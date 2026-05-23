@@ -2,3 +2,4 @@
 Cargo.lock.bak
 *.swp
 .DS_Store
+crates/harness/data/
