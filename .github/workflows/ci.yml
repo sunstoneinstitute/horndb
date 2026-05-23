@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint-test-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.88.0"
+          components: rustfmt, clippy
+          cache: true
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: unit tests
+        run: cargo test --workspace
+
+      - name: build harness binary
+        run: cargo build -p reasoner-harness --bin harness --release
+
+      - name: conformance — selected subset (real run, no --allow-failing)
+        # Stage 0 selected.toml intentionally includes a test the stub
+        # cannot pass, so the *expected* outcome of this step is a red
+        # failure once we wire the stub up. Until the real engine lands
+        # (Stage 1), this job is required-but-allowed-to-fail in branch
+        # protection — see /docs/CONTRIBUTING when added.
+        run: |
+          ./target/release/harness \
+            --engine stub \
+            run \
+            --junit target/junit.xml
+
+      - name: upload junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.run_id }}
+          path: target/junit.xml
+
+      - name: publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: target/junit.xml
+          include_passed: true
+          fail_on_failure: true
