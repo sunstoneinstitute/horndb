@@ -107,7 +107,9 @@ fn real_main() -> Result<ExitCode> {
             let sel = Selected::load(&sel_path)?;
             let mut engine: Box<dyn Reasoner> = match cli.engine.as_str() {
                 "stub" => Box::new(StubReasoner::new()),
-                other => anyhow::bail!("unknown engine: {other} (Stage 0 supports: stub)"),
+                #[cfg(feature = "real-engine")]
+                "owlrl" => Box::new(reasoner_owlrl::Engine::new()),
+                other => anyhow::bail!("unknown engine: {other}"),
             };
             let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
             let hw = hardware_fingerprint();

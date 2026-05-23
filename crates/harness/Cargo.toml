@@ -29,6 +29,14 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }
 
+[dependencies.reasoner-owlrl]
+path = "../owlrl"
+optional = true
+
+[features]
+default = []
+real-engine = ["dep:reasoner-owlrl"]
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
