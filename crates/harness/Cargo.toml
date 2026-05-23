@@ -28,6 +28,7 @@ walkdir = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 time = { workspace = true }
+serde_json = { workspace = true }
 
 [dependencies.reasoner-owlrl]
 path = "../owlrl"

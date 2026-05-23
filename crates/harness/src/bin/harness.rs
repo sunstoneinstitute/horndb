@@ -72,6 +72,21 @@ enum Cmd {
         #[arg(long, default_value = "50")]
         max: usize,
     },
+    /// Run LDBC SPB driver against an endpoint and record results.
+    SpbRun {
+        #[arg(long)]
+        driver_jar: PathBuf,
+        #[arg(long)]
+        scenario: PathBuf,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long, default_value_t = 600)]
+        duration: u64,
+        /// Label used as the `dataset` column so we can A/B
+        /// (e.g. "reasoner-engine" vs "graphdb-free").
+        #[arg(long)]
+        label: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -203,6 +218,21 @@ fn real_main() -> Result<ExitCode> {
             for case in cases.iter().take(max) {
                 println!("{}", case.id);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::SpbRun { driver_jar, scenario, endpoint, duration, label } => {
+            let cfg = reasoner_harness::ldbc_spb::SpbConfig {
+                driver_jar: &driver_jar,
+                scenario: &scenario,
+                endpoint: &endpoint,
+                duration_seconds: duration,
+            };
+            let result = reasoner_harness::ldbc_spb::run(&cfg)?;
+            let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
+            let run_id = db.start_run(&commit_sha, &hardware_fingerprint(), &label)?;
+            reasoner_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
+            println!("spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
+                     result.editorial_qps, result.aggregation_qps, result.update_qps);
             Ok(ExitCode::SUCCESS)
         }
     }
