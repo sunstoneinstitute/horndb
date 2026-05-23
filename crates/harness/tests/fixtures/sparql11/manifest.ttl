@@ -1,0 +1,11 @@
+@prefix mf:  <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> .
+@prefix qt:  <http://www.w3.org/2001/sw/DataAccess/tests/test-query#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+<#manifest> a mf:Manifest ;
+    mf:entries ( <#ask-true> ) .
+
+<#ask-true> a mf:QueryEvaluationTest ;
+    mf:name "trivial ASK returning true" ;
+    mf:action [ qt:query <ask-true.rq> ; qt:data <ask-true.data.ttl> ] ;
+    mf:result <ask-true.srx> .
