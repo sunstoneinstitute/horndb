@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/harness",
+    "crates/storage",
+    "crates/wcoj",
+    "crates/owlrl",
+    "crates/closure",
+    "crates/incremental",
+    "crates/sparql",
+    "crates/ml",
+    "crates/hardware-ext",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/sunstoneinstitute/reasoner"
+authors = ["Sunstone Institute"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
