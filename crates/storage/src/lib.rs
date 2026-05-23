@@ -26,3 +26,5 @@ pub use error::StorageError;
 pub use term::{TermId, TermKind, GraphId, DEFAULT_GRAPH};
 pub use dictionary::Dictionary;
 pub use partition::PredicatePartition;
+pub use tier::{Tier, TierStats};
+pub use memory_tier::MemoryTier;
