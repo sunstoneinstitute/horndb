@@ -7,7 +7,7 @@
 use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
-use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
+use crate::term::{GraphId, DEFAULT_GRAPH};
 use crate::tier::{Tier, TierStats};
 use oxrdf::Term;
 
