@@ -6,3 +6,4 @@
 pub mod delta;
 pub mod provenance;
 pub mod types;
+pub mod vocab;
