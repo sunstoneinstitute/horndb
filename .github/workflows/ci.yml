@@ -35,15 +35,11 @@ jobs:
       - name: build harness binary
         run: cargo build -p reasoner-harness --bin harness --release
 
-      - name: conformance — selected subset (real run, no --allow-failing)
-        # Stage 0 selected.toml intentionally includes a test the stub
-        # cannot pass, so the *expected* outcome of this step is a red
-        # failure once we wire the stub up. Until the real engine lands
-        # (Stage 1), this job is required-but-allowed-to-fail in branch
-        # protection — see /docs/CONTRIBUTING when added.
+      - name: conformance — Stage-1 selected subset (real engine)
         run: |
+          cargo build -p reasoner-harness --bin harness --release --features real-engine
           ./target/release/harness \
-            --engine stub \
+            --engine owlrl \
             run \
             --junit target/junit.xml
 
