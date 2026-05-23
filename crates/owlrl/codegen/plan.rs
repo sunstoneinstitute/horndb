@@ -7,6 +7,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone)]
 pub struct Plan {
     /// Order in which body patterns are visited. Index into `rule.body`.
+    #[allow(dead_code)]
     pub order: Vec<usize>,
     /// For each step (in `order` order): for each slot (s,p,o), is the slot
     /// `Bound` to a previously-named variable (or vocab), or does it introduce
@@ -16,6 +17,7 @@ pub struct Plan {
 
 #[derive(Debug, Clone)]
 pub struct PlanStep {
+    #[allow(dead_code)]
     pub pattern_index: usize,
     pub s: SlotPlan,
     pub p: SlotPlan,
