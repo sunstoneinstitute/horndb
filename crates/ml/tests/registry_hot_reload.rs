@@ -15,11 +15,7 @@ impl CandidateGenerator for AlwaysHigh {
     fn model_id(&self) -> ModelId {
         ModelId::new("always-high")
     }
-    fn propose_sameas(
-        &self,
-        _left: &TripleSubject,
-        _right: &TripleSubject,
-    ) -> Confidence {
+    fn propose_sameas(&self, _left: &TripleSubject, _right: &TripleSubject) -> Confidence {
         Confidence::new(0.99)
     }
 }

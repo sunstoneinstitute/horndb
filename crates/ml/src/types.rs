@@ -13,9 +13,7 @@ pub struct Confidence(f64);
 
 impl Confidence {
     pub fn new(v: f64) -> Self {
-        if v.is_nan() {
-            Confidence(0.0)
-        } else if v < 0.0 {
+        if v.is_nan() || v < 0.0 {
             Confidence(0.0)
         } else if v > 1.0 {
             Confidence(1.0)

@@ -51,7 +51,11 @@ impl MlRegistry {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.inner.read().expect("registry rwlock poisoned").config.enabled
+        self.inner
+            .read()
+            .expect("registry rwlock poisoned")
+            .config
+            .enabled
     }
 
     /// Hot-reload the config (acceptance #5 — no restart).
@@ -132,10 +136,7 @@ mod tests {
     fn disabled_returns_no_op_candidate() {
         let r = MlRegistry::new(MlConfig::disabled());
         let g = r.candidate_generator();
-        assert_eq!(
-            g.model_id().as_str(),
-            DisabledCandidateGenerator::MODEL_ID
-        );
+        assert_eq!(g.model_id().as_str(), DisabledCandidateGenerator::MODEL_ID);
     }
 
     #[test]
@@ -143,10 +144,7 @@ mod tests {
         let r = MlRegistry::new(MlConfig::enabled());
         let g = r.candidate_generator();
         // Enabled but nothing registered: still no-op.
-        assert_eq!(
-            g.model_id().as_str(),
-            DisabledCandidateGenerator::MODEL_ID
-        );
+        assert_eq!(g.model_id().as_str(), DisabledCandidateGenerator::MODEL_ID);
     }
 
     struct FakeCandidate;
@@ -179,10 +177,7 @@ mod tests {
         let g = r.candidate_generator();
         // The registered plugin is still in the registry, but the
         // config switch routes us back to the no-op.
-        assert_eq!(
-            g.model_id().as_str(),
-            DisabledCandidateGenerator::MODEL_ID
-        );
+        assert_eq!(g.model_id().as_str(), DisabledCandidateGenerator::MODEL_ID);
     }
 
     #[test]

@@ -28,7 +28,11 @@ fn disabled_candidate_returns_zero_confidence() {
 fn disabled_planner_returns_unadvised() {
     let r = MlRegistry::new(MlConfig::disabled());
     let p = r.plan_advisor();
-    let shape = SubplanShape { n_patterns: 4, n_vars: 3, bound_vars: 1 };
+    let shape = SubplanShape {
+        n_patterns: 4,
+        n_vars: 3,
+        bound_vars: 1,
+    };
     assert_eq!(p.advise(&shape), PlanAdvice::unadvised());
     assert_eq!(p.model_id().as_str(), DisabledPlanAdvisor::MODEL_ID);
 }

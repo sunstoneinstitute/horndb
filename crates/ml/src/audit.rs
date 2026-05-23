@@ -37,7 +37,10 @@ impl MlAuditLog {
     }
 
     pub fn record(&self, entry: MlAuditEntry) {
-        self.inner.lock().expect("audit-log mutex poisoned").push(entry);
+        self.inner
+            .lock()
+            .expect("audit-log mutex poisoned")
+            .push(entry);
     }
 
     pub fn len(&self) -> usize {
@@ -53,12 +56,7 @@ impl MlAuditLog {
     /// `offset` is the index into the filtered result, not the raw
     /// log — so a caller can keep paginating with the returned token
     /// even as new entries arrive.
-    pub fn query_since(
-        &self,
-        since: DateTime<Utc>,
-        offset: usize,
-        limit: usize,
-    ) -> AuditPage {
+    pub fn query_since(&self, since: DateTime<Utc>, offset: usize, limit: usize) -> AuditPage {
         let guard = self.inner.lock().expect("audit-log mutex poisoned");
         let filtered: Vec<MlAuditEntry> = guard
             .iter()
@@ -71,8 +69,15 @@ impl MlAuditLog {
         } else {
             filtered[offset..end].to_vec()
         };
-        let next_offset = if end < filtered.len() { Some(end) } else { None };
-        AuditPage { entries, next_offset }
+        let next_offset = if end < filtered.len() {
+            Some(end)
+        } else {
+            None
+        };
+        AuditPage {
+            entries,
+            next_offset,
+        }
     }
 }
 
