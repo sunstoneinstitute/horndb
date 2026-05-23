@@ -25,3 +25,4 @@ pub mod loader;
 pub use error::StorageError;
 pub use term::{TermId, TermKind, GraphId, DEFAULT_GRAPH};
 pub use dictionary::Dictionary;
+pub use partition::PredicatePartition;
