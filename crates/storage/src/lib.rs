@@ -22,4 +22,6 @@ pub mod loader;
 // Re-exports below are added incrementally as each module is implemented.
 // See plans/2026-05-24-SPEC-02-storage.md tasks 2–9.
 
+pub use error::StorageError;
 pub use term::{TermId, TermKind, GraphId, DEFAULT_GRAPH};
+pub use dictionary::Dictionary;
