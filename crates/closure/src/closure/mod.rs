@@ -1,4 +1,4 @@
 //! Closure algorithms — transitive, sub-class, sub-property.
 
+pub mod schema;
 pub mod transitive;
-// schema is added in Task 8.
