@@ -13,4 +13,5 @@ pub mod error;
 pub mod ffi;
 pub mod grb;
 pub mod sameas;
+pub mod sink;
 pub mod types;
