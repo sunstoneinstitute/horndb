@@ -14,7 +14,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.79"
+rust-version = "1.87"
 license = "Apache-2.0"
 repository = "https://github.com/sunstoneinstitute/reasoner"
 authors = ["Sunstone Institute"]
@@ -43,3 +43,9 @@ assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
+spargebra = "0.4"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = "0.5"
+hyper = "1"
+pretty_assertions = "1"
