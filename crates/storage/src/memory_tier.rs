@@ -88,6 +88,10 @@ impl Tier for MemoryTier {
             .sum()
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn stats(&self) -> TierStats {
         let inner = self.inner.read();
         let graphs = inner.graphs.len() as u64;

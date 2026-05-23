@@ -16,7 +16,7 @@ pub struct TierStats {
     pub bytes_estimated: u64,
 }
 
-pub trait Tier: Send + Sync {
+pub trait Tier: Send + Sync + std::any::Any {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()>;
 
     fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&PredicatePartition>;
@@ -28,4 +28,6 @@ pub trait Tier: Send + Sync {
     fn triple_count(&self) -> u64;
 
     fn stats(&self) -> TierStats;
+
+    fn as_any(&self) -> &dyn std::any::Any;
 }

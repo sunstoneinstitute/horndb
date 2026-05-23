@@ -28,3 +28,4 @@ pub use dictionary::Dictionary;
 pub use partition::PredicatePartition;
 pub use tier::{Tier, TierStats};
 pub use memory_tier::MemoryTier;
+pub use store::Store;
