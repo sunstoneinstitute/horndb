@@ -5,4 +5,5 @@
 //! symbolically) and *advise* the planner. With `MlConfig.enabled =
 //! false` the engine behaves bit-identically to a non-ML build.
 
+pub mod provenance;
 pub mod types;
