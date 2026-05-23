@@ -9,6 +9,7 @@
 pub mod ci;
 pub mod db;
 pub mod manifest;
+pub mod ore;
 pub mod outcome;
 pub mod reasoner;
 pub mod report;

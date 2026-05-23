@@ -1,0 +1,58 @@
+# SPEC-01 Stage-1 ORE 2015 selection — 10 hand-picked OWL 2 RL clean
+# ontologies. Paths are relative to the ORE corpus root that
+# scripts/fetch-ore2015-subset.sh writes into crates/harness/data/ore2015/.
+
+version = 1
+
+# 10 ontologies (placeholders — Stage-1 implementer replaces these IDs
+# with the actual hand-picked ten from the Zenodo 18578 manifest, see
+# harness/curation/ore2015-10.md to be created alongside this file).
+[[ontologies]]
+id = "fma-lite-v3.2"
+path = "fma-lite-v3.2.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "go-basic"
+path = "go-basic.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "doid"
+path = "doid.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "chebi-lite"
+path = "chebi-lite.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "uberon"
+path = "uberon.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "envo"
+path = "envo.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "pato"
+path = "pato.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "ro"
+path = "ro.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "iao"
+path = "iao.ttl"
+task = "consistency"
+
+[[ontologies]]
+id = "obi-rl-fragment"
+path = "obi-rl-fragment.ttl"
+task = "consistency"
