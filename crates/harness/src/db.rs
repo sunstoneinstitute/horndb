@@ -132,6 +132,44 @@ impl Db {
         Ok(n as usize)
     }
 
+    pub fn record_metric(
+        &self,
+        run_id: &str,
+        suite: &str,
+        dataset: Option<&str>,
+        metric_name: &str,
+        metric_value: f64,
+        units: &str,
+    ) -> Result<()> {
+        let now = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)?;
+        self.conn.execute(
+            "INSERT INTO metrics (run_id, suite, dataset, metric_name, metric_value, units, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![run_id, suite, dataset, metric_name, metric_value, units, now],
+        )?;
+        Ok(())
+    }
+
+    /// Returns `(run_id, timestamp_rfc3339, metric_value)` rows for the
+    /// given suite/metric, newest first.
+    pub fn metric_series(
+        &self,
+        suite: &str,
+        metric_name: &str,
+    ) -> Result<Vec<(String, String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, timestamp, metric_value FROM metrics
+             WHERE suite = ?1 AND metric_name = ?2
+             ORDER BY timestamp DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![suite, metric_name], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
