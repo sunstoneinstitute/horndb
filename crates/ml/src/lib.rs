@@ -6,5 +6,6 @@
 //! false` the engine behaves bit-identically to a non-ML build.
 
 pub mod candidate;
+pub mod planner;
 pub mod provenance;
 pub mod types;
