@@ -6,3 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
