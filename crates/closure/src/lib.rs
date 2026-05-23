@@ -7,6 +7,7 @@
 //! - Per-predicate dense renumbering of dictionary IDs.
 //! - Writeback into a `TripleSink` (implemented by the storage crate).
 
+pub mod dense_id;
 pub mod error;
 pub mod ffi;
 pub mod grb;
