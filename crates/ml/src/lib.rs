@@ -7,6 +7,7 @@
 
 pub mod audit;
 pub mod candidate;
+pub mod config;
 pub mod hotset;
 pub mod planner;
 pub mod provenance;
