@@ -37,6 +37,7 @@ pub mod types;
 pub mod zset;
 
 pub use change_feed::{ChangeFeed, ChangeFeedRx};
+pub use checkpoint::{Checkpoint, CheckpointReport};
 pub use delta_log::DeltaLog;
 pub use operator::{BilinearRule, LinearRule, NaryPlan};
 pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
