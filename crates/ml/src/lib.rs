@@ -11,4 +11,8 @@ pub mod config;
 pub mod hotset;
 pub mod planner;
 pub mod provenance;
+pub mod registry;
 pub mod types;
+
+pub use config::{MlConfig, MlConfigError};
+pub use registry::MlRegistry;
