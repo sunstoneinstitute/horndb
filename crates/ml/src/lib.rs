@@ -5,6 +5,7 @@
 //! symbolically) and *advise* the planner. With `MlConfig.enabled =
 //! false` the engine behaves bit-identically to a non-ML build.
 
+pub mod audit;
 pub mod candidate;
 pub mod hotset;
 pub mod planner;
