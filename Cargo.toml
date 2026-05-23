@@ -14,7 +14,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.79"
 license = "Apache-2.0"
 repository = "https://github.com/sunstoneinstitute/reasoner"
 authors = ["Sunstone Institute"]
@@ -22,3 +22,25 @@ authors = ["Sunstone Institute"]
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+oxrdf = "0.2"
+oxrdfio = "0.1"
+oxttl = "0.1"
+oxigraph = "0.4"
+sparesults = "0.2"
+quick-xml = { version = "0.36", features = ["serialize"] }
+walkdir = "2"
+sha2 = "0.10"
+hex = "0.4"
+time = { version = "0.3", features = ["formatting", "serde", "macros"] }
+
+[workspace.dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+insta = { version = "1", features = ["yaml"] }
+tempfile = "3"
