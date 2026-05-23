@@ -35,3 +35,6 @@ pub mod delta_log;
 pub mod operator;
 pub mod types;
 pub mod zset;
+
+pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
+pub use zset::Zset;
