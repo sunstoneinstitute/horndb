@@ -63,6 +63,15 @@ enum Cmd {
         #[arg(long)]
         root: PathBuf,
     },
+    /// List candidate test IDs for a profile from a manifest.
+    ListCases {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value = "50")]
+        max: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -174,6 +183,24 @@ fn real_main() -> Result<ExitCode> {
                 count += 1;
             }
             println!("converted {count} manifest.rdf → manifest.ttl");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::ListCases { manifest, profile, max } => {
+            // Stage-1 minimal: read the manifest, print the first
+            // `max` test IDs (the implementer hand-curates which 50
+            // to keep based on rule coverage — see
+            // harness/curation/owl2-rl-50.md).
+            let suite = if manifest.to_string_lossy().contains("sparql11") {
+                reasoner_harness::testcase::Suite::Sparql11
+            } else {
+                reasoner_harness::testcase::Suite::Owl2
+            };
+            let cases = manifest::parse(&manifest, suite)?;
+            let _ = profile; // profile filter requires `mf:profile` parsing;
+                             // wired by the Stage-1 implementer.
+            for case in cases.iter().take(max) {
+                println!("{}", case.id);
+            }
             Ok(ExitCode::SUCCESS)
         }
     }
