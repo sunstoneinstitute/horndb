@@ -42,7 +42,14 @@ pub fn run_selected(
         let cases = manifest_loader(&manifest_path, suite)
             .with_context(|| format!("loading manifest {}", manifest_path.display()))?;
         for case in &cases {
-            if !suite_entry.include.iter().any(|id| id == &case.id) {
+            // Selected IDs may be either exact (absolute IRI) or a
+            // suffix (e.g. `#trivial-entail-true`) so they survive
+            // moving the workspace root.
+            if !suite_entry
+                .include
+                .iter()
+                .any(|id| id == &case.id || case.id.ends_with(id.as_str()))
+            {
                 continue;
             }
             let start = Instant::now();

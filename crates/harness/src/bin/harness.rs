@@ -1,3 +1,149 @@
-fn main() {
-    println!("reasoner-harness (placeholder; see Task 12)");
+//! `harness` — entrypoint for the SPEC-01 conformance & benchmark
+//! harness. Used both locally and from GitHub Actions.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use tracing::info;
+
+use reasoner_harness::{
+    ci::to_junit_xml,
+    db::Db,
+    manifest, report as report_mod,
+    runner::run_selected,
+    selected::Selected,
+    stub::StubReasoner,
+    Reasoner, Status,
+};
+
+#[derive(Parser, Debug)]
+#[command(name = "harness", version, about = "reasoner conformance & benchmark harness")]
+struct Cli {
+    /// Path to workspace root (default: cwd).
+    #[arg(long, default_value = ".")]
+    workspace: PathBuf,
+    /// SQLite result DB (default: target/harness.sqlite).
+    #[arg(long)]
+    db: Option<PathBuf>,
+    /// Engine to dispatch against. Stage 0 only supports `stub`.
+    #[arg(long, default_value = "stub")]
+    engine: String,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Run the currently-selected subset against the chosen engine.
+    Run {
+        /// Path to selected.toml (default: harness/selected.toml under workspace).
+        #[arg(long)]
+        selected: Option<PathBuf>,
+        /// Write JUnit XML to this path.
+        #[arg(long)]
+        junit: Option<PathBuf>,
+        /// Treat the run as green even if some tests fail (used by the
+        /// stub self-test that deliberately includes a failing case).
+        #[arg(long)]
+        allow_failing: bool,
+    },
+    /// Query the trend database.
+    Report {
+        #[arg(long)]
+        suite: String,
+        #[arg(long)]
+        metric: String,
+    },
+}
+
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    match real_main() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("harness: error: {e:#}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn real_main() -> Result<ExitCode> {
+    let cli = Cli::parse();
+    let workspace = cli.workspace.canonicalize().unwrap_or(cli.workspace.clone());
+    let db_path = cli
+        .db
+        .unwrap_or_else(|| workspace.join("target/harness.sqlite"));
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let db = Db::open(&db_path)?;
+
+    match cli.cmd {
+        Cmd::Run { selected, junit, allow_failing } => {
+            let sel_path = selected.unwrap_or_else(|| workspace.join("harness/selected.toml"));
+            let sel = Selected::load(&sel_path)?;
+            let mut engine: Box<dyn Reasoner> = match cli.engine.as_str() {
+                "stub" => Box::new(StubReasoner::new()),
+                other => anyhow::bail!("unknown engine: {other} (Stage 0 supports: stub)"),
+            };
+            let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
+            let hw = hardware_fingerprint();
+            let run_id = db.start_run(&commit_sha, &hw, engine.name())?;
+            info!(run_id = %run_id, "harness run started");
+
+            let report = run_selected(
+                engine.as_mut(),
+                &sel,
+                &workspace,
+                &|p, s| manifest::parse(p, s),
+            )?;
+            for outcome in &report.outcomes {
+                db.record_outcome(&run_id, outcome)?;
+            }
+            println!(
+                "harness: run_id={} passed={} failed={} skipped={}",
+                run_id, report.passed(), report.failed(), report.skipped(),
+            );
+            for o in &report.outcomes {
+                let tag = match o.status {
+                    Status::Passed => "PASS",
+                    Status::Failed => "FAIL",
+                    Status::Skipped => "SKIP",
+                };
+                let reason = o.reason.as_deref().unwrap_or("");
+                println!("  [{tag}] {} {} {}", o.suite, o.test_id, reason);
+            }
+            if let Some(p) = junit {
+                std::fs::write(&p, to_junit_xml(&report))
+                    .with_context(|| format!("writing junit {}", p.display()))?;
+            }
+            if report.has_failures() && !allow_failing {
+                return Ok(ExitCode::from(1));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Report { suite, metric } => {
+            let t = report_mod::trend(&db, &suite, &metric)?;
+            println!(
+                "trend suite={} metric={} points={} regression={}",
+                t.suite, t.metric, t.points.len(), t.regression_flag,
+            );
+            for p in &t.points {
+                println!("  {} {} {}", p.timestamp, p.run_id, p.value);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn hardware_fingerprint() -> String {
+    // Stage 0: minimal — OS + arch. Stage 2 deepens this per F7.
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }

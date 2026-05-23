@@ -8,6 +8,9 @@
 # when it should. As Stage-1 work lands, the OWL 2 suite grows to >=50
 # real W3C cases (see plans/2026-05-24-SPEC-01-conformance-harness.md
 # Stage 1).
+#
+# IDs are suffix-matched against the manifest entry IRI so the same
+# selection survives any workspace root path (worktrees, CI checkouts).
 
 version = 1
 
@@ -15,15 +18,15 @@ version = 1
 manifest = "crates/harness/tests/fixtures/owl2/manifest.ttl"
 include = [
     # Stub passes this (empty graph entails empty graph).
-    "file:///stig/git/sunstone/reasoner/crates/harness/tests/fixtures/owl2/manifest.ttl#trivial-entail-true",
+    "#trivial-entail-true",
     # Stub fails this -- included on purpose so CI proves red-on-failure.
-    "file:///stig/git/sunstone/reasoner/crates/harness/tests/fixtures/owl2/manifest.ttl#subclass-entail",
+    "#subclass-entail",
     # Stub passes this (recognises explicit owl:Nothing membership).
-    "file:///stig/git/sunstone/reasoner/crates/harness/tests/fixtures/owl2/manifest.ttl#inconsistent-001",
+    "#inconsistent-001",
 ]
 
 [suites.sparql11]
 manifest = "crates/harness/tests/fixtures/sparql11/manifest.ttl"
 include = [
-    "file:///stig/git/sunstone/reasoner/crates/harness/tests/fixtures/sparql11/manifest.ttl#ask-true",
+    "#ask-true",
 ]
