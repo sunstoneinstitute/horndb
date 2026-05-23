@@ -17,6 +17,6 @@ pub mod selected;
 pub mod stub;
 pub mod testcase;
 
-// Re-exports filled as each module lands; see Task 3+ in plan.
+pub use outcome::{Outcome, Report, Status};
 pub use reasoner::Reasoner;
 pub use stub::StubReasoner;
