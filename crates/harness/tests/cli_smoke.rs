@@ -37,6 +37,35 @@ fn run_with_default_selection_against_stub_fails_red() {
 }
 
 #[test]
+fn convert_manifests_rewrites_rdfxml_into_turtle() {
+    let tmp = tempdir().unwrap();
+    let manifest = tmp.path().join("manifest.rdf");
+    std::fs::write(
+        &manifest,
+        r##"<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:mf="http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#">
+  <mf:Manifest rdf:about="#m">
+    <mf:entries rdf:resource="http://www.w3.org/1999/02/22-rdf-syntax-ns#nil"/>
+  </mf:Manifest>
+</rdf:RDF>
+"##,
+    )
+    .unwrap();
+    Command::cargo_bin("harness")
+        .unwrap()
+        .args([
+            "convert-manifests",
+            "--root", tmp.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("converted 1"));
+    let ttl = std::fs::read_to_string(manifest.with_extension("ttl")).unwrap();
+    assert!(ttl.contains("Manifest"));
+}
+
+#[test]
 fn allow_failing_flag_keeps_exit_zero() {
     let tmp = tempdir().unwrap();
     let db = tmp.path().join("h.sqlite");

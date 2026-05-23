@@ -56,6 +56,13 @@ enum Cmd {
         #[arg(long)]
         metric: String,
     },
+    /// Walk `--root` and convert every `manifest.rdf` (RDF/XML) into
+    /// a sibling `manifest.ttl`. Skips files that already have a .ttl
+    /// counterpart. Stage-1 only.
+    ConvertManifests {
+        #[arg(long)]
+        root: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -138,6 +145,35 @@ fn real_main() -> Result<ExitCode> {
             for p in &t.points {
                 println!("  {} {} {}", p.timestamp, p.run_id, p.value);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::ConvertManifests { root } => {
+            use oxrdfio::{RdfFormat, RdfParser, RdfSerializer};
+            let mut count = 0usize;
+            for entry in walkdir::WalkDir::new(&root) {
+                let entry = entry?;
+                if entry.file_name() != "manifest.rdf" {
+                    continue;
+                }
+                let src = entry.path().to_path_buf();
+                let dst = src.with_extension("ttl");
+                if dst.exists() {
+                    continue;
+                }
+                let base_iri = format!("file://{}", src.display());
+                let bytes = std::fs::read(&src)?;
+                let parser = RdfParser::from_format(RdfFormat::RdfXml)
+                    .with_base_iri(&base_iri)?;
+                let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle)
+                    .for_writer(Vec::<u8>::new());
+                for quad in parser.for_slice(&bytes) {
+                    serializer.serialize_quad(&quad?)?;
+                }
+                let out = serializer.finish()?;
+                std::fs::write(&dst, out)?;
+                count += 1;
+            }
+            println!("converted {count} manifest.rdf → manifest.ttl");
             Ok(ExitCode::SUCCESS)
         }
     }
