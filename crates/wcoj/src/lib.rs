@@ -18,5 +18,5 @@ pub mod trie;
 
 pub use error::WcojError;
 pub use ids::{Ordering, TermId, Triple};
-// pub use pattern::{Bgp, Term, TriplePattern, Var}; — restored in Task 3
+pub use pattern::{Bgp, Term, TriplePattern, Var};
 
