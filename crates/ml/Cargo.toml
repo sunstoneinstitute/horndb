@@ -6,3 +6,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+# Tests use only std + chrono; nothing extra needed at Stage 1.
