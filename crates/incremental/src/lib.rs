@@ -36,6 +36,7 @@ pub mod operator;
 pub mod types;
 pub mod zset;
 
+pub use change_feed::{ChangeFeed, ChangeFeedRx};
 pub use delta_log::DeltaLog;
 pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
 pub use zset::Zset;
