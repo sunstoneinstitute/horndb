@@ -6,3 +6,19 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+rustc-hash = "2"
+smallvec = "1.13"
+
+[build-dependencies]
+anyhow = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+prettyplease = "0.2"
+
+[dev-dependencies]
+anyhow = { workspace = true }

@@ -1715,6 +1715,18 @@ dependencies = [
 [[package]]
 name = "reasoner-owlrl"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "rustc-hash",
+ "serde",
+ "smallvec",
+ "syn",
+ "thiserror 1.0.69",
+ "toml",
+]
 
 [[package]]
 name = "reasoner-sparql"

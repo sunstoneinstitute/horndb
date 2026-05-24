@@ -1,0 +1,306 @@
+# Stage-1 OWL 2 RL/RDF rule subset.
+# Source: W3C OWL 2 Profiles — https://www.w3.org/TR/owl2-profiles/ Tables 4–9.
+# Adding a rule: append a [[rule]] block; build.rs regenerates on next build.
+# Rules with delegate = "closure" are NOT compiled here — they are routed to
+# `reasoner-closure` (SPEC-05) via the ClosureBackend trait. We list them so
+# the rule table is complete and self-documenting.
+
+# ---------------------------------------------------------------------------
+# Closure-delegated rules (Table 4, Table 5, Table 9)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "eq-ref"
+comment = "Reflexivity of owl:sameAs — delegated to EQREL structure in SPEC-05."
+delegate = "closure"
+body = []
+head = { s = "?s", p = "owl:sameAs", o = "?s" }
+
+[[rule]]
+id = "eq-sym"
+comment = "Symmetry of owl:sameAs — implicit in EQREL representation."
+delegate = "closure"
+body = [ { s = "?x", p = "owl:sameAs", o = "?y" } ]
+head = { s = "?y", p = "owl:sameAs", o = "?x" }
+
+[[rule]]
+id = "eq-trans"
+comment = "Transitivity of owl:sameAs — implicit in EQREL representation."
+delegate = "closure"
+body = [
+  { s = "?x", p = "owl:sameAs", o = "?y" },
+  { s = "?y", p = "owl:sameAs", o = "?z" },
+]
+head = { s = "?x", p = "owl:sameAs", o = "?z" }
+
+[[rule]]
+id = "prp-trp"
+comment = "Transitive property — delegated to GraphBLAS closure."
+delegate = "closure"
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:TransitiveProperty" },
+  { s = "?x", p = "?p", o = "?y" },
+  { s = "?y", p = "?p", o = "?z" },
+]
+head = { s = "?x", p = "?p", o = "?z" }
+
+[[rule]]
+id = "scm-sco"
+comment = "Transitivity of rdfs:subClassOf — delegated to closure."
+delegate = "closure"
+body = [
+  { s = "?c1", p = "rdfs:subClassOf", o = "?c2" },
+  { s = "?c2", p = "rdfs:subClassOf", o = "?c3" },
+]
+head = { s = "?c1", p = "rdfs:subClassOf", o = "?c3" }
+
+[[rule]]
+id = "scm-spo"
+comment = "Transitivity of rdfs:subPropertyOf — delegated to closure."
+delegate = "closure"
+body = [
+  { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
+  { s = "?p2", p = "rdfs:subPropertyOf", o = "?p3" },
+]
+head = { s = "?p1", p = "rdfs:subPropertyOf", o = "?p3" }
+
+# ---------------------------------------------------------------------------
+# Class axiom rules (Table 7 — cax-*)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "cax-sco"
+comment = "Subclass instance propagation."
+body = [
+  { s = "?c1", p = "rdfs:subClassOf", o = "?c2" },
+  { s = "?x",  p = "rdf:type",       o = "?c1" },
+]
+head = { s = "?x", p = "rdf:type", o = "?c2" }
+
+[[rule]]
+id = "cax-eqc1"
+comment = "owl:equivalentClass instance propagation (left → right)."
+body = [
+  { s = "?c1", p = "owl:equivalentClass", o = "?c2" },
+  { s = "?x",  p = "rdf:type",            o = "?c1" },
+]
+head = { s = "?x", p = "rdf:type", o = "?c2" }
+
+[[rule]]
+id = "cax-eqc2"
+comment = "owl:equivalentClass instance propagation (right → left)."
+body = [
+  { s = "?c1", p = "owl:equivalentClass", o = "?c2" },
+  { s = "?x",  p = "rdf:type",            o = "?c2" },
+]
+head = { s = "?x", p = "rdf:type", o = "?c1" }
+
+# ---------------------------------------------------------------------------
+# Property rules (Table 6 — prp-*)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "prp-dom"
+comment = "Domain axiom."
+body = [
+  { s = "?p", p = "rdfs:domain", o = "?c" },
+  { s = "?x", p = "?p",          o = "?y" },
+]
+head = { s = "?x", p = "rdf:type", o = "?c" }
+
+[[rule]]
+id = "prp-rng"
+comment = "Range axiom."
+body = [
+  { s = "?p", p = "rdfs:range", o = "?c" },
+  { s = "?x", p = "?p",         o = "?y" },
+]
+head = { s = "?y", p = "rdf:type", o = "?c" }
+
+[[rule]]
+id = "prp-symp"
+comment = "Symmetric property."
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:SymmetricProperty" },
+  { s = "?x", p = "?p",       o = "?y" },
+]
+head = { s = "?y", p = "?p", o = "?x" }
+
+[[rule]]
+id = "prp-spo1"
+comment = "Sub-property propagation."
+body = [
+  { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
+  { s = "?x",  p = "?p1",                o = "?y" },
+]
+head = { s = "?x", p = "?p2", o = "?y" }
+
+[[rule]]
+id = "prp-eqp1"
+comment = "Equivalent property propagation (left → right)."
+body = [
+  { s = "?p1", p = "owl:equivalentProperty", o = "?p2" },
+  { s = "?x",  p = "?p1",                    o = "?y" },
+]
+head = { s = "?x", p = "?p2", o = "?y" }
+
+[[rule]]
+id = "prp-eqp2"
+comment = "Equivalent property propagation (right → left)."
+body = [
+  { s = "?p1", p = "owl:equivalentProperty", o = "?p2" },
+  { s = "?x",  p = "?p2",                    o = "?y" },
+]
+head = { s = "?x", p = "?p1", o = "?y" }
+
+[[rule]]
+id = "prp-inv1"
+comment = "Inverse property (left → right)."
+body = [
+  { s = "?p1", p = "owl:inverseOf", o = "?p2" },
+  { s = "?x",  p = "?p1",           o = "?y" },
+]
+head = { s = "?y", p = "?p2", o = "?x" }
+
+[[rule]]
+id = "prp-inv2"
+comment = "Inverse property (right → left)."
+body = [
+  { s = "?p1", p = "owl:inverseOf", o = "?p2" },
+  { s = "?x",  p = "?p2",           o = "?y" },
+]
+head = { s = "?y", p = "?p1", o = "?x" }
+
+# ---------------------------------------------------------------------------
+# Schema rules (Table 9 — scm-*). scm-sco / scm-spo already declared above as
+# closure-delegated. The remaining scm-* rules are compiled here.
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "scm-cls"
+comment = "Every class is a subclass of itself and of owl:Thing; disjoint with owl:Nothing."
+body = [ { s = "?c", p = "rdf:type", o = "owl:Class" } ]
+head = { s = "?c", p = "rdfs:subClassOf", o = "?c" }
+
+[[rule]]
+id = "scm-cls-thing"
+comment = "Every class is a subclass of owl:Thing."
+body = [ { s = "?c", p = "rdf:type", o = "owl:Class" } ]
+head = { s = "?c", p = "rdfs:subClassOf", o = "owl:Thing" }
+
+[[rule]]
+id = "scm-cls-nothing"
+comment = "owl:Nothing is a subclass of every class."
+body = [ { s = "?c", p = "rdf:type", o = "owl:Class" } ]
+head = { s = "owl:Nothing", p = "rdfs:subClassOf", o = "?c" }
+
+[[rule]]
+id = "scm-eqc1"
+comment = "equivalentClass implies subClassOf in both directions (1)."
+body = [ { s = "?c1", p = "owl:equivalentClass", o = "?c2" } ]
+head = { s = "?c1", p = "rdfs:subClassOf", o = "?c2" }
+
+[[rule]]
+id = "scm-eqc2"
+comment = "equivalentClass implies subClassOf in both directions (2)."
+body = [ { s = "?c1", p = "owl:equivalentClass", o = "?c2" } ]
+head = { s = "?c2", p = "rdfs:subClassOf", o = "?c1" }
+
+[[rule]]
+id = "scm-op"
+comment = "Every object property is a subPropertyOf itself."
+body = [ { s = "?p", p = "rdf:type", o = "owl:ObjectProperty" } ]
+head = { s = "?p", p = "rdfs:subPropertyOf", o = "?p" }
+
+[[rule]]
+id = "scm-eqp1"
+comment = "equivalentProperty implies subPropertyOf (1)."
+body = [ { s = "?p1", p = "owl:equivalentProperty", o = "?p2" } ]
+head = { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" }
+
+[[rule]]
+id = "scm-eqp2"
+comment = "equivalentProperty implies subPropertyOf (2)."
+body = [ { s = "?p1", p = "owl:equivalentProperty", o = "?p2" } ]
+head = { s = "?p2", p = "rdfs:subPropertyOf", o = "?p1" }
+
+[[rule]]
+id = "scm-dom1"
+comment = "Domain narrows along subClassOf."
+body = [
+  { s = "?p",  p = "rdfs:domain",     o = "?c1" },
+  { s = "?c1", p = "rdfs:subClassOf", o = "?c2" },
+]
+head = { s = "?p", p = "rdfs:domain", o = "?c2" }
+
+[[rule]]
+id = "scm-rng1"
+comment = "Range narrows along subClassOf."
+body = [
+  { s = "?p",  p = "rdfs:range",      o = "?c1" },
+  { s = "?c1", p = "rdfs:subClassOf", o = "?c2" },
+]
+head = { s = "?p", p = "rdfs:range", o = "?c2" }
+
+[[rule]]
+id = "scm-dom2"
+comment = "Domain widens along subPropertyOf (sub-property inherits domain)."
+body = [
+  { s = "?p2", p = "rdfs:domain",        o = "?c" },
+  { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
+]
+head = { s = "?p1", p = "rdfs:domain", o = "?c" }
+
+[[rule]]
+id = "scm-rng2"
+comment = "Range widens along subPropertyOf (sub-property inherits range)."
+body = [
+  { s = "?p2", p = "rdfs:range",         o = "?c" },
+  { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
+]
+head = { s = "?p1", p = "rdfs:range", o = "?c" }
+
+# ---------------------------------------------------------------------------
+# Class expression rules (Table 7 — cls-*; list-based int/uni deferred)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "cls-svf2"
+comment = "someValuesFrom with owl:Thing as filler — type propagation."
+body = [
+  { s = "?x", p = "owl:someValuesFrom", o = "owl:Thing" },
+  { s = "?x", p = "owl:onProperty",     o = "?p" },
+  { s = "?u", p = "?p",                 o = "?vv" },
+]
+head = { s = "?u", p = "rdf:type", o = "?x" }
+
+[[rule]]
+id = "cls-avf"
+comment = "allValuesFrom propagation."
+body = [
+  { s = "?x", p = "owl:allValuesFrom", o = "?y" },
+  { s = "?x", p = "owl:onProperty",    o = "?p" },
+  { s = "?u", p = "rdf:type",          o = "?x" },
+  { s = "?u", p = "?p",                o = "?vv" },
+]
+head = { s = "?vv", p = "rdf:type", o = "?y" }
+
+[[rule]]
+id = "cls-hv1"
+comment = "hasValue → property assertion."
+body = [
+  { s = "?x", p = "owl:hasValue",   o = "?y" },
+  { s = "?x", p = "owl:onProperty", o = "?p" },
+  { s = "?u", p = "rdf:type",       o = "?x" },
+]
+head = { s = "?u", p = "?p", o = "?y" }
+
+[[rule]]
+id = "cls-hv2"
+comment = "hasValue ← property assertion."
+body = [
+  { s = "?x", p = "owl:hasValue",   o = "?y" },
+  { s = "?x", p = "owl:onProperty", o = "?p" },
+  { s = "?u", p = "?p",             o = "?y" },
+]
+head = { s = "?u", p = "rdf:type", o = "?x" }
