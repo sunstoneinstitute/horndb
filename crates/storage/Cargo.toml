@@ -6,3 +6,21 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+arrow.workspace = true
+roaring.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+bytemuck.workspace = true
+oxttl.workspace = true
+oxrdf.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "load_lubm"
+harness = false
