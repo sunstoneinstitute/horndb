@@ -10,7 +10,7 @@ here in the same commit.
 
 ## CRITICAL — Correctness gaps
 
-- [ ] **SPEC-03 WCOJ over-produces on BGPs with repeated patterns.**
+- [x] **SPEC-03 WCOJ over-produces on BGPs with repeated patterns.**
   - The differential fuzzer in `crates/wcoj/tests/differential_fuzz.rs`
     (currently `#[ignore]`'d) finds inputs where the WCOJ executor returns
     more bindings than the binary-hash reference. The minimal failing input
@@ -21,9 +21,20 @@ here in the same commit.
     same depth with identical patterns — the leapfrog's seek-past-match
     advancement on one iter is not reflected when the sibling iter is
     refreshed.
-  - Acceptance criterion #3 in `specs/SPEC-03-query-engine.md` cannot be
-    closed until this passes. Remove the `#[ignore]` and the regression
-    file when fixed.
+  - **Root cause** turned out to be elsewhere: the inlined leapfrog's
+    `find_match` only compared `iter[p]` against `iter[(p + k - 1) % k]`
+    and never sorted the iters at prime time, so the Veldhuizen
+    invariant "iter at `prev` holds the running max" was violated on
+    the very first call when `k ≥ 3` and the iters were given to the
+    leapfrog in a non-sorted-by-current-head order. A snapshot like
+    `[A=2, B=14, C=2]` would falsely report a match of 2 because `B`
+    was never visited. Fix: sort `contributing[d]` by current peek on
+    prime (executor) and by current head on prime (standalone
+    `LeapfrogJoin`), then operate over the sorted permutation; the
+    standard invariant then holds and `cur == target` correctly implies
+    all iters agree. Differential fuzzer cases bumped 16 → 256;
+    `#[ignore]` and the regression file removed; inline regression
+    tests added for the 2-iter and 3-iter priming cases.
 
 ## HIGH — Lint cleanup (CI gate)
 

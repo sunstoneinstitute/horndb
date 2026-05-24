@@ -133,8 +133,19 @@ impl<'src> TrieIterator for AdaptiveIter<'src> {
 /// Per-depth state for the inlined leapfrog. We hold no iter references;
 /// the executor borrows iters from `BatchIter::iters` by index list.
 struct DepthState {
-    /// Round-robin index into the depth's contributing list.
+    /// Index into the depth's `contributing` list of the iter currently
+    /// being seeked forward. After a seek, this rotates to the next iter
+    /// in the circular order. The invariant maintained by `find_match` is
+    /// "the iter just *before* `p` in `sorted_idxs` order holds the
+    /// running maximum key", so `target` in the loop is always the true
+    /// global max across all `k` iters.
     p: usize,
+    /// `sorted_idxs[i]` = index into `contributing[depth]` of the `i`-th
+    /// iter in non-decreasing key order at prime time. The leapfrog
+    /// operates circularly over this list — sorting on prime is what
+    /// keeps the "iter[p-1] holds the max, others are ≤ max" invariant
+    /// after every seek+rotate. See Veldhuizen, *Leapfrog Triejoin*, 2014.
+    sorted_idxs: Vec<usize>,
     /// True before the first call advances iters.
     primed: bool,
     /// True once the leapfrog is exhausted at this depth.
@@ -149,6 +160,7 @@ impl DepthState {
     fn fresh() -> Self {
         Self {
             p: 0,
+            sorted_idxs: Vec::new(),
             primed: false,
             done: false,
             has_descended: false,
@@ -352,8 +364,7 @@ impl<'src> BatchIter<'src> {
     /// directly on `iters` indexed by `contributing[depth]`.
     fn leapfrog_next(&mut self, depth: u8) -> Option<TermId> {
         let st = self.state[depth as usize].as_mut().unwrap();
-        let idxs = &self.contributing[depth as usize];
-        let k = idxs.len();
+        let k = self.contributing[depth as usize].len();
         if st.done || k == 0 {
             st.done = true;
             return None;
@@ -362,21 +373,42 @@ impl<'src> BatchIter<'src> {
         if !st.primed {
             st.primed = true;
             // Initial peek check: any iter exhausted => no match.
-            for &i in idxs {
-                if self.iters[i].peek(depth).is_none() {
-                    st.done = true;
-                    return None;
+            // Also sort the contributing iters by their current peek so the
+            // classic leapfrog invariant holds: `sorted_idxs` lists iters
+            // in non-decreasing key order, `p` starts at the smallest, and
+            // `sorted_idxs[(p + k - 1) % k]` (i.e. `prev`) always holds the
+            // running maximum. Without the sort, a priming snapshot like
+            // [A=2, B=14, C=2] would falsely report a match of 2 — the
+            // loop only checks `iter[p]` against `iter[prev]`, and would
+            // never compare B against the others.
+            let mut sorted: Vec<(usize, TermId)> = Vec::with_capacity(k);
+            let idxs_snapshot = self.contributing[depth as usize].clone();
+            for &i in &idxs_snapshot {
+                match self.iters[i].peek(depth) {
+                    None => {
+                        let st = self.state[depth as usize].as_mut().unwrap();
+                        st.done = true;
+                        return None;
+                    }
+                    Some(v) => sorted.push((i, v)),
                 }
             }
+            sorted.sort_by_key(|&(_, v)| v);
+            let sorted_iter_idxs: Vec<usize> = sorted.into_iter().map(|(i, _)| i).collect();
+            let st = self.state[depth as usize].as_mut().unwrap();
+            st.sorted_idxs = sorted_iter_idxs;
             st.p = 0;
             return self.find_match(depth);
         }
 
         // Subsequent call: advance the iter that just produced the match
-        // past it, then re-leapfrog.
-        let cur = self.iters[idxs[st.p]].peek(depth).unwrap();
-        self.iters[idxs[st.p]].seek(depth, cur.wrapping_add(1));
-        if self.iters[idxs[st.p]].peek(depth).is_none() {
+        // past it, then re-leapfrog. Use `sorted_idxs` so the leapfrog
+        // invariant (iter at `prev` holds the max) is preserved across
+        // calls.
+        let cur_iter = st.sorted_idxs[st.p];
+        let cur = self.iters[cur_iter].peek(depth).unwrap();
+        self.iters[cur_iter].seek(depth, cur.wrapping_add(1));
+        if self.iters[cur_iter].peek(depth).is_none() {
             self.state[depth as usize].as_mut().unwrap().done = true;
             return None;
         }
@@ -386,21 +418,29 @@ impl<'src> BatchIter<'src> {
     }
 
     fn find_match(&mut self, depth: u8) -> Option<TermId> {
-        let idxs = self.contributing[depth as usize].clone();
-        let k = idxs.len();
+        let k = self.contributing[depth as usize].len();
         loop {
-            let p = self.state[depth as usize].as_ref().unwrap().p;
+            let (sorted_idxs, p) = {
+                let st = self.state[depth as usize].as_ref().unwrap();
+                (st.sorted_idxs.clone(), st.p)
+            };
             let prev = (p + k - 1) % k;
-            let target = self.iters[idxs[prev]].peek(depth)?;
-            let cur = self.iters[idxs[p]].peek(depth)?;
+            let target = self.iters[sorted_idxs[prev]].peek(depth)?;
+            let cur = self.iters[sorted_idxs[p]].peek(depth)?;
             if cur == target {
+                // Loop invariant (maintained by sorting on prime and by
+                // each successful seek making `iter[p]` the new max):
+                // `iter[sorted_idxs[p+i]]` are non-decreasing in `i` mod k,
+                // with the max at `iter[sorted_idxs[prev]]`. Hence
+                // `iter[p].key == iter[prev].key` implies all iters at the
+                // same key.
                 return Some(cur);
             }
             // Seek iter[p] forward to at least `target`. If the resulting
             // peek is *less than* target (impossible if seek honors >= semantics),
             // bail to avoid infinite loops.
-            self.iters[idxs[p]].seek(depth, target);
-            let new_cur = self.iters[idxs[p]].peek(depth);
+            self.iters[sorted_idxs[p]].seek(depth, target);
+            let new_cur = self.iters[sorted_idxs[p]].peek(depth);
             match new_cur {
                 None => {
                     self.state[depth as usize].as_mut().unwrap().done = true;
