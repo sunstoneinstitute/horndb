@@ -1,6 +1,6 @@
+use horndb_storage::Dictionary;
 use oxrdf::{NamedNode, Term};
 use proptest::prelude::*;
-use horndb_storage::Dictionary;
 
 fn arb_uri() -> impl Strategy<Value = Term> {
     "[a-z]{1,16}"

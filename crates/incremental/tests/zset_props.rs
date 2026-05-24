@@ -2,8 +2,8 @@
 //! the abelian-group structure: addition is commutative, associative, and
 //! has inverses. We assert each.
 
-use proptest::prelude::*;
 use horndb_incremental::Zset;
+use proptest::prelude::*;
 
 fn arb_zset() -> impl Strategy<Value = Zset<i32>> {
     prop::collection::vec((0i32..50, -3i64..=3), 0..30).prop_map(Zset::from_iter)

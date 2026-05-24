@@ -9,8 +9,8 @@
 //! them separate in the trait because most bilinear rules are joins of
 //! two distinct patterns.
 
-use proptest::prelude::*;
 use horndb_incremental::{BilinearRule, RuleId, TripleId, Zset};
+use proptest::prelude::*;
 
 const P: u64 = 7;
 

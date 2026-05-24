@@ -1,5 +1,5 @@
-use oxrdf::{BlankNode, Literal, NamedNode, Term};
 use horndb_storage::{Dictionary, TermKind};
+use oxrdf::{BlankNode, Literal, NamedNode, Term};
 
 fn uri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())

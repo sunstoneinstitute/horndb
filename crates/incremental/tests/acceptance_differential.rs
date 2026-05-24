@@ -13,8 +13,8 @@
 mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, full_rematerialize, SC, SPO, TYPE};
-use proptest::prelude::*;
 use horndb_incremental::{Circuit, TripleId, Zset};
+use proptest::prelude::*;
 
 /// Returns true if `incremental` equals the reference run.
 ///

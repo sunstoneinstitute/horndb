@@ -1,5 +1,5 @@
-use oxrdf::{NamedNode, Term};
 use horndb_storage::Store;
+use oxrdf::{NamedNode, Term};
 
 fn nn(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())

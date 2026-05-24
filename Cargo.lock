@@ -1117,6 +1117,138 @@ dependencies = [
 ]
 
 [[package]]
+name = "horndb-closure"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bindgen 0.69.5",
+ "criterion",
+ "pkg-config",
+ "rand 0.8.6",
+ "rustc-hash 2.1.2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "horndb-hardware-ext"
+version = "0.0.0"
+
+[[package]]
+name = "horndb-harness"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "hex",
+ "horndb-owlrl",
+ "insta",
+ "oxigraph",
+ "oxrdf 0.2.4",
+ "oxrdfio",
+ "oxttl",
+ "predicates",
+ "quick-xml 0.36.2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sparesults 0.2.5",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
+name = "horndb-incremental"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "crossbeam-channel",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "horndb-ml"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "horndb-owlrl"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "rustc-hash 2.1.2",
+ "serde",
+ "smallvec",
+ "syn",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
+name = "horndb-sparql"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "hyper",
+ "insta",
+ "oxrdf 0.3.3",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sparesults 0.3.3",
+ "spargebra 0.4.6",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "horndb-storage"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "bytemuck",
+ "criterion",
+ "dashmap",
+ "oxrdf 0.2.4",
+ "oxttl",
+ "parking_lot",
+ "proptest",
+ "roaring",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "horndb-wcoj"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "criterion",
+ "proptest",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,138 +2219,6 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
-]
-
-[[package]]
-name = "reasoner-closure"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "bindgen 0.69.5",
- "criterion",
- "pkg-config",
- "rand 0.8.6",
- "rustc-hash 2.1.2",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reasoner-hardware-ext"
-version = "0.0.0"
-
-[[package]]
-name = "reasoner-harness"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "hex",
- "insta",
- "oxigraph",
- "oxrdf 0.2.4",
- "oxrdfio",
- "oxttl",
- "predicates",
- "quick-xml 0.36.2",
- "reasoner-owlrl",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "sparesults 0.2.5",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "toml",
- "tracing",
- "tracing-subscriber",
- "walkdir",
-]
-
-[[package]]
-name = "reasoner-incremental"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "criterion",
- "crossbeam-channel",
- "proptest",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reasoner-ml"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reasoner-owlrl"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "prettyplease",
- "proc-macro2",
- "quote",
- "rustc-hash 2.1.2",
- "serde",
- "smallvec",
- "syn",
- "thiserror 1.0.69",
- "toml",
-]
-
-[[package]]
-name = "reasoner-sparql"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "hyper",
- "insta",
- "oxrdf 0.3.3",
- "pretty_assertions",
- "serde",
- "serde_json",
- "sparesults 0.3.3",
- "spargebra 0.4.6",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tower",
-]
-
-[[package]]
-name = "reasoner-storage"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "arrow",
- "bytemuck",
- "criterion",
- "dashmap",
- "oxrdf 0.2.4",
- "oxttl",
- "parking_lot",
- "proptest",
- "roaring",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "reasoner-wcoj"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "arrow",
- "criterion",
- "proptest",
- "thiserror 1.0.69",
 ]
 
 [[package]]
