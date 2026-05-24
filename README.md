@@ -1,0 +1,140 @@
+# HornDB
+
+A hybrid forward/backward-chaining RDF reasoner targeting **OWL 2 RL** semantics with a **SPARQL 1.1** frontend, designed for modern unified-memory hardware (HBM-equipped GPUs/APUs, CXL-attached DRAM tiers).
+
+Apache-2.0, EU-developed, open from the start. Built by [Sunstone Institute](https://sunstoneinstitute.ai).
+
+> Status: **Stage 1 (feasibility prototype) in progress.** The workspace builds and the SPEC-01 conformance harness runs the Stage-1 OWL 2 RL subset against the real engine in CI. See [`TASKS.md`](TASKS.md) for the live punch list, including known correctness and performance gaps.
+
+## Why this exists
+
+The reasoner space today forces a choice between:
+
+- **Pure-materialization commercial engines** (RDFox, GraphDB) that give up 100–1000× on backward chaining and are not open;
+- **Open-source toolkits** (Apache Jena, Eclipse RDF4J) that are flexible but slower on the same materialization workload.
+
+HornDB makes a different set of bets — they're stated in full in [`specs/SPEC-00-vision.md`](specs/SPEC-00-vision.md), but in short:
+
+1. **Hybrid execution**, not pure materialization. Materialize the schema/transitive-closure subset (subClassOf, subPropertyOf, sameAs, transitive properties); backward-chain the rest with magic sets.
+2. **Unified-memory hardware as a first-class target.** HBM for the hot working set, DDR5 for warm, CXL/NVMe for cold.
+3. **DBSP-style incremental maintenance.** Z-set differences instead of DRed/FBF counting.
+4. **GraphBLAS for the closure subset.** Schema-level transitive closure as semiring matrix multiply on SuiteSparse:GraphBLAS.
+5. **Soufflé-style ahead-of-time rule compilation.** OWL 2 RL rules compiled to native Rust — no rule interpreter in the hot path.
+6. **Provenance as a hard requirement.** Every inferred triple traces back to its premises.
+
+Non-goals: OWL 2 DL completeness, property-graph compatibility, beating RDFox on pure single-node main-memory materialization, embedding-based "neural" reasoning as the source of truth.
+
+## Architecture at a glance
+
+Nine Rust crates under `crates/`, one per SPEC:
+
+```
+storage  ─┬─ wcoj  ─┬─ owlrl  ─┐
+          │         │          ├─ sparql  ─── harness
+          │         └─ closure ─┤
+          └─────────── incremental ─┘
+                                    └─ ml (boundary)
+```
+
+| Crate | SPEC | What it does |
+|---|---|---|
+| `horndb-storage` | [SPEC-02](specs/SPEC-02-storage.md) | Tiered storage, dictionary encoding, columnar partitions |
+| `horndb-wcoj` | [SPEC-03](specs/SPEC-03-query-engine.md) | Worst-case optimal joins (Leapfrog Triejoin) |
+| `horndb-owlrl` | [SPEC-04](specs/SPEC-04-rule-engine.md) | OWL 2 RL rule engine (rules compiled at `build.rs` time) |
+| `horndb-closure` | [SPEC-05](specs/SPEC-05-closure-backend.md) | GraphBLAS closure backend (SuiteSparse:GraphBLAS C ABI) |
+| `horndb-incremental` | [SPEC-06](specs/SPEC-06-incremental-maintenance.md) | DBSP-style Z-set deltas |
+| `horndb-sparql` | [SPEC-07](specs/SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend + axum HTTP server |
+| `horndb-ml` | [SPEC-08](specs/SPEC-08-ml-integration.md) | ML/LLM boundary — symbolic source of truth, ML as optimizer |
+| `horndb-hardware-ext` | [SPEC-09](specs/SPEC-09-hardware-specialization.md) | Stage-3 placeholder (GPU/CXL/multi-node) |
+| `horndb-harness` | [SPEC-01](specs/SPEC-01-conformance-benchmarks.md) | Conformance + benchmark runner; ships the `harness` binary |
+
+The harness comes **first by design**: every SPEC's acceptance criteria reference a concrete subset of SPEC-01's test corpus, and a SPEC is not satisfied until its subset is green.
+
+## Getting started
+
+### Prerequisites
+
+- Rust **1.88.0** (pinned via `rust-toolchain.toml` — `rustup` will install it automatically).
+- **SuiteSparse:GraphBLAS** available to `pkg-config` (required by `horndb-closure`'s `build.rs`).
+- Optional: `pre-commit` (`pip install pre-commit && pre-commit install`) for the fmt / clippy / build hooks. Pre-commit runs `cargo fmt --check` only; pre-push runs `cargo clippy --workspace --exclude horndb-harness -- -D warnings` and `cargo build --workspace`.
+- For the LDBC SPB-256 nightly: Java + the SPB driver JAR.
+- For the W3C conformance suite and ORE 2015 ontologies: see the fetch scripts under `crates/harness/scripts/`.
+
+### Build and test
+
+```bash
+cargo build --workspace
+cargo test  --workspace
+cargo test -p horndb-sparql --features server     # SPARQL HTTP tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all
+```
+
+### Run the conformance harness
+
+Stage-0 plumbing check (no real engine):
+
+```bash
+cargo run -p horndb-harness --bin harness -- --engine stub run --allow-failing
+```
+
+Stage-1, real engine, full 50-case OWL 2 RL subset:
+
+```bash
+./crates/harness/scripts/fetch-w3c-suites.sh
+cargo run -p horndb-harness --bin harness --features real-engine -- \
+    --engine owlrl run
+```
+
+ORE 2015 ten-ontology subset:
+
+```bash
+./crates/harness/scripts/fetch-ore2015-subset.sh
+cargo run -p horndb-harness --bin harness --features real-engine -- \
+    ore-run --selected harness/ore2015-selected.toml
+```
+
+LDBC SPB-256 (requires Java + the SPB driver JAR):
+
+```bash
+./crates/harness/scripts/run-spb-256.sh
+./crates/harness/scripts/run-graphdb-free-spb-256.sh
+cargo run -p horndb-harness --bin harness -- \
+    report --suite ldbc-spb-256 --metric editorial-qps
+```
+
+Harness state is persisted to `target/harness.sqlite`. Fetched corpora go under `crates/harness/data/` (gitignored).
+
+## CI
+
+- `.github/workflows/ci.yml` — per-PR: fmt, clippy, full workspace tests, SPARQL server tests, and a real-engine conformance run with JUnit publishing.
+- `.github/workflows/nightly.yml` — self-hosted runner: LDBC SPB-256 against both HornDB and GraphDB Free.
+
+## Roadmap
+
+| Stage | Scope | Gate |
+|---|---|---|
+| **Stage 0** | Harness bootstrap | Selected suite plumbing green; deliberate failure is correctly flagged red. |
+| **Stage 1** (in progress) | Storage + WCOJ + OWL 2 RL minimal slice | ≥50 W3C OWL 2 RL cases green; within 3× of RDFox materialization on LUBM-100; benchmarked vs RDFox/GraphDB on LDBC SPB-256. |
+| **Stage 2** | Full SPEC-02..07 + RDF 1.2 triple terms | Full W3C OWL 2 RL + SPARQL 1.1 + Entailment Regimes green; ORE 2015 OWL 2 RL fragment 100% solved; LDBC SPB SF3 ≥50% of GraphDB Enterprise. |
+| **Stage 3** | Hardware specialization | GPU backend for GraphBLAS + WCOJ; CXL tiering; multi-node via DBSP timely-dataflow. Conformance bar from Stage 2 does not drop. |
+
+## Repository map
+
+```
+specs/                    # SPEC-00..09 — the contracts
+plans/                    # Per-spec implementation plans (historical)
+TASKS.md                  # Live follow-up list (CRITICAL → LOW)
+crates/                   # The nine workspace crates
+harness/                  # Workspace-level harness assets (selected.toml, curation/)
+.github/workflows/        # CI (per-PR) and nightly (SPB-256)
+initial-research.md       # Feasibility study and competitive landscape
+```
+
+## Performance
+
+Targets, baselines, current measurements, and reproduction commands live in [`BENCHMARKS.md`](BENCHMARKS.md). Live performance gaps are tracked in [`TASKS.md`](TASKS.md) alongside correctness gaps.
+
+## License
+
+Apache-2.0 — see [`LICENSE`](LICENSE).

@@ -32,14 +32,14 @@ here in the same commit.
     these are fixed, but at the moment a fresh clone fails clippy. Known
     categories (from a sweep on `cde4b99`):
     - `uninlined_format_args` (multiple crates)
-    - `manual_range_inclusive` in `reasoner-wcoj`
+    - `manual_range_inclusive` in `horndb-wcoj`
     - `into_iter` / `next` confused with the `Iterator` trait methods in
-      `reasoner-wcoj` trie types — needs `#[allow]` with rationale or
+      `horndb-wcoj` trie types — needs `#[allow]` with rationale or
       renaming
-    - `map_or` can be simplified in `reasoner-owlrl`
-    - explicit lifetimes that could be elided in `reasoner-wcoj`
-    - `loop variable used to index` rewrite in `reasoner-wcoj` joins
-  - The `reasoner-harness` crate also has its own clippy gaps that are
+    - `map_or` can be simplified in `horndb-owlrl`
+    - explicit lifetimes that could be elided in `horndb-wcoj`
+    - `loop variable used to index` rewrite in `horndb-wcoj` joins
+  - The `horndb-harness` crate also has its own clippy gaps that are
     excluded from the pre-push hook because of rocksdb compile time;
     address those in a separate pass with CI cache priming.
 
@@ -67,8 +67,8 @@ here in the same commit.
     community **RDF-star** extension it superseded — RDF 1.2 has cleaner
     semantics and a cleaner SPARQL surface for the same underlying
     triple-term graph model.
-  - Today the workspace is mixed: `reasoner-sparql` already pulls
-    `oxrdf 0.3` directly, while `reasoner-storage` and the harness ride
+  - Today the workspace is mixed: `horndb-sparql` already pulls
+    `oxrdf 0.3` directly, while `horndb-storage` and the harness ride
     `oxrdf 0.2` transitively (oxigraph 0.4 pins it). Stage-1 storage and
     SPARQL dispatch surface RDF 1.2 triple terms as `unreachable!`
     because the Stage-1 N-Triples / SPARQL 1.1 loaders cannot produce

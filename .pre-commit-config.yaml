@@ -1,4 +1,4 @@
-# Pre-commit hooks for the reasoner project.
+# Pre-commit hooks for the HornDB project.
 #
 # Install once per checkout:
 #   pip install pre-commit && pre-commit install
@@ -45,11 +45,11 @@ repos:
 
       # Slow: full workspace clippy. Runs on `git push` so commits stay fast
       # but nothing reaches the remote (or CI) with -D warnings violations.
-      # reasoner-harness is excluded here because oxrocksdb-sys takes minutes
+      # horndb-harness is excluded here because oxrocksdb-sys takes minutes
       # to compile from scratch; CI runs it separately on a cached runner.
       - id: cargo-clippy-workspace
-        name: cargo clippy --workspace --exclude reasoner-harness -- -D warnings
-        entry: cargo clippy --workspace --all-targets --exclude reasoner-harness -- -D warnings
+        name: cargo clippy --workspace --exclude horndb-harness -- -D warnings
+        entry: cargo clippy --workspace --all-targets --exclude horndb-harness -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

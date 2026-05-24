@@ -21,14 +21,14 @@ jobs:
           cache: true
 
       - name: build harness
-        run: cargo build -p reasoner-harness --bin harness --release --features real-engine
+        run: cargo build -p horndb-harness --bin harness --release --features real-engine
 
-      - name: start reasoner engine
+      - name: start HornDB engine
         run: ./scripts/dev/start-engine.sh &
         # The engine startup script lives in SPEC-04 territory; this
         # workflow assumes it exists. If absent the next step fails.
 
-      - name: SPB-256 against reasoner-engine
+      - name: SPB-256 against HornDB
         run: ./crates/harness/scripts/run-spb-256.sh
 
       - name: SPB-256 against GraphDB Free

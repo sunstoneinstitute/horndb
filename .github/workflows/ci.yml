@@ -33,14 +33,14 @@ jobs:
         run: cargo test --workspace
 
       - name: sparql tests (server feature)
-        run: cargo test -p reasoner-sparql --features server
+        run: cargo test -p horndb-sparql --features server
 
       - name: build harness binary
-        run: cargo build -p reasoner-harness --bin harness --release
+        run: cargo build -p horndb-harness --bin harness --release
 
       - name: conformance — Stage-1 selected subset (real engine)
         run: |
-          cargo build -p reasoner-harness --bin harness --release --features real-engine
+          cargo build -p horndb-harness --bin harness --release --features real-engine
           ./target/release/harness \
             --engine owlrl \
             run \
