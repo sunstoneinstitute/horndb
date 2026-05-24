@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::error::WcojError;
-use reasoner_wcoj::executor::Executor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::planner::Planner;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::error::WcojError;
+use horndb_wcoj::executor::Executor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::planner::Planner;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn cancellation_returns_within_100ms() {

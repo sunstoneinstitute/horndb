@@ -1,10 +1,10 @@
 use arrow::array::UInt64Array;
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::ExecutionPlan;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::ExecutionPlan;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 fn collect_pairs(batches: Vec<arrow::record_batch::RecordBatch>) -> Vec<Vec<u64>> {
     let mut out: Vec<Vec<u64>> = Vec::new();
@@ -39,7 +39,7 @@ fn triangle_join_produces_correct_results() {
         TriplePattern::new(Term::Var(Var(2)), Term::Bound(p), Term::Var(Var(0))),
     ]);
     let plan = ExecutionPlan {
-        kind: reasoner_wcoj::plan::PlanKind::Wcoj,
+        kind: horndb_wcoj::plan::PlanKind::Wcoj,
         var_order: vec![Var(0), Var(1), Var(2)],
     };
 
@@ -61,7 +61,7 @@ fn empty_result_yields_no_batches() {
         TriplePattern::new(Term::Var(Var(0)), Term::Bound(99), Term::Var(Var(1))),
     ]);
     let plan = ExecutionPlan {
-        kind: reasoner_wcoj::plan::PlanKind::Wcoj,
+        kind: horndb_wcoj::plan::PlanKind::Wcoj,
         var_order: vec![Var(0), Var(1)],
     };
     let exec = WcojExecutor::new(&src, &bgp, &plan, CancelToken::new());

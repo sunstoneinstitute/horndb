@@ -1,6 +1,6 @@
 //! Storage abstraction over which the WCOJ executor operates.
 //!
-//! SPEC-02 (`reasoner-storage`) will provide the production implementation;
+//! SPEC-02 (`horndb-storage`) will provide the production implementation;
 //! the executor never depends on the storage crate directly. Instead, anything
 //! that can serve sorted iterators with `seek` over one of the six orderings
 //! implements `TripleSource`.

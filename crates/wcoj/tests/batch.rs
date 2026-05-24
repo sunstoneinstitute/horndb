@@ -1,6 +1,6 @@
 use arrow::array::UInt64Array;
-use reasoner_wcoj::batch::{BindingBatchBuilder, STANDARD_VECTOR_SIZE};
-use reasoner_wcoj::pattern::Var;
+use horndb_wcoj::batch::{BindingBatchBuilder, STANDARD_VECTOR_SIZE};
+use horndb_wcoj::pattern::Var;
 
 #[test]
 fn standard_vector_size_is_2048() {

@@ -1,9 +1,9 @@
-use reasoner_wcoj::cardinality::UniformEstimator;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::PlanKind;
-use reasoner_wcoj::planner::Planner;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cardinality::UniformEstimator;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::PlanKind;
+use horndb_wcoj::planner::Planner;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn four_pattern_cycle_picks_wcoj() {

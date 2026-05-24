@@ -1,9 +1,9 @@
-use reasoner_wcoj::ids::{Ordering, Triple};
-use reasoner_wcoj::pattern::{Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
-use reasoner_wcoj::trie::leapfrog::LeapfrogJoin;
-use reasoner_wcoj::trie::source_iter::PatternTrieIter;
-use reasoner_wcoj::trie::TrieIterator;
+use horndb_wcoj::ids::{Ordering, Triple};
+use horndb_wcoj::pattern::{Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::trie::leapfrog::LeapfrogJoin;
+use horndb_wcoj::trie::source_iter::PatternTrieIter;
+use horndb_wcoj::trie::TrieIterator;
 
 #[test]
 fn leapfrog_intersection_returns_only_common_values() {

@@ -1,4 +1,4 @@
-//! reasoner-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
+//! horndb-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
 //!
 //! See `specs/SPEC-03-query-engine.md` for the full design. Stage 0/1 scope:
 //! WCOJ on ≥4 patterns, binary-hash-join fallback, Arrow vectorization,

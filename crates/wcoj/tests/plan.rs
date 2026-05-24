@@ -1,5 +1,5 @@
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
 
 #[test]
 fn plan_for_4_cycle_uses_wcoj_and_orders_vars_by_degree() {

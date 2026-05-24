@@ -1,4 +1,4 @@
-# SPEC-08 Integration Notes for `reasoner-wcoj`
+# SPEC-08 Integration Notes for `horndb-wcoj`
 
 These notes describe call sites that **SPEC-03's plan** is responsible
 for implementing.
@@ -7,7 +7,7 @@ for implementing.
 
 Before finalising a join order, the WCOJ planner should:
 
-1. Construct a `reasoner_ml::types::SubplanShape { n_patterns,
+1. Construct a `horndb_ml::types::SubplanShape { n_patterns,
    n_vars, bound_vars }` from the candidate subplan.
 2. Call `registry.plan_advisor().advise(&shape)` to obtain a
    `PlanAdvice`.

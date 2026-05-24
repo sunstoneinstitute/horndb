@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
-use reasoner_wcoj::source::synthetic::SyntheticGraph;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::source::synthetic::SyntheticGraph;
 
 fn make_4_cycle_bgp() -> Bgp {
     let p = 10u64;

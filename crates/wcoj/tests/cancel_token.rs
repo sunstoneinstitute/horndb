@@ -1,4 +1,4 @@
-use reasoner_wcoj::cancel::CancelToken;
+use horndb_wcoj::cancel::CancelToken;
 
 #[test]
 fn fresh_token_is_not_cancelled() {

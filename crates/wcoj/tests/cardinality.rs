@@ -1,7 +1,7 @@
-use reasoner_wcoj::cardinality::{Cardinality, UniformEstimator};
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cardinality::{Cardinality, UniformEstimator};
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn fully_unbound_pattern_estimates_total_triples() {

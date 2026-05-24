@@ -1,5 +1,5 @@
-use reasoner_wcoj::ids::Ordering;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::ids::Ordering;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 
 #[test]
 fn variables_collects_unique_vars_in_first_appearance_order() {

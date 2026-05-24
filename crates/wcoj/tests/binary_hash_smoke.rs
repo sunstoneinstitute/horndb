@@ -1,9 +1,9 @@
 use arrow::array::UInt64Array;
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 fn collect(batches: Vec<arrow::record_batch::RecordBatch>) -> Vec<Vec<u64>> {
     let mut out: Vec<Vec<u64>> = Vec::new();

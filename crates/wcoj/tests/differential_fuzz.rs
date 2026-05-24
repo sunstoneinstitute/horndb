@@ -13,13 +13,13 @@ use std::collections::BTreeSet;
 use arrow::array::UInt64Array;
 use proptest::prelude::*;
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::ids::{TermId, Triple};
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::ids::{TermId, Triple};
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 const N_VERTICES: u64 = 30;
 const PREDICATES: &[u64] = &[100, 101, 102];
@@ -46,7 +46,7 @@ fn build_source(seed: u64) -> VecTripleSource {
 }
 
 fn collect_rows(
-    batches: impl Iterator<Item = reasoner_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
+    batches: impl Iterator<Item = horndb_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
 ) -> BTreeSet<Vec<TermId>> {
     let mut out = BTreeSet::new();
     for b in batches {
