@@ -31,7 +31,7 @@ impl Default for MlConfig {
 /// Reserved for future use — Stage 0/1 has no failure modes on
 /// `MlRegistry::register_*` because registration is allowed
 /// regardless of `enabled`, and the enabled flag only gates
-/// *accessors*. Kept here so consumers can `use reasoner_ml::MlConfigError`
+/// *accessors*. Kept here so consumers can `use horndb_ml::MlConfigError`
 /// without breakage when Stage 2 adds e.g. an "invalid model id"
 /// variant.
 #[derive(Debug, thiserror::Error)]

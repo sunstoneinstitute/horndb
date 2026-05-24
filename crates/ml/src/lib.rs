@@ -1,4 +1,4 @@
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified

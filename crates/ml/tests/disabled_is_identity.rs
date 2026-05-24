@@ -8,11 +8,11 @@
 //! adds the *engine-wide* version of this check; here we lock the
 //! boundary down.
 
-use reasoner_ml::candidate::DisabledCandidateGenerator;
-use reasoner_ml::hotset::DisabledHotSetAdvisor;
-use reasoner_ml::planner::DisabledPlanAdvisor;
-use reasoner_ml::types::{Confidence, PlanAdvice, SubplanShape, TripleSubject};
-use reasoner_ml::{MlConfig, MlRegistry};
+use horndb_ml::candidate::DisabledCandidateGenerator;
+use horndb_ml::hotset::DisabledHotSetAdvisor;
+use horndb_ml::planner::DisabledPlanAdvisor;
+use horndb_ml::types::{Confidence, PlanAdvice, SubplanShape, TripleSubject};
+use horndb_ml::{MlConfig, MlRegistry};
 
 #[test]
 fn disabled_candidate_returns_zero_confidence() {

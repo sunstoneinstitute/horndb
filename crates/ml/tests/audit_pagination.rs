@@ -2,9 +2,9 @@
 //! `since`-windowed paginated reads.
 
 use chrono::{Duration, Utc};
-use reasoner_ml::audit::MlAuditEntry;
-use reasoner_ml::types::{Confidence, ModelId, TripleSubject};
-use reasoner_ml::{MlConfig, MlRegistry};
+use horndb_ml::audit::MlAuditEntry;
+use horndb_ml::types::{Confidence, ModelId, TripleSubject};
+use horndb_ml::{MlConfig, MlRegistry};
 use std::sync::Arc;
 use std::thread;
 
