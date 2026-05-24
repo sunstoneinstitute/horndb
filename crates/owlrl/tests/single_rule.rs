@@ -87,6 +87,21 @@ fn prp_inv1_and_inv2() {
 }
 
 #[test]
+fn cls_hv1() {
+    let (mut s, v) = fresh_store();
+    let restriction = 70;
+    let prop = 80;
+    let val = 90;
+    let u = 100;
+    s.assert(t(restriction, v.owl_has_value.0, val));
+    s.assert(t(restriction, v.owl_on_property.0, prop));
+    s.assert(t(u, v.rdf_type.0, restriction));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(u, prop, val)));
+}
+
+#[test]
 fn cax_eqc_both_directions() {
     let (mut s, v) = fresh_store();
     s.assert(t(1, v.owl_equivalent_class.0, 2));

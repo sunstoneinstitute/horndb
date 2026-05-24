@@ -259,3 +259,48 @@ body = [
   { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
 ]
 head = { s = "?p1", p = "rdfs:range", o = "?c" }
+
+# ---------------------------------------------------------------------------
+# Class expression rules (Table 7 — cls-*; list-based int/uni deferred)
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "cls-svf2"
+comment = "someValuesFrom with owl:Thing as filler — type propagation."
+body = [
+  { s = "?x", p = "owl:someValuesFrom", o = "owl:Thing" },
+  { s = "?x", p = "owl:onProperty",     o = "?p" },
+  { s = "?u", p = "?p",                 o = "?vv" },
+]
+head = { s = "?u", p = "rdf:type", o = "?x" }
+
+[[rule]]
+id = "cls-avf"
+comment = "allValuesFrom propagation."
+body = [
+  { s = "?x", p = "owl:allValuesFrom", o = "?y" },
+  { s = "?x", p = "owl:onProperty",    o = "?p" },
+  { s = "?u", p = "rdf:type",          o = "?x" },
+  { s = "?u", p = "?p",                o = "?vv" },
+]
+head = { s = "?vv", p = "rdf:type", o = "?y" }
+
+[[rule]]
+id = "cls-hv1"
+comment = "hasValue → property assertion."
+body = [
+  { s = "?x", p = "owl:hasValue",   o = "?y" },
+  { s = "?x", p = "owl:onProperty", o = "?p" },
+  { s = "?u", p = "rdf:type",       o = "?x" },
+]
+head = { s = "?u", p = "?p", o = "?y" }
+
+[[rule]]
+id = "cls-hv2"
+comment = "hasValue ← property assertion."
+body = [
+  { s = "?x", p = "owl:hasValue",   o = "?y" },
+  { s = "?x", p = "owl:onProperty", o = "?p" },
+  { s = "?u", p = "?p",             o = "?y" },
+]
+head = { s = "?u", p = "rdf:type", o = "?x" }
