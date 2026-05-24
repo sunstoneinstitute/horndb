@@ -30,3 +30,21 @@ manifest = "crates/harness/tests/fixtures/sparql11/manifest.ttl"
 include = [
     "#ask-true",
 ]
+
+# SPEC-07 Stage-1 SPARQL query subset.
+#
+# These fixtures live outside the W3C manifest model used by `[suites.*]`:
+# each entry names a directory under
+# `crates/harness/tests/fixtures/sparql11/<path>` containing
+# `query.rq`, `data.nt`, `expected.srj`, and `form`. They are consumed
+# directly by `crates/sparql/tests/w3c_suite.rs`, not by the harness
+# binary's manifest-driven runner. SPEC-01 will subsume this section
+# into a uniform suite model once the SPARQL engine widens.
+[sparql_query]
+tests = [
+    "selected_subset/basic-001",
+    "selected_subset/basic-002",
+    "selected_subset/basic-003",
+    "selected_subset/basic-004",
+    "selected_subset/basic-005",
+]

@@ -32,7 +32,7 @@ Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`
 | `horndb-sparql` | SPEC-07 | Parser (spargebra), algebra, planner, runtime, axum HTTP server (`server` feature, on by default). Pulls `oxrdf 0.3` / `sparesults 0.3` directly — workspace is otherwise on `oxrdf 0.2` (see RDF 1.2 migration in TASKS.md). |
 | `horndb-ml` | SPEC-08 | ML/LLM boundary — candidate generation, audit, registry. Symbolic is source of truth. |
 | `horndb-hardware-ext` | SPEC-09 | Empty placeholder; Stage-3 territory. |
-| `horndb-harness` | SPEC-01 | Conformance + benchmark runner, ships the `harness` binary. Has its own `selected.toml`. |
+| `horndb-harness` | SPEC-01 | Conformance + benchmark runner, ships the `harness` binary. Loads `harness/selected.toml` at the workspace root. |
 
 Dependency order (for refactors): `storage` → `wcoj` → `{owlrl, closure}` → `incremental` → `sparql`; `harness` and `ml` sit on top.
 
@@ -82,7 +82,7 @@ cargo run -p horndb-harness --bin harness -- report --suite ldbc-spb-256 --metri
 
 Harness state lives in `target/harness.sqlite`; CI publishes JUnit to `target/junit.xml`. Fetched corpora go under `crates/harness/data/` (gitignored).
 
-There are currently two `selected.toml` files (`harness/selected.toml` at workspace root, `crates/harness/selected.toml` for the SPARQL fixtures). Consolidation is tracked in TASKS.md — pick one when touching either.
+The canonical selection file is `harness/selected.toml` at the workspace root. It carries both the manifest-driven `[suites.*]` entries the harness binary loads and the path-based `[sparql_query]` section consumed by `crates/sparql/tests/w3c_suite.rs`.
 
 ## Crate-specific gotchas
 

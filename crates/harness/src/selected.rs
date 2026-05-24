@@ -21,6 +21,13 @@ pub struct Selected {
     /// History of removed tests (must be non-empty to remove anything).
     #[serde(default)]
     pub removed: Vec<Removed>,
+    /// SPEC-07 SPARQL query subset. Path-based selection of fixture
+    /// directories under `crates/harness/tests/fixtures/sparql11/`.
+    /// Consumed by `crates/sparql/tests/w3c_suite.rs`, not by the
+    /// manifest-driven harness runner above. Optional: absent when the
+    /// SPARQL subset is empty.
+    #[serde(default)]
+    pub sparql_query: Option<SparqlQuerySection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,6 +44,13 @@ pub struct Removed {
     pub suite: String,
     pub xfail_reason: String,
     pub tracking_issue: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SparqlQuerySection {
+    /// Fixture directories relative to
+    /// `crates/harness/tests/fixtures/sparql11/`.
+    pub tests: Vec<String>,
 }
 
 impl Selected {
@@ -142,5 +156,23 @@ include = ["file:///x#trivial-entail-true"]
         assert!(sel.is_selected("owl2", "file:///x#trivial-entail-true"));
         assert!(!sel.is_selected("owl2", "other"));
         assert!(!sel.is_selected("sparql11", "file:///x#trivial-entail-true"));
+        assert!(sel.sparql_query.is_none());
+    }
+
+    #[test]
+    fn parses_sparql_query_section() {
+        let f = write_toml(
+            r#"version = 1
+[suites.owl2]
+manifest = "x"
+include = ["t"]
+[sparql_query]
+tests = ["selected_subset/basic-001", "selected_subset/basic-002"]
+"#,
+        );
+        let sel = Selected::load(f.path()).unwrap();
+        let sq = sel.sparql_query.expect("sparql_query parsed");
+        assert_eq!(sq.tests.len(), 2);
+        assert_eq!(sq.tests[0], "selected_subset/basic-001");
     }
 }
