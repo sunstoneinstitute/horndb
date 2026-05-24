@@ -100,8 +100,8 @@ impl Db {
         reasoner_name: &str,
     ) -> Result<String> {
         let run_id = new_run_id(commit_sha, reasoner_name);
-        let now = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
         self.conn.execute(
             "INSERT INTO runs (run_id, commit_sha, hardware_id, reasoner_name, started_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![run_id, commit_sha, hardware_id, reasoner_name, now],
@@ -141,8 +141,8 @@ impl Db {
         metric_value: f64,
         units: &str,
     ) -> Result<()> {
-        let now = OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
         self.conn.execute(
             "INSERT INTO metrics (run_id, suite, dataset, metric_name, metric_value, units, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![run_id, suite, dataset, metric_name, metric_value, units, now],
@@ -164,7 +164,11 @@ impl Db {
         )?;
         let rows = stmt
             .query_map(params![suite, metric_name], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
@@ -191,7 +195,13 @@ mod tests {
     use super::*;
 
     fn outcome(id: &str, status: Status) -> Outcome {
-        Outcome { test_id: id.into(), suite: "owl2".into(), status, reason: None, duration_ms: 1 }
+        Outcome {
+            test_id: id.into(),
+            suite: "owl2".into(),
+            status,
+            reason: None,
+            duration_ms: 1,
+        }
     }
 
     #[test]
@@ -205,9 +215,12 @@ mod tests {
     fn records_and_counts_outcomes() {
         let db = Db::open_in_memory().unwrap();
         let run = db.start_run("deadbeef", "fingerprint-1", "stub").unwrap();
-        db.record_outcome(&run, &outcome("a", Status::Passed)).unwrap();
-        db.record_outcome(&run, &outcome("b", Status::Failed)).unwrap();
-        db.record_outcome(&run, &outcome("c", Status::Skipped)).unwrap();
+        db.record_outcome(&run, &outcome("a", Status::Passed))
+            .unwrap();
+        db.record_outcome(&run, &outcome("b", Status::Failed))
+            .unwrap();
+        db.record_outcome(&run, &outcome("c", Status::Skipped))
+            .unwrap();
         assert_eq!(db.outcomes_for(&run).unwrap(), 3);
     }
 

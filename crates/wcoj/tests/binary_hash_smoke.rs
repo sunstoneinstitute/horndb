@@ -33,7 +33,8 @@ fn binary_hash_join_triangle() {
         TriplePattern::new(Term::Var(Var(1)), Term::Bound(p), Term::Var(Var(2))),
         TriplePattern::new(Term::Var(Var(2)), Term::Bound(p), Term::Var(Var(0))),
     ]);
-    let exec = BinaryHashExecutor::new(&src, &bgp, vec![Var(0), Var(1), Var(2)], CancelToken::new());
+    let exec =
+        BinaryHashExecutor::new(&src, &bgp, vec![Var(0), Var(1), Var(2)], CancelToken::new());
     let mut rows = collect(exec.into_iter().collect::<Result<_, _>>().unwrap());
     rows.sort();
     assert_eq!(rows, vec![vec![1, 2, 3], vec![2, 3, 1], vec![3, 1, 2]]);
@@ -43,7 +44,11 @@ fn binary_hash_join_triangle() {
 fn binary_hash_join_ground_pattern_returns_one_empty_row_when_match() {
     // (1, 10, 2) is in the graph — match yields one empty binding.
     let src = VecTripleSource::from_triples(vec![Triple::new(1, 10, 2)]);
-    let bgp = Bgp::new(vec![TriplePattern::new(Term::Bound(1), Term::Bound(10), Term::Bound(2))]);
+    let bgp = Bgp::new(vec![TriplePattern::new(
+        Term::Bound(1),
+        Term::Bound(10),
+        Term::Bound(2),
+    )]);
     let exec = BinaryHashExecutor::new(&src, &bgp, vec![], CancelToken::new());
     let batches: Vec<_> = exec.into_iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);

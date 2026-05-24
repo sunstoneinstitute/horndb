@@ -49,11 +49,7 @@ fn transitive_predicate_closes_and_writes_back() {
     let pairs: Vec<(u64, u64)> = triples.iter().map(|t| (t.s.0, t.o.0)).collect();
     let mut sorted = pairs.clone();
     sorted.sort();
-    let expected: Vec<(u64, u64)> = vec![
-        (1, 2), (1, 3), (1, 4),
-        (2, 3), (2, 4),
-        (3, 4),
-    ];
+    let expected: Vec<(u64, u64)> = vec![(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)];
     assert_eq!(sorted, expected);
     for t in triples.iter() {
         assert_eq!(t.p, p);

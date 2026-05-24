@@ -41,10 +41,10 @@ pub struct Removed {
 
 impl Selected {
     pub fn load(path: &Path) -> Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let parsed: Selected = toml::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let parsed: Selected =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -92,44 +92,52 @@ mod tests {
 
     #[test]
     fn rejects_wrong_version() {
-        let f = write_toml(r#"version = 2
+        let f = write_toml(
+            r#"version = 2
 [suites.owl2]
 manifest = "x"
 include = ["t"]
-"#);
+"#,
+        );
         let err = Selected::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("schema version"));
     }
 
     #[test]
     fn rejects_empty_include() {
-        let f = write_toml(r#"version = 1
+        let f = write_toml(
+            r#"version = 1
 [suites.owl2]
 manifest = "x"
 include = []
-"#);
+"#,
+        );
         let err = Selected::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("no included tests"));
     }
 
     #[test]
     fn rejects_duplicates() {
-        let f = write_toml(r#"version = 1
+        let f = write_toml(
+            r#"version = 1
 [suites.owl2]
 manifest = "x"
 include = ["t", "t"]
-"#);
+"#,
+        );
         let err = Selected::load(f.path()).unwrap_err();
         assert!(err.to_string().contains("duplicate include"));
     }
 
     #[test]
     fn round_trip_selected() {
-        let f = write_toml(r#"version = 1
+        let f = write_toml(
+            r#"version = 1
 [suites.owl2]
 manifest = "crates/harness/tests/fixtures/owl2/manifest.ttl"
 include = ["file:///x#trivial-entail-true"]
-"#);
+"#,
+        );
         let sel = Selected::load(f.path()).unwrap();
         assert!(sel.is_selected("owl2", "file:///x#trivial-entail-true"));
         assert!(!sel.is_selected("owl2", "other"));

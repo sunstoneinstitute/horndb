@@ -483,7 +483,10 @@ impl<'src> BatchIter<'src> {
                         for &i in &self.descend_at[self.depth as usize] {
                             self.iters[i].open_level(self.depth);
                         }
-                        self.state[self.depth as usize].as_mut().unwrap().has_descended = true;
+                        self.state[self.depth as usize]
+                            .as_mut()
+                            .unwrap()
+                            .has_descended = true;
                         self.depth += 1;
                     }
                 }

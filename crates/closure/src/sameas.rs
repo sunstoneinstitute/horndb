@@ -63,7 +63,10 @@ impl EquivClasses {
             return slot;
         }
         let slot = self.values.len() as Slot;
-        assert!(slot != NIL, "EquivClasses capacity exhausted (2^32 - 1 entries)");
+        assert!(
+            slot != NIL,
+            "EquivClasses capacity exhausted (2^32 - 1 entries)"
+        );
         self.values.push(id);
         self.parent.push(slot);
         self.rank.push(0);
@@ -110,8 +113,14 @@ impl EquivClasses {
 
     /// Returns `true` if `a` and `b` are in the same class.
     pub fn same(&mut self, a: DictId, b: DictId) -> bool {
-        let sa = match self.index.get(&a) { Some(&s) => s, None => return false };
-        let sb = match self.index.get(&b) { Some(&s) => s, None => return false };
+        let sa = match self.index.get(&a) {
+            Some(&s) => s,
+            None => return false,
+        };
+        let sb = match self.index.get(&b) {
+            Some(&s) => s,
+            None => return false,
+        };
         self.find(sa) == self.find(sb)
     }
 
@@ -135,8 +144,11 @@ impl EquivClasses {
             Some(c) => c,
             None => return Box::new(std::iter::empty()),
         };
-        Box::new(self.values.iter().copied().filter(move |&v| {
-            self.canonical(v) == Some(target_canon)
-        }))
+        Box::new(
+            self.values
+                .iter()
+                .copied()
+                .filter(move |&v| self.canonical(v) == Some(target_canon)),
+        )
     }
 }

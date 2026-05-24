@@ -23,7 +23,9 @@ fn naive_closure(n: usize, edges: &[(u64, u64)]) -> BTreeSet<(u64, u64)> {
     // splitting borrows by iterator is more obfuscating than it is worth.
     for k in 0..n {
         for i in 0..n {
-            if !reach[i][k] { continue; }
+            if !reach[i][k] {
+                continue;
+            }
             for j in 0..n {
                 if reach[k][j] {
                     reach[i][j] = true;
@@ -57,12 +59,7 @@ fn random_edges(n: usize, density_per_node: usize, seed: u64) -> Vec<(u64, u64)>
 #[test]
 fn random_graphs_match_naive_closure() {
     init_once().unwrap();
-    for (seed, n, density) in [
-        (1u64, 10usize, 2usize),
-        (2, 20, 3),
-        (3, 50, 4),
-        (4, 100, 2),
-    ] {
+    for (seed, n, density) in [(1u64, 10usize, 2usize), (2, 20, 3), (3, 50, 4), (4, 100, 2)] {
         let edges = random_edges(n, density, seed);
         let naive = naive_closure(n, &edges);
 
@@ -71,7 +68,8 @@ fn random_graphs_match_naive_closure() {
         let grb: BTreeSet<(u64, u64)> = star.extract_edges().unwrap().into_iter().collect();
 
         assert_eq!(
-            grb, naive,
+            grb,
+            naive,
             "mismatch on seed={seed} n={n} density={density}\n\
              only in grb: {:?}\nonly in naive: {:?}",
             grb.difference(&naive).collect::<Vec<_>>(),

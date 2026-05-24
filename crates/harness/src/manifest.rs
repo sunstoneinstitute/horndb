@@ -33,8 +33,7 @@ const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 /// Parse a manifest from disk. `suite` is supplied externally because
 /// the harness already knows which directory it is loading.
 pub fn parse(path: &Path, suite: Suite) -> Result<Vec<TestCase>> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading manifest {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("reading manifest {}", path.display()))?;
     let base = path
         .parent()
         .ok_or_else(|| anyhow!("manifest has no parent dir"))?;
@@ -239,8 +238,8 @@ fn project_entry(
         // SPARQL ASK: action is a qt:QueryTest with qt:query + qt:data,
         // result is an SRX file we read here to extract the boolean.
         let action_node = action.ok_or_else(|| anyhow!("missing mf:action"))?;
-        let action_subj = term_to_subject(&action_node)
-            .map_err(|_| anyhow!("qt action is not a resource"))?;
+        let action_subj =
+            term_to_subject(&action_node).map_err(|_| anyhow!("qt action is not a resource"))?;
         let qt_query = NamedNodeRef::new(&p.qt_query_iri)?;
         let qt_data = NamedNodeRef::new(&p.qt_data_iri)?;
         let query = resolve(
@@ -259,12 +258,21 @@ fn project_entry(
         let srx = fs::read_to_string(&expected_path)
             .with_context(|| format!("reading SRX {}", expected_path.display()))?;
         let expected = srx.contains("<boolean>true</boolean>");
-        TestKind::SparqlAsk { query, data, expected }
+        TestKind::SparqlAsk {
+            query,
+            data,
+            expected,
+        }
     } else {
         bail!("unsupported test type for entry {id}: {kind_str}");
     };
 
-    Ok(TestCase { id, suite, name, kind })
+    Ok(TestCase {
+        id,
+        suite,
+        name,
+        kind,
+    })
 }
 
 fn resolve_file(iri: &str, base: &Path) -> Result<PathBuf> {

@@ -15,12 +15,10 @@ fn rules_were_generated() {
 
 #[test]
 fn closure_delegated_rules_marked() {
-    let delegated: Vec<&str> = RULES
-        .iter()
-        .filter(|r| r.delegated)
-        .map(|r| r.id)
-        .collect();
-    for required in ["eq-ref", "eq-sym", "eq-trans", "prp-trp", "scm-sco", "scm-spo"] {
+    let delegated: Vec<&str> = RULES.iter().filter(|r| r.delegated).map(|r| r.id).collect();
+    for required in [
+        "eq-ref", "eq-sym", "eq-trans", "prp-trp", "scm-sco", "scm-spo",
+    ] {
         assert!(
             delegated.contains(&required),
             "{required} should be closure-delegated"

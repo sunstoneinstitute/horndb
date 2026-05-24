@@ -37,7 +37,9 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
 impl Reasoner for StubReasoner {
-    fn name(&self) -> &str { "stub" }
+    fn name(&self) -> &str {
+        "stub"
+    }
 
     fn load(&mut self, dataset: &Dataset) -> Result<()> {
         self.triple_count = dataset.len();

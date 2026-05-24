@@ -9,9 +9,7 @@
 
 use std::path::PathBuf;
 
-use reasoner_harness::{
-    manifest, runner::run_selected, selected::Selected, testcase::Suite,
-};
+use reasoner_harness::{manifest, runner::run_selected, selected::Selected, testcase::Suite};
 
 fn workspace() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -24,17 +22,15 @@ fn workspace() -> PathBuf {
 fn real_engine_passes_full_stage1_selection() {
     let sel = Selected::load(&workspace().join("harness/selected.toml")).unwrap();
     let mut engine = reasoner_owlrl::Engine::new();
-    let report = run_selected(
-        &mut engine,
-        &sel,
-        &workspace(),
-        &|p, s: Suite| manifest::parse(p, s),
-    )
+    let report = run_selected(&mut engine, &sel, &workspace(), &|p, s: Suite| {
+        manifest::parse(p, s)
+    })
     .unwrap();
 
     assert!(
         report.outcomes.len() >= 50,
-        "expected >=50 selected tests, got {}", report.outcomes.len(),
+        "expected >=50 selected tests, got {}",
+        report.outcomes.len(),
     );
     let failing: Vec<&str> = report
         .outcomes
@@ -42,5 +38,8 @@ fn real_engine_passes_full_stage1_selection() {
         .filter(|o| matches!(o.status, reasoner_harness::Status::Failed))
         .map(|o| o.test_id.as_str())
         .collect();
-    assert!(failing.is_empty(), "real engine failed selected cases: {failing:?}");
+    assert!(
+        failing.is_empty(),
+        "real engine failed selected cases: {failing:?}"
+    );
 }

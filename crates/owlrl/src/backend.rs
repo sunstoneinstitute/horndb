@@ -64,12 +64,7 @@ impl ClosureBackend for RuleFiringBackend {
 }
 
 /// Helper: chain-close a single predicate (the body `?a p ?b /\ ?b p ?c → ?a p ?c`).
-fn close_transitive(
-    store: &dyn TripleStore,
-    pred: TermId,
-    rule_id: &'static str,
-    out: &mut Delta,
-) {
+fn close_transitive(store: &dyn TripleStore, pred: TermId, rule_id: &'static str, out: &mut Delta) {
     let edges: Vec<(TermId, TermId)> = store
         .scan_predicate(pred)
         .map(|t| (t.s, t.o))
@@ -84,10 +79,7 @@ fn close_transitive(
                         head,
                         Provenance {
                             rule_id,
-                            premises: smallvec![
-                                Triple::new(a, pred, b),
-                                Triple::new(b, pred, c),
-                            ],
+                            premises: smallvec![Triple::new(a, pred, b), Triple::new(b, pred, c),],
                         },
                     );
                 }
@@ -96,12 +88,7 @@ fn close_transitive(
     }
 }
 
-fn close_symmetric(
-    store: &dyn TripleStore,
-    pred: TermId,
-    rule_id: &'static str,
-    out: &mut Delta,
-) {
+fn close_symmetric(store: &dyn TripleStore, pred: TermId, rule_id: &'static str, out: &mut Delta) {
     let edges: Vec<(TermId, TermId)> = store
         .scan_predicate(pred)
         .map(|t| (t.s, t.o))

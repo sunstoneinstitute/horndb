@@ -9,7 +9,7 @@ fn sco_chain_includes_reflexivity_over_extent() {
     let rtc = reflexive_transitive_closure(&m).unwrap();
     let edges = rtc.extract_edges().unwrap();
     // Strict closure: (1,0), (2,0), (2,1). Plus reflexive (0,0),(1,1),(2,2).
-    let mut expected: Vec<(u64, u64)> = vec![(0,0),(1,0),(1,1),(2,0),(2,1),(2,2)];
+    let mut expected: Vec<(u64, u64)> = vec![(0, 0), (1, 0), (1, 1), (2, 0), (2, 1), (2, 2)];
     expected.sort();
     assert_eq!(edges, expected);
 }

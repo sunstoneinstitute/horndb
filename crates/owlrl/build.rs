@@ -9,8 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
-    let manifest_dir =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let rules_path = manifest_dir.join("rules.toml");
     println!("cargo:rerun-if-changed={}", rules_path.display());
     println!("cargo:rerun-if-changed=codegen/mod.rs");

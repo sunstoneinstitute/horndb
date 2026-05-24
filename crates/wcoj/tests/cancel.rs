@@ -46,5 +46,9 @@ fn cancellation_returns_within_100ms() {
     }
     let elapsed = start.elapsed();
     assert!(elapsed < Duration::from_millis(100), "took {elapsed:?}");
-    assert!(matches!(last_err, Some(WcojError::Cancelled)), "got {:?}", last_err);
+    assert!(
+        matches!(last_err, Some(WcojError::Cancelled)),
+        "got {:?}",
+        last_err
+    );
 }

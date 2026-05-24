@@ -9,17 +9,16 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 
 use reasoner_harness::{
-    ci::to_junit_xml,
-    db::Db,
-    manifest, report as report_mod,
-    runner::run_selected,
-    selected::Selected,
-    stub::StubReasoner,
-    Reasoner, Status,
+    ci::to_junit_xml, db::Db, manifest, report as report_mod, runner::run_selected,
+    selected::Selected, stub::StubReasoner, Reasoner, Status,
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "harness", version, about = "reasoner conformance & benchmark harness")]
+#[command(
+    name = "harness",
+    version,
+    about = "reasoner conformance & benchmark harness"
+)]
 struct Cli {
     /// Path to workspace root (default: cwd).
     #[arg(long, default_value = ".")]
@@ -107,7 +106,10 @@ fn main() -> ExitCode {
 
 fn real_main() -> Result<ExitCode> {
     let cli = Cli::parse();
-    let workspace = cli.workspace.canonicalize().unwrap_or(cli.workspace.clone());
+    let workspace = cli
+        .workspace
+        .canonicalize()
+        .unwrap_or(cli.workspace.clone());
     let db_path = cli
         .db
         .unwrap_or_else(|| workspace.join("target/harness.sqlite"));
@@ -117,7 +119,11 @@ fn real_main() -> Result<ExitCode> {
     let db = Db::open(&db_path)?;
 
     match cli.cmd {
-        Cmd::Run { selected, junit, allow_failing } => {
+        Cmd::Run {
+            selected,
+            junit,
+            allow_failing,
+        } => {
             let sel_path = selected.unwrap_or_else(|| workspace.join("harness/selected.toml"));
             let sel = Selected::load(&sel_path)?;
             let mut engine: Box<dyn Reasoner> = match cli.engine.as_str() {
@@ -131,18 +137,18 @@ fn real_main() -> Result<ExitCode> {
             let run_id = db.start_run(&commit_sha, &hw, engine.name())?;
             info!(run_id = %run_id, "harness run started");
 
-            let report = run_selected(
-                engine.as_mut(),
-                &sel,
-                &workspace,
-                &|p, s| manifest::parse(p, s),
-            )?;
+            let report = run_selected(engine.as_mut(), &sel, &workspace, &|p, s| {
+                manifest::parse(p, s)
+            })?;
             for outcome in &report.outcomes {
                 db.record_outcome(&run_id, outcome)?;
             }
             println!(
                 "harness: run_id={} passed={} failed={} skipped={}",
-                run_id, report.passed(), report.failed(), report.skipped(),
+                run_id,
+                report.passed(),
+                report.failed(),
+                report.skipped(),
             );
             for o in &report.outcomes {
                 let tag = match o.status {
@@ -166,7 +172,10 @@ fn real_main() -> Result<ExitCode> {
             let t = report_mod::trend(&db, &suite, &metric)?;
             println!(
                 "trend suite={} metric={} points={} regression={}",
-                t.suite, t.metric, t.points.len(), t.regression_flag,
+                t.suite,
+                t.metric,
+                t.points.len(),
+                t.regression_flag,
             );
             for p in &t.points {
                 println!("  {} {} {}", p.timestamp, p.run_id, p.value);
@@ -188,10 +197,9 @@ fn real_main() -> Result<ExitCode> {
                 }
                 let base_iri = format!("file://{}", src.display());
                 let bytes = std::fs::read(&src)?;
-                let parser = RdfParser::from_format(RdfFormat::RdfXml)
-                    .with_base_iri(&base_iri)?;
-                let mut serializer = RdfSerializer::from_format(RdfFormat::Turtle)
-                    .for_writer(Vec::<u8>::new());
+                let parser = RdfParser::from_format(RdfFormat::RdfXml).with_base_iri(&base_iri)?;
+                let mut serializer =
+                    RdfSerializer::from_format(RdfFormat::Turtle).for_writer(Vec::<u8>::new());
                 for quad in parser.for_slice(&bytes) {
                     serializer.serialize_quad(&quad?)?;
                 }
@@ -202,7 +210,11 @@ fn real_main() -> Result<ExitCode> {
             println!("converted {count} manifest.rdf → manifest.ttl");
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::ListCases { manifest, profile, max } => {
+        Cmd::ListCases {
+            manifest,
+            profile,
+            max,
+        } => {
             // Stage-1 minimal: read the manifest, print the first
             // `max` test IDs (the implementer hand-curates which 50
             // to keep based on rule coverage — see
@@ -220,7 +232,13 @@ fn real_main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::SpbRun { driver_jar, scenario, endpoint, duration, label } => {
+        Cmd::SpbRun {
+            driver_jar,
+            scenario,
+            endpoint,
+            duration,
+            label,
+        } => {
             let cfg = reasoner_harness::ldbc_spb::SpbConfig {
                 driver_jar: &driver_jar,
                 scenario: &scenario,
@@ -231,8 +249,10 @@ fn real_main() -> Result<ExitCode> {
             let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
             let run_id = db.start_run(&commit_sha, &hardware_fingerprint(), &label)?;
             reasoner_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
-            println!("spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
-                     result.editorial_qps, result.aggregation_qps, result.update_qps);
+            println!(
+                "spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
+                result.editorial_qps, result.aggregation_qps, result.update_qps
+            );
             Ok(ExitCode::SUCCESS)
         }
     }

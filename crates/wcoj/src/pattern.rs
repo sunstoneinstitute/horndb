@@ -121,7 +121,13 @@ impl TriplePattern {
             let bound_sum: isize = phys
                 .iter()
                 .enumerate()
-                .map(|(d, t)| if matches!(t, Term::Bound(_)) { d as isize } else { 0 })
+                .map(|(d, t)| {
+                    if matches!(t, Term::Bound(_)) {
+                        d as isize
+                    } else {
+                        0
+                    }
+                })
                 .sum();
             // Stable index for tiebreaks.
             let idx = all.iter().position(|&o| o == ord).unwrap() as isize;
@@ -132,7 +138,8 @@ impl TriplePattern {
                 best = Some((ord, score));
             }
         }
-        best.map(|(o, _)| o).unwrap_or_else(|| self.preferred_ordering())
+        best.map(|(o, _)| o)
+            .unwrap_or_else(|| self.preferred_ordering())
     }
 
     /// Return the position (0=S, 1=P, 2=O) of the given variable, or `None`.

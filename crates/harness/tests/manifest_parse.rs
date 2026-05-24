@@ -14,8 +14,12 @@ fn fixture(rel: &str) -> PathBuf {
 fn parses_owl2_fixture_manifest() {
     let cases = manifest::parse(&fixture("owl2/manifest.ttl"), Suite::Owl2).unwrap();
     assert_eq!(cases.len(), 3);
-    assert!(cases.iter().any(|c| matches!(c.kind, TestKind::PositiveEntailment { .. })));
-    assert!(cases.iter().any(|c| matches!(c.kind, TestKind::Inconsistency { .. })));
+    assert!(cases
+        .iter()
+        .any(|c| matches!(c.kind, TestKind::PositiveEntailment { .. })));
+    assert!(cases
+        .iter()
+        .any(|c| matches!(c.kind, TestKind::Inconsistency { .. })));
 }
 
 #[test]

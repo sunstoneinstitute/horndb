@@ -59,7 +59,11 @@ fn no_gaps_no_duplicates_under_sustained_inserts() {
     // Asserted logical times are unique and strictly monotonic.
     let asserted_times: Vec<u64> = asserted.iter().map(|r| r.time).collect();
     let unique: HashSet<_> = asserted_times.iter().collect();
-    assert_eq!(unique.len(), asserted_times.len(), "duplicate asserted times");
+    assert_eq!(
+        unique.len(),
+        asserted_times.len(),
+        "duplicate asserted times"
+    );
     for w in asserted_times.windows(2) {
         assert!(w[0] < w[1], "asserted times must be strictly increasing");
     }

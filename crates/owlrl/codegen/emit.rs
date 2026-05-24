@@ -183,11 +183,7 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
     }
 }
 
-fn filter_for_leading(
-    s: &SlotPlan,
-    o: &SlotPlan,
-    triple: &proc_macro2::Ident,
-) -> TokenStream {
+fn filter_for_leading(s: &SlotPlan, o: &SlotPlan, triple: &proc_macro2::Ident) -> TokenStream {
     let s_chk = match s {
         SlotPlan::Bound(BoundSource::Vocab(field)) => {
             let id = format_ident!("{}", field);

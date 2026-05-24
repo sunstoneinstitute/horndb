@@ -24,15 +24,15 @@ pub struct TrendReport {
     pub regression_flag: bool,
 }
 
-pub fn trend(
-    db: &Db,
-    suite: &str,
-    metric: &str,
-) -> Result<TrendReport> {
+pub fn trend(db: &Db, suite: &str, metric: &str) -> Result<TrendReport> {
     let rows = db.metric_series(suite, metric)?;
     let points: Vec<TrendPoint> = rows
         .into_iter()
-        .map(|(run_id, timestamp, value)| TrendPoint { run_id, timestamp, value })
+        .map(|(run_id, timestamp, value)| TrendPoint {
+            run_id,
+            timestamp,
+            value,
+        })
         .collect();
     let regression_flag = detect_regression(&points);
     Ok(TrendReport {

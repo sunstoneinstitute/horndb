@@ -26,10 +26,7 @@ fn round_trips_dict_to_dense_and_back() {
 #[test]
 fn bulk_intern_pairs_returns_dense_edges() {
     let mut m = DenseIdMap::new();
-    let edges = m.intern_edges(&[
-        (DictId(10), DictId(20)),
-        (DictId(20), DictId(30)),
-    ]);
+    let edges = m.intern_edges(&[(DictId(10), DictId(20)), (DictId(20), DictId(30))]);
     // 10 -> 0, 20 -> 1, 30 -> 2 (first-seen order).
     assert_eq!(edges, vec![(0u64, 1u64), (1u64, 2u64)]);
     assert_eq!(m.len(), 3);

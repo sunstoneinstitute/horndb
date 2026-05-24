@@ -35,8 +35,7 @@ fn leapfrog_intersection_returns_only_common_values() {
     let it2 = PatternTrieIter::new(&src, &p2, &var_order, Ordering::Pos).unwrap();
     let it3 = PatternTrieIter::new(&src, &p3, &var_order, Ordering::Pos).unwrap();
 
-    let iters: Vec<Box<dyn TrieIterator>> =
-        vec![Box::new(it1), Box::new(it2), Box::new(it3)];
+    let iters: Vec<Box<dyn TrieIterator>> = vec![Box::new(it1), Box::new(it2), Box::new(it3)];
 
     let mut join = LeapfrogJoin::new(iters, 0);
     let mut out = Vec::new();

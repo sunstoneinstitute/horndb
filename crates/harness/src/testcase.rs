@@ -22,15 +22,25 @@ impl Suite {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestKind {
     /// Premise entails conclusion (both are RDF graphs).
-    PositiveEntailment { premise: PathBuf, conclusion: PathBuf },
+    PositiveEntailment {
+        premise: PathBuf,
+        conclusion: PathBuf,
+    },
     /// Premise does *not* entail conclusion.
-    NegativeEntailment { premise: PathBuf, conclusion: PathBuf },
+    NegativeEntailment {
+        premise: PathBuf,
+        conclusion: PathBuf,
+    },
     /// Premise graph is consistent.
     Consistency { premise: PathBuf },
     /// Premise graph is inconsistent.
     Inconsistency { premise: PathBuf },
     /// SPARQL ASK whose expected boolean answer is known.
-    SparqlAsk { query: PathBuf, data: PathBuf, expected: bool },
+    SparqlAsk {
+        query: PathBuf,
+        data: PathBuf,
+        expected: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

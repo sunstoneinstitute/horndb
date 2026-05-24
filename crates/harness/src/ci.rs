@@ -67,9 +67,27 @@ mod tests {
     #[test]
     fn emits_well_formed_junit_for_mixed_report() {
         let mut r = Report::new();
-        r.push(Outcome { test_id: "a".into(), suite: "owl2".into(), status: Status::Passed, reason: None, duration_ms: 12 });
-        r.push(Outcome { test_id: "b<x>".into(), suite: "owl2".into(), status: Status::Failed, reason: Some("not entailed".into()), duration_ms: 5 });
-        r.push(Outcome { test_id: "c".into(), suite: "sparql11".into(), status: Status::Skipped, reason: Some("waived".into()), duration_ms: 0 });
+        r.push(Outcome {
+            test_id: "a".into(),
+            suite: "owl2".into(),
+            status: Status::Passed,
+            reason: None,
+            duration_ms: 12,
+        });
+        r.push(Outcome {
+            test_id: "b<x>".into(),
+            suite: "owl2".into(),
+            status: Status::Failed,
+            reason: Some("not entailed".into()),
+            duration_ms: 5,
+        });
+        r.push(Outcome {
+            test_id: "c".into(),
+            suite: "sparql11".into(),
+            status: Status::Skipped,
+            reason: Some("waived".into()),
+            duration_ms: 0,
+        });
         let xml = to_junit_xml(&r);
         assert!(xml.starts_with("<?xml"));
         assert!(xml.contains(r#"tests="3""#));

@@ -57,16 +57,44 @@ pub fn run(cfg: &SpbConfig<'_>) -> Result<SpbResult> {
             String::from_utf8_lossy(&output.stderr),
         ));
     }
-    let parsed: SpbResult = serde_json::from_slice(&output.stdout)
-        .map_err(|e| anyhow!("parsing SPB JSON: {e}"))?;
+    let parsed: SpbResult =
+        serde_json::from_slice(&output.stdout).map_err(|e| anyhow!("parsing SPB JSON: {e}"))?;
     Ok(parsed)
 }
 
 pub fn record(db: &Db, run_id: &str, reasoner_name: &str, r: &SpbResult) -> Result<()> {
-    db.record_metric(run_id, "ldbc-spb-256", Some(reasoner_name), "editorial-qps", r.editorial_qps, "qps")?;
-    db.record_metric(run_id, "ldbc-spb-256", Some(reasoner_name), "aggregation-qps", r.aggregation_qps, "qps")?;
-    db.record_metric(run_id, "ldbc-spb-256", Some(reasoner_name), "update-qps", r.update_qps, "qps")?;
-    db.record_metric(run_id, "ldbc-spb-256", Some(reasoner_name), "duration-s", r.run_duration_seconds, "s")?;
+    db.record_metric(
+        run_id,
+        "ldbc-spb-256",
+        Some(reasoner_name),
+        "editorial-qps",
+        r.editorial_qps,
+        "qps",
+    )?;
+    db.record_metric(
+        run_id,
+        "ldbc-spb-256",
+        Some(reasoner_name),
+        "aggregation-qps",
+        r.aggregation_qps,
+        "qps",
+    )?;
+    db.record_metric(
+        run_id,
+        "ldbc-spb-256",
+        Some(reasoner_name),
+        "update-qps",
+        r.update_qps,
+        "qps",
+    )?;
+    db.record_metric(
+        run_id,
+        "ldbc-spb-256",
+        Some(reasoner_name),
+        "duration-s",
+        r.run_duration_seconds,
+        "s",
+    )?;
     Ok(())
 }
 

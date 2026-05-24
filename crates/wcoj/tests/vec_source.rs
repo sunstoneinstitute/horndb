@@ -43,10 +43,7 @@ fn vec_source_descends_levels() {
 
 #[test]
 fn vec_source_reports_total_count() {
-    let triples = vec![
-        Triple::new(1, 10, 100),
-        Triple::new(2, 10, 200),
-    ];
+    let triples = vec![Triple::new(1, 10, 100), Triple::new(2, 10, 200)];
     let src = VecTripleSource::from_triples(triples);
     assert_eq!(src.total_triples(), 2);
 }

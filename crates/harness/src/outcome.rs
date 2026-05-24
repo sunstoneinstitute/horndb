@@ -43,9 +43,15 @@ impl Report {
         self.outcomes.iter().filter(|o| o.status == status).count()
     }
 
-    pub fn passed(&self) -> usize { self.count(Status::Passed) }
-    pub fn failed(&self) -> usize { self.count(Status::Failed) }
-    pub fn skipped(&self) -> usize { self.count(Status::Skipped) }
+    pub fn passed(&self) -> usize {
+        self.count(Status::Passed)
+    }
+    pub fn failed(&self) -> usize {
+        self.count(Status::Failed)
+    }
+    pub fn skipped(&self) -> usize {
+        self.count(Status::Skipped)
+    }
 
     /// True if any test failed. Skips do not fail the report.
     pub fn has_failures(&self) -> bool {
@@ -69,9 +75,27 @@ mod tests {
     #[test]
     fn report_counts_by_status() {
         let mut r = Report::new();
-        r.push(Outcome { test_id: "a".into(), suite: "owl2".into(), status: Status::Passed, reason: None, duration_ms: 1 });
-        r.push(Outcome { test_id: "b".into(), suite: "owl2".into(), status: Status::Failed, reason: Some("nope".into()), duration_ms: 1 });
-        r.push(Outcome { test_id: "c".into(), suite: "owl2".into(), status: Status::Skipped, reason: Some("waived".into()), duration_ms: 0 });
+        r.push(Outcome {
+            test_id: "a".into(),
+            suite: "owl2".into(),
+            status: Status::Passed,
+            reason: None,
+            duration_ms: 1,
+        });
+        r.push(Outcome {
+            test_id: "b".into(),
+            suite: "owl2".into(),
+            status: Status::Failed,
+            reason: Some("nope".into()),
+            duration_ms: 1,
+        });
+        r.push(Outcome {
+            test_id: "c".into(),
+            suite: "owl2".into(),
+            status: Status::Skipped,
+            reason: Some("waived".into()),
+            duration_ms: 0,
+        });
         assert_eq!(r.passed(), 1);
         assert_eq!(r.failed(), 1);
         assert_eq!(r.skipped(), 1);
@@ -81,7 +105,13 @@ mod tests {
     #[test]
     fn skips_do_not_count_as_failures() {
         let mut r = Report::new();
-        r.push(Outcome { test_id: "c".into(), suite: "owl2".into(), status: Status::Skipped, reason: Some("waived".into()), duration_ms: 0 });
+        r.push(Outcome {
+            test_id: "c".into(),
+            suite: "owl2".into(),
+            status: Status::Skipped,
+            reason: Some("waived".into()),
+            duration_ms: 0,
+        });
         assert!(!r.has_failures());
     }
 }

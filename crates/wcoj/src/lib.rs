@@ -19,4 +19,3 @@ pub mod trie;
 pub use error::WcojError;
 pub use ids::{Ordering, TermId, Triple};
 pub use pattern::{Bgp, Term, TriplePattern, Var};
-

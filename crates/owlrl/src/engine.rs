@@ -17,10 +17,7 @@ pub struct Stats {
 
 /// Run forward chaining to fixed point. Does NOT clear existing inferred
 /// triples — see `reset_and_materialize` for that.
-pub fn materialize<S: TripleStore, B: ClosureBackend>(
-    store: &mut S,
-    backend: &mut B,
-) -> Stats {
+pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &mut B) -> Stats {
     let mut stats = Stats::default();
     // First round: every rule fires; treat all predicates as "dirty".
     let mut dirty: Option<FxHashSet<TermId>> = None;

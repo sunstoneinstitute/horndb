@@ -53,10 +53,7 @@ impl<'src> BinaryHashExecutor<'src> {
 /// Stage-1 simplification: full scan of one ordering, filtering on bound
 /// positions. SPEC-02 will offer a more selective access path; we don't
 /// need it here.
-fn scan_pattern<'src>(
-    source: &'src dyn TripleSource,
-    pat: &TriplePattern,
-) -> Result<Vec<Triple>> {
+fn scan_pattern<'src>(source: &'src dyn TripleSource, pat: &TriplePattern) -> Result<Vec<Triple>> {
     let ord = Ordering::Spo;
     let mut iter = source.iter(ord)?;
     let mut out = Vec::new();
@@ -167,8 +164,10 @@ impl<'src> BatchIter<'src> {
                 .collect();
             let triples = scan_pattern(exec.source, first)?;
             let mut cur_vars = first_vars.clone();
-            let mut cur_rows: Vec<Vec<TermId>> =
-                triples.iter().map(|t| project(first, *t, &cur_vars)).collect();
+            let mut cur_rows: Vec<Vec<TermId>> = triples
+                .iter()
+                .map(|t| project(first, *t, &cur_vars))
+                .collect();
 
             for pat in exec.bgp.patterns.iter().skip(1) {
                 if let Err(e) = exec.cancel.check() {
@@ -235,7 +234,12 @@ impl<'src> BatchIter<'src> {
             let out_positions: Vec<usize> = exec
                 .out_vars
                 .iter()
-                .map(|v| cur_vars.iter().position(|x| x == v).expect("out var missing"))
+                .map(|v| {
+                    cur_vars
+                        .iter()
+                        .position(|x| x == v)
+                        .expect("out var missing")
+                })
                 .collect();
             rows = cur_rows
                 .into_iter()

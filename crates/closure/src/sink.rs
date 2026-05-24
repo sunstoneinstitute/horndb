@@ -26,10 +26,7 @@ use crate::types::{DenseIdx, DictId, PredicateId, Triple};
 pub trait TripleSink: Sync {
     /// Bulk-insert inferred triples. Returns the count actually inserted
     /// (after the sink's own de-duplication against existing data).
-    fn bulk_insert_inferred(
-        &self,
-        triples: &mut dyn Iterator<Item = Triple>,
-    ) -> Result<u64>;
+    fn bulk_insert_inferred(&self, triples: &mut dyn Iterator<Item = Triple>) -> Result<u64>;
 }
 
 /// Consumed by SPEC-04 rule engine. The rule engine compiles `prp-trp`,
@@ -84,7 +81,9 @@ impl Default for BackendImpl {
     fn default() -> Self {
         // Cheap & safe to call repeatedly.
         let _ = init_once();
-        Self { sameas: EquivClasses::new() }
+        Self {
+            sameas: EquivClasses::new(),
+        }
     }
 }
 
@@ -164,7 +163,11 @@ fn write_closure(
     let mut iter = dense_edges.iter().filter_map(|&(s, o)| {
         let s_dict = map.to_dict(DenseIdx(s))?;
         let o_dict = map.to_dict(DenseIdx(o))?;
-        Some(Triple { s: s_dict, p, o: o_dict })
+        Some(Triple {
+            s: s_dict,
+            p,
+            o: o_dict,
+        })
     });
     sink.bulk_insert_inferred(&mut iter)
 }

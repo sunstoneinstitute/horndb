@@ -45,8 +45,8 @@ pub struct OreSmoke {
 const PER_ONTOLOGY_BUDGET: Duration = Duration::from_secs(5 * 60);
 
 pub fn load_selected(path: &Path) -> Result<OreSelected> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let parsed: OreSelected = toml::from_str(&raw)?;
     if parsed.version != 1 {
         anyhow::bail!("unsupported ore selected version {}", parsed.version);
@@ -54,11 +54,7 @@ pub fn load_selected(path: &Path) -> Result<OreSelected> {
     Ok(parsed)
 }
 
-pub fn run(
-    engine: &mut dyn Reasoner,
-    selected: &OreSelected,
-    root: &Path,
-) -> Result<Report> {
+pub fn run(engine: &mut dyn Reasoner, selected: &OreSelected, root: &Path) -> Result<Report> {
     let mut report = Report::new();
     for ont in &selected.ontologies {
         let start = Instant::now();
@@ -116,7 +112,11 @@ fn run_one(
     }
 
     let consistent = engine.is_consistent()?;
-    let mut status = if consistent { Status::Passed } else { Status::Failed };
+    let mut status = if consistent {
+        Status::Passed
+    } else {
+        Status::Failed
+    };
     let mut reason = if consistent {
         None
     } else {

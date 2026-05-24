@@ -72,22 +72,34 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
     let id = case.id.clone();
 
     let (status, reason) = match &case.kind {
-        TestKind::PositiveEntailment { premise, conclusion } => {
+        TestKind::PositiveEntailment {
+            premise,
+            conclusion,
+        } => {
             let p = load_dataset(premise)?;
             let c = load_dataset(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
                 (Status::Passed, None)
             } else {
-                (Status::Failed, Some("premise did not entail conclusion".into()))
+                (
+                    Status::Failed,
+                    Some("premise did not entail conclusion".into()),
+                )
             }
         }
-        TestKind::NegativeEntailment { premise, conclusion } => {
+        TestKind::NegativeEntailment {
+            premise,
+            conclusion,
+        } => {
             let p = load_dataset(premise)?;
             let c = load_dataset(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
-                (Status::Failed, Some("conclusion entailed but should not be".into()))
+                (
+                    Status::Failed,
+                    Some("conclusion entailed but should not be".into()),
+                )
             } else {
                 (Status::Passed, None)
             }
@@ -98,7 +110,10 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             if engine.is_consistent()? {
                 (Status::Passed, None)
             } else {
-                (Status::Failed, Some("expected consistent, got inconsistent".into()))
+                (
+                    Status::Failed,
+                    Some("expected consistent, got inconsistent".into()),
+                )
             }
         }
         TestKind::Inconsistency { premise } => {
@@ -107,10 +122,17 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             if !engine.is_consistent()? {
                 (Status::Passed, None)
             } else {
-                (Status::Failed, Some("expected inconsistent, got consistent".into()))
+                (
+                    Status::Failed,
+                    Some("expected inconsistent, got consistent".into()),
+                )
             }
         }
-        TestKind::SparqlAsk { query, data, expected } => {
+        TestKind::SparqlAsk {
+            query,
+            data,
+            expected,
+        } => {
             let d = load_dataset(data)?;
             engine.load(&d)?;
             let q = fs::read_to_string(query)
@@ -119,7 +141,10 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             if got == *expected {
                 (Status::Passed, None)
             } else {
-                (Status::Failed, Some(format!("ASK got {got}, expected {expected}")))
+                (
+                    Status::Failed,
+                    Some(format!("ASK got {got}, expected {expected}")),
+                )
             }
         }
     };
@@ -134,8 +159,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
 }
 
 fn load_dataset(path: &Path) -> Result<Dataset> {
-    let bytes = fs::read(path)
-        .with_context(|| format!("reading rdf {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("reading rdf {}", path.display()))?;
     let base_iri = format!("file://{}", path.display());
     let mut graph = Graph::new();
     let parser = TurtleParser::new()
@@ -166,7 +190,8 @@ mod tests {
 
     fn fixtures() -> PathBuf {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.pop(); p.pop(); // back to workspace root
+        p.pop();
+        p.pop(); // back to workspace root
         p
     }
 
@@ -186,15 +211,16 @@ mod tests {
                 include: cases.iter().map(|c| c.id.clone()).collect(),
             },
         );
-        let selected = Selected { version: 1, suites, removed: vec![] };
+        let selected = Selected {
+            version: 1,
+            suites,
+            removed: vec![],
+        };
 
         let mut engine = StubReasoner::new();
-        let report = run_selected(
-            &mut engine,
-            &selected,
-            &fixtures(),
-            &|p, s| crate::manifest::parse(p, s),
-        )
+        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+            crate::manifest::parse(p, s)
+        })
         .unwrap();
 
         assert_eq!(report.outcomes.len(), 3, "all three OWL2 fixtures run");

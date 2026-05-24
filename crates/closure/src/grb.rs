@@ -45,12 +45,7 @@ impl BoolMatrix {
     pub fn from_edges(n: u64, edges: &[(u64, u64)]) -> Result<Self, GrbError> {
         let mut handle: ffi::GrB_Matrix = std::ptr::null_mut();
         unsafe {
-            GrbError::check(ffi::GrB_Matrix_new(
-                &mut handle,
-                ffi::GrB_BOOL,
-                n,
-                n,
-            ))?;
+            GrbError::check(ffi::GrB_Matrix_new(&mut handle, ffi::GrB_BOOL, n, n))?;
         }
 
         if !edges.is_empty() {
@@ -71,7 +66,11 @@ impl BoolMatrix {
             }
         }
 
-        Ok(Self { inner: handle, nrows: n, ncols: n })
+        Ok(Self {
+            inner: handle,
+            nrows: n,
+            ncols: n,
+        })
     }
 
     /// Construct a fresh empty `n x n` Boolean matrix.
@@ -79,12 +78,18 @@ impl BoolMatrix {
         Self::from_edges(n, &[])
     }
 
-    pub fn nrows(&self) -> u64 { self.nrows }
-    pub fn ncols(&self) -> u64 { self.ncols }
+    pub fn nrows(&self) -> u64 {
+        self.nrows
+    }
+    pub fn ncols(&self) -> u64 {
+        self.ncols
+    }
 
     pub fn nvals(&self) -> Result<u64, GrbError> {
         let mut n: u64 = 0;
-        unsafe { GrbError::check(ffi::GrB_Matrix_nvals(&mut n, self.inner))?; }
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_nvals(&mut n, self.inner))?;
+        }
         Ok(n)
     }
 

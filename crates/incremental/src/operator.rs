@@ -79,11 +79,7 @@ impl NaryPlan {
     /// through as both base and delta inputs to the next join. Stage 1
     /// keeps the same `base` for every level for simplicity (correct
     /// when every body pattern reads the same predicate partition).
-    pub fn apply_delta(
-        &self,
-        base: &Zset<TripleId>,
-        delta: &Zset<TripleId>,
-    ) -> Zset<TripleId> {
+    pub fn apply_delta(&self, base: &Zset<TripleId>, delta: &Zset<TripleId>) -> Zset<TripleId> {
         if self.joins.is_empty() {
             return delta.clone();
         }
