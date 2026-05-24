@@ -1,5 +1,5 @@
 //! SPARQL 1.1 Query Results JSON Format.
-//! https://www.w3.org/TR/sparql11-results-json/
+//! <https://www.w3.org/TR/sparql11-results-json/>
 
 use crate::algebra::Term;
 use crate::exec::Bindings;

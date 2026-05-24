@@ -1,4 +1,4 @@
-//! SPARQL CSV results. https://www.w3.org/TR/sparql11-results-csv-tsv/
+//! SPARQL CSV results. <https://www.w3.org/TR/sparql11-results-csv-tsv/>
 
 use crate::algebra::Term;
 use crate::exec::Bindings;
