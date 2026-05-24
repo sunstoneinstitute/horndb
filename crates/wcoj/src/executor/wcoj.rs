@@ -1,14 +1,14 @@
 //! Leapfrog Triejoin executor.
 //!
 //! Drives a depth-first leapfrog intersection over a set of pattern trie
-//! iterators. Each iterator exposes *local* variable depths (the variables
-//! it mentions, in the same relative order as the executor's global
-//! `var_order`); the executor maintains a per-iterator local-depth cursor
-//! that advances/retreats as we descend and ascend.
+//! iterators. Each iterator exposes *local* variable depths; the executor
+//! maintains a per-iterator local-depth cursor that advances/retreats as we
+//! descend and ascend.
 //!
 //! The recursion is implemented with an explicit per-depth state stack so
-//! cancellation polling stays cheap and the hot path has no recursion
-//! frames.
+//! cancellation polling stays cheap. The leapfrog at each depth is inlined
+//! against `&mut [Box<dyn TrieIterator>]` rather than owning the iters, to
+//! avoid hot-path Box allocations.
 
 use std::sync::Arc;
 
@@ -21,7 +21,6 @@ use crate::ids::TermId;
 use crate::pattern::Bgp;
 use crate::plan::ExecutionPlan;
 use crate::source::TripleSource;
-use crate::trie::leapfrog::LeapfrogJoin;
 use crate::trie::source_iter::PatternTrieIter;
 use crate::trie::TrieIterator;
 
@@ -56,10 +55,6 @@ impl<'src> WcojExecutor<'src> {
 /// global depth* even when that global depth maps to a local depth specific
 /// to the iter. The wrapper translates global-depth peek/seek/open/up calls
 /// into the iter's local-depth calls.
-///
-/// The translation table `g_to_l[g] = Some(local_d)` is set up at executor
-/// init; `cur_local_depth` tracks where the inner iter's cursor currently
-/// sits.
 struct AdaptiveIter<'src> {
     inner: PatternTrieIter<'src>,
     /// `g_to_l[global_depth]` = Some(local_depth) if this pattern mentions
@@ -88,16 +83,10 @@ impl<'src> TrieIterator for AdaptiveIter<'src> {
         let local = self.local_for(depth);
         self.inner.seek(local, value);
     }
-    /// `open_level(global_depth)` ⇒ `inner.open_level(local_for(global_depth))`.
-    /// This descends past the iter's local var at `global_depth` to expose
-    /// the next contribution (if any).
     fn open_level(&mut self, depth: u8) {
         let local = self.local_for(depth);
         self.inner.open_level(local);
     }
-    /// `up(global_depth)` is called by the executor when ascending past
-    /// global depth (back to the parent at depth-1). We undo the matching
-    /// `open_level(global_depth - 1)` call.
     fn up(&mut self, depth: u8) {
         if depth == 0 {
             return;
@@ -112,34 +101,55 @@ impl<'src> TrieIterator for AdaptiveIter<'src> {
             }
         }
         if let Some(l) = prev_local {
-            // open_level(l) exposed local depth l+1 (and any trailing
-            // bound levels). Undo via inner.up(l+1).
             self.inner.up(l + 1);
         }
-        // If no previous contribution exists, the iter never descended for
-        // this branch — nothing to undo.
     }
 }
 
-/// Output iterator: drives the leapfrog loop, flushes Arrow batches.
+/// Per-depth state for the inlined leapfrog. We hold no iter references;
+/// the executor borrows iters from `BatchIter::iters` by index list.
+struct DepthState {
+    /// Round-robin index into the depth's contributing list.
+    p: usize,
+    /// True before the first call advances iters.
+    primed: bool,
+    /// True once the leapfrog is exhausted at this depth.
+    done: bool,
+    /// True once we have descended past this depth into depth+1 at least
+    /// once for the current binding (i.e. the leapfrog yielded a match).
+    /// When ascending, this signals "advance past the match and re-leapfrog".
+    has_descended: bool,
+}
+
+impl DepthState {
+    fn fresh() -> Self {
+        Self {
+            p: 0,
+            primed: false,
+            done: false,
+            has_descended: false,
+        }
+    }
+}
+
 pub struct BatchIter<'src> {
     exec: WcojExecutor<'src>,
     builder: BindingBatchBuilder,
-    /// All adaptive iterators. When a join at depth d is active, the
-    /// contributing iters are *moved* into that join (replaced here by
-    /// a sentinel); they're returned on ascent.
+    /// One iter per BGP pattern, in BGP order. Always present; never
+    /// moved (in contrast to the original LeapfrogJoin ownership scheme).
     iters: Vec<Box<dyn TrieIterator + 'src>>,
     /// For each variable depth: indices of `iters` that mention this var.
     contributing: Vec<Vec<usize>>,
     /// For each variable depth `d`: indices of iters that mention `d` AND
-    /// also mention some deeper variable. These are the iters that need
-    /// `open_level(d)` / `up(d+1)` when descending/ascending past `d`.
+    /// also mention some deeper variable.
     descend_at: Vec<Vec<usize>>,
-    /// Per-depth join state.
-    join_state: Vec<Option<LeapfrogJoin<'src>>>,
-    /// Current binding values per depth.
+    /// Iters whose top-contribution depth is exactly d (used for the
+    /// "reset on re-entry" pass during ascent).
+    top_at: Vec<Vec<usize>>,
+    /// Per-depth state. `None` ⇒ not yet entered at this depth.
+    state: Vec<Option<DepthState>>,
+    /// Current binding per depth.
     binding: Vec<TermId>,
-    /// Current recursion depth (== global variable index being processed).
     depth: u8,
     finished: bool,
     pending_error: Option<crate::error::WcojError>,
@@ -152,7 +162,6 @@ impl<'src> BatchIter<'src> {
         let mut iters: Vec<Box<dyn TrieIterator + 'src>> = Vec::new();
         let mut pending_error = None;
 
-        // Build one AdaptiveIter per pattern.
         for pat in &exec.bgp.patterns {
             match PatternTrieIter::new(
                 exec.source,
@@ -161,7 +170,6 @@ impl<'src> BatchIter<'src> {
                 pat.ordering_for(&exec.plan.var_order),
             ) {
                 Ok(inner) => {
-                    // Build the global → local map.
                     let mut g_to_l: Vec<Option<u8>> = vec![None; n_vars];
                     let mut local = 0u8;
                     for (g, var) in exec.plan.var_order.iter().enumerate() {
@@ -179,7 +187,6 @@ impl<'src> BatchIter<'src> {
             }
         }
 
-        // Compute, for each variable depth, which patterns contribute.
         let mut contributing = Vec::with_capacity(n_vars);
         for var in &exec.plan.var_order {
             let mut v = Vec::new();
@@ -190,8 +197,6 @@ impl<'src> BatchIter<'src> {
             }
             contributing.push(v);
         }
-        // Compute, for each depth, which contributing iters also mention a
-        // deeper variable (and thus need open_level/up on descent/ascent).
         let mut descend_at: Vec<Vec<usize>> = Vec::with_capacity(n_vars);
         for d in 0..n_vars {
             let mut v = Vec::new();
@@ -206,8 +211,17 @@ impl<'src> BatchIter<'src> {
             }
             descend_at.push(v);
         }
+        let mut top_at: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
+        for (i, pat) in exec.bgp.patterns.iter().enumerate() {
+            for (g, var) in exec.plan.var_order.iter().enumerate() {
+                if pat.position_of(*var).is_some() {
+                    top_at[g].push(i);
+                    break;
+                }
+            }
+        }
 
-        let join_state = (0..n_vars).map(|_| None).collect();
+        let state = (0..n_vars).map(|_| None).collect();
         let binding = vec![0; n_vars];
 
         Self {
@@ -216,11 +230,71 @@ impl<'src> BatchIter<'src> {
             iters,
             contributing,
             descend_at,
-            join_state,
+            top_at,
+            state,
             binding,
             depth: 0,
             finished: false,
             pending_error,
+        }
+    }
+
+    /// Advance the leapfrog at `depth` until it yields the next common
+    /// value (Some) or is exhausted (None). Inline implementation operating
+    /// directly on `iters` indexed by `contributing[depth]`.
+    fn leapfrog_next(&mut self, depth: u8) -> Option<TermId> {
+        let st = self.state[depth as usize].as_mut().unwrap();
+        let idxs = &self.contributing[depth as usize];
+        let k = idxs.len();
+        if st.done || k == 0 {
+            st.done = true;
+            return None;
+        }
+
+        if !st.primed {
+            st.primed = true;
+            // Initial peek check: any iter exhausted => no match.
+            for &i in idxs {
+                if self.iters[i].peek(depth).is_none() {
+                    st.done = true;
+                    return None;
+                }
+            }
+            st.p = 0;
+            return self.find_match(depth);
+        }
+
+        // Subsequent call: advance the iter that just produced the match
+        // past it, then re-leapfrog.
+        let cur = self.iters[idxs[st.p]].peek(depth).unwrap();
+        self.iters[idxs[st.p]].seek(depth, cur.wrapping_add(1));
+        if self.iters[idxs[st.p]].peek(depth).is_none() {
+            self.state[depth as usize].as_mut().unwrap().done = true;
+            return None;
+        }
+        let new_p = (st.p + 1) % k;
+        self.state[depth as usize].as_mut().unwrap().p = new_p;
+        self.find_match(depth)
+    }
+
+    fn find_match(&mut self, depth: u8) -> Option<TermId> {
+        let idxs = self.contributing[depth as usize].clone();
+        let k = idxs.len();
+        loop {
+            let p = self.state[depth as usize].as_ref().unwrap().p;
+            let prev = (p + k - 1) % k;
+            let target = self.iters[idxs[prev]].peek(depth)?;
+            let cur = self.iters[idxs[p]].peek(depth)?;
+            if cur == target {
+                return Some(cur);
+            }
+            self.iters[idxs[p]].seek(depth, target);
+            if self.iters[idxs[p]].peek(depth).is_none() {
+                self.state[depth as usize].as_mut().unwrap().done = true;
+                return None;
+            }
+            let new_p = (p + 1) % k;
+            self.state[depth as usize].as_mut().unwrap().p = new_p;
         }
     }
 
@@ -234,7 +308,6 @@ impl<'src> BatchIter<'src> {
         }
 
         let n_vars = self.exec.plan.var_order.len() as u8;
-
         if n_vars == 0 {
             self.finished = true;
             return None;
@@ -248,27 +321,25 @@ impl<'src> BatchIter<'src> {
                 }
             }
 
-            // Initialise the join at this depth if needed.
-            let needs_init = match &mut self.join_state[self.depth as usize] {
-                None => true,
-                Some(j) => j.iters_mut().is_empty(),
-            };
-
-            if needs_init {
-                let idxs = self.contributing[self.depth as usize].clone();
-                let mut taken: Vec<Box<dyn TrieIterator + 'src>> =
-                    Vec::with_capacity(idxs.len());
-                for &i in &idxs {
-                    let placeholder: Box<dyn TrieIterator + 'src> = Box::new(NoopTrieIter);
-                    let real = std::mem::replace(&mut self.iters[i], placeholder);
-                    taken.push(real);
-                }
-                self.join_state[self.depth as usize] =
-                    Some(LeapfrogJoin::new(taken, self.depth));
+            if self.state[self.depth as usize].is_none() {
+                self.state[self.depth as usize] = Some(DepthState::fresh());
             }
 
-            let join = self.join_state[self.depth as usize].as_mut().unwrap();
-            let next = join.next();
+            // If the prior iteration descended past this depth and we're
+            // back, advance the leapfrog past the prior match before
+            // re-leapfrogging.
+            let must_advance_after_descent = {
+                let st = self.state[self.depth as usize].as_ref().unwrap();
+                st.has_descended && !st.done
+            };
+            if must_advance_after_descent {
+                self.state[self.depth as usize]
+                    .as_mut()
+                    .unwrap()
+                    .has_descended = false;
+            }
+
+            let next = self.leapfrog_next(self.depth);
 
             match next {
                 Some(v) => {
@@ -278,35 +349,23 @@ impl<'src> BatchIter<'src> {
                         if let Some(b) = flushed {
                             return Some(Ok(b));
                         }
-                        // Stay at this depth.
                     } else {
-                        // Descend: return iters to self.iters, then call
-                        // open_level(depth) only on those that have a
-                        // deeper variable (descend_at[depth]).
-                        let idxs = self.contributing[self.depth as usize].clone();
-                        let placeholder = LeapfrogJoin::reentry_marker(self.depth);
-                        let taken_join = std::mem::replace(
-                            self.join_state[self.depth as usize].as_mut().unwrap(),
-                            placeholder,
-                        );
-                        let returned = taken_join.into_iters();
-                        for (i, real) in idxs.iter().zip(returned) {
-                            self.iters[*i] = real;
-                        }
                         for &i in &self.descend_at[self.depth as usize] {
                             self.iters[i].open_level(self.depth);
                         }
+                        self.state[self.depth as usize].as_mut().unwrap().has_descended = true;
                         self.depth += 1;
                     }
                 }
                 None => {
-                    // Exhausted at this depth.
-                    let join = self.join_state[self.depth as usize].take().unwrap();
-                    let idxs = self.contributing[self.depth as usize].clone();
-                    let returned = join.into_iters();
-                    for (i, real) in idxs.iter().zip(returned) {
-                        self.iters[*i] = real;
+                    // Reset iters whose top-contribution depth is exactly
+                    // self.depth so the next re-entry sees fresh state.
+                    let to_reset: Vec<usize> = self.top_at[self.depth as usize].clone();
+                    for i in to_reset {
+                        self.iters[i].reset();
                     }
+                    // Drop state at this depth.
+                    self.state[self.depth as usize] = None;
                     if self.depth == 0 {
                         self.finished = true;
                         if let Some(b) = self.builder.finish() {
@@ -314,42 +373,10 @@ impl<'src> BatchIter<'src> {
                         }
                         return None;
                     }
-                    // Ascend. Before adjusting `self.depth`, note that the
-                    // current depth (d+1) just finished iterating; any iters
-                    // whose top-contribution depth is exactly d+1 had their
-                    // cursor advanced and must be reset so that the next
-                    // re-entry sees the full set of values.
-                    let finished_depth = self.depth as usize;
-                    let to_reset: Vec<usize> = self.contributing[finished_depth]
-                        .iter()
-                        .copied()
-                        .filter(|&i| {
-                            // Reset if iter has no contribution at any
-                            // depth shallower than `finished_depth`.
-                            (0..finished_depth).all(|d| {
-                                !self.contributing[d].contains(&i)
-                            })
-                        })
-                        .collect();
-                    for i in to_reset {
-                        self.iters[i].reset();
-                    }
                     self.depth -= 1;
-                    // Undo open_level on parent's descending iters
-                    // (those that had a deeper var and called open_level).
                     for &i in &self.descend_at[self.depth as usize] {
                         self.iters[i].up(self.depth + 1);
                     }
-                    // Advance the parent leapfrog past the value we
-                    // descended on. This applies to all contributing iters
-                    // at the parent depth.
-                    let parent_val = self.binding[self.depth as usize];
-                    let parent_idxs = self.contributing[self.depth as usize].clone();
-                    for i in &parent_idxs {
-                        self.iters[*i].seek(self.depth, parent_val.wrapping_add(1));
-                    }
-                    // Clear the reentry_marker so init rebuilds the join.
-                    self.join_state[self.depth as usize] = None;
                 }
             }
         }
@@ -361,20 +388,4 @@ impl<'src> Iterator for BatchIter<'src> {
     fn next(&mut self) -> Option<Self::Item> {
         self.step()
     }
-}
-
-/// Placeholder trie iterator used while real iters are temporarily moved
-/// into a `LeapfrogJoin`. Never queried — must be replaced before use.
-struct NoopTrieIter;
-
-impl TrieIterator for NoopTrieIter {
-    fn arity(&self) -> u8 {
-        0
-    }
-    fn peek(&self, _: u8) -> Option<TermId> {
-        None
-    }
-    fn seek(&mut self, _: u8, _: TermId) {}
-    fn open_level(&mut self, _: u8) {}
-    fn up(&mut self, _: u8) {}
 }
