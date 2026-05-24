@@ -2,11 +2,14 @@ use horndb_owlrl::generated::{CompiledRule, RULES, RULE_COUNT};
 
 #[test]
 fn rules_were_generated() {
+    assert_eq!(RULES.len(), RULE_COUNT);
+    // Use the runtime `RULES.len()` rather than the `RULE_COUNT` const so
+    // clippy doesn't fold this as a constant assertion — the value is set by
+    // codegen at build time and we want a real lower-bound check on it.
     assert!(
-        RULE_COUNT >= 25,
+        RULES.len() >= 25,
         "expected ≥25 Stage-1 rules, got {RULE_COUNT}"
     );
-    assert_eq!(RULES.len(), RULE_COUNT);
     let ids: Vec<&str> = RULES.iter().map(|r: &CompiledRule| r.id).collect();
     for required in ["cax-sco", "scm-eqc1", "prp-dom", "scm-sco", "eq-trans"] {
         assert!(ids.contains(&required), "missing rule {required}");
