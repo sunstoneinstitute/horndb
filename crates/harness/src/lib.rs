@@ -1,5 +1,5 @@
-//! reasoner-harness — conformance and benchmarking harness for the
-//! `reasoner` project. See `specs/SPEC-01-conformance-benchmarks.md`.
+//! horndb-harness — conformance and benchmarking harness for the
+//! `HornDB` project. See `specs/SPEC-01-conformance-benchmarks.md`.
 //!
 //! The harness is engine-agnostic: implementations of the [`Reasoner`]
 //! trait are plugged in at runtime. A built-in [`StubReasoner`] exists

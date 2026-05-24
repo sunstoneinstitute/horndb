@@ -13,7 +13,7 @@ pub fn to_junit_xml(report: &Report) -> String {
     let _ = writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     let _ = writeln!(
         out,
-        r#"<testsuite name="reasoner-harness" tests="{total}" failures="{failures}" skipped="{skipped}">"#,
+        r#"<testsuite name="horndb-harness" tests="{total}" failures="{failures}" skipped="{skipped}">"#,
     );
     for o in &report.outcomes {
         let escaped_id = xml_escape(&o.test_id);

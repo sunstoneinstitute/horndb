@@ -28,7 +28,7 @@ fi
 
 # Convert each .rdf manifest into .ttl using the harness CLI helper.
 # (The convert subcommand is added in Task 17.)
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     convert-manifests --root "$DATA"
 
 echo "done."

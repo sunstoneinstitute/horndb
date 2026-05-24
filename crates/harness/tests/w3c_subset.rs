@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use reasoner_harness::{manifest, runner::run_selected, selected::Selected, testcase::Suite};
+use horndb_harness::{manifest, runner::run_selected, selected::Selected, testcase::Suite};
 
 fn workspace() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -21,7 +21,7 @@ fn workspace() -> PathBuf {
 #[test]
 fn real_engine_passes_full_stage1_selection() {
     let sel = Selected::load(&workspace().join("harness/selected.toml")).unwrap();
-    let mut engine = reasoner_owlrl::Engine::new();
+    let mut engine = horndb_owlrl::Engine::new();
     let report = run_selected(&mut engine, &sel, &workspace(), &|p, s: Suite| {
         manifest::parse(p, s)
     })
@@ -35,7 +35,7 @@ fn real_engine_passes_full_stage1_selection() {
     let failing: Vec<&str> = report
         .outcomes
         .iter()
-        .filter(|o| matches!(o.status, reasoner_harness::Status::Failed))
+        .filter(|o| matches!(o.status, horndb_harness::Status::Failed))
         .map(|o| o.test_id.as_str())
         .collect();
     assert!(

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use reasoner_harness::{
+use horndb_harness::{
     ci::to_junit_xml, db::Db, manifest, report as report_mod, runner::run_selected,
     selected::Selected, stub::StubReasoner, Reasoner, Status,
 };
@@ -17,7 +17,7 @@ use reasoner_harness::{
 #[command(
     name = "harness",
     version,
-    about = "reasoner conformance & benchmark harness"
+    about = "HornDB conformance & benchmark harness"
 )]
 struct Cli {
     /// Path to workspace root (default: cwd).
@@ -82,7 +82,7 @@ enum Cmd {
         #[arg(long, default_value_t = 600)]
         duration: u64,
         /// Label used as the `dataset` column so we can A/B
-        /// (e.g. "reasoner-engine" vs "graphdb-free").
+        /// (e.g. "horndb" vs "graphdb-free").
         #[arg(long)]
         label: String,
     },
@@ -129,7 +129,7 @@ fn real_main() -> Result<ExitCode> {
             let mut engine: Box<dyn Reasoner> = match cli.engine.as_str() {
                 "stub" => Box::new(StubReasoner::new()),
                 #[cfg(feature = "real-engine")]
-                "owlrl" => Box::new(reasoner_owlrl::Engine::new()),
+                "owlrl" => Box::new(horndb_owlrl::Engine::new()),
                 other => anyhow::bail!("unknown engine: {other}"),
             };
             let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
@@ -220,9 +220,9 @@ fn real_main() -> Result<ExitCode> {
             // to keep based on rule coverage — see
             // harness/curation/owl2-rl-50.md).
             let suite = if manifest.to_string_lossy().contains("sparql11") {
-                reasoner_harness::testcase::Suite::Sparql11
+                horndb_harness::testcase::Suite::Sparql11
             } else {
-                reasoner_harness::testcase::Suite::Owl2
+                horndb_harness::testcase::Suite::Owl2
             };
             let cases = manifest::parse(&manifest, suite)?;
             let _ = profile; // profile filter requires `mf:profile` parsing;
@@ -239,16 +239,16 @@ fn real_main() -> Result<ExitCode> {
             duration,
             label,
         } => {
-            let cfg = reasoner_harness::ldbc_spb::SpbConfig {
+            let cfg = horndb_harness::ldbc_spb::SpbConfig {
                 driver_jar: &driver_jar,
                 scenario: &scenario,
                 endpoint: &endpoint,
                 duration_seconds: duration,
             };
-            let result = reasoner_harness::ldbc_spb::run(&cfg)?;
+            let result = horndb_harness::ldbc_spb::run(&cfg)?;
             let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
             let run_id = db.start_run(&commit_sha, &hardware_fingerprint(), &label)?;
-            reasoner_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
+            horndb_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
             println!(
                 "spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
                 result.editorial_qps, result.aggregation_qps, result.update_qps

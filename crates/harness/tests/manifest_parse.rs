@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use reasoner_harness::manifest;
-use reasoner_harness::testcase::{Suite, TestKind};
+use horndb_harness::manifest;
+use horndb_harness::testcase::{Suite, TestKind};
 
 fn fixture(rel: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
