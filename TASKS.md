@@ -38,21 +38,17 @@ here in the same commit.
 
 ## HIGH — Lint cleanup (CI gate)
 
-- [ ] **Workspace-wide `cargo clippy -- -D warnings` is red.**
-  - The `.pre-commit-config.yaml` `pre-push` hook will block pushes once
-    these are fixed, but at the moment a fresh clone fails clippy. Known
-    categories (from a sweep on `cde4b99`):
-    - `uninlined_format_args` (multiple crates)
-    - `manual_range_inclusive` in `horndb-wcoj`
-    - `into_iter` / `next` confused with the `Iterator` trait methods in
-      `horndb-wcoj` trie types — needs `#[allow]` with rationale or
-      renaming
-    - `map_or` can be simplified in `horndb-owlrl`
-    - explicit lifetimes that could be elided in `horndb-wcoj`
-    - `loop variable used to index` rewrite in `horndb-wcoj` joins
-  - The `horndb-harness` crate also has its own clippy gaps that are
-    excluded from the pre-push hook because of rocksdb compile time;
-    address those in a separate pass with CI cache priming.
+- [x] **Workspace-wide `cargo clippy -- -D warnings` is red.** *Done:
+  `horndb-wcoj` clippy gaps (`manual_range_inclusive`, trie `into_iter`/
+  `next` shadowing, explicit lifetimes, `loop variable used to index`,
+  `uninlined_format_args`) were cleared alongside the WCOJ correctness
+  fix; `horndb-owlrl` `map_or` → `is_none_or` and a constant-assertion
+  warning were cleared in the non-wcoj pass. `cargo clippy --workspace
+  --all-targets --exclude horndb-harness -- -D warnings` is green.*
+  - Still outstanding: the `horndb-harness` crate has its own clippy
+    gaps that are excluded from the pre-push hook because of rocksdb
+    compile time; address those in a separate pass with CI cache
+    priming.
 
 ## HIGH — Performance gaps
 
