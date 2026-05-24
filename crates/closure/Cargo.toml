@@ -17,3 +17,13 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 anyhow = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = { version = "0.8", features = ["small_rng"] }
+
+[[bench]]
+name = "transitive"
+harness = false
+
+[[bench]]
+name = "sameas"
+harness = false
