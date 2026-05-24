@@ -135,6 +135,14 @@ initial-research.md       # Feasibility study and competitive landscape
 
 Targets, baselines, current measurements, and reproduction commands live in [`BENCHMARKS.md`](BENCHMARKS.md). Live performance gaps are tracked in [`TASKS.md`](TASKS.md) alongside correctness gaps.
 
+## The name
+
+**Horn** as in **Horn clauses** — implications of the form *B₁ ∧ … ∧ Bₙ → H* with at most one positive conclusion. OWL 2 RL is precisely the fragment of OWL 2 whose entailment rules can be written as Horn rules and evaluated bottom-up to a fixpoint, which is what this engine does; the W3C OWL 2 RL/RDF rules document is, quite literally, a set of Horn rules. So the name picks out the engine's logical core, not just the data it stores.
+
+**DB** because the user-facing shape is a database — load triples, run SPARQL, get answers (with provenance) — rather than a standalone rule engine or a library. It puts HornDB in the same naming neighbourhood as FaunaDB, EdgeDB, SurrealDB.
+
+The name was picked after sweeping roughly forty alternatives (Norse mythology, Norwegian cognition vocabulary, Greek philosophy, owl imagery) for namespace collisions across crates.io, PyPI, npm, GitHub, and the relevant TLDs. *HornDB* was the cleanest that also said something true about the engine.
+
 ## License
 
 Apache-2.0 — see [`LICENSE`](LICENSE).
