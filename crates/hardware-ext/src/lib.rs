@@ -1,1 +1,1 @@
-//! reasoner-hardware-ext — placeholder. See specs/SPEC-* for scope.
+//! horndb-hardware-ext — placeholder. See specs/SPEC-* for scope.
