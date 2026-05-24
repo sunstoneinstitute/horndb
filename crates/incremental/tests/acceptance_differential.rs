@@ -36,13 +36,13 @@ fn check_equivalence(asserted: &Zset<TripleId>, derived: &Zset<TripleId>) -> boo
 
     for (k, _) in reference.iter() {
         if union.get(k) == 0 {
-            eprintln!("missing: {:?}", k);
+            eprintln!("missing: {k:?}");
             return false;
         }
     }
     for (k, _) in union.iter() {
         if reference.get(k) == 0 {
-            eprintln!("spurious: {:?}", k);
+            eprintln!("spurious: {k:?}");
             return false;
         }
     }

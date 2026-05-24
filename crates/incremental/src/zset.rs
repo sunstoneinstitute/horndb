@@ -78,6 +78,12 @@ impl<K: Ord + Clone> Zset<K> {
 
     /// Construct from an iterator of `(key, multiplicity)` pairs.
     /// Duplicate keys are summed; zero results are dropped.
+    ///
+    /// Deliberately an inherent method rather than `FromIterator` because
+    /// our element type is `(K, Multiplicity)` not `K`, which would make
+    /// the trait impl misleading — `Zset::from_iter([1, 2, 3])` does not
+    /// mean what a casual reader expects.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_iter<I: IntoIterator<Item = (K, Multiplicity)>>(it: I) -> Self {
         let mut z = Self::new();
         for (k, m) in it {
