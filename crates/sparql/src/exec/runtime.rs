@@ -231,3 +231,60 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
 fn _witness() -> Result<()> {
     Err(SparqlError::Executor("unreachable".into()))
 }
+
+/// Render a CONSTRUCT template against a stream of solution mappings.
+///
+/// Returns concrete `(s, p, o)` lexical-form triples. Triples whose
+/// template references an unbound variable in the row are skipped
+/// (W3C: "ground triple results only").
+pub fn construct_triples(
+    query: &spargebra::Query,
+    rows: &[Bindings],
+) -> Result<Vec<(String, String, String)>> {
+    use spargebra::term::{NamedNodePattern, TermPattern};
+    let template = match query {
+        spargebra::Query::Construct { template, .. } => template,
+        _ => {
+            return Err(SparqlError::Executor(
+                "construct_triples called on non-CONSTRUCT query".into(),
+            ))
+        }
+    };
+
+    fn resolve_term(t: &TermPattern, row: &Bindings) -> Option<String> {
+        match t {
+            TermPattern::NamedNode(n) => Some(n.as_str().to_owned()),
+            TermPattern::BlankNode(b) => Some(b.as_str().to_owned()),
+            TermPattern::Literal(l) => Some(l.to_string()),
+            TermPattern::Variable(v) => match row.get(v.as_str()) {
+                Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => {
+                    Some(s.clone())
+                }
+                _ => None,
+            },
+        }
+    }
+    fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<String> {
+        match p {
+            NamedNodePattern::NamedNode(n) => Some(n.as_str().to_owned()),
+            NamedNodePattern::Variable(v) => match row.get(v.as_str()) {
+                Some(Term::Iri(s)) => Some(s.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    let mut out = Vec::new();
+    for row in rows {
+        for tp in template {
+            if let (Some(s), Some(p), Some(o)) = (
+                resolve_term(&tp.subject, row),
+                resolve_pred(&tp.predicate, row),
+                resolve_term(&tp.object, row),
+            ) {
+                out.push((s, p, o));
+            }
+        }
+    }
+    Ok(out)
+}
