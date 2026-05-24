@@ -12,12 +12,15 @@ use rand::{Rng, SeedableRng};
 use reasoner_closure::closure::transitive::transitive_closure;
 use reasoner_closure::grb::{init_once, BoolMatrix};
 
+#[allow(clippy::needless_range_loop)]
 fn naive_closure(n: usize, edges: &[(u64, u64)]) -> BTreeSet<(u64, u64)> {
     let mut reach = vec![vec![false; n]; n];
     for &(s, o) in edges {
         reach[s as usize][o as usize] = true;
     }
-    // Floyd–Warshall over Booleans.
+    // Floyd–Warshall over Booleans. Index-style loops are required here
+    // because we read reach[i][k] and reach[k][j] while writing reach[i][j];
+    // splitting borrows by iterator is more obfuscating than it is worth.
     for k in 0..n {
         for i in 0..n {
             if !reach[i][k] { continue; }
