@@ -2,7 +2,7 @@
 # Source: W3C OWL 2 Profiles — https://www.w3.org/TR/owl2-profiles/ Tables 4–9.
 # Adding a rule: append a [[rule]] block; build.rs regenerates on next build.
 # Rules with delegate = "closure" are NOT compiled here — they are routed to
-# `reasoner-closure` (SPEC-05) via the ClosureBackend trait. We list them so
+# `horndb-closure` (SPEC-05) via the ClosureBackend trait. We list them so
 # the rule table is complete and self-documenting.
 
 # ---------------------------------------------------------------------------

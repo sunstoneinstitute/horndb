@@ -1,4 +1,4 @@
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine, Stage-1 slice.
+//! horndb-owlrl — OWL 2 RL/RDF rule engine, Stage-1 slice.
 //!
 //! # Scope
 //!
@@ -10,7 +10,7 @@
 //! - Semi-naïve evaluation driver with dirty-predicate filtering.
 //! - Full re-materialization (`reset_and_materialize`).
 //! - `ClosureBackend` trait for `eq-*` / `prp-trp` / `scm-sco` / `scm-spo`
-//!   delegation to SPEC-05 (`reasoner-closure`). A reference
+//!   delegation to SPEC-05 (`horndb-closure`). A reference
 //!   `RuleFiringBackend` is provided for tests.
 //!
 //! # Future Work (NOT in this crate yet)
@@ -26,7 +26,7 @@
 //! # Adding a rule
 //!
 //! 1. Append a `[[rule]]` block to `rules.toml`.
-//! 2. `cargo build -p reasoner-owlrl` regenerates `generated_rules.rs`.
+//! 2. `cargo build -p horndb-owlrl` regenerates `generated_rules.rs`.
 //! 3. Add a unit test in `tests/single_rule.rs`.
 //!
 //! See `plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md` for the full plan.

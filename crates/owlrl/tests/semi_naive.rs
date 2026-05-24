@@ -1,10 +1,10 @@
 //! Verify the driver chains derivations across multiple rules and to fixed point.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::materialize;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::materialize;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))

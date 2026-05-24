@@ -1,6 +1,6 @@
 //! Closure-backend trait: equality and transitive-property closure.
 //!
-//! In production, `reasoner-closure` (SPEC-05) implements this trait against
+//! In production, `horndb-closure` (SPEC-05) implements this trait against
 //! SuiteSparse:GraphBLAS. In tests and for Stage-1 smoke runs, the
 //! `RuleFiringBackend` defined here runs the closure as ordinary rule firing
 //! (slow but obviously correct).

@@ -1,10 +1,10 @@
 //! SPEC-04 F7: reset_and_materialize produces a bit-identical store.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
-use reasoner_owlrl::{materialize, reset_and_materialize};
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
+use horndb_owlrl::{materialize, reset_and_materialize};
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))

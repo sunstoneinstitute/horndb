@@ -1,4 +1,4 @@
-use reasoner_owlrl::generated::{CompiledRule, RULES, RULE_COUNT};
+use horndb_owlrl::generated::{CompiledRule, RULES, RULE_COUNT};
 
 #[test]
 fn rules_were_generated() {

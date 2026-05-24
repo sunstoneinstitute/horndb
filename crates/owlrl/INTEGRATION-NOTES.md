@@ -1,4 +1,4 @@
-# SPEC-08 Integration Notes for `reasoner-owlrl`
+# SPEC-08 Integration Notes for `horndb-owlrl`
 
 These notes describe call sites that **SPEC-04's plan** is responsible
 for implementing.

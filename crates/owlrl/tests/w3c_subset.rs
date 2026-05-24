@@ -1,11 +1,11 @@
 //! Hand-encoded fixtures patterned on the W3C OWL 2 RL test suite.
 //! Each test corresponds to a single normative rule or simple rule combination.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::materialize;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::materialize;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))
