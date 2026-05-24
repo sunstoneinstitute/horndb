@@ -12,6 +12,7 @@
 //!   endpoint exposing `/query` and `/update`.
 
 pub mod algebra;
+pub mod api;
 pub mod error;
 pub mod exec;
 pub mod parser;
