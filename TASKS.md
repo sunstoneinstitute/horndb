@@ -156,9 +156,9 @@ list when the corresponding Stage-1 slice is settled.
   folded into `harness/selected.toml` as a new optional `[sparql_query]`
   table; the duplicate file was deleted and the loader updated to model
   the new section.*
-- [ ] **Plans/specs cross-reference cleanup.** `specs/README.md` doesn't
-  yet point at `plans/`; add a "Plans" column to the SPEC table so the
-  per-spec plan files are discoverable from the spec.
+- [x] **Plans/specs cross-reference cleanup.** `docs/specs/README.md`
+  now carries a `Plan` column linking each spec to its `docs/plans/`
+  entry so the per-spec plans are discoverable from the spec index.
 
 ## ARCHIVE — Done (for reference)
 
