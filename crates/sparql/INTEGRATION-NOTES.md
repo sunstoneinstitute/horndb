@@ -17,7 +17,7 @@ SPARQL queries should be able to filter on the provenance column
 exposed by SPEC-02. SPEC-07's plan should:
 
 1. Recognise the (engine-specific) predicate
-   `<https://reasoner.sunstone.institute/prov/source>` in `FILTER`
+   `<https://horndb.io/prov/source>` in `FILTER`
    clauses.
 2. Map literal values `"symbolic"` and `"ml-derived"` onto the
    `MlProvenance` discriminants from SPEC-02's storage column.
@@ -25,8 +25,8 @@ exposed by SPEC-02. SPEC-07's plan should:
    ```sparql
    SELECT ?s ?p ?o ?model WHERE {
      ?s ?p ?o .
-     ?s <https://reasoner.sunstone.institute/prov/source> "ml-derived" .
-     ?s <https://reasoner.sunstone.institute/prov/model>  ?model .
+     ?s <https://horndb.io/prov/source> "ml-derived" .
+     ?s <https://horndb.io/prov/model>  ?model .
    }
    ```
 
