@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use reasoner_storage::loader::ntriples::load_ntriples_file;
-use reasoner_storage::Store;
+use horndb_storage::loader::ntriples::load_ntriples_file;
+use horndb_storage::Store;
 use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {

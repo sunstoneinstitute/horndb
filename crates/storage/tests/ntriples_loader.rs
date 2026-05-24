@@ -1,5 +1,5 @@
-use reasoner_storage::loader::ntriples::{load_ntriples_file, LoadStats};
-use reasoner_storage::Store;
+use horndb_storage::loader::ntriples::{load_ntriples_file, LoadStats};
+use horndb_storage::Store;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {

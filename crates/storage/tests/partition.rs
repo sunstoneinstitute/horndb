@@ -1,4 +1,4 @@
-use reasoner_storage::{PredicatePartition, TermId, TermKind};
+use horndb_storage::{PredicatePartition, TermId, TermKind};
 
 fn uri(payload: u64) -> TermId {
     TermId::new(TermKind::Uri, payload)

@@ -8,7 +8,7 @@ Date: <fill in>
 
 | # | Criterion | Status | Evidence |
 |---|-----------|--------|----------|
-| 1 | LUBM-100 import ≤30 s | <PASS/FAIL> | `cargo bench -p reasoner-storage --bench load_lubm` with `LUBM_NT=...lubm100.nt`; elapsed = <ms> |
+| 1 | LUBM-100 import ≤30 s | <PASS/FAIL> | `cargo bench -p horndb-storage --bench load_lubm` with `LUBM_NT=...lubm100.nt`; elapsed = <ms> |
 | 2 | LUBM-8000 import ≤30 min | DEFERRED | Stage 2 — bench harness exists, just not run yet |
 | 3 | LUBM-8000 footprint ≤55 GB | DEFERRED | Stage 2 |
 | 4 | Sequential scan ≥80% of STREAM Triad | DEFERRED | Stage 2 (needs the hot tier in a NUMA-pinned bench) |
@@ -21,7 +21,7 @@ Date: <fill in>
 - LUBM-100 load elapsed: <fill in> ms (≈ <Mtriples/s>)
 - LUBM-100 dictionary size: <fill in>
 - LUBM-100 footprint via `Store::report_footprint()`: <fill in> bytes (<fill in> B/triple)
-- W3C harness selected subset run (`cargo test -p reasoner-harness`): <PASS/FAIL>
+- W3C harness selected subset run (`cargo test -p horndb-harness`): <PASS/FAIL>
 
 ## Out-of-scope items tracked as Future Work
 

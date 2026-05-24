@@ -1,13 +1,13 @@
-# SPEC-08 Integration Notes for `reasoner-storage`
+# SPEC-08 Integration Notes for `horndb-storage`
 
 These notes describe call sites that **SPEC-02's plan** is responsible
-for implementing. Nothing in this file modifies `reasoner-storage`
-directly; it records the contract `reasoner-ml` exposes for SPEC-02
+for implementing. Nothing in this file modifies `horndb-storage`
+directly; it records the contract `horndb-ml` exposes for SPEC-02
 to consume.
 
 ## F5 — Provenance annotation column
 
-`reasoner-ml::provenance::MlProvenance` is the value type to store
+`horndb-ml::provenance::MlProvenance` is the value type to store
 on each inferred triple. SPEC-02 should:
 
 1. Add an optional column `provenance: MlProvenance` to each
@@ -24,7 +24,7 @@ future variants must take new bytes, never reuse `0x00` or `0x01`.
 
 ## F4 — Hot-set advisor input to tiering
 
-`reasoner-ml::hotset::HotSetAdvisor::predict_hot(max)` returns
+`horndb-ml::hotset::HotSetAdvisor::predict_hot(max)` returns
 `Vec<TripleId>`. SPEC-02's tier-placement policy should:
 
 1. Hold an `Arc<MlRegistry>` provided at construction time.

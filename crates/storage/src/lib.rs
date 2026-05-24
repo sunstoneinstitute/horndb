@@ -1,4 +1,4 @@
-//! reasoner-storage — Stage 0/1 scope.
+//! horndb-storage — Stage 0/1 scope.
 //!
 //! Provides:
 //!   * 64-bit kind-tagged term IDs (`term`).
