@@ -45,16 +45,13 @@ impl<'a> LeapfrogJoin<'a> {
 
         if !self.primed {
             self.primed = true;
-            // Sort iterators by current head so we can leapfrog deterministically.
-            // For correctness we don't need to sort — but sorting picks the
-            // smallest max-min gap first, which is faster.
-            self.iters
-                .sort_by_key(|it| it.peek(self.depth).unwrap_or(TermId::MAX));
+            // Skip sort: the executor relies on `into_iters()` returning the
+            // iters in the same order they were inserted. (Stage-2 may add a
+            // separate sort-tracking permutation for the perf win.)
             if self.iters.iter().any(|it| it.peek(self.depth).is_none()) {
                 self.done = true;
                 return None;
             }
-            // After sort, p starts at 0 and the target is iters[k-1].peek.
             self.p = 0;
             return self.find_match();
         }

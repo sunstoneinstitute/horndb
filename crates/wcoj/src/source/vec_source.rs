@@ -134,7 +134,13 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
 
     fn up(&mut self, depth: u8) {
         let d = depth as usize;
-        self.range[d] = (0, 0);
-        self.cursor[d] = 0;
+        if d == 0 {
+            // Root: reset to full data range and rewind cursor to start.
+            self.range[0] = (0, self.data.len());
+            self.cursor[0] = 0;
+        } else {
+            self.range[d] = (0, 0);
+            self.cursor[d] = 0;
+        }
     }
 }

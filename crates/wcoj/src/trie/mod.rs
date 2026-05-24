@@ -24,6 +24,11 @@ pub trait TrieIterator {
     fn open_level(&mut self, depth: u8);
     fn up(&mut self, depth: u8);
 
+    /// Reset the iter to its post-construction state. Used by the executor
+    /// when re-entering a depth that this iter's top-contribution depth
+    /// equals (so its cursor advance must be undone).
+    fn reset(&mut self) {}
+
     fn at_end(&self, depth: u8) -> bool {
         self.peek(depth).is_none()
     }

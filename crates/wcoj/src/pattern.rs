@@ -76,6 +76,65 @@ impl TriplePattern {
             .unwrap()
     }
 
+    /// Pick a trie ordering consistent with the executor's global variable
+    /// elimination order: the resulting physical depth of each variable in
+    /// this pattern is monotone non-decreasing in its global var-depth, and
+    /// bound positions are pushed as shallow as possible within that
+    /// constraint. Falls back to `preferred_ordering()` if no consistent
+    /// ordering exists (impossible for triple patterns with ≤2 vars).
+    pub fn ordering_for(&self, var_order: &[Var]) -> Ordering {
+        use Ordering::*;
+        let all = [Spo, Sop, Pso, Pos, Osp, Ops];
+        let phys_of = |ord: Ordering| -> [Term; 3] {
+            match ord {
+                Spo => [self.s, self.p, self.o],
+                Sop => [self.s, self.o, self.p],
+                Pso => [self.p, self.s, self.o],
+                Pos => [self.p, self.o, self.s],
+                Osp => [self.o, self.s, self.p],
+                Ops => [self.o, self.p, self.s],
+            }
+        };
+        // Score: (consistent?, bound-depth-sum). Consistent=true wins;
+        // smaller bound-depth-sum wins as tiebreak (mirrors preferred_ordering).
+        let mut best: Option<(Ordering, (bool, isize, isize))> = None;
+        for &ord in &all {
+            let phys = phys_of(ord);
+            // Compute phys-depth of each pattern var in global var-depth order.
+            let mut prev_phys: i32 = -1;
+            let mut consistent = true;
+            for v in var_order {
+                for (pd, t) in phys.iter().enumerate() {
+                    if let Term::Var(vv) = t {
+                        if vv == v {
+                            let p = pd as i32;
+                            if p < prev_phys {
+                                consistent = false;
+                            }
+                            prev_phys = p;
+                            break;
+                        }
+                    }
+                }
+            }
+            // Bound-depth-sum: smaller = bounds at shallower depths.
+            let bound_sum: isize = phys
+                .iter()
+                .enumerate()
+                .map(|(d, t)| if matches!(t, Term::Bound(_)) { d as isize } else { 0 })
+                .sum();
+            // Stable index for tiebreaks.
+            let idx = all.iter().position(|&o| o == ord).unwrap() as isize;
+            // Minimise (!consistent, bound_sum, idx). For tiebreak `idx`,
+            // smaller index wins (matches array order Spo < Sop < ...).
+            let score = (!consistent, bound_sum, idx);
+            if best.map(|(_, b)| score < b).unwrap_or(true) {
+                best = Some((ord, score));
+            }
+        }
+        best.map(|(o, _)| o).unwrap_or_else(|| self.preferred_ordering())
+    }
+
     /// Return the position (0=S, 1=P, 2=O) of the given variable, or `None`.
     pub fn position_of(&self, v: Var) -> Option<u8> {
         if self.s == Term::Var(v) {
