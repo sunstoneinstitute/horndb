@@ -5,6 +5,7 @@
 
 pub mod backend;
 pub mod delta;
+pub mod engine;
 pub mod provenance;
 pub mod store;
 pub mod types;
@@ -13,3 +14,5 @@ pub mod vocab;
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
 }
+
+pub use engine::{materialize, reset_and_materialize, Stats};
