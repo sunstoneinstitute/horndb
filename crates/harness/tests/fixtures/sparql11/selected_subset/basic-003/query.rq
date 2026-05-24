@@ -1,0 +1,4 @@
+SELECT ?o WHERE {
+  ?s <http://example.org/p> ?o .
+  FILTER(?s = <http://example.org/a>)
+}
