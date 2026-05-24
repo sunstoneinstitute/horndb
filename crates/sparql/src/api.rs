@@ -15,7 +15,10 @@ use crate::update::apply_update;
 #[derive(Debug, Clone)]
 pub enum QueryAnswer {
     /// SELECT result: list of variable names + solution rows.
-    Solutions { vars: Vec<String>, rows: Vec<Bindings> },
+    Solutions {
+        vars: Vec<String>,
+        rows: Vec<Bindings>,
+    },
     /// ASK result.
     Boolean(bool),
     /// CONSTRUCT result: ground triples in (s, p, o) lexical form.

@@ -8,9 +8,7 @@ use crate::algebra::{Expr, OrderDir, Term, TriplePattern, Var};
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     /// Leaf: scan a BGP via the executor.
-    BgpScan {
-        patterns: Vec<TriplePattern>,
-    },
+    BgpScan { patterns: Vec<TriplePattern> },
     /// Cartesian/equi-join of two child plans on shared variables.
     Join {
         left: Box<PhysicalPlan>,
@@ -38,9 +36,7 @@ pub enum PhysicalPlan {
         inner: Box<PhysicalPlan>,
     },
     /// Deduplicate rows.
-    Distinct {
-        inner: Box<PhysicalPlan>,
-    },
+    Distinct { inner: Box<PhysicalPlan> },
     /// OFFSET/LIMIT.
     Slice {
         inner: Box<PhysicalPlan>,

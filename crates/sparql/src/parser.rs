@@ -17,24 +17,38 @@ use spargebra::{Query, SparqlParser, Update};
 /// without re-parsing.
 #[derive(Debug, Clone)]
 pub enum ParsedQuery {
-    Select { inner: Query },
-    Ask { inner: Query },
-    Construct { inner: Query },
+    Select {
+        inner: Query,
+    },
+    Ask {
+        inner: Query,
+    },
+    Construct {
+        inner: Query,
+    },
     /// DESCRIBE is recognised by the parser but rejected here in
     /// Stage 1; left as its own variant so the regression surface
     /// shows up at the `match` site, not as a silent fallthrough.
-    Describe { inner: Query },
+    Describe {
+        inner: Query,
+    },
 }
 
 /// A successfully parsed SPARQL update. Stage 1 only supports
 /// `INSERT DATA` and `DELETE DATA` literal forms.
 #[derive(Debug, Clone)]
 pub enum ParsedUpdate {
-    InsertData { inner: Update },
-    DeleteData { inner: Update },
+    InsertData {
+        inner: Update,
+    },
+    DeleteData {
+        inner: Update,
+    },
     /// Any other update form (LOAD/CLEAR/DROP/INSERT WHERE/...) is
     /// parsed but flagged as out-of-scope at runtime.
-    UnsupportedForm { inner: Update },
+    UnsupportedForm {
+        inner: Update,
+    },
 }
 
 /// Parse a SPARQL 1.1 query string.

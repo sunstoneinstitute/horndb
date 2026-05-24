@@ -54,8 +54,8 @@ fn join_of_two_bgps() {
 
 #[test]
 fn rejects_minus() {
-    let q = parse_query("SELECT * WHERE { ?s ?p ?o MINUS { ?s <http://ex/q> ?z } }")
-        .expect("parse");
+    let q =
+        parse_query("SELECT * WHERE { ?s ?p ?o MINUS { ?s <http://ex/q> ?z } }").expect("parse");
     let inner = match q {
         ParsedQuery::Select { inner } => inner,
         _ => unreachable!(),

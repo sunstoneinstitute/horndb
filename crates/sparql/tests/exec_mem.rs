@@ -38,7 +38,10 @@ fn mem_executor_matches_single_pattern() {
         })
         .collect();
     got.sort();
-    assert_eq!(got, vec!["http://ex/b".to_owned(), "http://ex/c".to_owned()]);
+    assert_eq!(
+        got,
+        vec!["http://ex/b".to_owned(), "http://ex/c".to_owned()]
+    );
 }
 
 #[test]

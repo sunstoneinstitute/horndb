@@ -215,9 +215,7 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
         E::Literal(l) => Expr::Term(Term::Literal(l.to_string())),
         E::Variable(v) => Expr::Term(Term::Var(translate_var(v))),
         E::Equal(a, b) => Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::SameTerm(a, b) => {
-            Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?))
-        }
+        E::SameTerm(a, b) => Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Less(a, b) => Expr::Lt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Greater(a, b) => Expr::Gt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::And(a, b) => Expr::And(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),

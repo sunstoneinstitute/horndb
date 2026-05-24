@@ -33,11 +33,7 @@ fn end_to_end_ask_true() {
 fn end_to_end_construct() {
     let mut s = MemStore::default();
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-    let ans = execute_query(
-        "CONSTRUCT { ?s <http://ex/r> ?o } WHERE { ?s ?p ?o }",
-        &s,
-    )
-    .unwrap();
+    let ans = execute_query("CONSTRUCT { ?s <http://ex/r> ?o } WHERE { ?s ?p ?o }", &s).unwrap();
     match ans {
         QueryAnswer::Triples(t) => {
             assert_eq!(t.len(), 1);

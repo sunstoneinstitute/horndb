@@ -16,7 +16,9 @@ use spargebra::term::{GroundTerm, NamedOrBlankNode, Term as SpgTerm};
 pub fn apply_update<S: Store>(u: &ParsedUpdate, store: &mut S) -> Result<()> {
     use spargebra::GraphUpdateOperation;
     let ops = match u {
-        ParsedUpdate::InsertData { inner } | ParsedUpdate::DeleteData { inner } => &inner.operations,
+        ParsedUpdate::InsertData { inner } | ParsedUpdate::DeleteData { inner } => {
+            &inner.operations
+        }
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),

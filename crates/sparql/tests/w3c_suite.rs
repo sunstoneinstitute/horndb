@@ -7,7 +7,7 @@ use reasoner_sparql::api::{execute_query, QueryAnswer};
 use reasoner_sparql::exec::mem::MemStore;
 use reasoner_sparql::exec::Store;
 use reasoner_sparql::results::json::{write_ask_json, write_select_json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn fixtures_root() -> PathBuf {
     // tests live in crates/sparql/tests/, fixtures in crates/harness/
@@ -17,7 +17,7 @@ fn fixtures_root() -> PathBuf {
     p
 }
 
-fn load_ntriples(path: &PathBuf) -> MemStore {
+fn load_ntriples(path: &Path) -> MemStore {
     let mut s = MemStore::default();
     let body = std::fs::read_to_string(path).expect("read data.nt");
     for line in body.lines() {
@@ -41,9 +41,8 @@ fn split_term(input: &str) -> (String, &str) {
     if input.starts_with('<') {
         let end = input.find('>').unwrap();
         (input[..=end].to_owned(), &input[end + 1..])
-    } else if input.starts_with('"') {
+    } else if let Some(rest) = input.strip_prefix('"') {
         // find the closing quote (no escape handling — fixtures are simple).
-        let rest = &input[1..];
         let end = rest.find('"').unwrap();
         (input[..=end + 1].to_owned(), &input[end + 2..])
     } else {
@@ -65,7 +64,7 @@ fn parse_term(s: &str) -> Term {
     }
 }
 
-fn read_form(dir: &PathBuf) -> String {
+fn read_form(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("form"))
         .expect("read form")
         .trim()
