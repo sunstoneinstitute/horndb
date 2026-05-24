@@ -102,7 +102,7 @@ impl TripleStore for MemStore {
         match self.by_pred.get(&p) {
             Some(set) => {
                 let iter = set.iter().filter_map(move |&(ss, oo)| {
-                    if s.map_or(true, |x| x == ss) && o.map_or(true, |x| x == oo) {
+                    if s.is_none_or(|x| x == ss) && o.is_none_or(|x| x == oo) {
                         Some(Triple::new(ss, p, oo))
                     } else {
                         None
