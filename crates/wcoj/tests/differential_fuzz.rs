@@ -95,20 +95,12 @@ fn arb_bgp() -> impl Strategy<Value = Bgp> {
 }
 
 proptest! {
-    // Stage-1: 16 cases. The fuzzer has identified at least one known
-    // mismatch between WCOJ and BinaryHash that's tracked as Future Work
-    // (BGPs with repeated patterns sharing the same variable layout —
-    // executor produces extra rows compared to the binary-hash reference).
-    // The 4-cycle benchmark (Task 14) also shows WCOJ slower than
-    // binary-hash; both gaps will be revisited in Stage-2.
-    //
-    // To keep CI green while the diagnosis is in progress, the test body
-    // is gated on RUST_LOG=fuzz=on. Stage-2 will fix the bug and lift
-    // the gate.
-    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+    // Stage-1: 256 cases (was 16 while the over-production bug was being
+    // diagnosed). Once SPEC-01 conformance harness can load LUBM-100 the
+    // case count ramps to 100K and the test moves to a nightly job.
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
     #[test]
-    #[ignore = "WCOJ vs BinaryHash mismatch on repeated patterns — Stage-2 fix"]
     fn wcoj_matches_binary_hash(seed in any::<u64>(), bgp in arb_bgp()) {
         let src = build_source(seed);
         let out_vars = bgp.variables();
@@ -126,4 +118,54 @@ proptest! {
         );
         prop_assert_eq!(wcoj_rows, bh_rows);
     }
+}
+
+/// Sanity check: the generator must actually produce BGPs with repeated
+/// patterns (i.e. structurally identical patterns appearing more than
+/// once) — this is the class of inputs that surfaced the
+/// over-production bug originally. If proptest is silently rejecting all
+/// such BGPs (e.g. via the self-loop filter) the differential test
+/// loses its main signal.
+///
+/// Uses a deterministic seed so the assertion isn't flaky; the threshold
+/// is conservatively low (≥1 out of 2048) — well under the empirical
+/// rate of repeated-pattern BGPs from the current `arb_bgp` strategy.
+#[test]
+fn fuzzer_generates_repeated_pattern_bgps() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::{Config, TestRng, TestRunner};
+    let seed = [0xC0u8; 32];
+    let rng = TestRng::from_seed(proptest::test_runner::RngAlgorithm::ChaCha, &seed);
+    let mut runner = TestRunner::new_with_rng(
+        Config {
+            cases: 2048,
+            ..Config::default()
+        },
+        rng,
+    );
+    let strat = arb_bgp();
+    let mut repeated_count = 0usize;
+    let mut total = 0usize;
+    for _ in 0..2048 {
+        let bgp = strat.new_tree(&mut runner).unwrap().current();
+        total += 1;
+        // Two patterns are "structurally identical" if their s/p/o terms
+        // are pairwise equal (this is what triggers the WCOJ trie-iter
+        // edge case — multiple iters sharing exactly the same physical
+        // layout).
+        let pats = &bgp.patterns;
+        for i in 0..pats.len() {
+            for j in (i + 1)..pats.len() {
+                if pats[i].s == pats[j].s && pats[i].p == pats[j].p && pats[i].o == pats[j].o {
+                    repeated_count += 1;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        repeated_count >= 1,
+        "expected ≥1/{total} BGPs with structurally repeated patterns, got {repeated_count} — \
+         the differential fuzzer relies on this class of input to surface trie-iter sharing bugs"
+    );
 }
