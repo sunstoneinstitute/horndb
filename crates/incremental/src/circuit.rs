@@ -94,52 +94,67 @@ impl Circuit {
     }
 
     pub fn tick(&mut self) -> TickReport {
-        // 1. Snapshot pending Δ_asserted from the log into a Zset.
-        let mut asserted_delta: Zset<TripleId> = Zset::new();
-        for rec in self.log.iter() {
-            asserted_delta.add(rec.triple, rec.mult);
-        }
-
-        // 2. Run every plan; collect per-plan derived deltas.
-        //    We keep them separate so the change feed can attribute
-        //    each derived record to its originating rule.
-        let mut derived_per_plan: Vec<(Zset<TripleId>, RuleId)> =
-            Vec::with_capacity(self.plans.len());
-        for (plan, rid) in &self.plans {
-            let dd = plan.apply_delta(&self.asserted_base, &asserted_delta);
-            derived_per_plan.push((dd, *rid));
-        }
-
-        // 3. Drain the asserted log into asserted_base, publishing each
-        //    record to the feed. Checkpoint::merge handles zero-pruning.
+        // First, drain pending asserted records into asserted_base and
+        // publish them. We need them in the base before running the
+        // fixed-point so that subsequent rounds can join against them.
         let asserted_records: Vec<_> = self.log.drain().collect();
         let asserted_merged = asserted_records.len();
+        let mut asserted_delta: Zset<TripleId> = Zset::new();
         for rec in &asserted_records {
+            asserted_delta.add(rec.triple, rec.mult);
             self.asserted_base.add(rec.triple, rec.mult);
             self.feed.publish_record(*rec);
         }
-        let logical_time = if asserted_records.is_empty() {
-            0
-        } else {
-            asserted_records.last().unwrap().time
-        };
+        let logical_time = asserted_records.last().map(|r| r.time).unwrap_or(0);
 
-        // 4. Merge derived deltas into derived_base, publishing.
-        //    Use derived_clock so derived records get monotonically
-        //    increasing timestamps distinct from the asserted log's.
+        // Fixed-point: keep firing plans until no new derived rows
+        // appear. Inputs to a plan are (asserted_base ∪ derived_base)
+        // and the running delta (asserted_delta initially, then
+        // last-round's derived delta).
+        //
+        // Bound the loop at MAX_ROUNDS to surface non-termination
+        // bugs early in development.
+        const MAX_ROUNDS: usize = 64;
+        let mut combined_base: Zset<TripleId> = self.asserted_base.clone();
+        combined_base.add_assign(&self.derived_base);
+        let mut round_delta = asserted_delta;
         let mut derived_merged = 0;
-        for (dd, rid) in &derived_per_plan {
-            for (triple, mult) in dd.iter() {
-                self.derived_base.add(*triple, mult);
-                let t = self.derived_clock;
-                self.derived_clock = self
-                    .derived_clock
-                    .checked_add(1)
-                    .expect("derived-clock overflow");
-                self.feed
-                    .publish(*triple, mult, t, DerivationKind::RuleInferred(*rid));
-                derived_merged += 1;
+
+        for _ in 0..MAX_ROUNDS {
+            let mut next_delta: Zset<TripleId> = Zset::new();
+            for (plan, rid) in &self.plans {
+                let dd = plan.apply_delta(&combined_base, &round_delta);
+                // Set-semantics filter: emit only the rows that cross
+                // the "present / absent" boundary in combined_base.
+                // Stage 1 is insertion-only, so a row is "newly
+                // derived" iff combined_base.get(triple) == 0 before
+                // this addition. Multi-rule re-derivations in the
+                // same round produce the same key multiple times;
+                // the first emits, the rest are filtered.
+                let mut new_only: Zset<TripleId> = Zset::new();
+                for (triple, _mult) in dd.iter() {
+                    if combined_base.get(triple) == 0 && new_only.get(triple) == 0 {
+                        new_only.add(*triple, 1);
+                    }
+                }
+                for (triple, mult) in new_only.iter() {
+                    self.derived_base.add(*triple, mult);
+                    combined_base.add(*triple, mult);
+                    let t = self.derived_clock;
+                    self.derived_clock = self
+                        .derived_clock
+                        .checked_add(1)
+                        .expect("derived-clock overflow");
+                    self.feed
+                        .publish(*triple, mult, t, DerivationKind::RuleInferred(*rid));
+                    derived_merged += 1;
+                    next_delta.add(*triple, mult);
+                }
             }
+            if next_delta.is_empty() {
+                break;
+            }
+            round_delta = next_delta;
         }
 
         TickReport {
