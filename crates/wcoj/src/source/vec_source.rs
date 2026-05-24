@@ -107,7 +107,7 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
     }
 
     fn open_level(&mut self, depth: u8) {
-        assert!(depth >= 1 && depth <= 2, "open_level depth must be 1 or 2");
+        assert!((1..=2).contains(&depth), "open_level depth must be 1 or 2");
         let parent = (depth - 1) as usize;
         let (_, hi_parent) = self.range[parent];
         let row = self.cursor[parent];

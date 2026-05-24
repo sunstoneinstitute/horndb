@@ -46,6 +46,11 @@ impl<'src> WcojExecutor<'src> {
         }
     }
 
+    // Intentionally named `into_iter` for symmetry with
+    // `BinaryHashExecutor::into_iter` and for the natural reading at call
+    // sites; we deliberately do not implement `IntoIterator` so the
+    // executor remains usable without pulling that trait into scope.
+    #[allow(clippy::should_implement_trait)]
     pub fn into_iter(self) -> BatchIter<'src> {
         BatchIter::new(self)
     }
@@ -295,9 +300,9 @@ impl<'src> BatchIter<'src> {
             contributing.push(v);
         }
         let mut descend_at: Vec<Vec<usize>> = Vec::with_capacity(n_vars);
-        for d in 0..n_vars {
+        for (d, contrib_at_d) in contributing.iter().enumerate().take(n_vars) {
             let mut v = Vec::new();
-            for &i in &contributing[d] {
+            for &i in contrib_at_d {
                 let pat = nonground_patterns[i];
                 let has_deeper = exec.plan.var_order[(d + 1)..]
                     .iter()

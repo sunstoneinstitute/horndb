@@ -44,6 +44,11 @@ impl<'a> LeapfrogJoin<'a> {
     }
 
     /// Yield the next value common to all iterators at `depth`, or `None`.
+    // Intentionally named `next` for the algorithmic meaning ("next common
+    // value") and to match the inlined leapfrog in `executor::wcoj`. We
+    // do not implement `Iterator` because the return type is the join's
+    // emitted value, not a per-row record.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<TermId> {
         if self.done || self.iters.is_empty() {
             self.done = true;

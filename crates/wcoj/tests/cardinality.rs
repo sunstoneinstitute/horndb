@@ -27,5 +27,5 @@ fn one_bound_position_estimates_third() {
     let est = UniformEstimator::from_source(&src);
     let pat = TriplePattern::new(Term::Var(Var(0)), Term::Bound(10), Term::Var(Var(1)));
     let e = est.estimate(&pat);
-    assert!(e >= 1 && e <= 3, "estimate {e} should be 1..=3");
+    assert!((1..=3).contains(&e), "estimate {e} should be 1..=3");
 }

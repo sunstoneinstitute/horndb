@@ -43,6 +43,11 @@ impl<'src> BinaryHashExecutor<'src> {
         }
     }
 
+    // Intentionally named `into_iter` to match the `WcojExecutor` shape;
+    // we do not impl `IntoIterator` because the trait would force the
+    // returned `BatchIter` to be the executor's only `IntoIter` form and
+    // we want callers to spell the conversion explicitly.
+    #[allow(clippy::should_implement_trait)]
     pub fn into_iter(self) -> BatchIter<'src> {
         BatchIter::new(self)
     }
@@ -53,7 +58,7 @@ impl<'src> BinaryHashExecutor<'src> {
 /// Stage-1 simplification: full scan of one ordering, filtering on bound
 /// positions. SPEC-02 will offer a more selective access path; we don't
 /// need it here.
-fn scan_pattern<'src>(source: &'src dyn TripleSource, pat: &TriplePattern) -> Result<Vec<Triple>> {
+fn scan_pattern(source: &dyn TripleSource, pat: &TriplePattern) -> Result<Vec<Triple>> {
     let ord = Ordering::Spo;
     let mut iter = source.iter(ord)?;
     let mut out = Vec::new();
@@ -170,9 +175,7 @@ impl<'src> BatchIter<'src> {
                 .collect();
 
             for pat in exec.bgp.patterns.iter().skip(1) {
-                if let Err(e) = exec.cancel.check() {
-                    return Err(e);
-                }
+                exec.cancel.check()?;
                 let pat_vars: Vec<Var> = exec
                     .out_vars
                     .iter()
