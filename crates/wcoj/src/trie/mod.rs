@@ -29,6 +29,13 @@ pub trait TrieIterator {
     /// equals (so its cursor advance must be undone).
     fn reset(&mut self) {}
 
+    /// Refresh the cursor at `global_depth` for the *current* ancestor
+    /// binding context, undoing any local-depth-greater-than-`global_depth`
+    /// advances. Used when re-entering depth `d` for an iter whose top
+    /// contribution is at some shallower depth — it needs to re-explore
+    /// from the start of its subtree under the current parent state.
+    fn refresh(&mut self, _global_depth: u8) {}
+
     fn at_end(&self, depth: u8) -> bool {
         self.peek(depth).is_none()
     }

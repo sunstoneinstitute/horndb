@@ -63,30 +63,37 @@ fn scan_pattern<'src>(
 
     while let Some(s) = iter.peek(0) {
         if let Term::Bound(req_s) = pat.s {
-            if s != req_s {
+            if s < req_s {
                 iter.seek(0, req_s);
                 continue;
+            }
+            if s > req_s {
+                break;
             }
         }
         iter.open_level(1);
         while let Some(p) = iter.peek(1) {
             if let Term::Bound(req_p) = pat.p {
-                if p != req_p {
+                if p < req_p {
                     iter.seek(1, req_p);
                     continue;
+                }
+                if p > req_p {
+                    break;
                 }
             }
             iter.open_level(2);
             while let Some(o) = iter.peek(2) {
-                let mut keep = true;
                 if let Term::Bound(req_o) = pat.o {
-                    if o != req_o {
-                        keep = false;
+                    if o < req_o {
+                        iter.seek(2, req_o);
+                        continue;
+                    }
+                    if o > req_o {
+                        break;
                     }
                 }
-                if keep {
-                    out.push(Triple::new(s, p, o));
-                }
+                out.push(Triple::new(s, p, o));
                 iter.seek(2, o.wrapping_add(1));
             }
             iter.up(2);

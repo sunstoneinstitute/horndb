@@ -18,7 +18,7 @@ use crate::batch::BindingBatchBuilder;
 use crate::cancel::CancelToken;
 use crate::error::Result;
 use crate::ids::TermId;
-use crate::pattern::Bgp;
+use crate::pattern::{Bgp, TriplePattern};
 use crate::plan::ExecutionPlan;
 use crate::source::TripleSource;
 use crate::trie::source_iter::PatternTrieIter;
@@ -67,6 +67,27 @@ impl<'src> AdaptiveIter<'src> {
         self.g_to_l[global_depth as usize]
             .expect("AdaptiveIter queried at a non-contributing global depth")
     }
+
+    /// Re-establish the cursor at `local_for(global_depth)` under whatever
+    /// the current parent state is. The caller guarantees that
+    /// `inner.open_level(prev_local)` has already been called (so the
+    /// parent's cursor is positioned). We `inner.up(local)` to clear, then
+    /// `inner.open_level(prev_local)` to re-establish. Or, since
+    /// `inner.up(local)` only touches phys levels [phys[prev_local]+1 .. phys[local]],
+    /// and we then need to walk those same phys levels with open_level
+    /// again, we instead call `inner.open_level(prev_local)` directly.
+    fn refresh_for(&mut self, global_depth: u8) {
+        let local = self.local_for(global_depth);
+        if local == 0 {
+            // Top contribution is at this depth — handled by `reset()`.
+            return;
+        }
+        // Undo the descent into local, then redo it. This rewinds the
+        // cursor at the local-depth level so peek(local) returns the
+        // first value under the current ancestor binding.
+        self.inner.up(local);
+        self.inner.open_level(local - 1);
+    }
 }
 
 impl<'src> TrieIterator for AdaptiveIter<'src> {
@@ -75,6 +96,9 @@ impl<'src> TrieIterator for AdaptiveIter<'src> {
     }
     fn reset(&mut self) {
         self.inner.reset();
+    }
+    fn refresh(&mut self, global_depth: u8) {
+        self.refresh_for(global_depth);
     }
     fn peek(&self, depth: u8) -> Option<TermId> {
         self.inner.peek(self.local_for(depth))
@@ -146,6 +170,12 @@ pub struct BatchIter<'src> {
     /// Iters whose top-contribution depth is exactly d (used for the
     /// "reset on re-entry" pass during ascent).
     top_at: Vec<Vec<usize>>,
+    /// For each depth d: iters that contribute at d AND whose top
+    /// contribution is at some shallower depth (i.e. they "carry" state
+    /// from their first descent). On re-entry to depth d (from above)
+    /// these need an `inner.up + inner.open_level` reset relative to the
+    /// current ancestor bindings.
+    carry_at: Vec<Vec<usize>>,
     /// Per-depth state. `None` ⇒ not yet entered at this depth.
     state: Vec<Option<DepthState>>,
     /// Current binding per depth.
@@ -162,35 +192,90 @@ impl<'src> BatchIter<'src> {
         let mut iters: Vec<Box<dyn TrieIterator + 'src>> = Vec::new();
         let mut pending_error = None;
 
+        // Ground-pattern pre-check: any all-bound pattern must already
+        // match in the source. If not, the join is empty.
+        let mut ground_empty = false;
         for pat in &exec.bgp.patterns {
-            match PatternTrieIter::new(
-                exec.source,
-                pat,
-                &exec.plan.var_order,
-                pat.ordering_for(&exec.plan.var_order),
-            ) {
-                Ok(inner) => {
-                    let mut g_to_l: Vec<Option<u8>> = vec![None; n_vars];
-                    let mut local = 0u8;
-                    for (g, var) in exec.plan.var_order.iter().enumerate() {
-                        if pat.position_of(*var).is_some() {
-                            g_to_l[g] = Some(local);
-                            local += 1;
-                        }
-                    }
-                    iters.push(Box::new(AdaptiveIter { inner, g_to_l }));
-                }
+            if !pat.is_ground() {
+                continue;
+            }
+            let mut it = match exec.source.iter(crate::ids::Ordering::Spo) {
+                Ok(it) => it,
                 Err(e) => {
                     pending_error = Some(e);
                     break;
                 }
+            };
+            let rs = pat.s.as_bound().unwrap();
+            let rp = pat.p.as_bound().unwrap();
+            let ro = pat.o.as_bound().unwrap();
+            it.seek(0, rs);
+            if it.peek(0) != Some(rs) {
+                ground_empty = true;
+                break;
+            }
+            it.open_level(1);
+            it.seek(1, rp);
+            if it.peek(1) != Some(rp) {
+                ground_empty = true;
+                break;
+            }
+            it.open_level(2);
+            it.seek(2, ro);
+            if it.peek(2) != Some(ro) {
+                ground_empty = true;
+                break;
             }
         }
 
+        // Indices into `exec.bgp.patterns` for the non-ground patterns —
+        // these are the only patterns we build iters for. `contributing`
+        // etc. below are indexed into `iters`, not the original BGP.
+        let nonground_pat_idx: Vec<usize> = exec
+            .bgp
+            .patterns
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_ground())
+            .map(|(i, _)| i)
+            .collect();
+        let nonground_patterns: Vec<&TriplePattern> = nonground_pat_idx
+            .iter()
+            .map(|&i| &exec.bgp.patterns[i])
+            .collect();
+
+        if !ground_empty && pending_error.is_none() {
+            for pat in &nonground_patterns {
+                match PatternTrieIter::new(
+                    exec.source,
+                    pat,
+                    &exec.plan.var_order,
+                    pat.ordering_for(&exec.plan.var_order),
+                ) {
+                    Ok(inner) => {
+                        let mut g_to_l: Vec<Option<u8>> = vec![None; n_vars];
+                        let mut local = 0u8;
+                        for (g, var) in exec.plan.var_order.iter().enumerate() {
+                            if pat.position_of(*var).is_some() {
+                                g_to_l[g] = Some(local);
+                                local += 1;
+                            }
+                        }
+                        iters.push(Box::new(AdaptiveIter { inner, g_to_l }));
+                    }
+                    Err(e) => {
+                        pending_error = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Index here is into `iters` (= position in `nonground_patterns`).
         let mut contributing = Vec::with_capacity(n_vars);
         for var in &exec.plan.var_order {
             let mut v = Vec::new();
-            for (i, pat) in exec.bgp.patterns.iter().enumerate() {
+            for (i, pat) in nonground_patterns.iter().enumerate() {
                 if pat.position_of(*var).is_some() {
                     v.push(i);
                 }
@@ -201,7 +286,7 @@ impl<'src> BatchIter<'src> {
         for d in 0..n_vars {
             let mut v = Vec::new();
             for &i in &contributing[d] {
-                let pat = &exec.bgp.patterns[i];
+                let pat = nonground_patterns[i];
                 let has_deeper = exec.plan.var_order[(d + 1)..]
                     .iter()
                     .any(|var| pat.position_of(*var).is_some());
@@ -212,7 +297,7 @@ impl<'src> BatchIter<'src> {
             descend_at.push(v);
         }
         let mut top_at: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
-        for (i, pat) in exec.bgp.patterns.iter().enumerate() {
+        for (i, pat) in nonground_patterns.iter().enumerate() {
             for (g, var) in exec.plan.var_order.iter().enumerate() {
                 if pat.position_of(*var).is_some() {
                     top_at[g].push(i);
@@ -220,6 +305,28 @@ impl<'src> BatchIter<'src> {
                 }
             }
         }
+        // carry_at[d] = iters in contributing[d] whose top contribution is
+        // < d. These need their depth-d state explicitly reset (un-open,
+        // re-open) on every re-entry.
+        let mut carry_at: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
+        for (d, conts) in contributing.iter().enumerate() {
+            for &i in conts {
+                let pat = nonground_patterns[i];
+                let top_d = exec
+                    .plan
+                    .var_order
+                    .iter()
+                    .position(|var| pat.position_of(*var).is_some())
+                    .unwrap();
+                if top_d < d {
+                    carry_at[d].push(i);
+                }
+            }
+        }
+
+        // If ground patterns ruled out the query, force immediate
+        // termination by marking finished.
+        let finished = ground_empty;
 
         let state = (0..n_vars).map(|_| None).collect();
         let binding = vec![0; n_vars];
@@ -231,10 +338,11 @@ impl<'src> BatchIter<'src> {
             contributing,
             descend_at,
             top_at,
+            carry_at,
             state,
             binding,
             depth: 0,
-            finished: false,
+            finished,
             pending_error,
         }
     }
@@ -288,10 +396,23 @@ impl<'src> BatchIter<'src> {
             if cur == target {
                 return Some(cur);
             }
+            // Seek iter[p] forward to at least `target`. If the resulting
+            // peek is *less than* target (impossible if seek honors >= semantics),
+            // bail to avoid infinite loops.
             self.iters[idxs[p]].seek(depth, target);
-            if self.iters[idxs[p]].peek(depth).is_none() {
-                self.state[depth as usize].as_mut().unwrap().done = true;
-                return None;
+            let new_cur = self.iters[idxs[p]].peek(depth);
+            match new_cur {
+                None => {
+                    self.state[depth as usize].as_mut().unwrap().done = true;
+                    return None;
+                }
+                Some(v) if v < target => {
+                    // Seek didn't advance — this iter's source violates the
+                    // seek contract. Treat as exhausted.
+                    self.state[depth as usize].as_mut().unwrap().done = true;
+                    return None;
+                }
+                Some(_) => {}
             }
             let new_p = (p + 1) % k;
             self.state[depth as usize].as_mut().unwrap().p = new_p;
@@ -322,6 +443,15 @@ impl<'src> BatchIter<'src> {
             }
 
             if self.state[self.depth as usize].is_none() {
+                // Refresh carry iters whose cursor may have been advanced
+                // during a deeper leapfrog under a prior ancestor binding.
+                // The refresh is also a no-op on first entry — open_level
+                // followed by up-then-open_level just re-reads the same
+                // range, leaving cursor[..] at lo.
+                let carry: Vec<usize> = self.carry_at[self.depth as usize].clone();
+                for i in carry {
+                    self.iters[i].refresh(self.depth);
+                }
                 self.state[self.depth as usize] = Some(DepthState::fresh());
             }
 

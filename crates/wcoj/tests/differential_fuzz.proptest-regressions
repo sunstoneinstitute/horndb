@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5f58c97cfc334a96783f9d291caa857d481c8e5da5a1e4b65d571b69b47f5b8c # shrinks to seed = 16407494527200665818, bgp = Bgp { patterns: [TriplePattern { s: Bound(22), p: Bound(102), o: Bound(11) }, TriplePattern { s: Bound(7), p: Bound(102), o: Var(Var(2)) }, TriplePattern { s: Var(Var(0)), p: Bound(102), o: Bound(0) }, TriplePattern { s: Bound(19), p: Bound(101), o: Var(Var(1)) }, TriplePattern { s: Bound(1), p: Bound(101), o: Bound(0) }, TriplePattern { s: Var(Var(1)), p: Bound(101), o: Bound(16) }] }
+cc c4b4926f05b97065a041a559d26e4a5f286da0e4cbaf8f6bba582f8f698f92dc # shrinks to seed = 0, bgp = Bgp { patterns: [TriplePattern { s: Var(Var(0)), p: Bound(100), o: Var(Var(2)) }, TriplePattern { s: Var(Var(0)), p: Bound(100), o: Var(Var(1)) }] }
+cc de38c4ae5f8375f28925b00bebaf8964f1963d32a8670458272f7aa92d59daf9 # shrinks to seed = 14218353177549249806, bgp = Bgp { patterns: [TriplePattern { s: Var(Var(1)), p: Bound(100), o: Var(Var(0)) }, TriplePattern { s: Var(Var(1)), p: Bound(100), o: Var(Var(0)) }, TriplePattern { s: Bound(0), p: Bound(100), o: Var(Var(0)) }] }
