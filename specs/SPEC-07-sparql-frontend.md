@@ -17,7 +17,7 @@ In scope:
 
 Out of scope:
 - SPARQL 1.1 Federation (`SERVICE`) — deferred indefinitely.
-- SPARQL-star / RDF-star — deferred indefinitely.
+- RDF 1.2 triple terms and the corresponding SPARQL surface — Stage 2 priority (tracked in `TASKS.md`). We follow W3C RDF 1.2, not the community RDF-star extension it superseded.
 - GeoSPARQL — deferred indefinitely.
 - SPARQL Inferencing Notation (SPIN) — out.
 - Full-text search extensions — out (Stage 2 may add a Lucene/Tantivy adapter).

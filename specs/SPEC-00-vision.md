@@ -82,7 +82,9 @@ The project succeeds if all three hold:
 
 ## Out-of-scope success criteria
 
-We do **not** measure success by: SPARQL 1.1 Federation support, full OWL 2 DL completeness, RDF-star adoption, GeoSPARQL, or property-graph compatibility. These are deferred indefinitely.
+We do **not** measure success by: SPARQL 1.1 Federation support, full OWL 2 DL completeness, GeoSPARQL, or property-graph compatibility. These are deferred indefinitely.
+
+**RDF 1.2 (triple terms) is a Stage-2 priority**, not a Stage-1 deliverable. We deliberately track the W3C RDF 1.2 standard rather than the community-driven RDF-star extension it superseded; the underlying graph model is essentially the same but the semantics and SPARQL surface are cleaner under 1.2. Stage-1 storage and SPARQL paths use catch-all arms that surface RDF 1.2 triple terms as `unreachable!` because the Stage-1 N-Triples / SPARQL 1.1 loaders cannot produce them; lifting that to real support is the Stage-2 migration tracked in `TASKS.md`.
 
 ## Open questions for SPEC-00
 

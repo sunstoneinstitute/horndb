@@ -59,6 +59,37 @@ here in the same commit.
   - Address after the correctness gap above (so the fuzzer can validate the
     rewrite).
 
+## HIGH — RDF 1.2 (triple terms) support
+
+- [ ] **Migrate workspace to oxrdf 0.3 with the `rdf-12` feature, deliver
+  end-to-end RDF 1.2 triple-term support.**
+  - We deliberately track the W3C **RDF 1.2** standard rather than the
+    community **RDF-star** extension it superseded — RDF 1.2 has cleaner
+    semantics and a cleaner SPARQL surface for the same underlying
+    triple-term graph model.
+  - Today the workspace is mixed: `reasoner-sparql` already pulls
+    `oxrdf 0.3` directly, while `reasoner-storage` and the harness ride
+    `oxrdf 0.2` transitively (oxigraph 0.4 pins it). Stage-1 storage and
+    SPARQL dispatch surface RDF 1.2 triple terms as `unreachable!`
+    because the Stage-1 N-Triples / SPARQL 1.1 loaders cannot produce
+    them; this task lifts that to real support.
+  - Concrete work:
+    1. Bump workspace `oxrdf` to `0.3.x` + `oxrdfio = "0.3"`, enable the
+       `rdf-12` feature; resolve `oxigraph` upgrade (or replace it with
+       narrower deps in the harness — see Operational gaps below).
+    2. Extend `TermKind` (`crates/storage/src/term.rs`) and the dictionary
+       encoding to admit a `TripleTerm` kind; replace the catch-all
+       `unreachable!` in `kind_of` with real handling.
+    3. Extend the N-Triples/Turtle/N-Quads loaders to accept RDF 1.2
+       triple-term syntax (currently the loaders use 1.1-only grammar).
+    4. Extend SPEC-07 SPARQL algebra translation to admit `TriplePattern`
+       subject/object as triple terms (gate behind a config flag during
+       rollout so default behaviour stays SPARQL 1.1).
+    5. Add a W3C RDF 1.2 conformance subset to the harness's
+       `selected.toml` once the W3C test suite ships fixtures.
+  - Replaces the previous "RDF-star — deferred indefinitely" entries in
+    SPEC-00-vision and SPEC-07-sparql-frontend.
+
 ## MEDIUM — Stage-2 scope explicitly deferred per plans
 
 Items that were marked Future Work in the per-spec plans. Pull from this
