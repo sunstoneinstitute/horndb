@@ -44,3 +44,29 @@ fn idempotent_insertion() {
     store.insert_triples(&[(s, p, o)]).unwrap();
     assert_eq!(store.triple_count(), 1);
 }
+
+#[test]
+fn footprint_is_reported() {
+    let store = Store::in_memory();
+    let s = NamedNode::new("http://example.org/s").unwrap();
+    let p = NamedNode::new("http://example.org/p").unwrap();
+    let triples: Vec<_> = (0..1000u32)
+        .map(|i| {
+            (
+                Term::NamedNode(s.clone()),
+                Term::NamedNode(p.clone()),
+                Term::NamedNode(NamedNode::new(format!("http://example.org/o{}", i)).unwrap()),
+            )
+        })
+        .collect();
+    store.insert_triples(&triples).unwrap();
+    let report = store.report_footprint();
+    assert_eq!(report.triples, 1000);
+    assert!(report.bytes_per_triple > 0.0);
+    // 16 bytes (s/o columns) plus per-predicate overhead; sanity bound.
+    assert!(
+        report.bytes_per_triple < 64.0,
+        "footprint {} bytes/triple exceeds Stage-1 sanity bound",
+        report.bytes_per_triple
+    );
+}

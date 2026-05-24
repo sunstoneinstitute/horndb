@@ -11,6 +11,13 @@ use crate::term::{GraphId, DEFAULT_GRAPH};
 use crate::tier::{Tier, TierStats};
 use oxrdf::Term;
 
+#[derive(Debug, Clone, Copy)]
+pub struct FootprintReport {
+    pub triples: u64,
+    pub bytes_estimated: u64,
+    pub bytes_per_triple: f64,
+}
+
 pub struct Store {
     dictionary: Dictionary,
     tier: Box<dyn Tier>,
@@ -101,5 +108,19 @@ impl Store {
             out.push((s, o));
         }
         Ok(out)
+    }
+
+    pub fn report_footprint(&self) -> FootprintReport {
+        let stats = self.tier.stats();
+        let bpt = if stats.triples == 0 {
+            0.0
+        } else {
+            stats.bytes_estimated as f64 / stats.triples as f64
+        };
+        FootprintReport {
+            triples: stats.triples,
+            bytes_estimated: stats.bytes_estimated,
+            bytes_per_triple: bpt,
+        }
     }
 }
