@@ -1,4 +1,4 @@
-# reasoner-incremental — Deferred Work
+# horndb-incremental — Deferred Work
 
 Stage 1 of SPEC-06 deliberately ships a narrow slice. This file
 catalogues what is **out** of Stage 1, in priority order for Stage 2,

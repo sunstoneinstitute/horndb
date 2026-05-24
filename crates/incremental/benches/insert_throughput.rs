@@ -7,7 +7,7 @@
 //! the number for later comparison.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use reasoner_incremental::{BilinearRule, Circuit, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, Circuit, NaryPlan, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 

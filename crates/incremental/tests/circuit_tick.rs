@@ -4,7 +4,7 @@
 //! Reuses the prp-trp-shape rule from the bilinear-correctness test
 //! but routed via a Circuit so we exercise the wiring end-to-end.
 
-use reasoner_incremental::{
+use horndb_incremental::{
     BilinearRule, Circuit, DerivationKind, NaryPlan, RuleId, TripleId, Zset,
 };
 

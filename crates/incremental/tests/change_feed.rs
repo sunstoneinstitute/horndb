@@ -1,4 +1,4 @@
-use reasoner_incremental::{ChangeFeed, DerivationKind};
+use horndb_incremental::{ChangeFeed, DerivationKind};
 
 #[test]
 fn published_records_arrive_in_order() {

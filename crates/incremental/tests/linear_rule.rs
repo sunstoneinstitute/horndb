@@ -2,7 +2,7 @@
 //! triples of the form `(s, P, o)` into `(s, P', o)`. Linear in its
 //! input — the delta passes straight through with the rule applied.
 
-use reasoner_incremental::{LinearRule, RuleId, TripleId, Zset};
+use horndb_incremental::{LinearRule, RuleId, TripleId, Zset};
 
 struct RewritePredicate {
     id: RuleId,

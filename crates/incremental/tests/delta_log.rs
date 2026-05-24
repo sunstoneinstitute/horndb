@@ -1,4 +1,4 @@
-use reasoner_incremental::{DeltaLog, DerivationKind};
+use horndb_incremental::{DeltaLog, DerivationKind};
 
 #[test]
 fn new_log_is_empty_and_time_starts_at_zero() {

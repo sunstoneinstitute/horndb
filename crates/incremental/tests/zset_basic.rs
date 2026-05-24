@@ -1,4 +1,4 @@
-use reasoner_incremental::Zset;
+use horndb_incremental::Zset;
 
 #[test]
 fn new_zset_is_empty() {

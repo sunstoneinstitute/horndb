@@ -1,4 +1,4 @@
-//! `reasoner-incremental` — DBSP-style incremental maintenance for SPEC-06.
+//! `horndb-incremental` — DBSP-style incremental maintenance for SPEC-06.
 //!
 //! # Why a hand-rolled Z-set core?
 //!

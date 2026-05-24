@@ -10,7 +10,7 @@
 //! two distinct patterns.
 
 use proptest::prelude::*;
-use reasoner_incremental::{BilinearRule, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 

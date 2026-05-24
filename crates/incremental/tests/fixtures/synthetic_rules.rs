@@ -9,7 +9,7 @@
 
 #![allow(dead_code)]
 
-use reasoner_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
 
 pub const SC: u64 = 100;
 pub const SPO: u64 = 101;

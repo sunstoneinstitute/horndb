@@ -8,7 +8,7 @@
 mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, SC, SPO, TYPE};
-use reasoner_incremental::{Circuit, DerivationKind};
+use horndb_incremental::{Circuit, DerivationKind};
 use std::collections::HashSet;
 
 #[test]

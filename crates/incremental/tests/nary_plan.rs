@@ -7,7 +7,7 @@
 //!
 //! and verify on a 4-node chain.
 
-use reasoner_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 

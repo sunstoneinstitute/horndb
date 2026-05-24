@@ -1,4 +1,4 @@
-use reasoner_incremental::{Checkpoint, DeltaLog, DerivationKind, Zset};
+use horndb_incremental::{Checkpoint, DeltaLog, DerivationKind, Zset};
 
 #[test]
 fn checkpoint_merges_pending_inserts_into_base() {

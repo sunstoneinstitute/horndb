@@ -1,7 +1,7 @@
 mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, full_rematerialize, SC, TYPE};
-use reasoner_incremental::Zset;
+use horndb_incremental::Zset;
 
 #[test]
 fn fixtures_compile_and_basic_closure_works() {
