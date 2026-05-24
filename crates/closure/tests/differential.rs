@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[allow(clippy::needless_range_loop)]
 fn naive_closure(n: usize, edges: &[(u64, u64)]) -> BTreeSet<(u64, u64)> {

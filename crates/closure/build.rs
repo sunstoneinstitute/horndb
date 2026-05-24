@@ -14,7 +14,7 @@ fn main() {
             eprintln!(
                 "\n\
                 =====================================================\n\
-                reasoner-closure: SuiteSparse:GraphBLAS not found.\n\
+                horndb-closure: SuiteSparse:GraphBLAS not found.\n\
                 pkg-config error: {e}\n\n\
                 Install instructions:\n  \
                   macOS:       brew install suite-sparse pkg-config\n  \

@@ -1,5 +1,5 @@
-use reasoner_closure::sameas::EquivClasses;
-use reasoner_closure::types::DictId;
+use horndb_closure::sameas::EquivClasses;
+use horndb_closure::types::DictId;
 
 #[test]
 fn singletons_are_their_own_representatives() {

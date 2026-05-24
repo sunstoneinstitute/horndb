@@ -1,5 +1,5 @@
-use reasoner_closure::closure::schema::reflexive_transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::schema::reflexive_transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn sco_chain_includes_reflexivity_over_extent() {

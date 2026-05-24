@@ -1,4 +1,4 @@
-# SPEC-08 Integration Notes for `reasoner-closure`
+# SPEC-08 Integration Notes for `horndb-closure`
 
 These notes describe call sites that **SPEC-05's plan** is responsible
 for implementing.
@@ -19,6 +19,6 @@ graph, SPEC-05's `EQREL` structure must:
    in the staging graph until accepted; the commit step then bulk-
    inserts via the writeback path described in SPEC-05 F5.
 
-No `reasoner-closure` API needs to change for Stage 0/1 — this
-integration is a SPEC-05 plan task that calls into `reasoner-ml`'s
+No `horndb-closure` API needs to change for Stage 0/1 — this
+integration is a SPEC-05 plan task that calls into `horndb-ml`'s
 existing types only.

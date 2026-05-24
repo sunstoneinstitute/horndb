@@ -1,5 +1,5 @@
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn chain_of_five_produces_complete_upper_triangle() {

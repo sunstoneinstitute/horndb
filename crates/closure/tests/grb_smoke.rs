@@ -1,6 +1,6 @@
 //! Smoke test: prove FFI surface compiles and we can convert error codes.
 
-use reasoner_closure::error::GrbError;
+use horndb_closure::error::GrbError;
 
 #[test]
 fn grb_success_is_ok() {
@@ -15,7 +15,7 @@ fn grb_nonzero_is_err() {
     assert!(err.is_err());
 }
 
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn init_and_build_bool_matrix() {

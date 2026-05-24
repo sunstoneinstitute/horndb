@@ -10,8 +10,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use reasoner_closure::sameas::EquivClasses;
-use reasoner_closure::types::DictId;
+use horndb_closure::sameas::EquivClasses;
+use horndb_closure::types::DictId;
 
 fn synth_pairs(n_assertions: usize, n_canonical: u64, seed: u64) -> Vec<(DictId, DictId)> {
     let mut rng = SmallRng::seed_from_u64(seed);

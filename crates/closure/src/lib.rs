@@ -1,4 +1,4 @@
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 //!
 //! # Stage-1 surface
 //!

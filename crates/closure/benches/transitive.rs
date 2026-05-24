@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 fn chain_matrix(n: u64) -> BoolMatrix {
     let edges: Vec<(u64, u64)> = (0..n - 1).map(|i| (i, i + 1)).collect();

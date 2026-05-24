@@ -1,5 +1,5 @@
-use reasoner_closure::dense_id::DenseIdMap;
-use reasoner_closure::types::{DenseIdx, DictId};
+use horndb_closure::dense_id::DenseIdMap;
+use horndb_closure::types::{DenseIdx, DictId};
 
 #[test]
 fn renumbers_in_first_seen_order() {

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
-use reasoner_closure::sink::{ClosureBackend, TripleSink};
-use reasoner_closure::types::{DictId, PredicateId, Triple};
+use horndb_closure::sink::{ClosureBackend, TripleSink};
+use horndb_closure::types::{DictId, PredicateId, Triple};
 
 /// A `TripleSink` that just accumulates into a Vec. Used by tests until the
 /// storage crate provides a real implementation.
@@ -25,7 +25,7 @@ impl TripleSink for VecSink {
 #[test]
 fn transitive_predicate_closes_and_writes_back() {
     let sink = VecSink::default();
-    let mut backend = reasoner_closure::sink::default_backend();
+    let mut backend = horndb_closure::sink::default_backend();
 
     // Predicate p = 42; transitive chain 1->2->3->4.
     let p = PredicateId(42);
