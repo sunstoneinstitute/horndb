@@ -20,10 +20,7 @@ fn insert_triple_and_query_by_predicate() {
     assert_eq!(store.triple_count(), 2);
 
     let pairs = store.scan_predicate_default_graph(&knows).unwrap();
-    let mut s_strings: Vec<String> = pairs
-        .iter()
-        .map(|(s, _)| format!("{}", s))
-        .collect();
+    let mut s_strings: Vec<String> = pairs.iter().map(|(s, _)| format!("{s}")).collect();
     s_strings.sort();
     assert_eq!(
         s_strings,
@@ -40,7 +37,9 @@ fn idempotent_insertion() {
     let s = nn("http://example.org/a");
     let p = nn("http://example.org/p");
     let o = nn("http://example.org/b");
-    store.insert_triples(&[(s.clone(), p.clone(), o.clone())]).unwrap();
+    store
+        .insert_triples(&[(s.clone(), p.clone(), o.clone())])
+        .unwrap();
     store.insert_triples(&[(s, p, o)]).unwrap();
     assert_eq!(store.triple_count(), 1);
 }
@@ -55,7 +54,7 @@ fn footprint_is_reported() {
             (
                 Term::NamedNode(s.clone()),
                 Term::NamedNode(p.clone()),
-                Term::NamedNode(NamedNode::new(format!("http://example.org/o{}", i)).unwrap()),
+                Term::NamedNode(NamedNode::new(format!("http://example.org/o{i}")).unwrap()),
             )
         })
         .collect();

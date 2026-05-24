@@ -14,9 +14,7 @@ fn fixture_path() -> PathBuf {
 
 fn bench_load(c: &mut Criterion) {
     let path = fixture_path();
-    let bytes = std::fs::metadata(&path)
-        .expect("fixture exists")
-        .len();
+    let bytes = std::fs::metadata(&path).expect("fixture exists").len();
 
     // Probe triple count once for throughput annotation.
     let probe = Store::in_memory();

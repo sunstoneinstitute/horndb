@@ -178,11 +178,8 @@ mod tests {
         let tier = MemoryTier::new();
         let g1 = GraphId(TermId::new(TermKind::Uri, 10).0);
         let g2 = GraphId(TermId::new(TermKind::Uri, 11).0);
-        tier.insert_quad_batch(&[
-            (g1, id(1), id(100), id(2)),
-            (g2, id(1), id(100), id(3)),
-        ])
-        .unwrap();
+        tier.insert_quad_batch(&[(g1, id(1), id(100), id(2)), (g2, id(1), id(100), id(3))])
+            .unwrap();
         let g1_pairs = tier
             .with_predicate(g1, id(100), |p| p.scan().collect::<Vec<_>>())
             .unwrap();

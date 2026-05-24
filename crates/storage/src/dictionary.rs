@@ -91,9 +91,8 @@ fn kind_of(term: &Term) -> TermKind {
             } else {
                 TermKind::TypedLiteral
             }
-        }
-        // Triples-as-terms (RDF-star) are out of Stage-1 scope; oxrdf::Term has no Triple
-        // variant unless the `rdf-star` feature is enabled, so this arm is unreachable.
+        } // Triples-as-terms (RDF-star) are out of Stage-1 scope; oxrdf::Term has no Triple
+          // variant unless the `rdf-star` feature is enabled, so this arm is unreachable.
     }
 }
 

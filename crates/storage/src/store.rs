@@ -80,10 +80,7 @@ impl Store {
     /// Scan a single predicate in the default graph, returning materialized
     /// (subject, object) `Term` pairs. Used by tests; production code should
     /// use the tier's columnar scan directly.
-    pub fn scan_predicate_default_graph(
-        &self,
-        predicate: &Term,
-    ) -> Result<Vec<(Term, Term)>> {
+    pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
         let p_id = self.dictionary.intern(predicate)?;
         let mt = self
             .tier
@@ -91,20 +88,18 @@ impl Store {
             .downcast_ref::<MemoryTier>()
             .expect("Stage-1 store always wraps MemoryTier");
         let pairs = mt
-            .with_predicate(DEFAULT_GRAPH, p_id, |part| {
-                part.scan().collect::<Vec<_>>()
-            })
+            .with_predicate(DEFAULT_GRAPH, p_id, |part| part.scan().collect::<Vec<_>>())
             .unwrap_or_default();
         let mut out = Vec::with_capacity(pairs.len());
         for (s_id, o_id) in pairs {
             let s = self
                 .dictionary
                 .lookup(s_id)
-                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {:?}", s_id)))?;
+                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {s_id:?}")))?;
             let o = self
                 .dictionary
                 .lookup(o_id)
-                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {:?}", o_id)))?;
+                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {o_id:?}")))?;
             out.push((s, o));
         }
         Ok(out)

@@ -3,9 +3,8 @@ use proptest::prelude::*;
 use reasoner_storage::Dictionary;
 
 fn arb_uri() -> impl Strategy<Value = Term> {
-    "[a-z]{1,16}".prop_map(|s| {
-        Term::NamedNode(NamedNode::new(format!("http://example.org/{}", s)).unwrap())
-    })
+    "[a-z]{1,16}"
+        .prop_map(|s| Term::NamedNode(NamedNode::new(format!("http://example.org/{s}")).unwrap()))
 }
 
 proptest! {

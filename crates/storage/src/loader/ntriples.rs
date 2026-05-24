@@ -42,8 +42,7 @@ pub fn load_ntriples_reader<R: Read>(store: &Store, reader: R) -> Result<LoadSta
 
     // Pre-intern terms via dictionary, then push encoded quad into batch.
     for t in iter {
-        let triple =
-            t.map_err(|e| StorageError::NtriplesParse(format!("{e}")))?;
+        let triple = t.map_err(|e| StorageError::NtriplesParse(format!("{e}")))?;
         // Convert oxrdf::Subject and oxrdf::Term-style nodes into oxrdf::Term.
         let s_term = subject_to_term(triple.subject);
         let p_term = Term::NamedNode(triple.predicate);
