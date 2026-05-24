@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the public SPARQL 1.1 query/update surface for `reasoner` — a parser (via the `spargebra` crate), algebra translator, basic planner, and stub-backed in-memory executor that can answer SELECT/ASK/CONSTRUCT and run minimal INSERT/DELETE updates, ship behind an HTTP `/query` endpoint, and demonstrably pass a hand-picked subset of the W3C SPARQL 1.1 Query Test Suite under the default "simple" entailment regime.
+**Goal:** Build the public SPARQL 1.1 query/update surface for HornDB — a parser (via the `spargebra` crate), algebra translator, basic planner, and stub-backed in-memory executor that can answer SELECT/ASK/CONSTRUCT and run minimal INSERT/DELETE updates, ship behind an HTTP `/query` endpoint, and demonstrably pass a hand-picked subset of the W3C SPARQL 1.1 Query Test Suite under the default "simple" entailment regime.
 
 **Architecture:** Sit in `crates/sparql/`. The crate is layered: (1) `parser` thin wrapper around `spargebra` producing our internal `Query`/`Update` enums; (2) `algebra` mirrors `spargebra::algebra` with our own simplified AST that hides the upstream churn surface; (3) `plan` lowers algebra into a `PhysicalPlan` tree whose leaves are `BgpScan` nodes routed to a pluggable `Executor` trait (SPEC-03 placeholder); (4) `exec` provides a built-in `MemExecutor` over a HashMap-of-triples backing store so the crate is testable in isolation, plus a `Runtime` that walks `PhysicalPlan` nodes; (5) `results` serialises bindings to SPARQL JSON Results, CSV, TSV (XML deferred); (6) `regime` provides a trait with two implementations — `SimpleRegime` (no inference, used for W3C SPARQL 1.1 Query tests) and `MaterializedOwlRlRegime` (assumes closure is already in the store, so query-time behaviour is identical to simple — the regime distinction is a marker on the answer set headers and the dataset wiring); (7) `server` exposes an `axum`-based `/query` and `/update` endpoint. Property paths `/` and `^` are evaluated by expansion to algebra `Join`; `*`, `+`, `?`, `|`, `!` return a typed `UnsupportedPathOp` error in Stage 1.
 
@@ -124,7 +124,7 @@ members = [
 edition = "2021"
 rust-version = "1.87"
 license = "Apache-2.0"
-repository = "https://github.com/sunstoneinstitute/reasoner"
+repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]
 
 [workspace.dependencies]
@@ -178,7 +178,7 @@ Overwrite `crates/sparql/Cargo.toml` with:
 
 ```toml
 [package]
-name = "reasoner-sparql"
+name = "horndb-sparql"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -211,7 +211,7 @@ tokio = { workspace = true }
 
 - [ ] **Step 2: Verify the crate compiles (empty source still in place)**
 
-Run: `cargo check -p reasoner-sparql`
+Run: `cargo check -p horndb-sparql`
 Expected: dependencies download and the placeholder `lib.rs` compiles. Exit code 0. (First run will take several minutes.)
 
 - [ ] **Step 3: Commit**
@@ -244,7 +244,7 @@ Create `crates/sparql/tests/parse_smoke.rs`:
 //! Smoke test for the public crate surface. Verifies the modules
 //! and error type are exported as documented in the plan.
 
-use reasoner_sparql::SparqlError;
+use horndb_sparql::SparqlError;
 
 #[test]
 fn error_type_displays() {
@@ -256,8 +256,8 @@ fn error_type_displays() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p reasoner-sparql --test parse_smoke`
-Expected: FAIL with `unresolved import 'reasoner_sparql::SparqlError'`.
+Run: `cargo test -p horndb-sparql --test parse_smoke`
+Expected: FAIL with `unresolved import 'horndb_sparql::SparqlError'`.
 
 - [ ] **Step 3: Add the error type**
 
@@ -305,7 +305,7 @@ pub type Result<T> = std::result::Result<T, SparqlError>;
 Overwrite `crates/sparql/src/lib.rs`:
 
 ```rust
-//! reasoner-sparql — SPARQL 1.1 frontend.
+//! horndb-sparql — SPARQL 1.1 frontend.
 //!
 //! See `specs/SPEC-07-sparql-frontend.md` for scope and acceptance
 //! criteria. This crate provides:
@@ -361,7 +361,7 @@ done
 
 - [ ] **Step 6: Run the smoke test**
 
-Run: `cargo test -p reasoner-sparql --test parse_smoke`
+Run: `cargo test -p horndb-sparql --test parse_smoke`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -391,7 +391,7 @@ EOF
 Create `crates/sparql/tests/parser_basic.rs`:
 
 ```rust
-use reasoner_sparql::parser::{parse_query, parse_update, ParsedQuery, ParsedUpdate};
+use horndb_sparql::parser::{parse_query, parse_update, ParsedQuery, ParsedUpdate};
 
 #[test]
 fn parses_minimal_select() {
@@ -438,7 +438,7 @@ fn parses_delete_data() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p reasoner-sparql --test parser_basic`
+Run: `cargo test -p horndb-sparql --test parser_basic`
 Expected: FAIL with unresolved imports.
 
 - [ ] **Step 3: Implement the parser wrapper**
@@ -528,7 +528,7 @@ pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test parser_basic`
+Run: `cargo test -p horndb-sparql --test parser_basic`
 Expected: 6 passed. If any of the `spargebra` types don't match (the upstream API may have evolved between 0.4.x patch releases — verify the actual enum field names with `cargo doc --open -p spargebra` or `rustdoc-json`), adjust the match arms but keep the public `ParsedQuery`/`ParsedUpdate` shape stable.
 
 - [ ] **Step 5: Commit**
@@ -558,7 +558,7 @@ EOF
 Create `crates/sparql/tests/algebra_types.rs`:
 
 ```rust
-use reasoner_sparql::algebra::{Algebra, Term, TriplePattern, Var};
+use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
 
 #[test]
 fn build_a_bgp() {
@@ -577,7 +577,7 @@ fn build_a_bgp() {
 
 - [ ] **Step 2: Run it to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test algebra_types`
+Run: `cargo test -p horndb-sparql --test algebra_types`
 Expected: FAIL — unresolved imports.
 
 - [ ] **Step 3: Define the algebra types**
@@ -688,7 +688,7 @@ pub enum OrderDir {
 
 - [ ] **Step 4: Run the test**
 
-Run: `cargo test -p reasoner-sparql --test algebra_types`
+Run: `cargo test -p horndb-sparql --test algebra_types`
 Expected: PASS.
 
 - [ ] **Step 5: Add a placeholder `translate` module so the `pub mod translate;` line resolves**
@@ -702,7 +702,7 @@ Create `crates/sparql/src/algebra/translate.rs`:
 
 - [ ] **Step 6: Verify the crate still compiles**
 
-Run: `cargo check -p reasoner-sparql`
+Run: `cargo check -p horndb-sparql`
 Expected: exit code 0.
 
 - [ ] **Step 7: Commit**
@@ -733,8 +733,8 @@ EOF
 Create `crates/sparql/tests/algebra_translate.rs`:
 
 ```rust
-use reasoner_sparql::algebra::{translate, Algebra};
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::algebra::{translate, Algebra};
+use horndb_sparql::parser::{parse_query, ParsedQuery};
 
 fn alg_of(query: &str) -> Algebra {
     let q = parse_query(query).expect("parse");
@@ -818,7 +818,7 @@ fn rejects_kleene_star_path() {
 
 - [ ] **Step 2: Run to confirm failures**
 
-Run: `cargo test -p reasoner-sparql --test algebra_translate`
+Run: `cargo test -p horndb-sparql --test algebra_translate`
 Expected: FAIL — `translate_query` unresolved.
 
 - [ ] **Step 3: Implement the translator**
@@ -1132,7 +1132,7 @@ fn expand_path_into(
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test algebra_translate`
+Run: `cargo test -p horndb-sparql --test algebra_translate`
 Expected: 5 passed.
 
 If `spargebra::algebra::GraphPattern` variant names differ in the installed 0.4.x patch version (e.g. `Path` vs `PropertyPath`), adjust the match arms accordingly; the strategy stays the same.
@@ -1166,9 +1166,9 @@ EOF
 Create `crates/sparql/tests/exec_mem.rs`:
 
 ```rust
-use reasoner_sparql::algebra::{Term, TriplePattern, Var};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::{Bindings, Executor};
+use horndb_sparql::algebra::{Term, TriplePattern, Var};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::{Bindings, Executor};
 
 fn t(s: &str, p: &str, o: &str) -> (String, String, String) {
     (s.into(), p.into(), o.into())
@@ -1236,7 +1236,7 @@ fn mem_executor_joins_two_patterns_on_shared_var() {
 
 - [ ] **Step 2: Run it to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test exec_mem`
+Run: `cargo test -p horndb-sparql --test exec_mem`
 Expected: FAIL — unresolved imports.
 
 - [ ] **Step 3: Define the executor trait**
@@ -1463,7 +1463,7 @@ impl Store for MemStore {
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test exec_mem`
+Run: `cargo test -p horndb-sparql --test exec_mem`
 Expected: 2 passed.
 
 - [ ] **Step 6: Commit**
@@ -1495,8 +1495,8 @@ EOF
 Create `crates/sparql/tests/planner_smoke.rs`:
 
 ```rust
-use reasoner_sparql::algebra::{Algebra, Term, TriplePattern, Var};
-use reasoner_sparql::plan::{planner, PhysicalPlan};
+use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
+use horndb_sparql::plan::{planner, PhysicalPlan};
 
 fn bgp(pat: TriplePattern) -> Algebra {
     Algebra::Bgp { patterns: vec![pat] }
@@ -1537,7 +1537,7 @@ fn plans_project_over_bgp() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test planner_smoke`
+Run: `cargo test -p horndb-sparql --test planner_smoke`
 Expected: FAIL — `planner::plan` unresolved.
 
 - [ ] **Step 3: Define `PhysicalPlan`**
@@ -1688,7 +1688,7 @@ mod tests {
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p reasoner-sparql --test planner_smoke && cargo test -p reasoner-sparql --lib plan`
+Run: `cargo test -p horndb-sparql --test planner_smoke && cargo test -p horndb-sparql --lib plan`
 Expected: all green.
 
 - [ ] **Step 6: Commit**
@@ -1719,13 +1719,13 @@ EOF
 Create `crates/sparql/tests/exec_select.rs`:
 
 ```rust
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::runtime::Runtime;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
-use reasoner_sparql::algebra::translate::translate_query;
-use reasoner_sparql::plan::planner;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::runtime::Runtime;
+use horndb_sparql::exec::Store;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::algebra::translate::translate_query;
+use horndb_sparql::plan::planner;
 
 fn iri(s: &str) -> Term {
     Term::Iri(s.into())
@@ -1739,7 +1739,7 @@ fn make_store() -> MemStore {
     s
 }
 
-fn run(q: &str, store: &MemStore) -> Vec<reasoner_sparql::exec::Bindings> {
+fn run(q: &str, store: &MemStore) -> Vec<horndb_sparql::exec::Bindings> {
     let inner = match parse_query(q).unwrap() {
         ParsedQuery::Select { inner }
         | ParsedQuery::Ask { inner }
@@ -1802,7 +1802,7 @@ fn select_limit_offset() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test exec_select`
+Run: `cargo test -p horndb-sparql --test exec_select`
 Expected: FAIL — `Runtime` unresolved.
 
 - [ ] **Step 3: Implement the runtime**
@@ -2041,7 +2041,7 @@ fn _witness() -> Result<()> {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test exec_select`
+Run: `cargo test -p horndb-sparql --test exec_select`
 Expected: 4 passed.
 
 - [ ] **Step 5: Commit**
@@ -2073,13 +2073,13 @@ EOF
 Create `crates/sparql/tests/exec_ask.rs`:
 
 ```rust
-use reasoner_sparql::algebra::translate::translate_query;
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::runtime::Runtime;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
-use reasoner_sparql::plan::planner;
+use horndb_sparql::algebra::translate::translate_query;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::runtime::Runtime;
+use horndb_sparql::exec::Store;
+use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::plan::planner;
 
 fn iri(s: &str) -> Term { Term::Iri(s.into()) }
 
@@ -2119,14 +2119,14 @@ fn ask_false_when_pattern_misses() {
 Create `crates/sparql/tests/exec_construct.rs`:
 
 ```rust
-use reasoner_sparql::algebra::translate::translate_query;
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::runtime::Runtime;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
-use reasoner_sparql::plan::planner;
-use reasoner_sparql::exec::runtime::construct_triples;
+use horndb_sparql::algebra::translate::translate_query;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::runtime::Runtime;
+use horndb_sparql::exec::Store;
+use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::plan::planner;
+use horndb_sparql::exec::runtime::construct_triples;
 
 fn iri(s: &str) -> Term { Term::Iri(s.into()) }
 
@@ -2155,7 +2155,7 @@ fn construct_rewrites_pairs() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test exec_ask --test exec_construct`
+Run: `cargo test -p horndb-sparql --test exec_ask --test exec_construct`
 Expected: FAIL — `construct_triples` unresolved.
 
 - [ ] **Step 3: Add the CONSTRUCT helper**
@@ -2224,7 +2224,7 @@ pub fn construct_triples(
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test exec_ask --test exec_construct`
+Run: `cargo test -p horndb-sparql --test exec_ask --test exec_construct`
 Expected: 3 passed.
 
 - [ ] **Step 5: Commit**
@@ -2255,9 +2255,9 @@ EOF
 Create `crates/sparql/tests/update_insert_delete.rs`:
 
 ```rust
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::parser::parse_update;
-use reasoner_sparql::update::apply_update;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::parser::parse_update;
+use horndb_sparql::update::apply_update;
 
 #[test]
 fn insert_data_adds_triple() {
@@ -2295,7 +2295,7 @@ fn unsupported_update_form_errors() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test update_insert_delete`
+Run: `cargo test -p horndb-sparql --test update_insert_delete`
 Expected: FAIL — `apply_update` unresolved.
 
 - [ ] **Step 3: Implement update application**
@@ -2411,7 +2411,7 @@ fn _gtp_witness() -> Option<GroundTriplePattern> {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test update_insert_delete`
+Run: `cargo test -p horndb-sparql --test update_insert_delete`
 Expected: 3 passed. If `spargebra::GraphUpdateOperation::InsertData::data` is actually a `Vec<Quad>` (not `Triple`) or uses `subject`/`predicate`/`object` field names differently in your patch version, follow the compiler errors and adjust — the *shape* of the test stays the same.
 
 - [ ] **Step 5: Commit**
@@ -2443,7 +2443,7 @@ EOF
 Create `crates/sparql/tests/regime.rs`:
 
 ```rust
-use reasoner_sparql::regime::{simple::SimpleRegime, owl_rl::MaterializedOwlRlRegime, EntailmentRegime};
+use horndb_sparql::regime::{simple::SimpleRegime, owl_rl::MaterializedOwlRlRegime, EntailmentRegime};
 
 #[test]
 fn regimes_are_distinguishable_by_name() {
@@ -2463,7 +2463,7 @@ fn simple_is_default() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test regime`
+Run: `cargo test -p horndb-sparql --test regime`
 Expected: FAIL — unresolved imports.
 
 - [ ] **Step 3: Implement the regime trait and two impls**
@@ -2552,7 +2552,7 @@ impl EntailmentRegime for MaterializedOwlRlRegime {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test regime`
+Run: `cargo test -p horndb-sparql --test regime`
 Expected: 2 passed.
 
 - [ ] **Step 5: Commit**
@@ -2586,9 +2586,9 @@ EOF
 Create `crates/sparql/tests/results_json.rs`:
 
 ```rust
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::Bindings;
-use reasoner_sparql::results::json::write_select_json;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::Bindings;
+use horndb_sparql::results::json::write_select_json;
 
 #[test]
 fn select_json_shape() {
@@ -2609,7 +2609,7 @@ fn select_json_shape() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test results_json`
+Run: `cargo test -p horndb-sparql --test results_json`
 Expected: FAIL — `write_select_json` unresolved.
 
 - [ ] **Step 3: Implement the serializers**
@@ -2820,7 +2820,7 @@ pub fn write_select_tsv(vars: &[String], rows: &[Bindings]) -> String {
 
 - [ ] **Step 4: Run the test**
 
-Run: `cargo test -p reasoner-sparql --test results_json`
+Run: `cargo test -p horndb-sparql --test results_json`
 Expected: 1 passed.
 
 - [ ] **Step 5: Commit**
@@ -2851,10 +2851,10 @@ EOF
 Create `crates/sparql/tests/api_end_to_end.rs`:
 
 ```rust
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::api::{execute_query, QueryAnswer};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
 
 fn iri(s: &str) -> Term { Term::Iri(s.into()) }
 
@@ -2901,7 +2901,7 @@ fn end_to_end_construct() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test api_end_to_end`
+Run: `cargo test -p horndb-sparql --test api_end_to_end`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the API layer**
@@ -2984,7 +2984,7 @@ pub mod api;
 
 - [ ] **Step 5: Run the test**
 
-Run: `cargo test -p reasoner-sparql --test api_end_to_end`
+Run: `cargo test -p horndb-sparql --test api_end_to_end`
 Expected: 3 passed.
 
 - [ ] **Step 6: Commit**
@@ -3021,11 +3021,11 @@ Create `crates/sparql/tests/server_http.rs`:
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::server::build_router;
-use reasoner_sparql::server::AppState;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
+use horndb_sparql::server::build_router;
+use horndb_sparql::server::AppState;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
@@ -3082,7 +3082,7 @@ async fn parse_error_returns_400() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-sparql --test server_http --features server`
+Run: `cargo test -p horndb-sparql --test server_http --features server`
 Expected: FAIL — unresolved.
 
 - [ ] **Step 3: Implement the server module**
@@ -3327,7 +3327,7 @@ pub(crate) fn url_form_update(body: &str) -> Option<String> {
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p reasoner-sparql --test server_http --features server`
+Run: `cargo test -p horndb-sparql --test server_http --features server`
 Expected: 3 passed.
 
 - [ ] **Step 6: Commit**
@@ -3565,11 +3565,11 @@ Create `crates/sparql/tests/w3c_suite.rs`:
 //! `crates/harness/tests/fixtures/sparql11/`. Diffs each query's
 //! answer against the vendored expected SPARQL-JSON file.
 
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::api::{execute_query, QueryAnswer};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::results::json::{write_ask_json, write_select_json};
+use horndb_sparql::algebra::Term;
+use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
+use horndb_sparql::results::json::{write_ask_json, write_select_json};
 use std::path::PathBuf;
 
 fn fixtures_root() -> PathBuf {
@@ -3697,7 +3697,7 @@ w3c_case!(basic_005, "basic-005");
 
 - [ ] **Step 2: Run**
 
-Run: `cargo test -p reasoner-sparql --test w3c_suite`
+Run: `cargo test -p horndb-sparql --test w3c_suite`
 Expected: 5 passed.
 
 If a test fails, the most likely cause is a literal-form mismatch
@@ -3739,10 +3739,10 @@ Create `crates/sparql/tests/latency_smoke.rs`:
 //! regressions: 10k triples + a single-pattern SELECT in <1 s on any
 //! reasonable laptop.
 
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::api::{execute_query, QueryAnswer};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
 use std::time::Instant;
 
 #[test]
@@ -3772,7 +3772,7 @@ fn ten_thousand_triple_scan_in_under_one_second() {
 
 - [ ] **Step 2: Run**
 
-Run: `cargo test -p reasoner-sparql --test latency_smoke --release`
+Run: `cargo test -p horndb-sparql --test latency_smoke --release`
 Expected: PASS. (The naive MemStore is O(triples) per pattern scan;
 10k triples in <1 s in release mode is comfortable. If this fails on
 the CI machine, the most likely cause is the test runner being on a
@@ -3835,7 +3835,7 @@ jobs:
       - name: Test (default features)
         run: cargo test --workspace --all-targets
       - name: Test (sparql + server feature)
-        run: cargo test -p reasoner-sparql --features server
+        run: cargo test -p horndb-sparql --features server
 ```
 
 - [ ] **Step 3: Run the same commands locally to confirm they pass**
@@ -3845,7 +3845,7 @@ Run:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets
-cargo test -p reasoner-sparql --features server
+cargo test -p horndb-sparql --features server
 ```
 Expected: all green. Fix any `rustfmt` or `clippy` warnings the workflow would flag — typically `cargo fmt --all` (no `--check`) then re-run. Suppress `clippy::too_many_arguments` only if a function genuinely needs them; otherwise refactor.
 
@@ -3877,9 +3877,9 @@ EOF
 Create `crates/sparql/README.md`:
 
 ```markdown
-# reasoner-sparql
+# horndb-sparql
 
-SPARQL 1.1 frontend for the `reasoner` project. See
+SPARQL 1.1 frontend for the HornDB project. See
 `specs/SPEC-07-sparql-frontend.md` for the full contract.
 
 ## Stage 1 status
@@ -3918,14 +3918,14 @@ this crate vendors a 5-test sanity subset in
 ## Running
 
 ```bash
-cargo test -p reasoner-sparql --features server
+cargo test -p horndb-sparql --features server
 ```
 
 To start the HTTP server in your own binary:
 
 ```rust
-use reasoner_sparql::server::{build_router, AppState};
-use reasoner_sparql::exec::mem::MemStore;
+use horndb_sparql::server::{build_router, AppState};
+use horndb_sparql::exec::mem::MemStore;
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]
@@ -3965,7 +3965,7 @@ This is a checklist for the implementer to run after the final task. Do not skip
 - [ ] Open `crates/sparql/README.md` and confirm every "Implemented" bullet has a corresponding test under `crates/sparql/tests/`.
 - [ ] Open `crates/harness/selected.toml` and confirm the `[sparql_query]` section is present and lists exactly the 5 vendored fixtures.
 - [ ] Confirm `Cargo.toml` MSRV is `1.87` and the `[workspace.dependencies]` block contains `spargebra`, `oxrdf`, `sparesults`, `axum`, `tokio`, `serde_json`.
-- [ ] `cargo doc -p reasoner-sparql --no-deps` builds without warnings.
+- [ ] `cargo doc -p horndb-sparql --no-deps` builds without warnings.
 
 If anything fails, fix it before declaring the plan complete. Do not amend prior commits — add new ones.
 

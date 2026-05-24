@@ -10,7 +10,7 @@
 
 **Stage 0/1 scope boundary:** In: triple-pattern executor (F1), WCOJ on ≥4 patterns (F2), Arrow vectorization to 2048-row batches (F3), binary-hash-join fallback for ≤3 patterns and ground patterns, cardinality estimator stub (F6 minimal), cancellation hook (F7), differential fuzzer. Out (deferred to a later plan): magic-sets rewriter (F4), SLG tabling (F5), full SIMD intrinsics (NF1 hot-path tuning beyond a simple scalar loop), parallel partition execution (NF3), GPU WCOJ.
 
-**Dependency handling:** SPEC-02 (storage) lands in parallel. We define `TripleSource` and `OrderedTripleIter` traits in this crate and implement two in-crate doubles for testing: `VecTripleSource` (sorted `Vec<(u64,u64,u64)>`) and a generative `SyntheticGraph` for the 4-cycle benchmark. When SPEC-02 ships, a thin wrapper crate (or impl block in `reasoner-storage`) adapts its concrete types to these traits — we never depend on the storage crate directly in Stage 0/1.
+**Dependency handling:** SPEC-02 (storage) lands in parallel. We define `TripleSource` and `OrderedTripleIter` traits in this crate and implement two in-crate doubles for testing: `VecTripleSource` (sorted `Vec<(u64,u64,u64)>`) and a generative `SyntheticGraph` for the 4-cycle benchmark. When SPEC-02 ships, a thin wrapper crate (or impl block in `horndb-storage`) adapts its concrete types to these traits — we never depend on the storage crate directly in Stage 0/1.
 
 ---
 
@@ -71,7 +71,7 @@ Replace the file contents with:
 
 ```toml
 [package]
-name = "reasoner-wcoj"
+name = "horndb-wcoj"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -97,13 +97,13 @@ harness = false
 
 - [ ] **Step 2: Verify the crate still compiles with the new deps**
 
-Run: `cargo check -p reasoner-wcoj`
+Run: `cargo check -p horndb-wcoj`
 Expected: `Finished ... dev [unoptimized + debuginfo] target(s)`. If `arrow 53` is unavailable, fall back to `arrow = "52"`; the APIs we use (`RecordBatch::try_new`, `UInt64Array::from`) are stable across both.
 
 - [ ] **Step 3: Replace `crates/wcoj/src/lib.rs` with the module skeleton**
 
 ```rust
-//! reasoner-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
+//! horndb-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
 //!
 //! See `specs/SPEC-03-query-engine.md` for the full design. Stage 0/1 scope:
 //! WCOJ on ≥4 patterns, binary-hash-join fallback, Arrow vectorization,
@@ -234,7 +234,7 @@ rm -f crates/wcoj/src/source.rs crates/wcoj/src/trie.rs
 
 - [ ] **Step 7: Verify the skeleton compiles**
 
-Run: `cargo check -p reasoner-wcoj`
+Run: `cargo check -p horndb-wcoj`
 Expected: `Finished ... target(s)`. No warnings about missing modules.
 
 - [ ] **Step 8: Commit**
@@ -262,9 +262,9 @@ EOF
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/vec_source.rs`**
 
 ```rust
-use reasoner_wcoj::ids::{Ordering, Triple};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
-use reasoner_wcoj::source::{OrderedTripleIter, TripleSource};
+use horndb_wcoj::ids::{Ordering, Triple};
+use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::source::{OrderedTripleIter, TripleSource};
 
 #[test]
 fn vec_source_seeks_within_spo_ordering() {
@@ -318,7 +318,7 @@ fn vec_source_reports_total_count() {
 
 - [ ] **Step 2: Run the test to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test vec_source`
+Run: `cargo test -p horndb-wcoj --test vec_source`
 Expected: compile errors — `source::vec_source` and `source::{TripleSource, OrderedTripleIter}` don't exist yet.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/source/mod.rs`**
@@ -328,7 +328,7 @@ Replace the placeholder with:
 ```rust
 //! Storage abstraction over which the WCOJ executor operates.
 //!
-//! SPEC-02 (`reasoner-storage`) will provide the production implementation;
+//! SPEC-02 (`horndb-storage`) will provide the production implementation;
 //! the executor never depends on the storage crate directly. Instead, anything
 //! that can serve sorted iterators with `seek` over one of the six orderings
 //! implements `TripleSource`.
@@ -541,7 +541,7 @@ Replace `crates/wcoj/src/source/synthetic.rs` (currently the directory's mod aut
 
 - [ ] **Step 6: Run the test — expect it to pass**
 
-Run: `cargo test -p reasoner-wcoj --test vec_source`
+Run: `cargo test -p horndb-wcoj --test vec_source`
 Expected: `test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 7: Commit**
@@ -570,8 +570,8 @@ EOF
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/pattern.rs`**
 
 ```rust
-use reasoner_wcoj::ids::Ordering;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::ids::Ordering;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 
 #[test]
 fn variables_collects_unique_vars_in_first_appearance_order() {
@@ -605,7 +605,7 @@ fn preferred_ordering_puts_bound_positions_first() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test pattern`
+Run: `cargo test -p horndb-wcoj --test pattern`
 Expected: errors — `pattern::{Bgp, ...}` don't exist.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/pattern.rs`**
@@ -732,7 +732,7 @@ impl Bgp {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test pattern`
+Run: `cargo test -p horndb-wcoj --test pattern`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -754,11 +754,11 @@ git commit -m "wcoj: add Term/Var/TriplePattern/Bgp with ordering heuristic"
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/trie_basics.rs`**
 
 ```rust
-use reasoner_wcoj::ids::{Ordering, Triple};
-use reasoner_wcoj::pattern::{Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
-use reasoner_wcoj::trie::source_iter::PatternTrieIter;
-use reasoner_wcoj::trie::TrieIterator;
+use horndb_wcoj::ids::{Ordering, Triple};
+use horndb_wcoj::pattern::{Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::trie::source_iter::PatternTrieIter;
+use horndb_wcoj::trie::TrieIterator;
 
 fn source() -> VecTripleSource {
     VecTripleSource::from_triples(vec![
@@ -806,7 +806,7 @@ fn pattern_trie_iter_filters_out_non_matching_predicate() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test trie_basics`
+Run: `cargo test -p horndb-wcoj --test trie_basics`
 Expected: compile errors — types not defined.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/trie/mod.rs`**
@@ -1042,7 +1042,7 @@ Create `crates/wcoj/src/trie/leapfrog.rs`:
 
 - [ ] **Step 6: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test trie_basics`
+Run: `cargo test -p horndb-wcoj --test trie_basics`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 7: Commit**
@@ -1070,12 +1070,12 @@ EOF
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/leapfrog.rs`**
 
 ```rust
-use reasoner_wcoj::ids::{Ordering, Triple};
-use reasoner_wcoj::pattern::{Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
-use reasoner_wcoj::trie::leapfrog::LeapfrogJoin;
-use reasoner_wcoj::trie::source_iter::PatternTrieIter;
-use reasoner_wcoj::trie::TrieIterator;
+use horndb_wcoj::ids::{Ordering, Triple};
+use horndb_wcoj::pattern::{Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::trie::leapfrog::LeapfrogJoin;
+use horndb_wcoj::trie::source_iter::PatternTrieIter;
+use horndb_wcoj::trie::TrieIterator;
 
 #[test]
 fn leapfrog_intersection_returns_only_common_values() {
@@ -1137,7 +1137,7 @@ fn leapfrog_empty_when_one_iterator_is_empty() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test leapfrog`
+Run: `cargo test -p horndb-wcoj --test leapfrog`
 Expected: compile errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/trie/leapfrog.rs`**
@@ -1243,7 +1243,7 @@ impl<'a> LeapfrogJoin<'a> {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test leapfrog`
+Run: `cargo test -p horndb-wcoj --test leapfrog`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1272,8 +1272,8 @@ EOF
 
 ```rust
 use arrow::array::UInt64Array;
-use reasoner_wcoj::batch::{BindingBatchBuilder, STANDARD_VECTOR_SIZE};
-use reasoner_wcoj::pattern::Var;
+use horndb_wcoj::batch::{BindingBatchBuilder, STANDARD_VECTOR_SIZE};
+use horndb_wcoj::pattern::Var;
 
 #[test]
 fn standard_vector_size_is_2048() {
@@ -1310,7 +1310,7 @@ fn finish_on_empty_builder_returns_none() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test batch`
+Run: `cargo test -p horndb-wcoj --test batch`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/batch.rs`**
@@ -1396,7 +1396,7 @@ impl BindingBatchBuilder {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test batch`
+Run: `cargo test -p horndb-wcoj --test batch`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1417,7 +1417,7 @@ git commit -m "wcoj: add Arrow RecordBatch builder with STANDARD_VECTOR_SIZE=204
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/cancel_token.rs`**
 
 ```rust
-use reasoner_wcoj::cancel::CancelToken;
+use horndb_wcoj::cancel::CancelToken;
 
 #[test]
 fn fresh_token_is_not_cancelled() {
@@ -1443,7 +1443,7 @@ fn check_returns_err_after_cancel() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test cancel_token`
+Run: `cargo test -p horndb-wcoj --test cancel_token`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/cancel.rs`**
@@ -1494,7 +1494,7 @@ impl CancelToken {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test cancel_token`
+Run: `cargo test -p horndb-wcoj --test cancel_token`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1515,10 +1515,10 @@ git commit -m "wcoj: add CancelToken (atomic bool, cloneable handle)"
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/cardinality.rs`**
 
 ```rust
-use reasoner_wcoj::cardinality::{Cardinality, UniformEstimator};
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cardinality::{Cardinality, UniformEstimator};
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn fully_unbound_pattern_estimates_total_triples() {
@@ -1550,7 +1550,7 @@ fn one_bound_position_estimates_third() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test cardinality`
+Run: `cargo test -p horndb-wcoj --test cardinality`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/cardinality.rs`**
@@ -1598,7 +1598,7 @@ impl Cardinality for UniformEstimator {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test cardinality`
+Run: `cargo test -p horndb-wcoj --test cardinality`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1619,8 +1619,8 @@ git commit -m "wcoj: add UniformEstimator stub for the planner cutover"
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/plan.rs`**
 
 ```rust
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
 
 #[test]
 fn plan_for_4_cycle_uses_wcoj_and_orders_vars_by_degree() {
@@ -1654,7 +1654,7 @@ fn plan_for_two_pattern_bgp_picks_binary_hash() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test plan`
+Run: `cargo test -p horndb-wcoj --test plan`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/plan.rs`**
@@ -1728,7 +1728,7 @@ impl ExecutionPlan {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test plan`
+Run: `cargo test -p horndb-wcoj --test plan`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1751,12 +1751,12 @@ git commit -m "wcoj: add ExecutionPlan with degree-ordered variable elimination"
 
 ```rust
 use arrow::array::UInt64Array;
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::ExecutionPlan;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::ExecutionPlan;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 fn collect_pairs(batches: Vec<arrow::record_batch::RecordBatch>) -> Vec<Vec<u64>> {
     let mut out: Vec<Vec<u64>> = Vec::new();
@@ -1791,7 +1791,7 @@ fn triangle_join_produces_correct_results() {
         TriplePattern::new(Term::Var(Var(2)), Term::Bound(p), Term::Var(Var(0))),
     ]);
     let plan = ExecutionPlan {
-        kind: reasoner_wcoj::plan::PlanKind::Wcoj,
+        kind: horndb_wcoj::plan::PlanKind::Wcoj,
         var_order: vec![Var(0), Var(1), Var(2)],
     };
 
@@ -1813,7 +1813,7 @@ fn empty_result_yields_no_batches() {
         TriplePattern::new(Term::Var(Var(0)), Term::Bound(99), Term::Var(Var(1))),
     ]);
     let plan = ExecutionPlan {
-        kind: reasoner_wcoj::plan::PlanKind::Wcoj,
+        kind: horndb_wcoj::plan::PlanKind::Wcoj,
         var_order: vec![Var(0), Var(1)],
     };
     let exec = WcojExecutor::new(&src, &bgp, &plan, CancelToken::new());
@@ -1824,7 +1824,7 @@ fn empty_result_yields_no_batches() {
 
 - [ ] **Step 2: Run to confirm it fails**
 
-Run: `cargo test -p reasoner-wcoj --test wcoj_smoke`
+Run: `cargo test -p horndb-wcoj --test wcoj_smoke`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/executor/mod.rs`**
@@ -2194,7 +2194,7 @@ impl<'a> LeapfrogJoin<'a> {
 
 - [ ] **Step 6: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test wcoj_smoke`
+Run: `cargo test -p horndb-wcoj --test wcoj_smoke`
 Expected: `test result: ok. 2 passed`. The triangle case is the canonical sanity check.
 
 If the test fails on result ordering, sort both `rows` and the expected vector in the test and compare — but the listed code already sorts.
@@ -2225,11 +2225,11 @@ EOF
 
 ```rust
 use arrow::array::UInt64Array;
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 fn collect(batches: Vec<arrow::record_batch::RecordBatch>) -> Vec<Vec<u64>> {
     let mut out: Vec<Vec<u64>> = Vec::new();
@@ -2280,7 +2280,7 @@ fn binary_hash_join_ground_pattern_returns_one_empty_row_when_match() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-wcoj --test binary_hash_smoke`
+Run: `cargo test -p horndb-wcoj --test binary_hash_smoke`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/executor/binary_hash.rs`**
@@ -2595,7 +2595,7 @@ impl<'src> Iterator for BatchIter<'src> {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test binary_hash_smoke`
+Run: `cargo test -p horndb-wcoj --test binary_hash_smoke`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Commit**
@@ -2623,12 +2623,12 @@ EOF
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/planner_choice.rs`**
 
 ```rust
-use reasoner_wcoj::cardinality::UniformEstimator;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::PlanKind;
-use reasoner_wcoj::planner::Planner;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cardinality::UniformEstimator;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::PlanKind;
+use horndb_wcoj::planner::Planner;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn four_pattern_cycle_picks_wcoj() {
@@ -2674,7 +2674,7 @@ fn three_patterns_with_low_cardinality_picks_binary_hash() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-wcoj --test planner_choice`
+Run: `cargo test -p horndb-wcoj --test planner_choice`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/planner.rs`**
@@ -2715,7 +2715,7 @@ impl Planner {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test planner_choice`
+Run: `cargo test -p horndb-wcoj --test planner_choice`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -2739,13 +2739,13 @@ git commit -m "wcoj: add Planner with default 4-pattern WCOJ cutover (F2)"
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::error::WcojError;
-use reasoner_wcoj::executor::Executor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::planner::Planner;
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::error::WcojError;
+use horndb_wcoj::executor::Executor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::planner::Planner;
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 #[test]
 fn cancellation_returns_within_100ms() {
@@ -2790,7 +2790,7 @@ fn cancellation_returns_within_100ms() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-wcoj --test cancel`
+Run: `cargo test -p horndb-wcoj --test cancel`
 Expected: errors — `Executor::for_bgp` not yet defined.
 
 - [ ] **Step 3: Expand `crates/wcoj/src/executor/mod.rs`**
@@ -2865,7 +2865,7 @@ impl<'src> Iterator for Executor<'src> {
 
 - [ ] **Step 4: Run the cancel test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test cancel`
+Run: `cargo test -p horndb-wcoj --test cancel`
 Expected: `test result: ok. 1 passed`.
 
 If the test occasionally fails because the executor finishes before the cancel signal arrives, increase the synthetic graph size in the test (e.g. 50_000 edges instead of 10_000). The 100ms latency assertion must always hold.
@@ -2896,8 +2896,8 @@ EOF
 - [ ] **Step 1: Write the failing test `crates/wcoj/tests/synthetic_graph.rs`**
 
 ```rust
-use reasoner_wcoj::source::synthetic::SyntheticGraph;
-use reasoner_wcoj::source::TripleSource;
+use horndb_wcoj::source::synthetic::SyntheticGraph;
+use horndb_wcoj::source::TripleSource;
 
 #[test]
 fn synthetic_4_cycle_graph_has_expected_size() {
@@ -2909,7 +2909,7 @@ fn synthetic_4_cycle_graph_has_expected_size() {
 #[test]
 fn synthetic_graph_supports_all_orderings() {
     let g = SyntheticGraph::cyclic(100, 2, 10, 0xCAFE);
-    for ord in reasoner_wcoj::ids::Ordering::ALL {
+    for ord in horndb_wcoj::ids::Ordering::ALL {
         assert!(g.supports(ord));
     }
 }
@@ -2917,7 +2917,7 @@ fn synthetic_graph_supports_all_orderings() {
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p reasoner-wcoj --test synthetic_graph`
+Run: `cargo test -p horndb-wcoj --test synthetic_graph`
 Expected: errors.
 
 - [ ] **Step 3: Implement `crates/wcoj/src/source/synthetic.rs`**
@@ -2987,7 +2987,7 @@ impl TripleSource for SyntheticGraph {
 
 - [ ] **Step 4: Run the test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test synthetic_graph`
+Run: `cargo test -p horndb-wcoj --test synthetic_graph`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Write the criterion bench `crates/wcoj/benches/four_cycle.rs`**
@@ -3002,12 +3002,12 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
-use reasoner_wcoj::source::synthetic::SyntheticGraph;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::source::synthetic::SyntheticGraph;
 
 fn make_4_cycle_bgp() -> Bgp {
     let p = 10u64;
@@ -3068,12 +3068,12 @@ criterion_main!(benches);
 
 - [ ] **Step 6: Run the bench**
 
-Run: `cargo bench -p reasoner-wcoj --bench four_cycle -- --quick`
+Run: `cargo bench -p horndb-wcoj --bench four_cycle -- --quick`
 Expected: both benchmarks complete; the criterion output should show `wcoj` mean time ≥10× faster than `binary_hash`. The `--quick` flag is for development; the assertion is qualitative — record both numbers in the next commit message.
 
 If WCOJ is *not* 10× faster, do not paper over the failure. Likely causes, in order:
 1. `BinaryHashExecutor::scan_pattern` is doing the *same* full-graph scan three times for binary-hash — that's actually realistic for the comparison. Verify by adding a counter.
-2. The `PatternTrieIter` adapter has a bug in `open_level` / `up` that causes redundant work. Run `cargo test -p reasoner-wcoj --release` and watch for any per-test slowdown.
+2. The `PatternTrieIter` adapter has a bug in `open_level` / `up` that causes redundant work. Run `cargo test -p horndb-wcoj --release` and watch for any per-test slowdown.
 3. The `VecTripleSource::seek` binary search is slow for the synthetic graph because of large `[lo, hi)` ranges. Confirm by profiling with `cargo bench -- --profile-time 10`.
 
 If the 10× criterion really cannot be met without further work, **insert a new task** between this one and Task 15 to investigate, rather than commenting it out.
@@ -3116,13 +3116,13 @@ use std::collections::BTreeSet;
 use arrow::array::UInt64Array;
 use proptest::prelude::*;
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::binary_hash::BinaryHashExecutor;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::ids::{TermId, Triple};
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::ids::{TermId, Triple};
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 const N_VERTICES: u64 = 30;
 const PREDICATES: &[u64] = &[100, 101, 102];
@@ -3149,7 +3149,7 @@ fn build_source(seed: u64) -> VecTripleSource {
 }
 
 fn collect_rows(
-    batches: impl Iterator<Item = reasoner_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
+    batches: impl Iterator<Item = horndb_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
 ) -> BTreeSet<Vec<TermId>> {
     let mut out = BTreeSet::new();
     for b in batches {
@@ -3212,7 +3212,7 @@ proptest! {
 
 - [ ] **Step 2: Run to confirm it fails (or compiles and passes)**
 
-Run: `cargo test -p reasoner-wcoj --test differential_fuzz --release`
+Run: `cargo test -p horndb-wcoj --test differential_fuzz --release`
 Expected: either (a) compiles and reports `1024 cases passed`, in which case skip steps 3-4 and proceed to commit, or (b) finds a counterexample which is what proptest is designed to do — the test will print a minimal failing BGP+seed.
 
 Why 1024 cases instead of 100K from SPEC-03: that target is for the full LUBM-100 fuzz that lands when SPEC-01 ships. 1024 cases on a 30-vertex / 3-predicate synthetic graph still exercises a very large surface; expand to 100K (and run nightly) when the integration plan ships.
@@ -3246,7 +3246,7 @@ Re-run after each fix. Repeat until 1024 cases pass cleanly.
 
 - [ ] **Step 4: Run the fuzz test — expect pass**
 
-Run: `cargo test -p reasoner-wcoj --test differential_fuzz --release`
+Run: `cargo test -p horndb-wcoj --test differential_fuzz --release`
 Expected: `test result: ok. 1 passed`. Proptest's regression file (`crates/wcoj/proptest-regressions/`) is checked in so previously-failing inputs are replayed forever.
 
 - [ ] **Step 5: Commit**
@@ -3285,12 +3285,12 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use reasoner_wcoj::cancel::CancelToken;
-use reasoner_wcoj::executor::wcoj::WcojExecutor;
-use reasoner_wcoj::ids::Triple;
-use reasoner_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use reasoner_wcoj::plan::{ExecutionPlan, PlanKind};
-use reasoner_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::ids::Triple;
+use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
+use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::source::vec_source::VecTripleSource;
 
 fn bench_per_tuple(c: &mut Criterion) {
     let n: u64 = 1_000_000;
@@ -3334,7 +3334,7 @@ criterion_main!(benches);
 
 - [ ] **Step 2: Run the bench**
 
-Run: `cargo bench -p reasoner-wcoj --bench per_tuple -- --quick`
+Run: `cargo bench -p horndb-wcoj --bench per_tuple -- --quick`
 Expected: criterion reports a per-element throughput. Compute ns/tuple = mean time / `n`. Record the result. NF1 target is ≤5 ns; Stage 1 is expected to be 10-50 ns. Do **not** fail the build on this — it's a regression-watch bench, not a gate.
 
 - [ ] **Step 3: Commit**
@@ -3393,7 +3393,7 @@ mod smoke {
 
 - [ ] **Step 2: Run the full crate test suite**
 
-Run: `cargo test -p reasoner-wcoj`
+Run: `cargo test -p horndb-wcoj`
 Expected: all tests pass — unit smoke + every integration test created in Tasks 2-15. Spot-check the output:
 - `vec_source`: 3 passed
 - `pattern`: 3 passed
@@ -3415,7 +3415,7 @@ If any test fails, do not proceed. Go back to the task that introduced it and de
 
 - [ ] **Step 3: Run clippy to catch obvious lints**
 
-Run: `cargo clippy -p reasoner-wcoj --all-targets -- -D warnings`
+Run: `cargo clippy -p horndb-wcoj --all-targets -- -D warnings`
 Expected: clean. Common fixes if not clean:
 - Unused `Term` import in `plan.rs` — already addressed with the `_ = Term::Bound(0)` line; remove if no longer needed.
 - `let _ = ord;` in `TripleSource::supports` default — keep as documentation.
@@ -3436,10 +3436,10 @@ git commit -m "wcoj: add crate-level dispatch smoke test; clippy clean"
 
 - [ ] **Step 1: Expand the crate doc-comment in `crates/wcoj/src/lib.rs`**
 
-Replace the existing crate-level doc (the `//! reasoner-wcoj — Leapfrog Triejoin ...` block) with:
+Replace the existing crate-level doc (the `//! horndb-wcoj — Leapfrog Triejoin ...` block) with:
 
 ```rust
-//! reasoner-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
+//! horndb-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
 //!
 //! # Architecture (Stage 0/1)
 //!
@@ -3477,7 +3477,7 @@ Replace the existing crate-level doc (the `//! reasoner-wcoj — Leapfrog Triejo
 //! # Storage abstraction
 //!
 //! [`source::TripleSource`] is the only interface this crate has to the
-//! outside world. SPEC-02's `reasoner-storage` crate will provide a
+//! outside world. SPEC-02's `horndb-storage` crate will provide a
 //! production impl; for tests we use [`source::vec_source::VecTripleSource`]
 //! and [`source::synthetic::SyntheticGraph`].
 //!
@@ -3534,17 +3534,17 @@ mod smoke {
 
 - [ ] **Step 2: Build the rustdoc and verify it renders**
 
-Run: `cargo doc -p reasoner-wcoj --no-deps`
-Expected: `Documenting reasoner-wcoj v0.0.0` followed by a successful exit. Browse `target/doc/reasoner_wcoj/index.html` to spot-check.
+Run: `cargo doc -p horndb-wcoj --no-deps`
+Expected: `Documenting horndb-wcoj v0.0.0` followed by a successful exit. Browse `target/doc/horndb_wcoj/index.html` to spot-check.
 
 - [ ] **Step 3: Final crate-wide test + clippy**
 
 Run these in sequence:
 ```bash
-cargo test -p reasoner-wcoj
-cargo test -p reasoner-wcoj --release
-cargo clippy -p reasoner-wcoj --all-targets -- -D warnings
-cargo doc -p reasoner-wcoj --no-deps
+cargo test -p horndb-wcoj
+cargo test -p horndb-wcoj --release
+cargo clippy -p horndb-wcoj --all-targets -- -D warnings
+cargo doc -p horndb-wcoj --no-deps
 ```
 Expected: all four green.
 
@@ -3557,7 +3557,7 @@ wcoj: expand crate docs with Stage-0/1 architecture diagram
 
 Documents the scope boundary (F1/F2/F3/F6/F7 in; F4/F5/NF1/NF3 deferred)
 and the storage trait seam that lets the executor sit in front of either
-VecTripleSource or the eventual SPEC-02 reasoner-storage impl.
+VecTripleSource or the eventual SPEC-02 horndb-storage impl.
 EOF
 )"
 ```
@@ -3593,7 +3593,7 @@ EOF
 
 **Known gaps deliberately deferred (Future Work):**
 1. Self-loop variables in one pattern (`?x p ?x`) — fuzzer excludes them; first Stage-2 task is to add the trie-iterator support.
-2. Real adapter from `reasoner-storage` to `TripleSource` — lands when SPEC-02 ships its concrete types (one file in either crate, depending on where the trait lives long-term).
+2. Real adapter from `horndb-storage` to `TripleSource` — lands when SPEC-02 ships its concrete types (one file in either crate, depending on where the trait lives long-term).
 3. Per-pattern ordering selection beyond the "shallowest-bound-first" heuristic — Stage 2 with the real cardinality estimator.
 4. Parallel partitioned execution — Stage 2.
 5. SIMD seek inner loop — Stage 2 once profiling identifies it as the bottleneck.

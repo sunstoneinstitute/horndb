@@ -4,9 +4,9 @@
 
 **Goal:** Establish the ML integration boundary as a set of pluggable Rust traits with reference no-op implementations, a provenance-source enum that other crates can attach to triples, a library-level audit log, and a global `ml.enabled` feature flag — such that with ML disabled the engine behaves bit-identically to a non-ML build.
 
-**Architecture:** SPEC-08 is deliberately small and cross-cutting. We define traits (`CandidateGenerator`, `PlanAdvisor`, `HotSetAdvisor`) and supporting value types (`Confidence`, `TripleSubject`, `SubplanShape`, `PlanAdvice`, `MlProvenance`) inside `reasoner-ml`. We ship no-op `Disabled*` implementations. We expose an `MlConfig` with `enabled: bool` plus a thread-safe `MlRegistry` that returns either the registered impl or the no-op fallback. We add an in-memory `MlAuditLog` (library API now; HTTP in Stage 2). We do **not** modify any other crate; instead, the plan ends by emitting a `INTEGRATION-NOTES.md` per consuming crate that records which trait method to call from which integration point.
+**Architecture:** SPEC-08 is deliberately small and cross-cutting. We define traits (`CandidateGenerator`, `PlanAdvisor`, `HotSetAdvisor`) and supporting value types (`Confidence`, `TripleSubject`, `SubplanShape`, `PlanAdvice`, `MlProvenance`) inside `horndb-ml`. We ship no-op `Disabled*` implementations. We expose an `MlConfig` with `enabled: bool` plus a thread-safe `MlRegistry` that returns either the registered impl or the no-op fallback. We add an in-memory `MlAuditLog` (library API now; HTTP in Stage 2). We do **not** modify any other crate; instead, the plan ends by emitting a `INTEGRATION-NOTES.md` per consuming crate that records which trait method to call from which integration point.
 
-**Tech Stack:** Rust 1.93+, workspace crate `reasoner-ml`. No new external crates required for Stage 0/1 beyond `anyhow`, `thiserror`, and the std-lib (`Arc`, `RwLock`, `Mutex`). LLM endpoint, FAISS-backed `CandidateGenerator`, HTTP audit endpoint, cost reporting, and training-data leakage controls are deferred to Stage 2.
+**Tech Stack:** Rust 1.93+, workspace crate `horndb-ml`. No new external crates required for Stage 0/1 beyond `anyhow`, `thiserror`, and the std-lib (`Arc`, `RwLock`, `Mutex`). LLM endpoint, FAISS-backed `CandidateGenerator`, HTTP audit endpoint, cost reporting, and training-data leakage controls are deferred to Stage 2.
 
 **Stage 0/1 Scope:**
 - F1 `CandidateGenerator` trait + `DisabledCandidateGenerator` no-op.
@@ -29,7 +29,7 @@
 
 ## File Structure
 
-We create one new crate body — `reasoner-ml` — split into focused modules. Files that change together live together.
+We create one new crate body — `horndb-ml` — split into focused modules. Files that change together live together.
 
 ```
 crates/ml/
@@ -60,7 +60,7 @@ crates/sparql/INTEGRATION-NOTES.md        # new — call site: PlanAdvisor + LLM
 
 ---
 
-## Task 1: Update `reasoner-ml` Cargo.toml with minimal deps
+## Task 1: Update `horndb-ml` Cargo.toml with minimal deps
 
 **Files:**
 - Modify: `crates/ml/Cargo.toml`
@@ -71,7 +71,7 @@ Run: `cat crates/ml/Cargo.toml`
 Expected output:
 ```
 [package]
-name = "reasoner-ml"
+name = "horndb-ml"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -86,7 +86,7 @@ Overwrite `crates/ml/Cargo.toml` with:
 
 ```toml
 [package]
-name = "reasoner-ml"
+name = "horndb-ml"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -105,8 +105,8 @@ Note: `chrono` is needed for `MlAuditEntry.timestamp`. We disable default featur
 
 - [ ] **Step 3: Verify it builds**
 
-Run: `cargo build -p reasoner-ml`
-Expected: `Compiling reasoner-ml v0.0.0` then `Finished ... profile [unoptimized + debuginfo]`. No errors.
+Run: `cargo build -p horndb-ml`
+Expected: `Compiling horndb-ml v0.0.0` then `Finished ... profile [unoptimized + debuginfo]`. No errors.
 
 - [ ] **Step 4: Commit**
 
@@ -169,7 +169,7 @@ mod tests {
 Overwrite `crates/ml/src/lib.rs`:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -179,7 +179,7 @@ Overwrite `crates/ml/src/lib.rs`:
 pub mod types;
 ```
 
-Run: `cargo test -p reasoner-ml --lib types::tests`
+Run: `cargo test -p horndb-ml --lib types::tests`
 Expected: FAIL with errors like `cannot find type 'Confidence' in this scope`.
 
 - [ ] **Step 3: Implement `Confidence`**
@@ -253,7 +253,7 @@ mod tests {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib types::tests`
+Run: `cargo test -p horndb-ml --lib types::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 5: Commit**
@@ -317,7 +317,7 @@ Append to `crates/ml/src/types.rs` (inside the existing `#[cfg(test)] mod tests`
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test -p reasoner-ml --lib types::tests`
+Run: `cargo test -p horndb-ml --lib types::tests`
 Expected: FAIL with `cannot find type 'TripleSubject'`, `cannot find type 'ModelId'`, etc.
 
 - [ ] **Step 3: Implement the new types**
@@ -385,7 +385,7 @@ impl PlanAdvice {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib types::tests`
+Run: `cargo test -p horndb-ml --lib types::tests`
 Expected: `running 7 tests ... test result: ok. 7 passed; 0 failed`.
 
 - [ ] **Step 5: Commit**
@@ -395,7 +395,7 @@ git add crates/ml/src/types.rs
 git commit -m "$(cat <<'EOF'
 ml: add TripleSubject, ModelId, SubplanShape, PlanAdvice value types
 
-TripleSubject uses owned strings on purpose — keeps reasoner-ml free
+TripleSubject uses owned strings on purpose — keeps horndb-ml free
 of any storage-crate dependency. SubplanShape is intentionally opaque
 so the planner can evolve its internal IR without breaking advisors.
 EOF
@@ -479,7 +479,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` — replace its contents with:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -492,7 +492,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib provenance::tests`
+Run: `cargo test -p horndb-ml --lib provenance::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -594,7 +594,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` — append `pub mod candidate;` so the file reads:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -608,7 +608,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib candidate::tests`
+Run: `cargo test -p horndb-ml --lib candidate::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -705,7 +705,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` to add `pub mod planner;` (alphabetical order). Final contents:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -720,7 +720,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib planner::tests`
+Run: `cargo test -p horndb-ml --lib planner::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -820,7 +820,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` adding `pub mod hotset;`:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -836,7 +836,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib hotset::tests`
+Run: `cargo test -p horndb-ml --lib hotset::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -1018,7 +1018,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` (final form):
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -1035,7 +1035,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib audit::tests`
+Run: `cargo test -p horndb-ml --lib audit::tests`
 Expected: `running 4 tests ... test result: ok. 4 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -1098,7 +1098,7 @@ impl Default for MlConfig {
 /// Reserved for future use — Stage 0/1 has no failure modes on
 /// `MlRegistry::register_*` because registration is allowed
 /// regardless of `enabled`, and the enabled flag only gates
-/// *accessors*. Kept here so consumers can `use reasoner_ml::MlConfigError`
+/// *accessors*. Kept here so consumers can `use horndb_ml::MlConfigError`
 /// without breakage when Stage 2 adds e.g. an "invalid model id"
 /// variant.
 #[derive(Debug, thiserror::Error)]
@@ -1138,7 +1138,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs`:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -1156,7 +1156,7 @@ pub mod types;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib config::tests`
+Run: `cargo test -p horndb-ml --lib config::tests`
 Expected: `running 3 tests ... test result: ok. 3 passed; 0 failed`.
 
 - [ ] **Step 4: Commit**
@@ -1389,7 +1389,7 @@ mod tests {
 Edit `crates/ml/src/lib.rs` to its final shape:
 
 ```rust
-//! reasoner-ml — ML/LLM integration boundary (SPEC-08).
+//! horndb-ml — ML/LLM integration boundary (SPEC-08).
 //!
 //! The symbolic reasoner is the source of truth; this crate's traits
 //! exist so external ML systems can *propose* facts (re-verified
@@ -1411,12 +1411,12 @@ pub use registry::MlRegistry;
 
 - [ ] **Step 3: Run tests to verify pass**
 
-Run: `cargo test -p reasoner-ml --lib registry::tests`
+Run: `cargo test -p horndb-ml --lib registry::tests`
 Expected: `running 5 tests ... test result: ok. 5 passed; 0 failed`.
 
 - [ ] **Step 4: Run full crate test suite as a checkpoint**
 
-Run: `cargo test -p reasoner-ml`
+Run: `cargo test -p horndb-ml`
 Expected: All unit tests across all modules pass (config 3 + types 7 + provenance 3 + candidate 3 + planner 3 + hotset 3 + audit 4 + registry 5 = 31 tests).
 
 - [ ] **Step 5: Commit**
@@ -1456,11 +1456,11 @@ Create `crates/ml/tests/disabled_is_identity.rs`:
 //! adds the *engine-wide* version of this check; here we lock the
 //! boundary down.
 
-use reasoner_ml::candidate::DisabledCandidateGenerator;
-use reasoner_ml::hotset::DisabledHotSetAdvisor;
-use reasoner_ml::planner::DisabledPlanAdvisor;
-use reasoner_ml::types::{Confidence, PlanAdvice, SubplanShape, TripleSubject};
-use reasoner_ml::{MlConfig, MlRegistry};
+use horndb_ml::candidate::DisabledCandidateGenerator;
+use horndb_ml::hotset::DisabledHotSetAdvisor;
+use horndb_ml::planner::DisabledPlanAdvisor;
+use horndb_ml::types::{Confidence, PlanAdvice, SubplanShape, TripleSubject};
+use horndb_ml::{MlConfig, MlRegistry};
 
 #[test]
 fn disabled_candidate_returns_zero_confidence() {
@@ -1500,7 +1500,7 @@ fn audit_log_is_empty_under_disabled_config() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p reasoner-ml --test disabled_is_identity`
+Run: `cargo test -p horndb-ml --test disabled_is_identity`
 Expected: `running 4 tests ... test result: ok. 4 passed; 0 failed`.
 
 - [ ] **Step 3: Commit**
@@ -1536,9 +1536,9 @@ Create `crates/ml/tests/registry_hot_reload.rs`:
 //! reload from a second thread, confirming the post-reload
 //! behaviour without recreating any state.
 
-use reasoner_ml::candidate::{CandidateGenerator, DisabledCandidateGenerator};
-use reasoner_ml::types::{Confidence, ModelId, TripleSubject};
-use reasoner_ml::{MlConfig, MlRegistry};
+use horndb_ml::candidate::{CandidateGenerator, DisabledCandidateGenerator};
+use horndb_ml::types::{Confidence, ModelId, TripleSubject};
+use horndb_ml::{MlConfig, MlRegistry};
 use std::sync::Arc;
 use std::thread;
 
@@ -1593,7 +1593,7 @@ fn hot_reload_round_trip_without_restart() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p reasoner-ml --test registry_hot_reload`
+Run: `cargo test -p horndb-ml --test registry_hot_reload`
 Expected: `running 1 test ... test result: ok. 1 passed; 0 failed`.
 
 - [ ] **Step 3: Commit**
@@ -1627,9 +1627,9 @@ Create `crates/ml/tests/audit_pagination.rs`:
 //! `since`-windowed paginated reads.
 
 use chrono::{Duration, Utc};
-use reasoner_ml::audit::MlAuditEntry;
-use reasoner_ml::types::{Confidence, ModelId, TripleSubject};
-use reasoner_ml::{MlConfig, MlRegistry};
+use horndb_ml::audit::MlAuditEntry;
+use horndb_ml::types::{Confidence, ModelId, TripleSubject};
+use horndb_ml::{MlConfig, MlRegistry};
 use std::sync::Arc;
 use std::thread;
 
@@ -1683,7 +1683,7 @@ fn concurrent_writers_then_paginated_read() {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p reasoner-ml --test audit_pagination`
+Run: `cargo test -p horndb-ml --test audit_pagination`
 Expected: `running 1 test ... test result: ok. 1 passed; 0 failed`.
 
 - [ ] **Step 3: Commit**
@@ -1706,9 +1706,9 @@ EOF
 
 **Files:** none — verification only.
 
-- [ ] **Step 1: Run every reasoner-ml test**
+- [ ] **Step 1: Run every horndb-ml test**
 
-Run: `cargo test -p reasoner-ml`
+Run: `cargo test -p horndb-ml`
 Expected: tail of output reads
 ```
 test result: ok. <N> passed; 0 failed
@@ -1717,12 +1717,12 @@ where the total is 31 unit + 4 + 1 + 1 = 37 tests across the crate.
 
 - [ ] **Step 2: Run clippy across the crate**
 
-Run: `cargo clippy -p reasoner-ml --all-targets -- -D warnings`
-Expected: `Checking reasoner-ml v0.0.0` then no warnings or errors. If a warning fires, fix it before proceeding (typical: missing `#[must_use]` or visibility nits).
+Run: `cargo clippy -p horndb-ml --all-targets -- -D warnings`
+Expected: `Checking horndb-ml v0.0.0` then no warnings or errors. If a warning fires, fix it before proceeding (typical: missing `#[must_use]` or visibility nits).
 
 - [ ] **Step 3: Format**
 
-Run: `cargo fmt -p reasoner-ml`
+Run: `cargo fmt -p horndb-ml`
 Expected: no output.
 
 - [ ] **Step 4: Commit any formatting changes**
@@ -1753,16 +1753,16 @@ This file is **documentation only** — no code changes to the storage crate. SP
 Create `crates/storage/INTEGRATION-NOTES.md`:
 
 ````markdown
-# SPEC-08 Integration Notes for `reasoner-storage`
+# SPEC-08 Integration Notes for `horndb-storage`
 
 These notes describe call sites that **SPEC-02's plan** is responsible
-for implementing. Nothing in this file modifies `reasoner-storage`
-directly; it records the contract `reasoner-ml` exposes for SPEC-02
+for implementing. Nothing in this file modifies `horndb-storage`
+directly; it records the contract `horndb-ml` exposes for SPEC-02
 to consume.
 
 ## F5 — Provenance annotation column
 
-`reasoner-ml::provenance::MlProvenance` is the value type to store
+`horndb-ml::provenance::MlProvenance` is the value type to store
 on each inferred triple. SPEC-02 should:
 
 1. Add an optional column `provenance: MlProvenance` to each
@@ -1779,7 +1779,7 @@ future variants must take new bytes, never reuse `0x00` or `0x01`.
 
 ## F4 — Hot-set advisor input to tiering
 
-`reasoner-ml::hotset::HotSetAdvisor::predict_hot(max)` returns
+`horndb-ml::hotset::HotSetAdvisor::predict_hot(max)` returns
 `Vec<TripleId>`. SPEC-02's tier-placement policy should:
 
 1. Hold an `Arc<MlRegistry>` provided at construction time.
@@ -1801,7 +1801,7 @@ ml: storage integration note for SPEC-08 F4/F5
 
 Documents the provenance column contract (stable discriminant bytes)
 and the HotSetAdvisor call pattern. SPEC-02's plan will read this and
-wire the call sites; we make no changes to reasoner-storage here.
+wire the call sites; we make no changes to horndb-storage here.
 EOF
 )"
 ```
@@ -1818,7 +1818,7 @@ EOF
 Create `crates/wcoj/INTEGRATION-NOTES.md`:
 
 ````markdown
-# SPEC-08 Integration Notes for `reasoner-wcoj`
+# SPEC-08 Integration Notes for `horndb-wcoj`
 
 These notes describe call sites that **SPEC-03's plan** is responsible
 for implementing.
@@ -1827,7 +1827,7 @@ for implementing.
 
 Before finalising a join order, the WCOJ planner should:
 
-1. Construct a `reasoner_ml::types::SubplanShape { n_patterns,
+1. Construct a `horndb_ml::types::SubplanShape { n_patterns,
    n_vars, bound_vars }` from the candidate subplan.
 2. Call `registry.plan_advisor().advise(&shape)` to obtain a
    `PlanAdvice`.
@@ -1868,7 +1868,7 @@ EOF
 Create `crates/owlrl/INTEGRATION-NOTES.md`:
 
 ````markdown
-# SPEC-08 Integration Notes for `reasoner-owlrl`
+# SPEC-08 Integration Notes for `horndb-owlrl`
 
 These notes describe call sites that **SPEC-04's plan** is responsible
 for implementing.
@@ -1928,7 +1928,7 @@ EOF
 Create `crates/closure/INTEGRATION-NOTES.md`:
 
 ````markdown
-# SPEC-08 Integration Notes for `reasoner-closure`
+# SPEC-08 Integration Notes for `horndb-closure`
 
 These notes describe call sites that **SPEC-05's plan** is responsible
 for implementing.
@@ -1949,8 +1949,8 @@ graph, SPEC-05's `EQREL` structure must:
    in the staging graph until accepted; the commit step then bulk-
    inserts via the writeback path described in SPEC-05 F5.
 
-No `reasoner-closure` API needs to change for Stage 0/1 — this
-integration is a SPEC-05 plan task that calls into `reasoner-ml`'s
+No `horndb-closure` API needs to change for Stage 0/1 — this
+integration is a SPEC-05 plan task that calls into `horndb-ml`'s
 existing types only.
 ````
 
@@ -1979,7 +1979,7 @@ EOF
 Create `crates/sparql/INTEGRATION-NOTES.md`:
 
 ````markdown
-# SPEC-08 Integration Notes for `reasoner-sparql`
+# SPEC-08 Integration Notes for `horndb-sparql`
 
 These notes describe call sites that **SPEC-07's plan** is responsible
 for implementing.
@@ -1998,7 +1998,7 @@ SPARQL queries should be able to filter on the provenance column
 exposed by SPEC-02. SPEC-07's plan should:
 
 1. Recognise the (engine-specific) predicate
-   `<https://reasoner.sunstone.institute/prov/source>` in `FILTER`
+   `<https://horndb.sunstone.institute/prov/source>` in `FILTER`
    clauses.
 2. Map literal values `"symbolic"` and `"ml-derived"` onto the
    `MlProvenance` discriminants from SPEC-02's storage column.
@@ -2006,8 +2006,8 @@ exposed by SPEC-02. SPEC-07's plan should:
    ```sparql
    SELECT ?s ?p ?o ?model WHERE {
      ?s ?p ?o .
-     ?s <https://reasoner.sunstone.institute/prov/source> "ml-derived" .
-     ?s <https://reasoner.sunstone.institute/prov/model>  ?model .
+     ?s <https://horndb.sunstone.institute/prov/source> "ml-derived" .
+     ?s <https://horndb.sunstone.institute/prov/model>  ?model .
    }
    ```
 
@@ -2018,14 +2018,14 @@ adds it, the implementation should:
 
 1. Live in a new module (`crates/sparql/src/nl.rs`).
 2. Take an injected `Arc<dyn LlmClient>` (trait to be defined in
-   `reasoner-ml` Stage 2) so the LLM provider is pluggable and the
+   `horndb-ml` Stage 2) so the LLM provider is pluggable and the
    handler is testable without network.
 3. Always return the generated SPARQL alongside the results (per
    SPEC-08 risks: "LLM SPARQL quality").
 4. Defer cost reporting and training-data leakage controls to
    Stage 2+ per SPEC-08.
 
-For Stage 0/1 the file remains absent — `reasoner-ml` ships only
+For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.
 ````
 
@@ -2057,12 +2057,12 @@ Expected: every crate (harness, storage, wcoj, owlrl, closure, incremental, spar
 - [ ] **Step 2: Workspace test**
 
 Run: `cargo test --workspace`
-Expected: `reasoner-ml` runs 37 tests passing; other crates run 0 tests (they're placeholders). No failures.
+Expected: `horndb-ml` runs 37 tests passing; other crates run 0 tests (they're placeholders). No failures.
 
 - [ ] **Step 3: Workspace clippy**
 
 Run: `cargo clippy --workspace --all-targets -- -D warnings`
-Expected: no warnings or errors. (Other crates have no real code yet; only `reasoner-ml` could fail this gate.)
+Expected: no warnings or errors. (Other crates have no real code yet; only `horndb-ml` could fail this gate.)
 
 - [ ] **Step 4: Verify INTEGRATION-NOTES files are committed**
 
@@ -2110,8 +2110,8 @@ If no such file exists, skip this task — do not create one. The PR will speak 
 - [ ] F3 is explicitly deferred and called out in `sparql/INTEGRATION-NOTES.md`.
 - [ ] NF1 (disabled-is-identity) has a dedicated integration test.
 - [ ] Acceptance #5 (runtime reload) has a dedicated integration test.
-- [ ] No edits to any crate other than `reasoner-ml` and the `INTEGRATION-NOTES.md` docs.
-- [ ] All commits are atomic and pass `cargo test -p reasoner-ml` at HEAD.
+- [ ] No edits to any crate other than `horndb-ml` and the `INTEGRATION-NOTES.md` docs.
+- [ ] All commits are atomic and pass `cargo test -p horndb-ml` at HEAD.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean.
 - [ ] No `Co-Authored-By:` lines in commit messages.
 

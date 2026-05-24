@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the `reasoner-closure` crate with a working SuiteSparse:GraphBLAS FFI layer, schema-matrix construction for transitive properties / `rdfs:subClassOf` / `rdfs:subPropertyOf`, Boolean `(∨,∧)` semiring closure via iterated `GrB_mxm`, a union-find based `owl:sameAs` structure, dense-per-predicate ID renumbering, and a writeback path into the SPEC-02 store through a `TripleSink` trait. SPEC-04 will call us via a `ClosureBackend` trait we define here.
+**Goal:** Stand up the `horndb-closure` crate with a working SuiteSparse:GraphBLAS FFI layer, schema-matrix construction for transitive properties / `rdfs:subClassOf` / `rdfs:subPropertyOf`, Boolean `(∨,∧)` semiring closure via iterated `GrB_mxm`, a union-find based `owl:sameAs` structure, dense-per-predicate ID renumbering, and a writeback path into the SPEC-02 store through a `TripleSink` trait. SPEC-04 will call us via a `ClosureBackend` trait we define here.
 
-**Architecture:** A single workspace crate (`reasoner-closure`) split into focused modules. The crate links against a system-installed SuiteSparse:GraphBLAS via direct `bindgen`-generated FFI (no third-party GraphBLAS wrapper crate — the only existing ones are CC BY-NC 4.0 and incompatible with our Apache-2.0 license). A thin safe wrapper (`grb`) over the FFI exposes only the GraphBLAS surface we need: `GrB_Matrix`, `GrB_mxm`, monoids/semirings, `GrB_*_build`, `GrB_*_extractTuples`, `GrB_Matrix_nvals`. A `dense_id` module maintains a per-predicate `dictionary_id ↔ u64 dense index` map (FxHashMap + Vec). A `closure::transitive` module runs the iterated Boolean MxM until `nvals` stabilises. A `sameas` module implements union-find over dictionary IDs (pure Rust, no GraphBLAS) with canonical-representative = lexicographically smallest URI ID. A `sink` module defines the `TripleSink` trait that SPEC-02 will implement and exports a `ClosureBackend` trait that SPEC-04 consumes. The `build.rs` uses `pkg-config` to locate SuiteSparse:GraphBLAS; if missing, it prints a Homebrew/apt install hint and fails the build cleanly.
+**Architecture:** A single workspace crate (`horndb-closure`) split into focused modules. The crate links against a system-installed SuiteSparse:GraphBLAS via direct `bindgen`-generated FFI (no third-party GraphBLAS wrapper crate — the only existing ones are CC BY-NC 4.0 and incompatible with our Apache-2.0 license). A thin safe wrapper (`grb`) over the FFI exposes only the GraphBLAS surface we need: `GrB_Matrix`, `GrB_mxm`, monoids/semirings, `GrB_*_build`, `GrB_*_extractTuples`, `GrB_Matrix_nvals`. A `dense_id` module maintains a per-predicate `dictionary_id ↔ u64 dense index` map (FxHashMap + Vec). A `closure::transitive` module runs the iterated Boolean MxM until `nvals` stabilises. A `sameas` module implements union-find over dictionary IDs (pure Rust, no GraphBLAS) with canonical-representative = lexicographically smallest URI ID. A `sink` module defines the `TripleSink` trait that SPEC-02 will implement and exports a `ClosureBackend` trait that SPEC-04 consumes. The `build.rs` uses `pkg-config` to locate SuiteSparse:GraphBLAS; if missing, it prints a Homebrew/apt install hint and fails the build cleanly.
 
 **Tech Stack:** Rust 2021 (workspace `rust-version = "1.75"`), `bindgen` 0.69+ (build-dep), `pkg-config` 0.3 (build-dep), `rustc-hash` (FxHashMap), `thiserror`, `anyhow`. External system dep: **SuiteSparse:GraphBLAS ≥ 8.x** (Homebrew: `brew install suite-sparse`; Debian/Ubuntu: `libsuitesparse-dev` or build from source for newer versions). No GPU, no LAGraph, no incremental update — those are deferred to Stage 2 / SPEC-09.
 
@@ -84,7 +84,7 @@ Do **not** proceed to Task 1 until this step succeeds. The plan assumes a workin
 
 ---
 
-## Task 1: Bootstrap the `reasoner-closure` crate manifest
+## Task 1: Bootstrap the `horndb-closure` crate manifest
 
 **Files:**
 - Modify: `crates/closure/Cargo.toml`
@@ -95,7 +95,7 @@ Write the file:
 
 ```toml
 [package]
-name = "reasoner-closure"
+name = "horndb-closure"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -129,7 +129,7 @@ Workaround: comment out the `[[bench]]` blocks for now until Task 13. Update the
 
 ```toml
 [package]
-name = "reasoner-closure"
+name = "horndb-closure"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -154,7 +154,7 @@ anyhow = { workspace = true }
 Run from repo root:
 
 ```bash
-cargo check -p reasoner-closure 2>&1 | tail -20
+cargo check -p horndb-closure 2>&1 | tail -20
 ```
 
 Expected: `error[E0463]: can't find crate for ...` or a build-script error from `build.rs` — but NOT a manifest parse error and NOT an unresolved-dependency error from `bindgen` / `pkg-config` / `rustc-hash`. Those should resolve from crates.io.
@@ -168,7 +168,7 @@ git add crates/closure/Cargo.toml
 git commit -m "$(cat <<'EOF'
 closure: replace placeholder manifest with real dependencies
 
-Sets up reasoner-closure as a linked crate against system
+Sets up horndb-closure as a linked crate against system
 SuiteSparse:GraphBLAS, with bindgen + pkg-config build deps.
 EOF
 )"
@@ -212,7 +212,7 @@ fn main() {
         Err(e) => {
             eprintln!("\n\
                 =====================================================\n\
-                reasoner-closure: SuiteSparse:GraphBLAS not found.\n\
+                horndb-closure: SuiteSparse:GraphBLAS not found.\n\
                 pkg-config error: {e}\n\n\
                 Install instructions:\n  \
                   macOS:       brew install suite-sparse pkg-config\n  \
@@ -258,7 +258,7 @@ fn main() {
 - [ ] **Step 3: Run cargo build to verify the bindings generate**
 
 ```bash
-cargo build -p reasoner-closure 2>&1 | tail -30
+cargo build -p horndb-closure 2>&1 | tail -30
 ```
 
 Expected: a successful build with no errors. `OUT_DIR/bindings.rs` should be ~hundreds of KB.
@@ -268,7 +268,7 @@ If you see `fatal error: 'GraphBLAS.h' file not found`, your `pkg-config` return
 - [ ] **Step 4: Inspect a generated symbol to confirm bindings worked**
 
 ```bash
-grep -c "pub fn GrB_mxm" target/debug/build/reasoner-closure-*/out/bindings.rs
+grep -c "pub fn GrB_mxm" target/debug/build/horndb-closure-*/out/bindings.rs
 ```
 
 Expected: `1` (the function declaration appears exactly once).
@@ -303,7 +303,7 @@ Create `crates/closure/tests/grb_smoke.rs`:
 ```rust
 //! Smoke test: prove FFI surface compiles and we can convert error codes.
 
-use reasoner_closure::error::GrbError;
+use horndb_closure::error::GrbError;
 
 #[test]
 fn grb_success_is_ok() {
@@ -322,7 +322,7 @@ fn grb_nonzero_is_err() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test grb_smoke 2>&1 | tail -10
+cargo test -p horndb-closure --test grb_smoke 2>&1 | tail -10
 ```
 
 Expected: `error[E0432]: unresolved import` — module `error` does not exist yet.
@@ -384,7 +384,7 @@ impl GrbError {
 Replace `crates/closure/src/lib.rs` with:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 //!
 //! Provides:
 //! - Transitive-property closure via iterated Boolean MxM on SuiteSparse:GraphBLAS.
@@ -400,7 +400,7 @@ pub mod ffi;
 - [ ] **Step 6: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test grb_smoke 2>&1 | tail -10
+cargo test -p horndb-closure --test grb_smoke 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 2 passed; 0 failed`.
@@ -433,7 +433,7 @@ EOF
 Append to `crates/closure/tests/grb_smoke.rs`:
 
 ```rust
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn init_and_build_bool_matrix() {
@@ -461,10 +461,10 @@ fn boolean_mxm_one_step() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test grb_smoke 2>&1 | tail -10
+cargo test -p horndb-closure --test grb_smoke 2>&1 | tail -10
 ```
 
-Expected: `unresolved import reasoner_closure::grb`.
+Expected: `unresolved import horndb_closure::grb`.
 
 - [ ] **Step 3: Implement `grb.rs`**
 
@@ -655,7 +655,7 @@ impl Drop for BoolMatrix {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod error;
 pub mod ffi;
@@ -665,7 +665,7 @@ pub mod grb;
 - [ ] **Step 5: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test grb_smoke 2>&1 | tail -10
+cargo test -p horndb-closure --test grb_smoke 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 4 passed; 0 failed`.
@@ -673,7 +673,7 @@ Expected: `test result: ok. 4 passed; 0 failed`.
 If you see linker errors about missing `GrB_LOR_MONOID_BOOL` or `GxB_LOR_LAND_BOOL`, your SuiteSparse:GraphBLAS may be older than 8.0; the constant names changed between v6 and v8. Check the binding output:
 
 ```bash
-grep -E "LOR_MONOID_BOOL|LOR_LAND_BOOL" target/debug/build/reasoner-closure-*/out/bindings.rs | head
+grep -E "LOR_MONOID_BOOL|LOR_LAND_BOOL" target/debug/build/horndb-closure-*/out/bindings.rs | head
 ```
 
 If the symbols are different, update `grb.rs` to match the names in the generated bindings.
@@ -753,7 +753,7 @@ pub struct Triple {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod error;
 pub mod ffi;
@@ -764,7 +764,7 @@ pub mod types;
 - [ ] **Step 3: Verify it builds**
 
 ```bash
-cargo check -p reasoner-closure 2>&1 | tail -5
+cargo check -p horndb-closure 2>&1 | tail -5
 ```
 
 Expected: no errors.
@@ -794,8 +794,8 @@ This implements F7 from SPEC-05.
 Create `crates/closure/tests/dense_id.rs`:
 
 ```rust
-use reasoner_closure::dense_id::DenseIdMap;
-use reasoner_closure::types::{DenseIdx, DictId};
+use horndb_closure::dense_id::DenseIdMap;
+use horndb_closure::types::{DenseIdx, DictId};
 
 #[test]
 fn renumbers_in_first_seen_order() {
@@ -835,10 +835,10 @@ fn bulk_intern_pairs_returns_dense_edges() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test dense_id 2>&1 | tail -5
+cargo test -p horndb-closure --test dense_id 2>&1 | tail -5
 ```
 
-Expected: `unresolved import reasoner_closure::dense_id`.
+Expected: `unresolved import horndb_closure::dense_id`.
 
 - [ ] **Step 3: Implement `dense_id.rs`**
 
@@ -927,7 +927,7 @@ impl DenseIdMap {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod dense_id;
 pub mod error;
@@ -939,7 +939,7 @@ pub mod types;
 - [ ] **Step 5: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test dense_id 2>&1 | tail -5
+cargo test -p horndb-closure --test dense_id 2>&1 | tail -5
 ```
 
 Expected: `test result: ok. 3 passed; 0 failed`.
@@ -974,8 +974,8 @@ This implements F3 — the heart of SPEC-05.
 Create `crates/closure/tests/transitive_closure.rs`:
 
 ```rust
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn chain_of_five_produces_complete_upper_triangle() {
@@ -1022,10 +1022,10 @@ fn empty_matrix_is_empty_closure() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test transitive_closure 2>&1 | tail -5
+cargo test -p horndb-closure --test transitive_closure 2>&1 | tail -5
 ```
 
-Expected: `unresolved import reasoner_closure::closure`.
+Expected: `unresolved import horndb_closure::closure`.
 
 - [ ] **Step 3: Implement `closure/mod.rs`**
 
@@ -1122,7 +1122,7 @@ pub fn identity_like(m: &BoolMatrix) -> Result<BoolMatrix, GrbError> {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod closure;
 pub mod dense_id;
@@ -1135,7 +1135,7 @@ pub mod types;
 - [ ] **Step 6: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test transitive_closure 2>&1 | tail -10
+cargo test -p horndb-closure --test transitive_closure 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 4 passed; 0 failed`.
@@ -1145,7 +1145,7 @@ If `triangle_cycle_closes_to_full_3x3` fails with `nvals = 6` or similar, the `r
 If you see a compile error about `GrB_WaitMode_GrB_MATERIALIZE` not being found, your bindgen output may have generated the enum variant with a slightly different name. Check:
 
 ```bash
-grep -E "WaitMode|MATERIALIZE|COMPLETE" target/debug/build/reasoner-closure-*/out/bindings.rs | head -5
+grep -E "WaitMode|MATERIALIZE|COMPLETE" target/debug/build/horndb-closure-*/out/bindings.rs | head -5
 ```
 
 and adjust the variant name in `BoolMatrix::wait` to match.
@@ -1179,8 +1179,8 @@ This implements F2 + the OWL 2 RL rules `scm-sco` and `scm-spo`.
 Create `crates/closure/tests/schema_closure.rs`:
 
 ```rust
-use reasoner_closure::closure::schema::reflexive_transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::schema::reflexive_transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 #[test]
 fn sco_chain_includes_reflexivity_over_extent() {
@@ -1207,7 +1207,7 @@ fn empty_input_yields_only_diagonal() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test schema_closure 2>&1 | tail -5
+cargo test -p horndb-closure --test schema_closure 2>&1 | tail -5
 ```
 
 Expected: `unresolved import`.
@@ -1243,7 +1243,7 @@ pub fn reflexive_transitive_closure(m: &BoolMatrix) -> Result<BoolMatrix, GrbErr
 - [ ] **Step 4: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test schema_closure 2>&1 | tail -5
+cargo test -p horndb-closure --test schema_closure 2>&1 | tail -5
 ```
 
 Expected: `test result: ok. 2 passed; 0 failed`.
@@ -1277,8 +1277,8 @@ This implements F4. Pure Rust — no GraphBLAS for EQREL in Stage 1 per the task
 Create `crates/closure/tests/sameas.rs`:
 
 ```rust
-use reasoner_closure::sameas::EquivClasses;
-use reasoner_closure::types::DictId;
+use horndb_closure::sameas::EquivClasses;
+use horndb_closure::types::DictId;
 
 #[test]
 fn singletons_are_their_own_representatives() {
@@ -1333,7 +1333,7 @@ fn one_million_unions_yields_one_class() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test sameas 2>&1 | tail -5
+cargo test -p horndb-closure --test sameas 2>&1 | tail -5
 ```
 
 Expected: `unresolved import`.
@@ -1492,7 +1492,7 @@ impl EquivClasses {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod closure;
 pub mod dense_id;
@@ -1506,7 +1506,7 @@ pub mod types;
 - [ ] **Step 5: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test sameas --release 2>&1 | tail -5
+cargo test -p horndb-closure --test sameas --release 2>&1 | tail -5
 ```
 
 Use `--release` for the 1M-union stress test; debug mode is ~30x slower and would push the test over a minute.
@@ -1544,8 +1544,8 @@ Create `crates/closure/tests/end_to_end.rs`:
 ```rust
 use std::sync::Mutex;
 
-use reasoner_closure::sink::{ClosureBackend, TripleSink};
-use reasoner_closure::types::{DictId, PredicateId, Triple};
+use horndb_closure::sink::{ClosureBackend, TripleSink};
+use horndb_closure::types::{DictId, PredicateId, Triple};
 
 /// A `TripleSink` that just accumulates into a Vec. Used by tests until the
 /// storage crate provides a real implementation.
@@ -1569,7 +1569,7 @@ impl TripleSink for VecSink {
 #[test]
 fn transitive_predicate_closes_and_writes_back() {
     let sink = VecSink::default();
-    let mut backend = reasoner_closure::sink::default_backend();
+    let mut backend = horndb_closure::sink::default_backend();
 
     // Predicate p = 42; transitive chain 1->2->3->4.
     let p = PredicateId(42);
@@ -1608,10 +1608,10 @@ fn transitive_predicate_closes_and_writes_back() {
 - [ ] **Step 2: Run the test (should fail to compile)**
 
 ```bash
-cargo test -p reasoner-closure --test end_to_end 2>&1 | tail -5
+cargo test -p horndb-closure --test end_to_end 2>&1 | tail -5
 ```
 
-Expected: `unresolved import reasoner_closure::sink`.
+Expected: `unresolved import horndb_closure::sink`.
 
 - [ ] **Step 3: Implement `sink.rs`**
 
@@ -1801,7 +1801,7 @@ pub fn default_backend() -> BackendImpl {
 Update `crates/closure/src/lib.rs`:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 
 pub mod closure;
 pub mod dense_id;
@@ -1816,7 +1816,7 @@ pub mod types;
 - [ ] **Step 5: Run the test (should pass)**
 
 ```bash
-cargo test -p reasoner-closure --test end_to_end 2>&1 | tail -10
+cargo test -p horndb-closure --test end_to_end 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 1 passed; 0 failed`.
@@ -1848,7 +1848,7 @@ EOF
 - [ ] **Step 1: Run all tests**
 
 ```bash
-cargo test -p reasoner-closure --release 2>&1 | tail -30
+cargo test -p horndb-closure --release 2>&1 | tail -30
 ```
 
 Expected: every test in `grb_smoke`, `dense_id`, `transitive_closure`, `schema_closure`, `sameas`, `end_to_end` passes. Total: ~17 tests.
@@ -1856,7 +1856,7 @@ Expected: every test in `grb_smoke`, `dense_id`, `transitive_closure`, `schema_c
 - [ ] **Step 2: Run clippy**
 
 ```bash
-cargo clippy -p reasoner-closure --all-targets -- -D warnings 2>&1 | tail -15
+cargo clippy -p horndb-closure --all-targets -- -D warnings 2>&1 | tail -15
 ```
 
 Expected: no warnings. Fix any that appear before continuing.
@@ -1929,8 +1929,8 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 fn chain_matrix(n: u64) -> BoolMatrix {
     let edges: Vec<(u64, u64)> = (0..n - 1).map(|i| (i, i + 1)).collect();
@@ -1977,8 +1977,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 
-use reasoner_closure::sameas::EquivClasses;
-use reasoner_closure::types::DictId;
+use horndb_closure::sameas::EquivClasses;
+use horndb_closure::types::DictId;
 
 fn synth_pairs(n_assertions: usize, n_canonical: u64, seed: u64) -> Vec<(DictId, DictId)> {
     let mut rng = SmallRng::seed_from_u64(seed);
@@ -2069,7 +2069,7 @@ rand = "0.8"
 - [ ] **Step 5: Compile-check the benches**
 
 ```bash
-cargo bench -p reasoner-closure --no-run 2>&1 | tail -10
+cargo bench -p horndb-closure --no-run 2>&1 | tail -10
 ```
 
 Expected: both `transitive` and `sameas` build successfully.
@@ -2077,7 +2077,7 @@ Expected: both `transitive` and `sameas` build successfully.
 - [ ] **Step 6: Run the benches (optional, slow)**
 
 ```bash
-cargo bench -p reasoner-closure 2>&1 | tail -40
+cargo bench -p horndb-closure 2>&1 | tail -40
 ```
 
 Expected (rough, reference workstation):
@@ -2126,8 +2126,8 @@ use std::collections::BTreeSet;
 use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 
-use reasoner_closure::closure::transitive::transitive_closure;
-use reasoner_closure::grb::{init_once, BoolMatrix};
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
 
 fn naive_closure(n: usize, edges: &[(u64, u64)]) -> BTreeSet<(u64, u64)> {
     let mut reach = vec![vec![false; n]; n];
@@ -2198,7 +2198,7 @@ fn random_graphs_match_naive_closure() {
 - [ ] **Step 2: Run the test**
 
 ```bash
-cargo test -p reasoner-closure --test differential --release 2>&1 | tail -10
+cargo test -p horndb-closure --test differential --release 2>&1 | tail -10
 ```
 
 Expected: `test result: ok. 1 passed; 0 failed`.
@@ -2232,7 +2232,7 @@ EOF
 Open `crates/closure/src/lib.rs` and replace the existing doc comment block at the top with:
 
 ```rust
-//! reasoner-closure — GraphBLAS-backed closure backend for SPEC-05.
+//! horndb-closure — GraphBLAS-backed closure backend for SPEC-05.
 //!
 //! # Stage-1 surface
 //!
@@ -2284,10 +2284,10 @@ pub mod types;
 - [ ] **Step 2: Verify rustdoc renders**
 
 ```bash
-cargo doc -p reasoner-closure --no-deps 2>&1 | tail -10
+cargo doc -p horndb-closure --no-deps 2>&1 | tail -10
 ```
 
-Expected: `Documenting reasoner-closure v0.0.0 ...` followed by `Generated /Users/.../target/doc/reasoner_closure/index.html`. No warnings about broken intra-doc links.
+Expected: `Documenting horndb-closure v0.0.0 ...` followed by `Generated /Users/.../target/doc/horndb_closure/index.html`. No warnings about broken intra-doc links.
 
 If any intra-doc link is broken (e.g. `[grb::BoolMatrix::mxm_lor_land]` typo), fix it before committing.
 
@@ -2314,13 +2314,13 @@ Run all of the following and confirm green. The first three are hard gates; the 
 - [ ] **All unit + integration tests pass**
 
 ```bash
-cargo test -p reasoner-closure --release
+cargo test -p horndb-closure --release
 ```
 
 - [ ] **Clippy clean**
 
 ```bash
-cargo clippy -p reasoner-closure --all-targets -- -D warnings
+cargo clippy -p horndb-closure --all-targets -- -D warnings
 ```
 
 - [ ] **Workspace still builds**
@@ -2332,7 +2332,7 @@ cargo check --workspace
 - [ ] **2,500-node transitive chain benchmark runs**
 
 ```bash
-cargo bench -p reasoner-closure --bench transitive
+cargo bench -p horndb-closure --bench transitive
 ```
 
 Record the wall time for `transitive_chain/2500` in the Stage-1 numbers log. Target: well under the naïve-rule-firing baseline (no SPEC-04 yet, so this is a baseline only).
@@ -2340,7 +2340,7 @@ Record the wall time for `transitive_chain/2500` in the Stage-1 numbers log. Tar
 - [ ] **10M sameAs across 1M canonicals benchmark runs**
 
 ```bash
-cargo bench -p reasoner-closure --bench sameas
+cargo bench -p horndb-closure --bench sameas
 ```
 
 Record `sameas_construction/10000000@1000000` wall time. Target: ≤5 s per sample (SPEC-05 acceptance criterion 3). Record `sameas_lookup/canonical_x10k` per-probe time. Target: ≤100 ns.
@@ -2348,7 +2348,7 @@ Record `sameas_construction/10000000@1000000` wall time. Target: ≤5 s per samp
 - [ ] **Differential test passes**
 
 ```bash
-cargo test -p reasoner-closure --test differential --release
+cargo test -p horndb-closure --test differential --release
 ```
 
 Stand-in for SPEC-05 acceptance criterion 4. Once SPEC-04 exists, add a second differential test against rule-fired closure on LUBM-100.

@@ -4,7 +4,7 @@
 
 **Goal:** Deliver a minimal but production-shaped in-memory RDF triple store: 64-bit term IDs with kind-tagged high bits, lock-free term↔ID dictionary, predicate-partitioned Arrow columns in SPO order, Roaring bitmaps for subject/object sets, a tier trait with one in-memory tier, and an N-Triples bulk loader that ingests LUBM-100 (~13M triples) in ≤30s on a reference workstation.
 
-**Architecture:** A single `reasoner-storage` crate organised as: `term` (ID encoding + taxonomy), `dictionary` (DashMap-backed term↔ID, with reverse-lookup `Vec`), `partition` (one `PredicatePartition` holding Arrow `UInt64Array` columns `s` and `o` plus two `RoaringBitmap`s), `store` (a `Tier` trait + `MemoryTier` impl owning a `HashMap<TermId /*predicate*/, PredicatePartition>`), `loader::ntriples` (streaming `oxttl`-based parser that interns into the dictionary and appends to per-predicate builders), and a public `Store` facade. Quads are supported with a reserved default-graph sentinel; named-graph storage in Stage 1 is a `HashMap<GraphId, GraphStore>` where each `GraphStore` is the predicate-partitioned structure above. The default graph uses sentinel `GraphId(0)`.
+**Architecture:** A single `horndb-storage` crate organised as: `term` (ID encoding + taxonomy), `dictionary` (DashMap-backed term↔ID, with reverse-lookup `Vec`), `partition` (one `PredicatePartition` holding Arrow `UInt64Array` columns `s` and `o` plus two `RoaringBitmap`s), `store` (a `Tier` trait + `MemoryTier` impl owning a `HashMap<TermId /*predicate*/, PredicatePartition>`), `loader::ntriples` (streaming `oxttl`-based parser that interns into the dictionary and appends to per-predicate builders), and a public `Store` facade. Quads are supported with a reserved default-graph sentinel; named-graph storage in Stage 1 is a `HashMap<GraphId, GraphStore>` where each `GraphStore` is the predicate-partitioned structure above. The default graph uses sentinel `GraphId(0)`.
 
 **Tech Stack:** Rust 1.93 / edition 2021, `arrow = 53` (columnar buffers), `roaring = 0.10` (bitmaps), `dashmap = 6` (lock-free read map for term→ID), `oxttl = 0.1` (N-Triples streaming parser), `oxrdf = 0.2` (RDF term model used by oxttl), `bytemuck = 1` (safe transmute for ID byte views), `parking_lot = 0.12` (writer mutex), `criterion = 0.5` (bench), `tempfile = 3` (test fixtures), `proptest = 1` (round-trip properties).
 
@@ -66,7 +66,7 @@ members = [
 edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
-repository = "https://github.com/sunstoneinstitute/reasoner"
+repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]
 
 [workspace.dependencies]
@@ -99,7 +99,7 @@ Replace the contents of `/Users/stig/git/sunstone/reasoner/crates/storage/Cargo.
 
 ```toml
 [package]
-name = "reasoner-storage"
+name = "horndb-storage"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -131,7 +131,7 @@ harness = false
 Replace contents of `/Users/stig/git/sunstone/reasoner/crates/storage/src/lib.rs` with:
 
 ```rust
-//! reasoner-storage — Stage 0/1 scope.
+//! horndb-storage — Stage 0/1 scope.
 //!
 //! Provides:
 //!   * 64-bit kind-tagged term IDs (`term`).
@@ -186,7 +186,7 @@ pub mod ntriples;
 
 - [ ] **Step 5: Compile to verify wiring**
 
-Run: `cargo check -p reasoner-storage`
+Run: `cargo check -p horndb-storage`
 Expected: succeeds with warnings about unused modules; no errors. If `oxttl` / `oxrdf` versions resolve to anything other than 0.1.x / 0.2.x respectively, pin to the latest 0.1 / 0.2 in `Cargo.toml`.
 
 - [ ] **Step 6: Commit**
@@ -196,7 +196,7 @@ git add Cargo.toml Cargo.lock crates/storage/
 git commit -m "$(cat <<'EOF'
 storage: scaffold Stage-1 module layout and dependencies
 
-Replaces the placeholder reasoner-storage crate with the module
+Replaces the placeholder horndb-storage crate with the module
 skeleton specified in plans/2026-05-24-SPEC-02-storage.md: term,
 dictionary, partition, tier, memory_tier, store, loader. Adds
 arrow/roaring/dashmap/oxttl/oxrdf/parking_lot to workspace deps.
@@ -370,7 +370,7 @@ mod tests {
 
 - [ ] **Step 2: Run the test to verify it passes**
 
-Run: `cargo test -p reasoner-storage --lib term::`
+Run: `cargo test -p horndb-storage --lib term::`
 Expected: 6 tests pass.
 
 - [ ] **Step 3: Commit**
@@ -436,7 +436,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/storage/tests/dictionary.rs`:
 
 ```rust
 use oxrdf::{BlankNode, Literal, NamedNode, Term};
-use reasoner_storage::{Dictionary, TermKind};
+use horndb_storage::{Dictionary, TermKind};
 
 fn uri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())
@@ -550,7 +550,7 @@ fn concurrent_intern_returns_same_id() {
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cargo test -p reasoner-storage --test dictionary`
+Run: `cargo test -p horndb-storage --test dictionary`
 Expected: compile errors (no `Dictionary::new`, no `intern`, no `lookup`, no `len`).
 
 - [ ] **Step 4: Implement `Dictionary`**
@@ -671,7 +671,7 @@ fn try_inline_int(term: &Term) -> Option<TermId> {
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p reasoner-storage --test dictionary`
+Run: `cargo test -p horndb-storage --test dictionary`
 Expected: 7 tests pass.
 
 - [ ] **Step 6: Commit**
@@ -716,7 +716,7 @@ Roaring bitmaps are 32-bit. A 60-bit payload may exceed `u32::MAX`. For Stage 1 
 Create `/Users/stig/git/sunstone/reasoner/crates/storage/tests/partition.rs`:
 
 ```rust
-use reasoner_storage::{PredicatePartition, TermId, TermKind};
+use horndb_storage::{PredicatePartition, TermId, TermKind};
 
 fn uri(payload: u64) -> TermId {
     TermId::new(TermKind::Uri, payload)
@@ -779,7 +779,7 @@ fn arrow_columns_share_length_with_triples() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p reasoner-storage --test partition`
+Run: `cargo test -p horndb-storage --test partition`
 Expected: compile errors — `PredicatePartition::builder` does not exist.
 
 - [ ] **Step 3: Implement `PredicatePartition`**
@@ -897,7 +897,7 @@ impl PartitionBuilder {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p reasoner-storage --test partition`
+Run: `cargo test -p horndb-storage --test partition`
 Expected: 4 tests pass.
 
 - [ ] **Step 5: Commit**
@@ -1173,7 +1173,7 @@ mod tests {
 
 - [ ] **Step 3: Run tests to verify they pass**
 
-Run: `cargo test -p reasoner-storage --lib memory_tier`
+Run: `cargo test -p horndb-storage --lib memory_tier`
 Expected: 3 tests pass.
 
 - [ ] **Step 4: Commit**
@@ -1207,7 +1207,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/storage/tests/store_roundtrip.r
 
 ```rust
 use oxrdf::{NamedNode, Term};
-use reasoner_storage::Store;
+use horndb_storage::Store;
 
 fn nn(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())
@@ -1256,7 +1256,7 @@ fn idempotent_insertion() {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p reasoner-storage --test store_roundtrip`
+Run: `cargo test -p horndb-storage --test store_roundtrip`
 Expected: compile errors — `Store::in_memory`, `insert_triples`, `scan_predicate_default_graph` not defined.
 
 - [ ] **Step 3: Implement `Store`**
@@ -1415,10 +1415,10 @@ Then in `crates/storage/src/memory_tier.rs`, inside `impl Tier for MemoryTier { 
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p reasoner-storage --test store_roundtrip`
+Run: `cargo test -p horndb-storage --test store_roundtrip`
 Expected: 2 tests pass.
 
-Also run: `cargo test -p reasoner-storage`
+Also run: `cargo test -p horndb-storage`
 Expected: all prior tests still pass.
 
 - [ ] **Step 6: Commit**
@@ -1476,8 +1476,8 @@ _:b0 <http://example.org/p> <http://example.org/o> .
 Create `/Users/stig/git/sunstone/reasoner/crates/storage/tests/ntriples_loader.rs`:
 
 ```rust
-use reasoner_storage::loader::ntriples::{load_ntriples_file, LoadStats};
-use reasoner_storage::Store;
+use horndb_storage::loader::ntriples::{load_ntriples_file, LoadStats};
+use horndb_storage::Store;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -1534,7 +1534,7 @@ fn missing_file_returns_error() {
 
 - [ ] **Step 3: Run to verify failure**
 
-Run: `cargo test -p reasoner-storage --test ntriples_loader`
+Run: `cargo test -p horndb-storage --test ntriples_loader`
 Expected: compile errors — symbols not yet defined.
 
 - [ ] **Step 4: Implement the loader**
@@ -1629,14 +1629,14 @@ fn subject_to_term(s: Subject) -> Term {
 
 - [ ] **Step 5: Verify the API surface in `lib.rs`**
 
-`crates/storage/src/lib.rs` already re-exports `loader` as a module. Confirm that callers can write `use reasoner_storage::loader::ntriples::{load_ntriples_file, LoadStats}`. No edit needed if the module declarations from Task 1 are intact.
+`crates/storage/src/lib.rs` already re-exports `loader` as a module. Confirm that callers can write `use horndb_storage::loader::ntriples::{load_ntriples_file, LoadStats}`. No edit needed if the module declarations from Task 1 are intact.
 
 - [ ] **Step 6: Run the loader tests**
 
-Run: `cargo test -p reasoner-storage --test ntriples_loader`
+Run: `cargo test -p horndb-storage --test ntriples_loader`
 Expected: 4 tests pass.
 
-If the literal-fixture test fails with a dictionary count off by one, inspect the actual count printed by `cargo test -p reasoner-storage --test ntriples_loader -- --nocapture` and reconcile against the fixture (most likely cause: an unexpected `xsd:string` datatype attached by oxrdf to plain literals — adjust the test count, not the loader).
+If the literal-fixture test fails with a dictionary count off by one, inspect the actual count printed by `cargo test -p horndb-storage --test ntriples_loader -- --nocapture` and reconcile against the fixture (most likely cause: an unexpected `xsd:string` datatype attached by oxrdf to plain literals — adjust the test count, not the loader).
 
 - [ ] **Step 7: Commit**
 
@@ -1666,7 +1666,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/storage/tests/dictionary_propte
 ```rust
 use oxrdf::{NamedNode, Term};
 use proptest::prelude::*;
-use reasoner_storage::Dictionary;
+use horndb_storage::Dictionary;
 
 fn arb_uri() -> impl Strategy<Value = Term> {
     "[a-z]{1,16}".prop_map(|s| {
@@ -1702,7 +1702,7 @@ proptest! {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p reasoner-storage --test dictionary_proptest`
+Run: `cargo test -p horndb-storage --test dictionary_proptest`
 Expected: 2 properties pass (64 cases each).
 
 - [ ] **Step 3: Commit**
@@ -1762,7 +1762,7 @@ fn footprint_is_reported() {
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p reasoner-storage --test store_roundtrip footprint_is_reported`
+Run: `cargo test -p horndb-storage --test store_roundtrip footprint_is_reported`
 Expected: `report_footprint` not defined.
 
 - [ ] **Step 3: Implement `report_footprint`**
@@ -1804,7 +1804,7 @@ pub use store::{FootprintReport, Store};
 
 - [ ] **Step 4: Verify the test passes**
 
-Run: `cargo test -p reasoner-storage --test store_roundtrip`
+Run: `cargo test -p horndb-storage --test store_roundtrip`
 Expected: 3 tests pass.
 
 - [ ] **Step 5: Commit**
@@ -1836,8 +1836,8 @@ Create `/Users/stig/git/sunstone/reasoner/crates/storage/benches/load_lubm.rs`:
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use reasoner_storage::loader::ntriples::load_ntriples_file;
-use reasoner_storage::Store;
+use horndb_storage::loader::ntriples::load_ntriples_file;
+use horndb_storage::Store;
 use std::path::PathBuf;
 
 fn fixture_path() -> PathBuf {
@@ -1889,7 +1889,7 @@ criterion_main!(benches);
 
 - [ ] **Step 2: Run the bench on the tiny fixture**
 
-Run: `cargo bench -p reasoner-storage --bench load_lubm -- --quick`
+Run: `cargo bench -p horndb-storage --bench load_lubm -- --quick`
 Expected: bench completes; reports a load time in microseconds for `tiny.nt`. Triples count printed is 6.
 
 - [ ] **Step 3: (Reference-workstation only) Run against LUBM-100 if available**
@@ -1897,7 +1897,7 @@ Expected: bench completes; reports a load time in microseconds for `tiny.nt`. Tr
 If a LUBM-100 N-Triples dump is available on the workstation, run:
 
 ```bash
-LUBM_NT=/abs/path/to/lubm100.nt cargo bench -p reasoner-storage --bench load_lubm
+LUBM_NT=/abs/path/to/lubm100.nt cargo bench -p horndb-storage --bench load_lubm
 ```
 
 Record the elapsed time in the commit message. Acceptance gate: ≤30 s. If it exceeds, file a follow-up issue rather than blocking Stage 1 — the gate is reported, then iterated.
@@ -1938,7 +1938,7 @@ Date: <fill in>
 
 | # | Criterion | Status | Evidence |
 |---|-----------|--------|----------|
-| 1 | LUBM-100 import ≤30 s | <PASS/FAIL> | `cargo bench -p reasoner-storage --bench load_lubm` with `LUBM_NT=...lubm100.nt`; elapsed = <ms> |
+| 1 | LUBM-100 import ≤30 s | <PASS/FAIL> | `cargo bench -p horndb-storage --bench load_lubm` with `LUBM_NT=...lubm100.nt`; elapsed = <ms> |
 | 2 | LUBM-8000 import ≤30 min | DEFERRED | Stage 2 — bench harness exists, just not run yet |
 | 3 | LUBM-8000 footprint ≤55 GB | DEFERRED | Stage 2 |
 | 4 | Sequential scan ≥80% of STREAM Triad | DEFERRED | Stage 2 (needs the hot tier in a NUMA-pinned bench) |
@@ -1951,7 +1951,7 @@ Date: <fill in>
 - LUBM-100 load elapsed: <fill in> ms (≈ <Mtriples/s>)
 - LUBM-100 dictionary size: <fill in>
 - LUBM-100 footprint via `Store::report_footprint()`: <fill in> bytes (<fill in> B/triple)
-- W3C harness selected subset run (`cargo test -p reasoner-harness`): <PASS/FAIL>
+- W3C harness selected subset run (`cargo test -p horndb-harness`): <PASS/FAIL>
 
 ## Out-of-scope items tracked as Future Work
 
@@ -1992,12 +1992,12 @@ Expected: no output (clean). If output appears, run `cargo fmt --all` and commit
 
 - [ ] **Step 2: Clippy on the storage crate**
 
-Run: `cargo clippy -p reasoner-storage --all-targets -- -D warnings`
+Run: `cargo clippy -p horndb-storage --all-targets -- -D warnings`
 Expected: no warnings or errors. If clippy flags issues, fix them and commit per failure with messages like `storage: address clippy lint <lint-name>`.
 
 - [ ] **Step 3: Full test run**
 
-Run: `cargo test -p reasoner-storage`
+Run: `cargo test -p horndb-storage`
 Expected: all tests (lib + integration + proptest) pass. Approximate counts:
 - `term` (lib): 6
 - `memory_tier` (lib): 3
@@ -2012,7 +2012,7 @@ Total: ~29 tests + 2 proptests.
 - [ ] **Step 4: Workspace build**
 
 Run: `cargo build --workspace`
-Expected: the rest of the crates (still placeholders) compile alongside `reasoner-storage`.
+Expected: the rest of the crates (still placeholders) compile alongside `horndb-storage`.
 
 - [ ] **Step 5: No new commit unless something was fixed in steps 1–2**
 

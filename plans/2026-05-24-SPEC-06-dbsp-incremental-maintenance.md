@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Stage-0/1 slice of SPEC-06 — a hand-rolled, narrow Z-set / DBSP-style incremental-maintenance core in the `reasoner-incremental` crate, sufficient to (a) maintain rule-engine consequences under insertions at checkpoint snapshot boundaries and (b) emit an ordered change feed.
+**Goal:** Build the Stage-0/1 slice of SPEC-06 — a hand-rolled, narrow Z-set / DBSP-style incremental-maintenance core in the `horndb-incremental` crate, sufficient to (a) maintain rule-engine consequences under insertions at checkpoint snapshot boundaries and (b) emit an ordered change feed.
 
 **Architecture:** A small in-crate Z-set library (`Zset<K>` over `BTreeMap<K, i64>`), a typed-erased operator trait (`Operator`), three concrete operator kinds (linear, bilinear, n-ary tree decomposition of bilinear), a `DeltaLog` of pending `(triple, ±1)` records, a `Checkpoint` merge routine that folds the log into a base `Zset`, and a `ChangeFeed` MPMC channel of committed deltas. The crate exposes a `Circuit` builder used by SPEC-04's rule codegen. Snapshot semantics are coarse: readers see either "pre-checkpoint" or "post-checkpoint" state, never in-flight deltas (Stage 2 widens this).
 
@@ -55,9 +55,9 @@ SPEC-06 acceptance #3 (retraction round-trip) is **deferred** with F6.
 
 ## Dependency interface contracts (frozen by this plan)
 
-These are the only API surfaces by which the rest of the workspace touches `reasoner-incremental`. They are introduced in early tasks, then *not changed* in later tasks (so SPEC-02 and SPEC-04 plans can be written against them in parallel).
+These are the only API surfaces by which the rest of the workspace touches `horndb-incremental`. They are introduced in early tasks, then *not changed* in later tasks (so SPEC-02 and SPEC-04 plans can be written against them in parallel).
 
-### Stable types exported from `reasoner-incremental` after Task 5
+### Stable types exported from `horndb-incremental` after Task 5
 
 ```rust
 pub type TripleId = (u64, u64, u64);          // (s_id, p_id, o_id) — SPEC-02 dictionary ids
@@ -144,7 +144,7 @@ Replace `/Users/stig/git/sunstone/reasoner/crates/incremental/Cargo.toml` entire
 
 ```toml
 [package]
-name = "reasoner-incremental"
+name = "horndb-incremental"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -171,8 +171,8 @@ Expected: exit 0, no stderr.
 
 - [ ] **Step 4: Verify the crate still compiles (placeholder lib still present)**
 
-Run: `cargo build -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
-Expected: `Compiling reasoner-incremental v0.0.0` then `Finished`. No warnings about unused deps (they're declared but not yet imported — that's allowed for direct deps, only `dev-dependencies` could warn; criterion won't until a bench imports it).
+Run: `cargo build -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Expected: `Compiling horndb-incremental v0.0.0` then `Finished`. No warnings about unused deps (they're declared but not yet imported — that's allowed for direct deps, only `dev-dependencies` could warn; criterion won't until a bench imports it).
 
 - [ ] **Step 5: Commit**
 
@@ -181,7 +181,7 @@ cd /Users/stig/git/sunstone/reasoner && git add Cargo.toml Cargo.lock crates/inc
 incremental: wire workspace deps for SPEC-06 stage-1
 
 Adds crossbeam-channel (change feed), proptest and criterion (dev-only)
-to the workspace. Updates the placeholder reasoner-incremental crate to
+to the workspace. Updates the placeholder horndb-incremental crate to
 declare its deps. No code yet.
 EOF
 )"
@@ -199,7 +199,7 @@ EOF
 Overwrite `/Users/stig/git/sunstone/reasoner/crates/incremental/src/lib.rs`:
 
 ```rust
-//! `reasoner-incremental` — DBSP-style incremental maintenance for SPEC-06.
+//! `horndb-incremental` — DBSP-style incremental maintenance for SPEC-06.
 //!
 //! # Why a hand-rolled Z-set core?
 //!
@@ -259,14 +259,14 @@ cd /Users/stig/git/sunstone/reasoner/crates/incremental/src && \
 
 - [ ] **Step 3: Verify build**
 
-Run: `cargo build -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo build -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `error[E0432]: unresolved import` for each of the `pub use` lines (nothing is exported yet). This is expected — we'll fix in the next tasks.
 
 To unblock the build now while subsequent tasks add real content, temporarily delete the `pub use` block (it'll be rebuilt incrementally as items get defined):
 
 Re-edit `src/lib.rs` and remove the `pub use ...;` lines, leaving only the doc comment and `pub mod` declarations.
 
-Re-run: `cargo build -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Re-run: `cargo build -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `Finished` with no errors.
 
 - [ ] **Step 4: Commit**
@@ -295,7 +295,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/zset_basic.rs`:
 
 ```rust
-use reasoner_incremental::Zset;
+use horndb_incremental::Zset;
 
 #[test]
 fn new_zset_is_empty() {
@@ -340,7 +340,7 @@ pub use zset::Zset;
 
 - [ ] **Step 3: Run the test, watch it fail**
 
-Run: `cargo test -p reasoner-incremental --test zset_basic --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test zset_basic --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile errors `cannot find type Zset` / `no function or associated item named new`.
 
 - [ ] **Step 4: Implement `Zset<K>`**
@@ -463,7 +463,7 @@ pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, 
 
 - [ ] **Step 6: Run the test, watch it pass**
 
-Run: `cargo test -p reasoner-incremental --test zset_basic --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test zset_basic --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 4 passed; 0 failed`.
 
 - [ ] **Step 7: Commit**
@@ -500,7 +500,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/zset_props.rs
 //! has inverses. We assert each.
 
 use proptest::prelude::*;
-use reasoner_incremental::Zset;
+use horndb_incremental::Zset;
 
 fn arb_zset() -> impl Strategy<Value = Zset<i32>> {
     prop::collection::vec((0i32..50, -3i64..=3), 0..30).prop_map(Zset::from_iter)
@@ -543,7 +543,7 @@ proptest! {
 
 - [ ] **Step 2: Run the props**
 
-Run: `cargo test -p reasoner-incremental --test zset_props --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test zset_props --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 4 passed`. If a property fails, the proptest framework prints a minimised counterexample — fix `Zset` accordingly. (Empirically: passes on the implementation above.)
 
 - [ ] **Step 3: Commit**
@@ -573,7 +573,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/delta_log.rs`:
 
 ```rust
-use reasoner_incremental::{DeltaLog, DerivationKind};
+use horndb_incremental::{DeltaLog, DerivationKind};
 
 #[test]
 fn new_log_is_empty_and_time_starts_at_zero() {
@@ -612,7 +612,7 @@ fn drain_clears_the_log_and_returns_records() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test delta_log --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test delta_log --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile errors `cannot find type DeltaLog`.
 
 - [ ] **Step 3: Implement `DeltaLog`**
@@ -670,7 +670,7 @@ pub use delta_log::DeltaLog;
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test delta_log --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test delta_log --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 4 passed`.
 
 - [ ] **Step 5: Commit**
@@ -700,7 +700,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/change_feed.rs`:
 
 ```rust
-use reasoner_incremental::{ChangeFeed, DerivationKind};
+use horndb_incremental::{ChangeFeed, DerivationKind};
 
 #[test]
 fn published_records_arrive_in_order() {
@@ -746,7 +746,7 @@ fn dropped_subscriber_does_not_block_publish() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile errors `cannot find type ChangeFeed`.
 
 - [ ] **Step 3: Implement the change feed**
@@ -813,7 +813,7 @@ pub use change_feed::{ChangeFeed, ChangeFeedRx};
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -848,7 +848,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/linear_rule.r
 //! triples of the form `(s, P, o)` into `(s, P', o)`. Linear in its
 //! input — the delta passes straight through with the rule applied.
 
-use reasoner_incremental::{LinearRule, RuleId, TripleId, Zset};
+use horndb_incremental::{LinearRule, RuleId, TripleId, Zset};
 
 struct RewritePredicate { id: RuleId, from: u64, to: u64 }
 
@@ -901,7 +901,7 @@ fn linearity_delta_of_union_is_union_of_deltas() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test linear_rule --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test linear_rule --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile error `cannot find trait LinearRule`.
 
 - [ ] **Step 3: Implement the `LinearRule` trait**
@@ -952,7 +952,7 @@ pub use operator::{BilinearRule, LinearRule};
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test linear_rule --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test linear_rule --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 2 passed`.
 
 - [ ] **Step 5: Commit**
@@ -996,7 +996,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/bilinear_corr
 //! two distinct patterns.
 
 use proptest::prelude::*;
-use reasoner_incremental::{BilinearRule, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 
@@ -1067,7 +1067,7 @@ proptest! {
 
 - [ ] **Step 2: Run the proptest**
 
-Run: `cargo test -p reasoner-incremental --test bilinear_correctness --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test bilinear_correctness --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 1 passed`. (Single proptest with 64 cases.)
 
 If this fails with a counterexample, the `apply_delta` arithmetic is wrong — verify against the SPEC-06 F3 identity and SPEC ref McSherry/Ryzhyk/Tannen PVLDB 2023 §3.
@@ -1111,7 +1111,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/nary_plan.rs`
 //!
 //! and verify on a 4-node chain.
 
-use reasoner_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 
@@ -1160,7 +1160,7 @@ fn left_deep_three_way_chain() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test nary_plan --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test nary_plan --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile error `cannot find type NaryPlan`.
 
 - [ ] **Step 3: Append `NaryPlan` to `operator.rs`**
@@ -1235,7 +1235,7 @@ pub use operator::{BilinearRule, LinearRule, NaryPlan};
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test nary_plan --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test nary_plan --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 1 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1265,7 +1265,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/checkpoint.rs`:
 
 ```rust
-use reasoner_incremental::{Checkpoint, DeltaLog, DerivationKind, Zset};
+use horndb_incremental::{Checkpoint, DeltaLog, DerivationKind, Zset};
 
 #[test]
 fn checkpoint_merges_pending_inserts_into_base() {
@@ -1310,7 +1310,7 @@ fn checkpoint_preserves_existing_base_rows() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test checkpoint --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test checkpoint --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile error `cannot find type Checkpoint`.
 
 - [ ] **Step 3: Implement `Checkpoint`**
@@ -1359,7 +1359,7 @@ pub use checkpoint::{Checkpoint, CheckpointReport};
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test checkpoint --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test checkpoint --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 3 passed`.
 
 - [ ] **Step 5: Commit**
@@ -1411,7 +1411,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/circuit_tick.
 //! Reuses the prp-trp-shape rule from the bilinear-correctness test
 //! but routed via a Circuit so we exercise the wiring end-to-end.
 
-use reasoner_incremental::{
+use horndb_incremental::{
     BilinearRule, Circuit, DerivationKind, NaryPlan, RuleId, TripleId, Zset,
 };
 
@@ -1469,7 +1469,7 @@ fn insert_two_edges_then_tick_derives_transitive_consequence() {
 
 - [ ] **Step 2: Run, watch fail**
 
-Run: `cargo test -p reasoner-incremental --test circuit_tick --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test circuit_tick --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: compile error `cannot find type Circuit`.
 
 - [ ] **Step 3: Implement `Circuit`**
@@ -1627,12 +1627,12 @@ pub use circuit::{Circuit, TickReport};
 
 - [ ] **Step 4: Run, watch pass**
 
-Run: `cargo test -p reasoner-incremental --test circuit_tick --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test circuit_tick --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 1 passed`.
 
 - [ ] **Step 5: Run the full crate test suite to confirm no regressions**
 
-Run: `cargo test -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: all of: `zset_basic` (4), `zset_props` (4), `delta_log` (4), `change_feed` (3), `linear_rule` (2), `bilinear_correctness` (1), `nary_plan` (1), `checkpoint` (3), `circuit_tick` (1). Total 23 tests, all passing.
 
 - [ ] **Step 6: Commit**
@@ -1690,7 +1690,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/fixtures/synt
 
 #![allow(dead_code)]
 
-use reasoner_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
 
 pub const SC: u64 = 100;
 pub const SPO: u64 = 101;
@@ -1791,7 +1791,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/fixtures_smok
 mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, full_rematerialize, SC, TYPE};
-use reasoner_incremental::Zset;
+use horndb_incremental::Zset;
 
 #[test]
 fn fixtures_compile_and_basic_closure_works() {
@@ -1816,7 +1816,7 @@ fn fixtures_compile_and_basic_closure_works() {
 
 - [ ] **Step 3: Run the smoke test**
 
-Run: `cargo test -p reasoner-incremental --test fixtures_smoke --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test fixtures_smoke --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 1 passed`.
 
 - [ ] **Step 4: Commit**
@@ -1866,7 +1866,7 @@ mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, full_rematerialize, SC, SPO, TYPE};
 use proptest::prelude::*;
-use reasoner_incremental::{Circuit, TripleId, Zset};
+use horndb_incremental::{Circuit, TripleId, Zset};
 
 /// Returns true if `incremental` equals the reference run.
 fn check_equivalence(asserted: &Zset<TripleId>, incremental: &Zset<TripleId>) -> bool {
@@ -1942,7 +1942,7 @@ proptest! {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cargo test -p reasoner-incremental --test acceptance_differential --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test acceptance_differential --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: **likely fails on the multi-rule cases** — Stage 1 `Circuit::tick` runs each plan once over `Δ_asserted` but does **not** feed derived triples back as inputs to other plans, so derivations like "R1 derives `(10, sc, 30)`, then R3 uses that as `(instance, type, 30)`" require either (a) multiple ticks or (b) a fixed-point iteration that's currently SPEC-04's job.
 
 If the tests fail with "missing" derivations of that shape, the fix is **not** to weaken the test — the fix is to add a bounded fixed-point loop *inside* `Circuit::tick` for Stage 1, so the differential acceptance holds. Do that now:
@@ -2019,14 +2019,14 @@ Edit `/Users/stig/git/sunstone/reasoner/crates/incremental/src/circuit.rs`, repl
 
 - [ ] **Step 3: Re-run the differential test**
 
-Run: `cargo test -p reasoner-incremental --test acceptance_differential --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test acceptance_differential --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 2 passed`. (40 cases × 2 tests = 80 random scenarios, all matching the full-rematerialize reference.)
 
 If still failing, the proptest framework prints a minimised counterexample. Likely cause: a missing case in the `new_only` filter. The intended semantics for *insertion only* is: emit the row exactly when it crosses from absent to present (`pre == 0 && post == 1`). Adjust accordingly and re-run.
 
 - [ ] **Step 4: Re-run the full crate test suite to confirm no regressions**
 
-Run: `cargo test -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: all prior tests still pass plus the 2 new ones.
 
 - [ ] **Step 5: Commit**
@@ -2067,7 +2067,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/tests/acceptance_ch
 mod fixtures;
 
 use fixtures::synthetic_rules::{build_plans, SC, SPO, TYPE};
-use reasoner_incremental::{Circuit, DerivationKind};
+use horndb_incremental::{Circuit, DerivationKind};
 use std::collections::HashSet;
 
 #[test]
@@ -2131,7 +2131,7 @@ fn no_gaps_no_duplicates_under_sustained_inserts() {
 
 - [ ] **Step 2: Run**
 
-Run: `cargo test -p reasoner-incremental --test acceptance_change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo test -p horndb-incremental --test acceptance_change_feed --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `test result: ok. 1 passed`.
 
 If it fails on "every assert_triple must produce exactly one feed record" — likely the change feed is dropping records because no subscriber is active when `publish_record` runs. Verify: `circuit.subscribe()` is called *before* the first `assert_triple`. The test above does this; if the implementation regresses this property, that's a real bug to fix in `Circuit::tick`.
@@ -2173,7 +2173,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/incremental/benches/insert_thro
 //! records the number for later comparison.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use reasoner_incremental::{BilinearRule, Circuit, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, Circuit, NaryPlan, RuleId, TripleId, Zset};
 
 const P: u64 = 7;
 
@@ -2224,12 +2224,12 @@ criterion_main!(benches);
 
 - [ ] **Step 2: Verify the bench compiles and runs**
 
-Run: `cargo bench -p reasoner-incremental --no-run --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
+Run: `cargo bench -p horndb-incremental --no-run --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
 Expected: `Compiling ... Finished`. No execution yet (`--no-run`).
 
 Smoke-run the bench briefly:
 
-Run: `cargo bench -p reasoner-incremental --bench insert_throughput --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml -- --quick --warm-up-time 1 --measurement-time 2`
+Run: `cargo bench -p horndb-incremental --bench insert_throughput --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml -- --quick --warm-up-time 1 --measurement-time 2`
 Expected: criterion prints three timing lines (one each for n=10/100/1000). No assertion on the numbers in Stage 1.
 
 - [ ] **Step 3: Commit**
@@ -2259,7 +2259,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/incremental/FUTURE-WORK.md`:
 
 ```markdown
-# reasoner-incremental — Deferred Work
+# horndb-incremental — Deferred Work
 
 Stage 1 of SPEC-06 deliberately ships a narrow slice. This file
 catalogues what is **out** of Stage 1, in priority order for Stage 2,
@@ -2345,23 +2345,23 @@ EOF
 
 - [ ] **Step 1: Confirm the public API matches the frozen contract**
 
-Run: `cargo doc -p reasoner-incremental --no-deps --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml 2>&1 | tail -20`
-Expected: `Finished` with no warnings. Open `target/doc/reasoner_incremental/index.html` mentally and confirm:
+Run: `cargo doc -p horndb-incremental --no-deps --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml 2>&1 | tail -20`
+Expected: `Finished` with no warnings. Open `target/doc/horndb_incremental/index.html` mentally and confirm:
 - Re-exports: `Zset`, `Circuit`, `TickReport`, `DeltaLog`, `ChangeFeed`, `ChangeFeedRx`, `Checkpoint`, `CheckpointReport`, `LinearRule`, `BilinearRule`, `NaryPlan`, `DeltaRecord`, `DerivationKind`, `LogicalTime`, `Multiplicity`, `RuleId`, `TripleId`.
 
 - [ ] **Step 2: Run the entire workspace test suite (catches accidental breakage in sibling crates)**
 
 Run: `cargo test --workspace --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml`
-Expected: all `reasoner-incremental` tests green; other crates have only placeholder libs so they compile and contribute 0 tests.
+Expected: all `horndb-incremental` tests green; other crates have only placeholder libs so they compile and contribute 0 tests.
 
 - [ ] **Step 3: Lint pass**
 
-Run: `cargo clippy -p reasoner-incremental --all-targets --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml -- -D warnings`
+Run: `cargo clippy -p horndb-incremental --all-targets --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml -- -D warnings`
 Expected: no warnings. If clippy complains about the `let _ = Checkpoint;` line in `circuit.rs` (after the inline merge), delete that line — the import is still used by the test surface.
 
 - [ ] **Step 4: Confirm test count and update the running tally**
 
-Run: `cargo test -p reasoner-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml 2>&1 | grep 'test result'`
+Run: `cargo test -p horndb-incremental --manifest-path /Users/stig/git/sunstone/reasoner/Cargo.toml 2>&1 | grep 'test result'`
 Expected output (one line per test binary):
 - `zset_basic`: 4 passed
 - `zset_props`: 4 passed
@@ -2401,8 +2401,8 @@ Otherwise there is nothing to commit; proceed to the post-conditions section bel
 After Task 17, the following must hold:
 
 1. **`cargo test --workspace`** is green.
-2. **`cargo clippy --all-targets -- -D warnings`** is clean for `reasoner-incremental`.
-3. **`cargo doc -p reasoner-incremental --no-deps`** produces no warnings.
+2. **`cargo clippy --all-targets -- -D warnings`** is clean for `horndb-incremental`.
+3. **`cargo doc -p horndb-incremental --no-deps`** produces no warnings.
 4. The crate exports the **frozen API contract** listed in the "Dependency interface contracts" section at the top of this plan.
 5. SPEC-06 acceptance #4 and #5 are demonstrated by `acceptance_differential.rs` and `acceptance_change_feed.rs` respectively.
 6. `FUTURE-WORK.md` exists and lists F5, F6, in-flight MVCC, and distributed timely as Stage 2/3 deliverables.

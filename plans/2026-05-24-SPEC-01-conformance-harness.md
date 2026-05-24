@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the conformance & benchmarking harness for the `reasoner` project — first against a deliberately-failing in-tree stub engine (Stage 0), then against the real engine running ≥50 hand-picked W3C OWL 2 RL test cases plus an ORE-2015 / LDBC-SPB-256 comparison run (Stage 1).
+**Goal:** Build the conformance & benchmarking harness for the HornDB project — first against a deliberately-failing in-tree stub engine (Stage 0), then against the real engine running ≥50 hand-picked W3C OWL 2 RL test cases plus an ORE-2015 / LDBC-SPB-256 comparison run (Stage 1).
 
-**Architecture:** A single `reasoner-harness` crate exposes (a) a `Reasoner` trait the engine implements, (b) parsers for the W3C OWL 2 + SPARQL 1.1 RDF/XML / Turtle test-case manifests, (c) a runner that dispatches each selected test against a chosen reasoner and classifies the outcome (`passed`/`failed`/`skipped` with reason), (d) a versioned `harness/selected.toml` that names exactly which test IDs are "in" for CI, (e) a SQLite result database, and (f) a `harness` CLI used both locally and from GitHub Actions. The stub engine lives inside the same crate as a test fixture so the harness is provable on day one, before any other crate compiles meaningfully.
+**Architecture:** A single `horndb-harness` crate exposes (a) a `Reasoner` trait the engine implements, (b) parsers for the W3C OWL 2 + SPARQL 1.1 RDF/XML / Turtle test-case manifests, (c) a runner that dispatches each selected test against a chosen reasoner and classifies the outcome (`passed`/`failed`/`skipped` with reason), (d) a versioned `harness/selected.toml` that names exactly which test IDs are "in" for CI, (e) a SQLite result database, and (f) a `harness` CLI used both locally and from GitHub Actions. The stub engine lives inside the same crate as a test fixture so the harness is provable on day one, before any other crate compiles meaningfully.
 
 **Tech Stack:** Rust 2021 (workspace edition), `clap` v4 for the CLI, `oxigraph`/`oxrdf`/`oxrdfio` for RDF & SPARQL parsing and the SPARQL evaluation surface, `oxttl` for Turtle, `rusqlite` (bundled) for the result store, `serde` + `toml` for config and `selected.toml`, `anyhow` + `thiserror` for errors, `tracing` for logging, `insta` for snapshot tests, `assert_cmd` + `predicates` for CLI integration tests. CI on GitHub Actions Ubuntu runners.
 
@@ -129,7 +129,7 @@ members = [
 edition = "2021"
 rust-version = "1.79"
 license = "Apache-2.0"
-repository = "https://github.com/sunstoneinstitute/reasoner"
+repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]
 
 [workspace.dependencies]
@@ -193,7 +193,7 @@ Replace `/Users/stig/git/sunstone/reasoner/crates/harness/Cargo.toml` with:
 
 ```toml
 [package]
-name = "reasoner-harness"
+name = "horndb-harness"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -235,8 +235,8 @@ tempfile = { workspace = true }
 Replace `/Users/stig/git/sunstone/reasoner/crates/harness/src/lib.rs` with:
 
 ```rust
-//! reasoner-harness — conformance and benchmarking harness for the
-//! `reasoner` project. See `specs/SPEC-01-conformance-benchmarks.md`.
+//! horndb-harness — conformance and benchmarking harness for the
+//! HornDB project. See `specs/SPEC-01-conformance-benchmarks.md`.
 //!
 //! The harness is engine-agnostic: implementations of the [`Reasoner`]
 //! trait are plugged in at runtime. A built-in [`StubReasoner`] exists
@@ -365,13 +365,13 @@ Create the bin directory and entrypoint placeholder
 
 ```rust
 fn main() {
-    println!("reasoner-harness (placeholder; see Task 12)");
+    println!("horndb-harness (placeholder; see Task 12)");
 }
 ```
 
 - [ ] **Step 4: Verify everything compiles**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo build -p reasoner-harness`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo build -p horndb-harness`
 Expected: builds cleanly. Warnings about unused trait items are acceptable at this stage.
 
 - [ ] **Step 5: Commit**
@@ -493,7 +493,7 @@ mod tests {
 
 - [ ] **Step 2: Run the test to confirm it passes**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness outcome::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness outcome::tests`
 Expected: 3 tests pass.
 
 - [ ] **Step 3: Commit**
@@ -562,7 +562,7 @@ mod tests {
 
 - [ ] **Step 2: Verify the compile-time assertions hold**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness reasoner::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness reasoner::tests`
 Expected: compiles and the (zero-runtime) module test passes.
 
 - [ ] **Step 3: Commit**
@@ -723,7 +723,7 @@ mod tests {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness stub::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness stub::tests`
 Expected: 6 tests pass.
 
 - [ ] **Step 3: Commit**
@@ -1091,7 +1091,7 @@ mod tests {
 
 - [ ] **Step 3: Run the parser tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness manifest::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness manifest::tests`
 Expected: 2 tests pass.
 
 - [ ] **Step 4: Commit**
@@ -1242,8 +1242,8 @@ Create `/Users/stig/git/sunstone/reasoner/crates/harness/tests/manifest_parse.rs
 ```rust
 use std::path::PathBuf;
 
-use reasoner_harness::manifest;
-use reasoner_harness::testcase::{Suite, TestKind};
+use horndb_harness::manifest;
+use horndb_harness::testcase::{Suite, TestKind};
 
 fn fixture(rel: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1273,7 +1273,7 @@ fn parses_sparql11_fixture_manifest() {
 
 - [ ] **Step 5: Run the integration test**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness --test manifest_parse`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness --test manifest_parse`
 Expected: both tests pass.
 
 - [ ] **Step 6: Commit**
@@ -1505,7 +1505,7 @@ here with a citation so the selection discipline (F11) stays honest.
 
 - [ ] **Step 4: Run the unit tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness selected::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness selected::tests`
 Expected: 4 tests pass.
 
 - [ ] **Step 5: Commit**
@@ -1722,7 +1722,7 @@ mod tests {
 
 - [ ] **Step 2: Run the db tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness db::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness db::tests`
 Expected: 3 tests pass.
 
 - [ ] **Step 3: Commit**
@@ -1910,7 +1910,7 @@ mod tests {
 
 - [ ] **Step 3: Run the report tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness report::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness report::tests`
 Expected: 3 tests pass.
 
 - [ ] **Step 4: Commit**
@@ -1956,7 +1956,7 @@ pub fn to_junit_xml(report: &Report) -> String {
     let _ = writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     let _ = writeln!(
         out,
-        r#"<testsuite name="reasoner-harness" tests="{total}" failures="{failures}" skipped="{skipped}">"#,
+        r#"<testsuite name="horndb-harness" tests="{total}" failures="{failures}" skipped="{skipped}">"#,
     );
     for o in &report.outcomes {
         let escaped_id = xml_escape(&o.test_id);
@@ -2033,7 +2033,7 @@ mod tests {
 
 - [ ] **Step 2: Run the emitter tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness ci::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness ci::tests`
 Expected: 2 tests pass.
 
 - [ ] **Step 3: Commit**
@@ -2274,7 +2274,7 @@ mod tests {
 
 - [ ] **Step 2: Run the runner tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness runner::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness runner::tests`
 Expected: 1 test passes. Stub passes trivial-entail-true and inconsistent-001; deliberately fails subclass-entail — exactly what SPEC-01 Stage-0 exit criterion 3 asks for.
 
 - [ ] **Step 3: Commit**
@@ -2316,7 +2316,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use reasoner_harness::{
+use horndb_harness::{
     ci::to_junit_xml,
     db::Db,
     manifest, report as report_mod,
@@ -2327,7 +2327,7 @@ use reasoner_harness::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "harness", version, about = "reasoner conformance & benchmark harness")]
+#[command(name = "harness", version, about = "HornDB conformance & benchmark harness")]
 struct Cli {
     /// Path to workspace root (default: cwd).
     #[arg(long, default_value = ".")]
@@ -2521,7 +2521,7 @@ fn allow_failing_flag_keeps_exit_zero() {
 
 - [ ] **Step 3: Run the CLI smoke tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness --test cli_smoke`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness --test cli_smoke`
 Expected: both tests pass. First test confirms the harness exits non-zero when the stub fails the deliberately-included `subclass-entail` case. Second test confirms `--allow-failing` keeps exit zero.
 
 - [ ] **Step 4: Commit**
@@ -2551,7 +2551,7 @@ EOF
 Create `/Users/stig/git/sunstone/reasoner/crates/harness/README.md`:
 
 ```markdown
-# reasoner-harness
+# horndb-harness
 
 SPEC-01 conformance and benchmarking harness. See
 `specs/SPEC-01-conformance-benchmarks.md` and
@@ -2562,7 +2562,7 @@ SPEC-01 conformance and benchmarking harness. See
 Run the currently-selected subset against the in-tree stub engine:
 
 ```bash
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     --engine stub \
     run \
     --junit target/junit.xml \
@@ -2576,7 +2576,7 @@ prove the harness flags red on real failure.
 ## Query the trend DB
 
 ```bash
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     report --suite owl2 --metric pass-rate
 ```
 
@@ -2654,7 +2654,7 @@ jobs:
         run: cargo test --workspace
 
       - name: build harness binary
-        run: cargo build -p reasoner-harness --bin harness --release
+        run: cargo build -p horndb-harness --bin harness --release
 
       - name: conformance — selected subset (real run, no --allow-failing)
         # Stage 0 selected.toml intentionally includes a test the stub
@@ -2731,7 +2731,7 @@ Exit criteria, from SPEC-01:
 7. LDBC SPB-256 end-to-end against the real engine and against GraphDB
    Free for comparison (F10).
 
-**Dependency:** Stage 1 assumes a real reasoner crate (`reasoner-owlrl`
+**Dependency:** Stage 1 assumes a real reasoner crate (`horndb-owlrl`
 or similar) exposes a struct that implements [`Reasoner`]. The exact
 wiring lives in the SPEC-04 plan; here we provide the harness-side
 surface and a thin adapter.
@@ -2787,7 +2787,7 @@ fi
 
 # Convert each .rdf manifest into .ttl using the harness CLI helper.
 # (The convert subcommand is added in Task 17.)
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     convert-manifests --root "$DATA"
 
 echo "done."
@@ -2906,7 +2906,7 @@ fn convert_manifests_rewrites_rdfxml_into_turtle() {
 
 - [ ] **Step 3: Run the smoke test**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness --test cli_smoke convert_manifests_rewrites_rdfxml_into_turtle`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness --test cli_smoke convert_manifests_rewrites_rdfxml_into_turtle`
 Expected: passes.
 
 - [ ] **Step 4: Commit**
@@ -2982,7 +2982,7 @@ Run:
 ```bash
 cd /Users/stig/git/sunstone/reasoner
 ./crates/harness/scripts/fetch-w3c-suites.sh
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     list-cases \
     --manifest crates/harness/data/w3c-owl2-tests/Manifest.ttl \
     --profile "OWL 2 RL" \
@@ -3021,7 +3021,7 @@ a `[[removed]]` entry recording the removal:
 test_id = "file:///stig/git/sunstone/reasoner/crates/harness/tests/fixtures/owl2/manifest.ttl#subclass-entail"
 suite = "owl2"
 xfail_reason = "Stage-0 deliberately-failing stub fixture; Stage-1 engine passes it via real W3C cases instead"
-tracking_issue = "https://github.com/sunstoneinstitute/reasoner/issues/TBD-stage1-cleanup"
+tracking_issue = "https://github.com/sunstoneinstitute/horndb/issues/TBD-stage1-cleanup"
 ```
 
 - [ ] **Step 3: Add the `list-cases` subcommand referenced above**
@@ -3050,9 +3050,9 @@ And the matching arm in `real_main`'s `match cli.cmd`:
             // to keep based on rule coverage — see
             // harness/curation/owl2-rl-50.md).
             let suite = if manifest.to_string_lossy().contains("sparql11") {
-                reasoner_harness::testcase::Suite::Sparql11
+                horndb_harness::testcase::Suite::Sparql11
             } else {
-                reasoner_harness::testcase::Suite::Owl2
+                horndb_harness::testcase::Suite::Owl2
             };
             let cases = manifest::parse(&manifest, suite)?;
             let _ = profile; // profile filter requires `mf:profile` parsing;
@@ -3094,9 +3094,9 @@ Append to `/Users/stig/git/sunstone/reasoner/crates/harness/Cargo.toml`:
 ```toml
 [features]
 default = []
-real-engine = ["dep:reasoner-owlrl"]
+real-engine = ["dep:horndb-owlrl"]
 
-[dependencies.reasoner-owlrl]
+[dependencies.horndb-owlrl]
 path = "../owlrl"
 optional = true
 ```
@@ -3109,24 +3109,24 @@ In `/Users/stig/git/sunstone/reasoner/crates/harness/src/bin/harness.rs`, change
             let mut engine: Box<dyn Reasoner> = match cli.engine.as_str() {
                 "stub" => Box::new(StubReasoner::new()),
                 #[cfg(feature = "real-engine")]
-                "owlrl" => Box::new(reasoner_owlrl::Engine::new()),
+                "owlrl" => Box::new(horndb_owlrl::Engine::new()),
                 other => anyhow::bail!("unknown engine: {other}"),
             };
 ```
 
 The real engine crate must (by Stage 1) expose a struct `Engine` that
-implements `reasoner_harness::Reasoner`. The wiring of `Engine` itself
+implements `horndb_harness::Reasoner`. The wiring of `Engine` itself
 lives in the SPEC-04 plan; this task only declares the harness-side
 seam.
 
 - [ ] **Step 3: Build with the real-engine feature off and on (off should still work)**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo build -p reasoner-harness`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo build -p horndb-harness`
 Expected: clean build (real-engine feature off).
 
-The `cargo build -p reasoner-harness --features real-engine` step is
+The `cargo build -p horndb-harness --features real-engine` step is
 *not* expected to pass until the SPEC-04 plan delivers
-`reasoner_owlrl::Engine`. That cross-spec dependency is the gating
+`horndb_owlrl::Engine`. That cross-spec dependency is the gating
 event for Stage-1 acceptance.
 
 - [ ] **Step 4: Commit**
@@ -3137,7 +3137,7 @@ git add crates/harness/Cargo.toml crates/harness/src/bin/harness.rs
 git commit -m "$(cat <<'EOF'
 feat(harness): real-engine cargo feature wiring
 
-Adds the `real-engine` feature that pulls in `reasoner-owlrl` and
+Adds the `real-engine` feature that pulls in `horndb-owlrl` and
 exposes it as `--engine owlrl`. The feature is off by default so CI
 builds keep working; turned on when the SPEC-04 engine lands.
 EOF
@@ -3435,7 +3435,7 @@ Run: `chmod +x /Users/stig/git/sunstone/reasoner/crates/harness/scripts/fetch-or
 
 - [ ] **Step 4: Run the ORE module's unit test**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness ore::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness ore::tests`
 Expected: 1 test passes.
 
 - [ ] **Step 5: Commit**
@@ -3584,7 +3584,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/harness/scripts/run-spb-256.sh`
 
 ```bash
 #!/usr/bin/env bash
-# Run LDBC SPB-256 against the local reasoner engine and record the
+# Run LDBC SPB-256 against the local HornDB engine and record the
 # numbers into the harness DB.
 set -euo pipefail
 
@@ -3600,13 +3600,13 @@ ENDPOINT="${REASONER_ENDPOINT:-http://127.0.0.1:7878/sparql}"
 JAR="${SPB_DRIVER_JAR:-$ROOT/crates/harness/data/ldbc-spb/spb-driver.jar}"
 SCENARIO="${SPB_SCENARIO:-$ROOT/crates/harness/data/ldbc-spb/sf-0.256.properties}"
 
-cargo run -p reasoner-harness --bin harness --release --features real-engine -- \
+cargo run -p horndb-harness --bin harness --release --features real-engine -- \
     spb-run \
     --driver-jar "$JAR" \
     --scenario "$SCENARIO" \
     --endpoint "$ENDPOINT" \
     --duration 600 \
-    --label "reasoner-engine"
+    --label "horndb-engine"
 ```
 
 `chmod +x /Users/stig/git/sunstone/reasoner/crates/harness/scripts/run-spb-256.sh`
@@ -3628,7 +3628,7 @@ ENDPOINT="${GRAPHDB_FREE_ENDPOINT:-http://127.0.0.1:7200/repositories/spb}"
 JAR="${SPB_DRIVER_JAR:-$ROOT/crates/harness/data/ldbc-spb/spb-driver.jar}"
 SCENARIO="${SPB_SCENARIO:-$ROOT/crates/harness/data/ldbc-spb/sf-0.256.properties}"
 
-cargo run -p reasoner-harness --bin harness --release -- \
+cargo run -p horndb-harness --bin harness --release -- \
     spb-run \
     --driver-jar "$JAR" \
     --scenario "$SCENARIO" \
@@ -3655,7 +3655,7 @@ In `/Users/stig/git/sunstone/reasoner/crates/harness/src/bin/harness.rs`, add to
         #[arg(long, default_value_t = 600)]
         duration: u64,
         /// Label used as the `dataset` column so we can A/B
-        /// (e.g. "reasoner-engine" vs "graphdb-free").
+        /// (e.g. "horndb-engine" vs "graphdb-free").
         #[arg(long)]
         label: String,
     },
@@ -3665,16 +3665,16 @@ And the matching arm:
 
 ```rust
         Cmd::SpbRun { driver_jar, scenario, endpoint, duration, label } => {
-            let cfg = reasoner_harness::ldbc_spb::SpbConfig {
+            let cfg = horndb_harness::ldbc_spb::SpbConfig {
                 driver_jar: &driver_jar,
                 scenario: &scenario,
                 endpoint: &endpoint,
                 duration_seconds: duration,
             };
-            let result = reasoner_harness::ldbc_spb::run(&cfg)?;
+            let result = horndb_harness::ldbc_spb::run(&cfg)?;
             let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "unknown".into());
             let run_id = db.start_run(&commit_sha, &hardware_fingerprint(), &label)?;
-            reasoner_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
+            horndb_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
             println!("spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
                      result.editorial_qps, result.aggregation_qps, result.update_qps);
             Ok(ExitCode::SUCCESS)
@@ -3683,7 +3683,7 @@ And the matching arm:
 
 - [ ] **Step 6: Run unit tests**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness ldbc_spb::tests`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness ldbc_spb::tests`
 Expected: 1 test passes.
 
 - [ ] **Step 7: Commit**
@@ -3701,7 +3701,7 @@ feat(harness): LDBC SPB-256 driver shim and GraphDB Free A/B (F4, F10)
 `harness spb-run` invokes the upstream LDBC SPB driver, parses the
 JSON report, and records editorial/aggregation/update QPS into the
 metric DB tagged with a `label` column so the same store carries both
-reasoner-engine and graphdb-free comparison runs.
+horndb-engine and graphdb-free comparison runs.
 EOF
 )"
 ```
@@ -3722,7 +3722,7 @@ conformance step with:
 ```yaml
       - name: conformance — Stage-1 selected subset (real engine)
         run: |
-          cargo build -p reasoner-harness --bin harness --release --features real-engine
+          cargo build -p horndb-harness --bin harness --release --features real-engine
           ./target/release/harness \
             --engine owlrl \
             run \
@@ -3760,14 +3760,14 @@ jobs:
           cache: true
 
       - name: build harness
-        run: cargo build -p reasoner-harness --bin harness --release --features real-engine
+        run: cargo build -p horndb-harness --bin harness --release --features real-engine
 
-      - name: start reasoner engine
+      - name: start HornDB engine
         run: ./scripts/dev/start-engine.sh &
         # The engine startup script lives in SPEC-04 territory; this
         # workflow assumes it exists. If absent the next step fails.
 
-      - name: SPB-256 against reasoner-engine
+      - name: SPB-256 against horndb-engine
         run: ./crates/harness/scripts/run-spb-256.sh
 
       - name: SPB-256 against GraphDB Free
@@ -3800,7 +3800,7 @@ ci: flip PR job to real engine; add nightly SPB-256 + GraphDB A/B (F9)
 
 PR-time CI now runs the Stage-1 selected subset against the SPEC-04
 engine without --allow-failing — green is required. Nightly self-
-hosted runner executes SPB-256 against both the reasoner engine and
+hosted runner executes SPB-256 against both the HornDB engine and
 GraphDB Free for the F10 differential.
 EOF
 )"
@@ -3829,7 +3829,7 @@ Create `/Users/stig/git/sunstone/reasoner/crates/harness/tests/w3c_subset.rs`:
 
 use std::path::PathBuf;
 
-use reasoner_harness::{
+use horndb_harness::{
     manifest, runner::run_selected, selected::Selected, testcase::Suite,
 };
 
@@ -3843,7 +3843,7 @@ fn workspace() -> PathBuf {
 #[test]
 fn real_engine_passes_full_stage1_selection() {
     let sel = Selected::load(&workspace().join("harness/selected.toml")).unwrap();
-    let mut engine = reasoner_owlrl::Engine::new();
+    let mut engine = horndb_owlrl::Engine::new();
     let report = run_selected(
         &mut engine,
         &sel,
@@ -3859,7 +3859,7 @@ fn real_engine_passes_full_stage1_selection() {
     let failing: Vec<&str> = report
         .outcomes
         .iter()
-        .filter(|o| matches!(o.status, reasoner_harness::Status::Failed))
+        .filter(|o| matches!(o.status, horndb_harness::Status::Failed))
         .map(|o| o.test_id.as_str())
         .collect();
     assert!(failing.is_empty(), "real engine failed selected cases: {failing:?}");
@@ -3868,7 +3868,7 @@ fn real_engine_passes_full_stage1_selection() {
 
 - [ ] **Step 2: Run it with the feature off (skips compile)**
 
-Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p reasoner-harness --test w3c_subset`
+Run: `cd /Users/stig/git/sunstone/reasoner && cargo test -p horndb-harness --test w3c_subset`
 Expected: zero tests run (the `#![cfg(feature = "real-engine")]` gates the whole file). The harness compiles and the suite reports `0 passed`.
 
 - [ ] **Step 3: Commit**
@@ -3898,7 +3898,7 @@ EOF
 Replace `/Users/stig/git/sunstone/reasoner/crates/harness/README.md` with:
 
 ```markdown
-# reasoner-harness
+# horndb-harness
 
 SPEC-01 conformance and benchmarking harness. See
 `specs/SPEC-01-conformance-benchmarks.md` and
@@ -3909,7 +3909,7 @@ SPEC-01 conformance and benchmarking harness. See
 Stage-0 (stub-only, no real engine yet):
 
 ```bash
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     --engine stub \
     run \
     --allow-failing
@@ -3919,7 +3919,7 @@ Stage-1 (real engine, full 50-case OWL 2 RL subset):
 
 ```bash
 ./crates/harness/scripts/fetch-w3c-suites.sh
-cargo run -p reasoner-harness --bin harness --features real-engine -- \
+cargo run -p horndb-harness --bin harness --features real-engine -- \
     --engine owlrl \
     run
 ```
@@ -3928,7 +3928,7 @@ ORE 2015 ten-ontology subset:
 
 ```bash
 ./crates/harness/scripts/fetch-ore2015-subset.sh
-cargo run -p reasoner-harness --bin harness --features real-engine -- \
+cargo run -p horndb-harness --bin harness --features real-engine -- \
     ore-run --selected harness/ore2015-selected.toml
 ```
 
@@ -3937,19 +3937,19 @@ LDBC SPB-256 (requires Java + the SPB driver JAR):
 ```bash
 ./crates/harness/scripts/run-spb-256.sh
 ./crates/harness/scripts/run-graphdb-free-spb-256.sh
-cargo run -p reasoner-harness --bin harness -- \
+cargo run -p horndb-harness --bin harness -- \
     report --suite ldbc-spb-256 --metric editorial-qps
 ```
 
 ## CI
 
 - `.github/workflows/ci.yml` — per-PR correctness run (selected subset, real engine).
-- `.github/workflows/nightly.yml` — SPB-256 reasoner-engine vs GraphDB Free.
+- `.github/workflows/nightly.yml` — SPB-256 horndb-engine vs GraphDB Free.
 ```
 
 Note: the README references an `ore-run` subcommand the Stage-1
 implementer must add to the CLI by analogy with `spb-run` (read
-`harness/ore2015-selected.toml`, call `reasoner_harness::ore::run`,
+`harness/ore2015-selected.toml`, call `horndb_harness::ore::run`,
 record outcomes). This is a 10-minute task that drops into
 `src/bin/harness.rs` mirroring the `SpbRun` arm — left implicit here
 to keep this task focused on the documentation refresh.

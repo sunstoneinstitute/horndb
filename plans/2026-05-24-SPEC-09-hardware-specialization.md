@@ -4,7 +4,7 @@
 
 **Goal:** Define when and how Stage 3 (GPU / CXL / multi-node specialization) begins, what must be true before it can begin, and what trait/API hooks earlier specs should land *now* to make Stage-3 backends pluggable rather than invasive.
 
-**Architecture:** Stage 3 plugs alternative backends into stable interfaces owned by SPEC-02 (storage tier), SPEC-03 (join executor), and SPEC-05 (closure engine). Nothing in Stage 3 invents a new architecture; it provides faster implementations of existing traits. The `reasoner-hardware-ext` crate is the integration seam.
+**Architecture:** Stage 3 plugs alternative backends into stable interfaces owned by SPEC-02 (storage tier), SPEC-03 (join executor), and SPEC-05 (closure engine). Nothing in Stage 3 invents a new architecture; it provides faster implementations of existing traits. The `horndb-hardware-ext` crate is the integration seam.
 
 **Tech Stack (Stage 3):** CUDA 12.x / ROCm 6.x; SuiteSparse:GraphBLAS GPU branch (or cuSPARSE/hipSPARSE fallback); CXL 2.0/3.0 via `/dev/dax` mmap; NVIDIA GPUDirect Storage / BaM; DBSP timely-dataflow for multi-node.
 

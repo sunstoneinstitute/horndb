@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the `reasoner-owlrl` crate with (a) an ahead-of-time codegen pipeline driven by a declarative `rules.toml`, emitting one Rust function per OWL 2 RL rule via `build.rs`; (b) a Stage-1 subset of the W3C OWL 2 RL/RDF rule set covering all `scm-*` schema rules plus the most-used `cls-*`, `cax-*`, `prp-*` rules (target: enough to pass ≥50 hand-picked W3C conformance tests per SPEC-00 Stage 1 gating); (c) semi-naïve evaluation with simple delta tables driving the rules to fixed point; (d) full re-materialization from base (`reset_and_materialize`); (e) a `ClosureBackend` trait that delegates `prp-trp` / `scm-sco` / `scm-spo` / `eq-*` to SPEC-05, with a trivial in-crate rule-firing implementation used for our own tests.
+**Goal:** Stand up the `horndb-owlrl` crate with (a) an ahead-of-time codegen pipeline driven by a declarative `rules.toml`, emitting one Rust function per OWL 2 RL rule via `build.rs`; (b) a Stage-1 subset of the W3C OWL 2 RL/RDF rule set covering all `scm-*` schema rules plus the most-used `cls-*`, `cax-*`, `prp-*` rules (target: enough to pass ≥50 hand-picked W3C conformance tests per SPEC-00 Stage 1 gating); (c) semi-naïve evaluation with simple delta tables driving the rules to fixed point; (d) full re-materialization from base (`reset_and_materialize`); (e) a `ClosureBackend` trait that delegates `prp-trp` / `scm-sco` / `scm-spo` / `eq-*` to SPEC-05, with a trivial in-crate rule-firing implementation used for our own tests.
 
-**Architecture:** A single workspace crate `reasoner-owlrl` with a `build.rs` that parses `rules.toml` (one entry per rule: id, head, body patterns, closure-delegate flag) and emits `$OUT_DIR/generated_rules.rs`. The generated file contains a `pub fn fire_<rule_id>(store: &dyn TripleStore, delta: &Delta) -> Delta` per rule, plus a `pub const RULES: &[CompiledRule]` table mapping rule IDs to function pointers and the predicates they read/write. The runtime in `src/lib.rs` defines small `TripleStore` and `Delta` traits (in-crate, behind a feature flag for the production SPEC-02 backend later), an in-memory reference `MemStore` implementation we own (for tests), and a `materialize()` function that runs semi-naïve evaluation: at each round it computes deltas from rules whose body-predicates overlap "dirty" predicates touched in the previous round, applies them through the store, and terminates when the round produces no new triples. A `ClosureBackend` trait abstracts equality/transitive closure; the crate ships a `RuleFiringBackend` (naïve, for tests) and exposes the trait for `reasoner-closure` (SPEC-05) to implement. Proof recording is a Stage-1 **stub**: each `Delta` row carries a `Provenance { rule_id, premises: SmallVec<[TripleId; 4]> }`, written through to the store via the `TripleSink`, but with no compression or backward-rederivation yet — that is Stage 2. No incremental update path (SPEC-06): only full re-materialization.
+**Architecture:** A single workspace crate `horndb-owlrl` with a `build.rs` that parses `rules.toml` (one entry per rule: id, head, body patterns, closure-delegate flag) and emits `$OUT_DIR/generated_rules.rs`. The generated file contains a `pub fn fire_<rule_id>(store: &dyn TripleStore, delta: &Delta) -> Delta` per rule, plus a `pub const RULES: &[CompiledRule]` table mapping rule IDs to function pointers and the predicates they read/write. The runtime in `src/lib.rs` defines small `TripleStore` and `Delta` traits (in-crate, behind a feature flag for the production SPEC-02 backend later), an in-memory reference `MemStore` implementation we own (for tests), and a `materialize()` function that runs semi-naïve evaluation: at each round it computes deltas from rules whose body-predicates overlap "dirty" predicates touched in the previous round, applies them through the store, and terminates when the round produces no new triples. A `ClosureBackend` trait abstracts equality/transitive closure; the crate ships a `RuleFiringBackend` (naïve, for tests) and exposes the trait for `horndb-closure` (SPEC-05) to implement. Proof recording is a Stage-1 **stub**: each `Delta` row carries a `Provenance { rule_id, premises: SmallVec<[TripleId; 4]> }`, written through to the store via the `TripleSink`, but with no compression or backward-rederivation yet — that is Stage 2. No incremental update path (SPEC-06): only full re-materialization.
 
-**Tech Stack:** Rust 2021 (workspace `rust-version = "1.75"`), no external runtime deps beyond `anyhow`, `thiserror`, `serde` + `toml` (build-deps only — the runtime crate must not pull serde), `rustc-hash` for `FxHashSet`/`FxHashMap`, `smallvec` for proof premises. `prettyplease` (build-dep) for emitting human-readable generated Rust. The W3C OWL 2 RL/RDF rules are the canonical reference (see https://www.w3.org/TR/owl2-profiles/ Tables 4–9). Co-developed with SPEC-05 (`reasoner-closure`) and SPEC-06 (`reasoner-incremental`); Stage 1 does not depend on either at the binary level — we stub them through traits.
+**Tech Stack:** Rust 2021 (workspace `rust-version = "1.75"`), no external runtime deps beyond `anyhow`, `thiserror`, `serde` + `toml` (build-deps only — the runtime crate must not pull serde), `rustc-hash` for `FxHashSet`/`FxHashMap`, `smallvec` for proof premises. `prettyplease` (build-dep) for emitting human-readable generated Rust. The W3C OWL 2 RL/RDF rules are the canonical reference (see https://www.w3.org/TR/owl2-profiles/ Tables 4–9). Co-developed with SPEC-05 (`horndb-closure`) and SPEC-06 (`horndb-incremental`); Stage 1 does not depend on either at the binary level — we stub them through traits.
 
 ---
 
@@ -71,7 +71,7 @@ Run:
 
 ```bash
 cd /Users/stig/git/sunstone/reasoner
-cargo build -p reasoner-owlrl
+cargo build -p horndb-owlrl
 ```
 
 Expected: clean build of the empty placeholder crate. If it fails for an unrelated reason (e.g. system toolchain), fix that *before* starting Task 1 — the rest of the plan assumes a working baseline.
@@ -81,14 +81,14 @@ Expected: clean build of the empty placeholder crate. If it fails for an unrelat
 Run:
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: `running 0 tests ... test result: ok. 0 passed; 0 failed; 0 ignored`.
 
 ---
 
-## Task 1: Bootstrap the `reasoner-owlrl` crate manifest
+## Task 1: Bootstrap the `horndb-owlrl` crate manifest
 
 **Files:**
 - Modify: `crates/owlrl/Cargo.toml`
@@ -99,7 +99,7 @@ Overwrite `crates/owlrl/Cargo.toml` with:
 
 ```toml
 [package]
-name = "reasoner-owlrl"
+name = "horndb-owlrl"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
@@ -129,7 +129,7 @@ anyhow = { workspace = true }
 Run:
 
 ```bash
-cargo build -p reasoner-owlrl
+cargo build -p horndb-owlrl
 ```
 
 Expected: success. Dependencies download on first run.
@@ -233,7 +233,7 @@ mod tests {
 Overwrite `crates/owlrl/src/lib.rs`:
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 //!
 //! See `specs/SPEC-04-rule-engine.md` for the design contract and
 //! `plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md` for the implementation plan.
@@ -246,7 +246,7 @@ pub mod types;
 Run:
 
 ```bash
-cargo test -p reasoner-owlrl types::tests
+cargo test -p horndb-owlrl types::tests
 ```
 
 Expected: `test result: ok. 2 passed`.
@@ -425,14 +425,14 @@ Note: the `merge_from` method above contains a deliberately broken stub — repl
 
 - [ ] **Step 3: Remove the broken `merge_from` stub**
 
-Edit `crates/owlrl/src/delta.rs`. Delete the entire `merge_from` method (the one ending in `unreachable!`). Keep `merge`. Re-run `cargo build -p reasoner-owlrl` and verify it still compiles.
+Edit `crates/owlrl/src/delta.rs`. Delete the entire `merge_from` method (the one ending in `unreachable!`). Keep `merge`. Re-run `cargo build -p horndb-owlrl` and verify it still compiles.
 
 - [ ] **Step 4: Wire modules into `lib.rs`**
 
 Update `crates/owlrl/src/lib.rs`:
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod delta;
 pub mod provenance;
@@ -444,7 +444,7 @@ pub mod types;
 Run:
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: 5 tests pass (2 from types, 3 from delta).
@@ -580,7 +580,7 @@ mod tests {
 - [ ] **Step 2: Wire into `lib.rs`**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod delta;
 pub mod provenance;
@@ -591,7 +591,7 @@ pub mod vocab;
 - [ ] **Step 3: Run tests**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: 6 tests pass.
@@ -820,7 +820,7 @@ mod tests {
 - [ ] **Step 2: Wire into `lib.rs`**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod delta;
 pub mod provenance;
@@ -832,7 +832,7 @@ pub mod vocab;
 - [ ] **Step 3: Run tests**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: 10 tests pass (6 prior + 4 new).
@@ -868,7 +868,7 @@ The vocabulary tokens use a fixed lowercase prefix set (`rdf:`, `rdfs:`, `owl:`)
 # Source: W3C OWL 2 Profiles — https://www.w3.org/TR/owl2-profiles/ Tables 4–9.
 # Adding a rule: append a [[rule]] block; build.rs regenerates on next build.
 # Rules with delegate = "closure" are NOT compiled here — they are routed to
-# `reasoner-closure` (SPEC-05) via the ClosureBackend trait. We list them so
+# `horndb-closure` (SPEC-05) via the ClosureBackend trait. We list them so
 # the rule table is complete and self-documenting.
 
 # ---------------------------------------------------------------------------
@@ -1448,7 +1448,7 @@ fn main() {
 - [ ] **Step 2: Add the include to `src/lib.rs`**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod delta;
 pub mod provenance;
@@ -1466,7 +1466,7 @@ pub mod generated {
 Create `crates/owlrl/tests/codegen_smoke.rs`:
 
 ```rust
-use reasoner_owlrl::generated::{RULE_COUNT, RULE_IDS};
+use horndb_owlrl::generated::{RULE_COUNT, RULE_IDS};
 
 #[test]
 fn rules_were_generated() {
@@ -1483,8 +1483,8 @@ fn rules_were_generated() {
 Run:
 
 ```bash
-cargo build -p reasoner-owlrl
-cargo test -p reasoner-owlrl --test codegen_smoke
+cargo build -p horndb-owlrl
+cargo test -p horndb-owlrl --test codegen_smoke
 ```
 
 Expected: build succeeds, smoke test passes. Inspect the generated file:
@@ -1632,7 +1632,7 @@ Confirm `crates/owlrl/codegen/mod.rs` lists `pub mod plan;`. If not, fix it.
 Run:
 
 ```bash
-cargo build -p reasoner-owlrl
+cargo build -p horndb-owlrl
 ```
 
 Expected: clean build. (The new `plan.rs` is only compiled inside `build.rs` via `#[path]`; its inline tests are not run by `cargo test` because the build script is not a test target. They will be moved to a host harness in Task 12 if we need them executable.)
@@ -2054,7 +2054,7 @@ fn main() {
 Replace `crates/owlrl/tests/codegen_smoke.rs`:
 
 ```rust
-use reasoner_owlrl::generated::{CompiledRule, RULES, RULE_COUNT};
+use horndb_owlrl::generated::{CompiledRule, RULES, RULE_COUNT};
 
 #[test]
 fn rules_were_generated() {
@@ -2080,9 +2080,9 @@ fn closure_delegated_rules_marked() {
 Run:
 
 ```bash
-cargo build -p reasoner-owlrl 2>&1 | tee /tmp/owlrl-build.log
+cargo build -p horndb-owlrl 2>&1 | tee /tmp/owlrl-build.log
 find target -name 'generated_rules.rs' -path '*owlrl*' | head -1 | xargs cat | head -80
-cargo test -p reasoner-owlrl --test codegen_smoke
+cargo test -p horndb-owlrl --test codegen_smoke
 ```
 
 Expected: clean build, generated file pretty-printed, both smoke tests pass.
@@ -2117,7 +2117,7 @@ EOF
 ```rust
 //! Closure-backend trait: equality and transitive-property closure.
 //!
-//! In production, `reasoner-closure` (SPEC-05) implements this trait against
+//! In production, `horndb-closure` (SPEC-05) implements this trait against
 //! SuiteSparse:GraphBLAS. In tests and for Stage-1 smoke runs, the
 //! `RuleFiringBackend` defined here runs the closure as ordinary rule firing
 //! (slow but obviously correct).
@@ -2297,7 +2297,7 @@ mod tests {
 - [ ] **Step 2: Wire into `lib.rs`**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod backend;
 pub mod delta;
@@ -2314,7 +2314,7 @@ pub mod generated {
 - [ ] **Step 3: Run tests**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: 12 tests pass (10 prior + 2 backend).
@@ -2475,7 +2475,7 @@ mod tests {
 - [ ] **Step 2: Wire into `lib.rs`**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
+//! horndb-owlrl — OWL 2 RL/RDF rule engine (Stage 1).
 
 pub mod backend;
 pub mod delta;
@@ -2495,7 +2495,7 @@ pub use engine::{materialize, reset_and_materialize, Stats};
 - [ ] **Step 3: Run tests**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: 14 tests pass (12 prior + 2 engine).
@@ -2521,11 +2521,11 @@ git commit -m "owlrl: add semi-naive materialize() + reset_and_materialize() dri
 ```rust
 //! Verify each Stage-1 rule fires correctly in isolation.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
-use reasoner_owlrl::materialize;
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
+use horndb_owlrl::materialize;
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))
@@ -2625,11 +2625,11 @@ fn cax_eqc_both_directions() {
 ```rust
 //! Verify the driver chains derivations across multiple rules and to fixed point.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
-use reasoner_owlrl::materialize;
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
+use horndb_owlrl::materialize;
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))
@@ -2691,11 +2691,11 @@ fn fixed_point_is_actually_fixed() {
 ```rust
 //! SPEC-04 F7: reset_and_materialize produces a bit-identical store.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
-use reasoner_owlrl::{materialize, reset_and_materialize};
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
+use horndb_owlrl::{materialize, reset_and_materialize};
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))
@@ -2725,7 +2725,7 @@ fn reset_then_rematerialize_is_identical() {
 - [ ] **Step 4: Run all tests**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: all green. If `prp-symp` or `prp-inv1` fails, the emitter's filter-on-vocab-object logic for non-leading patterns needs review (the rule body iterates over `(?p, rdf:type, owl:SymmetricProperty)` — leading pattern's object is bound to a vocab term, which is currently emitted as a *probe* on step 2, not a *filter* on step 1; revisit `filter_for_step` in emit.rs and the leading-step logic).
@@ -2865,8 +2865,8 @@ head = { s = "?u", p = "rdf:type", o = "?x" }
 The planner and emitter were written generically; rebuild and inspect:
 
 ```bash
-cargo build -p reasoner-owlrl
-cargo test -p reasoner-owlrl --test codegen_smoke
+cargo build -p horndb-owlrl
+cargo test -p horndb-owlrl --test codegen_smoke
 ```
 
 Expected: `RULE_COUNT` is now ≥29; smoke test passes.
@@ -2895,7 +2895,7 @@ fn cls_hv1() {
 - [ ] **Step 4: Run**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: green, including the new `cls_hv1` test.
@@ -2942,11 +2942,11 @@ check that does not require the harness binary.
 //! Hand-encoded fixtures patterned on the W3C OWL 2 RL test suite.
 //! Each test corresponds to a single normative rule or simple rule combination.
 
-use reasoner_owlrl::backend::RuleFiringBackend;
-use reasoner_owlrl::store::{MemStore, TripleStore};
-use reasoner_owlrl::types::{TermId, Triple};
-use reasoner_owlrl::vocab::Vocabulary;
-use reasoner_owlrl::materialize;
+use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::store::{MemStore, TripleStore};
+use horndb_owlrl::types::{TermId, Triple};
+use horndb_owlrl::vocab::Vocabulary;
+use horndb_owlrl::materialize;
 
 fn t(s: u64, p: u64, o: u64) -> Triple {
     Triple::new(TermId(s), TermId(p), TermId(o))
@@ -3103,7 +3103,7 @@ fn fixtures() {
 - [ ] **Step 3: Run**
 
 ```bash
-cargo test -p reasoner-owlrl --test w3c_subset -- --nocapture
+cargo test -p horndb-owlrl --test w3c_subset -- --nocapture
 ```
 
 Expected: green; 12 named sub-cases all pass.
@@ -3125,7 +3125,7 @@ git commit -m "owlrl: add 12 hand-encoded W3C-style fixtures as inner-loop smoke
 - [ ] **Step 1: Replace the `lib.rs` doc header**
 
 ```rust
-//! reasoner-owlrl — OWL 2 RL/RDF rule engine, Stage-1 slice.
+//! horndb-owlrl — OWL 2 RL/RDF rule engine, Stage-1 slice.
 //!
 //! # Scope
 //!
@@ -3137,7 +3137,7 @@ git commit -m "owlrl: add 12 hand-encoded W3C-style fixtures as inner-loop smoke
 //! - Semi-naïve evaluation driver with dirty-predicate filtering.
 //! - Full re-materialization (`reset_and_materialize`).
 //! - `ClosureBackend` trait for `eq-*` / `prp-trp` / `scm-sco` / `scm-spo`
-//!   delegation to SPEC-05 (`reasoner-closure`). A reference
+//!   delegation to SPEC-05 (`horndb-closure`). A reference
 //!   `RuleFiringBackend` is provided for tests.
 //!
 //! # Future Work (NOT in this crate yet)
@@ -3153,7 +3153,7 @@ git commit -m "owlrl: add 12 hand-encoded W3C-style fixtures as inner-loop smoke
 //! # Adding a rule
 //!
 //! 1. Append a `[[rule]]` block to `rules.toml`.
-//! 2. `cargo build -p reasoner-owlrl` regenerates `generated_rules.rs`.
+//! 2. `cargo build -p horndb-owlrl` regenerates `generated_rules.rs`.
 //! 3. Add a unit test in `tests/single_rule.rs`.
 //!
 //! See `plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md` for the full plan.
@@ -3176,7 +3176,7 @@ pub use engine::{materialize, reset_and_materialize, Stats};
 - [ ] **Step 2: Build the docs to confirm they render**
 
 ```bash
-cargo doc -p reasoner-owlrl --no-deps
+cargo doc -p horndb-owlrl --no-deps
 ```
 
 Expected: clean, no warnings on the public surface.
@@ -3184,7 +3184,7 @@ Expected: clean, no warnings on the public surface.
 - [ ] **Step 3: Run the full test suite one last time**
 
 ```bash
-cargo test -p reasoner-owlrl
+cargo test -p horndb-owlrl
 ```
 
 Expected: every test from Tasks 2–15 passes (≥20 tests).
@@ -3202,15 +3202,15 @@ git commit -m "owlrl: document Stage-1 scope and Future Work boundary"
 
 Run this manually after Task 16 completes:
 
-- [ ] `cargo build -p reasoner-owlrl` succeeds from a clean target.
-- [ ] `cargo test -p reasoner-owlrl` runs ≥20 tests, all green.
-- [ ] `cargo doc -p reasoner-owlrl --no-deps` emits no warnings.
+- [ ] `cargo build -p horndb-owlrl` succeeds from a clean target.
+- [ ] `cargo test -p horndb-owlrl` runs ≥20 tests, all green.
+- [ ] `cargo doc -p horndb-owlrl --no-deps` emits no warnings.
 - [ ] `RULES.len() >= 29` (verified by `codegen_smoke`).
 - [ ] The 12 named hand-encoded fixtures in `tests/w3c_subset.rs` all pass — this is the local proxy for the ≥50 W3C OWL 2 RL test-case gate that SPEC-01's harness will eventually run.
 - [ ] `reset_and_materialize` produces a bit-identical store (`tests/reset_rematerialize.rs`).
 - [ ] `RuleFiringBackend` correctly closes `subClassOf`, `subPropertyOf`, and `sameAs` chains (`tests/closure_backend.rs` covered by Task 11's tests).
 
-Once green, this plan's Stage-1 deliverable is complete. SPEC-05 can swap its real `ClosureBackend` impl in via a `cargo add reasoner-closure` and a one-line wiring change in downstream code. SPEC-01's conformance harness can begin pointing at this engine using the public `materialize` + `MemStore` (or a future SPEC-02 `TripleStore` impl) surface.
+Once green, this plan's Stage-1 deliverable is complete. SPEC-05 can swap its real `ClosureBackend` impl in via a `cargo add horndb-closure` and a one-line wiring change in downstream code. SPEC-01's conformance harness can begin pointing at this engine using the public `materialize` + `MemStore` (or a future SPEC-02 `TripleStore` impl) surface.
 
 ---
 
@@ -3222,7 +3222,7 @@ Once green, this plan's Stage-1 deliverable is complete. SPEC-05 can swap its re
 | All `dt-*` datatype rules | Stage 2; depends on SPEC-02 datatype-aware dictionary. |
 | Production proof recording | Stage 2; compressed side-table + SPEC-03 backward-rederivation. |
 | `rdf:type` skew partition-by-class-id | Stage 2; needs SPEC-02 partition iterator surface. |
-| Incremental updates (Δ semantics) | Stage 2; SPEC-06 / `reasoner-incremental`. |
-| WCOJ-driven rule bodies | Stage 2; SPEC-03 / `reasoner-wcoj`. |
+| Incremental updates (Δ semantics) | Stage 2; SPEC-06 / `horndb-incremental`. |
+| WCOJ-driven rule bodies | Stage 2; SPEC-03 / `horndb-wcoj`. |
 | LUBM-8000 ≥2 M triples/sec NF1 target | Stage 1 only validates termination on LUBM-100. |
 | User-defined Datalog rules | Stage 2 extension; current codegen requires recompile per rule change. |
