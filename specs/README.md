@@ -1,6 +1,6 @@
-# Reasoner Specs
+# HornDB Specs
 
-This directory contains the architectural specifications for the `reasoner` system — a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL semantics with SPARQL 1.1 querying, designed for modern unified-memory hardware.
+This directory contains the architectural specifications for **HornDB** — a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL semantics with SPARQL 1.1 querying, designed for modern unified-memory hardware.
 
 Specs are derived from `../initial-research.md` (the feasibility study and competitive landscape analysis). Read SPEC-00 first; the others assume it.
 

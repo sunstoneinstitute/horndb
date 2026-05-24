@@ -8,7 +8,7 @@ Define the project's reason for existence, its primary user, the differentiating
 
 A hybrid forward/backward-chaining RDF reasoner targeting **OWL 2 RL semantics** with **SPARQL 1.1** querying. The system is designed for modern unified-memory hardware (HBM-equipped GPUs/APUs, CXL-attached DRAM tiers) and treats incremental maintenance, provenance, and correctability as first-class concerns — not afterthoughts.
 
-The codename for the system is `reasoner`. It is intended to be permissively open-source and EU-developed.
+The system is called **HornDB** (internally codenamed `reasoner` during early development). It is intended to be permissively open-source and EU-developed.
 
 ## Primary user
 
