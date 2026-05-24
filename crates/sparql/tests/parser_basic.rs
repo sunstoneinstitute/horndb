@@ -1,4 +1,4 @@
-use reasoner_sparql::parser::{parse_query, parse_update, ParsedQuery, ParsedUpdate};
+use horndb_sparql::parser::{parse_query, parse_update, ParsedQuery, ParsedUpdate};
 
 #[test]
 fn parses_minimal_select() {

@@ -1,5 +1,5 @@
-use reasoner_sparql::algebra::{Algebra, Term, TriplePattern, Var};
-use reasoner_sparql::plan::{planner, PhysicalPlan};
+use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
+use horndb_sparql::plan::{planner, PhysicalPlan};
 
 fn bgp(pat: TriplePattern) -> Algebra {
     Algebra::Bgp {

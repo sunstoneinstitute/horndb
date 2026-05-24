@@ -1,4 +1,4 @@
-# SPEC-08 Integration Notes for `reasoner-sparql`
+# SPEC-08 Integration Notes for `horndb-sparql`
 
 These notes describe call sites that **SPEC-07's plan** is responsible
 for implementing.
@@ -37,12 +37,12 @@ adds it, the implementation should:
 
 1. Live in a new module (`crates/sparql/src/nl.rs`).
 2. Take an injected `Arc<dyn LlmClient>` (trait to be defined in
-   `reasoner-ml` Stage 2) so the LLM provider is pluggable and the
+   `horndb-ml` Stage 2) so the LLM provider is pluggable and the
    handler is testable without network.
 3. Always return the generated SPARQL alongside the results (per
    SPEC-08 risks: "LLM SPARQL quality").
 4. Defer cost reporting and training-data leakage controls to
    Stage 2+ per SPEC-08.
 
-For Stage 0/1 the file remains absent — `reasoner-ml` ships only
+For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.

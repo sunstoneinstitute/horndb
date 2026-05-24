@@ -2,11 +2,11 @@
 //! `crates/harness/tests/fixtures/sparql11/`. Diffs each query's
 //! answer against the vendored expected SPARQL-JSON file.
 
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::api::{execute_query, QueryAnswer};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::results::json::{write_ask_json, write_select_json};
+use horndb_sparql::algebra::Term;
+use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
+use horndb_sparql::results::json::{write_ask_json, write_select_json};
 use std::path::{Path, PathBuf};
 
 fn fixtures_root() -> PathBuf {

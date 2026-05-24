@@ -1,5 +1,5 @@
 [package]
-name = "reasoner-sparql"
+name = "horndb-sparql"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true

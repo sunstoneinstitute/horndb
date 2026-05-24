@@ -1,4 +1,4 @@
-use reasoner_sparql::regime::{
+use horndb_sparql::regime::{
     owl_rl::MaterializedOwlRlRegime, simple::SimpleRegime, EntailmentRegime,
 };
 

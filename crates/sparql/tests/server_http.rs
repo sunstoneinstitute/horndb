@@ -2,11 +2,11 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::server::build_router;
-use reasoner_sparql::server::AppState;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
+use horndb_sparql::server::build_router;
+use horndb_sparql::server::AppState;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 

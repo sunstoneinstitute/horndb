@@ -5,10 +5,10 @@
 //! regressions: 10k triples + a single-pattern SELECT in <1 s on any
 //! reasonable laptop.
 
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::api::{execute_query, QueryAnswer};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::Store;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::Store;
 use std::time::Instant;
 
 #[test]

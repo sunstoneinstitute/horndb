@@ -1,7 +1,7 @@
 //! Smoke test for the public crate surface. Verifies the modules
 //! and error type are exported as documented in the plan.
 
-use reasoner_sparql::SparqlError;
+use horndb_sparql::SparqlError;
 
 #[test]
 fn error_type_displays() {

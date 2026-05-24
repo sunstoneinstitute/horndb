@@ -1,10 +1,10 @@
-use reasoner_sparql::algebra::translate::translate_query;
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::runtime::Runtime;
-use reasoner_sparql::exec::Store;
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
-use reasoner_sparql::plan::planner;
+use horndb_sparql::algebra::translate::translate_query;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::runtime::Runtime;
+use horndb_sparql::exec::Store;
+use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::plan::planner;
 
 fn iri(s: &str) -> Term {
     Term::Iri(s.into())
@@ -30,7 +30,7 @@ fn make_store() -> MemStore {
     s
 }
 
-fn run(q: &str, store: &MemStore) -> Vec<reasoner_sparql::exec::Bindings> {
+fn run(q: &str, store: &MemStore) -> Vec<horndb_sparql::exec::Bindings> {
     let inner = match parse_query(q).unwrap() {
         ParsedQuery::Select { inner }
         | ParsedQuery::Ask { inner }

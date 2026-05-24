@@ -1,6 +1,6 @@
-# reasoner-sparql
+# horndb-sparql
 
-SPARQL 1.1 frontend for the `reasoner` project. See
+SPARQL 1.1 frontend for the HornDB project. See
 `specs/SPEC-07-sparql-frontend.md` for the full contract.
 
 ## Stage 1 status
@@ -39,14 +39,14 @@ this crate vendors a 5-test sanity subset in
 ## Running
 
 ```bash
-cargo test -p reasoner-sparql --features server
+cargo test -p horndb-sparql --features server
 ```
 
 To start the HTTP server in your own binary:
 
 ```rust
-use reasoner_sparql::server::{build_router, AppState};
-use reasoner_sparql::exec::mem::MemStore;
+use horndb_sparql::server::{build_router, AppState};
+use horndb_sparql::exec::mem::MemStore;
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]

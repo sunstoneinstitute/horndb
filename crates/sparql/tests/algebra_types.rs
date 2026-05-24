@@ -1,4 +1,4 @@
-use reasoner_sparql::algebra::{Algebra, Term, TriplePattern, Var};
+use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
 
 #[test]
 fn build_a_bgp() {

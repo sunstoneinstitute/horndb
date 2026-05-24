@@ -1,5 +1,5 @@
-use reasoner_sparql::algebra::{translate, Algebra};
-use reasoner_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::algebra::{translate, Algebra};
+use horndb_sparql::parser::{parse_query, ParsedQuery};
 
 fn alg_of(query: &str) -> Algebra {
     let q = parse_query(query).expect("parse");

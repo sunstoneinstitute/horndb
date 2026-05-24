@@ -1,4 +1,4 @@
-//! reasoner-sparql — SPARQL 1.1 frontend.
+//! horndb-sparql — SPARQL 1.1 frontend.
 //!
 //! See `specs/SPEC-07-sparql-frontend.md` for scope and acceptance
 //! criteria. This crate provides:

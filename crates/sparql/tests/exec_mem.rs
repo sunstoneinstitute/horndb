@@ -1,6 +1,6 @@
-use reasoner_sparql::algebra::{Term, TriplePattern, Var};
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::exec::{Bindings, Executor};
+use horndb_sparql::algebra::{Term, TriplePattern, Var};
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::{Bindings, Executor};
 
 fn t(s: &str, p: &str, o: &str) -> (String, String, String) {
     (s.into(), p.into(), o.into())

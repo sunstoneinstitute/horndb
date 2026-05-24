@@ -1,6 +1,6 @@
-use reasoner_sparql::algebra::Term;
-use reasoner_sparql::exec::Bindings;
-use reasoner_sparql::results::json::write_select_json;
+use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::Bindings;
+use horndb_sparql::results::json::write_select_json;
 
 #[test]
 fn select_json_shape() {

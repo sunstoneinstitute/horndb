@@ -1,6 +1,6 @@
-use reasoner_sparql::exec::mem::MemStore;
-use reasoner_sparql::parser::parse_update;
-use reasoner_sparql::update::apply_update;
+use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::parser::parse_update;
+use horndb_sparql::update::apply_update;
 
 #[test]
 fn insert_data_adds_triple() {
