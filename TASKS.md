@@ -142,7 +142,7 @@ list when the corresponding Stage-1 slice is settled.
   `harness/selected.toml` at the workspace root; SPEC-07 added a parallel
   `crates/harness/selected.toml` for its 5 W3C SPARQL fixtures. Pick one
   canonical location and fold the other in.
-- [ ] **Plans/specs cross-reference cleanup.** `specs/README.md` doesn't
+- [x] **Plans/specs cross-reference cleanup.** `specs/README.md` doesn't
   yet point at `plans/`; add a "Plans" column to the SPEC table so the
   per-spec plan files are discoverable from the spec.
 

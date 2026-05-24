@@ -6,18 +6,20 @@ Specs are derived from `../initial-research.md` (the feasibility study and compe
 
 ## Index
 
-| SPEC | Subsystem | Status |
-|------|-----------|--------|
-| [SPEC-00](SPEC-00-vision.md) | Project vision & architecture | Draft |
-| [SPEC-01](SPEC-01-conformance-benchmarks.md) | Conformance & benchmarking harness — **built first** | Draft |
-| [SPEC-02](SPEC-02-storage.md) | Storage & dictionary encoding | Draft |
-| [SPEC-03](SPEC-03-query-engine.md) | WCOJ query engine | Draft |
-| [SPEC-04](SPEC-04-rule-engine.md) | OWL 2 RL rule engine | Draft |
-| [SPEC-05](SPEC-05-closure-backend.md) | GraphBLAS closure backend | Draft |
-| [SPEC-06](SPEC-06-incremental-maintenance.md) | DBSP incremental maintenance | Draft |
-| [SPEC-07](SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend | Draft |
-| [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft |
-| [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap |
+The **Plan** column links to each spec's Stage-1 implementation plan under `../plans/`. SPEC-00 is a vision document with no separate plan, and SPEC-09 is roadmap-only (Stage 3, gated on Stage 2 green).
+
+| SPEC | Subsystem | Status | Plan |
+|------|-----------|--------|------|
+| [SPEC-00](SPEC-00-vision.md) | Project vision & architecture | Draft | — (vision) |
+| [SPEC-01](SPEC-01-conformance-benchmarks.md) | Conformance & benchmarking harness — **built first** | Draft | [SPEC-01 plan](../plans/2026-05-24-SPEC-01-conformance-harness.md) |
+| [SPEC-02](SPEC-02-storage.md) | Storage & dictionary encoding | Draft | [SPEC-02 plan](../plans/2026-05-24-SPEC-02-storage.md) |
+| [SPEC-03](SPEC-03-query-engine.md) | WCOJ query engine | Draft | [SPEC-03 plan](../plans/2026-05-24-SPEC-03-wcoj-query-engine.md) |
+| [SPEC-04](SPEC-04-rule-engine.md) | OWL 2 RL rule engine | Draft | [SPEC-04 plan](../plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md) |
+| [SPEC-05](SPEC-05-closure-backend.md) | GraphBLAS closure backend | Draft | [SPEC-05 plan](../plans/2026-05-24-SPEC-05-graphblas-closure-backend.md) |
+| [SPEC-06](SPEC-06-incremental-maintenance.md) | DBSP incremental maintenance | Draft | [SPEC-06 plan](../plans/2026-05-24-SPEC-06-dbsp-incremental-maintenance.md) |
+| [SPEC-07](SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend | Draft | [SPEC-07 plan](../plans/2026-05-24-SPEC-07-sparql-frontend.md) |
+| [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/2026-05-24-SPEC-08-ml-integration.md) |
+| [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/2026-05-24-SPEC-09-hardware-specialization.md) (roadmap-only) |
 
 ## Reading order
 
