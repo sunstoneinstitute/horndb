@@ -1,0 +1,67 @@
+#![cfg(feature = "server")]
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use reasoner_sparql::algebra::Term;
+use reasoner_sparql::exec::mem::MemStore;
+use reasoner_sparql::exec::Store;
+use reasoner_sparql::server::build_router;
+use reasoner_sparql::server::AppState;
+use std::sync::{Arc, Mutex};
+use tower::ServiceExt;
+
+fn iri(s: &str) -> Term {
+    Term::Iri(s.into())
+}
+
+fn router_with_data() -> axum::Router {
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    let state = AppState {
+        store: Arc::new(Mutex::new(s)),
+    };
+    build_router(state)
+}
+
+#[tokio::test]
+async fn get_query_returns_json() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/b");
+}
+
+#[tokio::test]
+async fn post_update_then_query() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from(
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn parse_error_returns_400() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .uri("/query?query=NOT_VALID")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

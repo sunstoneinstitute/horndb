@@ -32,6 +32,9 @@ jobs:
       - name: unit tests
         run: cargo test --workspace
 
+      - name: sparql tests (server feature)
+        run: cargo test -p reasoner-sparql --features server
+
       - name: build harness binary
         run: cargo build -p reasoner-harness --bin harness --release
 

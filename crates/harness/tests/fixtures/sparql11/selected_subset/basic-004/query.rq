@@ -1,0 +1,4 @@
+SELECT ?s ?o WHERE {
+  ?s <http://example.org/p> "name" .
+  OPTIONAL { ?s <http://example.org/q> ?o }
+}

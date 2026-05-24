@@ -2,7 +2,29 @@
 name = "reasoner-sparql"
 version = "0.0.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper"]
+
 [dependencies]
+spargebra = { workspace = true }
+oxrdf = "0.3"
+sparesults = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+insta = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

@@ -1,0 +1,3 @@
+<http://example.org/a> <http://example.org/p> "name" .
+<http://example.org/b> <http://example.org/p> "name" .
+<http://example.org/a> <http://example.org/q> <http://example.org/x> .
