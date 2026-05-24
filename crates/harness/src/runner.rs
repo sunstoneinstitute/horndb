@@ -215,6 +215,7 @@ mod tests {
             version: 1,
             suites,
             removed: vec![],
+            sparql_query: None,
         };
 
         let mut engine = StubReasoner::new();

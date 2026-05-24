@@ -138,10 +138,13 @@ list when the corresponding Stage-1 slice is settled.
   subagents hit this and one bypassed signing (which violated the global
   rule); the right fix is to either keep the app foregrounded during long
   agent sessions or pre-cache an unencrypted signing key for CI.
-- [ ] **Consolidate `selected.toml` files.** SPEC-01 ships
+- [x] **Consolidate `selected.toml` files.** SPEC-01 ships
   `harness/selected.toml` at the workspace root; SPEC-07 added a parallel
   `crates/harness/selected.toml` for its 5 W3C SPARQL fixtures. Pick one
-  canonical location and fold the other in.
+  canonical location and fold the other in. *Done: the SPEC-07 slice was
+  folded into `harness/selected.toml` as a new optional `[sparql_query]`
+  table; the duplicate file was deleted and the loader updated to model
+  the new section.*
 - [ ] **Plans/specs cross-reference cleanup.** `specs/README.md` doesn't
   yet point at `plans/`; add a "Plans" column to the SPEC table so the
   per-spec plan files are discoverable from the spec.
