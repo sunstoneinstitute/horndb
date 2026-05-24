@@ -169,10 +169,6 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
-
-    pub(crate) fn conn(&self) -> &Connection {
-        &self.conn
-    }
 }
 
 fn new_run_id(commit_sha: &str, reasoner_name: &str) -> String {

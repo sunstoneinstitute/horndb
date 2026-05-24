@@ -146,7 +146,7 @@ fn vocab_term(token: &str) -> Result<VocabTerm> {
         "owl:onProperty" => "owl_on_property",
         "owl:maxCardinality" => "owl_max_cardinality",
         "owl:ObjectProperty" => "owl_object_property",
-        other => bail!("unknown vocabulary token {:?}", other),
+        other => bail!("unknown vocabulary token {other:?}"),
     };
     Ok(VocabTerm { field })
 }

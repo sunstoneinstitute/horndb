@@ -91,8 +91,15 @@ fn kind_of(term: &Term) -> TermKind {
             } else {
                 TermKind::TypedLiteral
             }
-        } // Triples-as-terms (RDF-star) are out of Stage-1 scope; oxrdf::Term has no Triple
-          // variant unless the `rdf-star` feature is enabled, so this arm is unreachable.
+        }
+        // RDF-star triples-as-terms (Term::Triple, gated behind oxrdf's "rdf-star"
+        // feature) are out of Stage-1 scope. Feature unification across the
+        // workspace can enable that variant transitively (oxigraph pulls it in),
+        // so a catch-all keeps the match exhaustive in both feature configurations.
+        // The N-Triples loader is the only path that produces a Term in Stage 1
+        // and cannot emit RDF-star, so the arm is unreachable in practice.
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("RDF-star quoted triples are not a Stage-1 input"),
     }
 }
 

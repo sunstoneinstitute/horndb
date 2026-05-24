@@ -1,0 +1,65 @@
+# Pre-commit hooks for the reasoner project.
+#
+# Install once per checkout:
+#   pip install pre-commit && pre-commit install
+# Then every `git commit` runs these checks against the staged tree.
+#
+# The hooks are intentionally local (no network fetches at hook time) and run
+# against the whole workspace rather than just staged files — Rust's borrow
+# checker and clippy lints depend on the full crate graph, so per-file checks
+# would miss things CI will catch.
+#
+# Long-running checks (cargo clippy --workspace) are wired to pre-push instead
+# of pre-commit so day-to-day commits stay fast.
+
+repos:
+  - repo: meta
+    hooks:
+      - id: check-hooks-apply
+      - id: check-useless-excludes
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.(diff|patch|proptest-regressions)$'
+      - id: end-of-file-fixer
+        exclude: '\.proptest-regressions$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=512']
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: local
+    hooks:
+      # Fast: just formatting. Runs on every commit.
+      - id: cargo-fmt
+        name: cargo fmt --all -- --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Slow: full workspace clippy. Runs on `git push` so commits stay fast
+      # but nothing reaches the remote (or CI) with -D warnings violations.
+      # reasoner-harness is excluded here because oxrocksdb-sys takes minutes
+      # to compile from scratch; CI runs it separately on a cached runner.
+      - id: cargo-clippy-workspace
+        name: cargo clippy --workspace --exclude reasoner-harness -- -D warnings
+        entry: cargo clippy --workspace --all-targets --exclude reasoner-harness -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Sanity: full workspace must at least *build* before pushing.
+      - id: cargo-build-workspace
+        name: cargo build --workspace
+        entry: cargo build --workspace
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]
