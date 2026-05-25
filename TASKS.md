@@ -43,12 +43,11 @@ here in the same commit.
   `next` shadowing, explicit lifetimes, `loop variable used to index`,
   `uninlined_format_args`) were cleared alongside the WCOJ correctness
   fix; `horndb-owlrl` `map_or` → `is_none_or` and a constant-assertion
-  warning were cleared in the non-wcoj pass. `cargo clippy --workspace
-  --all-targets --exclude horndb-harness -- -D warnings` is green.*
-  - Still outstanding: the `horndb-harness` crate has its own clippy
-    gaps that are excluded from the pre-push hook because of rocksdb
-    compile time; address those in a separate pass with CI cache
-    priming.
+  warning were cleared in the non-wcoj pass. The `horndb-harness`
+  exclusion was dropped from the pre-push hook (and from CLAUDE.md /
+  AGENTS.md) once `cargo clippy --workspace --all-targets -- -D warnings`
+  came up green end-to-end; the first push after a fresh checkout is
+  slow (oxrocksdb-sys), subsequent pushes are cached.*
 
 ## HIGH — Performance gaps
 

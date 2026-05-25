@@ -41,9 +41,9 @@ Dependency order (for refactors): `storage` → `wcoj` → `{owlrl, closure}` �
 The pre-commit configuration is split intentionally — keep this split when adding hooks:
 
 - **Pre-commit (fast):** `cargo fmt --all -- --check` only.
-- **Pre-push (slow):** `cargo clippy --workspace --all-targets --exclude horndb-harness -- -D warnings` and `cargo build --workspace`.
+- **Pre-push (slow):** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --workspace`.
 
-`horndb-harness` is excluded from the pre-push clippy hook because `oxrocksdb-sys` (pulled transitively via `oxigraph`) takes minutes to compile from scratch; CI runs it on a cached runner. Do not remove the exclusion without first solving the cache story.
+The pre-push clippy hook covers the full workspace including `horndb-harness`. The harness pulls in `oxrocksdb-sys` transitively via `oxigraph`, which compiles a ~700 MB artifact — expect the first pre-push after a fresh checkout (or a `cargo clean`) to take several minutes. Subsequent pushes reuse the cached build. If you run multiple worktrees in parallel, point `CARGO_TARGET_DIR` at a shared path so rocksdb is only compiled once across them.
 
 Day-to-day commands:
 
