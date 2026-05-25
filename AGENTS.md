@@ -10,7 +10,7 @@ HornDB is a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL wit
 
 These files drive the project — keep them in mind when planning work:
 
-- `docs/specs/SPEC-00..09-*.md` — subsystem contracts. Each ends with **Acceptance criteria** that gate the spec.
+- `docs/specs/SPEC-00..10-*.md` — subsystem contracts. Each ends with **Acceptance criteria** that gate the spec.
 - `docs/plans/2026-05-24-SPEC-*.md` — the one-per-spec implementation plans the Stage-1 pass executed.
 - `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit.
 - `BENCHMARKS.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.

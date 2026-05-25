@@ -20,6 +20,7 @@ The **Plan** column links to each spec's Stage-1 implementation plan under `../p
 | [SPEC-07](SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend | Draft | [SPEC-07 plan](../plans/2026-05-24-SPEC-07-sparql-frontend.md) |
 | [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/2026-05-24-SPEC-08-ml-integration.md) |
 | [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/2026-05-24-SPEC-09-hardware-specialization.md) (roadmap-only) |
+| [SPEC-10](SPEC-10-rdflib-compatible-python-api.md) | rdflib-compatible Python API | Draft | — |
 
 ## Reading order
 
@@ -27,6 +28,7 @@ The **Plan** column links to each spec's Stage-1 implementation plan under `../p
 - **Then SPEC-01** — the harness is the bench every other spec is graded against. Built before the engine; selected subset must always be green.
 - For implementers: SPEC-02 → SPEC-03 → SPEC-04 → SPEC-05 → SPEC-06 → SPEC-07 follows the dependency order.
 - SPEC-08 (ML) and SPEC-09 (hardware) are optional and Stage 2/3 respectively.
+- SPEC-10 (Python / rdflib compatibility) sits on top of SPEC-07 and is useful once you want a Python-facing surface.
 
 ## Spec format
 

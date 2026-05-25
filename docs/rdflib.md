@@ -1,6 +1,6 @@
 # rdflib vs HornDB
 
-This page is a translation guide for people who know `rdflib` and want to understand the current HornDB surface area.
+This page is a translation guide for people who know `rdflib` and want to understand the current HornDB surface area. If you are implementing the Python compatibility layer, read [`SPEC-10`](specs/SPEC-10-rdflib-compatible-python-api.md) next.
 
 HornDB is **not** a drop-in `rdflib` replacement. `rdflib` is a Python RDF toolkit with graph manipulation primitives, parsers, serializers, and a broad plugin ecosystem. HornDB is a Rust RDF reasoner and SPARQL engine with a narrower Stage 1 API surface and a stronger emphasis on reasoning, query planning, and provenance.
 
