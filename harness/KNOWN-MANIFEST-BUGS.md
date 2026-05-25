@@ -20,28 +20,28 @@ deferred. The OWL 2 RL rule names follow the W3C
 
 ## Summary (2026-05-25 survey)
 
-31 of the 115 synthesised entries fail today. They fall into the
+30 of the 115 synthesised entries fail today. They fall into the
 following buckets, ordered by how many cases each missing rule blocks:
 
 | Missing rule (W3C OWL 2 RL) | Cases blocked |
 |---|---|
 | `prp-spo2` (property chains) | 4 |
 | `cax-adc` / cls-expression-aware `cax-dw` (`owl:AllDisjointClasses`, description-logic 10x) | 4 |
-| `eq-diff1..3` (`owl:differentFrom` non-identity) | 3 |
+| `eq-diff2` / `eq-diff3` (list-based differentFrom) + auto-`owl:Thing` inference | 2 |
 | `prp-pdw` / `prp-adp` (disjoint properties via class/chain interactions) | 4 |
 | `prp-key` (`owl:hasKey`) | 2 |
-| `prp-rfp` (`owl:ReflexiveProperty`) | 1 |
+| Auto-`owl:Thing` inference for `prp-rfp` body | 1 |
 | `cls-maxqc1..4` (qualified cardinality) | 1 |
 | `owl:imports` external resolution | 1 |
-| `cls-int1` / `cls-uni` / `cls-hv1` interactions | 8 |
-| `prp-fp` + `eq-diff1` interaction | 3 |
+| `cls-int1` / `cls-uni` / `cls-hv1` interactions | 11 |
 
-Total: **31 cases**.
+Total: **30 cases**.
 
-The seven inconsistency-marker rules `cax-dw`, `prp-irp`, `prp-asyp`,
-`prp-pdw`, `prp-npa1`, `prp-npa2`, `eq-diff1` were added on
-2026-05-25 (branch `feat/owlrl-inconsistency-rules`) and flipped these
-six cases from red to green:
+Two Stage-1 rule batches landed on 2026-05-25 and together flipped 7
+cases from red to green:
+
+**`feat/owlrl-inconsistency-rules`** — added `cax-dw`, `prp-irp`,
+`prp-asyp`, `prp-pdw`, `prp-npa1`, `prp-npa2`, `eq-diff1`. Flipped:
 
 - `#DisjointClasses-002-incons` (was under `cax-dw`)
 - `#New-Feature-AsymmetricProperty-001-incons` (was under `prp-asyp`)
@@ -50,9 +50,19 @@ six cases from red to green:
 - `#New-Feature-NegativeObjectPropertyAssertion-001-incons` (was under `prp-npa1/2`)
 - `#New-Feature-DisjointDataProperties-001-incons` (was under `prp-pdw`)
 
-The remaining residue under `cax-adc` and `prp-pdw / prp-adp` needs
-class-expression / property-chain rules beyond the Stage-1 scope of
-this commit.
+**`feat/owlrl-sameas-rules`** — added `prp-fp`, `prp-ifp`, `prp-rfp`,
+`eq-rep-s`, `eq-rep-p`, `eq-rep-o`. Flipped:
+
+- `#WebOnt-sameAs-001-pe` (was under `prp-fp` + sameAs)
+
+The remaining residue under `cax-adc` / `prp-pdw` / `prp-adp` needs
+class-expression or property-chain rules beyond the Stage-1 scope of
+these commits. `prp-rfp` landed but the one positive-entailment case
+gated by it (`#New-Feature-ReflexiveProperty-001-pe`) still fails
+because the W3C rule's body requires `?x rdf:type owl:Thing` and the
+case types its individuals as `owl:NamedIndividual`. Stage-1 does not
+auto-infer `owl:Thing` membership for every named individual; that's
+a separate follow-up.
 
 ## Cases, grouped by missing rule
 
@@ -108,7 +118,14 @@ property-chain composition.
 - `#New-Feature-Keys-003-pe`
 - `#New-Feature-Keys-006-incons`
 
-### `prp-rfp` (`owl:ReflexiveProperty`)
+### Auto-`owl:Thing` inference for `prp-rfp`
+
+`prp-rfp` is implemented (2026-05-25) but its body requires
+`?x rdf:type owl:Thing`. The Stage-1 engine does not auto-infer
+`owl:Thing` membership for arbitrary named individuals; the one case
+below types its individual as `owl:NamedIndividual` instead and so
+the body never matches. Auto-Thing inference is its own Stage-2
+follow-up.
 
 - `#New-Feature-ReflexiveProperty-001-pe`
 
@@ -136,11 +153,6 @@ combinations that need additional class-expression machinery:
 - `#WebOnt-I5.8-011-pe`
 - `#WebOnt-equivalentClass-003-pe` — equivalentClass over `owl:hasValue`.
 - `#WebOnt-equivalentClass-008-Direct-pe` — equivalentClass + intersectionOf.
-
-### `prp-fp` + sameAs propagation
-
-- `#WebOnt-sameAs-001-pe` — `owl:FunctionalProperty` collapses two
-  objects to `sameAs`.
 
 ## Maintenance
 

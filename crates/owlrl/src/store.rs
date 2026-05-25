@@ -27,6 +27,13 @@ pub trait TripleStore {
     /// `None` slots are wildcards.
     fn probe(&self, s: Option<TermId>, p: TermId, o: Option<TermId>) -> TripleIter<'_>;
 
+    /// Probe with a wildcard predicate (equivalent to scanning every
+    /// predicate partition and filtering on (s?, o?)). Used by the
+    /// `eq-rep-s` / `eq-rep-o` rules whose second pattern reads `?s ?p ?o`
+    /// with the predicate not yet bound. Stage-1 cost is O(triples); a
+    /// Stage-2 implementation can specialise (see TASKS.md).
+    fn probe_any_predicate(&self, s: Option<TermId>, o: Option<TermId>) -> TripleIter<'_>;
+
     /// Insert an inferred triple with its proof. Returns true iff fresh.
     fn insert_inferred(&mut self, t: Triple, prov: Provenance) -> bool;
 
@@ -112,6 +119,19 @@ impl TripleStore for MemStore {
             }
             None => Box::new(std::iter::empty()),
         }
+    }
+
+    fn probe_any_predicate(&self, s: Option<TermId>, o: Option<TermId>) -> TripleIter<'_> {
+        let iter = self.by_pred.iter().flat_map(move |(&p, set)| {
+            set.iter().filter_map(move |&(ss, oo)| {
+                if s.is_none_or(|x| x == ss) && o.is_none_or(|x| x == oo) {
+                    Some(Triple::new(ss, p, oo))
+                } else {
+                    None
+                }
+            })
+        });
+        Box::new(iter)
     }
 
     fn insert_inferred(&mut self, t: Triple, prov: Provenance) -> bool {

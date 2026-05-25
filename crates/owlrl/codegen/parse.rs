@@ -134,6 +134,7 @@ fn vocab_term(token: &str) -> Result<VocabTerm> {
         "owl:SymmetricProperty" => "owl_symmetric_property",
         "owl:TransitiveProperty" => "owl_transitive_property",
         "owl:IrreflexiveProperty" => "owl_irreflexive_property",
+        "owl:ReflexiveProperty" => "owl_reflexive_property",
         "owl:AsymmetricProperty" => "owl_asymmetric_property",
         "owl:propertyDisjointWith" => "owl_property_disjoint_with",
         "owl:disjointWith" => "owl_disjoint_with",

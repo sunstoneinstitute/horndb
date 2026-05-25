@@ -57,8 +57,8 @@ include = [
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).
-# The 84 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
-# the 31 currently-failing W3C cases are listed in
+# The 85 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
+# the 30 currently-failing W3C cases are listed in
 # `harness/KNOWN-MANIFEST-BUGS.md` along with the missing rule that gates each.
 # To regrow this list as more rules.toml rules land, re-run the survey
 # documented at the bottom of `harness/curation/owl2-rl-50.md`.
@@ -142,6 +142,7 @@ include = [
     "#WebOnt-imports-011-cons",
     "#WebOnt-miscellaneous-303-cons",
     "#WebOnt-sameAs-001-cons",
+    "#WebOnt-sameAs-001-pe",
     "#chain2trans1-cons",
     "#owl2-rl-anonymous-individual-cons",
     "#owl2-rl-rules-fp-differentFrom-cons",
