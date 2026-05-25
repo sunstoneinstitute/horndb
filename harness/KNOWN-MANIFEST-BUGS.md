@@ -18,26 +18,32 @@ See `crates/owlrl/rules.toml` for which rules are implemented, and
 deferred. The OWL 2 RL rule names follow the W3C
 [Profiles document](https://www.w3.org/TR/owl2-profiles/#Reasoning_in_OWL_2_RL_and_RDF_Graphs_using_Rules).
 
-## Summary (2026-05-25 survey)
+## Summary (2026-05-25 survey, post `feat/owlrl-list-rules`)
 
-30 of the 115 synthesised entries fail today. They fall into the
-following buckets, ordered by how many cases each missing rule blocks:
+26 of the 115 synthesised entries fail today. They fall into the
+following buckets, grouped by the missing capability — not by a single
+rule name — because the residue is mostly tests that need *combinations*
+of features (datatype subsumption, complementOf, fresh-bnode generation,
+literal-collision inconsistency, ...) the Stage-1 engine intentionally
+defers:
 
-| Missing rule (W3C OWL 2 RL) | Cases blocked |
+| Missing capability | Cases blocked |
 |---|---|
-| `prp-spo2` (property chains) | 4 |
-| `cax-adc` / cls-expression-aware `cax-dw` (`owl:AllDisjointClasses`, description-logic 10x) | 4 |
-| `eq-diff2` / `eq-diff3` (list-based differentFrom) + auto-`owl:Thing` inference | 2 |
-| `prp-pdw` / `prp-adp` (disjoint properties via class/chain interactions) | 4 |
-| `prp-key` (`owl:hasKey`) | 2 |
-| Auto-`owl:Thing` inference for `prp-rfp` body | 1 |
-| `cls-maxqc1..4` (qualified cardinality) | 1 |
-| `owl:imports` external resolution | 1 |
-| `cls-int1` / `cls-uni` / `cls-hv1` interactions | 11 |
+| Datatype subsumption (`dt-type1..2`, XSD numeric tower `byte ⊑ short ⊑ int ⊑ ...`) | 5 |
+| `cls-com` / class-expression `cax-adc` over `owl:complementOf` (`DisjointClasses-001/003-pe`, description-logic 10x) | 5 |
+| `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`, `description-logic-104-incons`) | 4 |
+| Annotation-property / `equivalentClass` substitution (`equivalentClass-003/008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 5 |
+| `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
+| `prp-key` + functional-property literal disequality (`Keys-006-incons`, needs `dt-not-type`) | 1 |
+| Self-chain → `owl:TransitiveProperty` meta-rule (`chain2trans1-pe`) — not in W3C OWL 2 RL | 1 |
+| `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
+| `cls-maxqc1..4` (qualified cardinality, `ObjectQCR-002-pe`) | 1 |
+| `owl:imports` external resolution (`imports-011-pe`) | 1 |
+| Two-way subPropertyOf ⇒ `equivalentProperty` (`equivalentProperty-003-pe`) | 1 |
 
-Total: **30 cases**.
+Total: **26 cases**.
 
-Two Stage-1 rule batches landed on 2026-05-25 and together flipped 7
+Three Stage-1 rule batches landed on 2026-05-25 and together flipped 11
 cases from red to green:
 
 **`feat/owlrl-inconsistency-rules`** — added `cax-dw`, `prp-irp`,
@@ -55,79 +61,121 @@ cases from red to green:
 
 - `#WebOnt-sameAs-001-pe` (was under `prp-fp` + sameAs)
 
-The remaining residue under `cax-adc` / `prp-pdw` / `prp-adp` needs
-class-expression or property-chain rules beyond the Stage-1 scope of
-these commits. `prp-rfp` landed but the one positive-entailment case
-gated by it (`#New-Feature-ReflexiveProperty-001-pe`) still fails
-because the W3C rule's body requires `?x rdf:type owl:Thing` and the
-case types its individuals as `owl:NamedIndividual`. Stage-1 does not
-auto-infer `owl:Thing` membership for every named individual; that's
-a separate follow-up.
+**`feat/owlrl-list-rules`** — added the list-walking rules `prp-spo2`,
+`prp-key`, `cls-int1`, `cls-uni`, `cax-adc`, `eq-diff2`/`eq-diff3`, plus
+load-time auto-`owl:Thing` inference for `owl:NamedIndividual`s. Flipped:
 
-## Cases, grouped by missing rule
+- `#New-Feature-ObjectPropertyChain-001-pe` (`prp-spo2` two-step chain)
+- `#New-Feature-ObjectPropertyChain-BJP-003-pe` (`prp-spo2` two-step chain)
+- `#New-Feature-Keys-003-pe` (`prp-key` single-key sameAs derivation)
+- `#New-Feature-ReflexiveProperty-001-pe` (load-time auto-Thing + `prp-rfp`)
 
-### Property chain (`prp-spo2`)
+The `cls-int1`/`cls-uni`/`cax-adc`/`eq-diff2`/`eq-diff3` rules also
+landed and have isolated unit-test coverage in `list_rules.rs`, but no
+*W3C* test in the synthesised suite is gated by exactly those rules
+without also requiring complementOf / datatype subsumption / annotation
+substitution / fresh-bnode emission. So the unit tests are the green
+gate for those rules in this batch; the W3C wins come from `prp-spo2`,
+`prp-key`, and auto-Thing.
 
-The Stage-1 engine implements `prp-spo1` (single sub-property step) but
-not the OWL 2 RL property-chain rule `prp-spo2`.
+## Cases, grouped by missing capability
 
-- `#chain2trans1-pe` — chain `(p, p) ⇒ p` synthesises transitivity.
-- `#New-Feature-ObjectPropertyChain-001-pe`
-- `#New-Feature-ObjectPropertyChain-BJP-003-pe`
-- `#WebOnt-equivalentProperty-003-pe` — chain composed with property equivalence.
+### Datatype subsumption (`dt-type1..2`, XSD numeric tower)
 
-### `cax-adc` / cls-expression-aware `cax-dw` (disjoint classes)
+The Stage-1 engine has *no* datatype-aware rules. The `WebOnt-I5.8-*`
+tests assert that an `rdfs:range` declaration of `xsd:byte` (or
+`xsd:short`, ...) entails the same property having a wider XSD range
+like `xsd:short`. That requires the engine to know the XSD numeric
+hierarchy — Stage-2 work (SPEC-04 risk § "Datatype reasoning").
 
-`cax-dw` itself (an individual claimed in two `owl:disjointWith`
-classes) is now implemented; see `crates/owlrl/rules.toml` and was
-added on 2026-05-25. The remaining failures here either need the
-`owl:AllDisjointClasses` n-ary list rule (`cax-adc`) or interact with
-class-expression machinery the engine does not yet have.
+- `#WebOnt-I5.8-006-pe`
+- `#WebOnt-I5.8-008-pe`
+- `#WebOnt-I5.8-009-pe`
+- `#WebOnt-I5.8-011-pe`
+- `#WebOnt-equivalentClass-003-pe` — equivalentClass over a datatype
+  expression involving `xsd:byte`.
+
+### `cls-com` / `cax-adc` over `owl:complementOf`
+
+`cax-dw` and `cax-adc` are both implemented (2026-05-25) but they
+fire only on *explicit* disjointness. The cases below require the
+engine to *derive* disjointness from `owl:complementOf` (or to lift
+a class-expression assertion into an instance-level disjointness),
+i.e. the W3C `cls-com` rule and class-expression unfolding.
 
 - `#DisjointClasses-001-pe` — expects `owl:complementOf` entailment.
-- `#DisjointClasses-003-pe` — `owl:AllDisjointClasses` ternary.
-- `#WebOnt-description-logic-101-incons` — needs DL-style class
-  expression unfolding before `cax-dw` can fire.
+- `#DisjointClasses-003-pe` — `AllDisjointClasses` + `complementOf`
+  reasoning on the conclusion.
+- `#WebOnt-description-logic-101-incons` — DL-style class-expression
+  unfolding before `cax-dw` can fire.
 - `#WebOnt-description-logic-103-incons`
+- `#WebOnt-description-logic-104-incons` — property-disjointness via
+  class expression and chain composition.
 
-### `eq-diff*` (`owl:differentFrom`)
+### `prp-pdw`/`prp-adp` over derived property assertions
 
-`eq-diff1` is now implemented (2026-05-25). The cases below still
-fail because they require `prp-fp` / `prp-ifp` (functional /
-inverse-functional sameAs collapse) which is being added in a sibling
-branch, or list-based `eq-diff2`/`eq-diff3` which are out of scope.
-
-- `#WebOnt-differentFrom-001-pe`
-- `#owl2-rl-rules-fp-differentFrom-pe` — needs `prp-fp` + `eq-diff1`.
-- `#owl2-rl-rules-ifp-differentFrom-pe` — needs `prp-ifp` + `eq-diff1`.
-
-### `prp-pdw` / `prp-adp` (disjoint properties)
-
-`prp-pdw` is now implemented (2026-05-25); the inconsistency case for
-`owl:DisjointDataProperties` flipped to green. The remaining cases
-need either the n-ary `prp-adp` rule, class-expression rules, or
-property-chain composition.
+`prp-pdw` is implemented (2026-05-25); the W3C `*-incons` cases for
+explicit data-property disjointness pass. The `-pe` variants below
+require the engine to first *derive* the offending pair (via a chain
+or class-expression rule), then trigger the disjointness check.
 
 - `#New-Feature-DisjointDataProperties-002-pe`
 - `#New-Feature-DisjointObjectProperties-001-pe`
 - `#New-Feature-DisjointObjectProperties-002-pe`
-- `#WebOnt-description-logic-104-incons` — property-disjointness via chain.
 
-### `prp-key` (`owl:hasKey`)
+### Annotation-property / `equivalentClass` substitution
 
-- `#New-Feature-Keys-003-pe`
+These tests assert that an annotation triple on an `owl:equivalentClass`
+or `owl:sameAs` partner is reflected onto the other partner.
+OWL 2 RL does not provide a rule that substitutes annotation
+predicates across class equivalence; Stage-2 work.
+
+- `#WebOnt-I4.6-003-pe` — sameAs ⇒ equivalentClass for classes.
+- `#WebOnt-I4.6-005-Direct-pe`
+- `#WebOnt-I5.26-010-pe`
+- `#WebOnt-equivalentClass-008-Direct-pe` — equivalentClass +
+  annotation-property substitution.
+
+### `prp-fp`/`prp-ifp` interaction with `differentFrom`
+
+`prp-fp` and `prp-ifp` are implemented (`feat/owlrl-sameas-rules`)
+and emit `owl:sameAs` correctly. The W3C cases below require chaining
+through to `differentFrom` symmetry / `owl:Nothing` derivation, which
+needs additional rules beyond the Stage-1 scope.
+
+- `#WebOnt-differentFrom-001-pe` — needs `differentFrom` symmetry.
+- `#owl2-rl-rules-fp-differentFrom-pe`
+- `#owl2-rl-rules-ifp-differentFrom-pe`
+
+### `prp-key` + literal disequality (`dt-not-type`)
+
+`prp-key` is implemented in `list_rules.rs` (2026-05-25). The one
+remaining `-incons` case requires the engine to know that the
+literals `"Peter"` and `"Kichwa-Tembo"` cannot be `owl:sameAs`
+(i.e. `dt-not-type` literal-tower disequality) — Stage-2 work.
+
 - `#New-Feature-Keys-006-incons`
 
-### Auto-`owl:Thing` inference for `prp-rfp`
+### Self-chain → `owl:TransitiveProperty` meta-rule
 
-`prp-rfp` is implemented (2026-05-25) but its body requires
-`?x rdf:type owl:Thing`. The Stage-1 engine does not auto-infer
-`owl:Thing` membership for arbitrary named individuals; the one case
-below types its individual as `owl:NamedIndividual` instead and so
-the body never matches. Auto-Thing inference is its own Stage-2
-follow-up.
+OWL 2 RL's `prp-spo2` derives chain conclusions on instances but does
+not derive `?p rdf:type owl:TransitiveProperty` from a `(p, p)`
+self-chain. The `chain2trans1-pe` test expects this meta-derivation,
+which is not part of the W3C profile.
 
-- `#New-Feature-ReflexiveProperty-001-pe`
+- `#chain2trans1-pe`
+
+### `cls-uni`/`cls-int` with fresh-bnode generation
+
+`cls-uni` and `cls-int1` are implemented (`list_rules.rs`) and emit
+type-membership conclusions. The W3C case below conversely requires
+the engine to *generate* a new blank-node `owl:unionOf` class
+expression — out of OWL 2 RL scope (existential generation is the
+`tuple-generating-dependency` extension explicitly disclaimed in
+SPEC-04).
+
+- `#WebOnt-I5.5-005-pe` — equivalentClass derivation over a
+  generated `owl:unionOf`.
 
 ### Object qualified cardinality (`cls-maxqc1..4`)
 
@@ -138,21 +186,13 @@ follow-up.
 - `#WebOnt-imports-011-pe` — premise references an imported ontology
   that the Stage-1 loader does not fetch.
 
-### Class-expression rule interactions (`cls-int*` / `cls-uni*` / `cls-hv*`)
+### Two-way subPropertyOf ⇒ `equivalentProperty`
 
-These exercise rules the engine implements individually but in
-combinations that need additional class-expression machinery:
+OWL 2 RL has `scm-eqp1`/`scm-eqp2` (one direction: equivalentProperty
+⇒ subPropertyOf both ways) but not the reverse. The W3C case below
+needs the latter.
 
-- `#WebOnt-I4.6-003-pe`
-- `#WebOnt-I4.6-005-Direct-pe`
-- `#WebOnt-I5.26-010-pe`
-- `#WebOnt-I5.5-005-pe` — equivalentClass over `owl:unionOf`.
-- `#WebOnt-I5.8-006-pe` — `owl:intersectionOf` member entailment.
-- `#WebOnt-I5.8-008-pe`
-- `#WebOnt-I5.8-009-pe`
-- `#WebOnt-I5.8-011-pe`
-- `#WebOnt-equivalentClass-003-pe` — equivalentClass over `owl:hasValue`.
-- `#WebOnt-equivalentClass-008-Direct-pe` — equivalentClass + intersectionOf.
+- `#WebOnt-equivalentProperty-003-pe`
 
 ## Maintenance
 

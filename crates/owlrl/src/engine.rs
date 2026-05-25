@@ -3,6 +3,7 @@
 use crate::backend::ClosureBackend;
 use crate::delta::Delta;
 use crate::generated::{CompiledRule, RULES};
+use crate::list_rules::{self, SchemaAxioms};
 use crate::store::TripleStore;
 use crate::types::TermId;
 use crate::vocab::Vocabulary;
@@ -19,6 +20,11 @@ pub struct Stats {
 /// triples — see `reset_and_materialize` for that.
 pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &mut B) -> Stats {
     let mut stats = Stats::default();
+    // Resolve list-axiom schemas once per materialize pass. Stage-1 is
+    // insertion-only (SPEC-06) so the resolved chains do not change as
+    // round-deltas accumulate — they are entirely schema-shaped.
+    let vocab = *store.vocab();
+    let axioms = list_rules::resolve(store_as_dyn(store), &vocab);
     // First round: every rule fires; treat all predicates as "dirty".
     let mut dirty: Option<FxHashSet<TermId>> = None;
     loop {
@@ -38,11 +44,19 @@ pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &m
             round_delta.merge(d);
         }
 
-        // 2. Closure backend (handles delegated rules).
+        // 2. Hand-written list-axiom rules (prp-spo2, prp-key, cls-int1,
+        //    cls-uni, cax-adc, eq-diff2/3). See `list_rules.rs` for why
+        //    these live outside `rules.toml`.
+        if list_rules_relevant(&axioms, dirty.as_ref(), &vocab) {
+            let d = list_rules::fire_all(store_as_dyn(store), &axioms, &vocab, dirty.as_ref());
+            round_delta.merge(d);
+        }
+
+        // 3. Closure backend (handles delegated rules).
         let backend_delta = backend.close(store_as_dyn(store));
         round_delta.merge(backend_delta);
 
-        // 3. Apply to store.
+        // 4. Apply to store.
         let mut new_count = 0;
         let mut applied = Delta::new();
         for (t, prov) in round_delta.iter() {
@@ -59,6 +73,21 @@ pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &m
         dirty = Some(applied.dirty_predicates());
     }
     stats
+}
+
+fn list_rules_relevant(
+    axioms: &SchemaAxioms,
+    dirty: Option<&FxHashSet<TermId>>,
+    vocab: &Vocabulary,
+) -> bool {
+    if axioms.is_empty() {
+        return false;
+    }
+    let Some(dirty) = dirty else {
+        return true;
+    };
+    let body_preds = axioms.body_predicates(vocab);
+    body_preds.iter().any(|p| dirty.contains(p))
 }
 
 /// Drop all inferred triples and re-run forward chaining from the asserted base.

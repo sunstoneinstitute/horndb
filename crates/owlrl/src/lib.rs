@@ -35,6 +35,7 @@ pub mod backend;
 pub mod delta;
 pub mod engine;
 pub mod integration;
+pub mod list_rules;
 pub mod provenance;
 pub mod store;
 pub mod types;

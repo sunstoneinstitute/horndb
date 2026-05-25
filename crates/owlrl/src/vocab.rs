@@ -52,6 +52,14 @@ pub struct Vocabulary {
     pub owl_target_individual: TermId,
     pub owl_target_value: TermId,
     pub owl_object_property: TermId,
+    // list-axiom rules (SPEC-04 F1, list_rules.rs)
+    pub owl_property_chain_axiom: TermId,
+    pub owl_has_key: TermId,
+    pub owl_all_disjoint_classes: TermId,
+    pub owl_all_different: TermId,
+    pub owl_members: TermId,
+    pub owl_distinct_members: TermId,
+    pub owl_named_individual: TermId,
 }
 
 impl Vocabulary {
@@ -104,6 +112,13 @@ impl Vocabulary {
             owl_target_individual: next(),
             owl_target_value: next(),
             owl_object_property: next(),
+            owl_property_chain_axiom: next(),
+            owl_has_key: next(),
+            owl_all_disjoint_classes: next(),
+            owl_all_different: next(),
+            owl_members: next(),
+            owl_distinct_members: next(),
+            owl_named_individual: next(),
         }
     }
 }

@@ -57,8 +57,8 @@ include = [
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).
-# The 85 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
-# the 30 currently-failing W3C cases are listed in
+# The 89 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
+# the 26 currently-failing W3C cases are listed in
 # `harness/KNOWN-MANIFEST-BUGS.md` along with the missing rule that gates each.
 # To regrow this list as more rules.toml rules land, re-run the survey
 # documented at the bottom of `harness/curation/owl2-rl-50.md`.
@@ -96,15 +96,19 @@ include = [
     "#New-Feature-DisjointObjectProperties-002-cons",
     "#New-Feature-IrreflexiveProperty-001-incons",
     "#New-Feature-Keys-003-cons",
+    "#New-Feature-Keys-003-pe",
     "#New-Feature-Keys-004-cons",
     "#New-Feature-Keys-005-cons",
     "#New-Feature-NegativeDataPropertyAssertion-001-incons",
     "#New-Feature-NegativeObjectPropertyAssertion-001-incons",
     "#New-Feature-ObjectPropertyChain-001-cons",
+    "#New-Feature-ObjectPropertyChain-001-pe",
     "#New-Feature-ObjectPropertyChain-BJP-003-cons",
+    "#New-Feature-ObjectPropertyChain-BJP-003-pe",
     "#New-Feature-ObjectPropertyChain-BJP-004-cons",
     "#New-Feature-ObjectQCR-002-cons",
     "#New-Feature-ReflexiveProperty-001-cons",
+    "#New-Feature-ReflexiveProperty-001-pe",
     "#WebOnt-AnnotationProperty-003-cons",
     "#WebOnt-AnnotationProperty-004-cons",
     "#WebOnt-I4.6-003-cons",

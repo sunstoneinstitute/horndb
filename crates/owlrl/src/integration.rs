@@ -59,9 +59,16 @@ const OWL_ASSERTION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#assertionPro
 const OWL_TARGET_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#targetIndividual";
 const OWL_TARGET_VALUE: &str = "http://www.w3.org/2002/07/owl#targetValue";
 const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty";
+const OWL_PROPERTY_CHAIN_AXIOM: &str = "http://www.w3.org/2002/07/owl#propertyChainAxiom";
+const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
+const OWL_ALL_DISJOINT_CLASSES: &str = "http://www.w3.org/2002/07/owl#AllDisjointClasses";
+const OWL_ALL_DIFFERENT: &str = "http://www.w3.org/2002/07/owl#AllDifferent";
+const OWL_MEMBERS: &str = "http://www.w3.org/2002/07/owl#members";
+const OWL_DISTINCT_MEMBERS: &str = "http://www.w3.org/2002/07/owl#distinctMembers";
+const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=38`.
-const USER_TERMS_BASE: u64 = 39;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=45`.
+const USER_TERMS_BASE: u64 = 46;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -111,6 +118,15 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
+        // Auto-owl:Thing inference (companion to prp-rfp): every named
+        // individual is implicitly a member of owl:Thing. Cheapest faithful
+        // implementation is a load-time pass over `?x rdf:type
+        // owl:NamedIndividual`, asserting `?x rdf:type owl:Thing`. The
+        // ReflexiveProperty W3C test types its individuals via
+        // `owl:NamedIndividual` rather than `owl:Thing` directly, and
+        // `prp-rfp`'s body requires the latter. See
+        // `crates/owlrl/list_rules.rs` and KNOWN-MANIFEST-BUGS.md.
+        infer_owl_thing_from_named_individuals(&mut state.store, &self.vocab);
         let mut backend = RuleFiringBackend::new();
         reset_and_materialize(&mut state.store, &mut backend);
         self.state = Some(state);
@@ -174,6 +190,28 @@ impl Default for Engine {
     }
 }
 
+/// Assert `?x rdf:type owl:Thing` for every `?x` declared as
+/// `owl:NamedIndividual`. Stage-1 companion to `prp-rfp` whose body
+/// requires `owl:Thing` membership but the W3C tests type their
+/// individuals as `owl:NamedIndividual`. Per OWL 2 RL semantics every
+/// named individual is implicitly an `owl:Thing`.
+fn infer_owl_thing_from_named_individuals(store: &mut MemStore, vocab: &Vocabulary) {
+    let subjects: Vec<TermId> = store
+        .scan_predicate(vocab.rdf_type)
+        .filter(|t| t.o == vocab.owl_named_individual)
+        .map(|t| t.s)
+        .collect();
+    for s in subjects {
+        // Assert as a base triple so the resulting `rdf:type owl:Thing`
+        // is treated as schema-grade fact (not inferred provenance).
+        store.assert(crate::types::Triple::new(
+            s,
+            vocab.rdf_type,
+            vocab.owl_thing,
+        ));
+    }
+}
+
 fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
     let mut id: u64 = 1;
     let mut dict: FxHashMap<String, TermId> = FxHashMap::default();
@@ -222,6 +260,13 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_target_individual: alloc(OWL_TARGET_INDIVIDUAL, &mut id, &mut dict),
         owl_target_value: alloc(OWL_TARGET_VALUE, &mut id, &mut dict),
         owl_object_property: alloc(OWL_OBJECT_PROPERTY, &mut id, &mut dict),
+        owl_property_chain_axiom: alloc(OWL_PROPERTY_CHAIN_AXIOM, &mut id, &mut dict),
+        owl_has_key: alloc(OWL_HAS_KEY, &mut id, &mut dict),
+        owl_all_disjoint_classes: alloc(OWL_ALL_DISJOINT_CLASSES, &mut id, &mut dict),
+        owl_all_different: alloc(OWL_ALL_DIFFERENT, &mut id, &mut dict),
+        owl_members: alloc(OWL_MEMBERS, &mut id, &mut dict),
+        owl_distinct_members: alloc(OWL_DISTINCT_MEMBERS, &mut id, &mut dict),
+        owl_named_individual: alloc(OWL_NAMED_INDIVIDUAL, &mut id, &mut dict),
     };
     debug_assert_eq!(id, USER_TERMS_BASE);
     (vocab, dict)
