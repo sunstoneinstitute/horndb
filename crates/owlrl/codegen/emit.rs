@@ -33,6 +33,7 @@ pub fn emit_all(rules: &[RuleSpec]) -> TokenStream {
                     delegated: true,
                     fire: #fn_ident,
                     body_predicates: &[],
+                    wildcard_predicate: false,
                 }
             });
             continue;
@@ -40,6 +41,10 @@ pub fn emit_all(rules: &[RuleSpec]) -> TokenStream {
 
         let plan = plan_rule(r);
         let body_preds = body_predicate_fields(r);
+        let body_has_var_predicate = r
+            .body
+            .iter()
+            .any(|pat| matches!(pat.p, crate::codegen::parse::Slot::Var(_)));
         let body_tokens = emit_rule_body(r, &plan);
 
         fns.push(quote! {
@@ -68,6 +73,7 @@ pub fn emit_all(rules: &[RuleSpec]) -> TokenStream {
                 delegated: false,
                 fire: #fn_ident,
                 body_predicates: &[ #( #preds_tokens ),* ],
+                wildcard_predicate: #body_has_var_predicate,
             }
         });
     }
@@ -90,6 +96,12 @@ pub fn emit_all(rules: &[RuleSpec]) -> TokenStream {
             /// Predicate-IDs the rule body reads. Used by semi-naïve driver
             /// to skip rules whose predicates are not dirty.
             pub body_predicates: &'static [PredAccessor],
+            /// True iff the rule's body contains a pattern whose predicate
+            /// slot is a variable (e.g. `?s ?p ?o` in eq-rep-s/p/o). Such a
+            /// rule reads triples with *any* predicate, so the dirty-predicate
+            /// prune in [`crate::engine::rule_relevant`] must treat it as
+            /// always-relevant whenever the dirty set is non-empty.
+            pub wildcard_predicate: bool,
         }
 
         pub const RULE_COUNT: usize = #n;

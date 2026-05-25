@@ -78,6 +78,14 @@ fn rule_relevant(
 ) -> bool {
     // First round (dirty = None): everything is relevant.
     let Some(dirty) = dirty else { return true };
+    // A rule whose body contains a variable-predicate pattern (e.g.
+    // `?s ?p ?o` in eq-rep-s/p/o) reads triples with any predicate, so any
+    // dirty predicate in the previous round could expose a new match. Such
+    // rules cannot participate in the dirty-predicate prune — they must
+    // re-fire on every subsequent round.
+    if rule.wildcard_predicate {
+        return true;
+    }
     rule.body_predicates
         .iter()
         .any(|pa| dirty.contains(&pa(vocab)))

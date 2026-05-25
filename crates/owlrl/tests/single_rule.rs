@@ -325,3 +325,35 @@ fn eq_rep_o() {
     materialize(&mut s, &mut b);
     assert!(s.contains(&t(s_a, p, o_b)), "eq-rep-o");
 }
+
+// Regression: variable-predicate rules (eq-rep-s / -p / -o) must re-fire
+// on rounds where the matching triple is produced by *another* rule and
+// the corresponding sameAs fact is no longer dirty. The dirty-predicate
+// prune in `engine::rule_relevant` skips a rule whose body_predicates
+// aren't dirty; rules whose body contains a fresh-variable predicate
+// pattern need a wildcard escape from that prune. Pre-fix the codex
+// reviewer flagged this as a P1 completeness bug.
+#[test]
+fn eq_rep_p_refires_on_later_rounds_via_subproperty() {
+    let (mut s, v) = fresh_store();
+    let p1 = 50;
+    let p2 = 51;
+    let r = 52;
+    let s_a = 100;
+    let o = 200;
+    // Round 0: owl:sameAs is dirty; prp-spo1 is also dirty.
+    // - eq-rep-p will look for `?s p1 ?o` — there is none yet.
+    // - prp-spo1 derives `s_a p1 o` from `r rdfs:subPropertyOf p1` + `s_a r o`.
+    s.assert(t(p1, v.owl_same_as.0, p2));
+    s.assert(t(r, v.rdfs_sub_property_of.0, p1));
+    s.assert(t(s_a, r, o));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    // Round 1: p1 is now dirty (newly inferred). owl:sameAs is NOT
+    // dirty. eq-rep-p must still fire because its body has a
+    // variable-predicate pattern.
+    assert!(
+        s.contains(&t(s_a, p2, o)),
+        "eq-rep-p should re-fire after prp-spo1 produces the triple it substitutes over"
+    );
+}
