@@ -12,6 +12,8 @@ pub mod ldbc_spb;
 pub mod manifest;
 pub mod ore;
 pub mod outcome;
+#[cfg(feature = "real-engine")]
+pub mod owlrl_engine;
 pub mod reasoner;
 pub mod report;
 pub mod runner;

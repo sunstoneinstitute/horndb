@@ -8,6 +8,13 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# rdf-star is enabled here because workspace deps (oxttl, oxrdfio,
+# oxigraph) all activate it transitively. Cargo's feature unification
+# means the variant appears in `SubjectRef` / `TermRef` whether or not
+# we ask for it, so we declare it explicitly to keep our match arms in
+# sync. The Stage-1 OWL 2 RL slice rejects triple-term inputs; lifting
+# that is a SPEC-04 + RDF 1.2 migration task (see TASKS.md HIGH).
+oxrdf = { workspace = true, features = ["rdf-star"] }
 rustc-hash = "2"
 smallvec = "1.13"
 

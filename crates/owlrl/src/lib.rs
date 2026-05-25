@@ -34,6 +34,7 @@
 pub mod backend;
 pub mod delta;
 pub mod engine;
+pub mod integration;
 pub mod provenance;
 pub mod store;
 pub mod types;
@@ -44,3 +45,4 @@ pub mod generated {
 }
 
 pub use engine::{materialize, reset_and_materialize, Stats};
+pub use integration::Engine;
