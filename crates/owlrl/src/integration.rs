@@ -53,10 +53,14 @@ const OWL_ALL_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#allValuesFrom";
 const OWL_HAS_VALUE: &str = "http://www.w3.org/2002/07/owl#hasValue";
 const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
 const OWL_MAX_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#maxCardinality";
+const OWL_SOURCE_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#sourceIndividual";
+const OWL_ASSERTION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#assertionProperty";
+const OWL_TARGET_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#targetIndividual";
+const OWL_TARGET_VALUE: &str = "http://www.w3.org/2002/07/owl#targetValue";
 const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=33`.
-const USER_TERMS_BASE: u64 = 34;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=37`.
+const USER_TERMS_BASE: u64 = 38;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -211,6 +215,10 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_has_value: alloc(OWL_HAS_VALUE, &mut id, &mut dict),
         owl_on_property: alloc(OWL_ON_PROPERTY, &mut id, &mut dict),
         owl_max_cardinality: alloc(OWL_MAX_CARDINALITY, &mut id, &mut dict),
+        owl_source_individual: alloc(OWL_SOURCE_INDIVIDUAL, &mut id, &mut dict),
+        owl_assertion_property: alloc(OWL_ASSERTION_PROPERTY, &mut id, &mut dict),
+        owl_target_individual: alloc(OWL_TARGET_INDIVIDUAL, &mut id, &mut dict),
+        owl_target_value: alloc(OWL_TARGET_VALUE, &mut id, &mut dict),
         owl_object_property: alloc(OWL_OBJECT_PROPERTY, &mut id, &mut dict),
     };
     debug_assert_eq!(id, USER_TERMS_BASE);

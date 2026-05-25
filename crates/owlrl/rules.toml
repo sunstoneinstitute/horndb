@@ -304,3 +304,83 @@ body = [
   { s = "?u", p = "?p",             o = "?y" },
 ]
 head = { s = "?u", p = "rdf:type", o = "?x" }
+
+# ---------------------------------------------------------------------------
+# Inconsistency markers (Stage-1 addition)
+#
+# Each rule below detects a forbidden configuration permitted by OWL 2 RL
+# semantics and emits `?x rdf:type owl:Nothing` for an offending individual.
+# `Engine::is_consistent()` (integration.rs) returns false iff any such
+# triple is present in the materialized closure. Sources: W3C OWL 2 Profiles
+# Tables 6 (prp-*), 7 (cax-*), 8 (eq-*).
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "cax-dw"
+comment = "Disjoint classes — an individual cannot be in both."
+body = [
+  { s = "?c1", p = "owl:disjointWith", o = "?c2" },
+  { s = "?x",  p = "rdf:type",         o = "?c1" },
+  { s = "?x",  p = "rdf:type",         o = "?c2" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "prp-irp"
+comment = "Irreflexive property — no individual may relate to itself."
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:IrreflexiveProperty" },
+  { s = "?x", p = "?p",       o = "?x" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "prp-asyp"
+comment = "Asymmetric property — both directions cannot hold."
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:AsymmetricProperty" },
+  { s = "?x", p = "?p",       o = "?y" },
+  { s = "?y", p = "?p",       o = "?x" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "prp-pdw"
+comment = "Disjoint properties — same (s, o) pair cannot use both."
+body = [
+  { s = "?p1", p = "owl:propertyDisjointWith", o = "?p2" },
+  { s = "?x",  p = "?p1",                       o = "?y" },
+  { s = "?x",  p = "?p2",                       o = "?y" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "prp-npa1"
+comment = "Negative object property assertion violated by an asserted triple."
+body = [
+  { s = "?x", p = "owl:sourceIndividual",  o = "?i" },
+  { s = "?x", p = "owl:assertionProperty", o = "?p" },
+  { s = "?x", p = "owl:targetIndividual",  o = "?j" },
+  { s = "?i", p = "?p",                    o = "?j" },
+]
+head = { s = "?i", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "prp-npa2"
+comment = "Negative data property assertion violated by an asserted triple."
+body = [
+  { s = "?x", p = "owl:sourceIndividual",  o = "?i" },
+  { s = "?x", p = "owl:assertionProperty", o = "?p" },
+  { s = "?x", p = "owl:targetValue",       o = "?lt" },
+  { s = "?i", p = "?p",                    o = "?lt" },
+]
+head = { s = "?i", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "eq-diff1"
+comment = "Same individuals cannot also be declared different."
+body = [
+  { s = "?x", p = "owl:differentFrom", o = "?y" },
+  { s = "?x", p = "owl:sameAs",        o = "?y" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }

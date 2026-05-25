@@ -145,6 +145,10 @@ fn vocab_term(token: &str) -> Result<VocabTerm> {
         "owl:hasValue" => "owl_has_value",
         "owl:onProperty" => "owl_on_property",
         "owl:maxCardinality" => "owl_max_cardinality",
+        "owl:sourceIndividual" => "owl_source_individual",
+        "owl:assertionProperty" => "owl_assertion_property",
+        "owl:targetIndividual" => "owl_target_individual",
+        "owl:targetValue" => "owl_target_value",
         "owl:ObjectProperty" => "owl_object_property",
         other => bail!("unknown vocabulary token {other:?}"),
     };

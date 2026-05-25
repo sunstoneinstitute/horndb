@@ -1,7 +1,7 @@
 //! Emit one `fn fire_<id>(...)` per rule + a `pub const RULES: &[CompiledRule]`.
 
 use crate::codegen::parse::{RuleSpec, Slot};
-use crate::codegen::plan::{plan_rule, BoundSource, Plan, SlotPlan};
+use crate::codegen::plan::{plan_rule, BoundSource, Plan, SlotPlan, SlotPos};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -118,27 +118,12 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
 
     // Generate bindings from the iterated triple. For Fresh slots, bind the
     // variable to the corresponding field of the iterated Triple.
-    let bind_s = match &step.s {
-        SlotPlan::Fresh(name) => {
-            let var = format_ident!("{}", name);
-            quote! { let #var = #triple_var.s; }
-        }
-        SlotPlan::Bound(_) => quote! {},
-    };
-    let bind_p = match &step.p {
-        SlotPlan::Fresh(name) => {
-            let var = format_ident!("{}", name);
-            quote! { let #var = #triple_var.p; }
-        }
-        SlotPlan::Bound(_) => quote! {},
-    };
-    let bind_o = match &step.o {
-        SlotPlan::Fresh(name) => {
-            let var = format_ident!("{}", name);
-            quote! { let #var = #triple_var.o; }
-        }
-        SlotPlan::Bound(_) => quote! {},
-    };
+    let bind_s = bind_for(&step.s, &triple_var, SlotPos::S);
+    let bind_p = bind_for(&step.p, &triple_var, SlotPos::P);
+    let bind_o = bind_for(&step.o, &triple_var, SlotPos::O);
+
+    // Same-pattern repeated-variable equality filter (e.g. `?x ?p ?x`).
+    let intra_eq_filter = intra_step_equality_filter(step, &triple_var);
 
     if depth == 0 {
         // Leading step: choose iteration source.
@@ -147,7 +132,9 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
                 let id = format_ident!("{}", field);
                 quote! { store.scan_predicate(v.#id) }
             }
-            SlotPlan::Bound(BoundSource::Var(_)) | SlotPlan::Fresh(_) => {
+            SlotPlan::Bound(BoundSource::Var(_))
+            | SlotPlan::Fresh(_)
+            | SlotPlan::SameAsEarlierSlot { .. } => {
                 // No Stage-1 non-delegated rule needs variable-predicate
                 // leading iteration. prp-trp uses it but is delegated.
                 panic!(
@@ -161,6 +148,7 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
         quote! {
             for #triple_var in #leading_iter {
                 #filter
+                #intra_eq_filter
                 #bind_s
                 #bind_p
                 #bind_o
@@ -174,12 +162,60 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
         let o_arg = probe_arg(&step.o);
         quote! {
             for #triple_var in store.probe(#s_arg, #p_arg, #o_arg) {
+                #intra_eq_filter
                 #bind_s
                 #bind_p
                 #bind_o
                 #inner
             }
         }
+    }
+}
+
+fn bind_for(slot: &SlotPlan, triple_var: &proc_macro2::Ident, pos: SlotPos) -> TokenStream {
+    match slot {
+        SlotPlan::Fresh(name) => {
+            let var = format_ident!("{}", name);
+            let field = match pos {
+                SlotPos::S => quote! { s },
+                SlotPos::P => quote! { p },
+                SlotPos::O => quote! { o },
+            };
+            quote! { let #var = #triple_var.#field; }
+        }
+        SlotPlan::Bound(_) | SlotPlan::SameAsEarlierSlot { .. } => quote! {},
+    }
+}
+
+/// Emit `if __tN.<slot> != __tN.<earlier> { continue; }` for every slot in
+/// this step that re-uses a variable already introduced earlier in the same
+/// triple pattern (e.g. `?x ?p ?x` — second `?x` must equal the first).
+fn intra_step_equality_filter(
+    step: &crate::codegen::plan::PlanStep,
+    triple_var: &proc_macro2::Ident,
+) -> TokenStream {
+    let mut checks = Vec::new();
+    for (pos, slot) in [
+        (SlotPos::S, &step.s),
+        (SlotPos::P, &step.p),
+        (SlotPos::O, &step.o),
+    ] {
+        if let SlotPlan::SameAsEarlierSlot { earlier, .. } = slot {
+            let this = field_ident(pos);
+            let other = field_ident(*earlier);
+            checks.push(quote! {
+                if #triple_var.#this != #triple_var.#other { continue; }
+            });
+        }
+    }
+    quote! { #( #checks )* }
+}
+
+fn field_ident(pos: SlotPos) -> proc_macro2::Ident {
+    match pos {
+        SlotPos::S => format_ident!("s"),
+        SlotPos::P => format_ident!("p"),
+        SlotPos::O => format_ident!("o"),
     }
 }
 
@@ -205,7 +241,7 @@ fn filter_for_leading(s: &SlotPlan, o: &SlotPlan, triple: &proc_macro2::Ident) -
 
 fn probe_arg(slot: &SlotPlan) -> TokenStream {
     match slot {
-        SlotPlan::Fresh(_) => quote! { None },
+        SlotPlan::Fresh(_) | SlotPlan::SameAsEarlierSlot { .. } => quote! { None },
         SlotPlan::Bound(BoundSource::Var(name)) => {
             let id = format_ident!("{}", name);
             quote! { Some(#id) }
@@ -227,7 +263,7 @@ fn probe_predicate(slot: &SlotPlan, rule: &RuleSpec) -> TokenStream {
             let id = format_ident!("{}", name);
             quote! { #id }
         }
-        SlotPlan::Fresh(_) => panic!(
+        SlotPlan::Fresh(_) | SlotPlan::SameAsEarlierSlot { .. } => panic!(
             "rule {}: probe step predicate cannot be a fresh variable",
             rule.id
         ),

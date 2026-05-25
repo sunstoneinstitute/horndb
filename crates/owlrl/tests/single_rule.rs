@@ -112,3 +112,110 @@ fn cax_eqc_both_directions() {
     assert!(s.contains(&t(100, v.rdf_type.0, 2)), "cax-eqc1");
     assert!(s.contains(&t(101, v.rdf_type.0, 1)), "cax-eqc2");
 }
+
+// ---------------------------------------------------------------------------
+// Inconsistency markers — every rule below should emit
+// `?x rdf:type owl:Nothing` when its forbidden configuration is asserted.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cax_dw() {
+    let (mut s, v) = fresh_store();
+    let c1 = 1;
+    let c2 = 2;
+    let x = 100;
+    s.assert(t(c1, v.owl_disjoint_with.0, c2));
+    s.assert(t(x, v.rdf_type.0, c1));
+    s.assert(t(x, v.rdf_type.0, c2));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn prp_irp() {
+    let (mut s, v) = fresh_store();
+    let p = 50;
+    let x = 100;
+    let y = 200;
+    s.assert(t(p, v.rdf_type.0, v.owl_irreflexive_property.0));
+    s.assert(t(x, p, x)); // violation: self-loop on irreflexive property
+    s.assert(t(x, p, y)); // non-violating triple, must not flag x or y
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+    assert!(!s.contains(&t(y, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn prp_asyp() {
+    let (mut s, v) = fresh_store();
+    let p = 50;
+    let x = 100;
+    let y = 200;
+    s.assert(t(p, v.rdf_type.0, v.owl_asymmetric_property.0));
+    s.assert(t(x, p, y));
+    s.assert(t(y, p, x));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn prp_pdw() {
+    let (mut s, v) = fresh_store();
+    let p1 = 50;
+    let p2 = 60;
+    let x = 100;
+    let y = 200;
+    s.assert(t(p1, v.owl_property_disjoint_with.0, p2));
+    s.assert(t(x, p1, y));
+    s.assert(t(x, p2, y));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn prp_npa1() {
+    let (mut s, v) = fresh_store();
+    let npa = 70; // the negative-assertion individual
+    let i = 100;
+    let p = 200;
+    let j = 300;
+    s.assert(t(npa, v.owl_source_individual.0, i));
+    s.assert(t(npa, v.owl_assertion_property.0, p));
+    s.assert(t(npa, v.owl_target_individual.0, j));
+    s.assert(t(i, p, j)); // violating triple
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(i, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn prp_npa2() {
+    let (mut s, v) = fresh_store();
+    let npa = 70;
+    let i = 100;
+    let p = 200;
+    let lt = 400; // dictionary-encoded literal id
+    s.assert(t(npa, v.owl_source_individual.0, i));
+    s.assert(t(npa, v.owl_assertion_property.0, p));
+    s.assert(t(npa, v.owl_target_value.0, lt));
+    s.assert(t(i, p, lt));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(i, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn eq_diff1() {
+    let (mut s, v) = fresh_store();
+    let x = 100;
+    let y = 200;
+    s.assert(t(x, v.owl_different_from.0, y));
+    s.assert(t(x, v.owl_same_as.0, y));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+}

@@ -32,6 +32,25 @@ pub enum SlotPlan {
     /// Slot introduces a fresh variable named `name`. The probe sees `None`
     /// at this slot; the codegen reads the resulting triple's slot.
     Fresh(String),
+    /// Slot's variable was already introduced *within the same pattern step*
+    /// (e.g. `?x ?p ?x` — the second `?x`). Probe sees `None` at this slot
+    /// and the emitter adds a post-probe equality filter against the slot
+    /// that first introduced the variable (always an earlier slot in the
+    /// same triple). `name` is retained for diagnostics.
+    SameAsEarlierSlot {
+        #[allow(dead_code)]
+        name: String,
+        earlier: SlotPos,
+    },
+}
+
+/// Which slot in the current triple step first introduced a variable. Used
+/// for the rare same-pattern repeated-variable case (e.g. `?x ?p ?x`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SlotPos {
+    S,
+    P,
+    O,
 }
 
 #[derive(Debug, Clone)]
@@ -44,11 +63,15 @@ pub fn plan_rule(rule: &RuleSpec) -> Plan {
     let mut bound: HashSet<String> = HashSet::new();
     let mut steps = Vec::with_capacity(rule.body.len());
     let order: Vec<usize> = (0..rule.body.len()).collect();
-    for (step_i, &idx) in order.iter().enumerate() {
+    for &idx in order.iter() {
         let pat = &rule.body[idx];
-        let s = classify(&pat.s, &mut bound, step_i == 0);
-        let p = classify(&pat.p, &mut bound, step_i == 0);
-        let o = classify(&pat.o, &mut bound, step_i == 0);
+        // Track which variables this step has just introduced and at which
+        // position, so a later slot in the same step that references the
+        // same variable can be planned as `SameAsEarlierSlot`.
+        let mut intra_step: Vec<(String, SlotPos)> = Vec::new();
+        let s = classify(&pat.s, &mut bound, &mut intra_step, SlotPos::S);
+        let p = classify(&pat.p, &mut bound, &mut intra_step, SlotPos::P);
+        let o = classify(&pat.o, &mut bound, &mut intra_step, SlotPos::O);
         steps.push(PlanStep {
             pattern_index: idx,
             s,
@@ -59,14 +82,27 @@ pub fn plan_rule(rule: &RuleSpec) -> Plan {
     Plan { order, steps }
 }
 
-fn classify(slot: &Slot, bound: &mut HashSet<String>, _is_leading: bool) -> SlotPlan {
+fn classify(
+    slot: &Slot,
+    bound: &mut HashSet<String>,
+    intra_step: &mut Vec<(String, SlotPos)>,
+    pos: SlotPos,
+) -> SlotPlan {
     match slot {
         Slot::Vocab(v) => SlotPlan::Bound(BoundSource::Vocab(v.field)),
         Slot::Var(name) => {
-            if bound.contains(name) {
+            if let Some(&(_, earlier)) = intra_step.iter().find(|(n, _)| n == name) {
+                // Same variable already appeared earlier in *this* triple step.
+                // Plan as None probe + equality filter against the earlier slot.
+                SlotPlan::SameAsEarlierSlot {
+                    name: name.clone(),
+                    earlier,
+                }
+            } else if bound.contains(name) {
                 SlotPlan::Bound(BoundSource::Var(name.clone()))
             } else {
                 bound.insert(name.clone());
+                intra_step.push((name.clone(), pos));
                 SlotPlan::Fresh(name.clone())
             }
         }

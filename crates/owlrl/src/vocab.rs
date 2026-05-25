@@ -46,6 +46,10 @@ pub struct Vocabulary {
     pub owl_has_value: TermId,
     pub owl_on_property: TermId,
     pub owl_max_cardinality: TermId,
+    pub owl_source_individual: TermId,
+    pub owl_assertion_property: TermId,
+    pub owl_target_individual: TermId,
+    pub owl_target_value: TermId,
     pub owl_object_property: TermId,
 }
 
@@ -93,6 +97,10 @@ impl Vocabulary {
             owl_has_value: next(),
             owl_on_property: next(),
             owl_max_cardinality: next(),
+            owl_source_individual: next(),
+            owl_assertion_property: next(),
+            owl_target_individual: next(),
+            owl_target_value: next(),
             owl_object_property: next(),
         }
     }
