@@ -9,7 +9,7 @@ env:
   # SuiteSparse:GraphBLAS version probed by horndb-closure's build.rs.
   # Ubuntu apt only ships older releases, so we build from source and
   # cache the install tree across CI runs.
-  GRAPHBLAS_VERSION: "9.4.5"
+  GRAPHBLAS_VERSION: "10.3.0"
   GRAPHBLAS_PREFIX: ${{ github.workspace }}/.graphblas-install
 
 jobs:

@@ -22,7 +22,7 @@ pub fn init_once() -> Result<(), GrbError> {
     // Safety: GrB_init is thread-safe via Once; mode = GrB_NONBLOCKING (0).
     unsafe {
         GRB_INIT.call_once(|| {
-            GRB_INIT_RESULT = ffi::GrB_init(ffi::GrB_Mode_GrB_NONBLOCKING as ffi::GrB_Mode);
+            GRB_INIT_RESULT = ffi::GrB_init(ffi::GrB_Mode_GrB_NONBLOCKING as i32);
         });
         GrbError::check(GRB_INIT_RESULT)
     }
@@ -143,7 +143,7 @@ impl BoolMatrix {
         unsafe {
             GrbError::check(ffi::GrB_Matrix_wait(
                 self.inner,
-                ffi::GrB_WaitMode_GrB_MATERIALIZE as ffi::GrB_WaitMode,
+                ffi::GrB_WaitMode_GrB_MATERIALIZE as i32,
             ))
         }
     }

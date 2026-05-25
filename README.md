@@ -55,7 +55,7 @@ The harness comes **first by design**: every SPEC's acceptance criteria referenc
 ### Prerequisites
 
 - Rust **1.88.0** (pinned via `rust-toolchain.toml` — `rustup` will install it automatically).
-- **SuiteSparse:GraphBLAS** available to `pkg-config` (required by `horndb-closure`'s `build.rs`).
+- **SuiteSparse:GraphBLAS** available to `pkg-config` (required by `horndb-closure`'s `build.rs`). Recommended: **10.3.\***. The `build.rs` gate is `>=8.0`, but 10.3.x is what we test against locally; distro packages (Debian/Ubuntu `libsuitesparse-dev`, Homebrew `suite-sparse`) typically lag, so build from source (`https://github.com/DrTimothyAldenDavis/GraphBLAS`) if the packaged version is older.
 - Optional: `pre-commit` (`pip install pre-commit && pre-commit install`) for the fmt / clippy / build hooks. Pre-commit runs `cargo fmt --check` only; pre-push runs `cargo clippy --workspace --exclude horndb-harness -- -D warnings` and `cargo build --workspace`.
 - For the LDBC SPB-256 nightly: Java + the SPB driver JAR.
 - For the W3C conformance suite and ORE 2015 ontologies: see the fetch scripts under `crates/harness/scripts/`.

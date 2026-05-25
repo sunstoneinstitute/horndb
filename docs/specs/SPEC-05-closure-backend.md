@@ -51,7 +51,7 @@ Out of scope:
 - SPEC-02 (dictionary, predicate-partitioned storage).
 - SPEC-04 (calls in from rules `prp-trp`, `scm-sco`, `scm-spo`, `eq-*`).
 - SPEC-06 (incremental delta application for closure maintenance).
-- External: SuiteSparse:GraphBLAS (>=8.x).
+- External: SuiteSparse:GraphBLAS (>=8.x; **10.3.\*** recommended).
 
 ## Acceptance criteria
 
