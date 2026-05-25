@@ -3,3 +3,4 @@
 pub mod emit;
 pub mod parse;
 pub mod plan;
+pub mod vocab;

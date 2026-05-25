@@ -113,9 +113,17 @@ fn classify(
 mod tests {
     use super::*;
     use crate::codegen::parse::parse_str;
+    use std::collections::HashMap;
 
     fn rule(src: &str) -> RuleSpec {
-        parse_str(src).unwrap().into_iter().next().unwrap()
+        let map: HashMap<String, String> = [
+            ("rdf:type", "rdf_type"),
+            ("rdfs:subClassOf", "rdfs_sub_class_of"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        parse_str(src, &map).unwrap().into_iter().next().unwrap()
     }
 
     #[test]

@@ -1,7 +1,13 @@
 //! Parse `rules.toml` into typed rule specs.
+//!
+//! QName resolution (`rdf:type` → `rdf_type`) is driven by a map auto-derived
+//! from `src/vocab.rs` by [`crate::codegen::vocab::extract_qname_map`]. The
+//! parser does not maintain its own copy of the vocabulary — adding a vocab
+//! term is therefore a single edit in `src/vocab.rs`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Raw TOML shape — mirrors `rules.toml` literally.
@@ -59,24 +65,33 @@ pub struct RuleSpec {
     pub head: Pattern,
 }
 
-pub fn parse_file(path: &Path) -> Result<Vec<RuleSpec>> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    parse_str(&text)
+/// Parse `rules.toml`, resolving QNames against the vocab declared in
+/// `src/vocab.rs`. This is the only entry point `build.rs` needs.
+pub fn parse_file(rules_path: &Path, vocab_path: &Path) -> Result<Vec<RuleSpec>> {
+    let text = std::fs::read_to_string(rules_path)
+        .with_context(|| format!("reading {}", rules_path.display()))?;
+    let qname_map = crate::codegen::vocab::extract_qname_map(vocab_path)?;
+    parse_str(&text, &qname_map)
 }
 
-pub fn parse_str(text: &str) -> Result<Vec<RuleSpec>> {
+/// Parse `rules.toml` text given a precomputed QName map. The map is
+/// usually obtained from [`crate::codegen::vocab::extract_qname_map`], but
+/// callers (e.g. tests) may build a small map directly.
+pub fn parse_str(text: &str, qname_map: &HashMap<String, String>) -> Result<Vec<RuleSpec>> {
     let doc: Document = toml::from_str(text).context("parsing rules.toml")?;
-    doc.rule.into_iter().map(parse_rule).collect()
+    doc.rule
+        .into_iter()
+        .map(|r| parse_rule(r, qname_map))
+        .collect()
 }
 
-fn parse_rule(raw: RawRule) -> Result<RuleSpec> {
+fn parse_rule(raw: RawRule, qname_map: &HashMap<String, String>) -> Result<RuleSpec> {
     let body = raw
         .body
         .into_iter()
-        .map(parse_pattern)
+        .map(|p| parse_pattern(p, qname_map))
         .collect::<Result<Vec<_>>>()?;
-    let head = parse_pattern(raw.head)?;
+    let head = parse_pattern(raw.head, qname_map)?;
     let delegate = match raw.delegate.as_deref() {
         None => false,
         Some("closure") => true,
@@ -91,74 +106,52 @@ fn parse_rule(raw: RawRule) -> Result<RuleSpec> {
     })
 }
 
-fn parse_pattern(raw: RawPattern) -> Result<Pattern> {
+fn parse_pattern(raw: RawPattern, qname_map: &HashMap<String, String>) -> Result<Pattern> {
     Ok(Pattern {
-        s: parse_slot(&raw.s)?,
-        p: parse_slot(&raw.p)?,
-        o: parse_slot(&raw.o)?,
+        s: parse_slot(&raw.s, qname_map)?,
+        p: parse_slot(&raw.p, qname_map)?,
+        o: parse_slot(&raw.o, qname_map)?,
     })
 }
 
-fn parse_slot(s: &str) -> Result<Slot> {
+fn parse_slot(s: &str, qname_map: &HashMap<String, String>) -> Result<Slot> {
     if let Some(rest) = s.strip_prefix('?') {
         if rest.is_empty() {
             bail!("empty variable name");
         }
         Ok(Slot::Var(rest.to_string()))
     } else {
-        Ok(Slot::Vocab(vocab_term(s)?))
+        Ok(Slot::Vocab(vocab_term(s, qname_map)?))
     }
 }
 
-fn vocab_term(token: &str) -> Result<VocabTerm> {
-    // Map QName-style vocab token → field on `crate::vocab::Vocabulary`.
-    let field: &'static str = match token {
-        "rdf:type" => "rdf_type",
-        "rdf:first" => "rdf_first",
-        "rdf:rest" => "rdf_rest",
-        "rdf:nil" => "rdf_nil",
-        "rdfs:subClassOf" => "rdfs_sub_class_of",
-        "rdfs:subPropertyOf" => "rdfs_sub_property_of",
-        "rdfs:domain" => "rdfs_domain",
-        "rdfs:range" => "rdfs_range",
-        "owl:Class" => "owl_class",
-        "owl:Thing" => "owl_thing",
-        "owl:Nothing" => "owl_nothing",
-        "owl:sameAs" => "owl_same_as",
-        "owl:differentFrom" => "owl_different_from",
-        "owl:equivalentClass" => "owl_equivalent_class",
-        "owl:equivalentProperty" => "owl_equivalent_property",
-        "owl:inverseOf" => "owl_inverse_of",
-        "owl:FunctionalProperty" => "owl_functional_property",
-        "owl:InverseFunctionalProperty" => "owl_inverse_functional_property",
-        "owl:SymmetricProperty" => "owl_symmetric_property",
-        "owl:TransitiveProperty" => "owl_transitive_property",
-        "owl:IrreflexiveProperty" => "owl_irreflexive_property",
-        "owl:ReflexiveProperty" => "owl_reflexive_property",
-        "owl:AsymmetricProperty" => "owl_asymmetric_property",
-        "owl:propertyDisjointWith" => "owl_property_disjoint_with",
-        "owl:disjointWith" => "owl_disjoint_with",
-        "owl:complementOf" => "owl_complement_of",
-        "owl:intersectionOf" => "owl_intersection_of",
-        "owl:unionOf" => "owl_union_of",
-        "owl:someValuesFrom" => "owl_some_values_from",
-        "owl:allValuesFrom" => "owl_all_values_from",
-        "owl:hasValue" => "owl_has_value",
-        "owl:onProperty" => "owl_on_property",
-        "owl:maxCardinality" => "owl_max_cardinality",
-        "owl:sourceIndividual" => "owl_source_individual",
-        "owl:assertionProperty" => "owl_assertion_property",
-        "owl:targetIndividual" => "owl_target_individual",
-        "owl:targetValue" => "owl_target_value",
-        "owl:ObjectProperty" => "owl_object_property",
-        other => bail!("unknown vocabulary token {other:?}"),
-    };
+fn vocab_term(token: &str, qname_map: &HashMap<String, String>) -> Result<VocabTerm> {
+    let field = qname_map.get(token).ok_or_else(|| {
+        anyhow!(
+            "unknown vocabulary token {token:?}; add it to crates/owlrl/src/vocab.rs \
+             (struct field + matching `synthetic()` init + `/// `{token}`` doc comment)"
+        )
+    })?;
+    // The codegen needs `&'static str`s in the generated source. Leak the
+    // (small, build-time, finite) field-name strings to satisfy that — never
+    // freed, but `build.rs` exits long before this matters.
+    let field: &'static str = Box::leak(field.clone().into_boxed_str());
     Ok(VocabTerm { field })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_map() -> HashMap<String, String> {
+        [
+            ("rdf:type", "rdf_type"),
+            ("rdfs:subClassOf", "rdfs_sub_class_of"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
 
     #[test]
     fn parse_minimal_rule() {
@@ -171,7 +164,7 @@ mod tests {
             ]
             head = { s = "?x", p = "rdf:type", o = "?c2" }
         "#;
-        let rules = parse_str(src).unwrap();
+        let rules = parse_str(src, &fixture_map()).unwrap();
         assert_eq!(rules.len(), 1);
         let r = &rules[0];
         assert_eq!(r.id, "cax-sco");
@@ -191,22 +184,27 @@ mod tests {
             ]
             head = { s = "?a", p = "rdfs:subClassOf", o = "?c" }
         "#;
-        let rules = parse_str(src).unwrap();
+        let rules = parse_str(src, &fixture_map()).unwrap();
         assert!(rules[0].delegate);
     }
 
     #[test]
-    fn unknown_vocab_token_errors() {
+    fn unknown_vocab_token_errors_with_actionable_message() {
         let src = r#"
             [[rule]]
             id = "bogus"
             body = []
             head = { s = "?x", p = "foo:bar", o = "?y" }
         "#;
-        let err = parse_str(src).unwrap_err();
+        let err = parse_str(src, &fixture_map()).unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            err.to_string().contains("foo:bar")
-                || err.chain().any(|c| c.to_string().contains("foo:bar"))
+            msg.contains("foo:bar"),
+            "error should name the offending token, got: {msg}"
+        );
+        assert!(
+            msg.contains("src/vocab.rs"),
+            "error should point at vocab.rs as the fix location, got: {msg}"
         );
     }
 
@@ -218,6 +216,6 @@ mod tests {
             body = []
             head = { s = "?", p = "rdf:type", o = "?y" }
         "#;
-        assert!(parse_str(src).is_err());
+        assert!(parse_str(src, &fixture_map()).is_err());
     }
 }
