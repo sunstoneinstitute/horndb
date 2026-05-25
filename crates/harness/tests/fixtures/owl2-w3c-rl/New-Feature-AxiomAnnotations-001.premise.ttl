@@ -1,0 +1,9 @@
+_:c3dbe449e261e536a6b2c220a465bbfe a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/Child> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/Person> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/Child> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://example.org/Person> .
+_:a613b72f5ae732ba85854ccfc10f5880 a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/Child> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2000/01/rdf-schema#subClassOf> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://example.org/Person> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "Children are people." .

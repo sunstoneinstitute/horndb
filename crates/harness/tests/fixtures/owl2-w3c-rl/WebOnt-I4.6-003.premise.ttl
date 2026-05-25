@@ -1,0 +1,4 @@
+_:fddba931e9a837172b9f63cd85b497a0 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I4.6/premises003#C1> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/I4.6/premises003#C2> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/I4.6/premises003#C1> <http://www.w3.org/2002/07/owl#sameAs> <http://www.w3.org/2002/03owlt/I4.6/premises003#C2> .

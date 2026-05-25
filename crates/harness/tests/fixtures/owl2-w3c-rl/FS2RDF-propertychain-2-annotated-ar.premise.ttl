@@ -1,0 +1,15 @@
+_:b7a5c15b2583defdcc5c8335fc878964 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/r> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/p> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/q> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+_:A0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/q> .
+<http://example.org/r> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+_:A0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:c023d77186396474aaaf8da17c67a792 .
+_:c023d77186396474aaaf8da17c67a792 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/r> .
+<http://example.org/p> <http://www.w3.org/2002/07/owl#propertyChainAxiom> _:A0 .
+_:e5475007a55964e6a0e295cdad4de0c a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/p> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2002/07/owl#propertyChainAxiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> _:A0 ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .

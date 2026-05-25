@@ -12,6 +12,7 @@ pub mod ldbc_spb;
 pub mod manifest;
 pub mod ore;
 pub mod outcome;
+pub mod owl2_rl_extract;
 #[cfg(feature = "real-engine")]
 pub mod owlrl_engine;
 pub mod reasoner;

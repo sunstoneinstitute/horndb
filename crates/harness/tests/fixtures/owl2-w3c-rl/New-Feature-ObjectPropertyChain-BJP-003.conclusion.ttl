@@ -1,0 +1,2 @@
+_:ca419e490cc32ef36ccc89227e8b252a a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/a> <http://example.org/p> <http://example.org/c> .

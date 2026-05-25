@@ -1,0 +1,7 @@
+_:e00e6ceb27a190862346636e719c960c a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/hasAge> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+_:a8da51a254ca1d7fb127411823c3eb12 a <http://www.w3.org/2002/07/owl#NegativePropertyAssertion> ;
+	<http://www.w3.org/2002/07/owl#sourceIndividual> <http://example.org/Meg> ;
+	<http://www.w3.org/2002/07/owl#assertionProperty> <http://example.org/hasAge> ;
+	<http://www.w3.org/2002/07/owl#targetValue> 5 .
+<http://example.org/Meg> <http://example.org/hasAge> 5 .

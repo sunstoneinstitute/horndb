@@ -1,0 +1,4 @@
+_:b4f31a1b4eb55f2f75712560cdbf2f6d a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/equivalentProperty/conclusions003#hasHead> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://www.w3.org/2002/03owlt/equivalentProperty/conclusions003#hasLeader> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://www.w3.org/2002/03owlt/equivalentProperty/conclusions003#hasHead> <http://www.w3.org/2002/07/owl#equivalentProperty> <http://www.w3.org/2002/03owlt/equivalentProperty/conclusions003#hasLeader> .

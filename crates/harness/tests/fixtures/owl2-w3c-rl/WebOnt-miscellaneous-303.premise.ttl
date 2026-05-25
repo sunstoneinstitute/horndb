@@ -1,0 +1,2 @@
+_:ce2f4cc14ee760f7cf1d0d94d3929cc5 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://purl.org/dc/elements/1.0/creator> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .

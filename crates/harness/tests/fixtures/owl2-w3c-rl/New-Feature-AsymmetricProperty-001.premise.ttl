@@ -1,0 +1,4 @@
+_:c1fd5ede6ab7e2765282b522c58c0a54 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/parentOf> a <http://www.w3.org/2002/07/owl#ObjectProperty> , <http://www.w3.org/2002/07/owl#AsymmetricProperty> .
+<http://example.org/Peter> <http://example.org/parentOf> <http://example.org/Stewie> .
+<http://example.org/Stewie> <http://example.org/parentOf> <http://example.org/Peter> .

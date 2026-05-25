@@ -1,0 +1,6 @@
+_:fba35d64759b4b06125f7a4076843b9a a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises008#c1> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises008#c2> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises008#c1> <http://www.w3.org/2002/07/owl#equivalentClass> <http://www.w3.org/2002/03owlt/equivalentClass/premises008#c2> ;
+	<http://www.w3.org/2002/03owlt/equivalentClass/premises008#annotate> "description of c1" .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises008#annotate> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .

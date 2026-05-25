@@ -1,0 +1,3 @@
+_:e9f739cd6877d3461eaad1c2fa3acac6 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/knows> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/Peter> <http://example.org/knows> <http://example.org/Peter> .

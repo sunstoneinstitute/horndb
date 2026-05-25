@@ -1,0 +1,5 @@
+_:f5a10554ab58ad9285970a59f0e43d87 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/Boy> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/Girl> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/Boy> <http://www.w3.org/2002/07/owl#disjointWith> <http://example.org/Girl> .
+<http://example.org/Stewie> a <http://example.org/Boy> , <http://example.org/Girl> .

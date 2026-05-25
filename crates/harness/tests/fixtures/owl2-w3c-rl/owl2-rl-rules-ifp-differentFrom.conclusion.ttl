@@ -1,0 +1,4 @@
+_:eaeef89713b7d901991dcac2e65d9343 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://owl2.test/rules/X1> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://owl2.test/rules/X2> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://owl2.test/rules/X1> <http://www.w3.org/2002/07/owl#differentFrom> <http://owl2.test/rules/X2> .

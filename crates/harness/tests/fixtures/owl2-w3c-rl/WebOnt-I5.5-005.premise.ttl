@@ -1,0 +1,1 @@
+<http://www.w3.org/2002/03owlt/I5.5/premises005#a> a <http://www.w3.org/2002/07/owl#Class> .

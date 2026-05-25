@@ -1,0 +1,5 @@
+_:af317d16fd17be1dbcd0595ba71334c7 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions005#C1> a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "An example class." .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions005#C2> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions005#C1> <http://www.w3.org/2002/07/owl#equivalentClass> <http://www.w3.org/2002/03owlt/I4.6/nonconclusions005#C2> .

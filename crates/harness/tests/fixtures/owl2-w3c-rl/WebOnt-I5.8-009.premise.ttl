@@ -1,0 +1,3 @@
+_:ee24172b8adf17132da23c2bc075f226 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I5.8/premises009#p> a <http://www.w3.org/2002/07/owl#DatatypeProperty> ;
+	<http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#nonNegativeInteger> , <http://www.w3.org/2001/XMLSchema#nonPositiveInteger> .

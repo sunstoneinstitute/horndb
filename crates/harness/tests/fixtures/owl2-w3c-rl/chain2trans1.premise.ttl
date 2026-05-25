@@ -1,0 +1,7 @@
+<http://example.org/ontology> a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/ontology#p> a <http://www.w3.org/2002/07/owl#ObjectProperty> ;
+	<http://www.w3.org/2002/07/owl#propertyChainAxiom> _:b078a87d1c7927781a1e94aed7da5d0b .
+_:b078a87d1c7927781a1e94aed7da5d0b <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:ee80d8fde9cfce6fa2e2362d77804d0a ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/ontology#p> .
+_:ee80d8fde9cfce6fa2e2362d77804d0a <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/ontology#p> .

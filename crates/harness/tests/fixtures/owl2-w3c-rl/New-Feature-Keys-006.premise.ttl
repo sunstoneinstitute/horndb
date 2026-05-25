@@ -1,0 +1,9 @@
+_:b0d2c5d031556342c9a60c21c7be9e6a a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/GriffinFamilyMember> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/hasName> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+<http://example.org/GriffinFamilyMember> <http://www.w3.org/2002/07/owl#hasKey> _:c981f3827c838d56b7549aa2821bdd52 .
+_:c981f3827c838d56b7549aa2821bdd52 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/hasName> .
+<http://example.org/Peter> <http://example.org/hasName> "Peter" , "Kichwa-Tembo" ;
+	a <http://example.org/GriffinFamilyMember> .
+<http://example.org/hasName> a <http://www.w3.org/2002/07/owl#FunctionalProperty> .

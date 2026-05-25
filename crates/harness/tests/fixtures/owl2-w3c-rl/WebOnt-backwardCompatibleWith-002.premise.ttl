@@ -1,0 +1,2 @@
+<http://www.example.org/> a <http://www.w3.org/2002/07/owl#Ontology> .
+_:d45fb26b3f4cca0d9c7a763e253d53d7 <http://www.w3.org/2002/07/owl#backwardCompatibleWith> <http://www.example.org/> .

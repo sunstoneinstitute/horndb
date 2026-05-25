@@ -1,0 +1,3 @@
+_:b04bff2e49e305e53aa98b014d9224a9 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/imports/support011-A#Mortal> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/data#Socrates> a <http://www.w3.org/2002/03owlt/imports/support011-A#Mortal> .

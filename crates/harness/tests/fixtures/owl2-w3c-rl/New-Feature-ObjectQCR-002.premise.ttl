@@ -1,0 +1,11 @@
+_:b2ee83ad11b22a3cb37c57be3ecb070e a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/fatherOf> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/Woman> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/Peter> <http://example.org/fatherOf> <http://example.org/Stewie> , <http://example.org/Meg> .
+<http://example.org/Meg> a <http://example.org/Woman> .
+_:a4ef6ac15e007275b95d5735f9686ba4 a <http://www.w3.org/2002/07/owl#Restriction> ;
+	<http://www.w3.org/2002/07/owl#onProperty> <http://example.org/fatherOf> ;
+	<http://www.w3.org/2002/07/owl#maxQualifiedCardinality> "1"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger> ;
+	<http://www.w3.org/2002/07/owl#onClass> <http://example.org/Woman> .
+<http://example.org/Peter> a _:a4ef6ac15e007275b95d5735f9686ba4 .
+<http://example.org/Stewie> <http://www.w3.org/2002/07/owl#differentFrom> <http://example.org/Meg> .

@@ -62,6 +62,21 @@ enum Cmd {
         #[arg(long)]
         root: PathBuf,
     },
+    /// Extract the W3C OWL 2 RL profile aggregate (`profile-RL.rdf`)
+    /// into a harness-format `manifest.ttl` plus sibling
+    /// `<id>.premise.ttl` / `<id>.conclusion.ttl` files. The W3C file
+    /// embeds premise/conclusion ontologies as RDF/XML literals; this
+    /// subcommand materialises them as standalone Turtle files so the
+    /// in-tree manifest parser can read them.
+    ExtractOwl2Rl {
+        /// Path to `profile-RL.rdf` (the W3C aggregate).
+        #[arg(long)]
+        source: PathBuf,
+        /// Directory to write `manifest.ttl` and the sibling
+        /// `<id>.premise.ttl` / `<id>.conclusion.ttl` files into.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// List candidate test IDs for a profile from a manifest.
     ListCases {
         #[arg(long)]
@@ -208,6 +223,17 @@ fn real_main() -> Result<ExitCode> {
                 count += 1;
             }
             println!("converted {count} manifest.rdf → manifest.ttl");
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::ExtractOwl2Rl { source, out } => {
+            let stats = horndb_harness::owl2_rl_extract::extract(&source, &out)?;
+            println!(
+                "extracted owl2-rl: scanned={} entries={} ttl_files={} skipped={}",
+                stats.cases_scanned,
+                stats.entries_emitted,
+                stats.turtle_files_written,
+                stats.skipped_no_payload,
+            );
             Ok(ExitCode::SUCCESS)
         }
         Cmd::ListCases {

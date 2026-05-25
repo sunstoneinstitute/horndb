@@ -1,0 +1,16 @@
+_:e2657c10f2f1b513ebb0ba4457e64b0c a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/disjointWith/consistent009#A> a <http://www.w3.org/2002/07/owl#Class> .
+_:B a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/disjointWith/consistent009#B> a <http://www.w3.org/2002/07/owl#Class> .
+_:B <http://www.w3.org/2002/07/owl#intersectionOf> _:d1aa4f1fa1f804d51f6688c23c8e7a58 .
+_:d1aa4f1fa1f804d51f6688c23c8e7a58 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://www.w3.org/2002/03owlt/disjointWith/consistent009#B> .
+_:B <http://www.w3.org/2002/07/owl#disjointWith> <http://www.w3.org/2002/03owlt/disjointWith/consistent009#A> .
+_:C a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/disjointWith/consistent009#C> a <http://www.w3.org/2002/07/owl#Class> .
+_:C <http://www.w3.org/2002/07/owl#intersectionOf> _:e285138529dd85dc0a5fe410ca7b7a3e .
+_:e285138529dd85dc0a5fe410ca7b7a3e <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://www.w3.org/2002/03owlt/disjointWith/consistent009#C> .
+_:C <http://www.w3.org/2002/07/owl#disjointWith> <http://www.w3.org/2002/03owlt/disjointWith/consistent009#A> .
+<http://www.w3.org/2002/03owlt/disjointWith/consistent009#D> a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2002/07/owl#disjointWith> _:B , _:C , <http://www.w3.org/2002/03owlt/disjointWith/consistent009#A> .

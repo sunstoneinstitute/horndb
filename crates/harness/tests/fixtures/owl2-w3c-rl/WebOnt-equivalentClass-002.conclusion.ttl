@@ -1,0 +1,5 @@
+_:f94410a38b55e8ae10c4a1f4b5123636 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises002#Car> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises002#Automobile> a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2002/03owlt/equivalentClass/premises002#Car> .
+<http://www.w3.org/2002/03owlt/equivalentClass/premises002#Car> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://www.w3.org/2002/03owlt/equivalentClass/premises002#Automobile> .

@@ -1,0 +1,2 @@
+_:a566383db9c5b84e17fdecc5f12bcd28 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/Stewie> <http://example.org/hasAunt> <http://example.org/Carol> .

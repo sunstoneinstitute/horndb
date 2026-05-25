@@ -1,0 +1,9 @@
+_:acb95a0d028c188cac2fc8c3d59f2dbd a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://owl2.test/rules/ifp> a <http://www.w3.org/2002/07/owl#InverseFunctionalProperty> , <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://owl2.test/rules/Y2> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://owl2.test/rules/X2> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://owl2.test/rules/Y2> <http://owl2.test/rules/ifp> <http://owl2.test/rules/X2> .
+<http://owl2.test/rules/X1> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://owl2.test/rules/Y1> a <http://www.w3.org/2002/07/owl#NamedIndividual> ;
+	<http://www.w3.org/2002/07/owl#differentFrom> <http://owl2.test/rules/Y2> ;
+	<http://owl2.test/rules/ifp> <http://owl2.test/rules/X1> .

@@ -1,0 +1,4 @@
+_:bf2cd47c82307e6ab5f7addde3dd5808 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/a> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/b> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/a> <http://www.w3.org/2002/07/owl#equivalentClass> <http://example.org/b> .

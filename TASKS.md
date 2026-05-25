@@ -163,21 +163,38 @@ list when the corresponding Stage-1 slice is settled.
   corpus (1,920 ontologies), LDBC SPB SF3 + SF5 audited-style runs, LUBM
   + UOBM profile coverage, RDFox A/B (license review required for
   publication — see SPEC-01 risks).
-- [ ] **W3C OWL 2 RL test-suite ingestion pipeline.** Today
-  `harness/selected.toml` ships 18 hand-rolled rule-coverage fixtures
-  (see `harness/curation/owl2-rl-50.md`). The aspirational ≥50-case
-  W3C subset needs: (1) fix `scripts/fetch-w3c-suites.sh` — the
-  testOntology zip URL is 404, the live source is the file tree at
-  `https://www.w3.org/2009/11/owl-test/` (esp. `profile-RL.rdf`);
-  (2) handle single-quoted DOCTYPE entities in W3C RDF/XML (oxrdfio
-  rejects them); (3) write a one-shot extractor that turns each
-  `test:TestCase`'s embedded `rdfXmlPremiseOntology` /
-  `rdfXmlConclusionOntology` strings into sibling `.premise.ttl` /
-  `.conclusion.ttl` files plus a synthesized harness-format
-  `manifest.ttl`; (4) curate which W3C cases the Stage-1 engine can
-  pass (the engine is missing `cax-dw`, `prp-irp`, datatype rules,
-  and full bnode-existential matching — anything that exercises
-  those needs a `KNOWN-MANIFEST-BUGS.md` exclusion).
+- [x] **W3C OWL 2 RL test-suite ingestion pipeline.** *Done
+  (2026-05-25): all four ingestion steps shipped in one pass. (1)
+  `scripts/fetch-w3c-suites.sh` now pulls
+  `https://www.w3.org/2009/11/owl-test/profile-RL.rdf` (the live
+  per-profile aggregate). (2) DOCTYPE quoting handled by an in-memory
+  pre-substitution of the four `&rdf;` / `&rdfs;` / `&owl;` / `&test;`
+  entities before parsing — neither oxrdfio nor quick-xml is patched.
+  (3) New `crates/harness/src/owl2_rl_extract.rs` plus
+  `harness extract-owl2-rl --source --out` subcommand walks each
+  `<test:TestCase>` via `quick-xml`, decodes the embedded
+  `rdfXmlPremiseOntology` / `rdfXmlConclusionOntology` literals, and
+  re-serialises them as sibling `<id>.{premise,conclusion}.ttl` via
+  `oxrdfio` (`RdfFormat::RdfXml` → `RdfFormat::Turtle`); a synthesised
+  `manifest.ttl` is emitted alongside, mapping each W3C `test:*Test`
+  rdf:type to its `mf:*Test` counterpart so the existing manifest
+  parser handles it unchanged (W3C cases typed as both
+  `PositiveEntailmentTest` and `ConsistencyTest` produce two entries
+  with `-pe` / `-cons` suffixes). (4) The full survey was run against
+  `--features real-engine` and partitioned 91 W3C cases → 115
+  synthesised entries → **78 green, 37 red**. The green subset is
+  listed in a new `[suites.owl2-w3c-rl]` block in
+  `harness/selected.toml` (runner accepts `"owl2-w3c-rl"` as a
+  Suite::Owl2 alias); the red entries are documented in the rewritten
+  `harness/KNOWN-MANIFEST-BUGS.md`, grouped by the missing OWL 2 RL
+  rule (`prp-spo2`, `cax-dw`, `eq-diff*`, `prp-asyp`, `prp-irp`,
+  `prp-pdw`, `prp-key`, `prp-rfp`, `cls-maxqc*`, `owl:imports`,
+  `cls-int1` / `cls-uni` / `cls-hv1` interactions, `prp-fp` + sameAs).
+  `harness/curation/owl2-rl-50.md` gained a "W3C reality" section
+  with the ingestion totals and a re-run recipe.  End-to-end smoke
+  test: `harness --engine owlrl run` (with `--features real-engine`)
+  reports `passed=97 failed=0 skipped=0` (18 hand-rolled + 78 W3C
+  OWL 2 RL + 1 SPARQL ASK).*
 
 ## LOW — Operational
 

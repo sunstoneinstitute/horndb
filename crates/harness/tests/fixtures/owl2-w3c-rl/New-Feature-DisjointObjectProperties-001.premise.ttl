@@ -1,0 +1,6 @@
+_:c8aad68618744e3f237258666eb59db4 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/hasFather> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/hasMother> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/hasFather> <http://www.w3.org/2002/07/owl#propertyDisjointWith> <http://example.org/hasMother> .
+<http://example.org/Stewie> <http://example.org/hasFather> <http://example.org/Peter> ;
+	<http://example.org/hasMother> <http://example.org/Lois> .
