@@ -23,6 +23,29 @@ include = [
     "#subclass-entail",
     # Stub passes this (recognises explicit owl:Nothing membership).
     "#inconsistent-001",
+    # Rule-coverage fixtures for the SPEC-04 Stage-1 OWL 2 RL engine.
+    # Each name corresponds to the rules.toml id whose body+head it
+    # exercises in isolation. The aspirational ≥50-case W3C subset
+    # (see harness/curation/owl2-rl-50.md) ships in a follow-up once
+    # the W3C OWL 2 test suite is fetched and its embedded-ontology
+    # manifest format is wired through the harness.
+    "#scm-sco-transitive",
+    "#scm-spo-transitive",
+    "#eq-sym",
+    "#eq-trans",
+    "#prp-symp",
+    "#prp-trp",
+    "#prp-inv1",
+    "#prp-inv2",
+    "#prp-spo1",
+    "#prp-eqp1",
+    "#prp-dom",
+    "#prp-rng",
+    "#cax-eqc1",
+    "#cax-eqc2",
+    # Exercises the negative-entailment path: premise without an
+    # instance does not entail an instance-membership conclusion.
+    "#negative-subclass-no-instance",
 ]
 
 [suites.sparql11]

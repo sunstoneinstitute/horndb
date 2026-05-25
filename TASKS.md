@@ -163,6 +163,21 @@ list when the corresponding Stage-1 slice is settled.
   corpus (1,920 ontologies), LDBC SPB SF3 + SF5 audited-style runs, LUBM
   + UOBM profile coverage, RDFox A/B (license review required for
   publication — see SPEC-01 risks).
+- [ ] **W3C OWL 2 RL test-suite ingestion pipeline.** Today
+  `harness/selected.toml` ships 18 hand-rolled rule-coverage fixtures
+  (see `harness/curation/owl2-rl-50.md`). The aspirational ≥50-case
+  W3C subset needs: (1) fix `scripts/fetch-w3c-suites.sh` — the
+  testOntology zip URL is 404, the live source is the file tree at
+  `https://www.w3.org/2009/11/owl-test/` (esp. `profile-RL.rdf`);
+  (2) handle single-quoted DOCTYPE entities in W3C RDF/XML (oxrdfio
+  rejects them); (3) write a one-shot extractor that turns each
+  `test:TestCase`'s embedded `rdfXmlPremiseOntology` /
+  `rdfXmlConclusionOntology` strings into sibling `.premise.ttl` /
+  `.conclusion.ttl` files plus a synthesized harness-format
+  `manifest.ttl`; (4) curate which W3C cases the Stage-1 engine can
+  pass (the engine is missing `cax-dw`, `prp-irp`, datatype rules,
+  and full bnode-existential matching — anything that exercises
+  those needs a `KNOWN-MANIFEST-BUGS.md` exclusion).
 
 ## LOW — Operational
 

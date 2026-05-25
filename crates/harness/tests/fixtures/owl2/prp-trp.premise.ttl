@@ -1,0 +1,6 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix ex:  <http://example.org/> .
+
+ex:p a owl:TransitiveProperty .
+ex:x ex:p ex:y .
+ex:y ex:p ex:z .

@@ -224,7 +224,11 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(report.outcomes.len(), 3, "all three OWL2 fixtures run");
+        assert_eq!(
+            report.outcomes.len(),
+            cases.len(),
+            "one outcome per case in the OWL 2 fixture manifest",
+        );
 
         let by_id = |id_suffix: &str| -> &Outcome {
             report
@@ -234,8 +238,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing outcome for {id_suffix}"))
         };
 
+        // Stub's contract (see crate::stub): entails returns true iff the
+        // conclusion is empty, is_consistent flags only explicit
+        // owl:Nothing membership. So:
+        //  - trivial-entail-true (empty conclusion)         → Passed
+        //  - subclass-entail (non-empty conclusion)         → Failed
+        //  - inconsistent-001 (explicit owl:Nothing)        → Passed
+        //  - negative-subclass-no-instance (negative ent.)  → Passed
+        //    (stub's "not entailed" is the *correct* answer for the
+        //    negative-entailment test, even though the stub got there
+        //    by knowing nothing.)
         assert_eq!(by_id("trivial-entail-true").status, Status::Passed);
         assert_eq!(by_id("subclass-entail").status, Status::Failed);
         assert_eq!(by_id("inconsistent-001").status, Status::Passed);
+        assert_eq!(
+            by_id("negative-subclass-no-instance").status,
+            Status::Passed
+        );
     }
 }

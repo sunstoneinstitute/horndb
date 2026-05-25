@@ -6,6 +6,21 @@
         <#trivial-entail-true>
         <#subclass-entail>
         <#inconsistent-001>
+        <#scm-sco-transitive>
+        <#scm-spo-transitive>
+        <#eq-sym>
+        <#eq-trans>
+        <#prp-symp>
+        <#prp-trp>
+        <#prp-inv1>
+        <#prp-inv2>
+        <#prp-spo1>
+        <#prp-eqp1>
+        <#prp-dom>
+        <#prp-rng>
+        <#cax-eqc1>
+        <#cax-eqc2>
+        <#negative-subclass-no-instance>
     ) .
 
 <#trivial-entail-true> a mf:PositiveEntailmentTest ;
@@ -21,3 +36,78 @@
 <#inconsistent-001> a mf:InconsistencyTest ;
     mf:name "explicit owl:Nothing membership is inconsistent" ;
     mf:action <inconsistent-001.premise.ttl> .
+
+<#scm-sco-transitive> a mf:PositiveEntailmentTest ;
+    mf:name "scm-sco: rdfs:subClassOf is transitive" ;
+    mf:action <scm-sco-transitive.premise.ttl> ;
+    mf:result <scm-sco-transitive.conclusion.ttl> .
+
+<#scm-spo-transitive> a mf:PositiveEntailmentTest ;
+    mf:name "scm-spo: rdfs:subPropertyOf is transitive" ;
+    mf:action <scm-spo-transitive.premise.ttl> ;
+    mf:result <scm-spo-transitive.conclusion.ttl> .
+
+<#eq-sym> a mf:PositiveEntailmentTest ;
+    mf:name "eq-sym: owl:sameAs is symmetric" ;
+    mf:action <eq-sym.premise.ttl> ;
+    mf:result <eq-sym.conclusion.ttl> .
+
+<#eq-trans> a mf:PositiveEntailmentTest ;
+    mf:name "eq-trans: owl:sameAs is transitive" ;
+    mf:action <eq-trans.premise.ttl> ;
+    mf:result <eq-trans.conclusion.ttl> .
+
+<#prp-symp> a mf:PositiveEntailmentTest ;
+    mf:name "prp-symp: owl:SymmetricProperty exchanges subject/object" ;
+    mf:action <prp-symp.premise.ttl> ;
+    mf:result <prp-symp.conclusion.ttl> .
+
+<#prp-trp> a mf:PositiveEntailmentTest ;
+    mf:name "prp-trp: owl:TransitiveProperty closes a chain" ;
+    mf:action <prp-trp.premise.ttl> ;
+    mf:result <prp-trp.conclusion.ttl> .
+
+<#prp-inv1> a mf:PositiveEntailmentTest ;
+    mf:name "prp-inv1: owl:inverseOf propagates p to q (forward)" ;
+    mf:action <prp-inv1.premise.ttl> ;
+    mf:result <prp-inv1.conclusion.ttl> .
+
+<#prp-inv2> a mf:PositiveEntailmentTest ;
+    mf:name "prp-inv2: owl:inverseOf propagates q to p (backward)" ;
+    mf:action <prp-inv2.premise.ttl> ;
+    mf:result <prp-inv2.conclusion.ttl> .
+
+<#prp-spo1> a mf:PositiveEntailmentTest ;
+    mf:name "prp-spo1: subPropertyOf lifts assertions to the super-property" ;
+    mf:action <prp-spo1.premise.ttl> ;
+    mf:result <prp-spo1.conclusion.ttl> .
+
+<#prp-eqp1> a mf:PositiveEntailmentTest ;
+    mf:name "prp-eqp1: owl:equivalentProperty propagates p-assertions to q" ;
+    mf:action <prp-eqp1.premise.ttl> ;
+    mf:result <prp-eqp1.conclusion.ttl> .
+
+<#prp-dom> a mf:PositiveEntailmentTest ;
+    mf:name "prp-dom: rdfs:domain types the subject" ;
+    mf:action <prp-dom.premise.ttl> ;
+    mf:result <prp-dom.conclusion.ttl> .
+
+<#prp-rng> a mf:PositiveEntailmentTest ;
+    mf:name "prp-rng: rdfs:range types the object" ;
+    mf:action <prp-rng.premise.ttl> ;
+    mf:result <prp-rng.conclusion.ttl> .
+
+<#cax-eqc1> a mf:PositiveEntailmentTest ;
+    mf:name "cax-eqc1: owl:equivalentClass propagates type-A to type-B" ;
+    mf:action <cax-eqc1.premise.ttl> ;
+    mf:result <cax-eqc1.conclusion.ttl> .
+
+<#cax-eqc2> a mf:PositiveEntailmentTest ;
+    mf:name "cax-eqc2: owl:equivalentClass propagates type-B to type-A" ;
+    mf:action <cax-eqc2.premise.ttl> ;
+    mf:result <cax-eqc2.conclusion.ttl> .
+
+<#negative-subclass-no-instance> a mf:NegativeEntailmentTest ;
+    mf:name "subClassOf alone does not entail an instance membership" ;
+    mf:action <negative-subclass-no-instance.premise.ttl> ;
+    mf:result <negative-subclass-no-instance.conclusion.ttl> .

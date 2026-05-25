@@ -13,10 +13,20 @@ fn fixture(rel: &str) -> PathBuf {
 #[test]
 fn parses_owl2_fixture_manifest() {
     let cases = manifest::parse(&fixture("owl2/manifest.ttl"), Suite::Owl2).unwrap();
-    assert_eq!(cases.len(), 3);
+    // Three Stage-0 smoke fixtures plus the rule-coverage expansion
+    // (see harness/selected.toml). Bumping this count is intentional
+    // when fixtures are added.
+    assert!(
+        cases.len() >= 16,
+        "expected at least 16 owl2 fixtures, got {}",
+        cases.len(),
+    );
     assert!(cases
         .iter()
         .any(|c| matches!(c.kind, TestKind::PositiveEntailment { .. })));
+    assert!(cases
+        .iter()
+        .any(|c| matches!(c.kind, TestKind::NegativeEntailment { .. })));
     assert!(cases
         .iter()
         .any(|c| matches!(c.kind, TestKind::Inconsistency { .. })));
