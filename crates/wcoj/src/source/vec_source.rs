@@ -30,12 +30,14 @@ impl VecTripleSource {
 }
 
 impl TripleSource for VecTripleSource {
-    fn iter(&self, ord: Ordering) -> Result<Box<dyn OrderedTripleIter + '_>> {
+    type Iter<'a> = VecIter<'a>;
+
+    fn iter(&self, ord: Ordering) -> Result<VecIter<'_>> {
         let data = self
             .sorted
             .get(&ord)
             .ok_or(WcojError::OrderingUnavailable(ord))?;
-        Ok(Box::new(VecIter::new(data)))
+        Ok(VecIter::new(data))
     }
 
     fn total_triples(&self) -> usize {
@@ -46,7 +48,7 @@ impl TripleSource for VecTripleSource {
 /// Cursor state: at each depth we hold a `(lo, hi)` range into `data` of rows
 /// whose prefix matches the chosen path so far. `cursor[depth]` is the index
 /// of the next row to return at `depth`.
-struct VecIter<'a> {
+pub struct VecIter<'a> {
     data: &'a [(TermId, TermId, TermId)],
     /// (lo, hi) per depth — `hi` is exclusive.
     range: [(usize, usize); 3],
@@ -55,7 +57,7 @@ struct VecIter<'a> {
 }
 
 impl<'a> VecIter<'a> {
-    fn new(data: &'a [(TermId, TermId, TermId)]) -> Self {
+    pub(crate) fn new(data: &'a [(TermId, TermId, TermId)]) -> Self {
         let full = (0usize, data.len());
         Self {
             data,
@@ -76,6 +78,7 @@ impl<'a> VecIter<'a> {
 }
 
 impl<'a> OrderedTripleIter for VecIter<'a> {
+    #[inline]
     fn peek(&self, depth: u8) -> Option<TermId> {
         let (lo, hi) = self.range[depth as usize];
         let c = self.cursor[depth as usize].max(lo);
@@ -85,14 +88,18 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         Some(self.col(c, depth))
     }
 
+    #[inline]
     fn seek(&mut self, depth: u8, value: TermId) {
         let d = depth as usize;
         let (lo, hi) = self.range[d];
         let start = self.cursor[d].max(lo);
-        // Binary search the suffix `data[start..hi]` for the first row whose
-        // `depth` column is ≥ `value`. Because rows share a common prefix at
-        // depths < `depth`, the `depth` column is monotone non-decreasing
-        // within `[lo, hi)`.
+        // Binary search the suffix `data[start..hi]` for the first row
+        // whose `depth` column is ≥ `value`. Because rows share a common
+        // prefix at depths < `depth`, the `depth` column is monotone
+        // non-decreasing within `[lo, hi)`. `partition_point` is faster
+        // than the obvious gallop+bisect hybrid here because the closure
+        // is auto-vectorised into a branchless SIMD comparison on the
+        // contiguous `Vec<(u64, u64, u64)>` storage.
         let slice = &self.data[start..hi];
         let off = slice.partition_point(|row| {
             let v = match depth {
@@ -106,6 +113,7 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         self.cursor[d] = start + off;
     }
 
+    #[inline]
     fn open_level(&mut self, depth: u8) {
         assert!((1..=2).contains(&depth), "open_level depth must be 1 or 2");
         let parent = (depth - 1) as usize;
@@ -132,6 +140,7 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         self.cursor[depth as usize] = new_lo;
     }
 
+    #[inline]
     fn up(&mut self, depth: u8) {
         let d = depth as usize;
         if d == 0 {
@@ -142,5 +151,11 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
             self.range[d] = (0, 0);
             self.cursor[d] = 0;
         }
+    }
+
+    #[inline]
+    fn rewind(&mut self, depth: u8) {
+        let d = depth as usize;
+        self.cursor[d] = self.range[d].0;
     }
 }

@@ -9,8 +9,8 @@
 use std::collections::BTreeSet;
 
 use crate::ids::{Ordering, Triple};
-use crate::source::vec_source::VecTripleSource;
-use crate::source::{OrderedTripleIter, TripleSource};
+use crate::source::vec_source::{VecIter, VecTripleSource};
+use crate::source::TripleSource;
 
 pub struct SyntheticGraph {
     inner: VecTripleSource,
@@ -48,7 +48,8 @@ impl SyntheticGraph {
 }
 
 impl TripleSource for SyntheticGraph {
-    fn iter(&self, ord: Ordering) -> crate::error::Result<Box<dyn OrderedTripleIter + '_>> {
+    type Iter<'a> = VecIter<'a>;
+    fn iter(&self, ord: Ordering) -> crate::error::Result<VecIter<'_>> {
         self.inner.iter(ord)
     }
     fn total_triples(&self) -> usize {

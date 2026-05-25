@@ -52,19 +52,56 @@ here in the same commit.
 
 ## HIGH — Performance gaps
 
-- [ ] **SPEC-03 WCOJ is 1.6× *slower* than binary-hash on the 4-cycle bench.**
-  - Acceptance criterion #2 in `specs/SPEC-03-query-engine.md` requires
-    ≥10× speedup; measured ~12.5s vs ~7.6s on a 10⁶-edge synthetic graph.
-  - Root causes diagnosed by the implementation agent:
-    1. `VecTripleSource::seek` is `partition_point` over the full physical
-       level range — should index per-level into a sorted view to get O(log
-       k) seek where k is the local subtree size.
-    2. `Box<dyn TrieIterator>` virtual dispatch dominates the inner loop —
-       consider an enum dispatch or static generics.
-    3. `refresh(depth)` does `up + open_level` on every re-entry — should
-       cache the cursor state and rewind in place.
-  - Address after the correctness gap above (so the fuzzer can validate the
-    rewrite).
+- [ ] **SPEC-03 WCOJ 4-cycle bench is no longer in regression, but still
+  far from the ≥10× acceptance gate.** *Partial: the original
+  "1.6× slower than binary-hash" was driven by per-call allocations and
+  vtable dispatch; both are now gone. Current measured numbers
+  (2026-05-25, reference workstation, criterion 0.5):*
+
+  | Variant | Mean | 95% CI |
+  |---|---|---|
+  | WCOJ | **3.55 s** | [3.50, 3.59] |
+  | Binary-hash | **4.07 s** | [4.03, 4.11] |
+  | WCOJ vs binary-hash | **1.15× faster** | — |
+
+  *Done in this pass (`crates/wcoj/src/{executor/wcoj.rs,trie/source_iter.rs,source/{mod,vec_source,synthetic}.rs}`):*
+    1. `Box<dyn TrieIterator>` and `Box<dyn OrderedTripleIter>` both
+       removed — `WcojExecutor`, `BatchIter`, `BinaryHashExecutor`,
+       `PatternTrieIter`, and `AdaptiveIter` are now generic over the
+       source's `TripleSource::Iter<'_>` (GAT). Hot-path peek/seek
+       chains inline.
+    2. Per-prime allocations (clone of `contributing[d]`, intermediate
+       `sorted: Vec<(usize, TermId)>`, final `sorted_iter_idxs` Vec)
+       hoisted into `BatchIter::{sorted_idxs, prime_scratch}` and
+       reused across descents. Saves 3 small Vec allocs per leapfrog
+       prime on every depth.
+    3. `find_match`'s per-iteration `sorted_idxs.clone()` removed —
+       indices are read out by name (`sorted_idxs[d][prev/p]`).
+    4. `step()`'s `carry_at[d].clone()` and `top_at[d].clone()` removed —
+       replaced with disjoint-field borrows of `self.iters`.
+    5. `AdaptiveIter::refresh_for` no longer round-trips through
+       `inner.up + inner.open_level`; rewinds the cursor in place via
+       a new `OrderedTripleIter::rewind` (default impl falls back, VecIter
+       overrides to `cursor[d] = range[d].0`).
+    6. `#[inline]` on the hot-path peek/seek/up/rewind/phys_for surface
+       so monomorphisation produces inlined call chains.
+
+  *Tried and reverted: a galloping-then-bisect `seek` in `VecIter`. The
+  hand-rolled loop disabled the auto-vectorised closure inside
+  `partition_point` and net-regressed by ~9% (3.34 s → 3.63 s). Note in
+  case anyone tries it again.*
+
+  *Still outstanding to hit the ≥10× gate (acceptance criterion #2 in
+  `docs/specs/SPEC-03-query-engine.md`):* the dominant remaining cost
+  is **memory bandwidth on the materialised `VecTripleSource`** — three
+  `u64`s per row, two distinct orderings (Pso + Pos) walked
+  simultaneously, total working set ≈48 MB, well above L3 on the
+  reference workstation. Closing the gap needs storage-side work
+  (compressed columnar storage with bitmap or delta encoding, SPEC-02
+  F1 — see [SPEC-02 acceptance #3](docs/specs/SPEC-02-storage.md))
+  rather than further executor tuning; the cardinality estimator + plan
+  shape are not the bottleneck. Re-open this row when SPEC-02 ships its
+  compressed warm tier and the bench can be re-pointed at it.
 
 ## HIGH — RDF 1.2 (triple terms) support
 

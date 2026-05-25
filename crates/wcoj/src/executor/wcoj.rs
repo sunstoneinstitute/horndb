@@ -7,8 +7,8 @@
 //!
 //! The recursion is implemented with an explicit per-depth state stack so
 //! cancellation polling stays cheap. The leapfrog at each depth is inlined
-//! against `&mut [Box<dyn TrieIterator>]` rather than owning the iters, to
-//! avoid hot-path Box allocations.
+//! against `&mut [AdaptiveIter]` (concrete, not `dyn TrieIterator`) so the
+//! peek/seek/open/up calls on the hot path are statically dispatched.
 
 use std::sync::Arc;
 
@@ -20,24 +20,19 @@ use crate::error::Result;
 use crate::ids::TermId;
 use crate::pattern::{Bgp, TriplePattern};
 use crate::plan::ExecutionPlan;
-use crate::source::TripleSource;
+use crate::source::{OrderedTripleIter, TripleSource};
 use crate::trie::source_iter::PatternTrieIter;
 use crate::trie::TrieIterator;
 
-pub struct WcojExecutor<'src> {
-    source: &'src dyn TripleSource,
+pub struct WcojExecutor<'src, S: TripleSource + ?Sized + 'src> {
+    source: &'src S,
     bgp: Arc<Bgp>,
     plan: Arc<ExecutionPlan>,
     cancel: CancelToken,
 }
 
-impl<'src> WcojExecutor<'src> {
-    pub fn new(
-        source: &'src dyn TripleSource,
-        bgp: &Bgp,
-        plan: &ExecutionPlan,
-        cancel: CancelToken,
-    ) -> Self {
+impl<'src, S: TripleSource + ?Sized + 'src> WcojExecutor<'src, S> {
+    pub fn new(source: &'src S, bgp: &Bgp, plan: &ExecutionPlan, cancel: CancelToken) -> Self {
         Self {
             source,
             bgp: Arc::new(bgp.clone()),
@@ -51,7 +46,7 @@ impl<'src> WcojExecutor<'src> {
     // sites; we deliberately do not implement `IntoIterator` so the
     // executor remains usable without pulling that trait into scope.
     #[allow(clippy::should_implement_trait)]
-    pub fn into_iter(self) -> BatchIter<'src> {
+    pub fn into_iter(self) -> BatchIter<'src, S> {
         BatchIter::new(self)
     }
 }
@@ -60,42 +55,39 @@ impl<'src> WcojExecutor<'src> {
 /// global depth* even when that global depth maps to a local depth specific
 /// to the iter. The wrapper translates global-depth peek/seek/open/up calls
 /// into the iter's local-depth calls.
-struct AdaptiveIter<'src> {
-    inner: PatternTrieIter<'src>,
+struct AdaptiveIter<I: OrderedTripleIter> {
+    inner: PatternTrieIter<I>,
     /// `g_to_l[global_depth]` = Some(local_depth) if this pattern mentions
     /// the variable at that global depth.
     g_to_l: Vec<Option<u8>>,
 }
 
-impl<'src> AdaptiveIter<'src> {
+impl<I: OrderedTripleIter> AdaptiveIter<I> {
+    #[inline]
     fn local_for(&self, global_depth: u8) -> u8 {
         self.g_to_l[global_depth as usize]
             .expect("AdaptiveIter queried at a non-contributing global depth")
     }
 
-    /// Re-establish the cursor at `local_for(global_depth)` under whatever
-    /// the current parent state is. The caller guarantees that
-    /// `inner.open_level(prev_local)` has already been called (so the
-    /// parent's cursor is positioned). We `inner.up(local)` to clear, then
-    /// `inner.open_level(prev_local)` to re-establish. Or, since
-    /// `inner.up(local)` only touches phys levels [phys[prev_local]+1 .. phys[local]],
-    /// and we then need to walk those same phys levels with open_level
-    /// again, we instead call `inner.open_level(prev_local)` directly.
+    /// Re-establish the cursor at `local_for(global_depth)` under the
+    /// current parent state. The range at the corresponding phys-level
+    /// was last set when an ancestor descent called `open_level` on this
+    /// iter, and that ancestor binding hasn't changed since (otherwise
+    /// `up(local)` would have torn the range down). So all we need to do
+    /// is rewind the cursor to `range[phys].0` — no recomputation of the
+    /// range itself.
     fn refresh_for(&mut self, global_depth: u8) {
         let local = self.local_for(global_depth);
         if local == 0 {
             // Top contribution is at this depth — handled by `reset()`.
             return;
         }
-        // Undo the descent into local, then redo it. This rewinds the
-        // cursor at the local-depth level so peek(local) returns the
-        // first value under the current ancestor binding.
-        self.inner.up(local);
-        self.inner.open_level(local - 1);
+        self.inner.rewind_local(local);
     }
 }
 
-impl<'src> TrieIterator for AdaptiveIter<'src> {
+impl<I: OrderedTripleIter> TrieIterator for AdaptiveIter<I> {
+    #[inline]
     fn arity(&self) -> u8 {
         self.inner.arity()
     }
@@ -105,13 +97,16 @@ impl<'src> TrieIterator for AdaptiveIter<'src> {
     fn refresh(&mut self, global_depth: u8) {
         self.refresh_for(global_depth);
     }
+    #[inline]
     fn peek(&self, depth: u8) -> Option<TermId> {
         self.inner.peek(self.local_for(depth))
     }
+    #[inline]
     fn seek(&mut self, depth: u8, value: TermId) {
         let local = self.local_for(depth);
         self.inner.seek(local, value);
     }
+    #[inline]
     fn open_level(&mut self, depth: u8) {
         let local = self.local_for(depth);
         self.inner.open_level(local);
@@ -145,12 +140,6 @@ struct DepthState {
     /// running maximum key", so `target` in the loop is always the true
     /// global max across all `k` iters.
     p: usize,
-    /// `sorted_idxs[i]` = index into `contributing[depth]` of the `i`-th
-    /// iter in non-decreasing key order at prime time. The leapfrog
-    /// operates circularly over this list — sorting on prime is what
-    /// keeps the "iter[p-1] holds the max, others are ≤ max" invariant
-    /// after every seek+rotate. See Veldhuizen, *Leapfrog Triejoin*, 2014.
-    sorted_idxs: Vec<usize>,
     /// True before the first call advances iters.
     primed: bool,
     /// True once the leapfrog is exhausted at this depth.
@@ -165,7 +154,6 @@ impl DepthState {
     fn fresh() -> Self {
         Self {
             p: 0,
-            sorted_idxs: Vec::new(),
             primed: false,
             done: false,
             has_descended: false,
@@ -173,12 +161,16 @@ impl DepthState {
     }
 }
 
-pub struct BatchIter<'src> {
-    exec: WcojExecutor<'src>,
+pub struct BatchIter<'src, S: TripleSource + ?Sized + 'src> {
+    exec: WcojExecutor<'src, S>,
     builder: BindingBatchBuilder,
     /// One iter per BGP pattern, in BGP order. Always present; never
     /// moved (in contrast to the original LeapfrogJoin ownership scheme).
-    iters: Vec<Box<dyn TrieIterator + 'src>>,
+    /// Concrete `AdaptiveIter` (not `Box<dyn TrieIterator>`) so the
+    /// peek/seek calls on the leapfrog hot path are statically dispatched
+    /// — both the outer `AdaptiveIter` impl *and* the inner
+    /// `PatternTrieIter` → source-iter dispatch.
+    iters: Vec<AdaptiveIter<S::Iter<'src>>>,
     /// For each variable depth: indices of `iters` that mention this var.
     contributing: Vec<Vec<usize>>,
     /// For each variable depth `d`: indices of iters that mention `d` AND
@@ -195,6 +187,16 @@ pub struct BatchIter<'src> {
     carry_at: Vec<Vec<usize>>,
     /// Per-depth state. `None` ⇒ not yet entered at this depth.
     state: Vec<Option<DepthState>>,
+    /// Per-depth permutation of `contributing[depth]` indices, sorted by
+    /// peeked key at prime time so the leapfrog invariant ("iter at
+    /// `sorted_idxs[(p+k-1) % k]` holds the running max") holds entering
+    /// `find_match`. Hoisted out of `DepthState` so its `Vec` capacity
+    /// survives the per-descent state reset and is reused on re-prime.
+    sorted_idxs: Vec<Vec<usize>>,
+    /// Reusable scratch buffer for the prime-time sort of contributing
+    /// iters by current peek. One buffer shared across all depths
+    /// because priming is not re-entrant.
+    prime_scratch: Vec<(usize, TermId)>,
     /// Current binding per depth.
     binding: Vec<TermId>,
     depth: u8,
@@ -202,11 +204,11 @@ pub struct BatchIter<'src> {
     pending_error: Option<crate::error::WcojError>,
 }
 
-impl<'src> BatchIter<'src> {
-    fn new(exec: WcojExecutor<'src>) -> Self {
+impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
+    fn new(exec: WcojExecutor<'src, S>) -> Self {
         let n_vars = exec.plan.var_order.len();
         let builder = BindingBatchBuilder::new(exec.plan.var_order.clone());
-        let mut iters: Vec<Box<dyn TrieIterator + 'src>> = Vec::new();
+        let mut iters: Vec<AdaptiveIter<S::Iter<'src>>> = Vec::new();
         let mut pending_error = None;
 
         // Ground-pattern pre-check: any all-bound pattern must already
@@ -278,7 +280,7 @@ impl<'src> BatchIter<'src> {
                                 local += 1;
                             }
                         }
-                        iters.push(Box::new(AdaptiveIter { inner, g_to_l }));
+                        iters.push(AdaptiveIter { inner, g_to_l });
                     }
                     Err(e) => {
                         pending_error = Some(e);
@@ -347,6 +349,10 @@ impl<'src> BatchIter<'src> {
 
         let state = (0..n_vars).map(|_| None).collect();
         let binding = vec![0; n_vars];
+        let sorted_idxs = (0..n_vars)
+            .map(|d| Vec::with_capacity(contributing[d].len()))
+            .collect();
+        let max_k = contributing.iter().map(|c| c.len()).max().unwrap_or(0);
 
         Self {
             exec,
@@ -357,6 +363,8 @@ impl<'src> BatchIter<'src> {
             top_at,
             carry_at,
             state,
+            sorted_idxs,
+            prime_scratch: Vec::with_capacity(max_k),
             binding,
             depth: 0,
             finished,
@@ -368,99 +376,104 @@ impl<'src> BatchIter<'src> {
     /// value (Some) or is exhausted (None). Inline implementation operating
     /// directly on `iters` indexed by `contributing[depth]`.
     fn leapfrog_next(&mut self, depth: u8) -> Option<TermId> {
-        let st = self.state[depth as usize].as_mut().unwrap();
-        let k = self.contributing[depth as usize].len();
-        if st.done || k == 0 {
-            st.done = true;
+        let d = depth as usize;
+        let k = self.contributing[d].len();
+        let (done, primed, p) = {
+            let st = self.state[d].as_ref().unwrap();
+            (st.done, st.primed, st.p)
+        };
+        if done || k == 0 {
+            self.state[d].as_mut().unwrap().done = true;
             return None;
         }
 
-        if !st.primed {
-            st.primed = true;
-            // Initial peek check: any iter exhausted => no match.
-            // Also sort the contributing iters by their current peek so the
-            // classic leapfrog invariant holds: `sorted_idxs` lists iters
-            // in non-decreasing key order, `p` starts at the smallest, and
-            // `sorted_idxs[(p + k - 1) % k]` (i.e. `prev`) always holds the
-            // running maximum. Without the sort, a priming snapshot like
-            // [A=2, B=14, C=2] would falsely report a match of 2 — the
-            // loop only checks `iter[p]` against `iter[prev]`, and would
-            // never compare B against the others.
-            let mut sorted: Vec<(usize, TermId)> = Vec::with_capacity(k);
-            let idxs_snapshot = self.contributing[depth as usize].clone();
-            for &i in &idxs_snapshot {
+        if !primed {
+            // Sort the contributing iters by their current peek so the
+            // classic leapfrog invariant holds: `sorted_idxs[d]` lists
+            // iters in non-decreasing key order, `p` starts at the
+            // smallest, and `sorted_idxs[d][(p + k - 1) % k]` (i.e.
+            // `prev`) always holds the running maximum. Without the
+            // sort, a priming snapshot like [A=2, B=14, C=2] would
+            // falsely report a match of 2 — the loop only compares
+            // `iter[p]` against `iter[prev]`, and would never discover B
+            // holds a value the others can't reach.
+            self.prime_scratch.clear();
+            for j in 0..k {
+                let i = self.contributing[d][j];
                 match self.iters[i].peek(depth) {
                     None => {
-                        let st = self.state[depth as usize].as_mut().unwrap();
+                        let st = self.state[d].as_mut().unwrap();
                         st.done = true;
+                        st.primed = true;
                         return None;
                     }
-                    Some(v) => sorted.push((i, v)),
+                    Some(v) => self.prime_scratch.push((i, v)),
                 }
             }
-            sorted.sort_by_key(|&(_, v)| v);
-            let sorted_iter_idxs: Vec<usize> = sorted.into_iter().map(|(i, _)| i).collect();
-            let st = self.state[depth as usize].as_mut().unwrap();
-            st.sorted_idxs = sorted_iter_idxs;
+            // k is small (one entry per pattern at this depth, typically
+            // 2-4), so sort_by_key over the inline-allocated scratch is
+            // cheap. Reuses `prime_scratch`'s capacity across calls.
+            self.prime_scratch.sort_by_key(|&(_, v)| v);
+            let sorted = &mut self.sorted_idxs[d];
+            sorted.clear();
+            for &(i, _) in &self.prime_scratch {
+                sorted.push(i);
+            }
+            let st = self.state[d].as_mut().unwrap();
+            st.primed = true;
             st.p = 0;
             return self.find_match(depth);
         }
 
         // Subsequent call: advance the iter that just produced the match
         // past it, then re-leapfrog. Use `sorted_idxs` so the leapfrog
-        // invariant (iter at `prev` holds the max) is preserved across
-        // calls.
-        let cur_iter = st.sorted_idxs[st.p];
+        // invariant (iter at `prev` holds the max) is preserved.
+        let cur_iter = self.sorted_idxs[d][p];
         let cur = self.iters[cur_iter].peek(depth).unwrap();
         self.iters[cur_iter].seek(depth, cur.wrapping_add(1));
         if self.iters[cur_iter].peek(depth).is_none() {
-            self.state[depth as usize].as_mut().unwrap().done = true;
+            self.state[d].as_mut().unwrap().done = true;
             return None;
         }
-        let new_p = (st.p + 1) % k;
-        self.state[depth as usize].as_mut().unwrap().p = new_p;
+        self.state[d].as_mut().unwrap().p = (p + 1) % k;
         self.find_match(depth)
     }
 
     fn find_match(&mut self, depth: u8) -> Option<TermId> {
-        let k = self.contributing[depth as usize].len();
+        let d = depth as usize;
+        let k = self.contributing[d].len();
         loop {
-            let (sorted_idxs, p) = {
-                let st = self.state[depth as usize].as_ref().unwrap();
-                (st.sorted_idxs.clone(), st.p)
-            };
+            // Loop invariant (maintained by sorting on prime and by each
+            // successful seek making `iter[p]` the new max):
+            // `iter[sorted_idxs[d][p+i]]` are non-decreasing in `i` mod k,
+            // with the max at `iter[sorted_idxs[d][prev]]`. Hence
+            // `iter[p].key == iter[prev].key` implies all iters agree.
+            let p = self.state[d].as_ref().unwrap().p;
             let prev = (p + k - 1) % k;
-            let target = self.iters[sorted_idxs[prev]].peek(depth)?;
-            let cur = self.iters[sorted_idxs[p]].peek(depth)?;
+            let iter_prev = self.sorted_idxs[d][prev];
+            let iter_p = self.sorted_idxs[d][p];
+            let target = self.iters[iter_prev].peek(depth)?;
+            let cur = self.iters[iter_p].peek(depth)?;
             if cur == target {
-                // Loop invariant (maintained by sorting on prime and by
-                // each successful seek making `iter[p]` the new max):
-                // `iter[sorted_idxs[p+i]]` are non-decreasing in `i` mod k,
-                // with the max at `iter[sorted_idxs[prev]]`. Hence
-                // `iter[p].key == iter[prev].key` implies all iters at the
-                // same key.
                 return Some(cur);
             }
             // Seek iter[p] forward to at least `target`. If the resulting
-            // peek is *less than* target (impossible if seek honors >= semantics),
-            // bail to avoid infinite loops.
-            self.iters[sorted_idxs[p]].seek(depth, target);
-            let new_cur = self.iters[sorted_idxs[p]].peek(depth);
-            match new_cur {
+            // peek is *less than* target (impossible if seek honors >=
+            // semantics), bail to avoid infinite loops.
+            self.iters[iter_p].seek(depth, target);
+            match self.iters[iter_p].peek(depth) {
                 None => {
-                    self.state[depth as usize].as_mut().unwrap().done = true;
+                    self.state[d].as_mut().unwrap().done = true;
                     return None;
                 }
                 Some(v) if v < target => {
-                    // Seek didn't advance — this iter's source violates the
-                    // seek contract. Treat as exhausted.
-                    self.state[depth as usize].as_mut().unwrap().done = true;
+                    // Seek violated >= contract; treat as exhausted.
+                    self.state[d].as_mut().unwrap().done = true;
                     return None;
                 }
                 Some(_) => {}
             }
-            let new_p = (p + 1) % k;
-            self.state[depth as usize].as_mut().unwrap().p = new_p;
+            self.state[d].as_mut().unwrap().p = (p + 1) % k;
         }
     }
 
@@ -493,11 +506,11 @@ impl<'src> BatchIter<'src> {
                 // The refresh is also a no-op on first entry — open_level
                 // followed by up-then-open_level just re-reads the same
                 // range, leaving cursor[..] at lo.
-                let carry: Vec<usize> = self.carry_at[self.depth as usize].clone();
-                for i in carry {
-                    self.iters[i].refresh(self.depth);
+                let depth = self.depth;
+                for &i in &self.carry_at[depth as usize] {
+                    self.iters[i].refresh(depth);
                 }
-                self.state[self.depth as usize] = Some(DepthState::fresh());
+                self.state[depth as usize] = Some(DepthState::fresh());
             }
 
             // If the prior iteration descended past this depth and we're
@@ -538,12 +551,12 @@ impl<'src> BatchIter<'src> {
                 None => {
                     // Reset iters whose top-contribution depth is exactly
                     // self.depth so the next re-entry sees fresh state.
-                    let to_reset: Vec<usize> = self.top_at[self.depth as usize].clone();
-                    for i in to_reset {
+                    let depth = self.depth;
+                    for &i in &self.top_at[depth as usize] {
                         self.iters[i].reset();
                     }
                     // Drop state at this depth.
-                    self.state[self.depth as usize] = None;
+                    self.state[depth as usize] = None;
                     if self.depth == 0 {
                         self.finished = true;
                         if let Some(b) = self.builder.finish() {
@@ -561,7 +574,7 @@ impl<'src> BatchIter<'src> {
     }
 }
 
-impl<'src> Iterator for BatchIter<'src> {
+impl<'src, S: TripleSource + ?Sized + 'src> Iterator for BatchIter<'src, S> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
         self.step()

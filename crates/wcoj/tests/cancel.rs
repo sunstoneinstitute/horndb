@@ -4,20 +4,19 @@ use std::time::{Duration, Instant};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::error::WcojError;
 use horndb_wcoj::executor::Executor;
-use horndb_wcoj::ids::Triple;
 use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 use horndb_wcoj::planner::Planner;
-use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::source::synthetic::SyntheticGraph;
 
 #[test]
 fn cancellation_returns_within_100ms() {
-    // Build a synthetic graph large enough to keep the executor busy.
+    // Build a graph dense enough that the optimized 4-cycle executor
+    // is still doing work well after the 10ms cancel deadline. A
+    // 250K-vertex × 4-out-edge cyclic graph is the same shape the
+    // four_cycle bench uses; full execution there is multiple seconds
+    // on release, so cancel reliably catches it mid-flight.
     let p = 10u64;
-    let mut triples = Vec::new();
-    for s in 0..10_000u64 {
-        triples.push(Triple::new(s, p, (s + 1) % 10_000));
-    }
-    let src = Arc::new(VecTripleSource::from_triples(triples));
+    let src = Arc::new(SyntheticGraph::cyclic(250_000, 4, p, 0xCAFE_F00D));
     let bgp = Bgp::new(vec![
         TriplePattern::new(Term::Var(Var(0)), Term::Bound(p), Term::Var(Var(1))),
         TriplePattern::new(Term::Var(Var(1)), Term::Bound(p), Term::Var(Var(2))),
@@ -27,7 +26,7 @@ fn cancellation_returns_within_100ms() {
     let token = CancelToken::new();
     let token_clone = token.clone();
     let planner = Planner::default();
-    let src_ref: &VecTripleSource = &src;
+    let src_ref: &SyntheticGraph = &src;
 
     // Cancel after 10 ms from another thread.
     std::thread::spawn(move || {

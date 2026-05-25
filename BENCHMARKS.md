@@ -2,7 +2,7 @@
 
 Where we are, where we need to be, and what we measure against. This document is the single source of truth for the project's quantitative goals. Targets come from the per-subsystem SPECs (non-functional requirements and acceptance criteria); baselines come from the cited literature and vendor publications.
 
-> **Status — 2026-05-24.** Stage 1 is in flight. Two performance numbers have been measured against the canonical Stage-1 benches; the rest of this document is targets and baselines that the harness (SPEC-01) will fill in as the engine grows. Live gaps are tracked in [`TASKS.md`](TASKS.md).
+> **Status — 2026-05-25.** Stage 1 is in flight. Two performance numbers have been measured against the canonical Stage-1 benches; the rest of this document is targets and baselines that the harness (SPEC-01) will fill in as the engine grows. Live gaps are tracked in [`TASKS.md`](TASKS.md).
 
 ## Reference hardware
 
@@ -141,8 +141,8 @@ Honest accounting. Updated when a bench moves.
 
 | Bench | Crate | Spec target | Measured | Verdict |
 |---|---|---|---|---|
-| 4-cycle, 10⁶-edge synthetic (`benches/four_cycle.rs`) | `horndb-wcoj` | WCOJ ≥10× binary-hash | WCOJ **~12.5 s** vs binary-hash **~7.6 s** → WCOJ is **1.6× slower** | **RED — Stage-1 acceptance #2 not met** (TASKS.md HIGH, perf gap) |
-| Differential fuzzer, 1024 random BGPs (`tests/differential_fuzz.rs`) | `horndb-wcoj` | zero mismatches vs binary-hash | proptest finds inputs where WCOJ over-produces (e.g. two copies of `(?a, p, ?b)` + `(0, p, ?b)`); regression checked into `tests/differential_fuzz.proptest-regressions`; test is `#[ignore]`'d | **RED — Stage-1 acceptance #3 not met** (TASKS.md CRITICAL, correctness gap) |
+| 4-cycle, 10⁶-edge synthetic (`benches/four_cycle.rs`) | `horndb-wcoj` | WCOJ ≥10× binary-hash | WCOJ **3.55 s** vs binary-hash **4.07 s** → WCOJ is **1.15× faster** (2026-05-25, post-perf-pass) | **RED — Stage-1 acceptance #2 not met** (TASKS.md HIGH; the 1.6× regression is gone, but the ≥10× gate still needs storage-side work — see TASKS.md note) |
+| Differential fuzzer, 1024 random BGPs (`tests/differential_fuzz.rs`) | `horndb-wcoj` | zero mismatches vs binary-hash | green at 256 cases on default seed; `#[ignore]` removed; regression file deleted | **GREEN — Stage-1 acceptance #3 met** (TASKS.md CRITICAL closed) |
 
 ### Scaffolded but not yet evaluated against targets
 

@@ -20,18 +20,13 @@ pub type BatchStream<'a> = Box<dyn Iterator<Item = Result<RecordBatch>> + 'a>;
 
 /// Dispatch enum: the planner picks WCOJ or BinaryHash and this wrapper
 /// hides the choice from callers.
-pub enum Executor<'src> {
-    Wcoj(wcoj::BatchIter<'src>),
-    BinaryHash(binary_hash::BatchIter<'src>),
+pub enum Executor<'src, S: TripleSource + ?Sized + 'src> {
+    Wcoj(wcoj::BatchIter<'src, S>),
+    BinaryHash(binary_hash::BatchIter<'src, S>),
 }
 
-impl<'src> Executor<'src> {
-    pub fn for_bgp(
-        source: &'src dyn TripleSource,
-        bgp: &Bgp,
-        planner: &Planner,
-        cancel: CancelToken,
-    ) -> Self {
+impl<'src, S: TripleSource + ?Sized + 'src> Executor<'src, S> {
+    pub fn for_bgp(source: &'src S, bgp: &Bgp, planner: &Planner, cancel: CancelToken) -> Self {
         let est = UniformEstimator::from_source(source);
         let plan = planner.choose(bgp, &est);
         match plan.kind {
@@ -52,7 +47,7 @@ impl<'src> Executor<'src> {
     }
 }
 
-impl<'src> Iterator for Executor<'src> {
+impl<'src, S: TripleSource + ?Sized + 'src> Iterator for Executor<'src, S> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {

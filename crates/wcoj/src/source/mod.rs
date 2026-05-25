@@ -12,10 +12,22 @@ use crate::error::Result;
 use crate::ids::{Ordering, TermId};
 
 /// A multi-ordering RDF triple source.
+///
+/// The associated [`Self::Iter`] is intentionally a generic associated
+/// type so the executor's hot path can be monomorphised against the
+/// concrete iter (no `Box<dyn>` indirection). This makes the trait
+/// non-object-safe — `&dyn TripleSource` no longer compiles; pass it as
+/// a generic bound (`<S: TripleSource>`) instead. The executor and the
+/// cardinality estimator are both already generic over the source type.
 pub trait TripleSource: Send + Sync {
-    /// The iterator type returned by [`Self::iter`]. Boxed to keep the trait
-    /// object-safe; Stage-2 may revisit if dispatch cost shows up in profiles.
-    fn iter(&self, ord: Ordering) -> Result<Box<dyn OrderedTripleIter + '_>>;
+    /// The iterator type returned by [`Self::iter`]. Concrete (not boxed)
+    /// so peek/seek calls on the leapfrog hot path inline.
+    type Iter<'a>: OrderedTripleIter + 'a
+    where
+        Self: 'a;
+
+    /// Open a new cursor over the triples in `ord` ordering.
+    fn iter(&self, ord: Ordering) -> Result<Self::Iter<'_>>;
 
     /// Total triple count across all predicates. Used by the cardinality stub.
     fn total_triples(&self) -> usize;
@@ -50,6 +62,27 @@ pub trait OrderedTripleIter: Send {
 
     /// Ascend one level, undoing the matching `open_level`.
     fn up(&mut self, depth: u8);
+
+    /// Rewind the cursor at `depth` to the start of the current subtree
+    /// (the `lo` of the range last established by `open_level(depth)` or,
+    /// for `depth == 0`, the full data range). Used by the executor on
+    /// carry-iter refresh during ascent re-entry: it positions the iter
+    /// at the first value under the current ancestor binding without the
+    /// up+open_level round-trip that recomputes the same range.
+    ///
+    /// Precondition: `open_level(depth)` (or root for `depth == 0`) was
+    /// last called and not subsequently undone by `up(depth)`. The
+    /// default impl falls back to up+open_level, which is correct but
+    /// allocates no faster than a fresh descent — concrete sources should
+    /// override.
+    fn rewind(&mut self, depth: u8) {
+        if depth == 0 {
+            self.up(0);
+        } else {
+            self.up(depth);
+            self.open_level(depth);
+        }
+    }
 
     /// True if the cursor has exhausted values at `depth`.
     fn at_end(&self, depth: u8) -> bool {

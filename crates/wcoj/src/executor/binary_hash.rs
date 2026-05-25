@@ -19,22 +19,17 @@ use crate::cancel::CancelToken;
 use crate::error::{Result, WcojError};
 use crate::ids::{Ordering, TermId, Triple};
 use crate::pattern::{Bgp, Term, TriplePattern, Var};
-use crate::source::TripleSource;
+use crate::source::{OrderedTripleIter, TripleSource};
 
-pub struct BinaryHashExecutor<'src> {
-    source: &'src dyn TripleSource,
+pub struct BinaryHashExecutor<'src, S: TripleSource + ?Sized + 'src> {
+    source: &'src S,
     bgp: Arc<Bgp>,
     out_vars: Vec<Var>,
     cancel: CancelToken,
 }
 
-impl<'src> BinaryHashExecutor<'src> {
-    pub fn new(
-        source: &'src dyn TripleSource,
-        bgp: &Bgp,
-        out_vars: Vec<Var>,
-        cancel: CancelToken,
-    ) -> Self {
+impl<'src, S: TripleSource + ?Sized + 'src> BinaryHashExecutor<'src, S> {
+    pub fn new(source: &'src S, bgp: &Bgp, out_vars: Vec<Var>, cancel: CancelToken) -> Self {
         Self {
             source,
             bgp: Arc::new(bgp.clone()),
@@ -48,7 +43,7 @@ impl<'src> BinaryHashExecutor<'src> {
     // returned `BatchIter` to be the executor's only `IntoIter` form and
     // we want callers to spell the conversion explicitly.
     #[allow(clippy::should_implement_trait)]
-    pub fn into_iter(self) -> BatchIter<'src> {
+    pub fn into_iter(self) -> BatchIter<'src, S> {
         BatchIter::new(self)
     }
 }
@@ -58,7 +53,7 @@ impl<'src> BinaryHashExecutor<'src> {
 /// Stage-1 simplification: full scan of one ordering, filtering on bound
 /// positions. SPEC-02 will offer a more selective access path; we don't
 /// need it here.
-fn scan_pattern(source: &dyn TripleSource, pat: &TriplePattern) -> Result<Vec<Triple>> {
+fn scan_pattern<S: TripleSource + ?Sized>(source: &S, pat: &TriplePattern) -> Result<Vec<Triple>> {
     let ord = Ordering::Spo;
     let mut iter = source.iter(ord)?;
     let mut out = Vec::new();
@@ -123,8 +118,8 @@ fn project(pat: &TriplePattern, t: Triple, vars: &[Var]) -> Vec<TermId> {
     out
 }
 
-pub struct BatchIter<'src> {
-    exec: BinaryHashExecutor<'src>,
+pub struct BatchIter<'src, S: TripleSource + ?Sized + 'src> {
+    exec: BinaryHashExecutor<'src, S>,
     /// All output rows materialised eagerly — Stage-1 simplification. For
     /// Stage-2 we'll stream batches lazily.
     rows: std::vec::IntoIter<Vec<TermId>>,
@@ -136,8 +131,8 @@ pub struct BatchIter<'src> {
     ground_match_remaining: usize,
 }
 
-impl<'src> BatchIter<'src> {
-    fn new(exec: BinaryHashExecutor<'src>) -> Self {
+impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
+    fn new(exec: BinaryHashExecutor<'src, S>) -> Self {
         let mut pending_error = None;
         let mut rows: Vec<Vec<TermId>> = Vec::new();
         let mut ground_match_remaining = 0usize;
@@ -265,7 +260,7 @@ impl<'src> BatchIter<'src> {
     }
 }
 
-impl<'src> Iterator for BatchIter<'src> {
+impl<'src, S: TripleSource + ?Sized + 'src> Iterator for BatchIter<'src, S> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(e) = self.pending_error.take() {

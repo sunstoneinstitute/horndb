@@ -21,8 +21,8 @@ enum LevelAction {
     Var(#[allow(dead_code)] u8),
 }
 
-pub struct PatternTrieIter<'src> {
-    inner: Box<dyn OrderedTripleIter + 'src>,
+pub struct PatternTrieIter<I: OrderedTripleIter> {
+    inner: I,
     /// One entry per physical trie depth (0..3).
     actions: [LevelAction; 3],
     /// Map *local* variable-depth (0..arity) → physical depth.
@@ -32,13 +32,16 @@ pub struct PatternTrieIter<'src> {
     arity: u8,
 }
 
-impl<'src> PatternTrieIter<'src> {
-    pub fn new(
-        source: &'src dyn TripleSource,
+impl<I: OrderedTripleIter> PatternTrieIter<I> {
+    pub fn new<'src, S>(
+        source: &'src S,
         pattern: &TriplePattern,
         var_order: &[Var],
         ordering: Ordering,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        S: TripleSource<Iter<'src> = I> + ?Sized + 'src,
+    {
         if !source.supports(ordering) {
             return Err(WcojError::OrderingUnavailable(ordering));
         }
@@ -109,8 +112,19 @@ impl<'src> PatternTrieIter<'src> {
         })
     }
 
+    #[inline]
     fn phys_for(&self, local_depth: u8) -> u8 {
         self.var_to_phys[local_depth as usize]
+    }
+
+    /// Rewind the cursor at local-var depth `local` to the start of the
+    /// current ancestor-restricted subtree, without recomputing the
+    /// range. Cheap counterpart to `up(local) + open_level(local - 1)`
+    /// for the carry-iter refresh case where the range is still valid
+    /// under the current parent binding.
+    pub fn rewind_local(&mut self, local: u8) {
+        let phys = self.phys_for(local);
+        self.inner.rewind(phys);
     }
 
     /// Reset the inner cursor to the post-construction state: seek through
@@ -139,7 +153,8 @@ impl<'src> PatternTrieIter<'src> {
     }
 }
 
-impl<'src> TrieIterator for PatternTrieIter<'src> {
+impl<I: OrderedTripleIter> TrieIterator for PatternTrieIter<I> {
+    #[inline]
     fn arity(&self) -> u8 {
         self.arity
     }
@@ -148,16 +163,19 @@ impl<'src> TrieIterator for PatternTrieIter<'src> {
         PatternTrieIter::reset(self)
     }
 
+    #[inline]
     fn peek(&self, depth: u8) -> Option<TermId> {
         let phys = self.phys_for(depth);
         self.inner.peek(phys)
     }
 
+    #[inline]
     fn seek(&mut self, depth: u8, value: TermId) {
         let phys = self.phys_for(depth);
         self.inner.seek(phys, value);
     }
 
+    #[inline]
     fn open_level(&mut self, depth: u8) {
         // Descend from local var-depth `depth` to local var-depth `depth+1`.
         // In physical terms: open all phys levels between var_to_phys[depth]+1
@@ -187,6 +205,7 @@ impl<'src> TrieIterator for PatternTrieIter<'src> {
         }
     }
 
+    #[inline]
     fn up(&mut self, depth: u8) {
         // Inverse of open_level(depth-1): undo physical levels touched
         // between phys_for(depth-1)+1 and phys_for(depth).

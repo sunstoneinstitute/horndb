@@ -1,6 +1,6 @@
 use horndb_wcoj::ids::{Ordering, Triple};
 use horndb_wcoj::source::vec_source::VecTripleSource;
-use horndb_wcoj::source::TripleSource;
+use horndb_wcoj::source::{OrderedTripleIter, TripleSource};
 
 #[test]
 fn vec_source_seeks_within_spo_ordering() {
