@@ -253,6 +253,15 @@ pub fn fire_all(
         }
     }
 
+    // scm-int — schema-only: each intersection class is a subclass of every
+    // member of its list. Output is fully determined by the resolved schema
+    // so we fire once, on the first round.
+    if !axioms.intersections.is_empty() && dirty.is_none() {
+        for (c, cs) in &axioms.intersections {
+            fire_scm_int(store, vocab, *c, cs, &mut out);
+        }
+    }
+
     // cls-uni — body reads rdf:type for each c_i.
     if !axioms.unions.is_empty() && is_dirty(dirty, vocab.rdf_type) {
         for (c, cs) in &axioms.unions {
@@ -514,6 +523,36 @@ fn fire_cls_int1(
 }
 
 // ---------------------------------------------------------------------------
+// scm-int — `?c owl:intersectionOf (c1 ... cn) ⇒ ?c rdfs:subClassOf ci`
+//
+// Schema-derived: the resolved intersections are constant across semi-naïve
+// rounds (Stage-1 insertion-only — SPEC-06), so we emit on the first round
+// only. Downstream `cax-sco` / `scm-sco` then propagate to instance-level
+// type triples, which is how the description-logic-1xx-incons cases close
+// in combination with `cls-com`.
+// ---------------------------------------------------------------------------
+fn fire_scm_int(
+    store: &dyn TripleStore,
+    vocab: &Vocabulary,
+    c: TermId,
+    cs: &[TermId],
+    out: &mut Delta,
+) {
+    for &ci in cs {
+        let head = Triple::new(c, vocab.rdfs_sub_class_of, ci);
+        if !out.contains(&head) && !store.contains(&head) {
+            out.insert(
+                head,
+                Provenance {
+                    rule_id: "scm-int",
+                    premises: smallvec![],
+                },
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cls-uni — `?c owl:unionOf (c1 ... cn) ∧ ∃i. ?x rdf:type ci ⇒ ?x rdf:type ?c`
 // ---------------------------------------------------------------------------
 fn fire_cls_uni(
@@ -731,6 +770,26 @@ mod tests {
         let ax = resolve(&s, &v);
         let d = fire_all(&s, &ax, &v, None);
         assert!(d.contains(&t(x.0, v.rdf_type.0, c.0)), "cls-int1");
+    }
+
+    #[test]
+    fn scm_int_emits_sub_class_of_for_each_member() {
+        let (mut s, v) = fresh();
+        let c = TermId(50);
+        let c1 = TermId(51);
+        let c2 = TermId(52);
+        s.assert(t(c.0, v.owl_intersection_of.0, 1000));
+        assert_list(&mut s, &v, 1000, &[c1.0, c2.0]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(c.0, v.rdfs_sub_class_of.0, c1.0)),
+            "scm-int: c ⊑ c1"
+        );
+        assert!(
+            d.contains(&t(c.0, v.rdfs_sub_class_of.0, c2.0)),
+            "scm-int: c ⊑ c2"
+        );
     }
 
     #[test]

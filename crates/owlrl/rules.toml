@@ -224,6 +224,19 @@ comment = "equivalentProperty implies subPropertyOf (2)."
 body = [ { s = "?p1", p = "owl:equivalentProperty", o = "?p2" } ]
 head = { s = "?p2", p = "rdfs:subPropertyOf", o = "?p1" }
 
+# scm-eqp-rev is the converse of scm-eqp1/2: two-way subPropertyOf implies
+# equivalentProperty. Not numbered in W3C OWL 2 RL Table 9 but the W3C test
+# `WebOnt-equivalentProperty-003-pe` asserts it; SPEC-04 keeps Stage-1 ahead
+# of the conformance suite rather than the bare profile.
+[[rule]]
+id = "scm-eqp-rev"
+comment = "Two-way rdfs:subPropertyOf implies owl:equivalentProperty (W3C test extension)."
+body = [
+  { s = "?p1", p = "rdfs:subPropertyOf", o = "?p2" },
+  { s = "?p2", p = "rdfs:subPropertyOf", o = "?p1" },
+]
+head = { s = "?p1", p = "owl:equivalentProperty", o = "?p2" }
+
 [[rule]]
 id = "scm-dom1"
 comment = "Domain narrows along subClassOf."
@@ -320,6 +333,16 @@ id = "cax-dw"
 comment = "Disjoint classes — an individual cannot be in both."
 body = [
   { s = "?c1", p = "owl:disjointWith", o = "?c2" },
+  { s = "?x",  p = "rdf:type",         o = "?c1" },
+  { s = "?x",  p = "rdf:type",         o = "?c2" },
+]
+head = { s = "?x", p = "rdf:type", o = "owl:Nothing" }
+
+[[rule]]
+id = "cls-com"
+comment = "Complement classes — an individual cannot belong to a class and its owl:complementOf partner. W3C OWL 2 RL Table 7."
+body = [
+  { s = "?c1", p = "owl:complementOf", o = "?c2" },
   { s = "?x",  p = "rdf:type",         o = "?c1" },
   { s = "?x",  p = "rdf:type",         o = "?c2" },
 ]

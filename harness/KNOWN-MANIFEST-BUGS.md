@@ -18,30 +18,29 @@ See `crates/owlrl/rules.toml` for which rules are implemented, and
 deferred. The OWL 2 RL rule names follow the W3C
 [Profiles document](https://www.w3.org/TR/owl2-profiles/#Reasoning_in_OWL_2_RL_and_RDF_Graphs_using_Rules).
 
-## Summary (2026-05-25 survey, post `feat/owlrl-list-rules`)
+## Summary (2026-05-25 survey, post `feat/owlrl-cls-com`)
 
-26 of the 115 synthesised entries fail today. They fall into the
+22 of the 115 synthesised entries fail today. They fall into the
 following buckets, grouped by the missing capability — not by a single
 rule name — because the residue is mostly tests that need *combinations*
-of features (datatype subsumption, complementOf, fresh-bnode generation,
+of features (datatype subsumption, fresh-bnode generation,
 literal-collision inconsistency, ...) the Stage-1 engine intentionally
 defers:
 
 | Missing capability | Cases blocked |
 |---|---|
 | Datatype subsumption (`dt-type1..2`, XSD numeric tower `byte ⊑ short ⊑ int ⊑ ...`) | 5 |
-| `cls-com` / class-expression `cax-adc` over `owl:complementOf` (`DisjointClasses-001/003-pe`, description-logic 10x) | 5 |
-| `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`, `description-logic-104-incons`) | 4 |
-| Annotation-property / `equivalentClass` substitution (`equivalentClass-003/008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 5 |
+| Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`) | 2 |
+| `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) | 3 |
+| Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
 | `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
 | `prp-key` + functional-property literal disequality (`Keys-006-incons`, needs `dt-not-type`) | 1 |
 | Self-chain → `owl:TransitiveProperty` meta-rule (`chain2trans1-pe`) — not in W3C OWL 2 RL | 1 |
 | `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
 | `cls-maxqc1..4` (qualified cardinality, `ObjectQCR-002-pe`) | 1 |
 | `owl:imports` external resolution (`imports-011-pe`) | 1 |
-| Two-way subPropertyOf ⇒ `equivalentProperty` (`equivalentProperty-003-pe`) | 1 |
 
-Total: **26 cases**.
+Total: **22 cases**.
 
 Three Stage-1 rule batches landed on 2026-05-25 and together flipped 11
 cases from red to green:
@@ -78,6 +77,17 @@ substitution / fresh-bnode emission. So the unit tests are the green
 gate for those rules in this batch; the W3C wins come from `prp-spo2`,
 `prp-key`, and auto-Thing.
 
+**`feat/owlrl-cls-com`** — added `cls-com` (compiled), `scm-int`
+(list_rules.rs), and `scm-eqp-rev` (compiled). Flipped:
+
+- `#WebOnt-description-logic-101-incons` (`scm-int` decomposes
+  `Unsatisfiable ≡ c ⊓ d`, `cls-com` then fires on `c ⊑ ¬d`)
+- `#WebOnt-description-logic-103-incons` (same chain across e3/f)
+- `#WebOnt-description-logic-104-incons` (pure `cls-com` over a
+  `c ⊑ [complementOf d]` subClassOf chain — no intersection needed)
+- `#WebOnt-equivalentProperty-003-pe` (`scm-eqp-rev` derives
+  `equivalentProperty` from two-way `subPropertyOf`)
+
 ## Cases, grouped by missing capability
 
 ### Datatype subsumption (`dt-type1..2`, XSD numeric tower)
@@ -95,22 +105,20 @@ hierarchy — Stage-2 work (SPEC-04 risk § "Datatype reasoning").
 - `#WebOnt-equivalentClass-003-pe` — equivalentClass over a datatype
   expression involving `xsd:byte`.
 
-### `cls-com` / `cax-adc` over `owl:complementOf`
+### Fresh-bnode generation of `owl:complementOf` partner classes
 
-`cax-dw` and `cax-adc` are both implemented (2026-05-25) but they
-fire only on *explicit* disjointness. The cases below require the
-engine to *derive* disjointness from `owl:complementOf` (or to lift
-a class-expression assertion into an instance-level disjointness),
-i.e. the W3C `cls-com` rule and class-expression unfolding.
+`cls-com` (2026-05-25, `feat/owlrl-cls-com`) closes the
+`description-logic-1xx-incons` series, but the two `DisjointClasses-*-pe`
+cases below remain red because their *conclusion* graphs assert that the
+target individual belongs to a *generated* anonymous class with an
+`owl:complementOf` partner. OWL 2 RL does not include existential
+fresh-bnode generation (TGDs are explicitly disclaimed in SPEC-04), so
+these need Stage-2 work.
 
-- `#DisjointClasses-001-pe` — expects `owl:complementOf` entailment.
-- `#DisjointClasses-003-pe` — `AllDisjointClasses` + `complementOf`
-  reasoning on the conclusion.
-- `#WebOnt-description-logic-101-incons` — DL-style class-expression
-  unfolding before `cax-dw` can fire.
-- `#WebOnt-description-logic-103-incons`
-- `#WebOnt-description-logic-104-incons` — property-disjointness via
-  class expression and chain composition.
+- `#DisjointClasses-001-pe` — conclusion is `Stewie a _:X` with
+  `_:X owl:complementOf Girl`.
+- `#DisjointClasses-003-pe` — same shape over an `AllDisjointClasses`
+  premise.
 
 ### `prp-pdw`/`prp-adp` over derived property assertions
 
@@ -185,14 +193,6 @@ SPEC-04).
 
 - `#WebOnt-imports-011-pe` — premise references an imported ontology
   that the Stage-1 loader does not fetch.
-
-### Two-way subPropertyOf ⇒ `equivalentProperty`
-
-OWL 2 RL has `scm-eqp1`/`scm-eqp2` (one direction: equivalentProperty
-⇒ subPropertyOf both ways) but not the reverse. The W3C case below
-needs the latter.
-
-- `#WebOnt-equivalentProperty-003-pe`
 
 ## Maintenance
 

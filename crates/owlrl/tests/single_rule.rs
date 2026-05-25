@@ -220,6 +220,38 @@ fn eq_diff1() {
     assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
 }
 
+#[test]
+fn cls_com() {
+    // ?c1 owl:complementOf ?c2 ∧ ?x : ?c1 ∧ ?x : ?c2 ⇒ ?x : owl:Nothing.
+    let (mut s, v) = fresh_store();
+    let c1 = 1;
+    let c2 = 2;
+    let x = 100;
+    let other = 101;
+    s.assert(t(c1, v.owl_complement_of.0, c2));
+    s.assert(t(x, v.rdf_type.0, c1));
+    s.assert(t(x, v.rdf_type.0, c2));
+    // A second individual that is only in c1 must not be flagged.
+    s.assert(t(other, v.rdf_type.0, c1));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(x, v.rdf_type.0, v.owl_nothing.0)));
+    assert!(!s.contains(&t(other, v.rdf_type.0, v.owl_nothing.0)));
+}
+
+#[test]
+fn scm_eqp_rev() {
+    // ?p1 subPropertyOf ?p2 ∧ ?p2 subPropertyOf ?p1 ⇒ ?p1 equivalentProperty ?p2.
+    let (mut s, v) = fresh_store();
+    let p1 = 50;
+    let p2 = 60;
+    s.assert(t(p1, v.rdfs_sub_property_of.0, p2));
+    s.assert(t(p2, v.rdfs_sub_property_of.0, p1));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(p1, v.owl_equivalent_property.0, p2)));
+}
+
 // ---------------------------------------------------------------------------
 // sameAs derivation + replacement — closure backend symmetrises / transitively
 // closes any new sameAs facts the compiled rules emit (SPEC-04 F6).

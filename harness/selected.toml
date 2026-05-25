@@ -57,8 +57,8 @@ include = [
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).
-# The 89 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
-# the 26 currently-failing W3C cases are listed in
+# The 93 ids below are the cases the Stage-1 OWL 2 RL engine passes today;
+# the 22 currently-failing W3C cases are listed in
 # `harness/KNOWN-MANIFEST-BUGS.md` along with the missing rule that gates each.
 # To regrow this list as more rules.toml rules land, re-run the survey
 # documented at the bottom of `harness/curation/owl2-rl-50.md`.
@@ -127,6 +127,9 @@ include = [
     "#WebOnt-I5.8-011-cons",
     "#WebOnt-Nothing-001-incons",
     "#WebOnt-backwardCompatibleWith-002-cons",
+    "#WebOnt-description-logic-101-incons",
+    "#WebOnt-description-logic-103-incons",
+    "#WebOnt-description-logic-104-incons",
     "#WebOnt-differentFrom-001-cons",
     "#WebOnt-disjointWith-003-cons",
     "#WebOnt-disjointWith-004-cons",
@@ -143,6 +146,7 @@ include = [
     "#WebOnt-equivalentProperty-002-cons",
     "#WebOnt-equivalentProperty-002-pe",
     "#WebOnt-equivalentProperty-003-cons",
+    "#WebOnt-equivalentProperty-003-pe",
     "#WebOnt-imports-011-cons",
     "#WebOnt-miscellaneous-303-cons",
     "#WebOnt-sameAs-001-cons",
