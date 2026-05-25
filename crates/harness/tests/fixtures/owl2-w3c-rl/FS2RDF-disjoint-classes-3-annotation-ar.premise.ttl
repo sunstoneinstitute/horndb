@@ -1,0 +1,16 @@
+_:e67bf8ac5df6574e0513d650a54ce4c3 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/c> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/a> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/b> a <http://www.w3.org/2002/07/owl#Class> .
+_:b90197edbf03808adad10daca47c8d27 a <http://www.w3.org/2002/07/owl#AllDisjointClasses> .
+<http://example.org/a> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/b> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/c> a <http://www.w3.org/2002/07/owl#Class> .
+_:b90197edbf03808adad10daca47c8d27 <http://www.w3.org/2002/07/owl#members> _:ff781d3f3cf6121a44dac9c8a3dd3eef .
+_:ff781d3f3cf6121a44dac9c8a3dd3eef <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:fd65171f2dc72a783747a6ba82177253 ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/a> .
+_:fd65171f2dc72a783747a6ba82177253 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:b1ac92ec755750b29072e4d5972a4154 ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/b> .
+_:b1ac92ec755750b29072e4d5972a4154 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/c> .
+_:b90197edbf03808adad10daca47c8d27 <http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .

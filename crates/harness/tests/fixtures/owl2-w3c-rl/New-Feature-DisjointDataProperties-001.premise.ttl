@@ -1,0 +1,6 @@
+_:b4e9c831781a92a2b00732476161e83a a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/hasName> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+<http://example.org/hasAddress> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+<http://example.org/hasName> <http://www.w3.org/2002/07/owl#propertyDisjointWith> <http://example.org/hasAddress> .
+<http://example.org/Peter> <http://example.org/hasName> "Peter Griffin" ;
+	<http://example.org/hasAddress> "Peter Griffin" .

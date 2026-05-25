@@ -1,0 +1,5 @@
+_:e04c102c8f52dc3fb9efa92e9c5b6c0f a <http://www.w3.org/2002/07/owl#Ontology> .
+_:n a <http://www.w3.org/2002/07/owl#Restriction> .
+<http://www.w3.org/2002/03owlt/I5.26/premises010#p> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+_:n <http://www.w3.org/2002/07/owl#onProperty> <http://www.w3.org/2002/03owlt/I5.26/premises010#p> ;
+	<http://www.w3.org/2002/07/owl#minCardinality> "1"^^<http://www.w3.org/2001/XMLSchema#int> .

@@ -1,0 +1,4 @@
+_:fbc0cb9825b1859dbdeb9d729110ddb4 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions004#C1> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions004#C2> a <http://www.w3.org/2002/07/owl#Class> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions004#C1> <http://www.w3.org/2002/07/owl#equivalentClass> <http://www.w3.org/2002/03owlt/I4.6/nonconclusions004#C2> .

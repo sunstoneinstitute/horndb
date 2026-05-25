@@ -25,7 +25,12 @@ pub fn run_selected(
     let mut report = Report::new();
     for (suite_name, suite_entry) in &selected.suites {
         let suite = match suite_name.as_str() {
+            // SPEC-01 Stage-1 hand-rolled rule-coverage subset.
             "owl2" => Suite::Owl2,
+            // Synthesised from the W3C OWL 2 RL profile aggregate via
+            // `harness extract-owl2-rl`; same shape as `owl2`, just
+            // larger.
+            "owl2-w3c-rl" => Suite::Owl2,
             "sparql11" => Suite::Sparql11,
             other => {
                 report.push(Outcome {

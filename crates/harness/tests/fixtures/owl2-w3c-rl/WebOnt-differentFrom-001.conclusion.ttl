@@ -1,0 +1,2 @@
+_:bc361429fd3ad85490ff816a81c5e174 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/differentFrom/premises001#b> <http://www.w3.org/2002/07/owl#differentFrom> <http://www.w3.org/2002/03owlt/differentFrom/premises001#a> .

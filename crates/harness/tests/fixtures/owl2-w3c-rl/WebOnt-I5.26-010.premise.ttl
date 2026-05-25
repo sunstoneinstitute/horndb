@@ -1,0 +1,2 @@
+_:ef4f3fe8c4ecbb75a8e12217e828ad19 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I5.26/premises010#p> a <http://www.w3.org/2002/07/owl#ObjectProperty> .

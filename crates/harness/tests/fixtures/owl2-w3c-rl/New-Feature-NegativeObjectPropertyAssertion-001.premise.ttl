@@ -1,0 +1,7 @@
+_:ff43e85807c23e9e634bb3d1b03a7aaf a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/hasSon> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+_:d459fade5a773e04a51fab4d85a7d941 a <http://www.w3.org/2002/07/owl#NegativePropertyAssertion> ;
+	<http://www.w3.org/2002/07/owl#sourceIndividual> <http://example.org/Peter> ;
+	<http://www.w3.org/2002/07/owl#assertionProperty> <http://example.org/hasSon> ;
+	<http://www.w3.org/2002/07/owl#targetIndividual> <http://example.org/Meg> .
+<http://example.org/Peter> <http://example.org/hasSon> <http://example.org/Meg> .

@@ -1,0 +1,6 @@
+_:d8cb85ec16b4d50d30ace88549c2e3c9 a <http://www.w3.org/2002/07/owl#Class> .
+_:f98a51d46492ae5b09b5b9f7d917b4d a <http://www.w3.org/1999/02/22-rdf-syntax-ns#List> .
+<http://www.w3.org/2002/03owlt/I5.5/premises005#a> a <http://www.w3.org/2002/07/owl#Class> .
+_:f98a51d46492ae5b09b5b9f7d917b4d <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://www.w3.org/2002/03owlt/I5.5/premises005#a> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .
+_:d8cb85ec16b4d50d30ace88549c2e3c9 <http://www.w3.org/2002/07/owl#unionOf> _:f98a51d46492ae5b09b5b9f7d917b4d .

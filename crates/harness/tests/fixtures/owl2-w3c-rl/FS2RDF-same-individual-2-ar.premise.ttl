@@ -1,0 +1,2 @@
+_:e1e3781eccb27576df44c5311a05217c a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/a> <http://www.w3.org/2002/07/owl#sameAs> <http://example.org/b> .

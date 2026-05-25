@@ -170,14 +170,31 @@ fn emit_step(rule: &RuleSpec, plan: &Plan, depth: usize) -> TokenStream {
     } else {
         // Probing step.
         let s_arg = probe_arg(&step.s);
-        let p_arg = probe_predicate(&step.p, rule);
         let o_arg = probe_arg(&step.o);
-        quote! {
-            for #triple_var in store.probe(#s_arg, #p_arg, #o_arg) {
-                #bind_s
-                #bind_p
-                #bind_o
-                #inner
+        match &step.p {
+            // Variable predicate not yet bound — scan every predicate partition.
+            // Used by eq-rep-s / eq-rep-o whose second pattern is `?s ?p ?o`.
+            SlotPlan::Fresh(_) => {
+                quote! {
+                    for #triple_var in store.probe_any_predicate(#s_arg, #o_arg) {
+                        #bind_s
+                        #bind_p
+                        #bind_o
+                        #inner
+                    }
+                }
+            }
+            // Predicate is either a vocab term or a previously-bound variable.
+            _ => {
+                let p_arg = probe_predicate(&step.p, rule);
+                quote! {
+                    for #triple_var in store.probe(#s_arg, #p_arg, #o_arg) {
+                        #bind_s
+                        #bind_p
+                        #bind_o
+                        #inner
+                    }
+                }
             }
         }
     }

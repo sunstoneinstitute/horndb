@@ -1,0 +1,621 @@
+@prefix mf:  <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Synthesised from the W3C OWL 2 RL profile aggregate
+# (https://www.w3.org/2009/11/owl-test/profile-RL.rdf) by the
+# horndb-harness `extract-owl2-rl` subcommand. Each TestCase in
+# the W3C file produces one entry per applicable kind
+# (PositiveEntailmentTest, NegativeEntailmentTest, ConsistencyTest,
+# InconsistencyTest). Premises and conclusions live in sibling
+# `<id>.premise.ttl` / `<id>.conclusion.ttl` files; the original
+# embedded RDF/XML payloads were re-serialized as Turtle here.
+
+<#manifest> a mf:Manifest ;
+    mf:entries (
+        <#chain2trans1-pe>
+        <#chain2trans1-cons>
+        <#DisjointClasses-001-pe>
+        <#DisjointClasses-001-cons>
+        <#DisjointClasses-002-incons>
+        <#DisjointClasses-003-pe>
+        <#DisjointClasses-003-cons>
+        <#FS2RDF-different-individuals-2-annotation-ar-cons>
+        <#FS2RDF-different-individuals-2-ar-cons>
+        <#FS2RDF-different-individuals-3-annotation-ar-cons>
+        <#FS2RDF-different-individuals-3-ar-cons>
+        <#FS2RDF-disjoint-classes-2-annotation-ar-cons>
+        <#FS2RDF-disjoint-classes-2-ar-cons>
+        <#FS2RDF-disjoint-classes-3-annotation-ar-cons>
+        <#FS2RDF-disjoint-classes-3-ar-cons>
+        <#FS2RDF-domain-range-simple-ar-cons>
+        <#FS2RDF-equivalent-classes-2-annotation-ar-cons>
+        <#FS2RDF-equivalent-classes-2-ar-cons>
+        <#FS2RDF-equivalent-classes-3-annotation-ar-cons>
+        <#FS2RDF-equivalent-classes-3-ar-cons>
+        <#FS2RDF-no-builtin-prefixes-ar-cons>
+        <#FS2RDF-ontology-annotation-annotation-ar-cons>
+        <#FS2RDF-propertychain-2-annotated-ar-cons>
+        <#FS2RDF-propertychain-2-ar-cons>
+        <#FS2RDF-same-individual-2-annotation-ar-cons>
+        <#FS2RDF-same-individual-2-ar-cons>
+        <#FS2RDF-same-individual-3-annotation-ar-cons>
+        <#New-Feature-AnnotationAnnotations-001-cons>
+        <#New-Feature-AsymmetricProperty-001-incons>
+        <#New-Feature-AxiomAnnotations-001-cons>
+        <#New-Feature-DisjointDataProperties-001-incons>
+        <#New-Feature-DisjointDataProperties-002-pe>
+        <#New-Feature-DisjointDataProperties-002-cons>
+        <#New-Feature-DisjointObjectProperties-001-pe>
+        <#New-Feature-DisjointObjectProperties-001-cons>
+        <#New-Feature-DisjointObjectProperties-002-pe>
+        <#New-Feature-DisjointObjectProperties-002-cons>
+        <#New-Feature-IrreflexiveProperty-001-incons>
+        <#New-Feature-Keys-003-pe>
+        <#New-Feature-Keys-003-cons>
+        <#New-Feature-Keys-004-cons>
+        <#New-Feature-Keys-005-cons>
+        <#New-Feature-Keys-006-incons>
+        <#New-Feature-NegativeDataPropertyAssertion-001-incons>
+        <#New-Feature-NegativeObjectPropertyAssertion-001-incons>
+        <#New-Feature-ObjectPropertyChain-001-pe>
+        <#New-Feature-ObjectPropertyChain-001-cons>
+        <#New-Feature-ObjectPropertyChain-BJP-003-pe>
+        <#New-Feature-ObjectPropertyChain-BJP-003-cons>
+        <#New-Feature-ObjectPropertyChain-BJP-004-cons>
+        <#New-Feature-ObjectQCR-002-pe>
+        <#New-Feature-ObjectQCR-002-cons>
+        <#New-Feature-ReflexiveProperty-001-pe>
+        <#New-Feature-ReflexiveProperty-001-cons>
+        <#owl2-rl-anonymous-individual-cons>
+        <#owl2-rl-rules-fp-differentFrom-pe>
+        <#owl2-rl-rules-fp-differentFrom-cons>
+        <#owl2-rl-rules-ifp-differentFrom-pe>
+        <#owl2-rl-rules-ifp-differentFrom-cons>
+        <#owl2-rl-valid-oneof-cons>
+        <#owl2-rl-valid-rightside-allvaluesfrom-cons>
+        <#WebOnt-AnnotationProperty-003-cons>
+        <#WebOnt-AnnotationProperty-004-cons>
+        <#WebOnt-I4.6-003-pe>
+        <#WebOnt-I4.6-003-cons>
+        <#WebOnt-I4.6-004-cons>
+        <#WebOnt-I4.6-005-cons>
+        <#WebOnt-I4.6-005-Direct-pe>
+        <#WebOnt-I4.6-005-Direct-cons>
+        <#WebOnt-I5.26-001-cons>
+        <#WebOnt-I5.26-002-cons>
+        <#WebOnt-I5.26-005-cons>
+        <#WebOnt-I5.26-010-pe>
+        <#WebOnt-I5.26-010-cons>
+        <#WebOnt-I5.5-005-pe>
+        <#WebOnt-I5.5-005-cons>
+        <#WebOnt-I5.8-006-pe>
+        <#WebOnt-I5.8-006-cons>
+        <#WebOnt-I5.8-007-cons>
+        <#WebOnt-I5.8-008-pe>
+        <#WebOnt-I5.8-008-cons>
+        <#WebOnt-I5.8-009-pe>
+        <#WebOnt-I5.8-009-cons>
+        <#WebOnt-I5.8-011-pe>
+        <#WebOnt-I5.8-011-cons>
+        <#WebOnt-Nothing-001-incons>
+        <#WebOnt-backwardCompatibleWith-002-cons>
+        <#WebOnt-description-logic-101-incons>
+        <#WebOnt-description-logic-103-incons>
+        <#WebOnt-description-logic-104-incons>
+        <#WebOnt-differentFrom-001-pe>
+        <#WebOnt-differentFrom-001-cons>
+        <#WebOnt-disjointWith-003-cons>
+        <#WebOnt-disjointWith-004-cons>
+        <#WebOnt-disjointWith-005-cons>
+        <#WebOnt-disjointWith-006-cons>
+        <#WebOnt-disjointWith-007-cons>
+        <#WebOnt-disjointWith-008-cons>
+        <#WebOnt-disjointWith-009-cons>
+        <#WebOnt-equivalentClass-002-pe>
+        <#WebOnt-equivalentClass-002-cons>
+        <#WebOnt-equivalentClass-003-pe>
+        <#WebOnt-equivalentClass-003-cons>
+        <#WebOnt-equivalentClass-008-cons>
+        <#WebOnt-equivalentClass-008-Direct-pe>
+        <#WebOnt-equivalentClass-008-Direct-cons>
+        <#WebOnt-equivalentProperty-002-pe>
+        <#WebOnt-equivalentProperty-002-cons>
+        <#WebOnt-equivalentProperty-003-pe>
+        <#WebOnt-equivalentProperty-003-cons>
+        <#WebOnt-imports-011-pe>
+        <#WebOnt-imports-011-cons>
+        <#WebOnt-miscellaneous-303-cons>
+        <#WebOnt-sameAs-001-pe>
+        <#WebOnt-sameAs-001-cons>
+    ) .
+
+<#chain2trans1-pe> a mf:PositiveEntailmentTest ;
+    mf:name "chain2trans1 (pe)" ;
+    mf:action <chain2trans1.premise.ttl> ;
+    mf:result <chain2trans1.conclusion.ttl> .
+
+<#chain2trans1-cons> a mf:ConsistencyTest ;
+    mf:name "chain2trans1 (cons)" ;
+    mf:action <chain2trans1.premise.ttl> .
+
+<#DisjointClasses-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "DisjointClasses-001 (pe)" ;
+    mf:action <DisjointClasses-001.premise.ttl> ;
+    mf:result <DisjointClasses-001.conclusion.ttl> .
+
+<#DisjointClasses-001-cons> a mf:ConsistencyTest ;
+    mf:name "DisjointClasses-001 (cons)" ;
+    mf:action <DisjointClasses-001.premise.ttl> .
+
+<#DisjointClasses-002-incons> a mf:InconsistencyTest ;
+    mf:name "DisjointClasses-002 (incons)" ;
+    mf:action <DisjointClasses-002.premise.ttl> .
+
+<#DisjointClasses-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "DisjointClasses-003 (pe)" ;
+    mf:action <DisjointClasses-003.premise.ttl> ;
+    mf:result <DisjointClasses-003.conclusion.ttl> .
+
+<#DisjointClasses-003-cons> a mf:ConsistencyTest ;
+    mf:name "DisjointClasses-003 (cons)" ;
+    mf:action <DisjointClasses-003.premise.ttl> .
+
+<#FS2RDF-different-individuals-2-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-different-individuals-2-annotation-ar (cons)" ;
+    mf:action <FS2RDF-different-individuals-2-annotation-ar.premise.ttl> .
+
+<#FS2RDF-different-individuals-2-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-different-individuals-2-ar (cons)" ;
+    mf:action <FS2RDF-different-individuals-2-ar.premise.ttl> .
+
+<#FS2RDF-different-individuals-3-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-different-individuals-3-annotation-ar (cons)" ;
+    mf:action <FS2RDF-different-individuals-3-annotation-ar.premise.ttl> .
+
+<#FS2RDF-different-individuals-3-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-different-individuals-3-ar (cons)" ;
+    mf:action <FS2RDF-different-individuals-3-ar.premise.ttl> .
+
+<#FS2RDF-disjoint-classes-2-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-disjoint-classes-2-annotation-ar (cons)" ;
+    mf:action <FS2RDF-disjoint-classes-2-annotation-ar.premise.ttl> .
+
+<#FS2RDF-disjoint-classes-2-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-disjoint-classes-2-ar (cons)" ;
+    mf:action <FS2RDF-disjoint-classes-2-ar.premise.ttl> .
+
+<#FS2RDF-disjoint-classes-3-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-disjoint-classes-3-annotation-ar (cons)" ;
+    mf:action <FS2RDF-disjoint-classes-3-annotation-ar.premise.ttl> .
+
+<#FS2RDF-disjoint-classes-3-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-disjoint-classes-3-ar (cons)" ;
+    mf:action <FS2RDF-disjoint-classes-3-ar.premise.ttl> .
+
+<#FS2RDF-domain-range-simple-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-domain-range-simple-ar (cons)" ;
+    mf:action <FS2RDF-domain-range-simple-ar.premise.ttl> .
+
+<#FS2RDF-equivalent-classes-2-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-equivalent-classes-2-annotation-ar (cons)" ;
+    mf:action <FS2RDF-equivalent-classes-2-annotation-ar.premise.ttl> .
+
+<#FS2RDF-equivalent-classes-2-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-equivalent-classes-2-ar (cons)" ;
+    mf:action <FS2RDF-equivalent-classes-2-ar.premise.ttl> .
+
+<#FS2RDF-equivalent-classes-3-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-equivalent-classes-3-annotation-ar (cons)" ;
+    mf:action <FS2RDF-equivalent-classes-3-annotation-ar.premise.ttl> .
+
+<#FS2RDF-equivalent-classes-3-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-equivalent-classes-3-ar (cons)" ;
+    mf:action <FS2RDF-equivalent-classes-3-ar.premise.ttl> .
+
+<#FS2RDF-no-builtin-prefixes-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-no-builtin-prefixes-ar (cons)" ;
+    mf:action <FS2RDF-no-builtin-prefixes-ar.premise.ttl> .
+
+<#FS2RDF-ontology-annotation-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-ontology-annotation-annotation-ar (cons)" ;
+    mf:action <FS2RDF-ontology-annotation-annotation-ar.premise.ttl> .
+
+<#FS2RDF-propertychain-2-annotated-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-propertychain-2-annotated-ar (cons)" ;
+    mf:action <FS2RDF-propertychain-2-annotated-ar.premise.ttl> .
+
+<#FS2RDF-propertychain-2-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-propertychain-2-ar (cons)" ;
+    mf:action <FS2RDF-propertychain-2-ar.premise.ttl> .
+
+<#FS2RDF-same-individual-2-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-same-individual-2-annotation-ar (cons)" ;
+    mf:action <FS2RDF-same-individual-2-annotation-ar.premise.ttl> .
+
+<#FS2RDF-same-individual-2-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-same-individual-2-ar (cons)" ;
+    mf:action <FS2RDF-same-individual-2-ar.premise.ttl> .
+
+<#FS2RDF-same-individual-3-annotation-ar-cons> a mf:ConsistencyTest ;
+    mf:name "FS2RDF-same-individual-3-annotation-ar (cons)" ;
+    mf:action <FS2RDF-same-individual-3-annotation-ar.premise.ttl> .
+
+<#New-Feature-AnnotationAnnotations-001-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-AnnotationAnnotations-001 (cons)" ;
+    mf:action <New-Feature-AnnotationAnnotations-001.premise.ttl> .
+
+<#New-Feature-AsymmetricProperty-001-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-AsymmetricProperty-001 (incons)" ;
+    mf:action <New-Feature-AsymmetricProperty-001.premise.ttl> .
+
+<#New-Feature-AxiomAnnotations-001-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-AxiomAnnotations-001 (cons)" ;
+    mf:action <New-Feature-AxiomAnnotations-001.premise.ttl> .
+
+<#New-Feature-DisjointDataProperties-001-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-DisjointDataProperties-001 (incons)" ;
+    mf:action <New-Feature-DisjointDataProperties-001.premise.ttl> .
+
+<#New-Feature-DisjointDataProperties-002-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-DisjointDataProperties-002 (pe)" ;
+    mf:action <New-Feature-DisjointDataProperties-002.premise.ttl> ;
+    mf:result <New-Feature-DisjointDataProperties-002.conclusion.ttl> .
+
+<#New-Feature-DisjointDataProperties-002-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-DisjointDataProperties-002 (cons)" ;
+    mf:action <New-Feature-DisjointDataProperties-002.premise.ttl> .
+
+<#New-Feature-DisjointObjectProperties-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-DisjointObjectProperties-001 (pe)" ;
+    mf:action <New-Feature-DisjointObjectProperties-001.premise.ttl> ;
+    mf:result <New-Feature-DisjointObjectProperties-001.conclusion.ttl> .
+
+<#New-Feature-DisjointObjectProperties-001-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-DisjointObjectProperties-001 (cons)" ;
+    mf:action <New-Feature-DisjointObjectProperties-001.premise.ttl> .
+
+<#New-Feature-DisjointObjectProperties-002-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-DisjointObjectProperties-002 (pe)" ;
+    mf:action <New-Feature-DisjointObjectProperties-002.premise.ttl> ;
+    mf:result <New-Feature-DisjointObjectProperties-002.conclusion.ttl> .
+
+<#New-Feature-DisjointObjectProperties-002-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-DisjointObjectProperties-002 (cons)" ;
+    mf:action <New-Feature-DisjointObjectProperties-002.premise.ttl> .
+
+<#New-Feature-IrreflexiveProperty-001-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-IrreflexiveProperty-001 (incons)" ;
+    mf:action <New-Feature-IrreflexiveProperty-001.premise.ttl> .
+
+<#New-Feature-Keys-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-Keys-003 (pe)" ;
+    mf:action <New-Feature-Keys-003.premise.ttl> ;
+    mf:result <New-Feature-Keys-003.conclusion.ttl> .
+
+<#New-Feature-Keys-003-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-Keys-003 (cons)" ;
+    mf:action <New-Feature-Keys-003.premise.ttl> .
+
+<#New-Feature-Keys-004-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-Keys-004 (cons)" ;
+    mf:action <New-Feature-Keys-004.premise.ttl> .
+
+<#New-Feature-Keys-005-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-Keys-005 (cons)" ;
+    mf:action <New-Feature-Keys-005.premise.ttl> .
+
+<#New-Feature-Keys-006-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-Keys-006 (incons)" ;
+    mf:action <New-Feature-Keys-006.premise.ttl> .
+
+<#New-Feature-NegativeDataPropertyAssertion-001-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-NegativeDataPropertyAssertion-001 (incons)" ;
+    mf:action <New-Feature-NegativeDataPropertyAssertion-001.premise.ttl> .
+
+<#New-Feature-NegativeObjectPropertyAssertion-001-incons> a mf:InconsistencyTest ;
+    mf:name "New-Feature-NegativeObjectPropertyAssertion-001 (incons)" ;
+    mf:action <New-Feature-NegativeObjectPropertyAssertion-001.premise.ttl> .
+
+<#New-Feature-ObjectPropertyChain-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-ObjectPropertyChain-001 (pe)" ;
+    mf:action <New-Feature-ObjectPropertyChain-001.premise.ttl> ;
+    mf:result <New-Feature-ObjectPropertyChain-001.conclusion.ttl> .
+
+<#New-Feature-ObjectPropertyChain-001-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-ObjectPropertyChain-001 (cons)" ;
+    mf:action <New-Feature-ObjectPropertyChain-001.premise.ttl> .
+
+<#New-Feature-ObjectPropertyChain-BJP-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-ObjectPropertyChain-BJP-003 (pe)" ;
+    mf:action <New-Feature-ObjectPropertyChain-BJP-003.premise.ttl> ;
+    mf:result <New-Feature-ObjectPropertyChain-BJP-003.conclusion.ttl> .
+
+<#New-Feature-ObjectPropertyChain-BJP-003-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-ObjectPropertyChain-BJP-003 (cons)" ;
+    mf:action <New-Feature-ObjectPropertyChain-BJP-003.premise.ttl> .
+
+<#New-Feature-ObjectPropertyChain-BJP-004-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-ObjectPropertyChain-BJP-004 (cons)" ;
+    mf:action <New-Feature-ObjectPropertyChain-BJP-004.premise.ttl> .
+
+<#New-Feature-ObjectQCR-002-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-ObjectQCR-002 (pe)" ;
+    mf:action <New-Feature-ObjectQCR-002.premise.ttl> ;
+    mf:result <New-Feature-ObjectQCR-002.conclusion.ttl> .
+
+<#New-Feature-ObjectQCR-002-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-ObjectQCR-002 (cons)" ;
+    mf:action <New-Feature-ObjectQCR-002.premise.ttl> .
+
+<#New-Feature-ReflexiveProperty-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "New-Feature-ReflexiveProperty-001 (pe)" ;
+    mf:action <New-Feature-ReflexiveProperty-001.premise.ttl> ;
+    mf:result <New-Feature-ReflexiveProperty-001.conclusion.ttl> .
+
+<#New-Feature-ReflexiveProperty-001-cons> a mf:ConsistencyTest ;
+    mf:name "New-Feature-ReflexiveProperty-001 (cons)" ;
+    mf:action <New-Feature-ReflexiveProperty-001.premise.ttl> .
+
+<#owl2-rl-anonymous-individual-cons> a mf:ConsistencyTest ;
+    mf:name "owl2-rl-anonymous-individual (cons)" ;
+    mf:action <owl2-rl-anonymous-individual.premise.ttl> .
+
+<#owl2-rl-rules-fp-differentFrom-pe> a mf:PositiveEntailmentTest ;
+    mf:name "owl2-rl-rules-fp-differentFrom (pe)" ;
+    mf:action <owl2-rl-rules-fp-differentFrom.premise.ttl> ;
+    mf:result <owl2-rl-rules-fp-differentFrom.conclusion.ttl> .
+
+<#owl2-rl-rules-fp-differentFrom-cons> a mf:ConsistencyTest ;
+    mf:name "owl2-rl-rules-fp-differentFrom (cons)" ;
+    mf:action <owl2-rl-rules-fp-differentFrom.premise.ttl> .
+
+<#owl2-rl-rules-ifp-differentFrom-pe> a mf:PositiveEntailmentTest ;
+    mf:name "owl2-rl-rules-ifp-differentFrom (pe)" ;
+    mf:action <owl2-rl-rules-ifp-differentFrom.premise.ttl> ;
+    mf:result <owl2-rl-rules-ifp-differentFrom.conclusion.ttl> .
+
+<#owl2-rl-rules-ifp-differentFrom-cons> a mf:ConsistencyTest ;
+    mf:name "owl2-rl-rules-ifp-differentFrom (cons)" ;
+    mf:action <owl2-rl-rules-ifp-differentFrom.premise.ttl> .
+
+<#owl2-rl-valid-oneof-cons> a mf:ConsistencyTest ;
+    mf:name "owl2-rl-valid-oneof (cons)" ;
+    mf:action <owl2-rl-valid-oneof.premise.ttl> .
+
+<#owl2-rl-valid-rightside-allvaluesfrom-cons> a mf:ConsistencyTest ;
+    mf:name "owl2-rl-valid-rightside-allvaluesfrom (cons)" ;
+    mf:action <owl2-rl-valid-rightside-allvaluesfrom.premise.ttl> .
+
+<#WebOnt-AnnotationProperty-003-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-AnnotationProperty-003 (cons)" ;
+    mf:action <WebOnt-AnnotationProperty-003.premise.ttl> .
+
+<#WebOnt-AnnotationProperty-004-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-AnnotationProperty-004 (cons)" ;
+    mf:action <WebOnt-AnnotationProperty-004.premise.ttl> .
+
+<#WebOnt-I4.6-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I4.6-003 (pe)" ;
+    mf:action <WebOnt-I4.6-003.premise.ttl> ;
+    mf:result <WebOnt-I4.6-003.conclusion.ttl> .
+
+<#WebOnt-I4.6-003-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I4.6-003 (cons)" ;
+    mf:action <WebOnt-I4.6-003.premise.ttl> .
+
+<#WebOnt-I4.6-004-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I4.6-004 (cons)" ;
+    mf:action <WebOnt-I4.6-004.premise.ttl> .
+
+<#WebOnt-I4.6-005-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I4.6-005 (cons)" ;
+    mf:action <WebOnt-I4.6-005.premise.ttl> .
+
+<#WebOnt-I4.6-005-Direct-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I4.6-005-Direct (pe)" ;
+    mf:action <WebOnt-I4.6-005-Direct.premise.ttl> ;
+    mf:result <WebOnt-I4.6-005-Direct.conclusion.ttl> .
+
+<#WebOnt-I4.6-005-Direct-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I4.6-005-Direct (cons)" ;
+    mf:action <WebOnt-I4.6-005-Direct.premise.ttl> .
+
+<#WebOnt-I5.26-001-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.26-001 (cons)" ;
+    mf:action <WebOnt-I5.26-001.premise.ttl> .
+
+<#WebOnt-I5.26-002-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.26-002 (cons)" ;
+    mf:action <WebOnt-I5.26-002.premise.ttl> .
+
+<#WebOnt-I5.26-005-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.26-005 (cons)" ;
+    mf:action <WebOnt-I5.26-005.premise.ttl> .
+
+<#WebOnt-I5.26-010-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.26-010 (pe)" ;
+    mf:action <WebOnt-I5.26-010.premise.ttl> ;
+    mf:result <WebOnt-I5.26-010.conclusion.ttl> .
+
+<#WebOnt-I5.26-010-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.26-010 (cons)" ;
+    mf:action <WebOnt-I5.26-010.premise.ttl> .
+
+<#WebOnt-I5.5-005-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.5-005 (pe)" ;
+    mf:action <WebOnt-I5.5-005.premise.ttl> ;
+    mf:result <WebOnt-I5.5-005.conclusion.ttl> .
+
+<#WebOnt-I5.5-005-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.5-005 (cons)" ;
+    mf:action <WebOnt-I5.5-005.premise.ttl> .
+
+<#WebOnt-I5.8-006-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.8-006 (pe)" ;
+    mf:action <WebOnt-I5.8-006.premise.ttl> ;
+    mf:result <WebOnt-I5.8-006.conclusion.ttl> .
+
+<#WebOnt-I5.8-006-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.8-006 (cons)" ;
+    mf:action <WebOnt-I5.8-006.premise.ttl> .
+
+<#WebOnt-I5.8-007-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.8-007 (cons)" ;
+    mf:action <WebOnt-I5.8-007.premise.ttl> .
+
+<#WebOnt-I5.8-008-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.8-008 (pe)" ;
+    mf:action <WebOnt-I5.8-008.premise.ttl> ;
+    mf:result <WebOnt-I5.8-008.conclusion.ttl> .
+
+<#WebOnt-I5.8-008-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.8-008 (cons)" ;
+    mf:action <WebOnt-I5.8-008.premise.ttl> .
+
+<#WebOnt-I5.8-009-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.8-009 (pe)" ;
+    mf:action <WebOnt-I5.8-009.premise.ttl> ;
+    mf:result <WebOnt-I5.8-009.conclusion.ttl> .
+
+<#WebOnt-I5.8-009-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.8-009 (cons)" ;
+    mf:action <WebOnt-I5.8-009.premise.ttl> .
+
+<#WebOnt-I5.8-011-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-I5.8-011 (pe)" ;
+    mf:action <WebOnt-I5.8-011.premise.ttl> ;
+    mf:result <WebOnt-I5.8-011.conclusion.ttl> .
+
+<#WebOnt-I5.8-011-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-I5.8-011 (cons)" ;
+    mf:action <WebOnt-I5.8-011.premise.ttl> .
+
+<#WebOnt-Nothing-001-incons> a mf:InconsistencyTest ;
+    mf:name "WebOnt-Nothing-001 (incons)" ;
+    mf:action <WebOnt-Nothing-001.premise.ttl> .
+
+<#WebOnt-backwardCompatibleWith-002-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-backwardCompatibleWith-002 (cons)" ;
+    mf:action <WebOnt-backwardCompatibleWith-002.premise.ttl> .
+
+<#WebOnt-description-logic-101-incons> a mf:InconsistencyTest ;
+    mf:name "WebOnt-description-logic-101 (incons)" ;
+    mf:action <WebOnt-description-logic-101.premise.ttl> .
+
+<#WebOnt-description-logic-103-incons> a mf:InconsistencyTest ;
+    mf:name "WebOnt-description-logic-103 (incons)" ;
+    mf:action <WebOnt-description-logic-103.premise.ttl> .
+
+<#WebOnt-description-logic-104-incons> a mf:InconsistencyTest ;
+    mf:name "WebOnt-description-logic-104 (incons)" ;
+    mf:action <WebOnt-description-logic-104.premise.ttl> .
+
+<#WebOnt-differentFrom-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-differentFrom-001 (pe)" ;
+    mf:action <WebOnt-differentFrom-001.premise.ttl> ;
+    mf:result <WebOnt-differentFrom-001.conclusion.ttl> .
+
+<#WebOnt-differentFrom-001-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-differentFrom-001 (cons)" ;
+    mf:action <WebOnt-differentFrom-001.premise.ttl> .
+
+<#WebOnt-disjointWith-003-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-003 (cons)" ;
+    mf:action <WebOnt-disjointWith-003.premise.ttl> .
+
+<#WebOnt-disjointWith-004-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-004 (cons)" ;
+    mf:action <WebOnt-disjointWith-004.premise.ttl> .
+
+<#WebOnt-disjointWith-005-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-005 (cons)" ;
+    mf:action <WebOnt-disjointWith-005.premise.ttl> .
+
+<#WebOnt-disjointWith-006-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-006 (cons)" ;
+    mf:action <WebOnt-disjointWith-006.premise.ttl> .
+
+<#WebOnt-disjointWith-007-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-007 (cons)" ;
+    mf:action <WebOnt-disjointWith-007.premise.ttl> .
+
+<#WebOnt-disjointWith-008-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-008 (cons)" ;
+    mf:action <WebOnt-disjointWith-008.premise.ttl> .
+
+<#WebOnt-disjointWith-009-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-disjointWith-009 (cons)" ;
+    mf:action <WebOnt-disjointWith-009.premise.ttl> .
+
+<#WebOnt-equivalentClass-002-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-equivalentClass-002 (pe)" ;
+    mf:action <WebOnt-equivalentClass-002.premise.ttl> ;
+    mf:result <WebOnt-equivalentClass-002.conclusion.ttl> .
+
+<#WebOnt-equivalentClass-002-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentClass-002 (cons)" ;
+    mf:action <WebOnt-equivalentClass-002.premise.ttl> .
+
+<#WebOnt-equivalentClass-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-equivalentClass-003 (pe)" ;
+    mf:action <WebOnt-equivalentClass-003.premise.ttl> ;
+    mf:result <WebOnt-equivalentClass-003.conclusion.ttl> .
+
+<#WebOnt-equivalentClass-003-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentClass-003 (cons)" ;
+    mf:action <WebOnt-equivalentClass-003.premise.ttl> .
+
+<#WebOnt-equivalentClass-008-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentClass-008 (cons)" ;
+    mf:action <WebOnt-equivalentClass-008.premise.ttl> .
+
+<#WebOnt-equivalentClass-008-Direct-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-equivalentClass-008-Direct (pe)" ;
+    mf:action <WebOnt-equivalentClass-008-Direct.premise.ttl> ;
+    mf:result <WebOnt-equivalentClass-008-Direct.conclusion.ttl> .
+
+<#WebOnt-equivalentClass-008-Direct-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentClass-008-Direct (cons)" ;
+    mf:action <WebOnt-equivalentClass-008-Direct.premise.ttl> .
+
+<#WebOnt-equivalentProperty-002-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-equivalentProperty-002 (pe)" ;
+    mf:action <WebOnt-equivalentProperty-002.premise.ttl> ;
+    mf:result <WebOnt-equivalentProperty-002.conclusion.ttl> .
+
+<#WebOnt-equivalentProperty-002-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentProperty-002 (cons)" ;
+    mf:action <WebOnt-equivalentProperty-002.premise.ttl> .
+
+<#WebOnt-equivalentProperty-003-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-equivalentProperty-003 (pe)" ;
+    mf:action <WebOnt-equivalentProperty-003.premise.ttl> ;
+    mf:result <WebOnt-equivalentProperty-003.conclusion.ttl> .
+
+<#WebOnt-equivalentProperty-003-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-equivalentProperty-003 (cons)" ;
+    mf:action <WebOnt-equivalentProperty-003.premise.ttl> .
+
+<#WebOnt-imports-011-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-imports-011 (pe)" ;
+    mf:action <WebOnt-imports-011.premise.ttl> ;
+    mf:result <WebOnt-imports-011.conclusion.ttl> .
+
+<#WebOnt-imports-011-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-imports-011 (cons)" ;
+    mf:action <WebOnt-imports-011.premise.ttl> .
+
+<#WebOnt-miscellaneous-303-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-miscellaneous-303 (cons)" ;
+    mf:action <WebOnt-miscellaneous-303.premise.ttl> .
+
+<#WebOnt-sameAs-001-pe> a mf:PositiveEntailmentTest ;
+    mf:name "WebOnt-sameAs-001 (pe)" ;
+    mf:action <WebOnt-sameAs-001.premise.ttl> ;
+    mf:result <WebOnt-sameAs-001.conclusion.ttl> .
+
+<#WebOnt-sameAs-001-cons> a mf:ConsistencyTest ;
+    mf:name "WebOnt-sameAs-001 (cons)" ;
+    mf:action <WebOnt-sameAs-001.premise.ttl> .
+

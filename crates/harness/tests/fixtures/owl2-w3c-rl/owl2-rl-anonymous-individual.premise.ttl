@@ -1,0 +1,5 @@
+_:c23c220108a2e3605a89d60e065a227e a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://owl2.test/rules#op> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://owl2.test/rules#I> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+_:cd0d9f952f83ca32e28e1edb719fcc0 a <http://www.w3.org/2002/07/owl#NamedIndividual> ;
+	<http://owl2.test/rules#op> <http://owl2.test/rules#I> .

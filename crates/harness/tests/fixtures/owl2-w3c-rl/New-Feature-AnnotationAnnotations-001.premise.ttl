@@ -1,0 +1,9 @@
+<http://example.org/> a <http://www.w3.org/2002/07/owl#Ontology> ;
+	<http://www.w3.org/2000/01/rdf-schema#label> "An example ontology" .
+_:a07282664005348607ebfadc39e8ff92 a <http://www.w3.org/2002/07/owl#Annotation> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2000/01/rdf-schema#label> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> "An example ontology" ;
+	<http://example.org/author> "Mike Smith" .
+<http://example.org/author> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://example.org/i> a <http://www.w3.org/2002/07/owl#NamedIndividual> .

@@ -304,3 +304,74 @@ body = [
   { s = "?u", p = "?p",             o = "?y" },
 ]
 head = { s = "?u", p = "rdf:type", o = "?x" }
+
+# ---------------------------------------------------------------------------
+# sameAs derivation + replacement rules (Stage-1 addition)
+#
+# These rules *produce* new owl:sameAs facts (prp-fp, prp-ifp) and *use* them
+# to substitute on each triple position (eq-rep-s, eq-rep-p, eq-rep-o), plus
+# the literal owl:ReflexiveProperty axiom (prp-rfp). Per SPEC-04 F6, the
+# closure backend (SPEC-05) is responsible for eq-ref / eq-sym / eq-trans on
+# any owl:sameAs we derive — these rules deliberately do NOT re-derive them.
+# Sources: W3C OWL 2 Profiles Tables 4 (eq-*), 6 (prp-*).
+# ---------------------------------------------------------------------------
+
+[[rule]]
+id = "prp-fp"
+comment = "Functional property — two ?y values for the same (?x, ?p) collapse to sameAs."
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:FunctionalProperty" },
+  { s = "?x", p = "?p",       o = "?y1" },
+  { s = "?x", p = "?p",       o = "?y2" },
+]
+head = { s = "?y1", p = "owl:sameAs", o = "?y2" }
+
+[[rule]]
+id = "prp-ifp"
+comment = "Inverse functional property — two ?x values for the same (?p, ?y) collapse to sameAs."
+body = [
+  { s = "?p",  p = "rdf:type", o = "owl:InverseFunctionalProperty" },
+  { s = "?x1", p = "?p",       o = "?y" },
+  { s = "?x2", p = "?p",       o = "?y" },
+]
+head = { s = "?x1", p = "owl:sameAs", o = "?x2" }
+
+[[rule]]
+id = "prp-rfp"
+comment = "Reflexive property — every owl:Thing relates to itself via ?p. Stage-1 fires only on explicitly-asserted owl:Thing membership (no auto-Thing inference)."
+body = [
+  { s = "?p", p = "rdf:type", o = "owl:ReflexiveProperty" },
+  { s = "?x", p = "rdf:type", o = "owl:Thing" },
+]
+head = { s = "?x", p = "?p", o = "?x" }
+
+[[rule]]
+id = "eq-rep-s"
+comment = "Substitute subject across owl:sameAs."
+body = [
+  { s = "?s",  p = "owl:sameAs", o = "?s2" },
+  { s = "?s",  p = "?p",         o = "?o" },
+]
+head = { s = "?s2", p = "?p", o = "?o" }
+
+# NOTE: eq-rep-p generates a *new predicate partition* per fired pair. On
+# adversarial inputs this can blow up the rdf:type partition (SPEC-04 F5
+# skew risk). Stage-1 ships the literal W3C rule; Stage-2 is tracked in
+# TASKS.md under "MEDIUM — Stage-2 scope explicitly deferred".
+[[rule]]
+id = "eq-rep-p"
+comment = "Substitute predicate across owl:sameAs."
+body = [
+  { s = "?p", p = "owl:sameAs", o = "?p2" },
+  { s = "?s", p = "?p",         o = "?o" },
+]
+head = { s = "?s", p = "?p2", o = "?o" }
+
+[[rule]]
+id = "eq-rep-o"
+comment = "Substitute object across owl:sameAs."
+body = [
+  { s = "?o",  p = "owl:sameAs", o = "?o2" },
+  { s = "?s",  p = "?p",         o = "?o" },
+]
+head = { s = "?s", p = "?p", o = "?o2" }

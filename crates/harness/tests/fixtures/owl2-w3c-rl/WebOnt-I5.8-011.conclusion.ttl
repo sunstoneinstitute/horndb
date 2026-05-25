@@ -1,0 +1,3 @@
+_:fd556db22fcf78cdaa10a0baa67b7c2b a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2001/XMLSchema#integer> a <http://www.w3.org/2000/01/rdf-schema#Datatype> .
+<http://www.w3.org/2001/XMLSchema#string> a <http://www.w3.org/2000/01/rdf-schema#Datatype> .

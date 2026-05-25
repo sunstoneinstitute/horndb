@@ -1,0 +1,3 @@
+_:d49253d6713052dce968fd49d4851906 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I5.8/premises006#p> a <http://www.w3.org/2002/07/owl#DatatypeProperty> ;
+	<http://www.w3.org/2000/01/rdf-schema#range> <http://www.w3.org/2001/XMLSchema#byte> .

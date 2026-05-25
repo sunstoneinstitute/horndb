@@ -138,6 +138,16 @@ here in the same commit.
 Items that were marked Future Work in the per-spec plans. Pull from this
 list when the corresponding Stage-1 slice is settled.
 
+- [ ] **SPEC-04 eq-rep-p skew.** Predicate-position sameAs substitution
+  can blow up the rdf:type partition on adversarial inputs. Stage-1
+  ships the literal rule (`crates/owlrl/rules.toml` `eq-rep-p`);
+  Stage-2 should add an admission filter or specialised path. Also
+  note: the codegen's dirty-predicate prune (`engine::rule_relevant`)
+  keys on the vocabulary predicates a rule reads — for rules with
+  fresh-variable predicates (`eq-rep-{s,p,o}`) the prune may miss
+  re-firing when *other* rules derive new triples with new predicates.
+  Stage-1 accepts this (correctness preserved through first-round
+  full-fire); Stage-2 should mark such rules "always-relevant".
 - [ ] **SPEC-02 storage**: HDT cold tier (F9), CXL/NVMe tiering, MVCC with
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).

@@ -1,0 +1,2 @@
+_:d9541f0b67b9354e4b4b68ceafd74ed3 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/a> <http://www.w3.org/2002/07/owl#differentFrom> <http://example.org/b> .

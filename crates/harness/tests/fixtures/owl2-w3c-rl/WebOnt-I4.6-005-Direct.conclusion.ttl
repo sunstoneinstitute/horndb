@@ -1,0 +1,3 @@
+_:b6b60dded3b41127ac6c90839002072b a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/I4.6/nonconclusions005#C2> a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "An example class." .

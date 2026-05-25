@@ -41,59 +41,88 @@ Rules not yet covered by a fixture (Stage-1 follow-up):
 `scm-rng1`, `scm-rng2`, `scm-eqc1`, `scm-eqc2`, `scm-eqp1`,
 `scm-eqp2`, `scm-op`.
 
-## Aspirational ≥50-case W3C OWL 2 RL subset
+## W3C reality (2026-05-25)
 
-The original target was the W3C OWL 2 test suite filtered to the
-`OWL 2 RL` profile (≥50 cases). That requires:
+The four ingestion steps below were completed in a single pass; the
+resulting fixtures and manifest live at
+`crates/harness/tests/fixtures/owl2-w3c-rl/`, and the green subset is
+listed in `harness/selected.toml`'s `[suites.owl2-w3c-rl]` block.
 
-1. **Fix `scripts/fetch-w3c-suites.sh`.** The hard-coded URL
-   `https://www.w3.org/2009/11/owl-test/testOntology-20091022.zip`
-   is 404. The canonical source is the file tree at
-   `https://www.w3.org/2009/11/owl-test/`, in particular
-   `profile-RL.rdf` (~254 KB, 4919 lines) which carries every
-   Profile-RL-tagged test case.
-2. **Handle RDF/XML DOCTYPE quoting.** `profile-RL.rdf` uses
-   single-quoted `<!ENTITY>` declarations in its DOCTYPE; oxrdfio
-   currently rejects these. Either pre-process the file (replace
-   single with double quotes) or upstream an oxrdfio fix.
-3. **Extract the embedded ontologies.** Each `test:TestCase` carries
-   `test:rdfXmlPremiseOntology` and `test:rdfXmlConclusionOntology` as
-   escaped RDF/XML *strings*, not file references. The harness's
-   existing `manifest.rs` parser expects `mf:action` / `mf:result`
-   file URIs. So either:
-   - extend the parser with a `W3CEmbedded` test variant that
-     re-parses the embedded ontology on every case, or
-   - one-shot extract every embedded ontology into a sibling
-     `.premise.ttl` / `.conclusion.ttl` and emit a synthesized
-     `manifest.ttl` that the existing parser already understands.
-   The second is simpler and matches the rest of the harness.
-4. **Curate which W3C cases the Stage-1 engine can pass.** The Stage-1
-   engine implements 33 rules (rules.toml) but is missing `cax-dw`,
-   `prp-irp`, `prp-pdw`, datatype rules, and full bnode-existential
-   matching. Manifests touching these will fail. The curation pass
-   picks the largest subset that's green against today's engine and
-   keeps a `KNOWN-MANIFEST-BUGS.md` (or similar) for failures
-   attributable to upstream rather than to us.
+1. **`scripts/fetch-w3c-suites.sh` rewritten.** The dead
+   `testOntology-20091022.zip` URL was replaced with the live
+   per-profile aggregate at
+   `https://www.w3.org/2009/11/owl-test/profile-RL.rdf` (~254 KB,
+   91 `test:TestCase`s, all tagged
+   `<test:profile rdf:resource="&test;RL"/>`).
+2. **DOCTYPE quoting handled inside the extractor.** Rather than
+   pre-processing the file on disk or patching oxrdfio, the new
+   `crates/harness/src/owl2_rl_extract.rs` substitutes the four
+   DOCTYPE-defined entities (`&rdf;`, `&rdfs;`, `&owl;`, `&test;`)
+   with their expansions in-memory before parsing with `quick-xml`.
+   The XML built-ins (`&lt;` / `&gt;` / `&amp;` / `&quot;` / `&apos;`)
+   are left intact and decoded normally.
+3. **Embedded ontologies materialised as sibling Turtle files.** The
+   new `harness extract-owl2-rl --source --out` subcommand decodes
+   each `test:rdfXmlPremiseOntology` / `test:rdfXmlConclusionOntology`
+   literal, re-parses it via `oxrdfio` (`RdfFormat::RdfXml`), and
+   re-serialises as Turtle to `<id>.premise.ttl` /
+   `<id>.conclusion.ttl`. A synthesised `manifest.ttl` is emitted
+   alongside, mapping each W3C `test:*Test` rdf:type to the matching
+   `mf:*Test` so the existing manifest parser works unchanged. A
+   W3C case carrying both `PositiveEntailmentTest` and
+   `ConsistencyTest` produces two entries (`-pe` and `-cons`).
+4. **Curation: 78 green, 37 red.** The full survey was run against
+   `--features real-engine` on 2026-05-25; 78 of the 115 synthesised
+   entries pass and are listed in `selected.toml`. The 37 failing
+   cases are documented in `harness/KNOWN-MANIFEST-BUGS.md` grouped
+   by the missing OWL 2 RL rule that gates each.
 
-Once those four steps are done, `harness/selected.toml` gains a
-second OWL2 suite entry (e.g. `[suites.owl2-w3c-rl]`) pointing at the
-generated manifest, and this document gets a "W3C reality" section
-listing the IDs and their rule coverage.
+### Ingestion totals
 
-## Selection process (when W3C is wired)
+| Quantity | Value |
+|---|---|
+| W3C `test:TestCase` elements scanned | 91 |
+| Manifest entries emitted (per applicable `test:*Test` type) | 115 |
+| Turtle files written | 115 |
+| Cases skipped (no usable payload) | 11 |
+| Green at Stage-1 (in `[suites.owl2-w3c-rl]`) | 78 |
+| Red at Stage-1 (in `KNOWN-MANIFEST-BUGS.md`) | 37 |
 
-1. After running `scripts/fetch-w3c-suites.sh`, list every test case
-   in `crates/harness/data/w3c-owl2-tests/` with profile `OWL 2 RL`
-   (filter by `<#profile>`).
-2. For each Stage-1 rule above, pick the smallest positive-entailment
-   test that exercises the rule in isolation.
-3. Where the OWL 2 RL profile has known-broken upstream manifests
-   (see `harness/KNOWN-MANIFEST-BUGS.md`), pick the next-smallest.
-4. Round to 50 total by adding consistency / inconsistency tests until
-   the count is met.
+### Green subset composition
+
+Most of the green cases are `ConsistencyTest` flavours that pass
+because the Stage-1 inconsistency rules do not fire — a meaningful
+result on consistent inputs, but not new rule coverage. The
+non-trivial entailment passes are:
+
+- `#WebOnt-equivalentClass-002-pe` — `owl:equivalentClass` propagation.
+- `#WebOnt-equivalentProperty-002-pe` — `owl:equivalentProperty` propagation.
+- `#WebOnt-Nothing-001-incons` — explicit `owl:Nothing` membership.
+
+The remaining 75 are `ConsistencyTest`s acting as a regression bed: as
+new inconsistency rules are added, none of these should flip to
+"expected consistent, got inconsistent".
+
+## Re-running the survey
+
+When the Stage-1 rule set widens, the green/red partition will drift.
+Re-run the survey to refresh both files:
+
+```bash
+./crates/harness/scripts/fetch-w3c-suites.sh
+# Then build a selected.toml that names every w3c-owl2-rl id and run:
+cargo run -p horndb-harness --bin harness --features real-engine -- \
+    --engine owlrl run --selected /tmp/all.toml --allow-failing \
+    | tee /tmp/survey.txt
+```
+
+See the "Maintenance" section in `harness/KNOWN-MANIFEST-BUGS.md` for
+the full recipe.
 
 ## Acceptance
 
-The selected IDs are listed under `[suites.owl2].include` in
-`harness/selected.toml`. Adding or removing entries requires updating
-*this file* and the appropriate section above.
+The selected IDs are listed under `[suites.owl2].include` (the
+hand-rolled rule-coverage subset) and `[suites.owl2-w3c-rl].include`
+(the W3C subset) in `harness/selected.toml`. Adding or removing
+entries requires updating *this file* and the appropriate section
+above.

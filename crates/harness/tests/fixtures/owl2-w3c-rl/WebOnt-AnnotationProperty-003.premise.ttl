@@ -1,0 +1,4 @@
+_:a6a1f979887400c3e1cc57f9c97ad416 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://www.w3.org/2002/03owlt/AnnotationProperty/consistent003#ap> a <http://www.w3.org/2002/07/owl#AnnotationProperty> .
+<http://www.w3.org/2002/03owlt/AnnotationProperty/consistent003#A> a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2002/03owlt/AnnotationProperty/consistent003#ap> <http://www.w3.org/2002/03owlt/AnnotationProperty/consistent003#B> .

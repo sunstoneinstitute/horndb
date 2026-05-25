@@ -1,0 +1,10 @@
+_:f1ad9ee8e47bcac0288ec9d5ebfb40b1 a <http://www.w3.org/2002/07/owl#Ontology> .
+_:db62f14e06e4763b7a2c085296b036d8 a <http://www.w3.org/2002/07/owl#AllDifferent> ;
+	<http://www.w3.org/2002/07/owl#members> _:e1141487475f7285b023ed5d72794005 .
+_:e1141487475f7285b023ed5d72794005 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:d0d3519135ee94f3da791109eff0179c ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/a> .
+_:d0d3519135ee94f3da791109eff0179c <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:d1976fbc5f6849b19b8ebf3ce23114c9 ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/b> .
+_:d1976fbc5f6849b19b8ebf3ce23114c9 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/c> .
+_:db62f14e06e4763b7a2c085296b036d8 <http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .

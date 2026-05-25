@@ -1,0 +1,9 @@
+_:da109c310cebabe2152fef57cabc8f4f a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/a> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/b> a <http://www.w3.org/2002/07/owl#Class> .
+<http://example.org/a> <http://www.w3.org/2002/07/owl#equivalentClass> <http://example.org/b> .
+_:dd12ec2f8e05073e41e3e15fd2f00c46 a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/a> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2002/07/owl#equivalentClass> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://example.org/b> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .

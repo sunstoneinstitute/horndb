@@ -42,6 +42,7 @@ const OWL_INVERSE_FUNCTIONAL_PROPERTY: &str =
 const OWL_SYMMETRIC_PROPERTY: &str = "http://www.w3.org/2002/07/owl#SymmetricProperty";
 const OWL_TRANSITIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
 const OWL_IRREFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#IrreflexiveProperty";
+const OWL_REFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ReflexiveProperty";
 const OWL_ASYMMETRIC_PROPERTY: &str = "http://www.w3.org/2002/07/owl#AsymmetricProperty";
 const OWL_PROPERTY_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#propertyDisjointWith";
 const OWL_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#disjointWith";
@@ -55,8 +56,8 @@ const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
 const OWL_MAX_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#maxCardinality";
 const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=33`.
-const USER_TERMS_BASE: u64 = 34;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=34`.
+const USER_TERMS_BASE: u64 = 35;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -200,6 +201,7 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_symmetric_property: alloc(OWL_SYMMETRIC_PROPERTY, &mut id, &mut dict),
         owl_transitive_property: alloc(OWL_TRANSITIVE_PROPERTY, &mut id, &mut dict),
         owl_irreflexive_property: alloc(OWL_IRREFLEXIVE_PROPERTY, &mut id, &mut dict),
+        owl_reflexive_property: alloc(OWL_REFLEXIVE_PROPERTY, &mut id, &mut dict),
         owl_asymmetric_property: alloc(OWL_ASYMMETRIC_PROPERTY, &mut id, &mut dict),
         owl_property_disjoint_with: alloc(OWL_PROPERTY_DISJOINT_WITH, &mut id, &mut dict),
         owl_disjoint_with: alloc(OWL_DISJOINT_WITH, &mut id, &mut dict),

@@ -1,0 +1,5 @@
+_:f28a6f5d43f8fcbf9920214550bdd29a a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/Girl> a <http://www.w3.org/2002/07/owl#Class> .
+_:debd14051028820d266d526ccc6330dd a <http://www.w3.org/2002/07/owl#Class> ;
+	<http://www.w3.org/2002/07/owl#complementOf> <http://example.org/Girl> .
+<http://example.org/Stewie> a _:debd14051028820d266d526ccc6330dd .

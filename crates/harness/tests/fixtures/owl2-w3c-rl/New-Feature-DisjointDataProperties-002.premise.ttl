@@ -1,0 +1,15 @@
+_:ee7a363e2b101e95a2f96645ce95a72d a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/hasName> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+<http://example.org/hasAddress> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+<http://example.org/hasZip> a <http://www.w3.org/2002/07/owl#DatatypeProperty> .
+_:b26f3fd68e2d1c8c49c31a7d5834a826 a <http://www.w3.org/2002/07/owl#AllDisjointProperties> ;
+	<http://www.w3.org/2002/07/owl#members> _:f577db87ac4a0d4eeff1b1bb5e9d3891 .
+_:f577db87ac4a0d4eeff1b1bb5e9d3891 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:b01c6fe92401c25ce6c6e7f238173fc0 ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/hasName> .
+_:b01c6fe92401c25ce6c6e7f238173fc0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:f1d66cc1e2f0b1155c93d2254653604b ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/hasAddress> .
+_:f1d66cc1e2f0b1155c93d2254653604b <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> ;
+	<http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <http://example.org/hasZip> .
+<http://example.org/Peter> <http://example.org/hasName> "Peter Griffin" .
+<http://example.org/Peter_Griffin> <http://example.org/hasAddress> "Peter Griffin" .
+<http://example.org/Petre> <http://example.org/hasZip> "Peter Griffin" .

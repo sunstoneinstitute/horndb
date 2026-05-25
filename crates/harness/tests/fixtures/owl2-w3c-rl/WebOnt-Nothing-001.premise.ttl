@@ -1,0 +1,2 @@
+_:db3af8e88773b57563ac34861e0c8458 a <http://www.w3.org/2002/07/owl#Ontology> .
+_:ec5416634c9df1786910ccf545460941 a <http://www.w3.org/2002/07/owl#Nothing> .

@@ -1,0 +1,4 @@
+_:e32d455959233827eb3ac3d7937bee82 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/knows> a <http://www.w3.org/2002/07/owl#ObjectProperty> .
+<http://example.org/Peter> a <http://www.w3.org/2002/07/owl#NamedIndividual> .
+<http://example.org/knows> a <http://www.w3.org/2002/07/owl#ReflexiveProperty> .

@@ -1,0 +1,13 @@
+_:b412bc63b93423cca5266ef9144dc856 a <http://www.w3.org/2002/07/owl#Ontology> .
+_:fbeefcc275a097413417c1ee48f0e400 a <http://www.w3.org/2002/07/owl#Axiom> .
+<http://example.org/b> <http://www.w3.org/2002/07/owl#sameAs> <http://example.org/c> .
+_:fbeefcc275a097413417c1ee48f0e400 <http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/b> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2002/07/owl#sameAs> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://example.org/c> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .
+<http://example.org/a> <http://www.w3.org/2002/07/owl#sameAs> <http://example.org/b> .
+_:b50e85249c5d0a1ae0a59dbdfd4837b0 a <http://www.w3.org/2002/07/owl#Axiom> ;
+	<http://www.w3.org/2002/07/owl#annotatedSource> <http://example.org/a> ;
+	<http://www.w3.org/2002/07/owl#annotatedProperty> <http://www.w3.org/2002/07/owl#sameAs> ;
+	<http://www.w3.org/2002/07/owl#annotatedTarget> <http://example.org/b> ;
+	<http://www.w3.org/2000/01/rdf-schema#comment> "I hereby annotate this" .

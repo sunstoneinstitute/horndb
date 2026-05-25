@@ -1,0 +1,2 @@
+_:c38735993b6d508a6771b58bb1a6df28 a <http://www.w3.org/2002/07/owl#Ontology> .
+<http://example.org/Peter> <http://www.w3.org/2002/07/owl#sameAs> <http://example.org/Peter_Griffin> .
