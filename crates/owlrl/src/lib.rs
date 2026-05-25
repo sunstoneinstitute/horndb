@@ -45,5 +45,11 @@ pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
 }
 
+/// The full text of the build-time-generated `generated_rules.rs` as a
+/// string. Used by the `show-rule` dev binary so contributors can inspect
+/// the compiled output of any rule without spelunking under `target/`.
+pub const COMPILED_RULES_SOURCE: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
+
 pub use engine::{materialize, reset_and_materialize, Stats};
 pub use integration::Engine;

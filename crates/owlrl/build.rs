@@ -1,5 +1,12 @@
-//! Build-time rule codegen. Reads rules.toml, emits one `fire_<id>()` per rule
-//! into `$OUT_DIR/generated_rules.rs`. Re-runs on changes to any codegen input.
+//! Build-time rule codegen.
+//!
+//! Reads `rules.toml` and emits `$OUT_DIR/generated_rules.rs` containing one
+//! `fire_<id>()` function per `[[rule]]` plus a `pub const RULES: &[CompiledRule]`
+//! dispatch table.
+//!
+//! QName resolution (`rdf:type` → `rdf_type`) is driven by a map auto-derived
+//! from `src/vocab.rs` — see `codegen::vocab` and `crates/owlrl/AGENTS.md`.
+//! Adding a vocabulary term is a single edit in `src/vocab.rs`.
 
 #[path = "codegen/mod.rs"]
 mod codegen;
@@ -10,14 +17,19 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let rules_path = manifest_dir.join("rules.toml");
+    let vocab_path = manifest_dir.join("src/vocab.rs");
+
     println!("cargo:rerun-if-changed={}", rules_path.display());
+    println!("cargo:rerun-if-changed={}", vocab_path.display());
     println!("cargo:rerun-if-changed=codegen/mod.rs");
     println!("cargo:rerun-if-changed=codegen/parse.rs");
     println!("cargo:rerun-if-changed=codegen/emit.rs");
     println!("cargo:rerun-if-changed=codegen/plan.rs");
+    println!("cargo:rerun-if-changed=codegen/vocab.rs");
 
-    let rules = match codegen::parse::parse_file(&rules_path) {
+    let rules = match codegen::parse::parse_file(&rules_path, &vocab_path) {
         Ok(rs) => rs,
         Err(e) => {
             eprintln!("FAILED to parse rules.toml: {e:#}");
@@ -35,8 +47,6 @@ fn main() {
         }
     };
     let pretty = prettyplease::unparse(&syntax_tree);
-
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let out_path = out_dir.join("generated_rules.rs");
     fs::write(&out_path, pretty).expect("writing generated_rules.rs");
 }

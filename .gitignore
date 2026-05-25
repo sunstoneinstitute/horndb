@@ -4,3 +4,9 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 crates/harness/data/
+
+# Claude Code local state.
+# `.claude/skills/` IS tracked (project-shared skills).
+# `.claude/worktrees/` and per-user settings are not.
+.claude/worktrees/
+.claude/settings.local.json

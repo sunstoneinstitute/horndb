@@ -2,6 +2,14 @@
 //!
 //! At runtime, populated by the caller (typically SPEC-02 storage layer) by
 //! dictionary-encoding each IRI. In tests we populate it by hand.
+//!
+//! Each field carries a `///` doc comment containing the canonical QName in
+//! backticks (e.g. `` `rdf:type` ``). `build.rs` parses this file via syn
+//! and uses those QNames to auto-generate the rules-parser lookup table —
+//! so adding a vocabulary term is a single edit in *this* file: add a
+//! field with its QName doc, then a matching line in `synthetic()` below.
+//!
+//! See `crates/owlrl/AGENTS.md` for the full pipeline description.
 
 use crate::types::TermId;
 
@@ -9,56 +17,106 @@ use crate::types::TermId;
 /// Fields are public so a builder can fill them directly.
 #[derive(Copy, Clone, Debug)]
 pub struct Vocabulary {
-    // rdf:
+    /// `rdf:type`
     pub rdf_type: TermId,
+    /// `rdf:first`
     pub rdf_first: TermId,
+    /// `rdf:rest`
     pub rdf_rest: TermId,
+    /// `rdf:nil`
     pub rdf_nil: TermId,
 
-    // rdfs:
+    /// `rdfs:subClassOf`
     pub rdfs_sub_class_of: TermId,
+    /// `rdfs:subPropertyOf`
     pub rdfs_sub_property_of: TermId,
+    /// `rdfs:domain`
     pub rdfs_domain: TermId,
+    /// `rdfs:range`
     pub rdfs_range: TermId,
 
-    // owl:
+    /// `owl:Class`
     pub owl_class: TermId,
+    /// `owl:Thing`
     pub owl_thing: TermId,
+    /// `owl:Nothing`
     pub owl_nothing: TermId,
+
+    /// `owl:sameAs`
     pub owl_same_as: TermId,
+    /// `owl:differentFrom`
     pub owl_different_from: TermId,
+    /// `owl:equivalentClass`
     pub owl_equivalent_class: TermId,
+    /// `owl:equivalentProperty`
     pub owl_equivalent_property: TermId,
+    /// `owl:inverseOf`
     pub owl_inverse_of: TermId,
+
+    /// `owl:FunctionalProperty`
     pub owl_functional_property: TermId,
+    /// `owl:InverseFunctionalProperty`
     pub owl_inverse_functional_property: TermId,
+    /// `owl:SymmetricProperty`
     pub owl_symmetric_property: TermId,
+    /// `owl:TransitiveProperty`
     pub owl_transitive_property: TermId,
+    /// `owl:IrreflexiveProperty`
     pub owl_irreflexive_property: TermId,
+    /// `owl:ReflexiveProperty`
     pub owl_reflexive_property: TermId,
+    /// `owl:AsymmetricProperty`
     pub owl_asymmetric_property: TermId,
+
+    /// `owl:propertyDisjointWith`
     pub owl_property_disjoint_with: TermId,
+    /// `owl:disjointWith`
     pub owl_disjoint_with: TermId,
+    /// `owl:complementOf`
     pub owl_complement_of: TermId,
+
+    /// `owl:intersectionOf`
     pub owl_intersection_of: TermId,
+    /// `owl:unionOf`
     pub owl_union_of: TermId,
+
+    /// `owl:someValuesFrom`
     pub owl_some_values_from: TermId,
+    /// `owl:allValuesFrom`
     pub owl_all_values_from: TermId,
+    /// `owl:hasValue`
     pub owl_has_value: TermId,
+    /// `owl:onProperty`
     pub owl_on_property: TermId,
+    /// `owl:maxCardinality`
     pub owl_max_cardinality: TermId,
+
+    /// `owl:sourceIndividual`
     pub owl_source_individual: TermId,
+    /// `owl:assertionProperty`
     pub owl_assertion_property: TermId,
+    /// `owl:targetIndividual`
     pub owl_target_individual: TermId,
+    /// `owl:targetValue`
     pub owl_target_value: TermId,
+
+    /// `owl:ObjectProperty`
     pub owl_object_property: TermId,
+
     // list-axiom rules (SPEC-04 F1, list_rules.rs)
+    /// `owl:propertyChainAxiom`
     pub owl_property_chain_axiom: TermId,
+    /// `owl:hasKey`
     pub owl_has_key: TermId,
+    /// `owl:AllDisjointClasses`
     pub owl_all_disjoint_classes: TermId,
+    /// `owl:AllDifferent`
     pub owl_all_different: TermId,
+    /// `owl:members`
     pub owl_members: TermId,
+    /// `owl:distinctMembers`
     pub owl_distinct_members: TermId,
+    /// `owl:NamedIndividual`
     pub owl_named_individual: TermId,
 }
 
