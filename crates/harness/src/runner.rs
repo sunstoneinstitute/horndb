@@ -145,7 +145,11 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             // same parser the storage crate's N-Triples loader uses;
             // running it here keeps the harness self-contained
             // (avoiding a `horndb-storage` dep just for this one suite).
-            match parse_ntriples_file(input) {
+            // I/O errors (missing fixture, unreadable file) propagate via
+            // `?` so they surface as a harness error rather than a silent
+            // test failure.
+            let bytes = read_syntax_input(input)?;
+            match parse_ntriples_bytes(&bytes) {
                 Ok(_) => (Status::Passed, None),
                 Err(e) => (
                     Status::Failed,
@@ -153,13 +157,21 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 ),
             }
         }
-        TestKind::SyntaxNegative { input } => match parse_ntriples_file(input) {
-            Ok(_) => (
-                Status::Failed,
-                Some("negative syntax test parsed successfully but should have failed".into()),
-            ),
-            Err(_) => (Status::Passed, None),
-        },
+        TestKind::SyntaxNegative { input } => {
+            // Read the file outside the parse call so an I/O error (e.g.
+            // a missing fixture or a broken `mf:action` path) is *not*
+            // silently turned into a passing rejection. Only a parse
+            // failure on bytes we successfully read counts as the
+            // expected outcome.
+            let bytes = read_syntax_input(input)?;
+            match parse_ntriples_bytes(&bytes) {
+                Ok(_) => (
+                    Status::Failed,
+                    Some("negative syntax test parsed successfully but should have failed".into()),
+                ),
+                Err(_) => (Status::Passed, None),
+            }
+        }
         TestKind::SparqlAsk {
             query,
             data,
@@ -190,16 +202,23 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
     })
 }
 
-/// Parse an N-Triples file and return the number of triples on success.
-/// Used by the W3C RDF 1.2 N-Triples syntax suite to check parser
-/// acceptance/rejection. Errors here are *expected* for the negative
-/// cases — the caller turns them into a Passed outcome.
-fn parse_ntriples_file(path: &Path) -> Result<usize> {
-    let bytes = fs::read(path).with_context(|| format!("reading nt {}", path.display()))?;
+/// Read a syntax-suite input file. I/O errors here mean a misconfigured
+/// fixture / selection (file not found, permission denied) — never the
+/// expected outcome of a negative test — so they propagate to the
+/// caller and surface as a harness error rather than a silent pass.
+fn read_syntax_input(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("reading nt {}", path.display()))
+}
+
+/// Parse already-read N-Triples bytes and return the number of triples
+/// on success. Used by the W3C RDF 1.2 N-Triples syntax suite: a parse
+/// failure here is *expected* for the negative cases and the caller
+/// turns it into a Passed outcome.
+fn parse_ntriples_bytes(bytes: &[u8]) -> Result<usize> {
     let parser = NTriplesParser::new();
     let mut count = 0;
-    for t in parser.for_slice(&bytes) {
-        t.with_context(|| format!("parsing {}", path.display()))?;
+    for t in parser.for_slice(bytes) {
+        t.context("parsing N-Triples bytes")?;
         count += 1;
     }
     Ok(count)
@@ -302,5 +321,67 @@ mod tests {
             by_id("negative-subclass-no-instance").status,
             Status::Passed
         );
+    }
+
+    #[test]
+    fn negative_syntax_test_with_missing_input_does_not_silently_pass() {
+        // Regression: a SyntaxNegative case whose input file is absent
+        // must surface as an I/O error from `run_one` (which
+        // `run_selected` then turns into a Failed outcome), *not* a
+        // silent Passed. Before splitting I/O from parsing, the missing
+        // file was swallowed by the "Err(_) => Passed" arm.
+        let case = TestCase {
+            id: "#missing-negative".to_string(),
+            suite: Suite::Rdf12NTriples,
+            name: "missing input".to_string(),
+            kind: TestKind::SyntaxNegative {
+                input: PathBuf::from("/nonexistent/path/to/fixture.nt"),
+            },
+        };
+        let mut engine = StubReasoner::new();
+        let err = run_one(&mut engine, &case)
+            .expect_err("missing fixture must surface as a harness error, not a passing outcome");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("reading nt"),
+            "expected I/O-error context, got {msg:?}",
+        );
+    }
+
+    #[test]
+    fn positive_syntax_test_passes_on_valid_ntriples() {
+        // Smoke test for the SyntaxPositive arm using an in-tree
+        // fixture from the RDF 1.2 N-Triples suite.
+        let case = TestCase {
+            id: "#positive-smoke".to_string(),
+            suite: Suite::Rdf12NTriples,
+            name: "positive smoke".to_string(),
+            kind: TestKind::SyntaxPositive {
+                input: fixtures()
+                    .join("crates/harness/tests/fixtures/rdf12-n-triples/ntriples12-syntax-01.nt"),
+            },
+        };
+        let mut engine = StubReasoner::new();
+        let outcome = run_one(&mut engine, &case).unwrap();
+        assert_eq!(outcome.status, Status::Passed);
+    }
+
+    #[test]
+    fn negative_syntax_test_passes_when_parse_rejects() {
+        // Pair the missing-input test: a bad-syntax fixture (parser
+        // *should* reject) must produce a Passed outcome.
+        let case = TestCase {
+            id: "#negative-smoke".to_string(),
+            suite: Suite::Rdf12NTriples,
+            name: "negative smoke".to_string(),
+            kind: TestKind::SyntaxNegative {
+                input: fixtures().join(
+                    "crates/harness/tests/fixtures/rdf12-n-triples/ntriples12-bad-syntax-01.nt",
+                ),
+            },
+        };
+        let mut engine = StubReasoner::new();
+        let outcome = run_one(&mut engine, &case).unwrap();
+        assert_eq!(outcome.status, Status::Passed);
     }
 }
