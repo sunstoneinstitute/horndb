@@ -7,6 +7,9 @@ use std::path::PathBuf;
 pub enum Suite {
     Owl2,
     Sparql11,
+    /// W3C RDF 1.2 N-Triples syntax tests (positive + negative).
+    /// Source: <https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/>.
+    Rdf12NTriples,
 }
 
 impl Suite {
@@ -14,6 +17,7 @@ impl Suite {
         match self {
             Suite::Owl2 => "owl2",
             Suite::Sparql11 => "sparql11",
+            Suite::Rdf12NTriples => "rdf12-n-triples",
         }
     }
 }
@@ -41,6 +45,14 @@ pub enum TestKind {
         data: PathBuf,
         expected: bool,
     },
+    /// `input` parses successfully under the named syntax. Used by the
+    /// W3C RDF 1.2 N-Triples syntax suite (positive cases), where we
+    /// only assert "the parser accepts the file" — no entailment,
+    /// no reasoner involvement.
+    SyntaxPositive { input: PathBuf },
+    /// `input` *must* fail to parse. Used by the bad-syntax cases of
+    /// the same suite.
+    SyntaxNegative { input: PathBuf },
 }
 
 #[derive(Debug, Clone)]

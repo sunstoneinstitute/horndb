@@ -22,7 +22,6 @@ use oxttl::TurtleParser;
 use crate::testcase::{Suite, TestCase, TestKind};
 
 const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
-#[allow(dead_code)]
 const RDFT: &str = "http://www.w3.org/ns/rdftest#";
 const QT: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -118,6 +117,8 @@ struct EntryProjector {
     qet_iri: String,
     qt_query_iri: String,
     qt_data_iri: String,
+    syntax_pos_iri: String,
+    syntax_neg_iri: String,
 }
 
 impl EntryProjector {
@@ -133,6 +134,11 @@ impl EntryProjector {
             qet_iri: format!("{MF}QueryEvaluationTest"),
             qt_query_iri: format!("{QT}query"),
             qt_data_iri: format!("{QT}data"),
+            // W3C RDF 1.2 N-Triples syntax tests use the rdft: vocabulary
+            // rather than mf:*. The syntax-only tests have only an
+            // `mf:action`; no `mf:result`.
+            syntax_pos_iri: format!("{RDFT}TestNTriplesPositiveSyntax"),
+            syntax_neg_iri: format!("{RDFT}TestNTriplesNegativeSyntax"),
         })
     }
 
@@ -243,6 +249,14 @@ fn project_entry(
     } else if kind_str == p.incons_iri {
         TestKind::Inconsistency {
             premise: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+        }
+    } else if kind_str == p.syntax_pos_iri {
+        TestKind::SyntaxPositive {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+        }
+    } else if kind_str == p.syntax_neg_iri {
+        TestKind::SyntaxNegative {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
         }
     } else if kind_str == p.qet_iri || kind_str.starts_with(QT) {
         // SPARQL ASK: action is a qt:QueryTest with qt:query + qt:data,

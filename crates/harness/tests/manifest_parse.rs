@@ -41,3 +41,35 @@ fn parses_sparql11_fixture_manifest() {
         other => panic!("expected SparqlAsk, got {other:?}"),
     }
 }
+
+#[test]
+fn parses_rdf12_ntriples_syntax_manifest() {
+    // Verbatim mirror of the upstream W3C manifest (see
+    // `crates/harness/scripts/fetch-w3c-suites.sh`). The manifest lists
+    // more cases than we currently select in `harness/selected.toml`;
+    // this test asserts the manifest *parses* and produces the right
+    // mix of TestKind::SyntaxPositive / SyntaxNegative entries.
+    let cases = manifest::parse(
+        &fixture("rdf12-n-triples/manifest.ttl"),
+        Suite::Rdf12NTriples,
+    )
+    .unwrap();
+    let pos = cases
+        .iter()
+        .filter(|c| matches!(c.kind, TestKind::SyntaxPositive { .. }))
+        .count();
+    let neg = cases
+        .iter()
+        .filter(|c| matches!(c.kind, TestKind::SyntaxNegative { .. }))
+        .count();
+    assert!(
+        pos >= 4,
+        "expected at least 4 SyntaxPositive cases, got {pos}"
+    );
+    assert!(
+        neg >= 6,
+        "expected at least 6 SyntaxNegative cases, got {neg}"
+    );
+    // No other kinds should appear in a syntax-only manifest.
+    assert_eq!(pos + neg, cases.len(), "unexpected non-syntax cases");
+}

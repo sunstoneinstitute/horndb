@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use oxrdf::{Dataset, Graph, GraphName, Quad};
-use oxttl::TurtleParser;
+use oxttl::{NTriplesParser, TurtleParser};
 
 use crate::outcome::{Outcome, Report, Status};
 use crate::reasoner::Reasoner;
@@ -32,6 +32,11 @@ pub fn run_selected(
             // larger.
             "owl2-w3c-rl" => Suite::Owl2,
             "sparql11" => Suite::Sparql11,
+            // W3C RDF 1.2 N-Triples syntax tests. The manifest uses the
+            // rdft: vocabulary (`TestNTriplesPositiveSyntax` /
+            // `TestNTriplesNegativeSyntax`), parsed by the same
+            // `manifest::parse` entry point as the mf:* suites.
+            "rdf12-n-triples" => Suite::Rdf12NTriples,
             other => {
                 report.push(Outcome {
                     test_id: format!("<suite:{other}>"),
@@ -133,6 +138,28 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 )
             }
         }
+        TestKind::SyntaxPositive { input } => {
+            // The W3C RDF 1.2 N-Triples syntax suite asserts only that
+            // the parser accepts/rejects the input — no reasoner. We
+            // use `oxttl::NTriplesParser` directly because it is the
+            // same parser the storage crate's N-Triples loader uses;
+            // running it here keeps the harness self-contained
+            // (avoiding a `horndb-storage` dep just for this one suite).
+            match parse_ntriples_file(input) {
+                Ok(_) => (Status::Passed, None),
+                Err(e) => (
+                    Status::Failed,
+                    Some(format!("positive syntax test failed to parse: {e}")),
+                ),
+            }
+        }
+        TestKind::SyntaxNegative { input } => match parse_ntriples_file(input) {
+            Ok(_) => (
+                Status::Failed,
+                Some("negative syntax test parsed successfully but should have failed".into()),
+            ),
+            Err(_) => (Status::Passed, None),
+        },
         TestKind::SparqlAsk {
             query,
             data,
@@ -161,6 +188,21 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
         reason,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// Parse an N-Triples file and return the number of triples on success.
+/// Used by the W3C RDF 1.2 N-Triples syntax suite to check parser
+/// acceptance/rejection. Errors here are *expected* for the negative
+/// cases — the caller turns them into a Passed outcome.
+fn parse_ntriples_file(path: &Path) -> Result<usize> {
+    let bytes = fs::read(path).with_context(|| format!("reading nt {}", path.display()))?;
+    let parser = NTriplesParser::new();
+    let mut count = 0;
+    for t in parser.for_slice(&bytes) {
+        t.with_context(|| format!("parsing {}", path.display()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn load_dataset(path: &Path) -> Result<Dataset> {
