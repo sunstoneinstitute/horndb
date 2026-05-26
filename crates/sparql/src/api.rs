@@ -3,13 +3,14 @@
 //! This is what the HTTP `/query` handler and integration tests use.
 //! Callers that need finer control should use the individual modules.
 
-use crate::algebra::translate::translate_query;
+use crate::algebra::translate::translate_query_with;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{construct_triples, Runtime};
 use crate::exec::{Bindings, Executor, Store};
 use crate::parser::{parse_query, parse_update, ParsedQuery};
 use crate::plan::planner;
 use crate::update::apply_update;
+use crate::SparqlConfig;
 
 /// What `execute_query` returns. Variant chosen by query form.
 #[derive(Debug, Clone)]
@@ -26,23 +27,33 @@ pub enum QueryAnswer {
 }
 
 pub fn execute_query<E: Executor + ?Sized>(query: &str, exec: &E) -> Result<QueryAnswer> {
+    execute_query_with(query, exec, &SparqlConfig::default())
+}
+
+/// Like [`execute_query`] but takes an explicit [`SparqlConfig`]; pass
+/// `SparqlConfig::rdf12()` to accept RDF 1.2 triple-term patterns.
+pub fn execute_query_with<E: Executor + ?Sized>(
+    query: &str,
+    exec: &E,
+    cfg: &SparqlConfig,
+) -> Result<QueryAnswer> {
     let parsed = parse_query(query)?;
     match parsed {
         ParsedQuery::Select { inner } => {
-            let alg = translate_query(&inner)?;
+            let alg = translate_query_with(&inner, cfg)?;
             let vars = projected_vars(&alg);
             let plan = planner::plan(&alg)?;
             let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
             Ok(QueryAnswer::Solutions { vars, rows })
         }
         ParsedQuery::Ask { inner } => {
-            let alg = translate_query(&inner)?;
+            let alg = translate_query_with(&inner, cfg)?;
             let plan = planner::plan(&alg)?;
             let any = Runtime::new(exec).run(&plan)?.next().is_some();
             Ok(QueryAnswer::Boolean(any))
         }
         ParsedQuery::Construct { inner } => {
-            let alg = translate_query(&inner)?;
+            let alg = translate_query_with(&inner, cfg)?;
             let plan = planner::plan(&alg)?;
             let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
             let triples = construct_triples(&inner, &rows)?;

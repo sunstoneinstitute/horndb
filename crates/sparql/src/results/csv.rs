@@ -25,6 +25,11 @@ fn term_to_lex(t: &Term) -> String {
     match t {
         Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => s.clone(),
         Term::Var(v) => v.name().to_owned(),
+        // RDF 1.2 triple terms in solution mappings: SPARQL 1.1 CSV has
+        // no syntax for them. Emit empty per the W3C "unbound" rule;
+        // SPEC-07 RDF 1.2 follow-up will route this through a real
+        // triple-term encoder.
+        Term::Triple(_) => String::new(),
     }
 }
 

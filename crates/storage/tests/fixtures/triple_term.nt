@@ -1,0 +1,3 @@
+<http://example.org/Alice> <http://example.org/claims> <<( <http://example.org/Bob> <http://example.org/age> "30" )>> .
+<http://example.org/Carol> <http://example.org/claims> <<( <http://example.org/Bob> <http://example.org/age> "30" )>> .
+<http://example.org/Eve> <http://example.org/claims> <<( <http://example.org/Bob> <http://example.org/age> "40" )>> .

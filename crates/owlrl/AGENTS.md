@@ -553,10 +553,13 @@ library is using.
 
 ## 7. Known caveats and Stage-2 deferrals
 
-- **`rdf-star` feature is locked on** in `Cargo.toml` because
-  workspace deps (oxttl, oxrdfio, oxigraph) activate it transitively
-  via Cargo feature unification. Stage-1 OWL 2 RL rejects triple-term
-  inputs anyway; the RDF 1.2 migration is tracked in TASKS.md HIGH.
+- **`rdf-12` feature is on workspace-wide** after PR2 of the RDF 1.2
+  migration. The Stage-1 OWL 2 RL engine still rejects triple-term
+  inputs — `intern_term` and `triple_entailed` bail explicitly when a
+  premise or conclusion quad carries a `TermRef::Triple` object (see
+  `crates/owlrl/src/integration.rs`). Real triple-term entailment
+  (reified rules, `sameTerm` over triple terms) is Stage-2 territory;
+  the bail keeps tests loud rather than silently dropping data.
 - **`eq-rep-p` is a partition-blowup risk.** It substitutes
   predicates across `owl:sameAs` and on adversarial input can
   explode the `rdf:type` partition. SPEC-04 F5 documents this; the

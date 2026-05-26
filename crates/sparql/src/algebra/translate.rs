@@ -7,14 +7,24 @@
 
 use crate::algebra::{Algebra, Expr, OrderDir, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
+use crate::SparqlConfig;
 use spargebra::algebra::{Expression, GraphPattern, OrderExpression, PropertyPathExpression};
 use spargebra::term::{
     GroundTerm, NamedNodePattern, TermPattern, TriplePattern as SpgTriplePattern, Variable,
 };
 use spargebra::Query;
 
-/// Top-level entry: lower a parsed `spargebra::Query` to [`Algebra`].
+/// Top-level entry: lower a parsed `spargebra::Query` to [`Algebra`]
+/// using the default [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term
+/// patterns are rejected). For RDF 1.2 callers use
+/// [`translate_query_with`].
 pub fn translate_query(q: &Query) -> Result<Algebra> {
+    translate_query_with(q, &SparqlConfig::default())
+}
+
+/// Like [`translate_query`] but takes an explicit [`SparqlConfig`] —
+/// pass [`SparqlConfig::rdf12`] to accept triple-term patterns.
+pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
     match q {
         Query::Select {
             pattern,
@@ -26,13 +36,13 @@ pub fn translate_query(q: &Query) -> Result<Algebra> {
             // honour it; otherwise wrap ourselves with the visible-var
             // list.
             if let GraphPattern::Project { inner, variables } = pattern {
-                let inner_alg = translate_pattern(inner)?;
+                let inner_alg = translate_pattern(inner, cfg)?;
                 Ok(Algebra::Project {
                     vars: variables.iter().map(translate_var).collect(),
                     inner: Box::new(inner_alg),
                 })
             } else {
-                let inner = translate_pattern(pattern)?;
+                let inner = translate_pattern(pattern, cfg)?;
                 let vars = collect_visible_vars(pattern);
                 Ok(Algebra::Project {
                     vars,
@@ -45,7 +55,7 @@ pub fn translate_query(q: &Query) -> Result<Algebra> {
             dataset: _,
             base_iri: _,
         } => {
-            let inner = translate_pattern(pattern)?;
+            let inner = translate_pattern(pattern, cfg)?;
             Ok(Algebra::Project {
                 vars: Vec::new(),
                 inner: Box::new(inner),
@@ -61,19 +71,19 @@ pub fn translate_query(q: &Query) -> Result<Algebra> {
             // runtime; here we only return the WHERE-clause algebra.
             // The planner is responsible for re-attaching the
             // template via Runtime::run_construct.
-            translate_pattern(pattern)
+            translate_pattern(pattern, cfg)
         }
         Query::Describe { .. } => Err(SparqlError::UnsupportedAlgebra("DESCRIBE".into())),
     }
 }
 
 /// Lower a `GraphPattern` (spargebra) to our `Algebra`.
-fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
+fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
     match p {
         GraphPattern::Bgp { patterns } => {
             let mut out = Vec::with_capacity(patterns.len());
             for tp in patterns {
-                out.push(translate_triple(tp)?);
+                out.push(translate_triple(tp, cfg)?);
             }
             Ok(Algebra::Bgp { patterns: out })
         }
@@ -87,43 +97,43 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
             // for the intermediate node in `Seq`, swapped subject/
             // object for `Inverse`). Kleene-star, alternation, etc.
             // are rejected.
-            let patterns = expand_path(subject, path, object)?;
+            let patterns = expand_path(subject, path, object, cfg)?;
             Ok(Algebra::Bgp { patterns })
         }
         GraphPattern::Join { left, right } => Ok(Algebra::Join {
-            left: Box::new(translate_pattern(left)?),
-            right: Box::new(translate_pattern(right)?),
+            left: Box::new(translate_pattern(left, cfg)?),
+            right: Box::new(translate_pattern(right, cfg)?),
         }),
         GraphPattern::LeftJoin {
             left,
             right,
             expression,
         } => Ok(Algebra::LeftJoin {
-            left: Box::new(translate_pattern(left)?),
-            right: Box::new(translate_pattern(right)?),
+            left: Box::new(translate_pattern(left, cfg)?),
+            right: Box::new(translate_pattern(right, cfg)?),
             expr: expression.as_ref().map(translate_expr).transpose()?,
         }),
         GraphPattern::Filter { expr, inner } => Ok(Algebra::Filter {
             expr: translate_expr(expr)?,
-            inner: Box::new(translate_pattern(inner)?),
+            inner: Box::new(translate_pattern(inner, cfg)?),
         }),
         GraphPattern::Union { left, right } => Ok(Algebra::Union {
-            left: Box::new(translate_pattern(left)?),
-            right: Box::new(translate_pattern(right)?),
+            left: Box::new(translate_pattern(left, cfg)?),
+            right: Box::new(translate_pattern(right, cfg)?),
         }),
         GraphPattern::Project { inner, variables } => Ok(Algebra::Project {
             vars: variables.iter().map(translate_var).collect(),
-            inner: Box::new(translate_pattern(inner)?),
+            inner: Box::new(translate_pattern(inner, cfg)?),
         }),
         GraphPattern::Distinct { inner } => Ok(Algebra::Distinct {
-            inner: Box::new(translate_pattern(inner)?),
+            inner: Box::new(translate_pattern(inner, cfg)?),
         }),
         GraphPattern::Slice {
             inner,
             start,
             length,
         } => Ok(Algebra::Slice {
-            inner: Box::new(translate_pattern(inner)?),
+            inner: Box::new(translate_pattern(inner, cfg)?),
             start: *start,
             length: *length,
         }),
@@ -137,7 +147,7 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
                 keys.push((e, dir));
             }
             Ok(Algebra::OrderBy {
-                inner: Box::new(translate_pattern(inner)?),
+                inner: Box::new(translate_pattern(inner, cfg)?),
                 keys,
             })
         }
@@ -146,7 +156,7 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
             variable,
             expression,
         } => Ok(Algebra::Extend {
-            inner: Box::new(translate_pattern(inner)?),
+            inner: Box::new(translate_pattern(inner, cfg)?),
             var: translate_var(variable),
             expr: translate_expr(expression)?,
         }),
@@ -155,14 +165,17 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
             bindings,
         } => {
             let vars = variables.iter().map(translate_var).collect();
-            let rows = bindings
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|cell| cell.as_ref().map(ground_term_to_term))
-                        .collect()
-                })
-                .collect();
+            let mut rows = Vec::with_capacity(bindings.len());
+            for row in bindings {
+                let mut out_row = Vec::with_capacity(row.len());
+                for cell in row {
+                    out_row.push(match cell {
+                        Some(gt) => Some(ground_term_to_term(gt)?),
+                        None => None,
+                    });
+                }
+                rows.push(out_row);
+            }
             Ok(Algebra::Values { vars, rows })
         }
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
@@ -174,20 +187,28 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
     }
 }
 
-fn translate_triple(tp: &SpgTriplePattern) -> Result<TriplePattern> {
+fn translate_triple(tp: &SpgTriplePattern, cfg: &SparqlConfig) -> Result<TriplePattern> {
     Ok(TriplePattern {
-        subject: term_pattern_to_term(&tp.subject)?,
+        subject: term_pattern_to_term(&tp.subject, cfg)?,
         predicate: named_node_pattern_to_term(&tp.predicate)?,
-        object: term_pattern_to_term(&tp.object)?,
+        object: term_pattern_to_term(&tp.object, cfg)?,
     })
 }
 
-fn term_pattern_to_term(tp: &TermPattern) -> Result<Term> {
+fn term_pattern_to_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
     Ok(match tp {
         TermPattern::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
         TermPattern::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
         TermPattern::Literal(l) => Term::Literal(l.to_string()),
         TermPattern::Variable(v) => Term::Var(translate_var(v)),
+        TermPattern::Triple(inner) => {
+            if !cfg.rdf12 {
+                return Err(SparqlError::UnsupportedAlgebra(
+                    "triple-term pattern (enable SparqlConfig::rdf12 to accept)".into(),
+                ));
+            }
+            Term::Triple(Box::new(translate_triple(inner, cfg)?))
+        }
     })
 }
 
@@ -202,11 +223,20 @@ fn translate_var(v: &Variable) -> Var {
     Var::new(v.as_str().to_owned())
 }
 
-fn ground_term_to_term(gt: &GroundTerm) -> Term {
-    match gt {
+fn ground_term_to_term(gt: &GroundTerm) -> Result<Term> {
+    Ok(match gt {
         GroundTerm::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
         GroundTerm::Literal(l) => Term::Literal(l.to_string()),
-    }
+        // Ground triple terms appear in `VALUES` rows under SPARQL 1.2.
+        // The Stage-1 executor has no in-memory representation for them
+        // outside of pattern matching, so we reject them at translation
+        // time; relaxing this is part of the SPEC-07 RDF 1.2 follow-up.
+        GroundTerm::Triple(_) => {
+            return Err(SparqlError::UnsupportedAlgebra(
+                "ground triple-term in VALUES (RDF 1.2)".into(),
+            ));
+        }
+    })
 }
 
 fn translate_expr(e: &Expression) -> Result<Expr> {
@@ -313,10 +343,11 @@ fn expand_path(
     subject: &TermPattern,
     path: &PropertyPathExpression,
     object: &TermPattern,
+    cfg: &SparqlConfig,
 ) -> Result<Vec<TriplePattern>> {
     let mut out = Vec::new();
     let mut fresh = 0usize;
-    expand_path_into(subject, path, object, &mut out, &mut fresh)?;
+    expand_path_into(subject, path, object, &mut out, &mut fresh, cfg)?;
     Ok(out)
 }
 
@@ -326,20 +357,21 @@ fn expand_path_into(
     object: &TermPattern,
     out: &mut Vec<TriplePattern>,
     fresh: &mut usize,
+    cfg: &SparqlConfig,
 ) -> Result<()> {
     use PropertyPathExpression as P;
     match path {
         P::NamedNode(n) => {
             out.push(TriplePattern {
-                subject: term_pattern_to_term(subject)?,
+                subject: term_pattern_to_term(subject, cfg)?,
                 predicate: Term::Iri(n.as_str().to_owned()),
-                object: term_pattern_to_term(object)?,
+                object: term_pattern_to_term(object, cfg)?,
             });
             Ok(())
         }
         P::Reverse(inner) => {
             // ^p between s and o == p between o and s
-            expand_path_into(object, inner, subject, out, fresh)
+            expand_path_into(object, inner, subject, out, fresh, cfg)
         }
         P::Sequence(a, b) => {
             // (a / b) between s and o introduces a fresh var v with
@@ -349,8 +381,8 @@ fn expand_path_into(
             let mid_var = Variable::new(mid_name.clone())
                 .map_err(|e| SparqlError::UnsupportedAlgebra(format!("fresh var: {e}")))?;
             let mid_pattern = TermPattern::Variable(mid_var);
-            expand_path_into(subject, a, &mid_pattern, out, fresh)?;
-            expand_path_into(&mid_pattern, b, object, out, fresh)?;
+            expand_path_into(subject, a, &mid_pattern, out, fresh, cfg)?;
+            expand_path_into(&mid_pattern, b, object, out, fresh, cfg)?;
             Ok(())
         }
         other => Err(SparqlError::UnsupportedPathOp(format!("{other:?}"))),

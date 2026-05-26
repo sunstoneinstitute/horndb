@@ -15,7 +15,12 @@ server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper"]
 # workspace's oxigraph dependency activates it transitively elsewhere,
 # so requesting it here keeps `-p horndb-sparql` matches exhaustive
 # under all feature configurations.
-spargebra = { workspace = true, features = ["sep-0006"] }
+#
+# `sparql-12` enables RDF 1.2 triple-term `TermPattern::Triple` and
+# transitively activates `oxrdf/rdf-12`. The SPARQL translator routes
+# triple-term patterns at runtime through `SparqlConfig::rdf12`; the
+# default config rejects them so SPARQL 1.1 clients keep their semantics.
+spargebra = { workspace = true, features = ["sep-0006", "sparql-12"] }
 oxrdf = { workspace = true }
 sparesults = { workspace = true }
 serde = { workspace = true }

@@ -1,5 +1,5 @@
 use horndb_storage::{Dictionary, TermKind};
-use oxrdf::{BlankNode, Literal, NamedNode, Term};
+use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
 
 fn uri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())
@@ -88,6 +88,34 @@ fn dictionary_indices_start_at_one() {
     let dict = Dictionary::new();
     let id = dict.intern(&uri("http://example.org/x")).unwrap();
     assert_eq!(id.payload(), 1, "first index must be 1, not 0");
+}
+
+#[test]
+fn intern_triple_term_round_trips() {
+    // RDF 1.2 triple terms (object position only). The dictionary is expected
+    // to dedupe identical triple terms by structural equality and to return
+    // the same `Term::Triple` from `lookup` as was interned.
+    let dict = Dictionary::new();
+    let inner = Triple::new(
+        NamedNode::new("http://example.org/s").unwrap(),
+        NamedNode::new("http://example.org/p").unwrap(),
+        NamedNode::new("http://example.org/o").unwrap(),
+    );
+    let tt = Term::Triple(Box::new(inner.clone()));
+    let id1 = dict.intern(&tt).unwrap();
+    assert_eq!(id1.kind(), TermKind::TripleTerm);
+    let id2 = dict.intern(&tt).unwrap();
+    assert_eq!(id1, id2, "triple terms with the same structure must dedupe");
+    let back = dict.lookup(id1).expect("lookup must round-trip");
+    assert_eq!(back, tt, "lookup returns the same Term::Triple structure");
+    // A structurally-different triple term lands in a fresh slot.
+    let other = Term::Triple(Box::new(Triple::new(
+        NamedNode::new("http://example.org/s2").unwrap(),
+        NamedNode::new("http://example.org/p").unwrap(),
+        NamedNode::new("http://example.org/o").unwrap(),
+    )));
+    let id3 = dict.intern(&other).unwrap();
+    assert_ne!(id1, id3);
 }
 
 #[test]
