@@ -71,10 +71,9 @@ pub fn load_ntriples_reader<R: Read>(store: &Store, reader: R) -> Result<LoadSta
 }
 
 fn subject_to_term(s: NamedOrBlankNode) -> Term {
-    // oxrdf 0.3 keeps triple-term subjects behind the `rdf-12` feature
-    // (off by default). PR1 keeps the feature OFF, so the match is
-    // exhaustive without an explicit triple-term arm; PR2 will gate
-    // that arm under `#[cfg(feature = "rdf-12")]`.
+    // RDF 1.2's data model (oxrdf 0.3 with `rdf-12`) keeps subjects as the
+    // 1.1-shaped `NamedOrBlankNode`: triple terms appear only in the
+    // object position (oxrdf's `Term::Triple`). The match is exhaustive.
     match s {
         NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n),
         NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b),

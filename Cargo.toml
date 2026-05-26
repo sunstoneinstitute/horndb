@@ -31,11 +31,11 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
-oxrdf = "0.3"
-oxrdfio = "0.2"
-oxttl = "0.2"
-oxigraph = "0.5"
-sparesults = "0.3"
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+oxrdfio = { version = "0.2", features = ["rdf-12"] }
+oxttl = { version = "0.2", features = ["rdf-12"] }
+oxigraph = { version = "0.5", features = ["rdf-12"] }
+sparesults = { version = "0.3", features = ["sparql-12"] }
 quick-xml = { version = "0.36", features = ["serialize"] }
 walkdir = "2"
 sha2 = "0.10"

@@ -92,15 +92,12 @@ fn kind_of(term: &Term) -> TermKind {
                 TermKind::TypedLiteral
             }
         }
-        // RDF 1.2 triple terms (Term::Triple in oxrdf 0.2 behind the "rdf-star"
-        // feature, Term::Triple in oxrdf 0.3 behind the "rdf-12" feature) are a
-        // Stage-2 priority — see SPEC-00 and TASKS.md. Feature unification across
-        // the workspace can enable the variant transitively, so a catch-all keeps
-        // the match exhaustive in both feature configurations. The Stage-1
-        // N-Triples loader is the only Term-producing path and cannot emit triple
-        // terms, so the arm is unreachable in practice.
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("RDF 1.2 triple terms are not a Stage-1 input"),
+        // RDF 1.2 triple terms — see SPEC-00 (vision) and TASKS.md (PR2 of
+        // the RDF 1.2 migration). `Term` implements `Hash + Eq` recursively,
+        // so the forward `DashMap<Term, TermId>` deduplicates identical
+        // triple terms automatically; the reverse `Vec<Term>` stores the
+        // full `Term::Triple` recursively.
+        Term::Triple(_) => TermKind::TripleTerm,
     }
 }
 

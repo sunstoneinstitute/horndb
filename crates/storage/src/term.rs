@@ -17,6 +17,12 @@ pub enum TermKind {
     LangLiteral = 3,
     TypedLiteral = 4,
     InlineInt = 5,
+    /// RDF 1.2 triple term (PR2 of the RDF 1.2 migration; tracked in
+    /// SPEC-00 / TASKS.md). The payload is a dictionary index pointing
+    /// at a recursively-interned `oxrdf::Term::Triple` in the reverse
+    /// vector — `Term`'s `Hash + Eq` are recursive, so the existing
+    /// `DashMap<Term, TermId>` deduplicates identical triple terms.
+    TripleTerm = 6,
 }
 
 impl TermKind {
@@ -28,6 +34,7 @@ impl TermKind {
             3 => Some(TermKind::LangLiteral),
             4 => Some(TermKind::TypedLiteral),
             5 => Some(TermKind::InlineInt),
+            6 => Some(TermKind::TripleTerm),
             _ => None,
         }
     }
@@ -126,5 +133,25 @@ mod tests {
     fn default_graph_distinct_from_any_dictionary_id() {
         assert_eq!(DEFAULT_GRAPH.0, 0);
         assert_ne!(DEFAULT_GRAPH.0, TermId::new(TermKind::Uri, 1).0);
+    }
+
+    #[test]
+    fn triple_term_kind_round_trips() {
+        let id = TermId::new(TermKind::TripleTerm, 42);
+        assert_eq!(id.kind(), TermKind::TripleTerm);
+        assert_eq!(id.payload(), 42);
+        // Tag round-trip via the public `from_tag` path.
+        assert_eq!(TermKind::from_tag(6), Some(TermKind::TripleTerm));
+        // Distinct from every other kind for the same payload.
+        for &k in &[
+            TermKind::Uri,
+            TermKind::Blank,
+            TermKind::PlainLiteral,
+            TermKind::LangLiteral,
+            TermKind::TypedLiteral,
+            TermKind::InlineInt,
+        ] {
+            assert_ne!(id.0, TermId::new(k, 42).0);
+        }
     }
 }
