@@ -104,39 +104,77 @@ here in the same commit.
 
 ## HIGH — RDF 1.2 (triple terms) support
 
-- [ ] **Migrate workspace to oxrdf 0.3 with the `rdf-12` feature, deliver
+- [x] **Migrate workspace to oxrdf 0.3 with the `rdf-12` feature, deliver
   end-to-end RDF 1.2 triple-term support.**
   - We deliberately track the W3C **RDF 1.2** standard rather than the
     community **RDF-star** extension it superseded — RDF 1.2 has cleaner
     semantics and a cleaner SPARQL surface for the same underlying
     triple-term graph model.
-  - As of PR1 the workspace is unified on `oxrdf 0.3` (workspace) /
-    `oxrdfio 0.2` / `oxttl 0.2` / `oxigraph 0.5` / `sparesults 0.3`, but
-    oxrdf's `rdf-12` feature is OFF. Storage and SPARQL dispatch still
-    cannot observe RDF 1.2 triple terms because the type-level
-    `Triple` variants are gated by that feature; PR2 enables the
-    feature and lifts the existing stubs to real support.
-  - Concrete work:
-    1. Bump workspace `oxrdf` to `0.3.x` + `oxrdfio = "0.2.x"`, enable the
-       `rdf-12` feature; resolve `oxigraph` upgrade (or replace it with
-       narrower deps in the harness — see Operational gaps below).
-       - Done in PR1: workspace bumped to `oxrdf 0.3`, `oxrdfio 0.2`,
-         `oxttl 0.2`, `oxigraph 0.5`, `sparesults 0.3`, `spargebra 0.4`
-         (with `sep-0006`). `rdf-12` feature on `oxrdf` is still OFF;
-         triple-term variants are unrepresentable at the type level
-         until PR2 enables the feature.
-    2. Extend `TermKind` (`crates/storage/src/term.rs`) and the dictionary
-       encoding to admit a `TripleTerm` kind; replace the catch-all
-       `unreachable!` in `kind_of` with real handling.
-    3. Extend the N-Triples/Turtle/N-Quads loaders to accept RDF 1.2
-       triple-term syntax (currently the loaders use 1.1-only grammar).
-    4. Extend SPEC-07 SPARQL algebra translation to admit `TriplePattern`
-       subject/object as triple terms (gate behind a config flag during
-       rollout so default behaviour stays SPARQL 1.1).
-    5. Add a W3C RDF 1.2 conformance subset to the harness's
-       `selected.toml` once the W3C test suite ships fixtures.
+  - PR1 (`dda6128`): workspace unified on `oxrdf 0.3` / `oxrdfio 0.2` /
+    `oxttl 0.2` / `oxigraph 0.5` / `sparesults 0.3` / `spargebra 0.4`
+    (with `sep-0006`). `rdf-12` feature still OFF; triple-term stubs.
+  - PR2 (this commit, this branch): flip the feature on workspace-wide
+    and lift the stubs:
+    1. ✅ Bump workspace deps to enable `rdf-12` / `sparql-12` features.
+       Required oxigraph's `rdf-12` feature too: its transitive
+       sparopt/spareval crates have their own `sparql-12` flags that
+       only activate via oxigraph (Cargo unifies upward, not down).
+       horndb-sparql additionally enables `spargebra/sparql-12` so the
+       `TermPattern::Triple` variant is visible.
+    2. ✅ `TermKind` gains `TripleTerm = 6`. The 60-bit payload encodes
+       a dictionary index pointing at a recursively-stored
+       `Term::Triple` in the reverse vec. `Dictionary::kind_of`
+       classifies `Term::Triple(_)` correctly; structural `Hash + Eq`
+       on `Term` makes the `DashMap` forward map dedupe automatically.
+       Replaces the `unreachable!` catch-all.
+    3. ✅ N-Triples loader unchanged in shape — RDF 1.2 keeps subjects
+       as `NamedOrBlankNode` (triple terms appear only as objects),
+       and the object path already goes through `Dictionary::intern`,
+       which now stores `Term::Triple` recursively. Fixture
+       `crates/storage/tests/fixtures/triple_term.nt` exercises the
+       `<<( s p o )>>` syntax including the dedupe path.
+    4. ✅ SPARQL algebra translation: `Term::Triple(Box<TriplePattern>)`
+       in `algebra::Term`, recursive `term_pattern_to_term` for the
+       new spargebra `TermPattern::Triple` variant, gated behind a
+       new runtime `SparqlConfig::rdf12` flag (default OFF → SPARQL
+       1.1 callers stay 1.1). New `translate_query_with` /
+       `execute_query_with` entry points carry the config; the
+       original API surface is a thin wrapper that pins the default.
+       SPARQL Update `INSERT/DELETE DATA` rejects triple-term forms
+       independently (no SPARQL 1.1 syntax for them).
+    5. ⏳ W3C RDF 1.2 conformance subset (`rdf/rdf12/rdf-n-triples`,
+       `rdf-turtle`, `rdf-trig`, `rdf-n-quads`, `rdf-semantics` —
+       deferred). The W3C published fixtures (10 N-Triples 1.2 syntax
+       tests including triple-term subjects/objects + 6 bad-syntax
+       negative cases), but adopting them requires extending the
+       harness's `TestKind` to cover syntax-only tests, a new `Suite`
+       variant, and a fetch path under
+       `crates/harness/scripts/fetch-w3c-suites.sh`. Tracked as a
+       Stage-2 follow-up.
+  - Out-of-scope-bail policy: `crates/owlrl/src/integration.rs` and
+    `crates/harness/src/manifest.rs` now explicitly bail on triple-term
+    inputs in the Stage-1 engine and W3C-manifest paths respectively
+    (manifests are RDF 1.1 per SPEC-01; OWL 2 RL Stage-1 engine
+    rejects triple-term inputs per SPEC-04 §7).
   - Replaces the previous "RDF-star — deferred indefinitely" entries in
     SPEC-00-vision and SPEC-07-sparql-frontend.
+
+- [ ] **W3C RDF 1.2 conformance subset in `harness/selected.toml`.**
+  Deferred from PR2. Requires:
+  1. A new `TestKind::SyntaxPositive` / `TestKind::SyntaxNegative`
+     variant in `crates/harness/src/testcase.rs` and matching
+     enum-name plumbing in `runner.rs::Suite::from_str`.
+  2. Fetch script entry under
+     `crates/harness/scripts/fetch-w3c-suites.sh` for
+     `https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/`
+     (plus turtle/trig/n-quads). The W3C ships these as plain `.ttl`
+     manifests — no DOCTYPE rewriting needed.
+  3. A `[suites.rdf12-n-triples]` block in `harness/selected.toml`
+     listing the 4 positive triple-term syntax tests
+     (`ntriples12-01..03` + `ntriples12-nested-1`) plus the 6 negative
+     bad-syntax tests (`ntriples12-bad-01,05,06,07,08,10`).
+  4. Wire the new test kinds through `runner.rs` so the harness
+     reports them in JUnit and the SQLite trend store.
 
 ## MEDIUM — Stage-2 scope explicitly deferred per plans
 
