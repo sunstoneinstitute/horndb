@@ -8,13 +8,13 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-# rdf-star is enabled here because workspace deps (oxttl, oxrdfio,
-# oxigraph) all activate it transitively. Cargo's feature unification
-# means the variant appears in `SubjectRef` / `TermRef` whether or not
-# we ask for it, so we declare it explicitly to keep our match arms in
-# sync. The Stage-1 OWL 2 RL slice rejects triple-term inputs; lifting
-# that is a SPEC-04 + RDF 1.2 migration task (see TASKS.md HIGH).
-oxrdf = { workspace = true, features = ["rdf-star"] }
+# Stage-1 keeps `rdf-12` (oxrdf 0.3's RDF 1.2 / triple-term feature) OFF.
+# The OWL 2 RL engine rejects triple-term inputs; lifting that is the
+# Stage-2 PR2 of the RDF 1.2 migration (see TASKS.md HIGH and CLAUDE.md).
+# Match arms in `src/integration.rs` against `SubjectRef::Triple` /
+# `TermRef::Triple` are guarded by a catch-all so the code compiles both
+# with and without the feature.
+oxrdf = { workspace = true }
 rustc-hash = "2"
 smallvec = "1.13"
 

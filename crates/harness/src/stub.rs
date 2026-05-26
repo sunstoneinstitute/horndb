@@ -72,11 +72,11 @@ impl Reasoner for StubReasoner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{Dataset, NamedNode, Quad, Subject};
+    use oxrdf::{Dataset, NamedNode, NamedOrBlankNode, Quad};
 
     fn quad(s: &str, p: &str, o: &str) -> Quad {
         Quad::new(
-            Subject::NamedNode(NamedNode::new(s).unwrap()),
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
             NamedNode::new(p).unwrap(),
             NamedNode::new(o).unwrap(),
             oxrdf::GraphName::DefaultGraph,
