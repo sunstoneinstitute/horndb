@@ -6,7 +6,7 @@
 use crate::error::{Result, StorageError};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
-use oxrdf::{Subject, Term};
+use oxrdf::{NamedOrBlankNode, Term};
 use oxttl::NTriplesParser;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -70,13 +70,13 @@ pub fn load_ntriples_reader<R: Read>(store: &Store, reader: R) -> Result<LoadSta
     })
 }
 
-fn subject_to_term(s: Subject) -> Term {
+fn subject_to_term(s: NamedOrBlankNode) -> Term {
+    // oxrdf 0.3 keeps triple-term subjects behind the `rdf-12` feature
+    // (off by default). PR1 keeps the feature OFF, so the match is
+    // exhaustive without an explicit triple-term arm; PR2 will gate
+    // that arm under `#[cfg(feature = "rdf-12")]`.
     match s {
-        Subject::NamedNode(n) => Term::NamedNode(n),
-        Subject::BlankNode(b) => Term::BlankNode(b),
-        // oxrdf gates triples-as-subjects behind the `rdf-star` feature, which
-        // we do not enable; this arm is therefore unreachable in Stage 1.
-        #[allow(unreachable_patterns)]
-        _ => panic!("RDF-star subject not supported in Stage 1"),
+        NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n),
+        NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b),
     }
 }

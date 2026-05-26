@@ -10,8 +10,8 @@
 //! every `load`. Triple-term (RDF 1.2) inputs return an error per the
 //! Stage-1 charter.
 
-use anyhow::{anyhow, bail, Result};
-use oxrdf::{Dataset, GraphName, Quad, SubjectRef, TermRef};
+use anyhow::{anyhow, Result};
+use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
@@ -281,18 +281,21 @@ fn encode_quad(state: &mut LoadState, quad: &Quad) -> Result<Triple> {
     Ok(Triple::new(s, p, o))
 }
 
-fn intern_subject(state: &mut LoadState, s: SubjectRef<'_>) -> Result<TermId> {
+fn intern_subject(state: &mut LoadState, s: NamedOrBlankNodeRef<'_>) -> Result<TermId> {
+    // RDF 1.2 / rdf-star triple-term subjects are not part of
+    // `NamedOrBlankNodeRef` while the `rdf-12` feature is OFF (PR2 will
+    // re-introduce a triple-term arm). The Stage-1 OWL 2 RL engine
+    // therefore cannot observe such subjects in the first place.
     match s {
-        SubjectRef::NamedNode(n) => Ok(intern_named(state, n.as_str())),
-        SubjectRef::BlankNode(b) => Ok(intern_blank(state, b.as_str())),
-        SubjectRef::Triple(_) => bail!(
-            "RDF 1.2 / rdf-star triple-term subjects are not supported by \
-             the Stage-1 OWL 2 RL engine"
-        ),
+        NamedOrBlankNodeRef::NamedNode(n) => Ok(intern_named(state, n.as_str())),
+        NamedOrBlankNodeRef::BlankNode(b) => Ok(intern_blank(state, b.as_str())),
     }
 }
 
 fn intern_term(state: &mut LoadState, t: TermRef<'_>) -> Result<TermId> {
+    // RDF 1.2 / rdf-star triple-term objects are gated behind the `rdf-12`
+    // feature on `oxrdf`, which is OFF for PR1. Re-introducing the
+    // `TermRef::Triple` arm with a bail is part of PR2.
     match t {
         TermRef::NamedNode(n) => Ok(intern_named(state, n.as_str())),
         TermRef::BlankNode(b) => Ok(intern_blank(state, b.as_str())),
@@ -302,10 +305,6 @@ fn intern_term(state: &mut LoadState, t: TermRef<'_>) -> Result<TermId> {
             l.datatype().as_str(),
             l.language(),
         )),
-        TermRef::Triple(_) => bail!(
-            "RDF 1.2 / rdf-star triple-term objects are not supported by \
-             the Stage-1 OWL 2 RL engine"
-        ),
     }
 }
 
@@ -357,16 +356,16 @@ fn triple_entailed(state: &LoadState, q: &Quad) -> Result<bool> {
         // Predicate IRI never seen in premise → not entailed.
         None => return Ok(false),
     };
+    // The `Triple` arms on `NamedOrBlankNodeRef` / `TermRef` are gated
+    // behind oxrdf's `rdf-12` feature. PR1 keeps that feature OFF, so a
+    // triple-term subject/object is unrepresentable here; PR2 will
+    // re-introduce the explicit bail arms.
     let s = match q.subject.as_ref() {
-        SubjectRef::NamedNode(n) => SlotPattern::Const(match state.dict.get(n.as_str()) {
+        NamedOrBlankNodeRef::NamedNode(n) => SlotPattern::Const(match state.dict.get(n.as_str()) {
             Some(&id) => id,
             None => return Ok(false),
         }),
-        SubjectRef::BlankNode(_) => SlotPattern::Wildcard,
-        SubjectRef::Triple(_) => bail!(
-            "RDF 1.2 / rdf-star triple-term subjects are not supported in \
-             conclusion graphs"
-        ),
+        NamedOrBlankNodeRef::BlankNode(_) => SlotPattern::Wildcard,
     };
     let o = match q.object.as_ref() {
         TermRef::NamedNode(n) => SlotPattern::Const(match state.dict.get(n.as_str()) {
@@ -384,10 +383,6 @@ fn triple_entailed(state: &LoadState, q: &Quad) -> Result<bool> {
                 None => return Ok(false),
             })
         }
-        TermRef::Triple(_) => bail!(
-            "RDF 1.2 / rdf-star triple-term objects are not supported in \
-             conclusion graphs"
-        ),
     };
     Ok(state
         .store
@@ -413,11 +408,11 @@ impl SlotPattern {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{BlankNode, GraphName, Literal, NamedNode, Quad, Subject};
+    use oxrdf::{BlankNode, GraphName, Literal, NamedNode, NamedOrBlankNode, Quad};
 
     fn nq(s: &str, p: &str, o: &str) -> Quad {
         Quad::new(
-            Subject::NamedNode(NamedNode::new(s).unwrap()),
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
             NamedNode::new(p).unwrap(),
             NamedNode::new(o).unwrap(),
             GraphName::DefaultGraph,
@@ -479,7 +474,7 @@ mod tests {
 
         let mut concl = Dataset::new();
         concl.insert(&Quad::new(
-            Subject::BlankNode(BlankNode::new("b1").unwrap()),
+            NamedOrBlankNode::BlankNode(BlankNode::new("b1").unwrap()),
             NamedNode::new(RDF_TYPE).unwrap(),
             NamedNode::new("http://ex/A").unwrap(),
             GraphName::DefaultGraph,
@@ -508,7 +503,7 @@ mod tests {
         let mut engine = Engine::new();
         let mut premise = Dataset::new();
         premise.insert(&Quad::new(
-            Subject::NamedNode(NamedNode::new("http://ex/x").unwrap()),
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/x").unwrap()),
             NamedNode::new("http://ex/p").unwrap(),
             Literal::new_simple_literal("hi"),
             GraphName::DefaultGraph,
@@ -516,7 +511,7 @@ mod tests {
         engine.load(&premise).unwrap();
         let mut concl = Dataset::new();
         concl.insert(&Quad::new(
-            Subject::NamedNode(NamedNode::new("http://ex/x").unwrap()),
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/x").unwrap()),
             NamedNode::new("http://ex/p").unwrap(),
             Literal::new_simple_literal("hi"),
             GraphName::DefaultGraph,

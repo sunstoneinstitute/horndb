@@ -170,6 +170,7 @@ fn translate_pattern(p: &GraphPattern) -> Result<Algebra> {
         GraphPattern::Group { .. } => Err(SparqlError::UnsupportedAlgebra("Group".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
         GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra("Graph".into())),
+        GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
     }
 }
 
@@ -268,7 +269,8 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             GraphPattern::Join { left, right }
             | GraphPattern::Union { left, right }
             | GraphPattern::LeftJoin { left, right, .. }
-            | GraphPattern::Minus { left, right } => {
+            | GraphPattern::Minus { left, right }
+            | GraphPattern::Lateral { left, right } => {
                 walk(left, acc);
                 walk(right, acc);
             }

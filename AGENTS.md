@@ -29,7 +29,7 @@ Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`
 | `horndb-owlrl` | SPEC-04 | OWL 2 RL rules — **compiled** via `build.rs` from `rules.toml` (Soufflé-style codegen, no interpreter). |
 | `horndb-closure` | SPEC-05 | GraphBLAS closure backend. **Links to SuiteSparse:GraphBLAS** via `build.rs` + `bindgen` + `pkg-config` (`links = "graphblas"`). |
 | `horndb-incremental` | SPEC-06 | DBSP-style Z-set deltas, change feed, checkpointing. Insertion-only at Stage 1. |
-| `horndb-sparql` | SPEC-07 | Parser (spargebra), algebra, planner, runtime, axum HTTP server (`server` feature, on by default). Pulls `oxrdf 0.3` / `sparesults 0.3` directly — workspace is otherwise on `oxrdf 0.2` (see RDF 1.2 migration in TASKS.md). |
+| `horndb-sparql` | SPEC-07 | Parser (spargebra), algebra, planner, runtime, axum HTTP server (`server` feature, on by default). Tracks workspace `oxrdf 0.3` / `oxrdfio 0.2` / `sparesults 0.3`; oxrdf's `rdf-12` feature is still OFF and triple-term semantics remain stubbed pending PR2 of the RDF 1.2 migration. |
 | `horndb-ml` | SPEC-08 | ML/LLM boundary — candidate generation, audit, registry. Symbolic is source of truth. |
 | `horndb-hardware-ext` | SPEC-09 | Empty placeholder; Stage-3 territory. |
 | `horndb-harness` | SPEC-01 | Conformance + benchmark runner, ships the `harness` binary. Loads `harness/selected.toml` at the workspace root. |
@@ -89,7 +89,7 @@ The canonical selection file is `harness/selected.toml` at the workspace root. I
 - **`horndb-closure`** has a `build.rs` that bindgen's against `wrapper.h` and `pkg-config`s `graphblas`. You need SuiteSparse:GraphBLAS installed locally to build this crate. The wrapper headers and integration notes live alongside `Cargo.toml`.
 - **`horndb-owlrl`** generates Rust source from `rules.toml` in `build.rs` (the codegen pipeline is in `codegen/`). When editing rules, expect a slower first build and check both `INTEGRATION-NOTES.md` and the generated code under `target/`.
 - **`horndb-wcoj`** has a known correctness bug on BGPs with repeated patterns (TASKS.md CRITICAL). The differential fuzzer in `tests/differential_fuzz.rs` is `#[ignore]`'d with a regression file checked into `tests/differential_fuzz.proptest-regressions`. The 4-cycle benchmark is also currently ~1.6× *slower* than the binary-hash reference — both gates block SPEC-03 acceptance.
-- **`horndb-sparql`** intentionally depends on `oxrdf = "0.3"` directly while the rest of the workspace transitively uses `oxrdf 0.2` (pinned by `oxigraph 0.4`). The RDF 1.2 / triple-terms migration that aligns these is a Stage-2 priority in TASKS.md — do not "fix" the mismatch ad hoc.
+- **`horndb-sparql`** now tracks the unified workspace versions (`oxrdf 0.3.x`, `oxrdfio 0.2.x`, `sparesults 0.3.x`) — PR1 of the RDF 1.2 migration bumped everything together. The `rdf-12` feature on `oxrdf` is still OFF; triple-term semantics remain stubbed (see PR2 in TASKS.md HIGH). `horndb-sparql` enables `spargebra/sep-0006` so the `GraphPattern::Lateral` variant is visible regardless of feature unification.
 - **`horndb-incremental`** is **insertion-only at Stage 1**. Retraction semantics are deferred (see `FUTURE-WORK.md` and SPEC-06).
 
 ## Workspace conventions

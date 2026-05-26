@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use oxrdf::{Graph, NamedNodeRef, Subject, SubjectRef, Term, TermRef};
+use oxrdf::{Graph, NamedNodeRef, NamedOrBlankNode, NamedOrBlankNodeRef, Term, TermRef};
 use oxttl::TurtleParser;
 
 use crate::testcase::{Suite, TestCase, TestKind};
@@ -53,19 +53,22 @@ fn parse_turtle(bytes: &[u8], base_iri: &str) -> Result<Graph> {
     Ok(graph)
 }
 
-fn term_to_subject(t: &Term) -> Result<Subject> {
+fn term_to_subject(t: &Term) -> Result<NamedOrBlankNode> {
+    // PR1 keeps oxrdf's `rdf-12` feature OFF, so triple-term subjects do
+    // not appear in `Term`; the literal arm is the only failure mode.
+    // PR2 will re-introduce a guarded triple-term arm.
     match t {
-        Term::NamedNode(n) => Ok(Subject::NamedNode(n.clone())),
-        Term::BlankNode(b) => Ok(Subject::BlankNode(b.clone())),
-        _ => bail!("expected resource, got literal"),
+        Term::NamedNode(n) => Ok(NamedOrBlankNode::NamedNode(n.clone())),
+        Term::BlankNode(b) => Ok(NamedOrBlankNode::BlankNode(b.clone())),
+        Term::Literal(_) => bail!("expected resource, got literal"),
     }
 }
 
-fn subjectref_to_subject(s: SubjectRef<'_>) -> Result<Subject> {
+fn subjectref_to_subject(s: NamedOrBlankNodeRef<'_>) -> Result<NamedOrBlankNode> {
+    // See `term_to_subject` for the PR1/PR2 triple-term note.
     match s {
-        SubjectRef::NamedNode(n) => Ok(Subject::NamedNode(n.into_owned())),
-        SubjectRef::BlankNode(b) => Ok(Subject::BlankNode(b.into_owned())),
-        other => bail!("unsupported subject shape: {other:?}"),
+        NamedOrBlankNodeRef::NamedNode(n) => Ok(NamedOrBlankNode::NamedNode(n.into_owned())),
+        NamedOrBlankNodeRef::BlankNode(b) => Ok(NamedOrBlankNode::BlankNode(b.into_owned())),
     }
 }
 
@@ -132,7 +135,7 @@ impl EntryProjector {
     fn project(
         &self,
         graph: &Graph,
-        entry: &Subject,
+        entry: &NamedOrBlankNode,
         base: &Path,
         suite: Suite,
     ) -> Result<TestCase> {
@@ -169,7 +172,7 @@ fn read_rdf_list(graph: &Graph, head: Term) -> Result<Vec<Term>> {
 fn project_entry(
     p: &EntryProjector,
     graph: &Graph,
-    entry: &Subject,
+    entry: &NamedOrBlankNode,
     base: &Path,
     suite: Suite,
 ) -> Result<TestCase> {
@@ -178,10 +181,12 @@ fn project_entry(
     let result_pred = NamedNodeRef::new(&p.result_iri)?;
     let rdf_type = NamedNodeRef::new(RDF_TYPE)?;
 
+    // The triple-term subject shape is gated behind oxrdf's `rdf-12`
+    // feature, which PR1 keeps OFF; PR2 will re-introduce a guarded
+    // catch-all bail for it.
     let id = match entry {
-        Subject::NamedNode(n) => n.as_str().to_string(),
-        Subject::BlankNode(b) => format!("_:{}", b.as_str()),
-        other => bail!("unsupported entry subject: {other:?}"),
+        NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
+        NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),
     };
 
     let name = graph

@@ -11,9 +11,13 @@ default = ["server"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper"]
 
 [dependencies]
-spargebra = { workspace = true }
-oxrdf = "0.3"
-sparesults = "0.3"
+# `sep-0006` enables spargebra's `GraphPattern::Lateral` variant. The
+# workspace's oxigraph dependency activates it transitively elsewhere,
+# so requesting it here keeps `-p horndb-sparql` matches exhaustive
+# under all feature configurations.
+spargebra = { workspace = true, features = ["sep-0006"] }
+oxrdf = { workspace = true }
+sparesults = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

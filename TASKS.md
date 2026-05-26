@@ -110,16 +110,21 @@ here in the same commit.
     community **RDF-star** extension it superseded — RDF 1.2 has cleaner
     semantics and a cleaner SPARQL surface for the same underlying
     triple-term graph model.
-  - Today the workspace is mixed: `horndb-sparql` already pulls
-    `oxrdf 0.3` directly, while `horndb-storage` and the harness ride
-    `oxrdf 0.2` transitively (oxigraph 0.4 pins it). Stage-1 storage and
-    SPARQL dispatch surface RDF 1.2 triple terms as `unreachable!`
-    because the Stage-1 N-Triples / SPARQL 1.1 loaders cannot produce
-    them; this task lifts that to real support.
+  - As of PR1 the workspace is unified on `oxrdf 0.3` (workspace) /
+    `oxrdfio 0.2` / `oxttl 0.2` / `oxigraph 0.5` / `sparesults 0.3`, but
+    oxrdf's `rdf-12` feature is OFF. Storage and SPARQL dispatch still
+    cannot observe RDF 1.2 triple terms because the type-level
+    `Triple` variants are gated by that feature; PR2 enables the
+    feature and lifts the existing stubs to real support.
   - Concrete work:
-    1. Bump workspace `oxrdf` to `0.3.x` + `oxrdfio = "0.3"`, enable the
+    1. Bump workspace `oxrdf` to `0.3.x` + `oxrdfio = "0.2.x"`, enable the
        `rdf-12` feature; resolve `oxigraph` upgrade (or replace it with
        narrower deps in the harness — see Operational gaps below).
+       - Done in PR1: workspace bumped to `oxrdf 0.3`, `oxrdfio 0.2`,
+         `oxttl 0.2`, `oxigraph 0.5`, `sparesults 0.3`, `spargebra 0.4`
+         (with `sep-0006`). `rdf-12` feature on `oxrdf` is still OFF;
+         triple-term variants are unrepresentable at the type level
+         until PR2 enables the feature.
     2. Extend `TermKind` (`crates/storage/src/term.rs`) and the dictionary
        encoding to admit a `TripleTerm` kind; replace the catch-all
        `unreachable!` in `kind_of` with real handling.
