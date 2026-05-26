@@ -84,6 +84,8 @@ Harness state lives in `target/harness.sqlite`; CI publishes JUnit to `target/ju
 
 The canonical selection file is `harness/selected.toml` at the workspace root. It carries both the manifest-driven `[suites.*]` entries the harness binary loads and the path-based `[sparql_query]` section consumed by `crates/sparql/tests/w3c_suite.rs`.
 
+Suite keys the runner recognises today (`crates/harness/src/runner.rs`): `owl2`, `owl2-w3c-rl`, `sparql11`, `rdf12-n-triples`. The last one runs the W3C RDF 1.2 N-Triples *syntax* tests (4 positive `<<( s p o )>>` cases + 6 bad-syntax negatives); it uses `TestKind::SyntaxPositive` / `SyntaxNegative` and invokes `oxttl::NTriplesParser` directly with no reasoner involvement. Fixtures live under `crates/harness/tests/fixtures/rdf12-n-triples/`, re-fetchable via `crates/harness/scripts/fetch-w3c-suites.sh`. Upstream URL: `https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/` — note the `syntax/` segment; the top-level `rdf-n-triples/manifest.ttl` only `mf:include`s the syntax sub-manifest alongside `c14n/` and the RDF 1.1 N-Triples suite.
+
 ## Crate-specific gotchas
 
 - **`horndb-closure`** has a `build.rs` that bindgen's against `wrapper.h` and `pkg-config`s `graphblas`. You need SuiteSparse:GraphBLAS installed locally to build this crate. The wrapper headers and integration notes live alongside `Cargo.toml`.

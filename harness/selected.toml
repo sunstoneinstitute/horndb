@@ -159,6 +159,38 @@ include = [
     "#owl2-rl-valid-rightside-allvaluesfrom-cons",
 ]
 
+[suites.rdf12-n-triples]
+# W3C RDF 1.2 N-Triples *syntax* tests. Manifest source:
+# https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/manifest.ttl
+# Re-fetch via `crates/harness/scripts/fetch-w3c-suites.sh`.
+#
+# The 4 positive cases exercise `<<( s p o )>>` triple-term objects
+# (incl. a nested-triple form). The 6 negative cases exercise the
+# bad-syntax positions our N-Triples loader must reject (triple-term
+# in predicate or subject position, with literal/bnode subterms).
+#
+# The upstream filenames have a `-syntax-` infix that the TASKS.md
+# inventory dropped: `ntriples12-01..03` map to
+# `ntriples12-syntax-01..03.nt`, and `ntriples12-bad-01..10` to
+# `ntriples12-bad-syntax-01..10.nt`. The IDs below are the manifest
+# entry IRIs (which keep the inventory shape) — the harness resolves
+# the on-disk filenames via the manifest's `mf:action` triple.
+manifest = "crates/harness/tests/fixtures/rdf12-n-triples/manifest.ttl"
+include = [
+    # Positive: triple-term as object.
+    "#ntriples12-01",
+    "#ntriples12-02",
+    "#ntriples12-03",
+    "#ntriples12-nested-1",
+    # Negative: triple-term in disallowed positions / disallowed subterms.
+    "#ntriples12-bad-01",
+    "#ntriples12-bad-05",
+    "#ntriples12-bad-06",
+    "#ntriples12-bad-07",
+    "#ntriples12-bad-08",
+    "#ntriples12-bad-10",
+]
+
 # SPEC-07 Stage-1 SPARQL query subset.
 #
 # These fixtures live outside the W3C manifest model used by `[suites.*]`:

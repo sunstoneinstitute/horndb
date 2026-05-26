@@ -159,22 +159,36 @@ here in the same commit.
   - Replaces the previous "RDF-star — deferred indefinitely" entries in
     SPEC-00-vision and SPEC-07-sparql-frontend.
 
-- [ ] **W3C RDF 1.2 conformance subset in `harness/selected.toml`.**
-  Deferred from PR2. Requires:
-  1. A new `TestKind::SyntaxPositive` / `TestKind::SyntaxNegative`
-     variant in `crates/harness/src/testcase.rs` and matching
-     enum-name plumbing in `runner.rs::Suite::from_str`.
-  2. Fetch script entry under
-     `crates/harness/scripts/fetch-w3c-suites.sh` for
-     `https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/`
-     (plus turtle/trig/n-quads). The W3C ships these as plain `.ttl`
-     manifests — no DOCTYPE rewriting needed.
-  3. A `[suites.rdf12-n-triples]` block in `harness/selected.toml`
-     listing the 4 positive triple-term syntax tests
-     (`ntriples12-01..03` + `ntriples12-nested-1`) plus the 6 negative
-     bad-syntax tests (`ntriples12-bad-01,05,06,07,08,10`).
-  4. Wire the new test kinds through `runner.rs` so the harness
-     reports them in JUnit and the SQLite trend store.
+- [x] **W3C RDF 1.2 conformance subset in `harness/selected.toml`.**
+  *Done in PR3 of the RDF 1.2 migration.* `TestKind::SyntaxPositive` /
+  `TestKind::SyntaxNegative` ship in `crates/harness/src/testcase.rs`;
+  `Suite::Rdf12NTriples` (string form `"rdf12-n-triples"`) maps in
+  `runner.rs`; the manifest parser recognises
+  `rdft:TestNTriplesPositiveSyntax` / `…NegativeSyntax`. The N-Triples
+  parser is invoked directly via `oxttl::NTriplesParser` (no reasoner
+  detour, since syntax tests don't need one). Fetch script:
+  `crates/harness/scripts/fetch-w3c-suites.sh` now pulls the 10
+  fixtures + `manifest.ttl` from
+  `https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/`
+  (note: under `syntax/` — the top-level manifest at
+  `rdf-n-triples/manifest.ttl` only `mf:include`s the syntax sub-manifest
+  alongside `c14n/` and the RDF 1.1 suite). The selection lists 10
+  cases: 4 positive (`ntriples12-01..03`, `ntriples12-nested-1`) + 6
+  negative (`ntriples12-bad-01,05,06,07,08,10`). End-to-end run with
+  `--engine owlrl` is 10/10 green. JUnit + SQLite outcome rows pick up
+  the new suite by name without further wiring (both store the
+  suite/test_id strings opaquely).
+  - **Upstream filename gotcha:** the *manifest IDs* keep the inventory
+    shape (`ntriples12-01..03`, `ntriples12-bad-01..10`), but the
+    on-disk filenames have a `-syntax-` infix (`ntriples12-syntax-01.nt`,
+    `ntriples12-bad-syntax-01.nt`). The harness resolves filenames via
+    the manifest's `mf:action` triple so this is invisible to
+    `selected.toml`; future maintainers extending the selection should
+    use the manifest IDs, not the filenames.
+  - **Turtle / TriG / N-Quads suites** are out of scope for this PR —
+    N-Triples alone is enough to call the original task done. Add them
+    when the trees they cover acquire a real exercise (e.g. when the
+    bulk loader grows a Turtle path).
 
 ## MEDIUM — Stage-2 scope explicitly deferred per plans
 
