@@ -36,6 +36,14 @@ fn term_to_json(t: &Term) -> Value {
         Term::BlankNode(s) => json!({ "type": "bnode", "value": s.trim_start_matches("_:") }),
         Term::Literal(raw) => parse_literal_to_json(raw),
         Term::Var(_) => json!({ "type": "literal", "value": "<unbound>" }),
+        // RDF 1.2 ground triple terms are emitted by the SPARQL 1.2 JSON
+        // results format as `{ "type": "triple", "value": { … } }`. The
+        // Stage-1 results path holds terms as opaque strings and has no
+        // pattern carrier here; emit the SPARQL 1.2 "unbound triple-term"
+        // shape until SPEC-07 RDF 1.2 follow-up wires real serialisation.
+        Term::Triple(_) => {
+            json!({ "type": "literal", "value": "<rdf-12-triple-term unsupported>" })
+        }
     }
 }
 

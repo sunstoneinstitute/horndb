@@ -54,18 +54,22 @@ fn parse_turtle(bytes: &[u8], base_iri: &str) -> Result<Graph> {
 }
 
 fn term_to_subject(t: &Term) -> Result<NamedOrBlankNode> {
-    // PR1 keeps oxrdf's `rdf-12` feature OFF, so triple-term subjects do
-    // not appear in `Term`; the literal arm is the only failure mode.
-    // PR2 will re-introduce a guarded triple-term arm.
+    // W3C test manifests are RDF 1.1 documents per SPEC-01 — they never
+    // carry triple-term subjects. The literal arm catches the same class
+    // of "wrong term shape" errors as a triple-term arm would, and the
+    // bail on `Term::Triple` is explicit so the failure mode is loud.
     match t {
         Term::NamedNode(n) => Ok(NamedOrBlankNode::NamedNode(n.clone())),
         Term::BlankNode(b) => Ok(NamedOrBlankNode::BlankNode(b.clone())),
         Term::Literal(_) => bail!("expected resource, got literal"),
+        Term::Triple(_) => bail!("RDF 1.2 triple terms are not valid in W3C test manifests"),
     }
 }
 
 fn subjectref_to_subject(s: NamedOrBlankNodeRef<'_>) -> Result<NamedOrBlankNode> {
-    // See `term_to_subject` for the PR1/PR2 triple-term note.
+    // RDF 1.2 keeps subjects as `NamedOrBlankNodeRef` — exhaustive
+    // without a triple-term arm. See `term_to_subject` for the
+    // manifest-only invariant on `Term::Triple`.
     match s {
         NamedOrBlankNodeRef::NamedNode(n) => Ok(NamedOrBlankNode::NamedNode(n.into_owned())),
         NamedOrBlankNodeRef::BlankNode(b) => Ok(NamedOrBlankNode::BlankNode(b.into_owned())),
@@ -181,9 +185,10 @@ fn project_entry(
     let result_pred = NamedNodeRef::new(&p.result_iri)?;
     let rdf_type = NamedNodeRef::new(RDF_TYPE)?;
 
-    // The triple-term subject shape is gated behind oxrdf's `rdf-12`
-    // feature, which PR1 keeps OFF; PR2 will re-introduce a guarded
-    // catch-all bail for it.
+    // Entries are subjects in the manifest — RDF 1.2 keeps subjects as
+    // `NamedOrBlankNode`, so the match is exhaustive without an explicit
+    // triple-term arm. See SPEC-01 / `term_to_subject` for the manifest
+    // shape rationale.
     let id = match entry {
         NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
         NamedOrBlankNode::BlankNode(b) => format!("_:{}", b.as_str()),

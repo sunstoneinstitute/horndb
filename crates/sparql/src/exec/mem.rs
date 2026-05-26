@@ -34,6 +34,12 @@ fn term_to_lex(t: &Term) -> String {
     match t {
         Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => s.clone(),
         Term::Var(v) => panic!("term_to_lex called on Var({})", v.name()),
+        // RDF 1.2 triple-term patterns are gated by SparqlConfig::rdf12
+        // at translation time; the planner only sees them on the rdf12
+        // path, which the Stage-1 MemStore does not implement.
+        Term::Triple(_) => panic!(
+            "term_to_lex called on Term::Triple (rdf-12 patterns are unsupported by MemStore)"
+        ),
     }
 }
 

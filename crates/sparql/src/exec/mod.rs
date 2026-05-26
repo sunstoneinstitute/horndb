@@ -121,6 +121,11 @@ pub(crate) fn unify_one(
                     return None;
                 }
             }
+            // RDF 1.2 triple-term patterns reach this far only if a
+            // caller bypasses the translator's SparqlConfig gate;
+            // unify_one only deals with lexical-form (s, p, o) tuples
+            // and has no way to recurse into a triple-term sub-pattern.
+            Term::Triple(_) => return None,
         }
     }
     Some(out)

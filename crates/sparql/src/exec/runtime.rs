@@ -177,6 +177,12 @@ fn lex(t: &Term) -> String {
     match t {
         Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => s.clone(),
         Term::Var(v) => v.name().to_owned(),
+        // RDF 1.2 triple terms have no canonical lexical form in the
+        // Stage-1 String-based representation. Emitting the empty
+        // string here is consistent with how unbound `Var` patterns
+        // surface in lexicographic comparisons; SPEC-07 RDF 1.2
+        // follow-up will route this through the dictionary instead.
+        Term::Triple(_) => String::new(),
     }
 }
 
@@ -262,6 +268,12 @@ pub fn construct_triples(
                 }
                 _ => None,
             },
+            // RDF 1.2 ground triple-term templates in CONSTRUCT are not
+            // emitted by the Stage-1 lexical-form path (a `Term::Triple`
+            // has no canonical `String` form here). Skip the slot so the
+            // outer (s, p, o) tuple is dropped. See SPEC-07 / TASKS.md
+            // for the dictionary-backed CONSTRUCT follow-up.
+            TermPattern::Triple(_) => None,
         }
     }
     fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<String> {

@@ -38,6 +38,11 @@ pub enum Term {
     /// A literal in N-Triples lexical form, e.g. `"hello"` or
     /// `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`.
     Literal(String),
+    /// An RDF 1.2 triple term (only emitted when `SparqlConfig::rdf12`
+    /// is enabled — the translator rejects it otherwise). The inner
+    /// `TriplePattern` may itself be variable-shaped, so this carries
+    /// a full sub-pattern, not just ground triples.
+    Triple(Box<TriplePattern>),
 }
 
 /// A SPARQL triple pattern.

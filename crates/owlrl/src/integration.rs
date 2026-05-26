@@ -10,7 +10,7 @@
 //! every `load`. Triple-term (RDF 1.2) inputs return an error per the
 //! Stage-1 charter.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::FxHashMap;
 
@@ -282,10 +282,9 @@ fn encode_quad(state: &mut LoadState, quad: &Quad) -> Result<Triple> {
 }
 
 fn intern_subject(state: &mut LoadState, s: NamedOrBlankNodeRef<'_>) -> Result<TermId> {
-    // RDF 1.2 / rdf-star triple-term subjects are not part of
-    // `NamedOrBlankNodeRef` while the `rdf-12` feature is OFF (PR2 will
-    // re-introduce a triple-term arm). The Stage-1 OWL 2 RL engine
-    // therefore cannot observe such subjects in the first place.
+    // RDF 1.2's data model keeps subjects as the 1.1-shaped
+    // `NamedOrBlankNodeRef`; triple terms appear only as objects. The
+    // match is exhaustive even with `oxrdf/rdf-12` enabled.
     match s {
         NamedOrBlankNodeRef::NamedNode(n) => Ok(intern_named(state, n.as_str())),
         NamedOrBlankNodeRef::BlankNode(b) => Ok(intern_blank(state, b.as_str())),
@@ -293,9 +292,6 @@ fn intern_subject(state: &mut LoadState, s: NamedOrBlankNodeRef<'_>) -> Result<T
 }
 
 fn intern_term(state: &mut LoadState, t: TermRef<'_>) -> Result<TermId> {
-    // RDF 1.2 / rdf-star triple-term objects are gated behind the `rdf-12`
-    // feature on `oxrdf`, which is OFF for PR1. Re-introducing the
-    // `TermRef::Triple` arm with a bail is part of PR2.
     match t {
         TermRef::NamedNode(n) => Ok(intern_named(state, n.as_str())),
         TermRef::BlankNode(b) => Ok(intern_blank(state, b.as_str())),
@@ -305,6 +301,14 @@ fn intern_term(state: &mut LoadState, t: TermRef<'_>) -> Result<TermId> {
             l.datatype().as_str(),
             l.language(),
         )),
+        // SPEC-04 §7 + crates/owlrl/AGENTS.md §7: the Stage-1 OWL 2 RL
+        // engine rejects RDF 1.2 triple-term inputs. Triple-term semantics
+        // for entailment (reified rules, sameTerm/sameAs on triple terms)
+        // are a Stage-2 question; until then any premise carrying a triple
+        // term should fail loudly rather than be silently dropped.
+        TermRef::Triple(_) => {
+            bail!("RDF 1.2 triple-term object is not supported by the Stage-1 OWL 2 RL engine")
+        }
     }
 }
 
@@ -356,10 +360,10 @@ fn triple_entailed(state: &LoadState, q: &Quad) -> Result<bool> {
         // Predicate IRI never seen in premise → not entailed.
         None => return Ok(false),
     };
-    // The `Triple` arms on `NamedOrBlankNodeRef` / `TermRef` are gated
-    // behind oxrdf's `rdf-12` feature. PR1 keeps that feature OFF, so a
-    // triple-term subject/object is unrepresentable here; PR2 will
-    // re-introduce the explicit bail arms.
+    // RDF 1.2 keeps subjects as `NamedOrBlankNodeRef`; the object-side
+    // `TermRef::Triple` arm is handled at the end of the `match` below
+    // (SPEC-04 §7 — triple terms in conclusions are not entailed by the
+    // Stage-1 engine).
     let s = match q.subject.as_ref() {
         NamedOrBlankNodeRef::NamedNode(n) => SlotPattern::Const(match state.dict.get(n.as_str()) {
             Some(&id) => id,
@@ -382,6 +386,15 @@ fn triple_entailed(state: &LoadState, q: &Quad) -> Result<bool> {
                 Some(&id) => id,
                 None => return Ok(false),
             })
+        }
+        // SPEC-04 §7: triple-term objects in conclusion graphs imply
+        // entailment over RDF 1.2 semantics, which the Stage-1 engine
+        // does not implement. Fail loudly rather than silently report
+        // "not entailed" — that would mask test bugs.
+        TermRef::Triple(_) => {
+            bail!(
+                "RDF 1.2 triple-term in conclusion is not supported by the Stage-1 OWL 2 RL engine"
+            )
         }
     };
     Ok(state
