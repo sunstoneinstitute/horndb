@@ -94,9 +94,15 @@ impl PackedColumn {
         self.len == 0
     }
 
-    /// Decode the value at index `i`. Panics if `i >= len`.
+    /// Decode the value at index `i`.
+    ///
+    /// `i` must be `< len`. In release builds an out-of-bounds `i` that still
+    /// falls inside the final (partially-filled) block reads zero-padded tail
+    /// bits and returns a garbage value rather than panicking, so callers must
+    /// respect the bound; a `debug_assert!` catches violations in tests.
     #[inline]
     pub fn get(&self, i: usize) -> u64 {
+        debug_assert!(i < self.len, "index {i} out of bounds (len {})", self.len);
         let meta = &self.blocks[i / BLOCK];
         if meta.bits == 0 {
             return meta.base;
