@@ -142,9 +142,16 @@ foundation every other crate reads/writes through.
 | Persistent on-disk dictionary (Marisa-trie / FST) | **deferred** | Stage 2. |
 | Turtle / N-Quads / HDT bulk-import paths | **planned** | Tracked under SPEC-02 completeness; add when a consumer needs them. |
 
-> **Note:** SPEC-03's 4-cycle ≥10× performance gate is blocked here — closing
-> it needs a compressed columnar warm tier (SPEC-02 F1), not more executor
-> tuning. See §5 and `TASKS.md` HIGH · *Performance*.
+> **Note:** SPEC-03's 4-cycle ≥10× performance gate was hypothesised to be
+> blocked here — that closing it needed a compressed columnar warm tier
+> (SPEC-02 F1), not more executor tuning. [#15](https://github.com/sunstoneinstitute/horndb/issues/15)
+> tested that hypothesis with a compressed columnar `TripleSource` *inside
+> `horndb-wcoj`* (frame-of-reference + bit-packing; a wcoj-side representation,
+> not yet the SPEC-02 storage warm tier): it shrinks the 4-cycle working set
+> 7.5× (144 → 19.32 B/triple) and makes WCOJ overtake binary-hash (0.73× →
+> 1.11×), but the ≥10× ratio is **not** reached by compression alone. Result:
+> the gate is no longer simply "blocked on SPEC-02" — see §5 and
+> `TASKS.md` HIGH · *Performance*.
 
 ---
 
@@ -164,7 +171,7 @@ Triejoin with a binary-hash fallback.
 | Cardinality estimation + cost-based plan choice | **implemented** | `cardinality.rs`, `planner.rs`, `plan.rs`. |
 | Cancellation (≤100 ms) | **implemented** | `cancel.rs`. |
 | Correctness vs binary-join (differential fuzzer) | **implemented** | Repeated-pattern over-production bug fixed; fuzzer cases 16 → 256, `#[ignore]` removed. |
-| 4-cycle ≥10× WCOJ-over-binary-join gate (acceptance #2) | **planned** | `TASKS.md` HIGH · *Performance*. Currently ~1.15× faster (regression cleared); the gate is **blocked on SPEC-02** compressed warm tier (memory-bandwidth bound). |
+| 4-cycle ≥10× WCOJ-over-binary-join gate (acceptance #2) | **planned** | `TASKS.md` HIGH · *Performance* ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)). [#15](https://github.com/sunstoneinstitute/horndb/issues/15) added a compressed columnar `CompressedTripleSource` (FoR + bit-packing) and re-pointed the bench: footprint 144 → 19.32 B/triple (7.5×), WCOJ 1.56× faster than on the dense source and now ahead of binary-hash (1.11×, was 0.73×). The ≥10× ratio is still **not met** — compression narrows the gap but the synthetic 4-cycle does not exhibit the intermediate-result blow-up WCOJ needs to dominate asymptotically. |
 | Magic-sets / demand transformation (F4) | **deferred** | `wcoj/src/lib.rs`: "Magic sets and SLG tabling are deferred." |
 | SLG-resolution tabling (F5) | **deferred** | As above. Blocks SPEC-07 backward-chained mode. |
 | GPU WCOJ kernels | **deferred** | SPEC-09, Stage 3. |
