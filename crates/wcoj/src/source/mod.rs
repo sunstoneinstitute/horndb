@@ -5,6 +5,7 @@
 //! that can serve sorted iterators with `seek` over one of the six orderings
 //! implements `TripleSource`.
 
+pub mod compressed;
 pub mod packed_column;
 pub mod synthetic;
 pub mod vec_source;
