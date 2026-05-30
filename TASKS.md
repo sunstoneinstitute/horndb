@@ -16,6 +16,12 @@ here in the same commit.
 > same edit. Keep the order, the `[ ]`/`[x]` markers, the **priority**, and
 > the _category_ tag in sync with the body.
 >
+> **Each open task mirrors a GitHub issue.** The `([#N](…))` link on a task
+> is its tracking issue, labelled `priority: …` + `category: …` to match.
+> When you add, complete, retitle, or re-prioritise a task, do the same to
+> its issue in the same change — see `CLAUDE.md` → "Keep the docs in sync"
+> for the exact protocol. Done tasks (`[x]`) keep their link; close the issue.
+>
 > **Priority** = urgency (CRITICAL/HIGH/MEDIUM/LOW). **Category** = type of
 > work: _Correctness_ (wrong results) · _Performance_ (speed/memory/skew) ·
 > _Completeness_ (feature to build) · _Conformance_ (standard test coverage) ·
@@ -24,23 +30,23 @@ here in the same commit.
 
 - [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produces on BGPs with repeated patterns
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
-- [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate
+- [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
-- [ ] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …)
-- [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings, not yet started)
-- [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B)
+- [ ] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings, not yet started) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
+- [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline
-- [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics (decide when custom semirings pay off)
-- [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration for Sunstone annotated reasoning
-- [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs
-- [ ] **LOW** · _Operational_ — 1Password SSH agent reliability
+- [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics (decide when custom semirings pay off) ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
+- [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration for Sunstone annotated reasoning ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
+- [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
+- [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [x] **LOW** · _Tooling_ — Vendor SuiteSparse:GraphBLAS as a git submodule (static, OpenMP, checked-in bindings)
 - [x] **LOW** · _Maintainability_ — Consolidate `selected.toml` files
 - [x] **LOW** · _Maintainability_ — Plans/specs cross-reference cleanup
@@ -93,7 +99,7 @@ here in the same commit.
 ## HIGH — Performance gaps
 
 - [ ] **SPEC-03 WCOJ 4-cycle bench is no longer in regression, but still
-  far from the ≥10× acceptance gate.** *Partial: the original
+  far from the ≥10× acceptance gate.** ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)) *Partial: the original
   "1.6× slower than binary-hash" was driven by per-call allocations and
   vtable dispatch; both are now gone. Current measured numbers
   (2026-05-25, reference workstation, criterion 0.5):*
@@ -231,7 +237,7 @@ here in the same commit.
 Items that were marked Future Work in the per-spec plans. Pull from this
 list when the corresponding Stage-1 slice is settled.
 
-- [ ] **SPEC-04 eq-rep-p skew.** Predicate-position sameAs substitution
+- [ ] **SPEC-04 eq-rep-p skew.** ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) Predicate-position sameAs substitution
   can blow up the rdf:type partition on adversarial inputs. Stage-1
   ships the literal rule (`crates/owlrl/rules.toml` `eq-rep-p`);
   Stage-2 should add an admission filter or specialised path. Also
@@ -241,27 +247,27 @@ list when the corresponding Stage-1 slice is settled.
   re-firing when *other* rules derive new triples with new predicates.
   Stage-1 accepts this (correctness preserved through first-round
   full-fire); Stage-2 should mark such rules "always-relevant".
-- [ ] **SPEC-02 storage**: HDT cold tier (F9), CXL/NVMe tiering, MVCC with
+- [ ] **SPEC-02 storage** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)): HDT cold tier (F9), CXL/NVMe tiering, MVCC with
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).
-- [ ] **SPEC-04 rules**: full `dt-*` datatype rules, `cls-int*`/`cls-uni*`
+- [ ] **SPEC-04 rules** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)): full `dt-*` datatype rules, `cls-int*`/`cls-uni*`
   list-walking rules, `rdf:type` skew parallelism (F5), production proof
   recording (F4 — Stage-1 ships a stub `Provenance` enum), user-defined
   rules via runtime Datalog frontend.
-- [ ] **SPEC-05 closure**: incremental closure updates (F6 — needs the
+- [ ] **SPEC-05 closure** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)): incremental closure updates (F6 — needs the
   SPEC-06 fix below for closure deltas), GPU backend (SPEC-09 territory),
   LAGraph adoption for higher-level primitives.
-- [ ] **SPEC-06 incremental**: closure-operator deltas (F5), correct
+- [ ] **SPEC-06 incremental** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)): closure-operator deltas (F5), correct
   retraction semantics (F6 — Stage-1 supports insertion only), MVCC for
   in-flight reads, distributed timely-dataflow (SPEC-09 territory).
-- [ ] **SPEC-07 SPARQL**: `DESCRIBE` query form, full `Update` vocabulary
+- [ ] **SPEC-07 SPARQL** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)): `DESCRIBE` query form, full `Update` vocabulary
   (`LOAD`/`CLEAR`/`DROP`), backward-chained entailment mode, Kleene-star
   property paths (`*` and `+`), Graph Store Protocol, `EXPLAIN` pragma,
   full streaming result serialization (currently buffers).
-- [ ] **SPEC-08 ML**: F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
+- [ ] **SPEC-08 ML** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)): F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
   `CandidateGenerator`, HTTP audit endpoint, cost reporting, training-data
   leakage controls.
-- [ ] **SPEC-10 rdflib-compatible Python API**: build the PyO3/maturin
+- [ ] **SPEC-10 rdflib-compatible Python API** ([#9](https://github.com/sunstoneinstitute/horndb/issues/9)): build the PyO3/maturin
   binding layer described in
   `docs/specs/SPEC-10-rdflib-compatible-python-api.md` — rdflib-shaped terms
   (`URIRef` / `BNode` / `Literal` / `Variable` / `Namespace`), `Graph` /
@@ -273,7 +279,7 @@ list when the corresponding Stage-1 slice is settled.
   upstream `rdflib` package on CPython 3.10–3.13 (macOS + Linux). Sits on top
   of SPEC-07. Open packaging decision: distribution/import-path strategy
   (shim vs. literal `rdflib` name) — see SPEC-10 risks.
-- [ ] **SPEC-01 harness**: replace the hand-picked 50-case W3C OWL 2 RL
+- [ ] **SPEC-01 harness** ([#10](https://github.com/sunstoneinstitute/horndb/issues/10)): replace the hand-picked 50-case W3C OWL 2 RL
   subset with the full W3C OWL 2 + SPARQL 1.1 suites, full ORE 2015
   corpus (1,920 ontologies), LDBC SPB SF3 + SF5 audited-style runs, LUBM
   + UOBM profile coverage, RDFox A/B (license review required for
@@ -324,7 +330,7 @@ inference chains. HornDB's SPEC-05 GraphBLAS backend is the natural
 executor. Two tasks: instrument first so we can *measure* when the
 expensive variant is justified, then the optimization itself.
 
-- [ ] **Closure valued-reasoning readiness metrics.** Add the
+- [ ] **Closure valued-reasoning readiness metrics.** ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) Add the
   instrumentation needed to decide *when* custom-semiring work pays off,
   before building any of it — without these numbers the call is a guess.
   Expose per closure run (harness + a `BENCHMARKS.md` row):
@@ -349,7 +355,7 @@ expensive variant is justified, then the optimization itself.
   harness, `BENCHMARKS.md`.
 
 - [ ] **Valued-closure / custom-semiring acceleration for Sunstone
-  annotated reasoning.** Depends on the readiness metrics above. The
+  annotated reasoning.** ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) Depends on the readiness metrics above. The
   optimization ladder, in cost order:
     1. **Fork A — scalar confidence on built-in semirings (do first).**
        Build a weighted concept/entity adjacency matrix from RDF 1.2
@@ -386,7 +392,7 @@ expensive variant is justified, then the optimization itself.
 
 ## LOW — Operational
 
-- [ ] **Disk pressure during multi-agent runs.** `oxrocksdb-sys` (pulled
+- [ ] **Disk pressure during multi-agent runs.** ([#13](https://github.com/sunstoneinstitute/horndb/issues/13)) `oxrocksdb-sys` (pulled
   in transitively by the harness via `oxigraph`) compiles a ~700 MB
   artifact. With multiple worktrees in parallel, the project consumed all
   free space on `/` (~16 GB free → ~100 MB) during the 2026-05-24
@@ -395,7 +401,7 @@ expensive variant is justified, then the optimization itself.
   shared location across worktrees, prune the harness's rocksdb dep
   (replace oxigraph with a narrower SPARQL-only dependency), or document
   a minimum-15-GB-free precondition.
-- [ ] **1Password SSH agent reliability.** During the same run the agent
+- [ ] **1Password SSH agent reliability.** ([#14](https://github.com/sunstoneinstitute/horndb/issues/14)) During the same run the agent
   intermittently returned "no identities" / "communication with agent
   failed" even when the desktop app was unlocked. Two implementation
   subagents hit this and one bypassed signing (which violated the global

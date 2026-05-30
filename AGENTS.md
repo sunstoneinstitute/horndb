@@ -28,6 +28,17 @@ These three documents are linked views of the same reality. When you edit one, u
 
 Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*. When they disagree, the code wins — fix whichever is stale.
 
+### Keep GitHub issues in sync with `TASKS.md`
+
+Every open task in `TASKS.md` mirrors one GitHub issue (`sunstoneinstitute/horndb`), carrying the `([#N](…))` link in both its index line and its body heading. The issue is labelled to match the task: one `priority:` label (`critical`/`high`/`medium`/`low`) and one `category:` label (`correctness`/`performance`/`completeness`/`conformance`/`tooling`/`operational`/`maintainability`). Keep the two in lockstep, in the same change:
+
+- **Add a task** → open an issue with the matching `priority:` + `category:` labels, then put its `([#N](url))` link on both the index line and the body heading. Use `gh issue create --title … --label "priority: …" --label "category: …" --body-file …`.
+- **Complete a task** (`[ ]` → `[x]`) → `gh issue close N`. Keep the link in `TASKS.md` for traceability.
+- **Retitle / re-prioritise / re-categorise a task** → `gh issue edit N` to update the title and swap the `priority:`/`category:` labels so they still match.
+- **Remove a task** → `gh issue close N` (comment why) and drop its `TASKS.md` lines.
+
+The `priority:`/`category:` label set is the GitHub mirror of the **Priority**/**Category** taxonomy defined at the top of `TASKS.md`; if you add a new category or priority there, create the matching label (`gh label create`) first.
+
 ## Workspace layout
 
 Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.88.0` via `rust-toolchain.toml`:
