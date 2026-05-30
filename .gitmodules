@@ -1,0 +1,4 @@
+[submodule "crates/closure/vendor/GraphBLAS"]
+	path = crates/closure/vendor/GraphBLAS
+	url = https://github.com/DrTimothyAldenDavis/GraphBLAS.git
+	shallow = true
