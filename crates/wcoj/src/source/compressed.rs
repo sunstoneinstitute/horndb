@@ -51,8 +51,10 @@ impl CompressedTripleSource {
         Self { sorted, total }
     }
 
-    /// Total heap bytes across every materialised ordering. Used by the bench
-    /// to report bytes/triple against the dense `VecTripleSource`.
+    /// Compressed payload bytes across every materialised ordering (the packed
+    /// word streams + per-block metadata; excludes `Vec`/`HashMap` bookkeeping).
+    /// Used by the bench to report bytes/triple against the dense
+    /// `VecTripleSource`.
     pub fn heap_bytes(&self) -> usize {
         self.sorted
             .values()
@@ -124,6 +126,10 @@ impl<'a> OrderedTripleIter for CompressedIter<'a> {
         let parent = (depth - 1) as usize;
         let (_, hi_parent) = self.range[parent];
         let row = self.cursor[parent];
+        debug_assert!(
+            row < self.rows,
+            "open_level called with exhausted parent cursor"
+        );
         let v = self.cols[parent].get(row);
         // Contiguous run in [row, hi_parent) whose parent column == v.
         let new_hi = self.cols[parent].upper_bound(row, hi_parent, v);
