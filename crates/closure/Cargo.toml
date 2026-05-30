@@ -6,14 +6,24 @@ license.workspace = true
 publish = false
 links = "graphblas"
 
+[features]
+default = ["vendored", "openmp"]
+# Build the vendored SuiteSparse:GraphBLAS submodule from source.
+vendored = ["dep:cmake"]
+# Build GraphBLAS with OpenMP support.
+openmp = []
+# Regenerate the FFI bindings via bindgen instead of using the checked-in src/bindings.rs.
+regen-bindings = ["dep:bindgen"]
+
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = "2"
 
 [build-dependencies]
-bindgen = "0.69"
+bindgen = { version = "0.69", optional = true }
 pkg-config = "0.3"
+cmake = { version = "0.1", optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
