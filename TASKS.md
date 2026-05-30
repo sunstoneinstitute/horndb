@@ -149,6 +149,24 @@ here in the same commit.
   shape are not the bottleneck. Re-open this row when SPEC-02 ships its
   compressed warm tier and the bench can be re-pointed at it.
 
+  *Update (2026-05-31, [#15](https://github.com/sunstoneinstitute/horndb/issues/15)):*
+  the compression hypothesis was tested directly. A compressed columnar
+  `CompressedTripleSource` (frame-of-reference + bit-packing, a wcoj-side
+  `TripleSource` — see `crates/wcoj/src/source/{packed_column,compressed}.rs`)
+  shrinks the 4-cycle source 144 → **19.32 B/triple (7.5×)** and the
+  bench was re-pointed at it (`benches/four_cycle.rs`:
+  `wcoj_compressed` / `binary_hash_compressed`). On the macOS dev
+  workstation: WCOJ **2.70 s** compressed vs **4.21 s** dense (**1.56×**
+  bandwidth win), and WCOJ moves from **0.73×** (slower than binary-hash)
+  on the dense source to **1.11× faster** on the compressed one. So
+  compression helps and is directionally correct, but **does not reach
+  ≥10× on its own** — the synthetic 4-cycle does not produce the
+  intermediate-result blow-up that makes WCOJ asymptotically dominate a
+  binary join, so the remaining gap is workload/shape, not only
+  bandwidth. This row stays open; next levers are a denser/blow-up-prone
+  bench shape (e.g. higher-degree graph) and/or the SPEC-02 storage warm
+  tier proper.
+
 ## HIGH — RDF 1.2 (triple terms) support
 
 - [x] **Migrate workspace to oxrdf 0.3 with the `rdf-12` feature, deliver
@@ -251,8 +269,13 @@ list when the corresponding Stage-1 slice is settled.
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).
   - **Epic breakdown (2026-05-31, tracked under [#3](https://github.com/sunstoneinstitute/horndb/issues/3)):**
-    [#15](https://github.com/sunstoneinstitute/horndb/issues/15) compressed
-    columnar warm tier (unblocks [#1](https://github.com/sunstoneinstitute/horndb/issues/1));
+    ✅ [#15](https://github.com/sunstoneinstitute/horndb/issues/15) compressed
+    columnar source — **delivered 2026-05-31** (`horndb-wcoj`
+    `CompressedTripleSource`, FoR + bit-packing): footprint 144 → 19.32 B/triple
+    (7.5×), WCOJ 1.56× faster than on the dense source and now ahead of
+    binary-hash (0.73× → 1.11×). It did **not** reach the ≥10× gate, so
+    [#1](https://github.com/sunstoneinstitute/horndb/issues/1) stays open with
+    the new measurement recorded;
     [#16](https://github.com/sunstoneinstitute/horndb/issues/16) six index
     orderings on demand (F4);
     [#17](https://github.com/sunstoneinstitute/horndb/issues/17) HDT cold tier +
