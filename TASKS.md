@@ -8,6 +8,43 @@ the system is usable for; everything else last.
 When a task is picked up, move it to its own commit / PR and check it off
 here in the same commit.
 
+## Index
+
+> **Maintenance rule:** this index is the table of contents for the whole
+> file — one line per task, mirroring its checkbox state. Whenever you add,
+> remove, complete, or retitle a task below, update its line here in the
+> same edit. Keep the order, the `[ ]`/`[x]` markers, the **priority**, and
+> the _category_ tag in sync with the body.
+>
+> **Priority** = urgency (CRITICAL/HIGH/MEDIUM/LOW). **Category** = type of
+> work: _Correctness_ (wrong results) · _Performance_ (speed/memory/skew) ·
+> _Completeness_ (feature to build) · _Conformance_ (standard test coverage) ·
+> _Tooling_ (CI/build) · _Operational_ (dev environment) · _Maintainability_
+> (cleanup/docs).
+
+- [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produces on BGPs with repeated patterns
+- [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
+- [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate
+- [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
+- [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
+- [ ] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …)
+- [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B)
+- [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline
+- [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs
+- [ ] **LOW** · _Operational_ — 1Password SSH agent reliability
+- [x] **LOW** · _Maintainability_ — Consolidate `selected.toml` files
+- [x] **LOW** · _Maintainability_ — Plans/specs cross-reference cleanup
+- [x] **LOW** · _Tooling_ — CI: install SuiteSparse:GraphBLAS on runners
+- [x] **LOW** · _Completeness_ — Wire `horndb_owlrl::Engine` to satisfy `Reasoner`
+
+(Archive section at the bottom holds done-for-reference setup items.)
+
 ## CRITICAL — Correctness gaps
 
 - [x] **SPEC-03 WCOJ over-produces on BGPs with repeated patterns.**
@@ -142,15 +179,10 @@ here in the same commit.
        original API surface is a thin wrapper that pins the default.
        SPARQL Update `INSERT/DELETE DATA` rejects triple-term forms
        independently (no SPARQL 1.1 syntax for them).
-    5. ⏳ W3C RDF 1.2 conformance subset (`rdf/rdf12/rdf-n-triples`,
-       `rdf-turtle`, `rdf-trig`, `rdf-n-quads`, `rdf-semantics` —
-       deferred). The W3C published fixtures (10 N-Triples 1.2 syntax
-       tests including triple-term subjects/objects + 6 bad-syntax
-       negative cases), but adopting them requires extending the
-       harness's `TestKind` to cover syntax-only tests, a new `Suite`
-       variant, and a fetch path under
-       `crates/harness/scripts/fetch-w3c-suites.sh`. Tracked as a
-       Stage-2 follow-up.
+    5. ✅ W3C RDF 1.2 N-Triples conformance subset — delivered in PR3;
+       see the dedicated "W3C RDF 1.2 conformance subset in
+       `harness/selected.toml`" entry below for the full detail.
+       (Turtle / TriG / N-Quads / semantics suites remain out of scope.)
   - Out-of-scope-bail policy: `crates/owlrl/src/integration.rs` and
     `crates/harness/src/manifest.rs` now explicitly bail on triple-term
     inputs in the Stage-1 engine and W3C-manifest paths respectively
