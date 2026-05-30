@@ -12,6 +12,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 
 ## Docs in this directory
 
+- [`architecture.md`](architecture.md) — single-page architecture map across all SPECs, with a **Status** field (implemented / specified / planned / deferred) per subsystem and feature. Read this to see what exists today; kept in sync with `../TASKS.md`.
 - [`rdflib.md`](rdflib.md) — compare common rdflib workflows with the current HornDB surface area; read SPEC-10 for the compatibility contract.
 - [`silicondb-horndb-claim-layer.md`](silicondb-horndb-claim-layer.md) — design sketch for a probabilistic claim layer with HornDB certification.
 
