@@ -34,13 +34,14 @@ here in the same commit.
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC)
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …)
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …)
+- [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings, not yet started)
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B)
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics (decide when custom semirings pay off)
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration for Sunstone annotated reasoning
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability
-- [ ] **LOW** · _Tooling_ — Vendor SuiteSparse:GraphBLAS as a git submodule (static, OpenMP, checked-in bindings)
+- [x] **LOW** · _Tooling_ — Vendor SuiteSparse:GraphBLAS as a git submodule (static, OpenMP, checked-in bindings)
 - [x] **LOW** · _Maintainability_ — Consolidate `selected.toml` files
 - [x] **LOW** · _Maintainability_ — Plans/specs cross-reference cleanup
 - [x] **LOW** · _Tooling_ — CI: install SuiteSparse:GraphBLAS on runners
@@ -260,6 +261,18 @@ list when the corresponding Stage-1 slice is settled.
 - [ ] **SPEC-08 ML**: F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
   `CandidateGenerator`, HTTP audit endpoint, cost reporting, training-data
   leakage controls.
+- [ ] **SPEC-10 rdflib-compatible Python API**: build the PyO3/maturin
+  binding layer described in
+  `docs/specs/SPEC-10-rdflib-compatible-python-api.md` — rdflib-shaped terms
+  (`URIRef` / `BNode` / `Literal` / `Variable` / `Namespace`), `Graph` /
+  `Dataset` facades, core `add`/`remove`/`triples`/`query`/`update`, Turtle +
+  N-Triples parse/serialize, and SPARQL passthrough to SPEC-07. No crate
+  exists yet and SPEC-10 (unlike SPEC-01..09) has no Stage-1 plan. Add a
+  `rdflib-compat` harness subset (SPEC-10 acceptance #1) so the compatibility
+  surface is graded like every other spec; differential-test against the
+  upstream `rdflib` package on CPython 3.10–3.13 (macOS + Linux). Sits on top
+  of SPEC-07. Open packaging decision: distribution/import-path strategy
+  (shim vs. literal `rdflib` name) — see SPEC-10 risks.
 - [ ] **SPEC-01 harness**: replace the hand-picked 50-case W3C OWL 2 RL
   subset with the full W3C OWL 2 + SPARQL 1.1 suites, full ORE 2015
   corpus (1,920 ontologies), LDBC SPB SF3 + SF5 audited-style runs, LUBM
@@ -388,7 +401,7 @@ expensive variant is justified, then the optimization itself.
   subagents hit this and one bypassed signing (which violated the global
   rule); the right fix is to either keep the app foregrounded during long
   agent sessions or pre-cache an unencrypted signing key for CI.
-- [ ] **Vendor SuiteSparse:GraphBLAS as a git submodule + build from
+- [x] **Vendor SuiteSparse:GraphBLAS as a git submodule + build from
   source.** Replace today's split setup — local `brew install
   suite-sparse` plus the bespoke tarball-fetch/build/cache steps in
   `ci.yml` — with one pinned, reproducible vendored source tree. Chosen
@@ -429,6 +442,19 @@ expensive variant is justified, then the optimization itself.
     semirings ever land, **PreJIT** them into the vendored lib rather than
     enabling runtime JIT — see the valued-closure task above.
   Cross-refs: SPEC-05, the `[x]` CI GraphBLAS-install item below.
+  *Done (2026-05-30, branch `feat/vendor-graphblas-submodule`):* submodule
+  pinned at `v10.3.0`; `vendored`+`openmp` default features with
+  `regen-bindings` optional; static link **verified via `otool -L`** (no
+  dynamic `libgraphblas` in the test binaries) and a real `libgraphblas.a`
+  produced. Checked-in `src/bindings.rs` (15.7k lines) drops libclang as a
+  hard dep. CI now checks out submodules (`submodules: recursive`) and the
+  ~30-line from-source build/cache/env-export is gone. One deviation from
+  the locked design: forcing a static build needed
+  `BUILD_SHARED_LIBS=OFF` + `BUILD_STATIC_LIBS=ON` — the
+  `GRAPHBLAS_BUILD_STATIC_LIBS=ON` flag alone is a no-op in v10.3.0; the
+  static `.pc` then carries `-lomp` in `Libs.private`, with a macOS-only
+  `rustc-link-search` for Homebrew libomp. The Linux `gomp` path is
+  validated by CI.
 - [x] **Consolidate `selected.toml` files.** SPEC-01 ships
   `harness/selected.toml` at the workspace root; SPEC-07 added a parallel
   `crates/harness/selected.toml` for its 5 W3C SPARQL fixtures. Pick one

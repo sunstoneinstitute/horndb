@@ -1,4 +1,35 @@
-# SPEC-08 Integration Notes for `horndb-closure`
+# Integration Notes for `horndb-closure`
+
+## Build: vendored SuiteSparse:GraphBLAS
+
+`horndb-closure` builds **SuiteSparse:GraphBLAS from a vendored git
+submodule** (`vendor/GraphBLAS`, pinned to tag `v10.3.0`) rather than a
+system install. After cloning the workspace:
+
+```bash
+git submodule update --init --recursive
+cargo build -p horndb-closure
+```
+
+- **Requirements:** `cmake` + a C compiler, and — for the default
+  `openmp` feature — an OpenMP runtime (`libomp` on macOS via
+  `brew install libomp cmake`; `libgomp`, shipped with gcc, on Linux).
+  **No** system GraphBLAS and **no** libclang are required for a normal
+  build.
+- **Cargo features:** `vendored` *(default)* compiles the submodule via
+  the `cmake` crate into `OUT_DIR` and links it **statically**; `openmp`
+  *(default)* builds GraphBLAS with OpenMP; `regen-bindings` *(off)*
+  re-runs bindgen (the only path that needs libclang) — otherwise the
+  checked-in `src/bindings.rs` is used. `--no-default-features` falls back
+  to a `pkg-config` probe of a system GraphBLAS.
+- **First build cost:** the vendored GraphBLAS compile takes ~1–3 min on a
+  cold `OUT_DIR`; cached afterwards, rebuilt on `cargo clean`.
+- **JIT:** built with `GRAPHBLAS_USE_JIT=OFF`. Standard semirings hit
+  GraphBLAS's precompiled FactoryKernels, so no runtime C compiler is
+  needed. If valued-closure custom semirings are ever required, PreJIT
+  them into the vendored library rather than enabling runtime JIT.
+
+## SPEC-08 integration
 
 These notes describe call sites that **SPEC-05's plan** is responsible
 for implementing.
