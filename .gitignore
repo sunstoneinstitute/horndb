@@ -10,3 +10,4 @@ crates/harness/data/
 # `.claude/worktrees/` and per-user settings are not.
 .claude/worktrees/
 .claude/settings.local.json
+.worktrees
