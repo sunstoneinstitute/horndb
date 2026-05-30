@@ -36,8 +36,11 @@ here in the same commit.
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …)
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B)
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline
+- [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics (decide when custom semirings pay off)
+- [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration for Sunstone annotated reasoning
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability
+- [ ] **LOW** · _Tooling_ — Vendor SuiteSparse:GraphBLAS as a git submodule (static, OpenMP, checked-in bindings)
 - [x] **LOW** · _Maintainability_ — Consolidate `selected.toml` files
 - [x] **LOW** · _Maintainability_ — Plans/specs cross-reference cleanup
 - [x] **LOW** · _Tooling_ — CI: install SuiteSparse:GraphBLAS on runners
@@ -295,6 +298,79 @@ list when the corresponding Stage-1 slice is settled.
   reports `passed=97 failed=0 skipped=0` (18 hand-rolled + 78 W3C
   OWL 2 RL + 1 SPARQL ASK).*
 
+## MEDIUM — Future optimization (Sunstone ontology-driven)
+
+These are forward-looking and triggered by Sunstone's own ontologies
+(`rdf-registry`), not by the Stage-1 per-spec plans. The GTIO ontology
+models a weighted `(S, P, O, w)` edge graph plus SKOS crosswalk
+confidences; once those weights move onto the edges via RDF 1.2 triple
+terms (rdf-registry issues #9 / #10), reasoning stops being boolean
+reachability and becomes **valued closure** — propagating a confidence
+(and possibly a SKOS match-type lattice element + provenance) through
+inference chains. HornDB's SPEC-05 GraphBLAS backend is the natural
+executor. Two tasks: instrument first so we can *measure* when the
+expensive variant is justified, then the optimization itself.
+
+- [ ] **Closure valued-reasoning readiness metrics.** Add the
+  instrumentation needed to decide *when* custom-semiring work pays off,
+  before building any of it — without these numbers the call is a guess.
+  Expose per closure run (harness + a `BENCHMARKS.md` row):
+    - **Problem size:** matrix dimension `N` (distinct nodes in the
+      closure), `nnz` (weighted/mapping edges), density.
+    - **Convergence:** iterations-to-fixpoint and work per iteration.
+    - **Kernel split:** wall-time in `GrB_mxm` for the valued semiring
+      vs. a boolean-reachability baseline on the same shape, and the
+      semiring op's share of total closure time.
+    - **Generic-kernel penalty:** throughput of a user-defined-op kernel
+      vs. the equivalent built-in FactoryKernel on the same shape
+      (microbench) — this is the multiplier JIT/PreJIT would remove.
+    - **Carrier shape:** per query/rule, is the required carrier *scalar*
+      (Fork A) or *structured* (Fork B)? Track as a workload property.
+    - **Workload mix & SLO:** frequency of valued-closure queries and
+      their latency target.
+  *Decision rule this enables (record it in the row):* stay on built-in
+  semirings while the carrier is scalar OR `N` is small; consider a
+  custom semiring only when a use case requires a structured carrier;
+  PreJIT only when the measured generic-kernel share × the generic→inlined
+  speedup actually crosses the latency SLO. Cross-refs: SPEC-05, SPEC-01
+  harness, `BENCHMARKS.md`.
+
+- [ ] **Valued-closure / custom-semiring acceleration for Sunstone
+  annotated reasoning.** Depends on the readiness metrics above. The
+  optimization ladder, in cost order:
+    1. **Fork A — scalar confidence on built-in semirings (do first).**
+       Build a weighted concept/entity adjacency matrix from RDF 1.2
+       triple-term annotations (SPEC-02 dictionary IDs → matrix indices);
+       compute transitive closure under the built-in `max-times` (best-
+       confidence path) or `min-plus`/tropical (cost = −log confidence)
+       semiring — both FactoryKernels, **no JIT**. This alone is a large
+       win over SPARQL property-path crawling for crosswalk resolution
+       (rdf-registry #10) and weighted-edge propagation (#9). Deliver a
+       bench against the GTIO/SKOS crosswalk graph.
+    2. **Fork B — structured carrier via custom semiring.** When a use
+       case must propagate `(confidence, SKOS match-type lattice element,
+       provenance set)` as one matrix cell — e.g. a derived crosswalk
+       that must report its *type* and *evidence*, not just a number —
+       define a user type + user semiring (`⊕` = max / probabilistic-OR,
+       `⊗` = confidence multiply + lattice meet + provenance union). Runs
+       on GraphBLAS's generic kernel.
+    3. **PreJIT.** If — and only if — the metrics say the generic kernel
+       hurts at real scale, capture the specialized kernels in a dev build
+       and bake them into the vendored `libgraphblas` (PreJIT) so
+       production stays compiler-free. (Ties to the GraphBLAS submodule /
+       vendoring work.)
+  *Spec precursor — open questions to resolve before writing the SPEC-05
+  addendum:* fixed-size encoding of the structured carrier; exact
+  `⊕`/`⊗` definitions and the semiring laws they must satisfy; how
+  triple-term-annotated weights enter from SPEC-02 storage;
+  threshold/pruning to keep the closure sparse; interaction with SPEC-06
+  incremental deltas; rollback of a *weighted* cascade (the SPEC-05
+  `sameAs` cascade-cost risk applies, now carrying weights). *Done-when:*
+  Fork A bench green on the live crosswalk graph, the readiness metrics
+  populated for it, and a documented, measured decision on whether
+  Fork B/PreJIT is warranted — *then* open the spec. Cross-refs: SPEC-05,
+  SPEC-02 (RDF 1.2 triple terms), SPEC-06, rdf-registry #9 / #10 / #11.
+
 ## LOW — Operational
 
 - [ ] **Disk pressure during multi-agent runs.** `oxrocksdb-sys` (pulled
@@ -312,6 +388,47 @@ list when the corresponding Stage-1 slice is settled.
   subagents hit this and one bypassed signing (which violated the global
   rule); the right fix is to either keep the app foregrounded during long
   agent sessions or pre-cache an unencrypted signing key for CI.
+- [ ] **Vendor SuiteSparse:GraphBLAS as a git submodule + build from
+  source.** Replace today's split setup — local `brew install
+  suite-sparse` plus the bespoke tarball-fetch/build/cache steps in
+  `ci.yml` — with one pinned, reproducible vendored source tree. Chosen
+  design (decisions locked):
+  - **Submodule** at `crates/closure/vendor/GraphBLAS`, pinned to tag
+    `v10.3.0` (matches the current CI `GRAPHBLAS_VERSION`); `--depth 1`,
+    commit `.gitmodules`.
+  - **Cargo features:** `vendored` *(default)* builds the submodule via
+    the `cmake` crate into `OUT_DIR`; with it **off**, fall back to
+    today's `pkg-config` system probe unchanged. `openmp` *(default on)*
+    toggles GraphBLAS OpenMP. `regen-bindings` *(off)* re-runs bindgen;
+    otherwise the checked-in `src/bindings.rs` is used.
+  - **Linking:** static — `GRAPHBLAS_BUILD_STATIC_LIBS=ON`,
+    `rustc-link-lib=static=graphblas`, `BUILD_TESTING=OFF`,
+    `GRAPHBLAS_USE_JIT=OFF`, `CMAKE_BUILD_TYPE=Release`.
+  - **Shared link-flag probe:** after the cmake build, point
+    `PKG_CONFIG_PATH` at the install's `lib/pkgconfig` and run the
+    existing `pkg_config…statik(true).probe("GraphBLAS")` so the OpenMP /
+    libm link flags come from the generated `.pc` for *both* vendored and
+    system modes — one code path, no per-platform hardcoding.
+  - **Bindings:** generate once against the pinned vendored header, commit
+    `src/bindings.rs`; this drops **libclang** as a hard build dep for
+    everyone except `--features regen-bindings`.
+  - **CI:** delete the fetch / cache / env-export / verify steps (~30
+    lines) from `ci.yml`; add `submodules: recursive` to the checkout;
+    the compiled GraphBLAS now lives in `target/` under the existing
+    toolchain cache. **Supersedes** the `[x]` "CI: install
+    SuiteSparse:GraphBLAS on runners" item below.
+  - **Docs:** update the `horndb-closure` gotcha in CLAUDE.md + the crate
+    `INTEGRATION-NOTES.md` — `git submodule update --init --recursive`
+    then `cargo build`; needs `cmake` + a C compiler + (for `openmp`)
+    libomp/libgomp; **no** system GraphBLAS or libclang required.
+  - **Tradeoff accepted:** first build / post-`cargo clean` spends
+    ~1–3 min compiling GraphBLAS (cached in `OUT_DIR` after); macOS devs
+    need `brew install cmake libomp`.
+  - **JIT note:** `USE_JIT=OFF` is correct for current workloads
+    (standard semirings hit FactoryKernels). If valued-closure custom
+    semirings ever land, **PreJIT** them into the vendored lib rather than
+    enabling runtime JIT — see the valued-closure task above.
+  Cross-refs: SPEC-05, the `[x]` CI GraphBLAS-install item below.
 - [x] **Consolidate `selected.toml` files.** SPEC-01 ships
   `harness/selected.toml` at the workspace root; SPEC-07 added a parallel
   `crates/harness/selected.toml` for its 5 W3C SPARQL fixtures. Pick one
