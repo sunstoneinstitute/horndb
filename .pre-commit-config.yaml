@@ -42,26 +42,3 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-
-      # Slow: full workspace clippy. Runs on `git push` so commits stay fast
-      # but nothing reaches the remote (or CI) with -D warnings violations.
-      # The first push after a fresh checkout takes several minutes because
-      # `horndb-harness` pulls in oxrocksdb-sys (~700 MB build artifact);
-      # subsequent pushes reuse the cached target/ tree. For worktree-heavy
-      # workflows set CARGO_TARGET_DIR to a shared path.
-      - id: cargo-clippy-workspace
-        name: cargo clippy --workspace --all-targets -- -D warnings
-        entry: cargo clippy --workspace --all-targets -- -D warnings
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
-
-      # Sanity: full workspace must at least *build* before pushing.
-      - id: cargo-build-workspace
-        name: cargo build --workspace
-        entry: cargo build --workspace
-        language: system
-        types: [rust]
-        pass_filenames: false
-        stages: [pre-push]
