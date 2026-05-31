@@ -20,6 +20,7 @@
 //! - Production proof recording (compressed side-table, on-demand rederivation
 //!   via SPEC-03) — Stage 2; today's `Provenance` is in-memory only.
 //! - `rdf:type` skew optimization (partition-by-class-id parallelism) — Stage 2.
+//!   (`eq-rep-p`'s own class blow-up is mitigated — see `eq_rep_p_opt`.)
 //! - Incremental updates via Z-sets — SPEC-06 / Stage 2.
 //! - WCOJ join execution inside rule bodies — SPEC-03 / Stage 2.
 //!

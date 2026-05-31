@@ -78,6 +78,7 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | Expansion ratio (OWL 2 RL workloads) | ≤**4×** asserted | GraphDB 1:3.2 (NF2, acceptance #3) |
 | Steady-state rule firing latency (LUBM-1000 warm store, single-triple insert) | ≤**1 s** | NF3 (jointly owned with SPEC-06) |
 | Proof-tree retrieval (depth ≤10) | ≤**100 ms** | NF4 |
+| `eq_rep_p_skew` bench — `eq-rep-p` class canonicalization (k=32 mutual-`owl:sameAs`, rows=8) | optimized path ≤ naive, identical closure (differential proptest) | this PR: **38.1 ms** optimized vs **48.7 ms** naive (~1.28×). Output blow-up is semantically irreducible; downstream F5 partition-scan still Stage-2 |
 
 ### SPEC-05 — GraphBLAS closure backend (`horndb-closure`)
 
