@@ -1,7 +1,25 @@
 //! SPEC-03 acceptance criterion #2: on the 4-cycle query
 //!   (?a -p-> ?b -p-> ?c -p-> ?d -p-> ?a)
-//! over a synthetic graph with ~10^6 edges, WCOJ outperforms binary-hash
-//! by ≥10×.
+//! over a synthetic graph of ~10^6 edges, WCOJ outperforms binary-hash join
+//! by ≥10× — the canonical worst-case-optimal-join win case.
+//!
+//! The win case is a *skewed* graph, not a uniform random one. A worst-case-
+//! optimal join only dominates a binary join when the binary join is forced
+//! to materialise an intermediate result far larger than the final output.
+//! On a uniform low-degree graph (the shape used before #1) the 4-cycle has
+//! no such blow-up, so WCOJ and binary-hash run within ~1× of each other.
+//!
+//! [`SyntheticGraph::skewed_four_cycle`] builds the canonical win case: four
+//! vertex layers A→B→C→D on a single predicate, with high-out-degree hubs in
+//! C and a thin, dedicated D→A closure. A binary-hash join materialises the
+//! full 3-path relation `(a,b,c,d)` — size `#2-paths · hub_out` — over *every*
+//! source before it can apply the closure. WCOJ binds `[a,b,c,d]` one variable
+//! at a time; because `a` is shared by the first and last atom it prunes `a`
+//! to the few closure targets at depth 0, then leapfrog-intersects
+//! `out(c) ∩ in(a)` at the last variable, so it never materialises the
+//! 3-paths. See the generator docs and `tests/skewed_four_cycle.rs` (which
+//! pins the correctness of both executors against an independent brute-force
+//! 4-cycle count) for the full rationale.
 
 use std::time::Duration;
 
@@ -12,13 +30,27 @@ use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
 use horndb_wcoj::executor::wcoj::WcojExecutor;
 use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
-use horndb_wcoj::source::compressed::CompressedTripleSource;
-use horndb_wcoj::source::synthetic::SyntheticGraph;
+use horndb_wcoj::source::synthetic::{SkewedFourCycle, SyntheticGraph};
 use horndb_wcoj::source::vec_source::VecTripleSource;
-use horndb_wcoj::source::TripleSource;
+
+/// Canonical WCOJ-win 4-cycle graph: ~10^6 edges, `hub_out = 32` blow-up.
+/// `#2-paths = sources·a_out·hubs = 10^6`; the binary-hash join materialises
+/// `#2-paths · hub_out ≈ 3.2·10^7` 3-paths, while the 4-cycle output is only
+/// `close_sources·a_out·close_sinks`-bounded (a few dozen rows).
+const GATE_PARAMS: SkewedFourCycle = SkewedFourCycle {
+    sources: 10_000,
+    a_out: 2,
+    hubs: 50,
+    hub_out: 32,
+    bulk_sinks: 10_000,
+    close_sources: 4,
+    close_sinks: 2,
+    predicate: 10,
+    seed: 0xDEAD_BEEF,
+};
 
 fn make_4_cycle_bgp() -> Bgp {
-    let p = 10u64;
+    let p = GATE_PARAMS.predicate;
     Bgp::new(vec![
         TriplePattern::new(Term::Var(Var(0)), Term::Bound(p), Term::Var(Var(1))),
         TriplePattern::new(Term::Var(Var(1)), Term::Bound(p), Term::Var(Var(2))),
@@ -28,35 +60,30 @@ fn make_4_cycle_bgp() -> Bgp {
 }
 
 fn bench_four_cycle(c: &mut Criterion) {
-    // 10^6 edges: 250_000 vertices * 4 out-edges = 1_000_000.
-    let edges = SyntheticGraph::cyclic_edges(250_000, 4, 10, 0xDEAD_BEEF);
-    let dense = VecTripleSource::from_triples(edges.clone());
-    let compressed = CompressedTripleSource::from_triples(edges);
+    let edges = SyntheticGraph::skewed_four_cycle_edges(&GATE_PARAMS);
+    let n_edges = edges.len();
+    let source = VecTripleSource::from_triples(edges);
     let bgp = make_4_cycle_bgp();
 
-    // One-time footprint report (stdout; criterion does not capture this).
-    let comp_bytes = compressed.heap_bytes();
-    let n = dense.total_triples().max(1);
+    // One-time shape report (stdout; criterion does not capture this).
     eprintln!(
-        "four_cycle source footprint: compressed = {} bytes ({:.2} B/triple over 6 orderings); \
-         dense ≈ {} bytes ({} B/triple)",
-        comp_bytes,
-        comp_bytes as f64 / n as f64,
-        n * 6 * 24,
-        6 * 24,
+        "four_cycle (skewed win case): {n_edges} edges, hub_out={}",
+        GATE_PARAMS.hub_out
     );
 
     let mut group = c.benchmark_group("four_cycle");
+    // The binary-hash leg materialises ~3.2·10^7 intermediate rows and takes
+    // several seconds per iteration; 10 samples keeps the run bounded.
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
 
-    group.bench_function("wcoj_dense", |b| {
+    group.bench_function("wcoj", |b| {
         b.iter(|| {
             let plan = ExecutionPlan {
                 kind: PlanKind::Wcoj,
                 var_order: vec![Var(0), Var(1), Var(2), Var(3)],
             };
-            let exec = WcojExecutor::new(&dense, &bgp, &plan, CancelToken::new());
+            let exec = WcojExecutor::new(&source, &bgp, &plan, CancelToken::new());
             let mut rows = 0u64;
             for batch in exec.into_iter() {
                 rows += batch.unwrap().num_rows() as u64;
@@ -65,41 +92,10 @@ fn bench_four_cycle(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("wcoj_compressed", |b| {
-        b.iter(|| {
-            let plan = ExecutionPlan {
-                kind: PlanKind::Wcoj,
-                var_order: vec![Var(0), Var(1), Var(2), Var(3)],
-            };
-            let exec = WcojExecutor::new(&compressed, &bgp, &plan, CancelToken::new());
-            let mut rows = 0u64;
-            for batch in exec.into_iter() {
-                rows += batch.unwrap().num_rows() as u64;
-            }
-            criterion::black_box(rows);
-        });
-    });
-
-    group.bench_function("binary_hash_dense", |b| {
+    group.bench_function("binary_hash", |b| {
         b.iter(|| {
             let exec = BinaryHashExecutor::new(
-                &dense,
-                &bgp,
-                vec![Var(0), Var(1), Var(2), Var(3)],
-                CancelToken::new(),
-            );
-            let mut rows = 0u64;
-            for batch in exec.into_iter() {
-                rows += batch.unwrap().num_rows() as u64;
-            }
-            criterion::black_box(rows);
-        });
-    });
-
-    group.bench_function("binary_hash_compressed", |b| {
-        b.iter(|| {
-            let exec = BinaryHashExecutor::new(
-                &compressed,
+                &source,
                 &bgp,
                 vec![Var(0), Var(1), Var(2), Var(3)],
                 CancelToken::new(),

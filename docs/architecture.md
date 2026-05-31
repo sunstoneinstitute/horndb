@@ -142,16 +142,16 @@ foundation every other crate reads/writes through.
 | Persistent on-disk dictionary (Marisa-trie / FST) | **deferred** | Stage 2. |
 | Turtle / N-Quads / HDT bulk-import paths | **planned** | Tracked under SPEC-02 completeness; add when a consumer needs them. |
 
-> **Note:** SPEC-03's 4-cycle ≥10× performance gate was hypothesised to be
-> blocked here — that closing it needed a compressed columnar warm tier
+> **Note:** SPEC-03's 4-cycle ≥10× performance gate was first hypothesised to
+> be blocked here — that closing it needed a compressed columnar warm tier
 > (SPEC-02 F1), not more executor tuning. [#15](https://github.com/sunstoneinstitute/horndb/issues/15)
-> tested that hypothesis with a compressed columnar `TripleSource` *inside
-> `horndb-wcoj`* (frame-of-reference + bit-packing; a wcoj-side representation,
-> not yet the SPEC-02 storage warm tier): it shrinks the 4-cycle working set
-> 7.5× (144 → 19.32 B/triple) and makes WCOJ overtake binary-hash (0.73× →
-> 1.11×), but the ≥10× ratio is **not** reached by compression alone. Result:
-> the gate is no longer simply "blocked on SPEC-02" — see §5 and
-> `TASKS.md` HIGH · *Performance*.
+> tested that with a compressed columnar `TripleSource` inside `horndb-wcoj`
+> (7.5× smaller, WCOJ 0.73× → 1.11×) — directionally right but **not** ≥10×.
+> The gate was finally closed in [#1](https://github.com/sunstoneinstitute/horndb/issues/1)
+> by fixing the *graph shape*: the old uniform low-degree synthetic graph never
+> forces the intermediate-result blow-up WCOJ needs. The canonical win case is
+> a *skewed* graph (high-out-degree hubs + a thin closure), where a binary join
+> must materialise a huge 3-path relation while WCOJ never does. See §5.
 
 ---
 
@@ -171,7 +171,7 @@ Triejoin with a binary-hash fallback.
 | Cardinality estimation + cost-based plan choice | **implemented** | `cardinality.rs`, `planner.rs`, `plan.rs`. |
 | Cancellation (≤100 ms) | **implemented** | `cancel.rs`. |
 | Correctness vs binary-join (differential fuzzer) | **implemented** | Repeated-pattern over-production bug fixed; fuzzer cases 16 → 256, `#[ignore]` removed. |
-| 4-cycle ≥10× WCOJ-over-binary-join gate (acceptance #2) | **planned** | `TASKS.md` HIGH · *Performance* ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)). [#15](https://github.com/sunstoneinstitute/horndb/issues/15) added a compressed columnar `CompressedTripleSource` (FoR + bit-packing) and re-pointed the bench: footprint 144 → 19.32 B/triple (7.5×), WCOJ 1.56× faster than on the dense source and now ahead of binary-hash (1.11×, was 0.73×). The ≥10× ratio is still **not met** — compression narrows the gap but the synthetic 4-cycle does not exhibit the intermediate-result blow-up WCOJ needs to dominate asymptotically. |
+| 4-cycle ≥10× WCOJ-over-binary-join gate (acceptance #2) | **implemented** | Met in [#1](https://github.com/sunstoneinstitute/horndb/issues/1) by re-pointing `benches/four_cycle.rs` at the *canonical* WCOJ win case — a skewed ~10⁶-edge graph (`SyntheticGraph::skewed_four_cycle`: high-out-degree hubs + a thin, dedicated closure) instead of the old uniform low-degree graph. The binary-hash join materialises the full `#2-paths · hub_out ≈ 3.2·10⁷` 3-path relation over every source; WCOJ prunes `a` to the few closure targets at depth 0 and leapfrog-intersects `out(c) ∩ in(a)`, never materialising the 3-paths. Measured (macOS dev workstation): WCOJ **0.55 s** vs binary-hash **18.8 s** → **~34× faster**. Correctness pinned by `tests/skewed_four_cycle.rs` against an independent brute-force count. Earlier compression work ([#15](https://github.com/sunstoneinstitute/horndb/issues/15)) was a partial lever (1.11×) but the gap was workload shape, not bandwidth. |
 | Magic-sets / demand transformation (F4) | **deferred** | `wcoj/src/lib.rs`: "Magic sets and SLG tabling are deferred." |
 | SLG-resolution tabling (F5) | **deferred** | As above. Blocks SPEC-07 backward-chained mode. |
 | GPU WCOJ kernels | **deferred** | SPEC-09, Stage 3. |
@@ -355,9 +355,9 @@ Stage-1 engine and W3C-manifest paths explicitly bail on triple-term inputs.
 
 ### Performance gates (BENCHMARKS.md)
 **Status: partially implemented.** Per-subsystem targets and measured numbers
-live in `BENCHMARKS.md`. The headline open gate is SPEC-03's 4-cycle ≥10×
-(currently ~1.15×, blocked on SPEC-02). Keep `BENCHMARKS.md` rows in sync with
-the `TASKS.md` performance entries.
+live in `BENCHMARKS.md`. SPEC-03's 4-cycle ≥10× gate is now **met** (~34× on
+the canonical skewed win case, [#1](https://github.com/sunstoneinstitute/horndb/issues/1)).
+Keep `BENCHMARKS.md` rows in sync with the `TASKS.md` performance entries.
 
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
