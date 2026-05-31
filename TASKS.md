@@ -33,7 +33,7 @@ here in the same commit.
 - [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
-- [ ] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
+- [v] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — _wip: session e88ad731 · task-2-eq-rep-p-skew · 2026-05-31_
 - [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session a64ca05c · tracking #3 · task-15-compressed-warm-tier · 2026-05-31_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
@@ -255,7 +255,7 @@ here in the same commit.
 Items that were marked Future Work in the per-spec plans. Pull from this
 list when the corresponding Stage-1 slice is settled.
 
-- [ ] **SPEC-04 eq-rep-p skew.** ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) Predicate-position sameAs substitution
+- [v] **SPEC-04 eq-rep-p skew.** ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — _wip: session e88ad731 · task-2-eq-rep-p-skew · 2026-05-31_ Predicate-position sameAs substitution
   can blow up the rdf:type partition on adversarial inputs. Stage-1
   ships the literal rule (`crates/owlrl/rules.toml` `eq-rep-p`);
   Stage-2 should add an admission filter or specialised path. Also
