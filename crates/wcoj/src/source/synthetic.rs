@@ -17,7 +17,10 @@ pub struct SyntheticGraph {
 }
 
 impl SyntheticGraph {
-    pub fn cyclic(n: u64, k: u64, predicate: u64, seed: u64) -> Self {
+    /// Deterministically generate the cyclic graph's edges (no source built).
+    /// Exposed so benches can build both a dense and a compressed source from
+    /// identical edges.
+    pub fn cyclic_edges(n: u64, k: u64, predicate: u64, seed: u64) -> Vec<Triple> {
         // Simple xorshift RNG, deterministic given seed.
         let mut state = seed | 1;
         let mut rand = || -> u64 {
@@ -40,7 +43,11 @@ impl SyntheticGraph {
                 }
             }
         }
-        let triples: Vec<Triple> = edges.into_iter().collect();
+        edges.into_iter().collect()
+    }
+
+    pub fn cyclic(n: u64, k: u64, predicate: u64, seed: u64) -> Self {
+        let triples = Self::cyclic_edges(n, k, predicate, seed);
         Self {
             inner: VecTripleSource::from_triples(triples),
         }
