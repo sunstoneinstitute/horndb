@@ -30,7 +30,7 @@ here in the same commit.
 
 - [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produces on BGPs with repeated patterns
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
-- [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
+- [v] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)) — _wip: session b8f95305 · task-1-wcoj-4cycle-gate · 2026-05-31_
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [v] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — _wip: session e88ad731 · task-2-eq-rep-p-skew · 2026-05-31_
@@ -98,8 +98,8 @@ here in the same commit.
 
 ## HIGH — Performance gaps
 
-- [ ] **SPEC-03 WCOJ 4-cycle bench is no longer in regression, but still
-  far from the ≥10× acceptance gate.** ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)) *Partial: the original
+- [v] **SPEC-03 WCOJ 4-cycle bench is no longer in regression, but still
+  far from the ≥10× acceptance gate.** ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)) — _wip: session b8f95305 · task-1-wcoj-4cycle-gate · 2026-05-31_ *Partial: the original
   "1.6× slower than binary-hash" was driven by per-call allocations and
   vtable dispatch; both are now gone. Current measured numbers
   (2026-05-25, reference workstation, criterion 0.5):*
