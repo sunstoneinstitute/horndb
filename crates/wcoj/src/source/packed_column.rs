@@ -24,7 +24,10 @@ struct BlockMeta {
     /// Bit width of `value - base`. `0` means a constant block (no payload).
     bits: u8,
     /// Index into `words` where this block's packed residuals start.
-    word_offset: u32,
+    /// `usize` (not `u32`): a column whose packed payload exceeds `u32::MAX`
+    /// words (~34 GiB) is plausible on HornDB's unified-memory target, and a
+    /// truncating offset would silently corrupt every later block.
+    word_offset: usize,
 }
 
 /// A compact, random-access encoding of one `u64` column.
@@ -53,7 +56,7 @@ impl PackedColumn {
             let base = *chunk.iter().min().expect("non-empty chunk");
             let max_delta = chunk.iter().map(|v| v - base).max().unwrap();
             let bits = bits_for(max_delta);
-            let word_offset = words.len() as u32;
+            let word_offset = words.len();
             blocks.push(BlockMeta {
                 base,
                 bits,
@@ -65,11 +68,11 @@ impl PackedColumn {
             // Reserve enough words for `chunk.len() * bits` bits, then write.
             let total_bits = chunk.len() * bits as usize;
             let n_words = total_bits.div_ceil(64);
-            words.resize(word_offset as usize + n_words, 0);
+            words.resize(word_offset + n_words, 0);
             for (i, v) in chunk.iter().enumerate() {
                 let delta = v - base;
                 let bit_index = i * bits as usize;
-                let w = word_offset as usize + bit_index / 64;
+                let w = word_offset + bit_index / 64;
                 let off = bit_index % 64;
                 words[w] |= delta << off;
                 if off + bits as usize > 64 {
@@ -109,7 +112,7 @@ impl PackedColumn {
         }
         let bits = meta.bits as usize;
         let bit_index = (i % BLOCK) * bits;
-        let w = meta.word_offset as usize + bit_index / 64;
+        let w = meta.word_offset + bit_index / 64;
         let off = bit_index % 64;
         let mask = if bits == 64 {
             u64::MAX
