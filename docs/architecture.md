@@ -197,7 +197,7 @@ Rust at build time from `rules.toml` (Soufflé-style) — no interpreter.
 | Production proof recording (F4: `(rule_id, premise_ids[])`, on-demand re-derivation) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-04 rules". |
 | Full `dt-*` datatype rules, `cls-int*` / `cls-uni*` list-walking rules | **planned** | As above. |
 | `rdf:type` skew parallelism (F5) | **planned** | As above. |
-| `eq-rep-p` predicate-position skew fix + always-relevant rule marking | **planned** | `TASKS.md` MEDIUM · *Performance* — "SPEC-04 eq-rep-p skew" (correctness preserved today). |
+| `eq-rep-p` predicate-position skew fix + always-relevant rule marking | **implemented** | Always-relevant marking via `wildcard_predicate`; semantics-preserving class-canonical path in `crates/owlrl/src/eq_rep_p_opt.rs` (union-find over `owl:sameAs`), default `EqRepPStrategy::Optimized`. Differential proptest `tests/eq_rep_p_differential.rs` proves identical closure to the naïve oracle. `TASKS.md` #2. Downstream F5 partition-by-class-id (row above) still planned. |
 | User-defined rules (runtime Datalog frontend) | **deferred** | Stage 2 extension. |
 
 ---

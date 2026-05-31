@@ -33,7 +33,7 @@ here in the same commit.
 - [ ] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
-- [v] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — _wip: session e88ad731 · task-2-eq-rep-p-skew · 2026-05-31_
+- [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
 - [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session a64ca05c · tracking #3 · task-15-compressed-warm-tier · 2026-05-31_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
@@ -255,16 +255,33 @@ here in the same commit.
 Items that were marked Future Work in the per-spec plans. Pull from this
 list when the corresponding Stage-1 slice is settled.
 
-- [v] **SPEC-04 eq-rep-p skew.** ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — _wip: session e88ad731 · task-2-eq-rep-p-skew · 2026-05-31_ Predicate-position sameAs substitution
-  can blow up the rdf:type partition on adversarial inputs. Stage-1
-  ships the literal rule (`crates/owlrl/rules.toml` `eq-rep-p`);
-  Stage-2 should add an admission filter or specialised path. Also
-  note: the codegen's dirty-predicate prune (`engine::rule_relevant`)
-  keys on the vocabulary predicates a rule reads — for rules with
-  fresh-variable predicates (`eq-rep-{s,p,o}`) the prune may miss
-  re-firing when *other* rules derive new triples with new predicates.
-  Stage-1 accepts this (correctness preserved through first-round
-  full-fire); Stage-2 should mark such rules "always-relevant".
+- [x] **SPEC-04 eq-rep-p skew.** ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) Predicate-position
+  sameAs substitution can blow up the `rdf:type` partition on adversarial
+  inputs. The two halves of this task are both resolved:
+  - **"Always-relevant" marking (was Stage-2):** *already in place* — the
+    `wildcard_predicate` flag on `CompiledRule` (set by the codegen for any
+    body pattern with a variable predicate) makes `engine::rule_relevant`
+    re-fire `eq-rep-{s,p,o}` on every round while the dirty set is non-empty.
+    It shipped with the WCOJ fix; this task confirms `eq-rep-p` carries
+    `wildcard_predicate: true` and is covered by
+    `tests/single_rule.rs::eq_rep_p_refires_on_later_rounds_via_subproperty`.
+  - **Specialised path (this PR):** the *materialised output* (each predicate
+    in an `owl:sameAs` class carries the class's union extent) is semantically
+    required and irreducible, but the *candidate-generation work* is not. The
+    engine now evaluates `eq-rep-p` via a class-canonical pass
+    (`crates/owlrl/src/eq_rep_p_opt.rs`): union-find over `owl:sameAs` computes
+    each class's union extent once instead of the naïve `O(k²)` per-round
+    pairwise firing. Identical closure proven by
+    `tests/eq_rep_p_differential.rs` (proptest, 256 cases, optimized ≡ the
+    generated `Naive` oracle); benched in `benches/eq_rep_p_skew.rs`
+    (optimized 38.1 ms vs naïve 48.7 ms at k=32). Selectable via
+    `EqRepPStrategy` in `MaterializeOpts`; `Optimized` is the default.
+  - **Still Stage-2:** downstream `rdf:type` partition-by-class-id parallelism
+    (SPEC-04 F5) so `cls-*`/`cax-*` scans over the (semantically required,
+    large) materialised partition don't serialise; routing `eq-rep-p` through
+    SPEC-05's EQREL union-find once that lands; and the sibling `eq-rep-s`/
+    `eq-rep-o` subject/object-position variants (same pattern, different
+    partitions).
 - [v] **SPEC-02 storage** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session a64ca05c · tracking #3 · task-15-compressed-warm-tier · 2026-05-31_: HDT cold tier (F9), CXL/NVMe tiering, MVCC with
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).
