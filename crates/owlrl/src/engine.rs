@@ -2,6 +2,7 @@
 
 use crate::backend::ClosureBackend;
 use crate::delta::Delta;
+use crate::eq_rep_p_opt::fire_eq_rep_p_canonical;
 use crate::generated::{CompiledRule, RULES};
 use crate::list_rules::{self, SchemaAxioms};
 use crate::store::TripleStore;
@@ -16,9 +17,36 @@ pub struct Stats {
     pub rule_fires: usize,
 }
 
+/// How the engine evaluates the `eq-rep-p` rule.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub enum EqRepPStrategy {
+    /// Predicate-equivalence-class canonicalization (default). Identical
+    /// closure to `Naive`, bounded work — see `eq_rep_p_opt`.
+    #[default]
+    Optimized,
+    /// The generated `fire_eq_rep_p` nested-loop firing. Retained as the
+    /// correctness oracle for `tests/eq_rep_p_differential.rs`.
+    Naive,
+}
+
+/// Tunables for a `materialize` run.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct MaterializeOpts {
+    pub eq_rep_p: EqRepPStrategy,
+}
+
 /// Run forward chaining to fixed point. Does NOT clear existing inferred
 /// triples — see `reset_and_materialize` for that.
 pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &mut B) -> Stats {
+    materialize_with(store, backend, MaterializeOpts::default())
+}
+
+/// As `materialize`, with explicit strategy selection.
+pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
+    store: &mut S,
+    backend: &mut B,
+    opts: MaterializeOpts,
+) -> Stats {
     let mut stats = Stats::default();
     // Resolve list-axiom schemas once per materialize pass. Stage-1 is
     // insertion-only (SPEC-06) so the resolved chains do not change as
@@ -34,6 +62,18 @@ pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &m
         // 1. Compiled rules.
         for rule in RULES {
             if rule.delegated {
+                continue;
+            }
+            // eq-rep-p is special-cased: under the Optimized strategy the
+            // engine substitutes a class-canonical pass (eq_rep_p_opt) for
+            // the generated nested-loop fire — identical closure, bounded
+            // work (TASKS.md #2 / SPEC-04 F5). The id-string match is the
+            // single deliberate coupling between the driver and a rule.
+            if rule.id == "eq-rep-p" && opts.eq_rep_p == EqRepPStrategy::Optimized {
+                if rule_relevant(rule, dirty.as_ref(), store.vocab()) {
+                    stats.rule_fires += 1;
+                    round_delta.merge(fire_eq_rep_p_canonical(store_as_dyn(store)));
+                }
                 continue;
             }
             if !rule_relevant(rule, dirty.as_ref(), store.vocab()) {

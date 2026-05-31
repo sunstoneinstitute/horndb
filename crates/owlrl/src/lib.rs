@@ -52,5 +52,7 @@ pub mod generated {
 pub const COMPILED_RULES_SOURCE: &str =
     include_str!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
 
-pub use engine::{materialize, reset_and_materialize, Stats};
+pub use engine::{
+    materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts, Stats,
+};
 pub use integration::Engine;
