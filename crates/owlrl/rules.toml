@@ -457,10 +457,16 @@ body = [
 ]
 head = { s = "?s2", p = "?p", o = "?o" }
 
-# NOTE: eq-rep-p generates a *new predicate partition* per fired pair. On
-# adversarial inputs this can blow up the rdf:type partition (SPEC-04 F5
-# skew risk). Stage-1 ships the literal W3C rule; Stage-2 is tracked in
-# TASKS.md under "MEDIUM — Stage-2 scope explicitly deferred".
+# eq-rep-p substitutes predicates across owl:sameAs. The materialised output
+# (every predicate in an owl:sameAs class carries the union of the class's
+# extents) is semantically required, but the engine evaluates it via a
+# class-canonical union pass (src/eq_rep_p_opt.rs), NOT the generated
+# nested-loop fire, to avoid the O(k^2) per-round candidate generation that
+# the naive path does on k mutually-sameAs predicates (SPEC-04 F5 skew). The
+# generated fire_eq_rep_p below is retained as the conformance oracle; the
+# engine's EqRepPStrategy::Naive selects it for the differential test
+# (tests/eq_rep_p_differential.rs). The downstream rdf:type partition-scan
+# cost (F5 partition-by-class-id) remains Stage-2. See TASKS.md #2.
 [[rule]]
 id = "eq-rep-p"
 comment = "Substitute predicate across owl:sameAs."

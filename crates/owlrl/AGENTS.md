@@ -560,10 +560,17 @@ library is using.
   `crates/owlrl/src/integration.rs`). Real triple-term entailment
   (reified rules, `sameTerm` over triple terms) is Stage-2 territory;
   the bail keeps tests loud rather than silently dropping data.
-- **`eq-rep-p` is a partition-blowup risk.** It substitutes
-  predicates across `owl:sameAs` and on adversarial input can
-  explode the `rdf:type` partition. SPEC-04 F5 documents this; the
-  Stage-2 mitigation is tracked in TASKS.md.
+- **`eq-rep-p` skew is mitigated by a class-canonical path.** `eq-rep-p`
+  substitutes predicates across `owl:sameAs`; the materialised output (each
+  predicate in an `owl:sameAs` class carries the class's union extent) is
+  semantically required and irreducible. The *work* is not: the engine
+  evaluates `eq-rep-p` via `src/eq_rep_p_opt.rs` (union-find over
+  `owl:sameAs`, union extent computed once per class) instead of the
+  generated `O(k²)` nested-loop fire. `EqRepPStrategy::Naive` selects the
+  generated path; `tests/eq_rep_p_differential.rs` proves the two reach the
+  identical closure. The remaining downstream cost — `cls-*`/`cax-*` rules
+  scanning a large materialised `rdf:type` partition (SPEC-04 F5
+  partition-by-class-id) — is separate and still Stage-2. See TASKS.md #2.
 - **No incremental deletion.** `reset_and_materialize` is the only
   re-derivation path (SPEC-04 F7); SPEC-06 / Stage 2 will add Z-set
   incremental updates.

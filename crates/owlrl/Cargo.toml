@@ -29,9 +29,15 @@ prettyplease = "0.2"
 
 [dev-dependencies]
 anyhow = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
 
 # Dev binary for inspecting the build-time-generated rule code.
 # See crates/owlrl/AGENTS.md and crates/owlrl/CONTRIBUTING-RULES.md.
 [[bin]]
 name = "show-rule"
 path = "src/bin/show_rule.rs"
+
+[[bench]]
+name = "eq_rep_p_skew"
+harness = false
