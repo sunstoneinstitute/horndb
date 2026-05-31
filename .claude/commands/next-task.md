@@ -216,17 +216,19 @@ worktree, on the feature branch, reviewing the branch diff against `main`:
 
 ```bash
 cd ".worktrees/<branch>"
-codex review --base main "Review this PR for correctness, security, and \
-quality. The task is <one-line task + its #N>. Acceptance criteria: <the \
-TASKS.md / SPEC acceptance gates>. Flag bugs, missing requirements, and \
-unjustified scope; be concrete with file:line." 2>&1 | tee /tmp/codex-review-<N>.txt
+codex review --base main 2>&1 | tee /tmp/codex-review-<N>.txt
 ```
 
 Notes and fallbacks:
 
 - `codex review --base main` reviews everything on the branch vs `main`
-  non-interactively. (`--commit <sha>` or `--uncommitted` exist if you need a
-  narrower scope.)
+  non-interactively with codex's built-in review instructions.
+- **`--base` and a custom `[PROMPT]` are mutually exclusive** in this codex
+  version — `codex review --base main "…instructions…"` errors out. If you want
+  to steer the review with task-specific instructions instead of diffing a base
+  branch, drop `--base` and pass the prompt as the positional arg (it reviews
+  the working tree / staged changes), or use `--commit <sha>`. For the
+  branch-vs-`main` diff used here, take the default instructions (no prompt).
 - If codex is not authenticated (`codex login` required) or not installed,
   **stop and tell the user** — do not silently skip the review or substitute a
   self-review. The review phase is mandatory; the user chose codex specifically
