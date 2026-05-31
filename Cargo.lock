@@ -1201,6 +1201,7 @@ dependencies = [
  "oxrdf",
  "prettyplease",
  "proc-macro2",
+ "proptest",
  "quote",
  "rustc-hash 2.1.2",
  "serde",

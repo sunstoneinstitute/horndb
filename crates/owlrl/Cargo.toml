@@ -29,6 +29,7 @@ prettyplease = "0.2"
 
 [dev-dependencies]
 anyhow = { workspace = true }
+proptest = { workspace = true }
 
 # Dev binary for inspecting the build-time-generated rule code.
 # See crates/owlrl/AGENTS.md and crates/owlrl/CONTRIBUTING-RULES.md.
