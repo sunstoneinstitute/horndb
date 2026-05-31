@@ -1198,6 +1198,7 @@ name = "horndb-owlrl"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "criterion",
  "oxrdf",
  "prettyplease",
  "proc-macro2",
