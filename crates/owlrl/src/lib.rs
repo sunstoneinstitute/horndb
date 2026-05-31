@@ -34,6 +34,7 @@
 pub mod backend;
 pub mod delta;
 pub mod engine;
+pub mod eq_rep_p_opt;
 pub mod integration;
 pub mod list_rules;
 pub mod provenance;
