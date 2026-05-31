@@ -76,16 +76,26 @@ impl SyntheticGraph {
     /// * **closure**: only the first `params.close_sources` source vertices
     ///   are cycle-closable. A dedicated set of `params.close_sinks` closing
     ///   sinks (their own ID range, *not* in the bulk pool) is wired
-    ///   `hub₀ → close_sink → close_source`. So the only 4-cycles run
-    ///   `a → b → hub₀ → close_sink → a`, giving a small, exactly-predictable
-    ///   output of `close_sources · a_out · close_sinks` rows.
+    ///   `hub₀ → close_sink → close_source`. So the only *geometric* 4-cycles
+    ///   run `a → b → hub₀ → close_sink → a`. Because all four atoms share the
+    ///   same predicate the query is rotationally symmetric, so each geometric
+    ///   cycle (its four vertices live in four distinct layers, hence are
+    ///   distinct) matches as **4 rotations**. The total 4-cycle output is
+    ///   therefore the small, predictable `4 · close_sources · a_out ·
+    ///   close_sinks` rows.
     ///
-    /// WCOJ binds variables in order `[a,b,c,d]`; because `a` is shared by the
-    /// first and last atom, the depth-0 leapfrog intersects "sources with an
-    /// out-edge" with "sources with an in-edge" (= the `close_sources`), so it
-    /// only ever explores cycles rooted at a closure target. Binary-hash, by
-    /// contrast, materialises 3-paths for every source. The result is a
-    /// speedup that grows with `sources · hub_out`.
+    /// WCOJ binds variables in order `[a,b,c,d]` depth-first with leapfrog
+    /// intersections and **never materialises an intermediate relation**. For
+    /// almost every `(a,b,c)` prefix the cycle-closing intersection
+    /// `out(c) ∩ in(a)` at the last variable is empty, so WCOJ backtracks in
+    /// O(1) without ever expanding a hub's `hub_out` out-edges into separate
+    /// tuples — its cost tracks the number of 2-paths. The binary-hash plan, by
+    /// contrast, materialises (and hashes) the full `#2-paths · hub_out` 3-path
+    /// relation over every source *before* it can apply the closure. The
+    /// resulting speedup grows with `hub_out`. (Note: the depth-0 candidates
+    /// for `a` are *all* vertices with both an in- and an out-edge — most of B
+    /// and C — not only the closure sources; the win comes from avoiding the
+    /// 3-path materialisation, not from pruning `a`.)
     pub fn skewed_four_cycle_edges(params: &SkewedFourCycle) -> Vec<Triple> {
         let SkewedFourCycle {
             sources,

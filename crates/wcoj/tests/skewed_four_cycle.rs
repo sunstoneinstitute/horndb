@@ -92,9 +92,18 @@ fn binary_rows(src: &VecTripleSource, bgp: &Bgp) -> u64 {
 fn skewed_four_cycle_both_executors_match_brute_force() {
     let edges = SyntheticGraph::skewed_four_cycle_edges(&SMALL);
     let expected = brute_force_four_cycles(&edges);
-    assert!(
-        expected > 0,
-        "win-case graph must contain at least one 4-cycle"
+
+    // The only geometric 4-cycles are `a → b → hub₀ → close_sink → a` with
+    // `a` a closure source, `b` one of its `a_out` stem targets, and the sink
+    // one of `close_sinks`. Because all four atoms share one predicate the
+    // query is rotationally symmetric and each geometric cycle (four vertices
+    // in four distinct layers) matches as 4 rotations, so the count is
+    // `4 · close_sources · a_out · close_sinks`.
+    let oriented = SMALL.close_sources * SMALL.a_out * SMALL.close_sinks;
+    assert_eq!(
+        expected,
+        4 * oriented,
+        "brute-force 4-cycle count should be 4 rotations × {oriented} oriented cycles"
     );
 
     let src = VecTripleSource::from_triples(edges);

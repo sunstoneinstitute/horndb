@@ -14,12 +14,14 @@
 //! C and a thin, dedicated D→A closure. A binary-hash join materialises the
 //! full 3-path relation `(a,b,c,d)` — size `#2-paths · hub_out` — over *every*
 //! source before it can apply the closure. WCOJ binds `[a,b,c,d]` one variable
-//! at a time; because `a` is shared by the first and last atom it prunes `a`
-//! to the few closure targets at depth 0, then leapfrog-intersects
-//! `out(c) ∩ in(a)` at the last variable, so it never materialises the
-//! 3-paths. See the generator docs and `tests/skewed_four_cycle.rs` (which
-//! pins the correctness of both executors against an independent brute-force
-//! 4-cycle count) for the full rationale.
+//! at a time, depth-first, and never materialises an intermediate: for almost
+//! every `(a,b,c)` prefix the cycle-closing intersection `out(c) ∩ in(a)` at
+//! the last variable is empty, so it backtracks in O(1) without expanding a
+//! hub's `hub_out` out-edges — its cost tracks the number of 2-paths, a
+//! ≈`hub_out` advantage. See the generator docs and `tests/skewed_four_cycle.rs`
+//! (which pins both executors against an independent brute-force 4-cycle count,
+//! including the rotational matches a single-predicate cycle admits) for the
+//! full rationale.
 
 use std::time::Duration;
 

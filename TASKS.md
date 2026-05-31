@@ -109,9 +109,10 @@ here in the same commit.
   high-out-degree hubs in the C layer + a thin, dedicated D→A closure). A
   binary-hash join materialises the full `#2-paths · hub_out ≈ 3.2·10⁷`
   3-path relation over every source; WCOJ binds `[a,b,c,d]` one variable at
-  a time, prunes `a` to the few closure targets at depth 0, and
-  leapfrog-intersects `out(c) ∩ in(a)` at the last variable, never
-  materialising the 3-paths. **Measured (macOS dev workstation):** WCOJ
+  a time, depth-first, and never materialises an intermediate — for almost
+  every `(a,b,c)` prefix the cycle-closing intersection `out(c) ∩ in(a)` is
+  empty, so it backtracks in O(1) without expanding the hubs, a ≈`hub_out`
+  advantage. **Measured (macOS dev workstation):** WCOJ
   **0.55 s** vs binary-hash **18.8 s** → **~34× faster** over 1,021,610
   edges. Correctness is pinned by `tests/skewed_four_cycle.rs`, which checks
   both executors against an independent brute-force 4-cycle count. See
