@@ -134,7 +134,16 @@ impl Circuit {
         const MAX_ROUNDS: usize = 64;
         let mut combined_base: Zset<TripleId> = self.asserted_base.clone();
         combined_base.add_assign(&self.derived_base);
-        let asserted_delta_for_closure = asserted_delta.clone();
+        // Snapshot the asserted delta for the closure pass only when there are
+        // closure plans — otherwise the rule fixed-point consumes `asserted_delta`
+        // and a no-closure circuit (e.g. the insert-throughput bench) must not pay
+        // an O(|Δ|) clone per tick. The empty placeholder is never read because the
+        // closure pass loop has no iterations when `closure_plans` is empty.
+        let asserted_delta_for_closure = if self.closure_plans.is_empty() {
+            Zset::new()
+        } else {
+            asserted_delta.clone()
+        };
         let mut round_delta = asserted_delta;
         let mut derived_merged = 0;
 
