@@ -314,43 +314,65 @@ pub fn construct_triples(
 /// subjects of stored triples, so they naturally contribute nothing —
 /// no special-casing needed.
 ///
+/// Each describe-target resource is scanned with its **original term**
+/// (kind preserved), so a type-preserving backend that binds a target
+/// to a `Term::BlankNode` is scanned as a blank node, not coerced to an
+/// IRI. The Stage-1 `MemStore` erases term kinds on scan (`unify_one`
+/// binds every value as `Term::Iri(lexical)`), which masks the
+/// distinction there but not for richer backends.
+///
 /// Deferred (out of scope, see SPEC-07 / TASKS.md): recursive
-/// blank-node CBD closure and symmetric CBD. The Stage-1 `MemStore`
-/// erases term types on scan (`unify_one` binds every value as
-/// `Term::Iri(lexical)`), so blank-node objects can't be reliably
-/// detected to recurse into. Typed-literal / Turtle serialisation is
-/// likewise a separate increment (#57); this reuses the N-Triples path.
+/// blank-node CBD closure and symmetric CBD (would require reliably
+/// detecting blank-node objects to recurse into, which the term-kind
+/// erasure in `MemStore` defeats). Typed-literal / Turtle serialisation
+/// is likewise a separate increment (#57); this reuses the N-Triples
+/// path.
 pub fn describe_triples<E: Executor + ?Sized>(
     exec: &E,
     rows: &[Bindings],
 ) -> Result<Vec<(String, String, String)>> {
     use crate::algebra::{Term, TriplePattern, Var};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     // Variable names used in the forward-scan pattern below. Defined once
     // so the pattern construction and the binding lookups can't drift.
     const PRED_VAR: &str = "p";
     const OBJ_VAR: &str = "o";
 
-    // Distinct lexical resources bound across all rows / all vars.
-    let mut resources: BTreeSet<String> = BTreeSet::new();
+    // Distinct resource *terms* (kind preserved) bound across all rows /
+    // all vars. Scanning with the original term keeps a `Term::BlankNode`
+    // target from being silently coerced to a `Term::Iri`, which would
+    // miss its triples on a kind-preserving backend.
+    let mut resources: HashSet<Term> = HashSet::new();
     for row in rows {
         for (_name, term) in row.vars() {
             match term {
-                Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => {
-                    resources.insert(s.clone());
+                Term::Iri(_) | Term::Literal(_) | Term::BlankNode(_) => {
+                    resources.insert(term.clone());
                 }
-                // An unbound var or a triple-term carries no describable
-                // resource here.
+                // An unbound var or a triple-term can't be a describe
+                // subject, so it carries no describable resource here.
                 Term::Var(_) | Term::Triple(_) => {}
             }
         }
     }
 
+    // Lexical form of a resource term, used as the subject of every
+    // emitted triple. Only the three scannable kinds reach here.
+    fn subject_lex(term: &Term) -> Option<&str> {
+        match term {
+            Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => Some(s),
+            Term::Var(_) | Term::Triple(_) => None,
+        }
+    }
+
     let mut out: BTreeSet<(String, String, String)> = BTreeSet::new();
     for resource in &resources {
+        let Some(subject) = subject_lex(resource) else {
+            continue;
+        };
         let pattern = TriplePattern {
-            subject: Term::Iri(resource.clone()),
+            subject: resource.clone(),
             predicate: Term::Var(Var::new(PRED_VAR)),
             object: Term::Var(Var::new(OBJ_VAR)),
         };
@@ -363,7 +385,7 @@ pub fn describe_triples<E: Executor + ?Sized>(
                 Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
                 _ => continue,
             };
-            out.insert((resource.clone(), p, o));
+            out.insert((subject.to_owned(), p, o));
         }
     }
     Ok(out.into_iter().collect())

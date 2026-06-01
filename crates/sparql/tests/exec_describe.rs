@@ -4,10 +4,12 @@
 //! `QueryAnswer::Triples` (forward, one-level Concise Bounded
 //! Description). Mirrors the conventions in `exec_construct.rs`.
 
-use horndb_sparql::algebra::Term;
+use horndb_sparql::algebra::{Term, TriplePattern};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::runtime::describe_triples;
+use horndb_sparql::exec::{Bindings, Executor, Store};
+use horndb_sparql::Result;
 
 fn iri(s: &str) -> Term {
     Term::Iri(s.into())
@@ -141,4 +143,92 @@ fn describe_is_stable_across_runs() {
         let again = triples(execute_query("DESCRIBE <http://ex/a>", &s).unwrap());
         assert_eq!(first, again);
     }
+}
+
+/// A **kind-aware** mock executor. Unlike `MemStore` (which erases term
+/// kinds by binding every scanned value as `Term::Iri`), this backend
+/// only unifies a constant-subject pattern when BOTH the lexical value
+/// AND the term kind match. It supports exactly the one pattern shape
+/// `describe_triples` issues: a constant subject with two object/pred
+/// variables.
+struct KindAwareStore {
+    triples: Vec<(Term, Term, Term)>,
+}
+
+impl Executor for KindAwareStore {
+    fn scan_bgp(
+        &self,
+        patterns: &[TriplePattern],
+    ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+        assert_eq!(patterns.len(), 1, "mock only handles single-pattern scans");
+        let pat = &patterns[0];
+        // Expect the describe shape: constant subject, var predicate, var object.
+        let (pred_var, obj_var) = match (&pat.predicate, &pat.object) {
+            (Term::Var(p), Term::Var(o)) => (p.name().to_owned(), o.name().to_owned()),
+            _ => panic!("mock only handles (const, var, var) patterns"),
+        };
+        let mut out = Vec::new();
+        for (s, p, o) in &self.triples {
+            // Kind-aware match: the stored subject term must equal the
+            // pattern subject term exactly (kind included). A
+            // `Term::Iri("b0")` pattern will NOT match a stored
+            // `Term::BlankNode("b0")`, and vice versa.
+            if *s == pat.subject {
+                let mut b = Bindings::new();
+                b.set(pred_var.clone(), p.clone());
+                b.set(obj_var.clone(), o.clone());
+                out.push(b);
+            }
+        }
+        Ok(Box::new(out.into_iter()))
+    }
+}
+
+/// Regression: a type-preserving backend can bind a DESCRIBE target to a
+/// `Term::BlankNode`. Scanning it as a `Term::Iri` (the old behaviour)
+/// would miss its outgoing triple. `describe_triples` must scan with the
+/// original term kind so blank-node and IRI targets are both described.
+#[test]
+fn describe_preserves_target_term_kind() {
+    let store = KindAwareStore {
+        triples: vec![
+            // Subject is a *blank node* "b0".
+            (
+                Term::BlankNode("b0".into()),
+                iri("http://ex/p"),
+                iri("http://ex/x"),
+            ),
+            // A decoy: an IRI "b0" with the SAME lexical form but a
+            // different kind. The blank-node scan must NOT pick this up.
+            (iri("b0"), iri("http://ex/decoy"), iri("http://ex/never")),
+            // And an ordinary IRI subject, to confirm IRIs still work.
+            (iri("http://ex/a"), iri("http://ex/q"), iri("http://ex/y")),
+        ],
+    };
+
+    // Row binds one var to the blank node, another to the IRI.
+    let mut row = Bindings::new();
+    row.set("s", Term::BlankNode("b0".into()));
+    row.set("t", iri("http://ex/a"));
+
+    let t = describe_triples(&store, &[row]).unwrap();
+
+    // The blank node's outgoing triple is described, with the decoy
+    // (same lexical, IRI kind) excluded.
+    assert!(
+        t.iter()
+            .any(|(s, p, o)| s == "b0" && p == "http://ex/p" && o == "http://ex/x"),
+        "blank-node target must be scanned as a blank node: {t:?}"
+    );
+    assert!(
+        !t.iter().any(|(_, p, _)| p == "http://ex/decoy"),
+        "IRI decoy with same lexical form must not be matched: {t:?}"
+    );
+    // The IRI target is described too.
+    assert!(
+        t.iter()
+            .any(|(s, p, o)| s == "http://ex/a" && p == "http://ex/q" && o == "http://ex/y"),
+        "IRI target must still be described: {t:?}"
+    );
+    assert_eq!(t.len(), 2, "exactly the blank-node and IRI triples: {t:?}");
 }
