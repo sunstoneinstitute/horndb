@@ -407,7 +407,11 @@ list when the corresponding Stage-1 slice is settled.
   - **Epic breakdown (2026-06-01, tracked under [#7](https://github.com/sunstoneinstitute/horndb/issues/7)):**
     the broad SPEC-07 scope splits into ten shippable increments:
     [#48](https://github.com/sunstoneinstitute/horndb/issues/48) `DESCRIBE`
-    query form — **first increment**;
+    query form — **first increment, delivered 2026-06-01**: forward one-level
+    Concise Bounded Description (`describe_triples` in `crates/sparql/src/exec/runtime.rs`
+    emits each resolved resource's outgoing triples); recursive/symmetric
+    blank-node CBD and typed-literal/Turtle serialisation deferred under
+    [#57](https://github.com/sunstoneinstitute/horndb/issues/57);
     [#49](https://github.com/sunstoneinstitute/horndb/issues/49) non-recursive
     property paths (`|`/`!`/`?`);
     [#50](https://github.com/sunstoneinstitute/horndb/issues/50) Kleene property
