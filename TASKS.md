@@ -384,11 +384,14 @@ list when the corresponding Stage-1 slice is settled.
     the Stage-2 scope in `crates/incremental/FUTURE-WORK.md` splits into three
     shippable increments:
     [#44](https://github.com/sunstoneinstitute/horndb/issues/44) **F5
-    closure-operator deltas** (SPEC-05 integration) — **first increment**:
-    wire the SPEC-05 `IncrementalClosureBackend` (#42) into `Circuit` via a
-    closure-plan slot so transitive-predicate inserts emit only the closure
-    delta, tagged `DerivationKind::ClosureInferred` on the change feed
-    (insertion-only);
+    closure-operator deltas** (SPEC-05 integration) — **first increment,
+    delivered 2026-06-01**: `Circuit::add_closure_plan` + `ClosureRule` /
+    `TransitiveClosureRule` (`crates/incremental/src/closure_plan.rs`) wire the
+    SPEC-05 `IncrementalClosureBackend` (#42) into the tick loop so
+    transitive-predicate inserts emit only the closure delta, tagged
+    `DerivationKind::ClosureInferred` on the change feed (insertion-only);
+    differential proptest vs full recompute pins it
+    (`tests/closure_deltas_differential.rs`);
     [#45](https://github.com/sunstoneinstitute/horndb/issues/45) **F6 correct
     retraction across joins** — replace the insertion-only "newly present"
     emission filter with multiplicity-correct Z-set algebra (acceptance #3 +

@@ -242,7 +242,7 @@ semantics. **Insertion-only at Stage 1** — the highest-risk spec.
 | Change feed (`(triple, mult, time, derivation_kind)`) | **implemented** | `change_feed.rs`. |
 | Checkpoint merge (collapse ±1 pairs) | **implemented** | `checkpoint.rs`, `delta_log.rs`. |
 | Retraction semantics (F6) | **deferred** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-06 incremental". Insertion only at Stage 1 (`FUTURE-WORK.md`). |
-| Closure-operator deltas (F5) | **planned** | Pairs with SPEC-05 incremental closure. Insertion-side SPEC-05 incremental closure now ships ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)); the SPEC-06 delta-feed pairing is still planned. |
+| Closure-operator deltas (F5) | **implemented (insertion-only)** | `closure_plan.rs` (`ClosureRule` / `TransitiveClosureRule`) + `circuit.rs` (`add_closure_plan`, closure pass): wraps SPEC-05's `IncrementalClosureBackend` ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)), folds the asserted insertion delta into the retained per-predicate closure, emits only newly inferred triples tagged `ClosureInferred`. Differential proptest vs full recompute (`tests/closure_deltas_differential.rs`) ([#44](https://github.com/sunstoneinstitute/horndb/issues/44)). Retraction through the closure stays deferred (needs F6). |
 | MVCC for in-flight reads | **deferred** | Stage 2. |
 | Distributed timely-dataflow | **deferred** | SPEC-09, Stage 3. |
 
