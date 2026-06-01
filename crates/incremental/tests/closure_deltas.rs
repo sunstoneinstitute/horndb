@@ -36,6 +36,8 @@ fn chain_closure_one_tick() {
     assert_eq!(c.derived_base().get(&(1, P, 4)), 1);
     assert_eq!(c.derived_base().get(&(2, P, 4)), 1);
     assert_eq!(c.derived_base().get(&(1, P, 2)), 0);
+    assert_eq!(c.derived_base().get(&(2, P, 3)), 0);
+    assert_eq!(c.derived_base().get(&(3, P, 4)), 0);
 }
 
 /// The change feed receives each closure-inferred triple once, tagged
