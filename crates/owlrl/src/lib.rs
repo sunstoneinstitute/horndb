@@ -33,6 +33,7 @@
 //! See `plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md` for the full plan.
 
 pub mod backend;
+pub mod datatypes;
 pub mod delta;
 pub mod engine;
 pub mod eq_rep_p_opt;

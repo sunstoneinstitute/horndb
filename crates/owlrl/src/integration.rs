@@ -127,6 +127,28 @@ impl Engine {
         // `prp-rfp`'s body requires the latter. See
         // `crates/owlrl/list_rules.rs` and KNOWN-MANIFEST-BUGS.md.
         infer_owl_thing_from_named_individuals(&mut state.store, &self.vocab);
+        // dt-type1 / dt-type2: inject the XSD datatype declarations and
+        // subsumption lattice as base axioms. Unconditional — dt-type1's
+        // declarations must be present even for an empty premise
+        // (WebOnt-I5.8-011). Borrow `dict`/`next_id` disjointly from
+        // `store` so the intern closure and the store mutation coexist.
+        {
+            let LoadState {
+                dict,
+                next_id,
+                store,
+                ..
+            } = &mut state;
+            crate::datatypes::inject_datatype_axioms(store, &self.vocab, |iri| {
+                if let Some(&t) = dict.get(iri) {
+                    return t;
+                }
+                let t = TermId(*next_id);
+                *next_id += 1;
+                dict.insert(iri.to_string(), t);
+                t
+            });
+        }
         let mut backend = RuleFiringBackend::new();
         reset_and_materialize(&mut state.store, &mut backend);
         self.state = Some(state);
