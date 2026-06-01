@@ -9,7 +9,9 @@
 //!   firing those rules itself.
 
 use anyhow::Result;
+use rustc_hash::FxHashMap;
 
+use crate::closure::incremental::IncrementalTransitiveClosure;
 use crate::closure::schema::reflexive_transitive_closure;
 use crate::closure::transitive::transitive_closure;
 use crate::dense_id::DenseIdMap;
@@ -176,4 +178,74 @@ fn write_closure(
 /// its own factory).
 pub fn default_backend() -> BackendImpl {
     BackendImpl::default()
+}
+
+/// Per-predicate retained closure state for the incremental path (SPEC-05 F6).
+#[derive(Default)]
+struct PredicateState {
+    map: DenseIdMap,
+    closure: IncrementalTransitiveClosure,
+}
+
+/// Insertion-only incremental closure backend. Unlike [`BackendImpl`], which
+/// recomputes the whole closure from the full edge set on every call, this
+/// retains per-predicate closure state and folds in only the newly inserted
+/// edges, writing **only the delta** triples to the sink (SPEC-05 F6).
+///
+/// Insertion only — deletion needs SPEC-06 DBSP deltas and is out of scope.
+#[derive(Default)]
+pub struct IncrementalClosureBackend {
+    predicates: FxHashMap<PredicateId, PredicateState>,
+    sameas: EquivClasses,
+}
+
+impl IncrementalClosureBackend {
+    pub fn new() -> Self {
+        let _ = init_once();
+        Self::default()
+    }
+
+    /// Insert `new_edges` into predicate `p`'s transitive closure and write the
+    /// newly inferred triples to `sink`. Returns the number of triples the sink
+    /// reports written. Edges already implied by the existing closure produce
+    /// no output.
+    pub fn insert_transitive_edges(
+        &mut self,
+        p: PredicateId,
+        new_edges: &[(DictId, DictId)],
+        sink: &dyn TripleSink,
+    ) -> Result<u64> {
+        if new_edges.is_empty() {
+            return Ok(0);
+        }
+        let state = self.predicates.entry(p).or_default();
+        let dense = state.map.intern_edges(new_edges);
+        let delta = state.closure.insert_edges(dense);
+        if delta.is_empty() {
+            return Ok(0);
+        }
+        let map = &state.map;
+        let mut iter = delta.iter().filter_map(|&(s, o)| {
+            let s_dict = map.to_dict(DenseIdx(s))?;
+            let o_dict = map.to_dict(DenseIdx(o))?;
+            Some(Triple {
+                s: s_dict,
+                p,
+                o: o_dict,
+            })
+        });
+        sink.bulk_insert_inferred(&mut iter)
+    }
+
+    /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
+    pub fn add_sameas(&mut self, pairs: &[(DictId, DictId)]) {
+        for &(a, b) in pairs {
+            self.sameas.union(a, b);
+        }
+    }
+
+    /// Borrow the equivalence-class state.
+    pub fn equiv_classes(&self) -> &EquivClasses {
+        &self.sameas
+    }
 }

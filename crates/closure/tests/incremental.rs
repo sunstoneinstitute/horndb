@@ -92,3 +92,73 @@ fn seeded_then_incremental_matches_grb_closure() {
         );
     }
 }
+
+use std::sync::Mutex;
+
+use horndb_closure::sink::{IncrementalClosureBackend, TripleSink};
+use horndb_closure::types::{DictId, PredicateId, Triple};
+
+#[derive(Default)]
+struct VecSink {
+    triples: Mutex<Vec<Triple>>,
+}
+
+impl TripleSink for VecSink {
+    fn bulk_insert_inferred(
+        &self,
+        triples: &mut dyn Iterator<Item = Triple>,
+    ) -> Result<u64, anyhow::Error> {
+        let mut guard = self.triples.lock().unwrap();
+        let before = guard.len();
+        guard.extend(triples);
+        Ok((guard.len() - before) as u64)
+    }
+}
+
+#[test]
+fn incremental_backend_writes_only_the_delta() {
+    let sink = VecSink::default();
+    let mut backend = IncrementalClosureBackend::default();
+    let p = PredicateId(42);
+
+    // First insert 1->2: only (1,2) is new.
+    let w1 = backend
+        .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &sink)
+        .unwrap();
+    assert_eq!(w1, 1);
+
+    // Insert 2->3: new closure edges are (2,3) and (1,3).
+    let w2 = backend
+        .insert_transitive_edges(p, &[(DictId(2), DictId(3))], &sink)
+        .unwrap();
+    assert_eq!(w2, 2);
+
+    // Insert 3->4: new are (3,4),(2,4),(1,4).
+    let w3 = backend
+        .insert_transitive_edges(p, &[(DictId(3), DictId(4))], &sink)
+        .unwrap();
+    assert_eq!(w3, 3);
+
+    let triples = sink.triples.lock().unwrap();
+    let mut pairs: Vec<(u64, u64)> = triples.iter().map(|t| (t.s.0, t.o.0)).collect();
+    pairs.sort();
+    assert_eq!(pairs, vec![(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]);
+    for t in triples.iter() {
+        assert_eq!(t.p, p);
+    }
+}
+
+#[test]
+fn incremental_backend_dedups_reinserted_edges() {
+    let sink = VecSink::default();
+    let mut backend = IncrementalClosureBackend::default();
+    let p = PredicateId(7);
+    backend
+        .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &sink)
+        .unwrap();
+    // Re-inserting the same edge writes nothing new.
+    let again = backend
+        .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &sink)
+        .unwrap();
+    assert_eq!(again, 0);
+}
