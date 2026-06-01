@@ -4,6 +4,20 @@ The HornDB mark is the **sign of the horns** (🤘) — a nod to the name (*Horn
 to the engine being written in **Rust** (metal → metal horns), and to the project's
 "wicked fast" intent. Rendered in rust-oxide orange, a colour no other RDF/DB engine owns.
 
+The canonical mark was rendered with an image model, then vector-traced (potrace) and
+recoloured to the brand rust — a clean, single-colour vector with transparent background.
+
+## Light & dark mode
+
+The **mark** is a single rust fill on a transparent background and works on both light and
+dark surfaces unchanged. The **horizontal lockup** ships in two variants because its
+wordmark is two-tone:
+
+| Variant | "Horn" | "DB" | Use on |
+|---|---|---|---|
+| `horndb-horizontal.svg` (light) | Ink `#1A1A20` | Rust `#C0501C` | light backgrounds |
+| `horndb-horizontal-dark.svg` | Cream `#F3EFE7` | Rust `#C0501C` | dark backgrounds |
+
 ## Colours
 
 | Token | Hex | Use |
