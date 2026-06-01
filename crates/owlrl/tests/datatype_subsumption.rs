@@ -20,6 +20,8 @@ const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#int";
 const XSD_SHORT: &str = "http://www.w3.org/2001/XMLSchema#short";
 const XSD_BYTE: &str = "http://www.w3.org/2001/XMLSchema#byte";
+const XSD_DATE_TIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+const XSD_DATE_TIME_STAMP: &str = "http://www.w3.org/2001/XMLSchema#dateTimeStamp";
 
 fn nq(s: &str, p: &str, o: &str) -> Quad {
     Quad::new(
@@ -92,6 +94,34 @@ fn dt_type2_range_transitive() {
     assert!(
         engine.entails(&concl).unwrap(),
         "range xsd:byte should propagate transitively to xsd:integer"
+    );
+}
+
+/// dt-type2 over the non-numeric branch: `xsd:dateTimeStamp ⊑ xsd:dateTime`
+/// (dateTimeStamp is dateTime with a required timezone). dt-type1 declares
+/// it a datatype and range propagates to xsd:dateTime.
+#[test]
+fn dt_type2_date_time_stamp_subsumption() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    premise.insert(&nq("http://ex/p", RDF_TYPE, OWL_DATATYPE_PROPERTY));
+    premise.insert(&nq("http://ex/p", RDFS_RANGE, XSD_DATE_TIME_STAMP));
+    engine.load(&premise).unwrap();
+
+    // dt-type1: dateTimeStamp is declared a datatype.
+    let mut concl = Dataset::new();
+    concl.insert(&nq(XSD_DATE_TIME_STAMP, RDF_TYPE, RDFS_DATATYPE));
+    assert!(
+        engine.entails(&concl).unwrap(),
+        "xsd:dateTimeStamp should be declared rdf:type rdfs:Datatype"
+    );
+
+    // dt-type2: range propagates to the wider xsd:dateTime.
+    let mut concl = Dataset::new();
+    concl.insert(&nq("http://ex/p", RDFS_RANGE, XSD_DATE_TIME));
+    assert!(
+        engine.entails(&concl).unwrap(),
+        "range xsd:dateTimeStamp should propagate to xsd:dateTime (dateTimeStamp ⊑ dateTime)"
     );
 }
 

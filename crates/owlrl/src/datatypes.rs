@@ -44,6 +44,7 @@ pub const XSD_DATATYPES: &[&str] = &[
     xsd!("decimal"),
     xsd!("integer"),
     xsd!("dateTime"),
+    xsd!("dateTimeStamp"),
     xsd!("long"),
     xsd!("int"),
     xsd!("short"),
@@ -58,13 +59,16 @@ pub const XSD_DATATYPES: &[&str] = &[
     xsd!("negativeInteger"),
 ];
 
-/// Directed `(sub, super)` `rdfs:subClassOf` edges of the XSD numeric
-/// datatype lattice (dt-type2). Each pair `(a, b)` means `a ⊑ b`. The
+/// Directed `(sub, super)` `rdfs:subClassOf` edges of the XSD datatype
+/// lattice (dt-type2) — the numeric tower plus `dateTimeStamp ⊑ dateTime`.
+/// Each pair `(a, b)` means `a ⊑ b`. The
 /// transitive closure is left to `scm-sco`; only the immediate edges are
 /// listed. No cross-branch or intersection edges.
 pub const XSD_SUBCLASS_EDGES: &[(&str, &str)] = &[
     // integer ⊑ decimal
     (xsd!("integer"), xsd!("decimal")),
+    // dateTimeStamp ⊑ dateTime (dateTime with a required timezone)
+    (xsd!("dateTimeStamp"), xsd!("dateTime")),
     // signed integer chain: byte ⊑ short ⊑ int ⊑ long ⊑ integer
     (xsd!("long"), xsd!("integer")),
     (xsd!("int"), xsd!("long")),
