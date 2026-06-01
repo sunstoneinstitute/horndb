@@ -122,16 +122,29 @@ fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
 /// `collect_visible_vars`, so `DESCRIBE <iri> … LIMIT/ORDER BY` seeds are
 /// still found.
 ///
-/// Caveat (accepted Stage-1 limitation): spargebra erases the distinction
-/// between a DESCRIBE-clause IRI and a top-level user
-/// `BIND(<iri> AS ?v)`. The `var ∈ targets` gate keeps WHERE-internal user
-/// `BIND`s out of the seed set, but a pathological
-/// `DESCRIBE ?v WHERE { …matches nothing… BIND(<iri> AS ?v) }` — where the
-/// BIND var *is itself* a describe target — will still describe `<iri>`
-/// even though strict SELECT semantics would leave `?v` unbound. The common
-/// forms — `DESCRIBE <iri>`, `DESCRIBE <iri> WHERE {…}`, and
-/// `DESCRIBE ?v WHERE {…}`, with or without `ORDER BY` / `LIMIT` /
-/// `OFFSET` / `DISTINCT` — are all handled correctly.
+/// Caveat (accepted Stage-1 limitation — irreducible at the algebra level):
+/// spargebra lowers an explicitly-named DESCRIBE IRI to `BIND(<iri> AS ?f)`
+/// using a *random, freshly-generated* variable name
+/// (`Variable::new_unchecked(format!("{:x}", random::<u128>()))`), which is
+/// structurally indistinguishable from a user-written `BIND(<iri> AS ?v)`.
+/// The original DESCRIBE target list is not preserved on `Query::Describe`,
+/// so the two cannot be told apart from the translated algebra. The
+/// `var ∈ targets` gate keeps ordinary WHERE-internal user `BIND`s (whose
+/// var is not a describe target) out of the seed set, which covers the
+/// realistic cases. The residual gap is a *contrived* query whose describe
+/// target variable is itself bound by a user `BIND` to a constant IRI over a
+/// pattern that matches nothing — directly or inside a subquery, e.g.
+/// `DESCRIBE ?v WHERE { …no match… BIND(<iri> AS ?v) }` or
+/// `DESCRIBE ?v WHERE { { SELECT ?v WHERE { …no match… BIND(<iri> AS ?v) } } }`.
+/// Such a query still describes `<iri>` even though strict SELECT semantics
+/// would leave `?v` unbound. Because DESCRIBE result graphs are
+/// implementation-defined (SPARQL 1.1 §16.4) and the over-described resource
+/// is exactly the IRI named in the query text, this is a benign
+/// over-approximation, not a wrong-data defect. The common forms —
+/// `DESCRIBE <iri>`, `DESCRIBE <iri> WHERE {…}`, and `DESCRIBE ?v WHERE {…}`,
+/// with or without `ORDER BY` / `LIMIT` / `OFFSET` / `DISTINCT` and with
+/// subqueries that do not rebind a describe target — are all handled
+/// correctly.
 fn explicit_describe_iris(alg: &crate::algebra::Algebra) -> Vec<crate::algebra::Term> {
     use crate::algebra::{Algebra, Expr, Term};
     use std::collections::HashSet;
