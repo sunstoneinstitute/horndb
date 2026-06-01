@@ -200,3 +200,71 @@ fn incremental_backend_dedups_reinserted_edges() {
         .unwrap();
     assert_eq!(again, 0);
 }
+
+/// A sink that always returns Err — used to verify rollback behaviour.
+struct FailingSink;
+
+impl TripleSink for FailingSink {
+    fn bulk_insert_inferred(
+        &self,
+        _triples: &mut dyn Iterator<Item = Triple>,
+    ) -> Result<u64, anyhow::Error> {
+        // Drain the iterator so the closure delta is fully computed before we
+        // fail — this is the worst case: state is mutated, then the sink errs.
+        Err(anyhow::anyhow!("boom"))
+    }
+}
+
+/// If the sink fails, the retained closure must be rolled back so that a
+/// subsequent successful insert still emits the full correct delta (no loss).
+#[test]
+fn sink_failure_rolls_back_retained_state() {
+    let mut backend = IncrementalClosureBackend::default();
+    let p = PredicateId(55);
+    let failing = FailingSink;
+
+    // Insert 1->2 through the failing sink — state must not advance.
+    assert!(backend
+        .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &failing)
+        .is_err());
+
+    // Insert 2->3 through the failing sink — state must not advance.
+    assert!(backend
+        .insert_transitive_edges(p, &[(DictId(2), DictId(3))], &failing)
+        .is_err());
+    // Retry 2->3 (still failing) — rollback must be idempotent.
+    assert!(backend
+        .insert_transitive_edges(p, &[(DictId(2), DictId(3))], &failing)
+        .is_err());
+
+    // Now insert 2->3 through a good sink.  Because no prior inserts landed,
+    // the retained state is empty and the delta must include everything for
+    // the new edges in isolation, i.e. just (2,3).
+    // Then insert 1->2 via the good sink; delta = (1,2).
+    // Then insert 2->3 again; it is already present → delta = 0.
+    let good = VecSink::default();
+
+    // First successful insert: 1->2
+    let w1 = backend
+        .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &good)
+        .unwrap();
+    assert_eq!(w1, 1);
+
+    // Second: 2->3 must still emit (2,3) AND (1,3) because the 1->2 state landed.
+    let w2 = backend
+        .insert_transitive_edges(p, &[(DictId(2), DictId(3))], &good)
+        .unwrap();
+    assert_eq!(
+        w2, 2,
+        "rollback failure: 2->3 insert after failed attempts must still emit 2 delta edges"
+    );
+
+    let triples = good.triples.lock().unwrap();
+    let mut pairs: Vec<(u64, u64)> = triples.iter().map(|t| (t.s.0, t.o.0)).collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![(1, 2), (1, 3), (2, 3)],
+        "wrong triples after rollback + retry"
+    );
+}

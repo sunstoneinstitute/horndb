@@ -91,6 +91,27 @@ impl IncrementalTransitiveClosure {
         delta
     }
 
+    /// Undo a set of edges that were just inserted by this same logical
+    /// operation (transaction rollback — NOT general deletion). Each `(x, y)`
+    /// must be an edge that was genuinely added (e.g. the delta returned by
+    /// `insert_edge` / `insert_edges`); removing it restores the prior closed
+    /// state exactly.
+    pub fn rollback_inserted(&mut self, edges: &[(u64, u64)]) {
+        for &(x, y) in edges {
+            let removed = self
+                .fwd
+                .get_mut(&x)
+                .map(|set| set.remove(&y))
+                .unwrap_or(false);
+            if removed {
+                if let Some(set) = self.bwd.get_mut(&y) {
+                    set.remove(&x);
+                }
+                self.nnz -= 1;
+            }
+        }
+    }
+
     /// Insert many edges (folded one at a time so later edges observe earlier
     /// contributions) and return the combined delta across all of them.
     pub fn insert_edges<I: IntoIterator<Item = (u64, u64)>>(
@@ -179,6 +200,28 @@ mod tests {
             ]
             .into_iter()
             .collect()
+        );
+    }
+
+    #[test]
+    fn rollback_inserted_restores_prior_state() {
+        // Build a chain 1->2->3.
+        let mut c = IncrementalTransitiveClosure::default();
+        c.insert_edge(1, 2);
+        c.insert_edge(2, 3);
+        // Capture state before inserting 3->4.
+        let pre_nnz = c.nnz();
+        let pre_edges = edge_set(&c);
+
+        // Insert 3->4 and immediately roll it back.
+        let delta = c.insert_edge(3, 4);
+        c.rollback_inserted(&delta);
+
+        assert_eq!(c.nnz(), pre_nnz, "nnz must be restored after rollback");
+        assert_eq!(
+            edge_set(&c),
+            pre_edges,
+            "edge set must match pre-insert state"
         );
     }
 

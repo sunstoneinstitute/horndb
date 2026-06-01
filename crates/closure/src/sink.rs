@@ -243,6 +243,9 @@ impl IncrementalClosureBackend {
             return Ok(0);
         }
         let state = self.predicates.entry(p).or_default();
+        // intern_edges only adds new dict ids to the map; extra interned ids
+        // with no edges are harmless and reused correctly on retry, so the
+        // DenseIdMap is intentionally NOT rolled back on sink error.
         let dense = state.map.intern_edges(new_edges);
         let delta = state.closure.insert_edges(dense);
         if delta.is_empty() {
@@ -258,7 +261,16 @@ impl IncrementalClosureBackend {
                 o: o_dict,
             })
         });
-        sink.bulk_insert_inferred(&mut iter)
+        match sink.bulk_insert_inferred(&mut iter) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                // Sink write failed: roll back the just-inserted closure edges
+                // so a retry re-emits them.  Map interns are left in place —
+                // they are harmless and will be reused correctly on retry.
+                state.closure.rollback_inserted(&delta);
+                Err(e)
+            }
+        }
     }
 
     /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
