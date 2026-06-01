@@ -24,6 +24,20 @@ jobs:
           components: rustfmt, clippy
           cache: true
 
+      # The vendored GraphBLAS now builds into crates/closure/vendor/.shared-build/,
+      # which lives outside target/ and so is NOT covered by rust-cache above.
+      # Cache it explicitly, keyed on the submodule SHA so it invalidates exactly
+      # when the GraphBLAS pin moves — otherwise CI recompiles GraphBLAS every run.
+      - name: resolve GraphBLAS submodule sha
+        id: graphblas
+        run: echo "sha=$(git -C crates/closure/vendor/GraphBLAS rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: cache vendored GraphBLAS build
+        uses: actions/cache@v4
+        with:
+          path: crates/closure/vendor/.shared-build
+          key: graphblas-${{ runner.os }}-${{ runner.arch }}-${{ steps.graphblas.outputs.sha }}
+
       - name: rustfmt
         run: cargo fmt --all -- --check
 
