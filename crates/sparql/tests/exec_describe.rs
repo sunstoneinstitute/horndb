@@ -74,8 +74,8 @@ fn describe_dedupes_and_sorts_deterministically() {
     s.insert_triple(iri("http://ex/a"), iri("http://ex/m"), iri("http://ex/2"));
     s.insert_triple(iri("http://ex/a"), iri("http://ex/a"), iri("http://ex/1"));
 
-    // Two projected vars that both bind to the same resource — the
-    // resource set must dedupe, and the output must be sorted.
+    // A single explicit IRI: its forward triples must come back sorted
+    // and deduplicated.
     let ans = execute_query("DESCRIBE <http://ex/a>", &s).unwrap();
     let t = triples(ans);
     let mut sorted = t.clone();
@@ -86,6 +86,38 @@ fn describe_dedupes_and_sorts_deterministically() {
     deduped.dedup();
     assert_eq!(t, deduped, "output must be deduplicated");
     assert_eq!(t.len(), 3);
+}
+
+#[test]
+fn describe_multi_var_dedupes_shared_resource() {
+    let mut s = MemStore::default();
+    // <b> is both the object of the first triple and the subject of the
+    // second, so `DESCRIBE ?s ?o WHERE { ?s ?p ?o }` binds it under both
+    // ?s and ?o. Its forward triple must be described exactly once.
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    s.insert_triple(iri("http://ex/b"), iri("http://ex/p"), iri("http://ex/c"));
+
+    let ans = execute_query("DESCRIBE ?s ?o WHERE { ?s ?p ?o }", &s).unwrap();
+    let t = triples(ans);
+
+    // Resources bound: a, b (subjects); b, c (objects) => {a, b, c}.
+    // Forward triples: a p b, b p c. c has no forward triples.
+    assert_eq!(
+        t.len(),
+        2,
+        "shared resource <b> must not be described twice"
+    );
+    assert!(t
+        .iter()
+        .any(|(sub, p, o)| sub == "http://ex/a" && p == "http://ex/p" && o == "http://ex/b"));
+    assert!(t
+        .iter()
+        .any(|(sub, p, o)| sub == "http://ex/b" && p == "http://ex/p" && o == "http://ex/c"));
+
+    // No duplicates.
+    let mut deduped = t.clone();
+    deduped.dedup();
+    assert_eq!(t, deduped, "output must be deduplicated");
 }
 
 #[test]

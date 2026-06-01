@@ -327,6 +327,11 @@ pub fn describe_triples<E: Executor + ?Sized>(
     use crate::algebra::{Term, TriplePattern, Var};
     use std::collections::BTreeSet;
 
+    // Variable names used in the forward-scan pattern below. Defined once
+    // so the pattern construction and the binding lookups can't drift.
+    const PRED_VAR: &str = "p";
+    const OBJ_VAR: &str = "o";
+
     // Distinct lexical resources bound across all rows / all vars.
     let mut resources: BTreeSet<String> = BTreeSet::new();
     for row in rows {
@@ -346,15 +351,15 @@ pub fn describe_triples<E: Executor + ?Sized>(
     for resource in &resources {
         let pattern = TriplePattern {
             subject: Term::Iri(resource.clone()),
-            predicate: Term::Var(Var::new("p")),
-            object: Term::Var(Var::new("o")),
+            predicate: Term::Var(Var::new(PRED_VAR)),
+            object: Term::Var(Var::new(OBJ_VAR)),
         };
         for b in exec.scan_bgp(std::slice::from_ref(&pattern))? {
-            let p = match b.get("p") {
+            let p = match b.get(PRED_VAR) {
                 Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
                 _ => continue,
             };
-            let o = match b.get("o") {
+            let o = match b.get(OBJ_VAR) {
                 Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
                 _ => continue,
             };
