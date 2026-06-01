@@ -31,6 +31,7 @@
 pub mod change_feed;
 pub mod checkpoint;
 pub mod circuit;
+pub mod closure_plan;
 pub mod delta_log;
 pub mod operator;
 pub mod types;
@@ -39,6 +40,7 @@ pub mod zset;
 pub use change_feed::{ChangeFeed, ChangeFeedRx};
 pub use checkpoint::{Checkpoint, CheckpointReport};
 pub use circuit::{Circuit, TickReport};
+pub use closure_plan::{ClosureRule, TransitiveClosureRule};
 pub use delta_log::DeltaLog;
 pub use operator::{BilinearRule, LinearRule, NaryPlan};
 pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
