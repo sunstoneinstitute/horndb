@@ -476,6 +476,12 @@ expensive variant is justified, then the optimization itself.
   shared location across worktrees, prune the harness's rocksdb dep
   (replace oxigraph with a narrower SPARQL-only dependency), or document
   a minimum-15-GB-free precondition.
+  *Update (2026-06-01):* the vendored GraphBLAS is no longer duplicated per
+  worktree — `build.rs` compiles it once per `(target, version)` into a shared,
+  flock-guarded `crates/closure/vendor/.shared-build/` dir (see
+  `crates/closure/INTEGRATION-NOTES.md`). The remaining disk-pressure driver is
+  `oxrocksdb-sys` under `horndb-harness`; `CARGO_TARGET_DIR` sharing is still the
+  mitigation for that. Issue stays open until rocksdb duplication is addressed.
 - [ ] **1Password SSH agent reliability.** ([#14](https://github.com/sunstoneinstitute/horndb/issues/14)) During the same run the agent
   intermittently returned "no identities" / "communication with agent
   failed" even when the desktop app was unlocked. Two implementation

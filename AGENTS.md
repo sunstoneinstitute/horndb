@@ -64,7 +64,13 @@ The pre-commit configuration is split intentionally — keep this split when add
 - **Pre-commit (fast):** `cargo fmt --all -- --check` only.
 - **Pre-push (slow):** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --workspace`.
 
-The pre-push clippy hook covers the full workspace including `horndb-harness`. The harness pulls in `oxrocksdb-sys` transitively via `oxigraph`, which compiles a ~700 MB artifact — expect the first pre-push after a fresh checkout (or a `cargo clean`) to take several minutes. Subsequent pushes reuse the cached build. If you run multiple worktrees in parallel, point `CARGO_TARGET_DIR` at a shared path so rocksdb is only compiled once across them.
+The pre-push clippy hook covers the full workspace including `horndb-harness`. The harness pulls in `oxrocksdb-sys` transitively via `oxigraph`, which compiles a ~700 MB artifact — expect the first pre-push after a fresh checkout (or a `cargo clean`) to take several minutes. Subsequent pushes reuse the cached build. If you run multiple worktrees in parallel, the vendored GraphBLAS is already
+shared automatically (built once per `(target, version)` into
+`crates/closure/vendor/.shared-build/`, flock-guarded — see
+`crates/closure/INTEGRATION-NOTES.md`). The remaining large per-worktree
+artifact is rocksdb (pulled in transitively by `horndb-harness`); point
+`CARGO_TARGET_DIR` at a shared path if you want it compiled only once across
+worktrees too.
 
 Day-to-day commands:
 
@@ -110,6 +116,9 @@ Suite keys the runner recognises today (`crates/harness/src/runner.rs`): `owl2`,
 ## Crate-specific gotchas
 
 - **`horndb-closure`** has a `build.rs` that bindgen's against `wrapper.h` and `pkg-config`s `graphblas`. You need SuiteSparse:GraphBLAS installed locally to build this crate. The wrapper headers and integration notes live alongside `Cargo.toml`.
+  The vendored build is compiled once per `(target, version)` into a
+  flock-guarded `crates/closure/vendor/.shared-build/<target>/<version>/` shared
+  across worktrees (details in `INTEGRATION-NOTES.md`).
 - **`horndb-owlrl`** generates Rust source from `rules.toml` in `build.rs` (the codegen pipeline is in `codegen/`). When editing rules, expect a slower first build and check both `INTEGRATION-NOTES.md` and the generated code under `target/`.
 - **`horndb-wcoj`** has a known correctness bug on BGPs with repeated patterns (TASKS.md CRITICAL). The differential fuzzer in `tests/differential_fuzz.rs` is `#[ignore]`'d with a regression file checked into `tests/differential_fuzz.proptest-regressions`. The 4-cycle benchmark is also currently ~1.6× *slower* than the binary-hash reference — both gates block SPEC-03 acceptance.
 - **`horndb-sparql`** tracks the unified workspace versions (`oxrdf 0.3.x`, `oxrdfio 0.2.x`, `sparesults 0.3.x`) with `rdf-12` (and `sparesults/sparql-12`) features on workspace-wide after PR2 of the RDF 1.2 migration. The crate additionally enables `spargebra/sep-0006` (for `GraphPattern::Lateral`) and `spargebra/sparql-12` (for `TermPattern::Triple`). Triple-term patterns are accepted only when callers pass `SparqlConfig::rdf12()` — the default config rejects them so SPARQL 1.1 callers keep their semantics; see `crates/sparql/src/lib.rs::SparqlConfig` and `translate_query_with` / `execute_query_with`. Note: enabling `oxrdf/rdf-12` workspace-wide forces `oxigraph/rdf-12` too (sparopt/spareval need their own `sparql-12` arms gated on, and Cargo only unifies features upward).

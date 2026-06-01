@@ -23,7 +23,22 @@ cargo build -p horndb-closure
   checked-in `src/bindings.rs` is used. `--no-default-features` falls back
   to a `pkg-config` probe of a system GraphBLAS.
 - **First build cost:** the vendored GraphBLAS compile takes ~1–3 min on a
-  cold `OUT_DIR`; cached afterwards, rebuilt on `cargo clean`.
+  cold build; thereafter it is **shared across git worktrees**. `build.rs`
+  compiles it once per `(target, version)` into
+  `<main-worktree>/crates/closure/vendor/.shared-build/<target>/<version>/`
+  (gitignored) and every worktree on that version reuses the artifact. A
+  `.complete` sentinel marks a usable install; concurrent builders serialise on
+  an advisory `flock` (via `fs4`) on `.build.lock`, into which the active
+  builder writes its pid so a waiting build can report who holds the lock.
+  Waiters poll for up to 30 minutes. The `flock` — not the pid — is the
+  correctness mechanism: if a builder dies, the kernel releases the lock and the
+  next waiter takes over. A worktree pinned to a *different* GraphBLAS version
+  builds its own copy under a separate `<version>` dir. **Caveat:** `flock` over
+  NFS is historically unreliable, so `.shared-build` must not sit on a network
+  mount. If git is unavailable (e.g. a source tarball), the build falls back to
+  a crate-local `vendor/.shared-build/<target>/<version>/` (no cross-worktree
+  sharing). CI caches the shared dir (`.github/workflows/ci.yml`) keyed on the
+  submodule SHA.
 - **JIT:** built with `GRAPHBLAS_USE_JIT=OFF`. Standard semirings hit
   GraphBLAS's precompiled FactoryKernels, so no runtime C compiler is
   needed. If valued-closure custom semirings are ever required, PreJIT
