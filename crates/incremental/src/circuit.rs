@@ -78,6 +78,11 @@ impl Circuit {
     /// `apply_insert_delta` runs over the asserted insertion delta and the
     /// newly inferred triples are merged into `derived_base`, published as
     /// `DerivationKind::ClosureInferred`.
+    ///
+    /// A plan registered against a `Circuit` that already contains edges the
+    /// plan depends on must be pre-seeded with the existing closed state (see
+    /// `TransitiveClosureRule::seed_closed_edges`); plans registered on an
+    /// empty circuit need no seeding.
     pub fn add_closure_plan(&mut self, rule: Box<dyn ClosureRule>) {
         self.closure_plans.push(rule);
     }

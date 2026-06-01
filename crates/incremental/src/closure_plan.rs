@@ -54,6 +54,11 @@ impl TripleSink for VecSink {
 /// multiplicity is positive contribute edges. The backend emits only the
 /// newly inferred edges (including a freshly inserted direct edge), so output
 /// is already deduplicated against the rule's own retained closure.
+///
+/// For a warm store that already holds edges for this predicate, call
+/// `seed_closed_edges` with the predicate's materialized (already-closed)
+/// extent before registering the rule, so incremental inserts close against
+/// the pre-existing reachable state.
 pub struct TransitiveClosureRule {
     predicate: u64,
     backend: IncrementalClosureBackend,
@@ -65,6 +70,25 @@ impl TransitiveClosureRule {
             predicate,
             backend: IncrementalClosureBackend::new(),
         }
+    }
+
+    /// Seed the retained closure from an **already transitively-closed** edge
+    /// set for this predicate (e.g. a warm store's materialized closure)
+    /// before feeding incremental inserts. Edges are `(s, o)` dictionary-id
+    /// pairs and MUST already be closed — this does not re-close them.
+    ///
+    /// Call this once, after `new` and before the rule is registered on a
+    /// `Circuit` that already holds edges for this predicate; otherwise the
+    /// first incremental inserts would not see the pre-existing reachable
+    /// state and would miss the transitive edges that bridge old and new
+    /// edges (SPEC-06 acceptance #1, warm-store case).
+    pub fn seed_closed_edges(&mut self, closed_edges: &[(u64, u64)]) {
+        let edges: Vec<(DictId, DictId)> = closed_edges
+            .iter()
+            .map(|&(s, o)| (DictId(s), DictId(o)))
+            .collect();
+        self.backend
+            .seed_transitive_closure(PredicateId(self.predicate), &edges);
     }
 }
 
@@ -134,6 +158,22 @@ mod tests {
         let got = rule.apply_insert_delta(&delta);
         // Only the positive (1,100,2) edge; no (2,3), no transitive (1,3).
         assert_eq!(got, vec![(1, 100, 2)]);
+    }
+
+    /// Warm-store path: seeding the rule with an already-closed edge set lets a
+    /// later insert produce the cross-product transitive edges against the
+    /// pre-existing reachable state (codex review P2 / SPEC-06 acceptance #1).
+    #[test]
+    fn transitive_rule_seeded_warm_store_closes_against_existing() {
+        let mut rule = TransitiveClosureRule::new(100);
+        // Already-closed extent for p=100: 1->2, 2->3, and the transitive 1->3.
+        rule.seed_closed_edges(&[(1, 2), (2, 3), (1, 3)]);
+        // Insert (3,4): must close to (3,4) plus (1,4),(2,4) via the seeded state.
+        let mut delta: Zset<crate::types::TripleId> = Zset::new();
+        delta.add((3, 100, 4), 1);
+        let mut got = rule.apply_insert_delta(&delta);
+        got.sort_unstable();
+        assert_eq!(got, vec![(1, 100, 4), (2, 100, 4), (3, 100, 4)]);
     }
 
     /// State is retained across calls: the second delta sees the first.
