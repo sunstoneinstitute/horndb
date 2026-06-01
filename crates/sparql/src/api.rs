@@ -101,35 +101,58 @@ fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
 ///
 /// spargebra lowers each explicitly-named DESCRIBE IRI into
 /// `BIND(<iri> AS ?fresh)`, i.e. an `Algebra::Extend { expr:
-/// Expr::Term(Term::Iri(..)), .. }` stacked directly under the top-level
-/// `Project`. We peel that constant-IRI Extend chain off the Project's
-/// `inner`, collecting each IRI, and stop at the first node that is not
-/// such an Extend — that node is the WHERE pattern.
+/// Expr::Term(Term::Iri(..)), .. }` stacked under the top-level `Project`.
+/// The seed `Extend` chain is not necessarily *directly* under the
+/// projection, though: SPARQL solution modifiers nest extra unary nodes
+/// between the projection and the seed Extends. The algebra for
+/// `DESCRIBE <iri> WHERE {…} ORDER BY … LIMIT …` is roughly
+/// `Project{ Slice{ Distinct{ Project{ OrderBy{ Extend…(WHERE) } } } } }`.
+/// We therefore walk the *entire* unary projection/modifier spine
+/// (`Project` / `Distinct` / `Slice` / `OrderBy` / `Extend`), collecting
+/// every constant-IRI `Extend` whose target variable is a describe target
+/// (a projected variable), and stop at the first node that is none of
+/// those — that node is the WHERE pattern.
 ///
 /// Caveat (accepted Stage-1 limitation): spargebra erases the distinction
 /// between a DESCRIBE-clause IRI and a top-level user
-/// `BIND(<iri> AS ?v)`. A pathological `DESCRIBE ?v WHERE { …matches
-/// nothing… BIND(<iri> AS ?v) }` will therefore describe `<iri>` even
-/// though strict SELECT semantics would leave `?v` unbound. The common
+/// `BIND(<iri> AS ?v)`. The `var ∈ targets` gate keeps WHERE-internal user
+/// `BIND`s out of the seed set, but a pathological
+/// `DESCRIBE ?v WHERE { …matches nothing… BIND(<iri> AS ?v) }` — where the
+/// BIND var *is itself* a describe target — will still describe `<iri>`
+/// even though strict SELECT semantics would leave `?v` unbound. The common
 /// forms — `DESCRIBE <iri>`, `DESCRIBE <iri> WHERE {…}`, and
-/// `DESCRIBE ?v WHERE {…}` — are all handled correctly.
+/// `DESCRIBE ?v WHERE {…}`, with or without `ORDER BY` / `LIMIT` /
+/// `OFFSET` / `DISTINCT` — are all handled correctly.
 fn explicit_describe_iris(alg: &crate::algebra::Algebra) -> Vec<crate::algebra::Term> {
     use crate::algebra::{Algebra, Expr, Term};
+    use std::collections::HashSet;
     let mut iris = Vec::new();
-    let mut node = match alg {
-        Algebra::Project { inner, .. } => inner.as_ref(),
-        // DESCRIBE always lowers through a top-level Project; anything
-        // else carries no explicit-IRI seeds.
-        _ => return iris,
+    // DESCRIBE always lowers through a top-level Project; anything else
+    // carries no explicit-IRI seeds.
+    let Algebra::Project { vars, inner } = alg else {
+        return iris;
     };
-    while let Algebra::Extend { inner, expr, .. } = node {
-        match expr {
-            Expr::Term(Term::Iri(s)) => {
-                iris.push(Term::Iri(s.clone()));
+    let mut targets: HashSet<String> = vars.iter().map(|v| v.name().to_owned()).collect();
+    let mut node = inner.as_ref();
+    loop {
+        match node {
+            Algebra::Project { vars, inner } => {
+                targets.extend(vars.iter().map(|v| v.name().to_owned()));
                 node = inner.as_ref();
             }
-            // First non-constant-IRI Extend (or any other node): this is
-            // the WHERE pattern. Stop peeling.
+            Algebra::Distinct { inner } => node = inner.as_ref(),
+            Algebra::Slice { inner, .. } => node = inner.as_ref(),
+            Algebra::OrderBy { inner, .. } => node = inner.as_ref(),
+            Algebra::Extend { inner, var, expr } => {
+                if let Expr::Term(Term::Iri(s)) = expr {
+                    if targets.contains(var.name()) {
+                        iris.push(Term::Iri(s.clone()));
+                    }
+                }
+                node = inner.as_ref();
+            }
+            // Any other variant (Bgp/Join/LeftJoin/Filter/Union/Values):
+            // the WHERE-pattern boundary. Stop walking.
             _ => break,
         }
     }

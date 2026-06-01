@@ -71,6 +71,50 @@ fn describe_explicit_iri_with_empty_where_still_describes() {
 }
 
 #[test]
+fn describe_explicit_iri_with_limit_and_empty_where() {
+    // Regression (#48): solution modifiers (here LIMIT) nest extra unary
+    // nodes between the top Project and the seed Extend chain, so the old
+    // "peel Extends directly under Project" logic saw a `Slice` and stopped,
+    // dropping the explicit IRI. The full modifier-spine walk must still seed
+    // <a> even though the WHERE matches nothing.
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+
+    let ans = execute_query(
+        "DESCRIBE <http://ex/a> WHERE { <http://ex/missing> ?p ?o } LIMIT 10",
+        &s,
+    )
+    .unwrap();
+    let t = triples(ans);
+    assert!(
+        t.iter()
+            .any(|(sub, p, o)| sub == "http://ex/a" && p == "http://ex/p" && o == "http://ex/b"),
+        "expected (<a>, <p>, <b>) through LIMIT modifier: {t:?}"
+    );
+}
+
+#[test]
+fn describe_explicit_iri_with_order_by_and_empty_where() {
+    // Regression (#48): ORDER BY / OFFSET / LIMIT together nest several unary
+    // modifier nodes above the seed Extend chain. The explicit IRI must still
+    // be described when the WHERE produces no rows.
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+
+    let ans = execute_query(
+        "DESCRIBE <http://ex/a> WHERE { <http://ex/missing> ?p ?o } ORDER BY ?p OFFSET 1 LIMIT 5",
+        &s,
+    )
+    .unwrap();
+    let t = triples(ans);
+    assert!(
+        t.iter()
+            .any(|(sub, p, o)| sub == "http://ex/a" && p == "http://ex/p" && o == "http://ex/b"),
+        "expected (<a>, <p>, <b>) through ORDER BY/OFFSET/LIMIT modifiers: {t:?}"
+    );
+}
+
+#[test]
 fn describe_multiple_explicit_iris_with_matching_where() {
     // Two explicit IRIs in the DESCRIBE clause, plus a WHERE that matches
     // (so there is at least one solution row). `DESCRIBE <a> <b>` names no
