@@ -36,7 +36,7 @@ oxrdfio = { version = "0.2", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxigraph = { version = "0.5", features = ["rdf-12"] }
 sparesults = { version = "0.3", features = ["sparql-12"] }
-quick-xml = { version = "0.36", features = ["serialize"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
 walkdir = "2"
 sha2 = "0.10"
 hex = "0.4"
