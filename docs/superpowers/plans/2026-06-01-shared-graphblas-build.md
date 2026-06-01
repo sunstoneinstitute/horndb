@@ -377,9 +377,12 @@ fn main() {
 /// 30 minutes. The builder writes its pid into the lock file for diagnostics.
 #[cfg(feature = "vendored")]
 fn build_vendored() {
-    use fs4::FileExt;
     use std::fs;
     use std::time::{Duration, Instant};
+    // NOTE: fs4's try_lock/unlock are called via fully-qualified trait syntax
+    // (`fs4::FileExt::try_lock(&f)`) below. On Rust 1.88 the bare method names
+    // collide with the soon-to-be-stabilised inherent std::fs::File methods,
+    // which `-D warnings` rejects — so we do NOT `use fs4::FileExt;`.
 
     // A version bump (submodule move) must retrigger the build.
     println!("cargo:rerun-if-changed={VERSION_CMAKE}");
@@ -404,7 +407,7 @@ fn build_vendored() {
 
         let deadline = Instant::now() + Duration::from_secs(30 * 60);
         loop {
-            let acquired = match lock_file.try_lock() {
+            let acquired = match fs4::FileExt::try_lock(&lock_file) {
                 Ok(()) => true,
                 Err(fs4::TryLockError::WouldBlock) => false,
                 Err(e) => panic!("locking {}: {e}", lock_path.display()),
@@ -414,7 +417,7 @@ fn build_vendored() {
             match shared::decide(marker.exists(), acquired, timed_out) {
                 shared::LockStep::UseInstall => {
                     if acquired {
-                        let _ = lock_file.unlock();
+                        let _ = fs4::FileExt::unlock(&lock_file);
                     }
                     break;
                 }
@@ -424,7 +427,7 @@ fn build_vendored() {
                     cmake_build_graphblas(&install);
                     fs::write(&marker, b"ok\n")
                         .unwrap_or_else(|e| panic!("writing {}: {e}", marker.display()));
-                    let _ = lock_file.unlock();
+                    let _ = fs4::FileExt::unlock(&lock_file);
                     break;
                 }
                 shared::LockStep::Wait => {
