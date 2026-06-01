@@ -26,9 +26,10 @@ pub enum ParsedQuery {
     Construct {
         inner: Query,
     },
-    /// DESCRIBE is recognised by the parser but rejected here in
-    /// Stage 1; left as its own variant so the regression surface
-    /// shows up at the `match` site, not as a silent fallthrough.
+    /// DESCRIBE: executed as a forward, one-level Concise Bounded
+    /// Description over the resources bound to the query's projected
+    /// variables (see `api::execute_query_with` and
+    /// `runtime::describe_triples`).
     Describe {
         inner: Query,
     },

@@ -300,3 +300,110 @@ pub fn construct_triples(
     }
     Ok(out)
 }
+
+/// Build a DESCRIBE result graph from explicit-IRI seeds plus
+/// already-projected solution rows.
+///
+/// `seeds` are resources named directly by IRI in the DESCRIBE clause
+/// (SPARQL 1.1 §16.4); they are described unconditionally — even when the
+/// WHERE clause yields zero rows. The `rows` arrive projected to the
+/// DESCRIBE-target variables (the planner runs the same projection as a
+/// SELECT), so every value bound to *any* variable in a row is also a
+/// resource to describe. The final resource set is (seeds) ∪ (row
+/// bindings), deduplicated. We emit a
+/// **forward, one-level Concise Bounded Description**: for each distinct
+/// resource, every stored triple with that resource as subject.
+///
+/// Output is deduplicated and returned in deterministic sorted order
+/// (via `BTreeSet`). Literals bound to a projected variable are never
+/// subjects of stored triples, so they naturally contribute nothing —
+/// no special-casing needed.
+///
+/// Each describe-target resource is scanned with its **original term**
+/// (kind preserved), so a type-preserving backend that binds a target
+/// to a `Term::BlankNode` is scanned as a blank node, not coerced to an
+/// IRI. The Stage-1 `MemStore` erases term kinds on scan (`unify_one`
+/// binds every value as `Term::Iri(lexical)`), which masks the
+/// distinction there but not for richer backends.
+///
+/// Deferred (out of scope, see SPEC-07 / TASKS.md): recursive
+/// blank-node CBD closure and symmetric CBD (would require reliably
+/// detecting blank-node objects to recurse into, which the term-kind
+/// erasure in `MemStore` defeats). Typed-literal / Turtle serialisation
+/// is likewise a separate increment (#57); this reuses the N-Triples
+/// path.
+pub fn describe_triples<E: Executor + ?Sized>(
+    exec: &E,
+    seeds: &[Term],
+    rows: &[Bindings],
+) -> Result<Vec<(String, String, String)>> {
+    use crate::algebra::{Term, TriplePattern, Var};
+    use std::collections::{BTreeSet, HashSet};
+
+    // Variable names used in the forward-scan pattern below. Defined once
+    // so the pattern construction and the binding lookups can't drift.
+    const PRED_VAR: &str = "p";
+    const OBJ_VAR: &str = "o";
+
+    // Distinct resource *terms* (kind preserved) bound across all rows /
+    // all vars. Scanning with the original term keeps a `Term::BlankNode`
+    // target from being silently coerced to a `Term::Iri`, which would
+    // miss its triples on a kind-preserving backend.
+    let mut resources: HashSet<Term> = HashSet::new();
+    // Resources named directly by IRI in the DESCRIBE clause (SPARQL 1.1
+    // §16.4). These are described unconditionally, independent of whether
+    // the WHERE clause produced any solution rows.
+    for term in seeds {
+        match term {
+            Term::Iri(_) | Term::Literal(_) | Term::BlankNode(_) => {
+                resources.insert(term.clone());
+            }
+            Term::Var(_) | Term::Triple(_) => {}
+        }
+    }
+    for row in rows {
+        for (_name, term) in row.vars() {
+            match term {
+                Term::Iri(_) | Term::Literal(_) | Term::BlankNode(_) => {
+                    resources.insert(term.clone());
+                }
+                // An unbound var or a triple-term can't be a describe
+                // subject, so it carries no describable resource here.
+                Term::Var(_) | Term::Triple(_) => {}
+            }
+        }
+    }
+
+    // Lexical form of a resource term, used as the subject of every
+    // emitted triple. Only the three scannable kinds reach here.
+    fn subject_lex(term: &Term) -> Option<&str> {
+        match term {
+            Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => Some(s),
+            Term::Var(_) | Term::Triple(_) => None,
+        }
+    }
+
+    let mut out: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for resource in &resources {
+        let Some(subject) = subject_lex(resource) else {
+            continue;
+        };
+        let pattern = TriplePattern {
+            subject: resource.clone(),
+            predicate: Term::Var(Var::new(PRED_VAR)),
+            object: Term::Var(Var::new(OBJ_VAR)),
+        };
+        for b in exec.scan_bgp(std::slice::from_ref(&pattern))? {
+            let p = match b.get(PRED_VAR) {
+                Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
+                _ => continue,
+            };
+            let o = match b.get(OBJ_VAR) {
+                Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
+                _ => continue,
+            };
+            out.insert((subject.to_owned(), p, o));
+        }
+    }
+    Ok(out.into_iter().collect())
+}

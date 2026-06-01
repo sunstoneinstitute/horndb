@@ -38,7 +38,7 @@ here in the same commit.
 - [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: session 257d4050 · tracking #4 · task-34-dt-datatype-rules · 2026-06-01_
 - [v] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)) — _wip: session 81a73431 · tracking #5 · task-42-incremental-closure · 2026-06-01_
 - [v] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)) — _wip: session 916ffb7f · tracking #6 · task-44-closure-deltas · 2026-06-01_
-- [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
+- [v] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)) — _wip: session d11d84f3 · tracking #7 · task-48-describe-query-form · 2026-06-01_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings, not yet started) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
@@ -400,10 +400,38 @@ list when the corresponding Stage-1 slice is settled.
     reader visibility (MVCC snapshots)**. Parent stays `[v]` until #44–#46
     close. Distributed timely-dataflow (SPEC-09) and the opportunistic
     `FUTURE-WORK.md` simplifications remain deferred under this parent.
-- [ ] **SPEC-07 SPARQL** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)): `DESCRIBE` query form, full `Update` vocabulary
+- [v] **SPEC-07 SPARQL** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)) — _wip: session d11d84f3 · tracking #7 · task-48-describe-query-form · 2026-06-01_: `DESCRIBE` query form, full `Update` vocabulary
   (`LOAD`/`CLEAR`/`DROP`), backward-chained entailment mode, Kleene-star
   property paths (`*` and `+`), Graph Store Protocol, `EXPLAIN` pragma,
   full streaming result serialization (currently buffers).
+  - **Epic breakdown (2026-06-01, tracked under [#7](https://github.com/sunstoneinstitute/horndb/issues/7)):**
+    the broad SPEC-07 scope splits into ten shippable increments:
+    [#48](https://github.com/sunstoneinstitute/horndb/issues/48) `DESCRIBE`
+    query form — **first increment, delivered 2026-06-01**: forward one-level
+    Concise Bounded Description (`describe_triples` in `crates/sparql/src/exec/runtime.rs`
+    emits each resolved resource's outgoing triples); recursive/symmetric
+    blank-node CBD and typed-literal/Turtle serialisation deferred under
+    [#57](https://github.com/sunstoneinstitute/horndb/issues/57);
+    [#49](https://github.com/sunstoneinstitute/horndb/issues/49) non-recursive
+    property paths (`|`/`!`/`?`);
+    [#50](https://github.com/sunstoneinstitute/horndb/issues/50) Kleene property
+    paths (`*`/`+`) via closure;
+    [#51](https://github.com/sunstoneinstitute/horndb/issues/51) pattern-based
+    Update (`INSERT`/`DELETE … WHERE`);
+    [#52](https://github.com/sunstoneinstitute/horndb/issues/52)
+    graph-management Update (`LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY`);
+    [#53](https://github.com/sunstoneinstitute/horndb/issues/53) `EXPLAIN`
+    pragma;
+    [#54](https://github.com/sunstoneinstitute/horndb/issues/54) Graph Store
+    Protocol;
+    [#55](https://github.com/sunstoneinstitute/horndb/issues/55)
+    backward-chained entailment mode + per-query pragma;
+    [#56](https://github.com/sunstoneinstitute/horndb/issues/56) streaming
+    result serialization;
+    [#57](https://github.com/sunstoneinstitute/horndb/issues/57) SPARQL XML
+    results + Turtle CONSTRUCT/DESCRIBE. Parent stays `[v]` until #48–#57
+    close. `SERVICE` federation, the RDF 1.2 SPARQL surface, and GeoSPARQL
+    remain out of scope per SPEC-07.
 - [ ] **SPEC-08 ML** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)): F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
   `CandidateGenerator`, HTTP audit endpoint, cost reporting, training-data
   leakage controls.

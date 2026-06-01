@@ -265,7 +265,7 @@ HTTP server (`server` feature, on by default).
 | SPARQL Update `INSERT/DELETE DATA` | **implemented** | `update.rs`. |
 | Embedded HTTP server (`/query`, `/update`) | **implemented** | `server/` (axum), behind `server` feature. |
 | RDF 1.2 triple-term patterns `<<( s p o )>>` | **implemented (gated)** | Accepted only when caller passes `SparqlConfig::rdf12()`; default rejects them so SPARQL 1.1 callers keep 1.1 semantics. `translate_query_with` / `execute_query_with`. |
-| `DESCRIBE` query form | **planned** | `translate.rs` returns `UnsupportedAlgebra("DESCRIBE")`. `TASKS.md` MEDIUM · *Completeness* — "SPEC-07 SPARQL". |
+| `DESCRIBE` query form | **implemented (partial)** | Forward one-level Concise Bounded Description: `translate.rs` lowers the describe pattern like SELECT, `exec/runtime.rs::describe_triples` emits each resource's outgoing triples. Recursive/symmetric blank-node CBD and typed-literal/Turtle serialisation deferred (Stage-1 `MemStore` erases term types on scan; tracked in [#57]). `TASKS.md` #48. |
 | Kleene-star property paths (`*`, `+`) | **planned** | `UnsupportedPathOp`; needs closure-on-demand or backward chaining. Same task. |
 | Full Update vocabulary (`LOAD` / `CLEAR` / `DROP`) | **planned** | Same task. |
 | Backward-chained entailment mode (F4 second mode) | **deferred** | Depends on SPEC-03 magic-sets/tabling (deferred). |

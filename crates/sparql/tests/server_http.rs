@@ -56,6 +56,23 @@ async fn post_update_then_query() {
 }
 
 #[tokio::test]
+async fn get_describe_returns_ntriples() {
+    let app = router_with_data();
+    // DESCRIBE <http://ex/a> — percent-encoded.
+    let req = Request::builder()
+        .uri("/query?query=DESCRIBE%20%3Chttp%3A%2F%2Fex%2Fa%3E")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(text.trim(), "<http://ex/a> <http://ex/p> <http://ex/b> .");
+}
+
+#[tokio::test]
 async fn parse_error_returns_400() {
     let app = router_with_data();
     let req = Request::builder()

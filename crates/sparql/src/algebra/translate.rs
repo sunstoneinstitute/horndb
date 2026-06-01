@@ -30,26 +30,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
             pattern,
             dataset: _,
             base_iri: _,
-        } => {
-            // spargebra often wraps the WHERE clause in a Project node
-            // already (for the SELECT clause's variable list). If so,
-            // honour it; otherwise wrap ourselves with the visible-var
-            // list.
-            if let GraphPattern::Project { inner, variables } = pattern {
-                let inner_alg = translate_pattern(inner, cfg)?;
-                Ok(Algebra::Project {
-                    vars: variables.iter().map(translate_var).collect(),
-                    inner: Box::new(inner_alg),
-                })
-            } else {
-                let inner = translate_pattern(pattern, cfg)?;
-                let vars = collect_visible_vars(pattern);
-                Ok(Algebra::Project {
-                    vars,
-                    inner: Box::new(inner),
-                })
-            }
-        }
+        } => translate_projection(pattern, cfg),
         Query::Ask {
             pattern,
             dataset: _,
@@ -73,7 +54,40 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
             // template via Runtime::run_construct.
             translate_pattern(pattern, cfg)
         }
-        Query::Describe { .. } => Err(SparqlError::UnsupportedAlgebra("DESCRIBE".into())),
+        Query::Describe {
+            pattern,
+            dataset: _,
+            base_iri: _,
+        } => {
+            // spargebra encodes a DESCRIBE's WHERE clause exactly like a
+            // SELECT (via `build_select`): the resources to describe are
+            // the values bound to the projected variables across all
+            // result rows. So the algebra translation is identical to
+            // the SELECT arm — the runtime (`describe_triples`) is what
+            // turns those bound resources into a forward CBD graph.
+            translate_projection(pattern, cfg)
+        }
+    }
+}
+
+/// Shared SELECT/DESCRIBE lowering: spargebra often wraps the WHERE
+/// clause in a `Project` node already (for the projected variable
+/// list). If so, honour it; otherwise wrap ourselves with the
+/// visible-var list.
+fn translate_projection(pattern: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
+    if let GraphPattern::Project { inner, variables } = pattern {
+        let inner_alg = translate_pattern(inner, cfg)?;
+        Ok(Algebra::Project {
+            vars: variables.iter().map(translate_var).collect(),
+            inner: Box::new(inner_alg),
+        })
+    } else {
+        let inner = translate_pattern(pattern, cfg)?;
+        let vars = collect_visible_vars(pattern);
+        Ok(Algebra::Project {
+            vars,
+            inner: Box::new(inner),
+        })
     }
 }
 
