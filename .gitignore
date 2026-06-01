@@ -5,6 +5,10 @@ Cargo.lock.bak
 .DS_Store
 crates/harness/data/
 
+# Shared, version-keyed vendored GraphBLAS build (built once per (target,
+# version) and reused across worktrees). See crates/closure/INTEGRATION-NOTES.md.
+crates/closure/vendor/.shared-build/
+
 # Claude Code local state.
 # `.claude/skills/` IS tracked (project-shared skills).
 # `.claude/worktrees/` and per-user settings are not.
