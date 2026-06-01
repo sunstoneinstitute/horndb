@@ -86,6 +86,17 @@ cargo bench -p <crate> --bench <name>                    # criterion benches (e.
 
 CI mirrors the above plus a conformance run with the real engine; see `.github/workflows/ci.yml`. Nightly runs LDBC SPB-256 on a self-hosted runner (`.github/workflows/nightly.yml`).
 
+### GitHub Actions hygiene
+
+Pin every GitHub Action to a **full 40-char commit SHA**, never a tag:
+`uses: owner/action@<sha> # vX.Y.Z`. The trailing `# vX.Y.Z` comment is required — it is what a human reads and what Dependabot rewrites on a bump. Floating tags (`@v4`, `@main`) are a supply-chain risk (the tag can be repointed at malicious code) and must not appear in `.github/workflows/`. When adding or upgrading an action, resolve the SHA first:
+
+```bash
+gh api repos/<owner>/<repo>/commits/<tag> --jq .sha   # SHA to pin
+```
+
+`.github/dependabot.yml` keeps these pinned SHAs (and their version comments) and the Cargo workspace dependencies up to date on a weekly schedule — GitHub Actions updates grouped under a `ci:` prefix, Cargo minor/patch updates under `chore:`. Review and merge those PRs like any other; do not hand-bump pins outside that flow unless patching an urgent CVE.
+
 ## The harness binary
 
 Built by `cargo build -p horndb-harness --bin harness [--release] [--features real-engine]`. Two engines:

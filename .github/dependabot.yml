@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Keep GitHub Actions pinned-SHAs (and their `# vX.Y.Z` comments) current.
+  # Actions are pinned to full commit SHAs in .github/workflows/ — Dependabot
+  # bumps the SHA and rewrites the version comment when a new release lands.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Keep the Rust workspace dependencies current (root Cargo.toml / Cargo.lock).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
