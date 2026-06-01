@@ -37,14 +37,23 @@ All paths derived inside `build_vendored()`:
 - **Version** `<ver>` (e.g. `10.3.0`): parsed from the **current worktree's**
   `vendor/GraphBLAS/cmake_modules/GraphBLAS_version.cmake` —
   the `GraphBLAS_VERSION_MAJOR`, `_MINOR`, `_SUB` `set(... CACHE STRING ...)`
-  lines. Reuse key is **version only**, as agreed.
+  lines.
+- **Target** `<target>` (e.g. `aarch64-apple-darwin`): the build-script `TARGET`
+  env var. GraphBLAS compiles to architecture-specific machine code, so the
+  artifact must not be shared across CPU architectures (Apple Silicon vs x86_64,
+  or any cross-compile). The full target triple is used rather than the bare CPU
+  arch because it also distinguishes OS/ABI, which matters if `.shared-build`
+  ever sits on a mount visible to more than one platform.
+- **Reuse key** = `<target>/<ver>` (version-only *within* a target, as agreed).
 - **Main worktree root** `<main>`: parent of
   `git rev-parse --path-format=absolute --git-common-dir` (which yields
-  `<main>/.git`); the shared dir is then `<main>/crates/closure/vendor/.shared-build/<ver>/`.
+  `<main>/.git`); the shared dir is then
+  `<main>/crates/closure/vendor/.shared-build/<target>/<ver>/`.
   If git is unavailable (e.g. building from a source tarball), fall back to a
-  crate-local shared dir `CARGO_MANIFEST_DIR/vendor/.shared-build/<ver>/` so the
-  build still works (it simply won't be shared across worktrees in that case).
-- **Shared dir**: `<main>/crates/closure/vendor/.shared-build/<ver>/`
+  crate-local shared dir `CARGO_MANIFEST_DIR/vendor/.shared-build/<target>/<ver>/`
+  so the build still works (it simply won't be shared across worktrees in that
+  case).
+- **Shared dir**: `<main>/crates/closure/vendor/.shared-build/<target>/<ver>/`
   - `install/` — the cmake install prefix (`lib/pkgconfig/GraphBLAS.pc`,
     headers, the static `.a`). This is the `out_dir` handed to `cmake::Config`.
   - `.build.lock` — advisory lock file; also holds the builder's pid as text.
@@ -55,9 +64,10 @@ All paths derived inside `build_vendored()`:
 
 **Why "current worktree's version, main worktree's location":** a worktree on a
 newer GraphBLAS (say `10.4.0`) parses `10.4.0`, builds from *its own*
-`vendor/GraphBLAS` into `<main>/crates/closure/vendor/.shared-build/10.4.0/`,
-fully separate from `10.3.0`. That is the "one worktree can build with a newer
-dependency separately" requirement.
+`vendor/GraphBLAS` into
+`<main>/crates/closure/vendor/.shared-build/<target>/10.4.0/`, fully separate
+from `10.3.0`. That is the "one worktree can build with a newer dependency
+separately" requirement.
 
 `crates/closure/vendor/.shared-build/` is added to the root `.gitignore`.
 
@@ -81,7 +91,8 @@ GraphBLAS 10.3.0, held by pid N"* instead of a silent stall.
 
 ```
 ver     = parse_version(<this-worktree>/vendor/GraphBLAS/cmake_modules/GraphBLAS_version.cmake)
-shared  = main_root()/crates/closure/vendor/.shared-build/<ver>
+target  = env("TARGET")                 # e.g. aarch64-apple-darwin
+shared  = main_root()/crates/closure/vendor/.shared-build/<target>/<ver>
 install = shared/install ;  marker = shared/.complete ;  lock = shared/.build.lock
 
 if marker exists:                       # fast path — no cmake, no lock
@@ -156,10 +167,10 @@ concerns); the helper isolates everything that benefits from a unit test.
 - **flock over NFS is historically unreliable.** Irrelevant for local dev
   builds, but `.shared-build` must not be pointed at a network mount. One
   sentence to this effect goes in `INTEGRATION-NOTES.md`.
-- Reuse key is **version only**: if someone moves the submodule to a *different
-  commit that still reports the same version string*, the stale build is reused
-  until `.shared-build/<ver>/` is cleared by hand. Accepted — release tags are
-  immutable in practice.
+- Reuse key is **version only within a target** (`<target>/<ver>`): if someone
+  moves the submodule to a *different commit that still reports the same version
+  string*, the stale build is reused until `.shared-build/<target>/<ver>/` is
+  cleared by hand. Accepted — release tags are immutable in practice.
 
 ## Docs to update in the same change
 
