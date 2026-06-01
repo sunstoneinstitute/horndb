@@ -70,6 +70,10 @@ fn build_vendored() {
             .unwrap_or_else(|e| panic!("opening {}: {e}", lock_path.display()));
 
         let deadline = Instant::now() + Duration::from_secs(30 * 60);
+        // Diagnostics are emitted once, not every poll, to avoid flooding the
+        // build log with one `cargo:warning` per 2s of waiting.
+        let mut announced_wait = false;
+        let mut announced_gone = false;
         loop {
             // Fully-qualified trait calls: on Rust 1.88 `try_lock`/`unlock`
             // collide with the soon-to-be-stabilised inherent `std::fs::File`
@@ -100,16 +104,22 @@ fn build_vendored() {
                 }
                 shared::LockStep::Wait => {
                     let holder = read_pid(&lock_path);
-                    println!(
-                        "cargo:warning=horndb-closure: waiting for GraphBLAS {ver} build \
-                         (holder pid {holder:?}); this is normal across parallel worktrees"
-                    );
-                    if let Some(pid) = holder {
-                        if !pid_is_alive(pid) {
-                            println!(
-                                "cargo:warning=horndb-closure: GraphBLAS builder pid {pid} \
-                                 appears gone; will retry once its flock is released"
-                            );
+                    if !announced_wait {
+                        println!(
+                            "cargo:warning=horndb-closure: waiting for GraphBLAS {ver} build \
+                             (holder pid {holder:?}); this is normal across parallel worktrees"
+                        );
+                        announced_wait = true;
+                    }
+                    if !announced_gone {
+                        if let Some(pid) = holder {
+                            if !pid_is_alive(pid) {
+                                println!(
+                                    "cargo:warning=horndb-closure: GraphBLAS builder pid {pid} \
+                                     appears gone; will retry once its flock is released"
+                                );
+                                announced_gone = true;
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_secs(2));
