@@ -9,6 +9,7 @@ publish = false
 anyhow.workspace = true
 thiserror.workspace = true
 crossbeam-channel.workspace = true
+horndb-closure = { path = "../closure" }
 
 [dev-dependencies]
 proptest.workspace = true
