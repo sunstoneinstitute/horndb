@@ -301,11 +301,16 @@ pub fn construct_triples(
     Ok(out)
 }
 
-/// Build a DESCRIBE result graph from already-projected solution rows.
+/// Build a DESCRIBE result graph from explicit-IRI seeds plus
+/// already-projected solution rows.
 ///
-/// The `rows` arrive projected to the DESCRIBE-target variables (the
-/// planner runs the same projection as a SELECT), so every value bound
-/// to *any* variable in a row is a resource to describe. We emit a
+/// `seeds` are resources named directly by IRI in the DESCRIBE clause
+/// (SPARQL 1.1 §16.4); they are described unconditionally — even when the
+/// WHERE clause yields zero rows. The `rows` arrive projected to the
+/// DESCRIBE-target variables (the planner runs the same projection as a
+/// SELECT), so every value bound to *any* variable in a row is also a
+/// resource to describe. The final resource set is (seeds) ∪ (row
+/// bindings), deduplicated. We emit a
 /// **forward, one-level Concise Bounded Description**: for each distinct
 /// resource, every stored triple with that resource as subject.
 ///
@@ -329,6 +334,7 @@ pub fn construct_triples(
 /// path.
 pub fn describe_triples<E: Executor + ?Sized>(
     exec: &E,
+    seeds: &[Term],
     rows: &[Bindings],
 ) -> Result<Vec<(String, String, String)>> {
     use crate::algebra::{Term, TriplePattern, Var};
@@ -344,6 +350,17 @@ pub fn describe_triples<E: Executor + ?Sized>(
     // target from being silently coerced to a `Term::Iri`, which would
     // miss its triples on a kind-preserving backend.
     let mut resources: HashSet<Term> = HashSet::new();
+    // Resources named directly by IRI in the DESCRIBE clause (SPARQL 1.1
+    // §16.4). These are described unconditionally, independent of whether
+    // the WHERE clause produced any solution rows.
+    for term in seeds {
+        match term {
+            Term::Iri(_) | Term::Literal(_) | Term::BlankNode(_) => {
+                resources.insert(term.clone());
+            }
+            Term::Var(_) | Term::Triple(_) => {}
+        }
+    }
     for row in rows {
         for (_name, term) in row.vars() {
             match term {

@@ -46,6 +46,60 @@ fn describe_iri_no_where_returns_forward_triples() {
 }
 
 #[test]
+fn describe_explicit_iri_with_empty_where_still_describes() {
+    // SPARQL 1.1 §16.4: an IRI named directly in the DESCRIBE clause is
+    // described in addition to the WHERE solutions. Here the WHERE matches
+    // nothing, so the only resource to describe is the explicit <a>.
+    // Regression: previously the explicit IRI was lowered to an Extend over
+    // the (empty) WHERE rows and was therefore dropped, returning an empty
+    // graph.
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+
+    let ans = execute_query(
+        "DESCRIBE <http://ex/a> WHERE { <http://ex/missing> ?p ?o }",
+        &s,
+    )
+    .unwrap();
+    let t = triples(ans);
+    assert_eq!(t.len(), 1, "explicit IRI must still be described: {t:?}");
+    assert!(
+        t.iter()
+            .any(|(sub, p, o)| sub == "http://ex/a" && p == "http://ex/p" && o == "http://ex/b"),
+        "expected (<a>, <p>, <b>): {t:?}"
+    );
+}
+
+#[test]
+fn describe_multiple_explicit_iris_with_matching_where() {
+    // Two explicit IRIs in the DESCRIBE clause, plus a WHERE that matches
+    // (so there is at least one solution row). `DESCRIBE <a> <b>` names no
+    // variables, so spargebra projects only the two fresh BIND vars
+    // carrying <a> and <b>; the WHERE's own variables (?s/?o) are projected
+    // away and are not themselves describe targets. Both explicit IRIs must
+    // be described.
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/x"));
+    s.insert_triple(iri("http://ex/b"), iri("http://ex/q"), iri("http://ex/y"));
+    // A triple the WHERE matches, ensuring the solution set is non-empty.
+    s.insert_triple(iri("http://ex/c"), iri("http://ex/r"), iri("http://ex/z"));
+
+    let ans = execute_query(
+        "DESCRIBE <http://ex/a> <http://ex/b> WHERE { ?s <http://ex/r> ?o }",
+        &s,
+    )
+    .unwrap();
+    let t = triples(ans);
+    assert_eq!(t.len(), 2, "both explicit IRIs described: {t:?}");
+    assert!(t
+        .iter()
+        .any(|(sub, p, o)| sub == "http://ex/a" && p == "http://ex/p" && o == "http://ex/x"));
+    assert!(t
+        .iter()
+        .any(|(sub, p, o)| sub == "http://ex/b" && p == "http://ex/q" && o == "http://ex/y"));
+}
+
+#[test]
 fn describe_var_describes_each_bound_resource() {
     let mut s = MemStore::default();
     // Two subjects that match the WHERE clause.
@@ -211,7 +265,7 @@ fn describe_preserves_target_term_kind() {
     row.set("s", Term::BlankNode("b0".into()));
     row.set("t", iri("http://ex/a"));
 
-    let t = describe_triples(&store, &[row]).unwrap();
+    let t = describe_triples(&store, &[], &[row]).unwrap();
 
     // The blank node's outgoing triple is described, with the decoy
     // (same lexical, IRI kind) excluded.
