@@ -18,3 +18,5 @@ crates/closure/vendor/.shared-build/
 
 # Visual brainstorming companion scratch
 .superpowers/
+/.superpowers
+/.horndb-shared-target/
