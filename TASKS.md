@@ -312,9 +312,10 @@ list when the corresponding Stage-1 slice is settled.
     columnar source — **delivered 2026-05-31** (`horndb-wcoj`
     `CompressedTripleSource`, FoR + bit-packing): footprint 144 → 19.32 B/triple
     (7.5×), WCOJ 1.56× faster than on the dense source and now ahead of
-    binary-hash (0.73× → 1.11×). It did **not** reach the ≥10× gate, so
-    [#1](https://github.com/sunstoneinstitute/horndb/issues/1) stays open with
-    the new measurement recorded;
+    binary-hash (0.73× → 1.11×). It did **not** reach the ≥10× gate on its
+    own — [#1](https://github.com/sunstoneinstitute/horndb/issues/1) was
+    subsequently closed by reshaping the benchmark graph into the canonical
+    skewed win case (PR #22, ~34×), not by compression;
     [#16](https://github.com/sunstoneinstitute/horndb/issues/16) six index
     orderings on demand (F4);
     [#17](https://github.com/sunstoneinstitute/horndb/issues/17) HDT cold tier +
