@@ -27,6 +27,7 @@
 //!   in via a `add_closure_plan` extension.
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx};
+use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
 use crate::operator::NaryPlan;
 use crate::types::{DerivationKind, LogicalTime, RuleId, TripleId};
@@ -44,6 +45,7 @@ pub struct Circuit {
     derived_base: Zset<TripleId>,
     log: DeltaLog,
     plans: Vec<(NaryPlan, RuleId)>,
+    closure_plans: Vec<Box<dyn ClosureRule>>,
     feed: ChangeFeed,
     derived_clock: LogicalTime,
 }
@@ -61,6 +63,7 @@ impl Circuit {
             derived_base: Zset::new(),
             log: DeltaLog::new(),
             plans: Vec::new(),
+            closure_plans: Vec::new(),
             feed: ChangeFeed::new(),
             derived_clock: 0,
         }
@@ -68,6 +71,14 @@ impl Circuit {
 
     pub fn add_plan(&mut self, plan: NaryPlan, attribution: RuleId) {
         self.plans.push((plan, attribution));
+    }
+
+    /// Register a closure operator (SPEC-06 F5). On each tick its
+    /// `apply_insert_delta` runs over the asserted insertion delta and the
+    /// newly inferred triples are merged into `derived_base`, published as
+    /// `DerivationKind::ClosureInferred`.
+    pub fn add_closure_plan(&mut self, rule: Box<dyn ClosureRule>) {
+        self.closure_plans.push(rule);
     }
 
     pub fn subscribe(&self) -> ChangeFeedRx {
@@ -117,6 +128,7 @@ impl Circuit {
         const MAX_ROUNDS: usize = 64;
         let mut combined_base: Zset<TripleId> = self.asserted_base.clone();
         combined_base.add_assign(&self.derived_base);
+        let asserted_delta_for_closure = asserted_delta.clone();
         let mut round_delta = asserted_delta;
         let mut derived_merged = 0;
 
@@ -156,6 +168,38 @@ impl Circuit {
             }
             round_delta = next_delta;
         }
+
+        // Closure pass (SPEC-06 F5): run each closure operator over the
+        // asserted insertion delta. Newly inferred triples not already present
+        // in the combined base are merged into derived_base and published as
+        // ClosureInferred. Insertion-only; closure↔rule cross-feedback within
+        // a tick is a Stage-2 concern (see FUTURE-WORK.md).
+        //
+        // We take the closure_plans out of self to satisfy the borrow checker:
+        // iterating over &mut closure_plans conflicts with borrowing
+        // self.derived_base / self.feed / self.derived_clock mutably through
+        // self at the same time (they are disjoint fields, but the compiler
+        // can't see through `self` without NLL field disjointness for &mut).
+        let mut closure_plans = std::mem::take(&mut self.closure_plans);
+        for rule in &mut closure_plans {
+            let inferred = rule.apply_insert_delta(&asserted_delta_for_closure);
+            for triple in inferred {
+                if combined_base.get(&triple) != 0 {
+                    continue;
+                }
+                self.derived_base.add(triple, 1);
+                combined_base.add(triple, 1);
+                let t = self.derived_clock;
+                self.derived_clock = self
+                    .derived_clock
+                    .checked_add(1)
+                    .expect("derived-clock overflow");
+                self.feed
+                    .publish(triple, 1, t, DerivationKind::ClosureInferred);
+                derived_merged += 1;
+            }
+        }
+        self.closure_plans = closure_plans;
 
         TickReport {
             asserted_merged,
