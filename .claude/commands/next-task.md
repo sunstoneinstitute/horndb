@@ -115,6 +115,15 @@ git commit -m "chore(tasks): claim #<N> (<title>) [v] — session <SESSION>"
 git push origin main
 ```
 
+Mark the cmux tab as claimed so the surface reflects the active task. The
+`[v]` mirrors the `TASKS.md` claim tag; `<N>` is the GitHub issue (the
+sub-issue, for an epic increment). The guard makes this a no-op when not
+running inside cmux:
+
+```bash
+command -v cmux >/dev/null && [ -n "$CMUX_TAB_ID" ] && cmux rename-tab "[v] #<N>"
+```
+
 Claiming **before** creating the branch is deliberate: the worktree forks from
 the `[v]` state, so the later `[v]` → `[x]` flip merges back without a conflict
 on that line.
@@ -294,6 +303,12 @@ all PR checks/CI are green **and** the branch is mergeable:
 4. Remove the worktree now that it is merged:
    ```bash
    git worktree remove ".worktrees/<branch>"
+   ```
+5. Mark the cmux tab done — `[x]` mirrors the `[x]` flip that just landed on
+   `main`. Use the same `<N>` the tab was claimed with in Phase 3 (the
+   sub-issue for an epic increment, even if the parent task stays `[v]`):
+   ```bash
+   command -v cmux >/dev/null && [ -n "$CMUX_TAB_ID" ] && cmux rename-tab "[x] #<N>"
    ```
 
 ## Phase 12 — Report
