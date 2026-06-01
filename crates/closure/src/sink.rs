@@ -193,15 +193,26 @@ struct PredicateState {
 /// edges, writing **only the delta** triples to the sink (SPEC-05 F6).
 ///
 /// Insertion only — deletion needs SPEC-06 DBSP deltas and is out of scope.
-#[derive(Default)]
 pub struct IncrementalClosureBackend {
     predicates: FxHashMap<PredicateId, PredicateState>,
     sameas: EquivClasses,
 }
 
+impl Default for IncrementalClosureBackend {
+    fn default() -> Self {
+        // Initialise GraphBLAS here too (mirrors `BackendImpl::default`) so a
+        // `default()`-constructed backend is never left uninitialised, even
+        // though today's incremental path is FFI-free. Cheap & idempotent.
+        let _ = init_once();
+        Self {
+            predicates: FxHashMap::default(),
+            sameas: EquivClasses::new(),
+        }
+    }
+}
+
 impl IncrementalClosureBackend {
     pub fn new() -> Self {
-        let _ = init_once();
         Self::default()
     }
 
