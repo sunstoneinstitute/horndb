@@ -5,14 +5,16 @@
 //!
 //! - **dt-type1**: each datatype `D` in the OWL 2 RL datatype set is
 //!   declared `D rdf:type rdfs:Datatype`.
-//! - **dt-type2** (as a subsumption lattice): the XSD numeric datatype
-//!   hierarchy is injected as `rdfs:subClassOf` edges. The existing
-//!   `scm-rng1` rule (range narrows along `subClassOf` of the range
-//!   class) and `scm-sco` (transitive `subClassOf` closure) then do the
-//!   propagation — this module does not reimplement them.
+//! - **dt-type2** (as a subsumption lattice): the XSD datatype hierarchy is
+//!   injected as `rdfs:subClassOf` edges. Only the numeric tower carries
+//!   subsumption edges; non-numeric datatypes (`xsd:string`, `xsd:boolean`,
+//!   `xsd:dateTime`) are declared by dt-type1 but have no edges. The
+//!   existing `scm-rng1` rule (range narrows along `subClassOf` of the
+//!   range class) and `scm-sco` (transitive `subClassOf` closure) then do
+//!   the propagation — this module does not reimplement them.
 //!
 //! This is **not** literal value reasoning: the datatypes are treated as
-//! ordinary terms and the lattice is the fixed XSD numeric hierarchy from
+//! ordinary terms and the lattice is the fixed XSD datatype hierarchy from
 //! the OWL 2 datatype map. Literal value parsing/comparison is a separate
 //! concern (Stage-2, tracked elsewhere).
 
