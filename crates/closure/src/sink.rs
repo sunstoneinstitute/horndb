@@ -216,6 +216,19 @@ impl IncrementalClosureBackend {
         Self::default()
     }
 
+    /// Seed predicate `p`'s retained closure state from an **already transitively
+    /// closed** edge set (e.g. the output of a prior bulk `close_transitive_predicate`
+    /// or the closure already materialized in storage). The caller guarantees the
+    /// edges are closed; this does not re-close them. Call once before feeding
+    /// incremental inserts for a predicate that already has a materialized closure.
+    /// Replaces any existing state for `p`. Writes nothing to a sink.
+    pub fn seed_transitive_closure(&mut self, p: PredicateId, closed_edges: &[(DictId, DictId)]) {
+        let mut map = DenseIdMap::with_capacity(closed_edges.len() * 2);
+        let dense = map.intern_edges(closed_edges);
+        let closure = IncrementalTransitiveClosure::from_closed_edges(dense);
+        self.predicates.insert(p, PredicateState { map, closure });
+    }
+
     /// Insert `new_edges` into predicate `p`'s transitive closure and write the
     /// newly inferred triples to `sink`. Returns the number of triples the sink
     /// reports written. Edges already implied by the existing closure produce

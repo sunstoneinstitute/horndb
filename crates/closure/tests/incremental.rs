@@ -148,6 +148,44 @@ fn incremental_backend_writes_only_the_delta() {
     }
 }
 
+/// Seed the backend with an already-closed chain (1→2, 1→3, 2→3), then
+/// insert 3→4 and expect the full delta (3,4),(2,4),(1,4).
+#[test]
+fn seed_transitive_closure_then_incremental_insert() {
+    let sink = VecSink::default();
+    let mut backend = IncrementalClosureBackend::default();
+    let p = PredicateId(99);
+
+    // Pre-existing closed chain 1→2→3 (including transitive 1→3).
+    backend.seed_transitive_closure(
+        p,
+        &[
+            (DictId(1), DictId(2)),
+            (DictId(1), DictId(3)),
+            (DictId(2), DictId(3)),
+        ],
+    );
+
+    // Now insert 3→4 incrementally.  Because the seed already contains the
+    // backward reach of 3 (namely {1,2}), the delta must include (1,4),(2,4),(3,4).
+    let written = backend
+        .insert_transitive_edges(p, &[(DictId(3), DictId(4))], &sink)
+        .unwrap();
+    assert_eq!(written, 3, "expected 3 new delta triples");
+
+    let triples = sink.triples.lock().unwrap();
+    let mut pairs: Vec<(u64, u64)> = triples.iter().map(|t| (t.s.0, t.o.0)).collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![(1, 4), (2, 4), (3, 4)],
+        "seed did not contribute backward reach to the delta"
+    );
+    for t in triples.iter() {
+        assert_eq!(t.p, p);
+    }
+}
+
 #[test]
 fn incremental_backend_dedups_reinserted_edges() {
     let sink = VecSink::default();
