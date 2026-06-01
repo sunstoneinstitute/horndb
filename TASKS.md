@@ -35,7 +35,7 @@ here in the same commit.
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
 - [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session a64ca05c · tracking #3 · task-15-compressed-warm-tier · 2026-05-31_
-- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
+- [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: session 257d4050 · tracking #4 · task-34-dt-datatype-rules · 2026-06-01_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
@@ -325,10 +325,29 @@ list when the corresponding Stage-1 slice is settled.
     snapshot isolation. Parent stays `[v]` until all five close; CXL/NVMe
     placement (SPEC-09), persistent dictionary, and true per-tuple MVCC remain
     deferred.
-- [ ] **SPEC-04 rules** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)): full `dt-*` datatype rules, `cls-int*`/`cls-uni*`
+- [v] **SPEC-04 rules** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: session 257d4050 · tracking #4 · task-34-dt-datatype-rules · 2026-06-01_: full `dt-*` datatype rules, `cls-int*`/`cls-uni*`
   list-walking rules, `rdf:type` skew parallelism (F5), production proof
   recording (F4 — Stage-1 ships a stub `Provenance` enum), user-defined
   rules via runtime Datalog frontend.
+  - **Epic breakdown (2026-06-01, tracked under [#4](https://github.com/sunstoneinstitute/horndb/issues/4)):**
+    several originally-listed items already shipped (`cls-int1`, `cls-uni`,
+    `prp-spo2`, `prp-key`, `cax-adc`, `eq-diff2/3` are live in
+    `crates/owlrl/src/list_rules.rs`). Remaining gaps split into shippable
+    increments:
+    [#34](https://github.com/sunstoneinstitute/horndb/issues/34) `dt-*`
+    datatype rules (Table 8) — **first increment**;
+    [#35](https://github.com/sunstoneinstitute/horndb/issues/35)
+    `cls-maxc1`/`cls-maxc2` unqualified max-cardinality;
+    [#36](https://github.com/sunstoneinstitute/horndb/issues/36)
+    `cls-maxqc1`–`cls-maxqc4` qualified max-cardinality;
+    [#37](https://github.com/sunstoneinstitute/horndb/issues/37) `prp-adp`
+    all-disjoint-properties;
+    [#38](https://github.com/sunstoneinstitute/horndb/issues/38) production
+    proof recording (F4) + `proof(t)` API;
+    [#39](https://github.com/sunstoneinstitute/horndb/issues/39) `rdf:type`
+    skew parallelism (F5). Parent stays `[v]` until all six close;
+    user-defined Datalog frontend (Stage-2, out of scope per SPEC-04) and
+    TGD-requiring rules remain deferred.
 - [ ] **SPEC-05 closure** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)): incremental closure updates (F6 — needs the
   SPEC-06 fix below for closure deltas), GPU backend (SPEC-09 territory),
   LAGraph adoption for higher-level primitives.
