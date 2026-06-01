@@ -9,7 +9,9 @@
 //!   firing those rules itself.
 
 use anyhow::Result;
+use rustc_hash::FxHashMap;
 
+use crate::closure::incremental::IncrementalTransitiveClosure;
 use crate::closure::schema::reflexive_transitive_closure;
 use crate::closure::transitive::transitive_closure;
 use crate::dense_id::DenseIdMap;
@@ -176,4 +178,110 @@ fn write_closure(
 /// its own factory).
 pub fn default_backend() -> BackendImpl {
     BackendImpl::default()
+}
+
+/// Per-predicate retained closure state for the incremental path (SPEC-05 F6).
+#[derive(Default)]
+struct PredicateState {
+    map: DenseIdMap,
+    closure: IncrementalTransitiveClosure,
+}
+
+/// Insertion-only incremental closure backend. Unlike [`BackendImpl`], which
+/// recomputes the whole closure from the full edge set on every call, this
+/// retains per-predicate closure state and folds in only the newly inserted
+/// edges, writing **only the delta** triples to the sink (SPEC-05 F6).
+///
+/// Insertion only — deletion needs SPEC-06 DBSP deltas and is out of scope.
+pub struct IncrementalClosureBackend {
+    predicates: FxHashMap<PredicateId, PredicateState>,
+    sameas: EquivClasses,
+}
+
+impl Default for IncrementalClosureBackend {
+    fn default() -> Self {
+        // Initialise GraphBLAS here too (mirrors `BackendImpl::default`) so a
+        // `default()`-constructed backend is never left uninitialised, even
+        // though today's incremental path is FFI-free. Cheap & idempotent.
+        let _ = init_once();
+        Self {
+            predicates: FxHashMap::default(),
+            sameas: EquivClasses::new(),
+        }
+    }
+}
+
+impl IncrementalClosureBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Seed predicate `p`'s retained closure state from an **already transitively
+    /// closed** edge set (e.g. the output of a prior bulk `close_transitive_predicate`
+    /// or the closure already materialized in storage). The caller guarantees the
+    /// edges are closed; this does not re-close them. Call once before feeding
+    /// incremental inserts for a predicate that already has a materialized closure.
+    /// Replaces any existing state for `p`. Writes nothing to a sink.
+    pub fn seed_transitive_closure(&mut self, p: PredicateId, closed_edges: &[(DictId, DictId)]) {
+        let mut map = DenseIdMap::with_capacity(closed_edges.len() * 2);
+        let dense = map.intern_edges(closed_edges);
+        let closure = IncrementalTransitiveClosure::from_closed_edges(dense);
+        self.predicates.insert(p, PredicateState { map, closure });
+    }
+
+    /// Insert `new_edges` into predicate `p`'s transitive closure and write the
+    /// newly inferred triples to `sink`. Returns the number of triples the sink
+    /// reports written. Edges already implied by the existing closure produce
+    /// no output.
+    pub fn insert_transitive_edges(
+        &mut self,
+        p: PredicateId,
+        new_edges: &[(DictId, DictId)],
+        sink: &dyn TripleSink,
+    ) -> Result<u64> {
+        if new_edges.is_empty() {
+            return Ok(0);
+        }
+        let state = self.predicates.entry(p).or_default();
+        // intern_edges only adds new dict ids to the map; extra interned ids
+        // with no edges are harmless and reused correctly on retry, so the
+        // DenseIdMap is intentionally NOT rolled back on sink error.
+        let dense = state.map.intern_edges(new_edges);
+        let delta = state.closure.insert_edges(dense);
+        if delta.is_empty() {
+            return Ok(0);
+        }
+        let map = &state.map;
+        let mut iter = delta.iter().filter_map(|&(s, o)| {
+            let s_dict = map.to_dict(DenseIdx(s))?;
+            let o_dict = map.to_dict(DenseIdx(o))?;
+            Some(Triple {
+                s: s_dict,
+                p,
+                o: o_dict,
+            })
+        });
+        match sink.bulk_insert_inferred(&mut iter) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                // Sink write failed: roll back the just-inserted closure edges
+                // so a retry re-emits them.  Map interns are left in place —
+                // they are harmless and will be reused correctly on retry.
+                state.closure.rollback_inserted(&delta);
+                Err(e)
+            }
+        }
+    }
+
+    /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
+    pub fn add_sameas(&mut self, pairs: &[(DictId, DictId)]) {
+        for &(a, b) in pairs {
+            self.sameas.union(a, b);
+        }
+    }
+
+    /// Borrow the equivalence-class state.
+    pub fn equiv_classes(&self) -> &EquivClasses {
+        &self.sameas
+    }
 }

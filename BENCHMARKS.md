@@ -89,6 +89,7 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | LUBM-8000 closure memory | ≤**2×** original transitive-property triples | NF3 / acceptance #5 |
 | Closure vs SPEC-04 rule-firing (LUBM-100) | **identical** triple set | acceptance #4 |
 | Routing heuristic | SPEC-04 if `nnz(M_p) < 10⁴`, else SPEC-05 | Risks — threshold needs bench tuning |
+| Incremental single-edge insert vs full recompute (F6, 2,000-node chain) | incremental ≪ full recompute | `benches/incremental.rs` — see Measured section below. |
 
 ### SPEC-06 — DBSP incremental maintenance (`horndb-incremental`)
 
@@ -144,6 +145,7 @@ Honest accounting. Updated when a bench moves.
 |---|---|---|---|---|
 | 4-cycle, ~10⁶-edge synthetic (`benches/four_cycle.rs`) | `horndb-wcoj` | WCOJ ≥10× binary-hash | _macOS dev workstation (2026-05-31, [#1](https://github.com/sunstoneinstitute/horndb/issues/1), canonical skewed win case, 1,021,610 edges, `hub_out=32`):_ WCOJ **0.55 s** (median; [0.45, 0.68]) vs binary-hash **18.8 s** ([17.6, 20.2]) → **~34× faster**. _Earlier on the old uniform low-degree graph the ratio was only ~1.15× (dense) / 1.11× (compressed, [#15](https://github.com/sunstoneinstitute/horndb/issues/15))._ | **GREEN — Stage-1 acceptance #2 met** ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)). The gate is a *graph-shape* problem, not bandwidth: a uniform low-degree graph never forces the intermediate-result blow-up. The canonical skewed win case (`SyntheticGraph::skewed_four_cycle`: high-out-degree hubs + a thin, dedicated closure) makes a binary join materialise the full `#2-paths · hub_out ≈ 3.2·10⁷` 3-path relation over every source, while WCOJ evaluates depth-first and never materialises an intermediate — the cycle-closing intersection is empty for almost every `(a,b,c)` prefix, so it backtracks in O(1) without expanding the hubs (a ≈`hub_out` advantage). Correctness vs an independent brute-force count (including the rotational matches a single-predicate cycle admits) is pinned by `tests/skewed_four_cycle.rs`. |
 | Differential fuzzer, 1024 random BGPs (`tests/differential_fuzz.rs`) | `horndb-wcoj` | zero mismatches vs binary-hash | green at 256 cases on default seed; `#[ignore]` removed; regression file deleted | **GREEN — Stage-1 acceptance #3 met** (TASKS.md CRITICAL closed) |
+| `spec05_incremental_append` — single-edge append on a 2,000-node chain | `horndb-closure` | incremental ≪ full recompute | this PR (macOS dev workstation, 2026-06-01): incremental_insert **393 µs** vs full_recompute **453 ms** (~**1,153×**) | **GREEN** — insertion-only F6; differential-proven equal to GraphBLAS closure (`tests/incremental.rs`). |
 
 ### Scaffolded but not yet evaluated against targets
 
@@ -156,6 +158,7 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
 | `benches/sameas.rs` | `horndb-closure` | SPEC-05 `owl:sameAs` equivalence-class scaffold. |
+| `benches/incremental.rs` | `horndb-closure` | SPEC-05 F6 incremental insert vs full recompute. |
 | `benches/four_cycle.rs` (binary-hash leg) | `horndb-wcoj` | Reference half of the comparison above. |
 
 ### Not yet running

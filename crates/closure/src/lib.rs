@@ -27,8 +27,12 @@
 //!
 //! # Future work (NOT in Stage 1)
 //!
-//! - Incremental update (SPEC-05 F6): forward-/backward-reachable slice
-//!   recomputation on single-edge insertion; integrates with SPEC-06.
+//! - Incremental update (SPEC-05 F6): **insertion path implemented** via
+//!   [`sink::IncrementalClosureBackend`] /
+//!   [`closure::incremental::IncrementalTransitiveClosure`] — a single-edge
+//!   insert updates only the affected slice (backward-reach × forward-reach)
+//!   instead of re-closing. **Deletion/retraction is still Stage 2** (needs
+//!   SPEC-06 DBSP deltas).
 //! - GPU GraphBLAS backend: SPEC-09.
 //! - LAGraph adoption: Stage 2 evaluation.
 //! - Cost-aware closures via `(min, +)` semiring: not required by OWL 2 RL.

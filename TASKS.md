@@ -36,7 +36,7 @@ here in the same commit.
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
 - [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session a64ca05c · tracking #3 · task-15-compressed-warm-tier · 2026-05-31_
 - [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: session 257d4050 · tracking #4 · task-34-dt-datatype-rules · 2026-06-01_
-- [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
+- [v] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)) — _wip: session 81a73431 · tracking #5 · task-42-incremental-closure · 2026-06-01_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
@@ -362,9 +362,21 @@ list when the corresponding Stage-1 slice is settled.
     under this parent;
     user-defined Datalog frontend (Stage-2, out of scope per SPEC-04) and
     TGD-requiring rules remain deferred.
-- [ ] **SPEC-05 closure** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)): incremental closure updates (F6 — needs the
+- [v] **SPEC-05 closure** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)) — _wip: session 81a73431 · tracking #5 · task-42-incremental-closure · 2026-06-01_: incremental closure updates (F6 — needs the
   SPEC-06 fix below for closure deltas), GPU backend (SPEC-09 territory),
   LAGraph adoption for higher-level primitives.
+  - **Epic breakdown (2026-06-01, tracked under [#5](https://github.com/sunstoneinstitute/horndb/issues/5)):**
+    [#42](https://github.com/sunstoneinstitute/horndb/issues/42) SPEC-05 F6
+    incremental insertion-path transitive closure — **first increment,
+    delivered 2026-06-01**: `IncrementalTransitiveClosure`
+    (`crates/closure/src/closure/incremental.rs`) + `IncrementalClosureBackend`
+    (`crates/closure/src/sink.rs`) update only the affected slice on insert and
+    write only the delta; differential proptest vs the GraphBLAS full closure.
+    Deferred under this parent until shippable: deletion/retraction half of F6
+    (blocked on SPEC-06 DBSP deltas, #6); GPU GraphBLAS backend (SPEC-09);
+    LAGraph adoption (Stage-2 eval); `GrB_Matrix_dup` fast-clone, `(min,+)`
+    cost-aware semiring, and nnz-threshold routing heuristic (Stage-2 perf
+    tuning). Parent stays `[v]` until the increments close.
 - [ ] **SPEC-06 incremental** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)): closure-operator deltas (F5), correct
   retraction semantics (F6 — Stage-1 supports insertion only), MVCC for
   in-flight reads, distributed timely-dataflow (SPEC-09 territory).
