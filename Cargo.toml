@@ -47,7 +47,7 @@ predicates = "3"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
 arrow = { version = "53", default-features = false }
-roaring = "0.10"
+roaring = "0.11"
 dashmap = "6"
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
