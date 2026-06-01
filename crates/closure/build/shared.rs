@@ -57,3 +57,9 @@ pub fn decide(marker_exists: bool, lock_acquired: bool, timed_out: bool) -> Lock
         LockStep::Wait
     }
 }
+
+/// Parse a pid written by the build holder into the lock file. Best-effort,
+/// used only for the "waiting for pid N" diagnostic.
+pub fn parse_pid(contents: &str) -> Option<u32> {
+    contents.trim().lines().next()?.trim().parse::<u32>().ok()
+}

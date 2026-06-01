@@ -74,3 +74,19 @@ fn decide_lock_held_by_other_no_marker_waits() {
 fn decide_timed_out_fails() {
     assert_eq!(shared::decide(false, false, true), LockStep::Fail);
 }
+
+#[test]
+fn parse_pid_reads_first_line() {
+    assert_eq!(shared::parse_pid("48213\n"), Some(48213));
+}
+
+#[test]
+fn parse_pid_trims_whitespace() {
+    assert_eq!(shared::parse_pid("  61\n\n"), Some(61));
+}
+
+#[test]
+fn parse_pid_rejects_garbage_and_empty() {
+    assert_eq!(shared::parse_pid(""), None);
+    assert_eq!(shared::parse_pid("not-a-pid"), None);
+}
