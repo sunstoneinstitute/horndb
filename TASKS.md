@@ -335,7 +335,14 @@ list when the corresponding Stage-1 slice is settled.
     `crates/owlrl/src/list_rules.rs`). Remaining gaps split into shippable
     increments:
     [#34](https://github.com/sunstoneinstitute/horndb/issues/34) `dt-*`
-    datatype rules (Table 8) — **first increment**;
+    datatype rules (Table 8) — **first increment, delivered
+    2026-06-01**: datatype subsumption (`dt-type1` + the `dt-type2` XSD
+    lattice) plus `scm-eqc-rev` landed, flipping `I5.8-006-pe`,
+    `I5.8-011-pe`, and `equivalentClass-003-pe` green (now graded in
+    `harness/selected.toml`). The literal-value rules (`dt-eq`/`dt-diff`/
+    `dt-not-type`) and datatype value-space *intersection* narrowing
+    (`I5.8-008/009-pe`) were carved out into
+    [#40](https://github.com/sunstoneinstitute/horndb/issues/40);
     [#35](https://github.com/sunstoneinstitute/horndb/issues/35)
     `cls-maxc1`/`cls-maxc2` unqualified max-cardinality;
     [#36](https://github.com/sunstoneinstitute/horndb/issues/36)
@@ -345,7 +352,11 @@ list when the corresponding Stage-1 slice is settled.
     [#38](https://github.com/sunstoneinstitute/horndb/issues/38) production
     proof recording (F4) + `proof(t)` API;
     [#39](https://github.com/sunstoneinstitute/horndb/issues/39) `rdf:type`
-    skew parallelism (F5). Parent stays `[v]` until all six close;
+    skew parallelism (F5);
+    [#40](https://github.com/sunstoneinstitute/horndb/issues/40)
+    literal-value rules (`dt-eq`/`dt-diff`/`dt-not-type`) + datatype
+    value-space intersection. Parent stays `[v]` until the remaining
+    increments (#35–#40) close;
     user-defined Datalog frontend (Stage-2, out of scope per SPEC-04) and
     TGD-requiring rules remain deferred.
 - [ ] **SPEC-05 closure** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)): incremental closure updates (F6 — needs the
