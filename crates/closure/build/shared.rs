@@ -22,3 +22,38 @@ fn extract_field(cmake: &str, name: &str) -> Option<u64> {
         rest.split_whitespace().next()?.parse::<u64>().ok()
     })
 }
+
+/// One iteration's decision in the build-lock loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockStep {
+    /// We hold the lock and there is no completed build — compile now.
+    Build,
+    /// A completed build exists — use it (release the lock if we hold one).
+    UseInstall,
+    /// Someone else is building and the deadline has not passed — sleep & retry.
+    Wait,
+    /// Deadline exceeded while another process still holds the lock — give up.
+    Fail,
+}
+
+/// Decide what to do this iteration.
+///
+/// Correctness rests on the flock, not on liveness checks: if the builder dies,
+/// the kernel releases its flock and a later iteration acquires it. So holder
+/// liveness is *not* an input here — it is logged by the caller for diagnostics
+/// only. `timed_out` is consulted solely when we are still waiting.
+pub fn decide(marker_exists: bool, lock_acquired: bool, timed_out: bool) -> LockStep {
+    if lock_acquired {
+        if marker_exists {
+            LockStep::UseInstall
+        } else {
+            LockStep::Build
+        }
+    } else if marker_exists {
+        LockStep::UseInstall
+    } else if timed_out {
+        LockStep::Fail
+    } else {
+        LockStep::Wait
+    }
+}

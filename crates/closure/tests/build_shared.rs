@@ -46,3 +46,31 @@ fn parse_version_missing_field_returns_none() {
                   set ( GraphBLAS_VERSION_MINOR 3 CACHE STRING \"\" FORCE )\n";
     assert_eq!(shared::parse_version(no_sub), None);
 }
+
+use shared::LockStep;
+
+#[test]
+fn decide_holding_lock_no_marker_builds() {
+    assert_eq!(shared::decide(false, true, false), LockStep::Build);
+}
+
+#[test]
+fn decide_holding_lock_marker_present_reuses() {
+    // Won the lock, but the build completed during the acquire race.
+    assert_eq!(shared::decide(true, true, false), LockStep::UseInstall);
+}
+
+#[test]
+fn decide_lock_held_by_other_marker_present_reuses() {
+    assert_eq!(shared::decide(true, false, false), LockStep::UseInstall);
+}
+
+#[test]
+fn decide_lock_held_by_other_no_marker_waits() {
+    assert_eq!(shared::decide(false, false, false), LockStep::Wait);
+}
+
+#[test]
+fn decide_timed_out_fails() {
+    assert_eq!(shared::decide(false, false, true), LockStep::Fail);
+}
