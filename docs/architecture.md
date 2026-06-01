@@ -192,10 +192,11 @@ Rust at build time from `rules.toml` (Soufflé-style) — no interpreter.
 | `Engine` satisfying the harness `Reasoner` trait | **implemented** | `integration.rs` (oxrdf dictionary over `MemStore` + `RuleFiringBackend`), adapter in `harness/src/owlrl_engine.rs`. |
 | Reset and rematerialize (F7) | **implemented** | Full re-materialization per `load`. |
 | `owl:sameAs` routed to SPEC-05 EQREL (F6) | **implemented** | Rule engine does not re-derive `eq-sym`/`eq-trans`. |
-| Subset of rules (`eq-rep-*`, common `prp-*`/`cls-*`/`cax-*`/`scm-*`) | **implemented** | 78 W3C OWL 2 RL cases green. |
+| Subset of rules (`eq-rep-*`, common `prp-*`/`cls-*`/`cax-*`/`scm-*`, incl. `scm-eqc-rev`) | **implemented** | 96 W3C OWL 2 RL cases green. `scm-eqc-rev` derives `owl:equivalentClass` from two-way `rdfs:subClassOf`. |
 | Stub `Provenance` (F4 placeholder) | **implemented** | `provenance.rs` — `struct Provenance`, not yet a production proof tree. |
 | Production proof recording (F4: `(rule_id, premise_ids[])`, on-demand re-derivation) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-04 rules". |
-| Full `dt-*` datatype rules, `cls-int*` / `cls-uni*` list-walking rules | **planned** | As above. |
+| Datatype subsumption (`dt-type1` + `dt-type2` XSD lattice) | **implemented** | Load-time injection of `byte ⊑ short ⊑ int ⊑ ... ⊑ decimal` (and unsigned/non-negative arms); flips `I5.8-006-pe`/`I5.8-011-pe` green. |
+| Datatype value-space intersection (`I5.8-008/009-pe`), literal-value rules (`dt-eq`/`dt-diff`/`dt-not-type`), `cls-int*` / `cls-uni*` list-walking rules | **deferred** | Intersection narrowing tracked under issue #4; literal-value rules carved out as issue #40. |
 | `rdf:type` skew parallelism (F5) | **planned** | As above. |
 | `eq-rep-p` predicate-position skew fix + always-relevant rule marking | **implemented** | Always-relevant marking via `wildcard_predicate`; semantics-preserving class-canonical path in `crates/owlrl/src/eq_rep_p_opt.rs` (union-find over `owl:sameAs`), default `EqRepPStrategy::Optimized`. Differential proptest `tests/eq_rep_p_differential.rs` proves identical closure to the naïve oracle. `TASKS.md` #2. Downstream F5 partition-by-class-id (row above) still planned. |
 | User-defined rules (runtime Datalog frontend) | **deferred** | Stage 2 extension. |

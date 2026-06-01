@@ -18,18 +18,20 @@ See `crates/owlrl/rules.toml` for which rules are implemented, and
 deferred. The OWL 2 RL rule names follow the W3C
 [Profiles document](https://www.w3.org/TR/owl2-profiles/#Reasoning_in_OWL_2_RL_and_RDF_Graphs_using_Rules).
 
-## Summary (2026-05-25 survey, post `feat/owlrl-cls-com`)
+## Summary (2026-06-01 survey, post `task-34-dt-datatype-rules`)
 
-22 of the 115 synthesised entries fail today. They fall into the
-following buckets, grouped by the missing capability — not by a single
-rule name — because the residue is mostly tests that need *combinations*
-of features (datatype subsumption, fresh-bnode generation,
-literal-collision inconsistency, ...) the Stage-1 engine intentionally
-defers:
+19 of the 115 synthesised entries fail today (down from 22: the #34
+datatype-subsumption + `scm-eqc-rev` batch flipped 3 cases green —
+`I5.8-006-pe`, `I5.8-011-pe`, `equivalentClass-003-pe`). They fall into
+the following buckets, grouped by the missing capability — not by a
+single rule name — because the residue is mostly tests that need
+*combinations* of features (datatype value-space intersection,
+fresh-bnode generation, literal-collision inconsistency, ...) the
+Stage-1 engine intentionally defers:
 
 | Missing capability | Cases blocked |
 |---|---|
-| Datatype subsumption (`dt-type1..2`, XSD numeric tower `byte ⊑ short ⊑ int ⊑ ...`) | 5 |
+| Datatype value-space *intersection* narrowing (`I5.8-008/009-pe`) — genuine interval reasoning, deferred (issue #4) | 2 |
 | Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`) | 2 |
 | `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) | 3 |
 | Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
@@ -40,7 +42,7 @@ defers:
 | `cls-maxqc1..4` (qualified cardinality, `ObjectQCR-002-pe`) | 1 |
 | `owl:imports` external resolution (`imports-011-pe`) | 1 |
 
-Total: **22 cases**.
+Total: **19 cases**.
 
 Three Stage-1 rule batches landed on 2026-05-25 and together flipped 11
 cases from red to green:
@@ -88,22 +90,36 @@ gate for those rules in this batch; the W3C wins come from `prp-spo2`,
 - `#WebOnt-equivalentProperty-003-pe` (`scm-eqp-rev` derives
   `equivalentProperty` from two-way `subPropertyOf`)
 
+**`task-34-dt-datatype-rules`** — added `dt-type1` (every XSD literal
+inhabits its own datatype) plus the `dt-type2` XSD subsumption lattice
+(`byte ⊑ short ⊑ int ⊑ long ⊑ integer ⊑ decimal`, and the
+`unsignedX`/`nonNegativeInteger`/... arms), injected at load time, and
+the `scm-eqc-rev` rule (class analogue of `scm-eqp-rev`: two-way
+`rdfs:subClassOf` ⇒ `owl:equivalentClass`). Flipped:
+
+- `#WebOnt-I5.8-006-pe` (`dt-type2` lattice: `xsd:byte` range ⊑ wider
+  `xsd:short`)
+- `#WebOnt-I5.8-011-pe` (`dt-type2` lattice over the unsigned arm)
+- `#WebOnt-equivalentClass-003-pe` (`scm-eqc-rev` — pure two-way
+  `rdfs:subClassOf` between `Car`/`Automobile`; no datatype involved)
+
 ## Cases, grouped by missing capability
 
-### Datatype subsumption (`dt-type1..2`, XSD numeric tower)
+### Datatype value-space intersection (`I5.8-008/009-pe`)
 
-The Stage-1 engine has *no* datatype-aware rules. The `WebOnt-I5.8-*`
-tests assert that an `rdfs:range` declaration of `xsd:byte` (or
-`xsd:short`, ...) entails the same property having a wider XSD range
-like `xsd:short`. That requires the engine to know the XSD numeric
-hierarchy — Stage-2 work (SPEC-04 risk § "Datatype reasoning").
+`dt-type1` and the `dt-type2` XSD subsumption lattice are now implemented
+(`task-34-dt-datatype-rules`), so the *subsumption* cases `I5.8-006-pe`
+and `I5.8-011-pe` are green. The two remaining `WebOnt-I5.8-*-pe` cases
+are **not** subsumption — they require value-space *intersection*
+narrowing, i.e. genuine interval/value-space reasoning the lattice alone
+cannot express:
 
-- `#WebOnt-I5.8-006-pe`
-- `#WebOnt-I5.8-008-pe`
-- `#WebOnt-I5.8-009-pe`
-- `#WebOnt-I5.8-011-pe`
-- `#WebOnt-equivalentClass-003-pe` — equivalentClass over a datatype
-  expression involving `xsd:byte`.
+- `#WebOnt-I5.8-008-pe` — `short ∩ unsignedInt ⊆ unsignedShort`.
+- `#WebOnt-I5.8-009-pe` — `nonNegativeInteger ∩ nonPositiveInteger =
+  {0} ⊆ short`.
+
+These are deferred (tracked under issue #4); they need a value-space
+intersection solver rather than the static subsumption lattice.
 
 ### Fresh-bnode generation of `owl:complementOf` partner classes
 
