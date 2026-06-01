@@ -300,3 +300,66 @@ pub fn construct_triples(
     }
     Ok(out)
 }
+
+/// Build a DESCRIBE result graph from already-projected solution rows.
+///
+/// The `rows` arrive projected to the DESCRIBE-target variables (the
+/// planner runs the same projection as a SELECT), so every value bound
+/// to *any* variable in a row is a resource to describe. We emit a
+/// **forward, one-level Concise Bounded Description**: for each distinct
+/// resource, every stored triple with that resource as subject.
+///
+/// Output is deduplicated and returned in deterministic sorted order
+/// (via `BTreeSet`). Literals bound to a projected variable are never
+/// subjects of stored triples, so they naturally contribute nothing —
+/// no special-casing needed.
+///
+/// Deferred (out of scope, see SPEC-07 / TASKS.md): recursive
+/// blank-node CBD closure and symmetric CBD. The Stage-1 `MemStore`
+/// erases term types on scan (`unify_one` binds every value as
+/// `Term::Iri(lexical)`), so blank-node objects can't be reliably
+/// detected to recurse into. Typed-literal / Turtle serialisation is
+/// likewise a separate increment (#57); this reuses the N-Triples path.
+pub fn describe_triples<E: Executor + ?Sized>(
+    exec: &E,
+    rows: &[Bindings],
+) -> Result<Vec<(String, String, String)>> {
+    use crate::algebra::{Term, TriplePattern, Var};
+    use std::collections::BTreeSet;
+
+    // Distinct lexical resources bound across all rows / all vars.
+    let mut resources: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        for (_name, term) in row.vars() {
+            match term {
+                Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => {
+                    resources.insert(s.clone());
+                }
+                // An unbound var or a triple-term carries no describable
+                // resource here.
+                Term::Var(_) | Term::Triple(_) => {}
+            }
+        }
+    }
+
+    let mut out: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for resource in &resources {
+        let pattern = TriplePattern {
+            subject: Term::Iri(resource.clone()),
+            predicate: Term::Var(Var::new("p")),
+            object: Term::Var(Var::new("o")),
+        };
+        for b in exec.scan_bgp(std::slice::from_ref(&pattern))? {
+            let p = match b.get("p") {
+                Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
+                _ => continue,
+            };
+            let o = match b.get("o") {
+                Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
+                _ => continue,
+            };
+            out.insert((resource.clone(), p, o));
+        }
+    }
+    Ok(out.into_iter().collect())
+}

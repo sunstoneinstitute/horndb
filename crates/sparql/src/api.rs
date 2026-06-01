@@ -4,8 +4,8 @@
 //! Callers that need finer control should use the individual modules.
 
 use crate::algebra::translate::translate_query_with;
-use crate::error::{Result, SparqlError};
-use crate::exec::runtime::{construct_triples, Runtime};
+use crate::error::Result;
+use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
 use crate::exec::{Bindings, Executor, Store};
 use crate::parser::{parse_query, parse_update, ParsedQuery};
 use crate::plan::planner;
@@ -59,7 +59,16 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let triples = construct_triples(&inner, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
-        ParsedQuery::Describe { .. } => Err(SparqlError::UnsupportedAlgebra("DESCRIBE".into())),
+        ParsedQuery::Describe { inner } => {
+            // DESCRIBE lowers like a SELECT (the projected vars carry the
+            // resources to describe); the runtime then expands each bound
+            // resource into its forward Concise Bounded Description.
+            let alg = translate_query_with(&inner, cfg)?;
+            let plan = planner::plan(&alg)?;
+            let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
+            let triples = describe_triples(exec, &rows)?;
+            Ok(QueryAnswer::Triples(triples))
+        }
     }
 }
 
