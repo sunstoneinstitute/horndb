@@ -15,3 +15,6 @@ crates/closure/vendor/.shared-build/
 .claude/worktrees/
 .claude/settings.local.json
 .worktrees
+
+# Visual brainstorming companion scratch
+.superpowers/

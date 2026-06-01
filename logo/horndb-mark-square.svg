@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="HornDB mark">
+  <title>HornDB mark (square, transparent)</title>
+  <g transform="translate(17.2,0) scale(0.8)" fill="#C0501C">
+    <path d="M18 66 L18 20 Q18 13 24.5 13 Q31 13 31 20 L31 66 Z"/>
+    <path d="M32.5 60 L32.5 51 Q32.5 44 39 44 Q45.5 44 45.5 51 L45.5 60 Z"/>
+    <path d="M47 60 L47 53 Q47 46 53.5 46 Q60 46 60 53 L60 60 Z"/>
+    <path d="M61.5 66 L61.5 31 Q61.5 24 68 24 Q74.5 24 74.5 31 L74.5 66 Z"/>
+    <path d="M16 112 L16 66 Q16 55 24 55 L30 55 Q31.75 68 33.5 55 L45 55 Q46.25 60 47.5 55 L60 55 Q60.75 68 62.5 55 L68 55 Q76 55 76 66 L76 112 Z"/>
+    <rect x="6" y="63" width="16" height="34" rx="8" transform="rotate(-22 14 80)"/>
+  </g>
+</svg>
