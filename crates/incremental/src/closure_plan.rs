@@ -123,6 +123,19 @@ mod tests {
         assert_eq!(got, vec![(1, 100, 2)]);
     }
 
+    /// Insertion-only contract: a negative-multiplicity entry contributes no
+    /// edge (retraction is F6, deferred). Only the positive edge is closed.
+    #[test]
+    fn transitive_rule_ignores_negative_multiplicities() {
+        let mut rule = TransitiveClosureRule::new(100);
+        let mut delta: Zset<crate::types::TripleId> = Zset::new();
+        delta.add((1, 100, 2), 1);
+        delta.add((2, 100, 3), -1); // retraction: ignored at Stage 1
+        let got = rule.apply_insert_delta(&delta);
+        // Only the positive (1,100,2) edge; no (2,3), no transitive (1,3).
+        assert_eq!(got, vec![(1, 100, 2)]);
+    }
+
     /// State is retained across calls: the second delta sees the first.
     #[test]
     fn transitive_rule_retains_state_across_deltas() {
