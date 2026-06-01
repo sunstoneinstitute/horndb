@@ -27,11 +27,19 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   hold a `Snapshot` that pins a consistent view across multiple ticks.
   Intersects SPEC-02 MVCC design.
 
-### F5 — Closure-operator deltas (SPEC-05 integration)
-- **Now**: not invoked. The `Circuit` has no `ClosurePlan` slot.
-- **Stage 2**: add `add_closure_plan(...)` and a `ClosureRule` trait
-  that wraps a GraphBLAS matrix-power step. SPEC-05 owns the matrix
-  side; SPEC-06 owns the delta integration.
+### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion-only)
+- **Done (2026-06-01, #44)**: `Circuit::add_closure_plan(Box<dyn ClosureRule>)`
+  registers a closure operator. `TransitiveClosureRule`
+  (`crates/incremental/src/closure_plan.rs`) wraps SPEC-05's
+  `IncrementalClosureBackend`; on each tick it folds the asserted insertion
+  delta into the retained per-predicate closure and emits only the newly
+  inferred triples, published as `DerivationKind::ClosureInferred`. Differential
+  test (`tests/closure_deltas_differential.rs`) pins it against the full
+  `BackendImpl` recompute.
+- **Still Stage 2**: retraction / negative-multiplicity deltas through the
+  closure (needs F6 below + the deletion half of SPEC-05's incremental
+  closure); closure↔rule cross-feedback *within* a single tick (closure output
+  feeding rule bodies and vice versa); non-transitive closure shapes.
 
 ## Stage 3 (SPEC-09 / hardware)
 

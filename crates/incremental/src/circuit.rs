@@ -23,8 +23,9 @@
 //! - Derived deltas are not fed back as inputs to other plans within
 //!   the same tick. Multi-plan recursion is a Stage 2 concern that
 //!   intersects SPEC-04's evaluation order.
-//! - Closure deltas (F5) are not invoked here; SPEC-05 stage 2 wires
-//!   in via a `add_closure_plan` extension.
+//! - Closure deltas (F5) run after the rule fixed-point via
+//!   `add_closure_plan` / `ClosureRule` (insertion-only). Closure↔rule
+//!   cross-feedback within one tick remains a Stage-2 concern.
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx};
 use crate::closure_plan::ClosureRule;
