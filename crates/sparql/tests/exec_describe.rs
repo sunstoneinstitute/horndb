@@ -144,6 +144,35 @@ fn describe_multiple_explicit_iris_with_matching_where() {
 }
 
 #[test]
+fn describe_does_not_seed_subquery_bind_iri() {
+    // Regression (#48): the explicit-IRI seed walk must take its describe
+    // targets only from the outer DESCRIBE projection, never expanding them
+    // with a nested subquery's projected vars. Here the WHERE wraps a
+    // `SELECT ?s ?x` subquery whose own `BIND(<a> AS ?x)` lowers to an
+    // Extend over the subquery's projected ?x. Because ?x is NOT an outer
+    // describe target, <a> must not be seeded; only ?s's bound resources
+    // (here <s>) are described.
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o"));
+
+    let ans = execute_query(
+        "DESCRIBE ?s WHERE { { SELECT ?s ?x WHERE { ?s <http://ex/p> ?o BIND(<http://ex/a> AS ?x) } } }",
+        &s,
+    )
+    .unwrap();
+    let t = triples(ans);
+    assert!(
+        t.iter()
+            .any(|(sub, p, o)| sub == "http://ex/s" && p == "http://ex/p" && o == "http://ex/o"),
+        "expected (<s>, <p>, <o>) from ?s binding: {t:?}"
+    );
+    assert!(
+        !t.iter().any(|(sub, _, _)| sub == "http://ex/a"),
+        "subquery BIND IRI <a> must not be seeded as a describe target: {t:?}"
+    );
+}
+
+#[test]
 fn describe_var_describes_each_bound_resource() {
     let mut s = MemStore::default();
     // Two subjects that match the WHERE clause.

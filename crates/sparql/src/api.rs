@@ -109,9 +109,18 @@ fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
 /// `Project{ Slice{ Distinct{ Project{ OrderBy{ Extend…(WHERE) } } } } }`.
 /// We therefore walk the *entire* unary projection/modifier spine
 /// (`Project` / `Distinct` / `Slice` / `OrderBy` / `Extend`), collecting
-/// every constant-IRI `Extend` whose target variable is a describe target
-/// (a projected variable), and stop at the first node that is none of
-/// those — that node is the WHERE pattern.
+/// every constant-IRI `Extend` whose target variable is a describe target,
+/// and stop at the first node that is none of those — that node is the
+/// WHERE pattern.
+///
+/// The describe-target variable set is taken *only* from the outer DESCRIBE
+/// projection's `vars` and is fixed for the whole walk. Nested/subquery
+/// `Project` nodes (e.g. a `{ SELECT ?s ?x WHERE { … } }` subquery in the
+/// WHERE clause) do **not** contribute targets: their projected variables
+/// (`?x`) must not seed describe IRIs. The translator surfaces the
+/// spargebra-generated seed var into the outer projection via
+/// `collect_visible_vars`, so `DESCRIBE <iri> … LIMIT/ORDER BY` seeds are
+/// still found.
 ///
 /// Caveat (accepted Stage-1 limitation): spargebra erases the distinction
 /// between a DESCRIBE-clause IRI and a top-level user
@@ -132,14 +141,14 @@ fn explicit_describe_iris(alg: &crate::algebra::Algebra) -> Vec<crate::algebra::
     let Algebra::Project { vars, inner } = alg else {
         return iris;
     };
-    let mut targets: HashSet<String> = vars.iter().map(|v| v.name().to_owned()).collect();
+    // Targets are exactly the outer DESCRIBE projection's variables, fixed
+    // for the whole walk. Nested/subquery `Project` nodes must not expand
+    // this set, or a subquery's own projected vars would wrongly seed IRIs.
+    let targets: HashSet<String> = vars.iter().map(|v| v.name().to_owned()).collect();
     let mut node = inner.as_ref();
     loop {
         match node {
-            Algebra::Project { vars, inner } => {
-                targets.extend(vars.iter().map(|v| v.name().to_owned()));
-                node = inner.as_ref();
-            }
+            Algebra::Project { inner, .. } => node = inner.as_ref(),
             Algebra::Distinct { inner } => node = inner.as_ref(),
             Algebra::Slice { inner, .. } => node = inner.as_ref(),
             Algebra::OrderBy { inner, .. } => node = inner.as_ref(),
