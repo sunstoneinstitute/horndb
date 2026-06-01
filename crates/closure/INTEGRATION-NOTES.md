@@ -17,7 +17,8 @@ cargo build -p horndb-closure
   **No** system GraphBLAS and **no** libclang are required for a normal
   build.
 - **Cargo features:** `vendored` *(default)* compiles the submodule via
-  the `cmake` crate into `OUT_DIR` and links it **statically**; `openmp`
+  the `cmake` crate into the shared `.shared-build/` dir (see *First build
+  cost* below) and links it **statically**; `openmp`
   *(default)* builds GraphBLAS with OpenMP; `regen-bindings` *(off)*
   re-runs bindgen (the only path that needs libclang) — otherwise the
   checked-in `src/bindings.rs` is used. `--no-default-features` falls back

@@ -105,9 +105,12 @@ fn build_vendored() {
                 shared::LockStep::Wait => {
                     let holder = read_pid(&lock_path);
                     if !announced_wait {
+                        let holder_desc = holder
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
                         println!(
                             "cargo:warning=horndb-closure: waiting for GraphBLAS {ver} build \
-                             (holder pid {holder:?}); this is normal across parallel worktrees"
+                             (holder pid {holder_desc}); this is normal across parallel worktrees"
                         );
                         announced_wait = true;
                     }

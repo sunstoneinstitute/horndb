@@ -76,6 +76,13 @@ fn decide_timed_out_fails() {
 }
 
 #[test]
+fn decide_timed_out_but_marker_appeared_reuses() {
+    // Polled until the deadline, but the build completed just before it: a
+    // present marker wins over the timeout — reuse rather than fail.
+    assert_eq!(shared::decide(true, false, true), LockStep::UseInstall);
+}
+
+#[test]
 fn parse_pid_reads_first_line() {
     assert_eq!(shared::parse_pid("48213\n"), Some(48213));
 }
