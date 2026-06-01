@@ -9,7 +9,7 @@ links = "graphblas"
 [features]
 default = ["vendored", "openmp"]
 # Build the vendored SuiteSparse:GraphBLAS submodule from source.
-vendored = ["dep:cmake"]
+vendored = ["dep:cmake", "dep:fs4"]
 # Build GraphBLAS with OpenMP support.
 openmp = []
 # Regenerate the FFI bindings via bindgen instead of using the checked-in src/bindings.rs.
@@ -24,6 +24,9 @@ rustc-hash = "2"
 bindgen = { version = "0.69", optional = true }
 pkg-config = "0.3"
 cmake = { version = "0.1", optional = true }
+# Advisory file lock (flock on unix) used to serialise the shared GraphBLAS
+# build across worktrees. Default features include the `sync` std-File impl.
+fs4 = { version = "1.1", optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
