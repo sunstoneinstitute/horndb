@@ -18,8 +18,7 @@ pub fn parse_version(cmake: &str) -> Option<String> {
 
 fn extract_field(cmake: &str, name: &str) -> Option<u64> {
     cmake.lines().find_map(|line| {
-        let idx = line.find(name)?;
-        let rest = &line[idx + name.len()..];
+        let (_, rest) = line.split_once(name)?;
         rest.split_whitespace().next()?.parse::<u64>().ok()
     })
 }

@@ -25,11 +25,17 @@ fn parse_version_nominal() {
 }
 
 #[test]
-fn parse_version_ignores_api_version_and_message_lines() {
-    // The file also mentions GraphBLAS_API_VERSION_MAJOR and ${...} message
-    // interpolation; neither must be mistaken for the real version fields.
+fn parse_version_skips_interpolation_line_before_set_lines() {
+    // The `message(...)` interpolation line mentions GraphBLAS_VERSION_MAJOR
+    // and friends *before* the real `set(...)` lines. A naive "first line
+    // containing the field name" parser would read `}` / `.` instead of the
+    // number; parse_version must skip lines whose next token isn't numeric.
+    let interp_first = "message ( STATUS \"v${GraphBLAS_VERSION_MAJOR}.${GraphBLAS_VERSION_MINOR}.${GraphBLAS_VERSION_SUB}\" )\n\
+                        set ( GraphBLAS_VERSION_MAJOR 10 CACHE STRING \"\" FORCE )\n\
+                        set ( GraphBLAS_VERSION_MINOR 3 CACHE STRING \"\" FORCE )\n\
+                        set ( GraphBLAS_VERSION_SUB   0 CACHE STRING \"\" FORCE )\n";
     assert_eq!(
-        shared::parse_version(VERSION_CMAKE).as_deref(),
+        shared::parse_version(interp_first).as_deref(),
         Some("10.3.0")
     );
 }
