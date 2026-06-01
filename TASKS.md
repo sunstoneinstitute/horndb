@@ -366,12 +366,16 @@ list when the corresponding Stage-1 slice is settled.
   LAGraph adoption for higher-level primitives.
   - **Epic breakdown (2026-06-01, tracked under [#5](https://github.com/sunstoneinstitute/horndb/issues/5)):**
     [#42](https://github.com/sunstoneinstitute/horndb/issues/42) SPEC-05 F6
-    incremental insertion-path transitive closure (**first increment**, in
-    progress). Deferred under this parent until shippable: deletion/retraction
-    half of F6 (blocked on SPEC-06 DBSP deltas, #6); GPU GraphBLAS backend
-    (SPEC-09); LAGraph adoption (Stage-2 eval); `GrB_Matrix_dup` fast-clone,
-    `(min,+)` cost-aware semiring, and nnz-threshold routing heuristic (Stage-2
-    perf tuning). Parent stays `[v]` until the increments close.
+    incremental insertion-path transitive closure — **first increment,
+    delivered 2026-06-01**: `IncrementalTransitiveClosure`
+    (`crates/closure/src/closure/incremental.rs`) + `IncrementalClosureBackend`
+    (`crates/closure/src/sink.rs`) update only the affected slice on insert and
+    write only the delta; differential proptest vs the GraphBLAS full closure.
+    Deferred under this parent until shippable: deletion/retraction half of F6
+    (blocked on SPEC-06 DBSP deltas, #6); GPU GraphBLAS backend (SPEC-09);
+    LAGraph adoption (Stage-2 eval); `GrB_Matrix_dup` fast-clone, `(min,+)`
+    cost-aware semiring, and nnz-threshold routing heuristic (Stage-2 perf
+    tuning). Parent stays `[v]` until the increments close.
 - [ ] **SPEC-06 incremental** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)): closure-operator deltas (F5), correct
   retraction semantics (F6 — Stage-1 supports insertion only), MVCC for
   in-flight reads, distributed timely-dataflow (SPEC-09 territory).

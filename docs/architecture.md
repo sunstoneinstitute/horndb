@@ -221,7 +221,7 @@ SuiteSparse:GraphBLAS. SPEC-04 routes those axioms here.
 | Materialization writeback to storage (no rule re-fire) | **implemented** | `sink.rs`. |
 | Vendored GraphBLAS as a git submodule (static, OpenMP, checked-in bindings) | **implemented** | `crates/closure/vendor/GraphBLAS` submodule `v10.3.0`; `vendored`+`openmp` default Cargo features (`regen-bindings` optional), statically linked (verified via `otool -L`), checked-in `src/bindings.rs`. CI checks out submodules and drops the from-source build. Supersedes the `[x]` "CI: install GraphBLAS on runners". |
 | Shared, flock-guarded GraphBLAS build across worktrees | **implemented** | `build.rs` compiles the vendored GraphBLAS once per `(target, version)` into `crates/closure/vendor/.shared-build/<target>/<version>/` (anchored at the main worktree, gitignored), reused across git worktrees; concurrent builders serialise on an `fs4` advisory flock with the builder pid written in for diagnostics; CI caches the dir keyed on the submodule SHA. Details in `crates/closure/INTEGRATION-NOTES.md`. Narrows the disk-pressure concern (`TASKS.md` #13) to rocksdb. |
-| Incremental closure updates (F6) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-05 closure"; needs SPEC-06 closure deltas. |
+| Incremental closure updates (F6) — insertion path | **partially implemented** | `closure/incremental.rs` (`IncrementalTransitiveClosure`) + `sink.rs` (`IncrementalClosureBackend`): a single-edge insert updates only the affected slice (backward-reach(s) × forward-reach(o)) and writes only the delta to the sink. Differential proptest vs GraphBLAS full closure (`tests/incremental.rs`). **Deletion/retraction deferred** — needs SPEC-06 DBSP deltas ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)/[#42](https://github.com/sunstoneinstitute/horndb/issues/42)). |
 | Valued closure / custom semirings (Sunstone annotated reasoning) | **planned** | `TASKS.md` MEDIUM · *Performance* (two entries): readiness metrics first, then Fork A (scalar, built-in semirings) → Fork B (structured carrier) → PreJIT. Spec addendum gated on the metrics. |
 | LAGraph adoption; GPU GraphBLAS backend | **deferred** | Stage 2 (LAGraph) / SPEC-09 Stage 3 (GPU). |
 
@@ -242,7 +242,7 @@ semantics. **Insertion-only at Stage 1** — the highest-risk spec.
 | Change feed (`(triple, mult, time, derivation_kind)`) | **implemented** | `change_feed.rs`. |
 | Checkpoint merge (collapse ±1 pairs) | **implemented** | `checkpoint.rs`, `delta_log.rs`. |
 | Retraction semantics (F6) | **deferred** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-06 incremental". Insertion only at Stage 1 (`FUTURE-WORK.md`). |
-| Closure-operator deltas (F5) | **planned** | Pairs with SPEC-05 incremental closure. |
+| Closure-operator deltas (F5) | **planned** | Pairs with SPEC-05 incremental closure. Insertion-side SPEC-05 incremental closure now ships ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)); the SPEC-06 delta-feed pairing is still planned. |
 | MVCC for in-flight reads | **deferred** | Stage 2. |
 | Distributed timely-dataflow | **deferred** | SPEC-09, Stage 3. |
 
