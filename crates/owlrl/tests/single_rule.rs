@@ -252,6 +252,18 @@ fn scm_eqp_rev() {
     assert!(s.contains(&t(p1, v.owl_equivalent_property.0, p2)));
 }
 
+#[test]
+fn scm_eqc_rev() {
+    // ?c1 subClassOf ?c2 ∧ ?c2 subClassOf ?c1 ⇒ ?c1 equivalentClass ?c2.
+    let (mut s, v) = fresh_store();
+    s.assert(t(1, v.rdfs_sub_class_of.0, 2));
+    s.assert(t(2, v.rdfs_sub_class_of.0, 1));
+    let mut b = RuleFiringBackend::new();
+    materialize(&mut s, &mut b);
+    assert!(s.contains(&t(1, v.owl_equivalent_class.0, 2)));
+    assert!(s.contains(&t(2, v.owl_equivalent_class.0, 1)));
+}
+
 // ---------------------------------------------------------------------------
 // sameAs derivation + replacement — closure backend symmetrises / transitively
 // closes any new sameAs facts the compiled rules emit (SPEC-04 F6).

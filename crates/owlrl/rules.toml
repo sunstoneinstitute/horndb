@@ -238,6 +238,15 @@ body = [
 head = { s = "?p1", p = "owl:equivalentProperty", o = "?p2" }
 
 [[rule]]
+id = "scm-eqc-rev"
+comment = "Two-way rdfs:subClassOf implies owl:equivalentClass (class analogue of scm-eqp-rev; W3C WebOnt-equivalentClass-003-pe)."
+body = [
+  { s = "?c1", p = "rdfs:subClassOf", o = "?c2" },
+  { s = "?c2", p = "rdfs:subClassOf", o = "?c1" },
+]
+head = { s = "?c1", p = "owl:equivalentClass", o = "?c2" }
+
+[[rule]]
 id = "scm-dom1"
 comment = "Domain narrows along subClassOf."
 body = [
