@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.88, `cmake` crate (0.1), `pkg-config` crate, `fs4` 1.1 (advisory flock; default `sync` feature), GitHub Actions (`actions/cache@v4`).
 
-**Design spec:** `docs/superpowers/specs/2026-05-31-shared-graphblas-build-design.md`
+**Design spec:** `docs/specs/2026-05-31-shared-graphblas-build-design.md`
 
 ---
 

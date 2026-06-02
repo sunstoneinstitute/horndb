@@ -19,6 +19,13 @@ These files drive the project — keep them in mind when planning work:
 
 The harness-first rule (from SPEC-00): a SPEC is not satisfied until its referenced subset in SPEC-01's harness is green. Implementation work may *grow* a subset but never bypass it.
 
+### Where specs and plans live
+
+All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There is exactly one home for each — do not create a parallel tree. This applies regardless of which workflow produced the document: when a superpowers skill (brainstorming, `writing-plans`, `writing-skills`, etc.) or any other tool defaults to writing under `docs/superpowers/` (or any other subdirectory), redirect its output to `docs/specs/` or `docs/plans/` instead. Naming conventions:
+
+- Subsystem contracts use the `SPEC-NN-<slug>.md` form and gate on **Acceptance criteria** (`docs/specs/`).
+- Dated design specs and implementation plans use a `YYYY-MM-DD-<slug>.md` prefix (`docs/specs/` and `docs/plans/` respectively).
+
 ### Keep the docs in sync (do this in the same commit)
 
 These three documents are linked views of the same reality. When you edit one, update the others so they never drift:
