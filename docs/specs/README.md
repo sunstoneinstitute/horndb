@@ -2,7 +2,7 @@
 
 This directory contains the architectural specifications for **HornDB** — a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL semantics with SPARQL 1.1 querying, designed for modern unified-memory hardware.
 
-Specs are derived from `../initial-research.md` (the feasibility study and competitive landscape analysis). Read SPEC-00 first; the others assume it.
+Specs are derived from `../../initial-research.md` (the feasibility study and competitive landscape analysis). Read SPEC-00 first; the others assume it.
 
 ## Index
 
@@ -21,6 +21,14 @@ The **Plan** column links to each spec's Stage-1 implementation plan under `../p
 | [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/2026-05-24-SPEC-08-ml-integration.md) |
 | [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/2026-05-24-SPEC-09-hardware-specialization.md) (roadmap-only) |
 | [SPEC-10](SPEC-10-rdflib-compatible-python-api.md) | rdflib-compatible Python API | Draft | — |
+
+## Dated design specs
+
+Numbered `SPEC-NN` files are the standing subsystem contracts above. Point design specs — narrower decisions that refine a subsystem rather than define it — use a `YYYY-MM-DD-<slug>.md` prefix and live alongside them here:
+
+| Design spec | Refines | Status |
+|------|---------|--------|
+| [Shared, lock-guarded GraphBLAS build across worktrees](2026-05-31-shared-graphblas-build-design.md) | SPEC-05 (closure backend) | Approved |
 
 ## Reading order
 
@@ -41,4 +49,4 @@ Each spec follows roughly this structure:
 - **Acceptance criteria** — measurable checks for "this spec is satisfied."
 - **Risks and open questions** — known unknowns; deferred decisions.
 
-These are living documents. When acceptance criteria are met, update the status in this table. When trade-offs change, update the spec and link to the decision in the project's ADR log (TBD).
+These are living documents. When acceptance criteria are met, update the status in this table. When trade-offs change, update the spec and record the decision in the project's [ADR log](../adr/README.md).
