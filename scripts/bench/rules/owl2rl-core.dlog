@@ -1,0 +1,11 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# The two OWL 2 RL rules the `taxonomy` workload exercises, written in
+# RDFox Datalog so RDFox runs the same closure HornDB's compiled engine does.
+#
+# cax-sco: a member of a subclass is a member of the superclass.
+[?x, rdf:type, ?c2] :- [?x, rdf:type, ?c1], [?c1, rdfs:subClassOf, ?c2] .
+
+# scm-sco: rdfs:subClassOf is transitive.
+[?c1, rdfs:subClassOf, ?c3] :- [?c1, rdfs:subClassOf, ?c2], [?c2, rdfs:subClassOf, ?c3] .

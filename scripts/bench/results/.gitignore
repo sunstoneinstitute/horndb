@@ -1,0 +1,7 @@
+# RDFox comparison results live here and must NEVER be committed.
+#
+# RDFox commercial/evaluation licences forbid publishing comparative benchmark
+# numbers (the "DeWitt clause"); a public git repo counts as publishing.
+# Ignore everything in this directory except this .gitignore itself.
+*
+!.gitignore

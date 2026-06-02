@@ -155,6 +155,22 @@ impl Engine {
         Ok(())
     }
 
+    /// Total triples in the materialized store after the most recent
+    /// [`load`](Self::load) — asserted base plus everything inferred.
+    /// `None` if nothing has been loaded yet.
+    ///
+    /// Walks the store, so this is O(triples); intended for benchmarking
+    /// and introspection, not a hot path.
+    pub fn materialized_len(&self) -> Option<usize> {
+        self.state.as_ref().map(|s| s.store.all_triples().len())
+    }
+
+    /// Number of asserted (base) triples ingested by the most recent
+    /// [`load`](Self::load), before inference. `None` if never loaded.
+    pub fn asserted_len(&self) -> Option<usize> {
+        self.state.as_ref().map(|s| s.loaded_count)
+    }
+
     /// Return true iff every triple in `conclusion`'s default graph is
     /// present in the materialized closure.
     ///

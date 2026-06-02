@@ -1136,6 +1136,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "horndb-bench-rdfox"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "horndb-closure",
+ "horndb-owlrl",
+ "horndb-storage",
+ "oxrdf",
+ "oxttl",
+]
+
+[[package]]
 name = "horndb-closure"
 version = "0.0.0"
 dependencies = [

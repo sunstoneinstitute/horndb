@@ -10,6 +10,7 @@ members = [
     "crates/sparql",
     "crates/ml",
     "crates/hardware-ext",
+    "crates/bench-rdfox",
 ]
 
 [workspace.package]

@@ -1,0 +1,205 @@
+//! `horndb-bench` — HornDB-side micro-runner for the RDFox comparison.
+//!
+//! This binary is internal benchmarking glue. It exposes the three HornDB
+//! operations we have published goals against RDFox for, each as a
+//! subcommand that loads a file (or files), runs the operation, and prints
+//! a single line of JSON to stdout. The orchestration — generating
+//! workloads, running the equivalent RDFox commands, and computing the
+//! comparison — lives in `scripts/bench/compare-rdfox.sh`.
+//!
+//! | Subcommand    | HornDB path                                   | Goal (BENCHMARKS.md)                         |
+//! |---------------|-----------------------------------------------|----------------------------------------------|
+//! | `import`      | `horndb_storage` N-Triples bulk loader        | SPEC-02 F8: ≥1 M triples/sec bulk import     |
+//! | `transitive`  | `horndb_closure` GraphBLAS transitive closure | SPEC-05 acc#1: ≥10× RDFox on a chain         |
+//! | `materialize` | `horndb_owlrl` OWL 2 RL forward materialization| Stage-1 gate: within 3× RDFox on LUBM        |
+//!
+//! All timings are wall-clock from `std::time::Instant` around the named
+//! phase only (parsing is reported separately from reasoning where the API
+//! allows). Numbers are emitted in milliseconds.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use oxrdf::{Dataset, GraphName, Quad};
+use oxttl::NTriplesParser;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "horndb-bench",
+    about = "HornDB-side micro-runner for the RDFox comparison harness. Emits one JSON object per run."
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Bulk N-Triples import throughput (no reasoning). SPEC-02 F8.
+    Import {
+        /// N-Triples file to load.
+        #[arg(long)]
+        data: PathBuf,
+    },
+    /// Transitive closure of a single predicate via GraphBLAS. SPEC-05 acc#1.
+    Transitive {
+        /// N-Triples file holding the edge relation.
+        #[arg(long)]
+        data: PathBuf,
+        /// Predicate IRI whose (subject, object) pairs form the graph.
+        #[arg(long)]
+        predicate: String,
+    },
+    /// OWL 2 RL forward materialization to fixpoint. Stage-1 LUBM gate.
+    Materialize {
+        /// One or more N-Triples files; concatenated into one default graph.
+        #[arg(long = "data", required = true, num_args = 1..)]
+        data: Vec<PathBuf>,
+    },
+}
+
+fn main() -> Result<()> {
+    match Cli::parse().cmd {
+        Cmd::Import { data } => run_import(&data),
+        Cmd::Transitive { data, predicate } => run_transitive(&data, &predicate),
+        Cmd::Materialize { data } => run_materialize(&data),
+    }
+}
+
+/// Emit one flat JSON object. Values are pre-formatted JSON fragments
+/// (numbers bare, strings already quoted) so we avoid a serde dependency.
+fn emit(fields: &[(&str, String)]) {
+    let body = fields
+        .iter()
+        .map(|(k, v)| format!("\"{k}\":{v}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("{{{body}}}");
+}
+
+fn ms(t: std::time::Duration) -> String {
+    format!("{:.3}", t.as_secs_f64() * 1e3)
+}
+
+fn run_import(data: &Path) -> Result<()> {
+    let store = horndb_storage::Store::in_memory();
+    let stats = horndb_storage::loader::ntriples::load_ntriples_file(&store, data)
+        .with_context(|| format!("loading {}", data.display()))?;
+    let secs = stats.elapsed_ms as f64 / 1e3;
+    let tps = if secs > 0.0 {
+        stats.triples as f64 / secs
+    } else {
+        0.0
+    };
+    emit(&[
+        ("kind", "\"import\"".into()),
+        ("input_triples", stats.triples.to_string()),
+        ("load_ms", stats.elapsed_ms.to_string()),
+        ("tps", format!("{tps:.1}")),
+    ]);
+    Ok(())
+}
+
+fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
+    // Parse the N-Triples file, keep only the target predicate, and map
+    // each distinct node IRI to a dense 0..n index for the bool matrix.
+    let reader =
+        BufReader::new(File::open(data).with_context(|| format!("opening {}", data.display()))?);
+    let mut ids: HashMap<String, u64> = HashMap::new();
+    let mut edges: Vec<(u64, u64)> = Vec::new();
+    let parse_start = Instant::now();
+    for triple in NTriplesParser::new().for_reader(reader) {
+        let t = triple.with_context(|| format!("parsing {}", data.display()))?;
+        if t.predicate.as_str() != predicate {
+            continue;
+        }
+        let next = ids.len() as u64;
+        let s = *ids.entry(t.subject.to_string()).or_insert(next);
+        let next = ids.len() as u64;
+        let o = *ids.entry(t.object.to_string()).or_insert(next);
+        edges.push((s, o));
+    }
+    let parse = parse_start.elapsed();
+    let n = ids.len() as u64;
+
+    horndb_closure::grb::init_once().context("GraphBLAS init")?;
+    let build_start = Instant::now();
+    let m = horndb_closure::grb::BoolMatrix::from_edges(n, &edges).context("building matrix")?;
+    let build = build_start.elapsed();
+
+    let reason_start = Instant::now();
+    let star = horndb_closure::closure::transitive::transitive_closure(&m).context("closure")?;
+    let reason = reason_start.elapsed();
+    let closure_edges = star.nvals().context("nvals")?;
+
+    let secs = reason.as_secs_f64();
+    let tps = if secs > 0.0 {
+        closure_edges as f64 / secs
+    } else {
+        0.0
+    };
+    emit(&[
+        ("kind", "\"transitive\"".into()),
+        ("nodes", n.to_string()),
+        ("input_edges", edges.len().to_string()),
+        ("closure_edges", closure_edges.to_string()),
+        ("parse_ms", ms(parse)),
+        ("build_ms", ms(build)),
+        ("reason_ms", ms(reason)),
+        ("closure_tps", format!("{tps:.1}")),
+    ]);
+    Ok(())
+}
+
+fn run_materialize(files: &[PathBuf]) -> Result<()> {
+    let mut dataset = Dataset::new();
+    let parse_start = Instant::now();
+    let mut input: u64 = 0;
+    for f in files {
+        let reader =
+            BufReader::new(File::open(f).with_context(|| format!("opening {}", f.display()))?);
+        for triple in NTriplesParser::new().for_reader(reader) {
+            let t = triple.with_context(|| format!("parsing {}", f.display()))?;
+            dataset.insert(
+                Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+            );
+            input += 1;
+        }
+    }
+    let parse = parse_start.elapsed();
+
+    let mut engine = horndb_owlrl::Engine::new();
+    let reason_start = Instant::now();
+    engine.load(&dataset).context("materializing")?;
+    let reason = reason_start.elapsed();
+
+    let asserted = engine.asserted_len().unwrap_or(0);
+    let total = engine.materialized_len().unwrap_or(0);
+    let inferred = total.saturating_sub(asserted);
+    let secs = reason.as_secs_f64();
+    // Throughput on *input* facts (comparable to RDFox "facts/sec" on the
+    // asserted base) and on *output* facts (total closure size / time).
+    let tps_in = if secs > 0.0 {
+        asserted as f64 / secs
+    } else {
+        0.0
+    };
+    let tps_out = if secs > 0.0 { total as f64 / secs } else { 0.0 };
+    emit(&[
+        ("kind", "\"materialize\"".into()),
+        ("parsed_triples", input.to_string()),
+        ("asserted", asserted.to_string()),
+        ("inferred", inferred.to_string()),
+        ("total", total.to_string()),
+        ("parse_ms", ms(parse)),
+        ("reason_ms", ms(reason)),
+        ("input_tps", format!("{tps_in:.1}")),
+        ("output_tps", format!("{tps_out:.1}")),
+    ]);
+    Ok(())
+}
