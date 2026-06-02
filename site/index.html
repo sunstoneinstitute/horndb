@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HornDB — a hybrid RDF reasoner for OWL 2 RL</title>
+  <meta name="description" content="HornDB is a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL with a SPARQL 1.1 frontend, designed for modern memory architectures. Apache-2.0, EU-developed, open from the start.">
+
+  <meta property="og:title" content="HornDB — a hybrid RDF reasoner for OWL 2 RL">
+  <meta property="og:description" content="A hybrid RDF reasoner targeting OWL 2 RL with a SPARQL 1.1 frontend, built for modern memory architectures. Open from the start.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/icon-512.png">
+
+  <link rel="icon" href="assets/favicon.ico" sizes="any">
+  <link rel="icon" href="assets/horndb-mark-square.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon-180.png">
+
+  <!-- Set the theme attribute before first paint to avoid a flash. -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("horndb-theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.setAttribute("data-theme", t);
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="HornDB home">
+      <img class="lockup lockup-light" src="assets/horndb-horizontal.svg" alt="HornDB" height="36">
+      <img class="lockup lockup-dark" src="assets/horndb-horizontal-dark.svg" alt="HornDB" height="36">
+    </a>
+    <nav class="site-nav">
+      <a href="https://github.com/sunstoneinstitute/horndb">GitHub</a>
+      <a href="https://github.com/sunstoneinstitute/horndb/tree/main/docs/specs">Specs</a>
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Switch colour theme" title="Theme: auto">
+        <span class="theme-toggle-label" data-theme-label>Auto</span>
+      </button>
+    </nav>
+  </header>
+
+  <main id="top">
+    <!-- Hero -->
+    <section class="hero">
+      <img class="hero-mark" src="assets/horndb-mark.svg" alt="" width="96" height="140" aria-hidden="true">
+      <h1>A hybrid RDF reasoner for OWL&nbsp;2&nbsp;RL,<br>built for modern memory architectures.</h1>
+      <p class="hero-sub">
+        Forward <em>and</em> backward chaining over OWL&nbsp;2&nbsp;RL semantics, with a
+        SPARQL&nbsp;1.1 frontend. Apache-2.0, EU-developed, open from the start.
+      </p>
+      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 — feasibility prototype in progress</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/sunstoneinstitute/horndb/blob/main/docs/specs/SPEC-00-vision.md">Read the vision</a>
+      </div>
+    </section>
+
+    <!-- What / Why -->
+    <section class="band">
+      <div class="wrap narrow">
+        <h2>What it is, and why we're building it</h2>
+        <p>
+          <strong>HornDB</strong> is a triple store you reason over: load RDF, run SPARQL, get
+          answers — with provenance back to the premises that produced them. The name is literal.
+          <strong>Horn</strong> as in <em>Horn clauses</em>; OWL&nbsp;2&nbsp;RL is precisely the
+          fragment of OWL&nbsp;2 whose entailment rules are Horn rules evaluated bottom-up to a
+          fixpoint, which is what this engine does.
+        </p>
+        <p>
+          The reasoner space today forces a choice. <strong>Pure-materialization commercial
+          engines</strong> are fast but give up 100–1000× on backward chaining and are not open.
+          <strong>Open-source toolkits</strong> are flexible but slower on the same workload.
+          HornDB makes a different set of bets: materialize the cheap, regular subset; backward-chain
+          the rest; and treat modern memory hierarchies as a first-class target rather than an
+          afterthought.
+        </p>
+      </div>
+    </section>
+
+    <!-- The bets -->
+    <section class="band band-alt">
+      <div class="wrap">
+        <h2>The bets</h2>
+        <p class="section-lede">Six design decisions set HornDB apart. The full rationale lives in the vision spec.</p>
+        <ul class="cards">
+          <li class="card">
+            <h3>Hybrid execution</h3>
+            <p>Not pure materialization. Materialize the schema and transitive-closure subset; backward-chain the rest with magic sets.</p>
+          </li>
+          <li class="card">
+            <h3>Modern memory as a target</h3>
+            <p>A tiered working set — fast memory for the hot data, DRAM for warm, CXL/NVMe for cold — designed in, not bolted on.</p>
+          </li>
+          <li class="card">
+            <h3>Incremental maintenance</h3>
+            <p>DBSP-style Z-set differences instead of DRed counting, so updates touch only what actually changed.</p>
+          </li>
+          <li class="card">
+            <h3>GraphBLAS closure</h3>
+            <p>Schema-level transitive closure as a semiring matrix multiply on SuiteSparse:GraphBLAS.</p>
+          </li>
+          <li class="card">
+            <h3>Compiled rules</h3>
+            <p>Soufflé-style ahead-of-time compilation: OWL&nbsp;2&nbsp;RL rules become native Rust — no rule interpreter in the hot path.</p>
+          </li>
+          <li class="card">
+            <h3>Provenance as a requirement</h3>
+            <p>Every inferred triple traces back to its premises. Explainability is a hard constraint, not a feature flag.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Goals / roadmap -->
+    <section class="band">
+      <div class="wrap narrow">
+        <h2>Where it's going</h2>
+        <p class="section-lede">
+          The harness comes first by design: every spec's acceptance criteria reference a concrete
+          test subset, and a spec is not satisfied until its subset is green.
+        </p>
+        <div class="table-scroll">
+          <table class="roadmap">
+            <thead>
+              <tr><th>Stage</th><th>Scope</th><th>Gate</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="stage">Stage 0</span></td>
+                <td>Harness bootstrap</td>
+                <td>Selected suite plumbing green; a deliberate failure is correctly flagged red.</td>
+              </tr>
+              <tr class="active-stage">
+                <td><span class="stage">Stage 1</span> <span class="badge">in progress</span></td>
+                <td>Storage + WCOJ + a minimal OWL&nbsp;2&nbsp;RL slice</td>
+                <td>≥50 W3C OWL&nbsp;2&nbsp;RL cases green; within 3× of a materialization baseline on LUBM-100.</td>
+              </tr>
+              <tr>
+                <td><span class="stage">Stage 2</span></td>
+                <td>Full storage→SPARQL stack + RDF&nbsp;1.2 triple terms</td>
+                <td>Full W3C OWL&nbsp;2&nbsp;RL + SPARQL&nbsp;1.1 + Entailment Regimes green; ORE&nbsp;2015 RL fragment solved.</td>
+              </tr>
+              <tr>
+                <td><span class="stage">Stage 3</span></td>
+                <td>Hardware specialization</td>
+                <td>GPU GraphBLAS + WCOJ, CXL tiering, multi-node. The Stage-2 conformance bar does not drop.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted-note">
+          Non-goals: OWL&nbsp;2&nbsp;DL completeness, property-graph compatibility, or embedding-based
+          “neural” reasoning as the source of truth. The symbolic engine is always the source of truth.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <p>
+        Built by <a href="https://sunstoneinstitute.ai">Sunstone Institute</a> ·
+        Apache-2.0 · EU-developed, open from the start
+      </p>
+      <p>
+        <a href="https://github.com/sunstoneinstitute/horndb">github.com/sunstoneinstitute/horndb</a>
+      </p>
+    </div>
+  </footer>
+
+  <script src="theme.js"></script>
+</body>
+</html>

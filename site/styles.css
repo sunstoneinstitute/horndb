@@ -1,0 +1,285 @@
+/* HornDB landing page
+   Brand palette (from logo/README.md):
+     Rust  #C0501C   accents, the "DB" in the wordmark
+     Ink   #1A1A20   near-black text on light
+     Dark  #14141A   dark-surface background
+     Cream #F3EFE7   warm light background / text on dark
+*/
+
+/* ---- Theme tokens -------------------------------------------------------- */
+:root {
+  --rust: #C0501C;
+  --rust-bright: #e0672f;
+
+  /* Light theme (default) */
+  --bg: #F3EFE7;
+  --bg-alt: #ece6da;
+  --surface: #ffffff;
+  --border: #ddd4c4;
+  --text: #1A1A20;
+  --text-muted: #5b5750;
+  --shadow: 0 1px 2px rgba(26, 26, 32, 0.06), 0 8px 24px rgba(26, 26, 32, 0.06);
+
+  --maxw: 1040px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14141A;
+    --bg-alt: #1b1b22;
+    --surface: #1f1f27;
+    --border: #2e2e38;
+    --text: #F3EFE7;
+    --text-muted: #a7a39a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* Explicit overrides (set by the toggle via data-theme on <html>) */
+:root[data-theme="dark"] {
+  --bg: #14141A;
+  --bg-alt: #1b1b22;
+  --surface: #1f1f27;
+  --border: #2e2e38;
+  --text: #F3EFE7;
+  --text-muted: #a7a39a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+:root[data-theme="light"] {
+  --bg: #F3EFE7;
+  --bg-alt: #ece6da;
+  --surface: #ffffff;
+  --border: #ddd4c4;
+  --text: #1A1A20;
+  --text-muted: #5b5750;
+  --shadow: 0 1px 2px rgba(26, 26, 32, 0.06), 0 8px 24px rgba(26, 26, 32, 0.06);
+}
+
+/* ---- Lockup swap: show the variant that fits the surface ----------------- */
+.lockup-dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .lockup-light { display: none; }
+  :root:not([data-theme="light"]) .lockup-dark { display: inline; }
+}
+:root[data-theme="dark"] .lockup-light { display: none; }
+:root[data-theme="dark"] .lockup-dark { display: inline; }
+:root[data-theme="light"] .lockup-light { display: inline; }
+:root[data-theme="light"] .lockup-dark { display: none; }
+
+/* ---- Base ---------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--rust); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+.wrap.narrow { max-width: 760px; }
+
+/* ---- Header -------------------------------------------------------------- */
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: saturate(140%) blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.brand { display: inline-flex; align-items: center; }
+.brand .lockup { display: block; height: 32px; width: auto; }
+
+.site-nav { display: flex; align-items: center; gap: 22px; }
+.site-nav a { color: var(--text); font-weight: 500; font-size: 0.95rem; }
+.site-nav a:hover { color: var(--rust); text-decoration: none; }
+
+.theme-toggle {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 5px 13px;
+  font: inherit;
+  font-size: 0.82rem;
+  line-height: 1;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--rust); }
+
+/* ---- Hero ---------------------------------------------------------------- */
+.hero {
+  text-align: center;
+  padding: 84px 24px 64px;
+  max-width: 860px;
+  margin: 0 auto;
+}
+.hero-mark {
+  display: block;
+  margin: 0 auto 28px;
+  height: 132px;
+  width: auto;
+  filter: drop-shadow(0 6px 18px rgba(192, 80, 28, 0.18));
+}
+.hero h1 {
+  margin: 0 0 20px;
+  font-size: clamp(1.9rem, 4.6vw, 3.1rem);
+  font-weight: 800;
+}
+.hero-sub {
+  margin: 0 auto 26px;
+  max-width: 620px;
+  font-size: 1.12rem;
+  color: var(--text-muted);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 30px;
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  background: var(--surface);
+}
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--rust);
+  box-shadow: 0 0 0 0 rgba(192, 80, 28, 0.5);
+  animation: pulse 2.4s infinite;
+}
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(192, 80, 28, 0.45); }
+  70%  { box-shadow: 0 0 0 7px rgba(192, 80, 28, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(192, 80, 28, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot { animation: none; }
+  html { scroll-behavior: auto; }
+}
+
+.cta-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+.btn {
+  display: inline-block;
+  padding: 12px 22px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.98rem;
+  border: 1px solid transparent;
+  transition: transform 0.05s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn-primary { background: var(--rust); color: #fff; }
+.btn-primary:hover { background: var(--rust-bright); }
+.btn-ghost { color: var(--text); border-color: var(--border); background: var(--surface); }
+.btn-ghost:hover { border-color: var(--rust); color: var(--rust); }
+
+/* ---- Bands --------------------------------------------------------------- */
+.band { padding: 64px 0; border-top: 1px solid var(--border); }
+.band-alt { background: var(--bg-alt); }
+.band h2 {
+  margin: 0 0 14px;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  font-weight: 750;
+}
+.band p { font-size: 1.05rem; }
+.band .narrow p + p { margin-top: 1em; }
+.section-lede { color: var(--text-muted); margin: 0 0 28px; max-width: 640px; }
+
+/* ---- Cards --------------------------------------------------------------- */
+.cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 18px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px 22px 20px;
+  box-shadow: var(--shadow);
+  border-top: 3px solid var(--rust);
+}
+.card h3 { margin: 0 0 8px; font-size: 1.1rem; }
+.card p { margin: 0; font-size: 0.97rem; color: var(--text-muted); }
+
+/* ---- Roadmap table ------------------------------------------------------- */
+.table-scroll { overflow-x: auto; }
+.roadmap {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 0.96rem;
+}
+.roadmap th, .roadmap td {
+  text-align: left;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.roadmap th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.roadmap td:last-child { color: var(--text-muted); }
+.roadmap .stage { font-weight: 700; color: var(--text); white-space: nowrap; }
+.roadmap .active-stage { background: color-mix(in srgb, var(--rust) 8%, transparent); }
+.badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--rust);
+  vertical-align: middle;
+}
+.muted-note { margin-top: 24px; font-size: 0.92rem; color: var(--text-muted); }
+
+/* ---- Footer -------------------------------------------------------------- */
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 36px 0;
+  background: var(--bg-alt);
+}
+.footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+.footer-inner a { color: var(--text-muted); }
+.footer-inner a:hover { color: var(--rust); }
+
+@media (max-width: 560px) {
+  .site-nav { gap: 14px; }
+  .site-nav a { font-size: 0.9rem; }
+  .hero { padding-top: 56px; }
+}
