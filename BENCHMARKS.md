@@ -166,7 +166,11 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 - **LDBC SPB-256 nightly.** Workflow exists (`.github/workflows/nightly.yml`) and points at a self-hosted runner with the SPB driver pre-installed. Requires `scripts/dev/start-engine.sh` to exist, which it does not yet (SPEC-04 territory).
 - **LUBM-8000 materialization** (SPEC-04 acceptance #2, SPEC-02 acceptance #2/#3). Gated on the storage + rule engine being usable on real corpora.
 - **ORE 2015 OWL 2 RL fragment full pass.** Ten-ontology subset is wired up (`harness/ore2015-selected.toml`); the full corpus expansion is Stage-2 work (TASKS.md MEDIUM).
-- **A/B vs RDFox / GraphDB Free.** SPEC-01 F10 — harness flow exists; needs the competitor binaries on the benchmark runner and (for any *published* number) legal review of the RDFox license.
+- **A/B vs GraphDB Free.** SPEC-01 F10 — harness flow exists; needs the GraphDB Free binary on the benchmark runner. No licence restriction on publishing.
+
+### Running, internal only (no published numbers)
+
+- **A/B vs RDFox.** SPEC-01 F10 — **implemented and runnable** via `scripts/bench/compare-rdfox.sh` (see `scripts/bench/README.md`). It times HornDB against RDFox on identical inputs for three goal-bearing operations: bulk N-Triples import (SPEC-02 F8), transitive closure (SPEC-05 acceptance #1), and OWL 2 RL materialization (the Stage-1 LUBM gate). Per the DeWitt-clause note under *Baselines*, the measured numbers are **internal only** — results are written to gitignored `scripts/bench/results/` and are never committed. Outstanding: a real-LUBM materialization workload (the literal Stage-1 gate currently stands in with a synthetic subClassOf taxonomy), and wiring the comparison into CI / the trend DB.
 
 ## Reproducing the numbers
 
