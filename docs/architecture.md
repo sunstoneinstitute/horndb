@@ -118,7 +118,8 @@ two engines: `--engine stub` (plumbing) and `--engine owlrl` (real, needs
 | Versioned selection manifest (`harness/selected.toml`) | **implemented** | Single canonical file at workspace root (manifest `[suites.*]` + `[sparql_query]`). |
 | Result DB (SQLite) + trend reports (`harness report`) | **implemented** | `db.rs`, `report.rs`; state in `target/harness.sqlite`, JUnit at `target/junit.xml`. |
 | Stub-engine smoke target | **implemented** | `stub.rs` (F12). |
-| Full W3C OWL 2 + SPARQL 1.1 suites, ORE 2015, LDBC SPB SF3/SF5, LUBM/UOBM, RDFox A/B | **planned** | `TASKS.md` MEDIUM · *Conformance* — "SPEC-01 harness". Scaffolding exists (`ore.rs`, `ldbc_spb.rs`); full corpora not wired. RDFox comparison gated on license review. |
+| LUBM materialization RDFox A/B (`scripts/bench/compare-rdfox.sh --lubm N`) | **implemented (N=1)** | Identical TBox+ABox + a ruleset generated from `rules.toml` through both engines; closure-count parity gate + HornDB wall-clock cap. N=1 runs end-to-end; surfaced a closure over-derivation ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)) and HornDB over the 3× timing gate at N=1. LUBM-100 not yet run. RDFox numbers internal-only (DeWitt). |
+| Full W3C OWL 2 + SPARQL 1.1 suites, ORE 2015, LDBC SPB SF3/SF5, LUBM-100/UOBM, broader RDFox A/B | **planned** | `TASKS.md` MEDIUM · *Conformance* — "SPEC-01 harness" (#10). Scaffolding exists (`ore.rs`, `ldbc_spb.rs`); full corpora not wired. Publication of RDFox numbers gated on license review. |
 
 ---
 

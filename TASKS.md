@@ -29,6 +29,7 @@ here in the same commit.
 > (cleanup/docs).
 
 - [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produces on BGPs with repeated patterns
+- [ ] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
 - [x] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
@@ -41,7 +42,7 @@ here in the same commit.
 - [v] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (`DESCRIBE`, full `Update`, property paths, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)) — _wip: session d11d84f3 · tracking #7 · task-48-describe-query-form · 2026-06-01_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings, not yet started) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
-- [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/LUBM suites, RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
+- [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC suites; LUBM materialization RDFox A/B wired via `scripts/bench/compare-rdfox.sh --lubm`, full-suite coverage outstanding) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics (decide when custom semirings pay off) ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration for Sunstone annotated reasoning ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
@@ -82,6 +83,30 @@ here in the same commit.
     all iters agree. Differential fuzzer cases bumped 16 → 256;
     `#[ignore]` and the regression file removed; inline regression
     tests added for the 2-iter and 3-iter priming cases.
+
+## HIGH — Correctness gaps
+
+- [ ] **HornDB OWL 2 RL closure over-derives vs reference on LUBM(1)** ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)).
+  - The internal HornDB-vs-RDFox comparison (`scripts/bench/compare-rdfox.sh
+    --lubm 1`) feeds both engines the identical LUBM TBox+ABox and the identical
+    rule set (RDFox runs a ruleset generated from `crates/owlrl/rules.toml` by
+    `scripts/bench/gen_ruleset.py`). Its closure-count **parity gate** fails:
+    HornDB's materialized closure is larger than the reference OWL 2 RL
+    entailment of the same rules.
+  - HornDB's own numbers on LUBM(1): asserted base 100,866; inferred 62,377;
+    total 163,243. The asserted base matches the reference exactly and the
+    reference accepted all 40 generated rules, so this is over-derivation, not a
+    dropped/garbled rule. The excess is in *inferred* facts, almost certainly
+    `rdf:type`. (Reference-engine figures are internal-only per the RDFox
+    licence / DeWitt clause.)
+  - Likely suspects: interaction of `cax-sco` / `prp-dom` / `prp-rng` with the 6
+    complex `owl:EquivalentClasses` definitions (`intersectionOf` /
+    `someValuesFrom` blank-node structures) after RDF/XML→N-Triples conversion.
+  - **Blocker for diagnosis:** `horndb-bench` emits only counts. Pinning the
+    over-derived triples needs a closure-export (N-Triples) from the owlrl
+    `Engine` so the two closures can be diffed triple-by-triple. Distinct from
+    the missing-`cls-int*`/`cls-uni*` work under #4 (this is the same 40 rules
+    producing too much, not a missing rule).
 
 ## HIGH — Lint cleanup (CI gate)
 
@@ -452,6 +477,15 @@ list when the corresponding Stage-1 slice is settled.
   corpus (1,920 ontologies), LDBC SPB SF3 + SF5 audited-style runs, LUBM
   + UOBM profile coverage, RDFox A/B (license review required for
   publication — see SPEC-01 risks).
+  - **Progress (2026-06-03):** the **LUBM materialization RDFox A/B** is now
+    wired — `scripts/bench/compare-rdfox.sh --lubm N` generates LUBM-N (Lehigh
+    UBA, `gen_lubm.sh`), feeds both engines identical TBox+ABox + a ruleset
+    generated from `rules.toml` (`gen_ruleset.py`), enforces a closure-count
+    parity gate, and caps HornDB's wall-clock. N=1 runs end-to-end; the gate
+    surfaced a closure divergence (tracked under #59) and HornDB is currently
+    over the 3× timing gate at N=1. LUBM-100 (the literal gate) not yet run.
+    RDFox numbers internal-only (DeWitt). Full W3C/ORE/LDBC + UOBM coverage
+    remains outstanding.
 - [x] **W3C OWL 2 RL test-suite ingestion pipeline.** *Done
   (2026-05-25): all four ingestion steps shipped in one pass. (1)
   `scripts/fetch-w3c-suites.sh` now pulls
