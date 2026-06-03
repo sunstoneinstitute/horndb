@@ -97,6 +97,36 @@ gen_workload.py ──┬─► chain.nt ──────────► hornd
 - **Hardware fingerprint matters.** Comparisons are only valid within one
   machine; don't compare a run here to a number measured elsewhere.
 
+## LUBM-N mode (`--lubm N`)
+
+Measures the literal Stage-1 gate — *LUBM-100 materialization within 3× of
+RDFox* — on real LUBM data, with both engines firing the **same** rules.
+
+```bash
+# Wire-up smoke test on LUBM(1) (~100k triples)
+scripts/bench/compare-rdfox.sh --lubm 1
+
+# The Stage-1 gate workload (~13M triples). Slow on HornDB's nested-loop
+# backend; capped at 30 min by default (override with --cap-seconds).
+scripts/bench/compare-rdfox.sh --lubm 100
+```
+
+How it works:
+
+- `gen_lubm.sh` fetches the Lehigh **UBA1.7** generator (needs a **JDK** — Java
+  21 is fine) and converts the generated RDF/XML to N-Triples with `riot`.
+  LUBM-100 produces a multi-GB `abox.nt` under the gitignored `target/` tree.
+- `gen_ruleset.py` regenerates the RDFox ruleset from `crates/owlrl/rules.toml`
+  on every run, so RDFox fires exactly HornDB's rules (no drift, no hand-copy).
+- A **closure-count parity gate** asserts HornDB and RDFox derive the same facts
+  (within HornDB's fixed XSD-base offset). A mismatch fails the run — it means
+  the ruleset translation dropped or added a rule.
+- HornDB's `materialize` uses the nested-loop `RuleFiringBackend`; if it exceeds
+  `--cap-seconds`, the run records **"did not complete"** as a valid Stage-1
+  finding rather than hanging.
+
+RDFox numbers stay **internal only** (gitignored `scripts/bench/results/`).
+
 ## Extending
 
 The natural next workload is real **LUBM** (the literal Stage-1 gate). RDFox

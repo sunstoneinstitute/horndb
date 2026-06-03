@@ -21,3 +21,6 @@ crates/closure/vendor/.shared-build/
 /.superpowers
 /.horndb-shared-target/
 __pycache__
+
+# Internal RDFox comparison results — must never be committed (DeWitt clause).
+/scripts/bench/results/
