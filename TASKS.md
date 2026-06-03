@@ -32,6 +32,7 @@ here in the same commit.
 - [x] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
 - [x] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
+- [ ] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
@@ -120,6 +121,31 @@ here in the same commit.
   slow (oxrocksdb-sys), subsequent pushes are cached.*
 
 ## HIGH — Performance gaps
+
+- [ ] **Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine
+  (Stage-1 LUBM timing gate).**
+  ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
+  Timing follow-up to [#59](https://github.com/sunstoneinstitute/horndb/issues/59):
+  that fix made the LUBM(1) closure-count **parity** gate exact (delta 0); what
+  remains is the **separate** Stage-1 "within 3×" *timing* gate, which HornDB
+  exceeds at N=1 (HornDB's own reason-time is ~225–320 ms; reference numbers
+  internal-only, DeWitt). The Stage-1 closure backend is the nested-loop
+  `RuleFiringBackend` (`crates/owlrl/src/backend.rs`, "slow but obviously
+  correct"), invoked per semi-naïve round at `crates/owlrl/src/engine.rs:96` and
+  hard-wired by `crates/owlrl/src/integration.rs::load()` (~line 152 —
+  `RuleFiringBackend::new()`, no injection point today). The intended
+  replacement is already designed and built: the `horndb-closure` GraphBLAS
+  transitive closure (`horndb_closure::closure::transitive`), which
+  `crates/owlrl/AGENTS.md` §4.5 says production should wire behind the
+  `ClosureBackend` trait. **Scope (focused, not an umbrella):** make the backend
+  injectable into the `Engine`, add a `horndb-closure`-backed `ClosureBackend`
+  impl, and **profile** LUBM(1) materialize to attribute the ~225–320 ms across
+  closure rounds vs compiled-rule scans vs list rules before assuming the swap
+  alone clears 3×. Cross-refs [#2](https://github.com/sunstoneinstitute/horndb/issues/2)
+  (SPEC-04 F5 `rdf:type`-partition scan) for the non-closure component. Specs:
+  `docs/specs/SPEC-05-closure-backend.md`,
+  `docs/plans/2026-05-24-SPEC-05-graphblas-closure-backend.md`. Parity with the
+  `RuleFiringBackend` result set must be preserved.
 
 - [x] **SPEC-03 WCOJ 4-cycle bench meets the ≥10× acceptance gate.**
   ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))

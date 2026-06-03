@@ -44,11 +44,14 @@ These are the project-level go/no-go thresholds from `specs/SPEC-00-vision.md`.
 > `scripts/bench/compare-rdfox.sh --lubm N`. Both engines reason over identical
 > LUBM TBox+ABox with the same rule set (RDFox runs a ruleset generated from
 > `crates/owlrl/rules.toml`), guarded by a closure-count parity gate and a
-> wall-clock cap on HornDB. The N=1 wiring run completes end-to-end but flags two
-> open issues (the gate does **not** pass): HornDB's closure **over-derives** vs the reference on LUBM(1)
-> (parity gate fails — tracked in `TASKS.md`/[#59](https://github.com/sunstoneinstitute/horndb/issues/59)),
-> and HornDB's nested-loop rule-firing backend is over the 3× timing target at
-> N=1. LUBM-100 (the literal gate) not yet run. RDFox comparison numbers are
+> wall-clock cap on HornDB. The N=1 wiring run completes end-to-end. The
+> closure-count **parity** gate now passes exactly (delta 0) — the earlier
+> over-derivation was a harness-completeness gap, resolved in
+> [#59](https://github.com/sunstoneinstitute/horndb/issues/59). The **timing**
+> gate does **not** yet pass: HornDB's nested-loop rule-firing backend is over
+> the 3× target at N=1 (tracked in `TASKS.md`/[#61](https://github.com/sunstoneinstitute/horndb/issues/61)
+> — wire the SPEC-05 GraphBLAS closure backend into the owlrl `Engine`).
+> LUBM-100 (the literal gate) not yet run. RDFox comparison numbers are
 > internal only (DeWitt clause) and are never recorded here.
 
 ## Per-subsystem targets (Stage 2 unless noted)
