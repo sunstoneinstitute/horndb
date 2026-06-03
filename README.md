@@ -54,7 +54,7 @@ The harness comes **first by design**: every SPEC's acceptance criteria referenc
 
 ### Prerequisites
 
-- Rust **1.88.0** (pinned via `rust-toolchain.toml` — `rustup` will install it automatically).
+- Rust **1.90.0** (pinned via `rust-toolchain.toml` — `rustup` will install it automatically).
 - **SuiteSparse:GraphBLAS** for `horndb-closure`. By default (`vendored` + `openmp` Cargo features, both on) the crate **builds the vendored submodule from source** — pinned to **v10.3.0** under `crates/closure/vendor/GraphBLAS` — so you need the submodule checked out (`git submodule update --init --recursive`) plus **CMake**, a **C compiler**, and **OpenMP** at build time. `pkg-config` is also required (the `build.rs` probe uses it to emit link flags). To link a system GraphBLAS instead, disable default features and provide one to `pkg-config`; the probe gate is `>=8.0`.
 - Optional: `pre-commit` (`pip install pre-commit && pre-commit install`) for the fmt / clippy / build hooks. Pre-commit runs `cargo fmt --all -- --check` only; pre-push runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --workspace` (the full workspace, including `horndb-harness`).
 - For the LDBC SPB-256 nightly: Java + the SPB driver JAR.

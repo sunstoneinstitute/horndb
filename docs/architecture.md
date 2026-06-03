@@ -61,7 +61,7 @@ engine; neural reasoning as source of truth; being a property-graph database.
 ## 2. Subsystem layering
 
 Nine Rust crates under `crates/`, all `publish = false`, `edition = 2021`,
-pinned to Rust `1.88.0`. Dependency / build order:
+pinned to Rust `1.90.0`. Dependency / build order:
 
 ```
                           ┌──────────────┐   ┌──────────┐

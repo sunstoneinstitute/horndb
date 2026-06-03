@@ -48,7 +48,7 @@ The `priority:`/`category:` label set is the GitHub mirror of the **Priority**/*
 
 ## Workspace layout
 
-Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.88.0` via `rust-toolchain.toml`:
+Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.90.0` via `rust-toolchain.toml`:
 
 | Crate | SPEC | Role |
 |---|---|---|
