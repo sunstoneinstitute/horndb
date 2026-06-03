@@ -24,3 +24,6 @@ __pycache__
 
 # Internal RDFox comparison results — must never be committed (DeWitt clause).
 /scripts/bench/results/
+
+# Python bytecode cache from bench scripts/tests.
+__pycache__/

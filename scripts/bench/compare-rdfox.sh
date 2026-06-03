@@ -259,7 +259,9 @@ lubm_compare() {
   fi
 
   echo ">> [lubm] RDFox materialize (matched ruleset)" >&2
-  cp "$lubmdir/tbox.nt" "$lubmdir/abox.nt" "$WORK/owl2rl-horndb-subset.dlog" "$WORK/"
+  # Data files into $WORK (the RDFox sandbox root); the ruleset was already
+  # generated directly into $WORK above, so it does not need copying.
+  cp "$lubmdir/tbox.nt" "$lubmdir/abox.nt" "$WORK/"
   # Data first (tbox + abox), rules LAST -> last import time = reasoning only.
   run_rdfox "$WORK" 'dstore create default' 'import tbox.nt' 'import abox.nt' \
             'import owl2rl-horndb-subset.dlog' 'info' >"$LOGS/lubm.rdfox.log"
