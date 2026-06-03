@@ -246,6 +246,13 @@ lubm_compare() {
 
   # Matched ruleset, freshly generated from rules.toml each run (no drift).
   python3 "$SCRIPT_DIR/gen_ruleset.py" >"$WORK/owl2rl-horndb-subset.dlog"
+  # HornDB also fires list-axiom rules (scm-int/cls-int1/cls-uni/prp-spo2) and a
+  # load-time XSD datatype base that rules.toml cannot express (issue #59).
+  # Resolve them from this TBox and append the rules + emit the matching facts,
+  # so RDFox derives exactly HornDB's closure (else faithful list-axiom
+  # derivations read as over-derivation in the parity gate).
+  python3 "$SCRIPT_DIR/gen_schema_closure.py" --tbox "$lubmdir/tbox.nt" \
+      --facts-out "$WORK/schema-facts.nt" >>"$WORK/owl2rl-horndb-subset.dlog"
 
   echo ">> [lubm] HornDB materialize (cap ${CAP_SECONDS}s)" >&2
   local capped=0 hj="" h_ms="—" h_total=""
@@ -262,21 +269,29 @@ lubm_compare() {
   # Data files into $WORK (the RDFox sandbox root); the ruleset was already
   # generated directly into $WORK above, so it does not need copying.
   cp "$lubmdir/tbox.nt" "$lubmdir/abox.nt" "$WORK/"
-  # Data first (tbox + abox), rules LAST -> last import time = reasoning only.
+  # Data first (tbox + abox + schema-closure facts), rules LAST -> last import
+  # time = reasoning only. schema-facts.nt was written into $WORK above; its
+  # blank-node labels match tbox.nt (RDFox keeps them unchanged across imports).
   run_rdfox "$WORK" 'dstore create default' 'import tbox.nt' 'import abox.nt' \
-            'import owl2rl-horndb-subset.dlog' 'info' >"$LOGS/lubm.rdfox.log"
+            'import schema-facts.nt' 'import owl2rl-horndb-subset.dlog' 'info' \
+            >"$LOGS/lubm.rdfox.log"
   local r_secs r_ms r_total
   r_secs="$(rdfox_import_secs "$LOGS/lubm.rdfox.log" last)"
   r_ms="$(awk -v s="$r_secs" 'BEGIN{printf "%.3f", s*1000}')"
   r_total="$(rdfox_facts "$LOGS/lubm.rdfox.log" all)"
 
   # --- closure-count parity gate ---
-  # HornDB carries a fixed XSD datatype base, so HornDB total = RDFox + offset.
-  # PASS iff 0 <= (h_total - r_total) <= XSD_OFFSET_MAX. HornDB having FEWER
-  # facts means the ruleset translation dropped a rule -> hard FAIL.
-  # HornDB's fixed XSD datatype base is ~60 axioms; 512 is generous headroom.
-  # Task 5 (N=1) measures the exact offset and may tighten this.
-  local XSD_OFFSET_MAX=512
+  # RDFox now fires HornDB's *full* rule set: gen_ruleset.py emits the
+  # fixed-arity rules.toml rules, and gen_schema_closure.py adds the list-axiom
+  # rules (scm-int/cls-int1/cls-uni/prp-spo2) + the XSD datatype base that
+  # rules.toml cannot express (issue #59). So the closures should be *equal*:
+  # the measured delta at N=1 is 0. A non-zero delta means a real translation
+  # gap — either gen_ruleset.py drift, or a list axiom gen_schema_closure.py
+  # does not yet handle (e.g. owl:hasKey/prp-key, which it warns about). We keep
+  # a small symmetric tolerance to absorb benign RDFox-version blank-node /
+  # serialization quirks; a dropped/added rule shifts the count by hundreds+,
+  # well outside it, so it still hard-FAILs.
+  local PARITY_TOLERANCE=64
   local parity ratio verdict
   if [[ "$capped" -eq 1 ]]; then
     parity="n/a (capped)"
@@ -284,8 +299,9 @@ lubm_compare() {
     verdict="DID NOT COMPLETE within ${CAP_SECONDS}s"
   else
     local delta=$(( h_total - r_total ))
-    if [[ "$delta" -ge 0 && "$delta" -le "$XSD_OFFSET_MAX" ]]; then
-      parity="OK (HornDB +${delta})"
+    local abs_delta=$(( delta < 0 ? -delta : delta ))
+    if [[ "$abs_delta" -le "$PARITY_TOLERANCE" ]]; then
+      parity="OK (delta=${delta})"
     else
       parity="MISMATCH (delta=${delta}) — ruleset translation suspect"
     fi

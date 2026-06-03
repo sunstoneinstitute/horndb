@@ -583,8 +583,15 @@ library is using.
   tested directly, or migrate these to real integration tests.
 - **Stage-1 leading pattern must have a constant predicate.** See
   §2.5; relaxing this is gated on SPEC-03 (WCOJ).
-- **List-walking rules (`cls-int*`, `cls-uni`) and `dt-*` datatype
-  rules are not implemented.** Stage-2 work, tracked in SPEC-04.
+- **List-walking rules (`scm-int`, `cls-int1`, `cls-uni`, `cax-adc`,
+  `prp-spo2`, `prp-key`, `eq-diff2/3`) are implemented** in `src/list_rules.rs`
+  (resolved once per `load`, fired in the semi-naïve loop — see `engine.rs`).
+  The remaining gap is `cls-svf*` / `cls-avf*` (someValuesFrom / allValuesFrom
+  restrictions), still Stage-2. The `dt-type1`/`dt-type2` datatype base is
+  injected at load time by `src/datatypes.rs`. (These three families — list
+  rules, the datatype base, and the `owl:Thing`-from-`NamedIndividual` pass —
+  live outside `rules.toml`, which is why the RDFox A/B harness needs
+  `scripts/bench/gen_schema_closure.py` to compare like-for-like; see #59.)
 - **Generated function bodies are O(|body|) nested loops.** This is
   fine for ~50 rules with bodies of length ≤ 4. SPEC-03 will replace
   the plan with leapfrog triejoin for arbitrary body sizes.

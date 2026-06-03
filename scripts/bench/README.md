@@ -117,10 +117,20 @@ How it works:
   21 is fine) and converts the generated RDF/XML to N-Triples with `riot`.
   LUBM-100 produces a multi-GB `abox.nt` under the gitignored `target/` tree.
 - `gen_ruleset.py` regenerates the RDFox ruleset from `crates/owlrl/rules.toml`
-  on every run, so RDFox fires exactly HornDB's rules (no drift, no hand-copy).
-- A **closure-count parity gate** asserts HornDB and RDFox derive the same facts
-  (within HornDB's fixed XSD-base offset). A mismatch fails the run — it means
-  the ruleset translation dropped or added a rule.
+  on every run, so RDFox fires the same fixed-arity rules HornDB compiles (no
+  drift, no hand-copy).
+- `gen_schema_closure.py` resolves *this TBox's* `rdf:List` axioms
+  (`owl:intersectionOf` / `unionOf` / `propertyChainAxiom` / `AllDifferent`) and
+  emits the matching `scm-int` / `cls-int1` / `cls-uni` / `prp-spo2` rules + the
+  XSD datatype base. HornDB fires these list-axiom rules (`list_rules.rs`) and
+  injects the datatype base (`datatypes.rs`), but they are **not expressible** in
+  `rules.toml`, so `gen_ruleset.py` alone cannot give them to RDFox — feeding
+  them here is what makes the comparison genuinely apples-to-apples (issue #59).
+- A **closure-count parity gate** asserts HornDB and RDFox derive the *same* facts
+  (delta 0 at N=1, within a small tolerance). A mismatch fails the run — it means
+  a real translation gap: `gen_ruleset.py` drift, or a list axiom
+  `gen_schema_closure.py` does not yet handle (e.g. `owl:hasKey`/`prp-key`, which
+  it warns about on stderr).
 - HornDB's `materialize` uses the nested-loop `RuleFiringBackend`; if it exceeds
   `--cap-seconds`, the run records **"did not complete"** as a valid Stage-1
   finding rather than hanging.

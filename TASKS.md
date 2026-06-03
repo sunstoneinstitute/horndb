@@ -29,7 +29,7 @@ here in the same commit.
 > (cleanup/docs).
 
 - [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produces on BGPs with repeated patterns
-- [ ] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
+- [x] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
 - [x] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
@@ -86,27 +86,25 @@ here in the same commit.
 
 ## HIGH — Correctness gaps
 
-- [ ] **HornDB OWL 2 RL closure over-derives vs reference on LUBM(1)** ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)).
-  - The internal HornDB-vs-RDFox comparison (`scripts/bench/compare-rdfox.sh
-    --lubm 1`) feeds both engines the identical LUBM TBox+ABox and the identical
-    rule set (RDFox runs a ruleset generated from `crates/owlrl/rules.toml` by
-    `scripts/bench/gen_ruleset.py`). Its closure-count **parity gate** fails:
-    HornDB's materialized closure is larger than the reference OWL 2 RL
-    entailment of the same rules.
-  - HornDB's own numbers on LUBM(1): asserted base 100,866; inferred 62,377;
-    total 163,243. The asserted base matches the reference exactly and the
-    reference accepted all 40 generated rules, so this is over-derivation, not a
-    dropped/garbled rule. The excess is in *inferred* facts, almost certainly
-    `rdf:type`. (Reference-engine figures are internal-only per the RDFox
-    licence / DeWitt clause.)
-  - Likely suspects: interaction of `cax-sco` / `prp-dom` / `prp-rng` with the 6
-    complex `owl:EquivalentClasses` definitions (`intersectionOf` /
-    `someValuesFrom` blank-node structures) after RDF/XML→N-Triples conversion.
-  - **Blocker for diagnosis:** `horndb-bench` emits only counts. Pinning the
-    over-derived triples needs a closure-export (N-Triples) from the owlrl
-    `Engine` so the two closures can be diffed triple-by-triple. Distinct from
-    the missing-`cls-int*`/`cls-uni*` work under #4 (this is the same 40 rules
-    producing too much, not a missing rule).
+- [x] **HornDB OWL 2 RL closure over-derives vs reference on LUBM(1)** ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)). *Resolved 2026-06-03 — harness-completeness bug, not a HornDB soundness bug.*
+  - **Diagnosis (differential):** running HornDB with the non-`rules.toml`
+    components disabled showed its *compiled* `rules.toml` closure is **identical**
+    to the reference's (exact match), and the ~7k "excess" decomposes exactly as:
+    the list-axiom rules HornDB fires from the 6 `owl:intersectionOf` definitions
+    (`scm-int` + `cls-int1` in `crates/owlrl/src/list_rules.rs`, ≈6.9k incl. the
+    `cax-sco` cascade) + the injected XSD datatype base (`datatypes.rs`, 62) +
+    `owl:Thing`-from-`owl:NamedIndividual` (0 on LUBM). All are sound OWL 2 RL
+    entailments; none are expressible in `rules.toml`, so `gen_ruleset.py` never
+    handed them to the reference — the reference under-derived.
+  - **Fix:** `scripts/bench/gen_schema_closure.py` resolves the TBox `rdf:List`
+    axioms (intersectionOf/unionOf/propertyChain/AllDifferent) and emits the XSD
+    datatype base; `compare-rdfox.sh --lubm` feeds these to RDFox alongside the
+    `rules.toml` ruleset so both engines fire the same rules. Parity is now
+    **exact (delta 0)** at N=1; HornDB is unchanged. (HornDB figures: asserted
+    100,866; inferred 62,377; total 163,243. Reference figures internal-only —
+    DeWitt clause.)
+  - Distinct from the `cls-svf*`/`cls-avf*` restriction-rule gap (someValuesFrom /
+    allValuesFrom), which remains unimplemented — Stage-2, tracked under #4.
 
 ## HIGH — Lint cleanup (CI gate)
 
