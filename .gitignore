@@ -20,3 +20,4 @@ crates/closure/vendor/.shared-build/
 .superpowers/
 /.superpowers
 /.horndb-shared-target/
+__pycache__
