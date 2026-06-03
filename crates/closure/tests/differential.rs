@@ -49,7 +49,7 @@ fn random_edges(n: usize, density_per_node: usize, seed: u64) -> Vec<(u64, u64)>
     let mut set: BTreeSet<(u64, u64)> = BTreeSet::new();
     for s in 0..n {
         for _ in 0..density_per_node {
-            let o = rng.gen_range(0..n);
+            let o = rng.random_range(0..n);
             set.insert((s as u64, o as u64));
         }
     }

@@ -19,8 +19,8 @@ fn synth_pairs(n_assertions: usize, n_canonical: u64, seed: u64) -> Vec<(DictId,
     // Each assertion: pick two ids in [0, 10*n_canonical), random.
     let range = 10 * n_canonical;
     for _ in 0..n_assertions {
-        let a = rng.gen_range(0..range);
-        let b = rng.gen_range(0..range);
+        let a = rng.random_range(0..range);
+        let b = rng.random_range(0..range);
         pairs.push((DictId(a), DictId(b)));
     }
     pairs
