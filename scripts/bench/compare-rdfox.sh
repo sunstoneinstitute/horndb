@@ -34,6 +34,8 @@ CHAIN_N=2500
 TAX_DEPTH=30
 TAX_INSTANCES=20000
 KEEP=0
+LUBM_N=0          # 0 = run the original three comparisons; >0 = LUBM mode
+CAP_SECONDS=1800  # wall-clock cap for HornDB materialize (LUBM mode)
 RDFOX_ZIP="${RDFOX_ZIP:-$HOME/Downloads/RDFox-macOS-arm64-7.5b.zip}"
 RDFOX_LIC="${RDFOX_LIC:-$HOME/Downloads/RDFox.lic}"
 OUTDIR="${OUTDIR:-$REPO_ROOT/target/bench-rdfox}"
@@ -44,6 +46,8 @@ while [[ $# -gt 0 ]]; do
     --depth)     TAX_DEPTH="$2"; shift 2 ;;
     --instances) TAX_INSTANCES="$2"; shift 2 ;;
     --keep)      KEEP=1; shift ;;
+    --lubm)         LUBM_N="$2"; shift 2 ;;
+    --cap-seconds)  CAP_SECONDS="$2"; shift 2 ;;
     -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -80,6 +84,31 @@ HB="$REPO_ROOT/target/release/horndb-bench"
 run_rdfox() {
   local root="$1"; shift
   "$RDFOX_BIN" sandbox "$root" "$@" 2>&1
+}
+
+# cap_run <seconds> <outfile> <cmd...>
+# Run a command writing stdout+stderr to <outfile>, killed after <seconds>.
+# Returns 0 on success, 124 if it hit the cap (or otherwise failed). Portable:
+# uses gtimeout/timeout if present, else a background-process + watchdog.
+cap_run() {
+  local cap="$1" out="$2"; shift 2
+  if command -v timeout >/dev/null; then
+    timeout "${cap}s" "$@" >"$out" 2>&1; return $?
+  elif command -v gtimeout >/dev/null; then
+    gtimeout "${cap}s" "$@" >"$out" 2>&1; return $?
+  fi
+  "$@" >"$out" 2>&1 &
+  local pid=$!
+  ( sleep "$cap"; kill -TERM "$pid" 2>/dev/null ) &
+  local watcher=$!
+  local rc=0
+  wait "$pid" 2>/dev/null || rc=124
+  # Reap the watchdog AND its lingering `sleep` child (else a slept timer
+  # outlives a fast run — noticeable on macOS where the fallback is the live path).
+  pkill -P "$watcher" 2>/dev/null || true
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  return $rc
 }
 
 # last "Import operation took X s" -> seconds (the rule/last import isolates
@@ -203,9 +232,81 @@ materialize_compare() {
 }
 
 # ----------------------------------------------------------------------------
-import_compare
-transitive_compare
-materialize_compare
+# 4. LUBM-N OWL 2 RL materialization (Stage-1 gate: within 3x RDFox).
+#    Same TBox + same ABox + SAME RULES (generated from rules.toml) through both
+#    engines. Hard closure-count parity gate. HornDB capped at CAP_SECONDS.
+# ----------------------------------------------------------------------------
+lubm_compare() {
+  local n="$1"
+  local lubmdir="$OUTDIR/lubm/$n"
+  if [[ ! -f "$lubmdir/abox.nt" || ! -f "$lubmdir/tbox.nt" ]]; then
+    echo ">> [lubm] generating LUBM-$n data" >&2
+    "$SCRIPT_DIR/gen_lubm.sh" --universities "$n" --out "$lubmdir" >&2
+  fi
+
+  # Matched ruleset, freshly generated from rules.toml each run (no drift).
+  python3 "$SCRIPT_DIR/gen_ruleset.py" >"$WORK/owl2rl-horndb-subset.dlog"
+
+  echo ">> [lubm] HornDB materialize (cap ${CAP_SECONDS}s)" >&2
+  local capped=0 hj="" h_ms="—" h_total=""
+  if cap_run "$CAP_SECONDS" "$LOGS/lubm.horndb.json" \
+        "$HB" materialize --data "$lubmdir/tbox.nt" --data "$lubmdir/abox.nt"; then
+    hj="$(cat "$LOGS/lubm.horndb.json")"
+    h_ms="$(hb_field "$hj" reason_ms)"; h_total="$(hb_field "$hj" total)"
+  else
+    capped=1
+    echo ">> [lubm] HornDB did not finish within ${CAP_SECONDS}s" >&2
+  fi
+
+  echo ">> [lubm] RDFox materialize (matched ruleset)" >&2
+  cp "$lubmdir/tbox.nt" "$lubmdir/abox.nt" "$WORK/owl2rl-horndb-subset.dlog" "$WORK/"
+  # Data first (tbox + abox), rules LAST -> last import time = reasoning only.
+  run_rdfox "$WORK" 'dstore create default' 'import tbox.nt' 'import abox.nt' \
+            'import owl2rl-horndb-subset.dlog' 'info' >"$LOGS/lubm.rdfox.log"
+  local r_secs r_ms r_total
+  r_secs="$(rdfox_import_secs "$LOGS/lubm.rdfox.log" last)"
+  r_ms="$(awk -v s="$r_secs" 'BEGIN{printf "%.3f", s*1000}')"
+  r_total="$(rdfox_facts "$LOGS/lubm.rdfox.log" all)"
+
+  # --- closure-count parity gate ---
+  # HornDB carries a fixed XSD datatype base, so HornDB total = RDFox + offset.
+  # PASS iff 0 <= (h_total - r_total) <= XSD_OFFSET_MAX. HornDB having FEWER
+  # facts means the ruleset translation dropped a rule -> hard FAIL.
+  # HornDB's fixed XSD datatype base is ~60 axioms; 512 is generous headroom.
+  # Task 5 (N=1) measures the exact offset and may tighten this.
+  local XSD_OFFSET_MAX=512
+  local parity ratio verdict
+  if [[ "$capped" -eq 1 ]]; then
+    parity="n/a (capped)"
+    ratio="—"
+    verdict="DID NOT COMPLETE within ${CAP_SECONDS}s"
+  else
+    local delta=$(( h_total - r_total ))
+    if [[ "$delta" -ge 0 && "$delta" -le "$XSD_OFFSET_MAX" ]]; then
+      parity="OK (HornDB +${delta})"
+    else
+      parity="MISMATCH (delta=${delta}) — ruleset translation suspect"
+    fi
+    ratio="$(fdiv "$h_ms" "$r_ms")"
+    if [[ "$parity" == MISMATCH* ]]; then
+      verdict="PARITY FAIL"
+    else
+      awk -v r="$ratio" 'BEGIN{exit !(r+0<=3.0)}' && verdict="PASS (within 3x)" || verdict="over 3x"
+    fi
+  fi
+
+  ROWS+=("lubm-$n|reason ms|${h_ms}|${r_ms}|${ratio}x|within 3x|$verdict")
+  DETAIL+=("lubm-$n     : LUBM($n); closure ${h_total:-—} / ${r_total} facts; parity ${parity}")
+}
+
+# ----------------------------------------------------------------------------
+if [[ "$LUBM_N" -gt 0 ]]; then
+  lubm_compare "$LUBM_N"
+else
+  import_compare
+  transitive_compare
+  materialize_compare
+fi
 
 # --- where results are STORED (gitignored — RDFox numbers must never be
 #     committed to a public repo; that counts as "publishing"). ---
