@@ -97,6 +97,46 @@ gen_workload.py ──┬─► chain.nt ──────────► hornd
 - **Hardware fingerprint matters.** Comparisons are only valid within one
   machine; don't compare a run here to a number measured elsewhere.
 
+## LUBM-N mode (`--lubm N`)
+
+Measures the literal Stage-1 gate — *LUBM-100 materialization within 3× of
+RDFox* — on real LUBM data, with both engines firing the **same** rules.
+
+```bash
+# Wire-up smoke test on LUBM(1) (~100k triples)
+scripts/bench/compare-rdfox.sh --lubm 1
+
+# The Stage-1 gate workload (~13M triples). Slow on HornDB's nested-loop
+# backend; capped at 30 min by default (override with --cap-seconds).
+scripts/bench/compare-rdfox.sh --lubm 100
+```
+
+How it works:
+
+- `gen_lubm.sh` fetches the Lehigh **UBA1.7** generator (needs a **JDK** — Java
+  21 is fine) and converts the generated RDF/XML to N-Triples with `riot`.
+  LUBM-100 produces a multi-GB `abox.nt` under the gitignored `target/` tree.
+- `gen_ruleset.py` regenerates the RDFox ruleset from `crates/owlrl/rules.toml`
+  on every run, so RDFox fires the same fixed-arity rules HornDB compiles (no
+  drift, no hand-copy).
+- `gen_schema_closure.py` resolves *this TBox's* `rdf:List` axioms
+  (`owl:intersectionOf` / `unionOf` / `propertyChainAxiom` / `AllDifferent`) and
+  emits the matching `scm-int` / `cls-int1` / `cls-uni` / `prp-spo2` rules + the
+  XSD datatype base. HornDB fires these list-axiom rules (`list_rules.rs`) and
+  injects the datatype base (`datatypes.rs`), but they are **not expressible** in
+  `rules.toml`, so `gen_ruleset.py` alone cannot give them to RDFox — feeding
+  them here is what makes the comparison genuinely apples-to-apples (issue #59).
+- A **closure-count parity gate** asserts HornDB and RDFox derive the *same* facts
+  (delta 0 at N=1, within a small tolerance). A mismatch fails the run — it means
+  a real translation gap: `gen_ruleset.py` drift, or a list axiom
+  `gen_schema_closure.py` does not yet handle (e.g. `owl:hasKey`/`prp-key`, which
+  it warns about on stderr).
+- HornDB's `materialize` uses the nested-loop `RuleFiringBackend`; if it exceeds
+  `--cap-seconds`, the run records **"did not complete"** as a valid Stage-1
+  finding rather than hanging.
+
+RDFox numbers stay **internal only** (gitignored `scripts/bench/results/`).
+
 ## Extending
 
 The natural next workload is real **LUBM** (the literal Stage-1 gate). RDFox

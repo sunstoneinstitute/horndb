@@ -40,6 +40,20 @@ These are the project-level go/no-go thresholds from `specs/SPEC-00-vision.md`.
 | **Stage 2** | LDBC SPB SF3 read | ≥**50%** of GraphDB Enterprise throughput | ORE 2015 OWL 2 RL fragment <100% solved |
 | **Stage 3** (hardware specialization) — *win condition* | LDBC SPB SF5 (~1B edges) on a single MI300A or GH200 | ≥**1.5×** RDFox materialization **and** ≥**2×** GraphDB Enterprise query throughput | "Stage 3 has not earned its budget" — SPEC-09 NF5 |
 
+> **Stage-1 LUBM gate — measurement status (internal):** wired and runnable via
+> `scripts/bench/compare-rdfox.sh --lubm N`. Both engines reason over identical
+> LUBM TBox+ABox with the same rule set (RDFox runs a ruleset generated from
+> `crates/owlrl/rules.toml`), guarded by a closure-count parity gate and a
+> wall-clock cap on HornDB. The N=1 wiring run completes end-to-end. The
+> closure-count **parity** gate now passes exactly (delta 0) — the earlier
+> over-derivation was a harness-completeness gap, resolved in
+> [#59](https://github.com/sunstoneinstitute/horndb/issues/59). The **timing**
+> gate does **not** yet pass: HornDB's nested-loop rule-firing backend is over
+> the 3× target at N=1 (tracked in `TASKS.md`/[#61](https://github.com/sunstoneinstitute/horndb/issues/61)
+> — wire the SPEC-05 GraphBLAS closure backend into the owlrl `Engine`).
+> LUBM-100 (the literal gate) not yet run. RDFox comparison numbers are
+> internal only (DeWitt clause) and are never recorded here.
+
 ## Per-subsystem targets (Stage 2 unless noted)
 
 Numbers below are pulled directly from each SPEC's NF section and acceptance criteria. They are the floor each subsystem must hit before it's "done."
