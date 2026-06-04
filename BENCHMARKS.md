@@ -19,7 +19,7 @@ The harness captures a hardware fingerprint per run; comparisons are valid only 
 
 | Engine | Role | Source of numbers |
 |---|---|---|
-| **RDFox** (Samsung / Oxford) | Materialization throughput leader. Pure forward-chaining. | ISWC 2015 paper: **6.1 M triples/sec** materialization on SPARC T5-8 (128 cores, 4 TB RAM). RDFox's own statement: pure-materialization gives up **100–1000×** on backward chaining. |
+| **RDFox** (Samsung / Oxford) | Materialization throughput leader. Pure forward-chaining. SPB-256 A/B driver: `scripts/run-rdfox-spb-256.sh` (requires a benchmarking license — see DeWitt note below). | ISWC 2015 paper: **6.1 M triples/sec** materialization on SPARC T5-8 (128 cores, 4 TB RAM). RDFox's own statement: pure-materialization gives up **100–1000×** on backward chaining. |
 | **GraphDB Enterprise** (Graphwise) | SPARQL throughput leader. Java/RDF4J derived. | LDBC SPB published baseline: expansion ratio **1:3.2** on SPB-256 OWL 2 RL run. |
 | **GraphDB Free** | Open competitor accessible without procurement. | Our differential A/B reference for nightly LDBC SPB-256 (`scripts/run-graphdb-free-spb-256.sh`). |
 | **Inferray** | Transitivity-closure speed record on commodity hardware. | **21.3 M triples/sec** closure on a single Intel desktop; **142×** vs RDFox and **590×** vs GraphDB/OWLIM on transitivity-chain. |
@@ -180,7 +180,7 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 - **LDBC SPB-256 nightly.** Workflow exists (`.github/workflows/nightly.yml`) and points at a self-hosted runner with the SPB driver pre-installed. Requires `scripts/dev/start-engine.sh` to exist, which it does not yet (SPEC-04 territory).
 - **LUBM-8000 materialization** (SPEC-04 acceptance #2, SPEC-02 acceptance #2/#3). Gated on the storage + rule engine being usable on real corpora.
 - **ORE 2015 OWL 2 RL fragment full pass.** Ten-ontology subset is wired up (`harness/ore2015-selected.toml`); the full corpus expansion is Stage-2 work (TASKS.md MEDIUM).
-- **A/B vs GraphDB Free.** SPEC-01 F10 — harness flow exists; needs the GraphDB Free binary on the benchmark runner. No licence restriction on publishing.
+- **A/B vs GraphDB Free.** SPEC-01 F10 — harness flow + per-engine SPB driver scripts exist (`scripts/run-graphdb-free-spb-256.sh`, `scripts/run-rdfox-spb-256.sh`); needs the GraphDB Free binary on the benchmark runner. No licence restriction on publishing.
 
 ### Running, internal only (no published numbers)
 
