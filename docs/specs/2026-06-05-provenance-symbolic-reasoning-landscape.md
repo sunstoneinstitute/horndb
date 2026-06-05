@@ -117,46 +117,78 @@ Verifiability here is the weaker "commutes with semiring homomorphisms" sense, n
 
 ## Sources
 
-Foundations & academic:
-- Provenance Semirings (PODS 2007) — https://web.cs.ucdavis.edu/~green/papers/pods07.pdf
-- Datalog provenance / power series — https://www.cis.upenn.edu/~val/15MayPODS.pdf
-- Scallop (PLDI 2023) — https://dl.acm.org/doi/10.1145/3591280 · https://arxiv.org/abs/2304.04812 · https://github.com/scallop-lang/scallop
-- ProbLog / DeepProbLog — https://arxiv.org/pdf/1304.6810 · https://arxiv.org/abs/1805.10872
-- Why-provenance for Datalog — https://arxiv.org/pdf/2303.12773
-- Soufflé provenance (TOPLAS 2020) — https://dl.acm.org/doi/10.1145/3379446 · https://souffle-lang.github.io/provenance
-- SPARQLprov — https://vldb.org/pvldb/vol14/p3389-galarraga.pdf · https://arxiv.org/pdf/1209.0378
-- Semiring provenance for DL / OBDA — https://arxiv.org/abs/2310.16472 · https://www.ijcai.org/proceedings/2019/0224.pdf
-- xclingo — https://arxiv.org/abs/2009.10242
-- Reason maintenance (JTMS/ATMS) — https://en.wikipedia.org/wiki/Reason_maintenance
+### Key papers (most relevant to HornDB's verifiable-justification goal)
 
-RDF/OWL reasoners & proofs:
-- EYE reasoner — https://eyereasoner.github.io/eye/ · https://josd.github.io/Papers/EYE.pdf
-- cwm — https://www.w3.org/2000/10/swap/doc/cwm.html
-- RDFox reasoning/explain — https://docs.oxfordsemantic.tech/reasoning.html · https://docs.oxfordsemantic.tech/rdfox-shell.html
+- **Cuong et al. / ESWC 2025 — "Proving Soundness of SPARQL Query Results Using Selective Disclosure of RDF
+  Datasets and Zero-Knowledge Proofs."** *The Semantic Web — ESWC 2025*, Springer LNCS, chapter DOI
+  `10.1007/978-3-032-25156-5_16`. Proves SPARQL result *soundness* by proving properties of the queried, signed,
+  Merkle-committed RDF dataset rather than executing the query in-circuit — reported ~3 orders of magnitude faster
+  than the execute-in-circuit approach; circuit encoding covers a SPARQL 1.1 fragment (BGP, Join, Filter, OPTIONAL,
+  UNION, bounded property paths, EXISTS, NOT EXISTS, MINUS). The single closest published result to "verifiable
+  proof of SPARQL answers." — https://link.springer.com/chapter/10.1007/978-3-032-25156-5_16
+- **Green, Karvounarakis & Tannen — "Provenance Semirings."** PODS 2007. The unifying framework: bag semantics,
+  probabilistic/incomplete DBs, and why/how-provenance as one semiring-parameterised algorithm; free semiring =
+  provenance polynomials `N[X]`. — https://web.cs.ucdavis.edu/~green/papers/pods07.pdf ·
+  https://dl.acm.org/doi/10.1145/3034786.3056125 · Datalog/power-series extension: https://www.cis.upenn.edu/~val/15MayPODS.pdf
+- **Li, Huang, Naik et al. — "Scallop: A Language for Neurosymbolic Programming."** PLDI / PACMPL 2023.
+  Datalog + provenance semirings + differentiable top-k proofs. —
+  https://dl.acm.org/doi/10.1145/3591280 · https://arxiv.org/abs/2304.04812 ·
+  https://www.cis.upenn.edu/~mhnaik/papers/pldi23.pdf · https://github.com/scallop-lang/scallop ·
+  precursor (probabilistic→differentiable): https://www.cis.upenn.edu/~mhnaik/papers/aiplans21.pdf
+- **Zhao, Subotić, Scholz — "Debugging Large-scale Datalog: A Scalable Provenance Evaluation Strategy."** ACM
+  TOPLAS 2020 (Soufflé proof trees). — https://dl.acm.org/doi/10.1145/3379446 · https://souffle-lang.github.io/provenance
+- **Berners-Lee / Verborgh et al. — EYE reasoner & the Semantic Web "proof layer."** Independently validatable N3
+  proofs via the SWAP `reason` vocabulary. — https://eyereasoner.github.io/eye/ · https://josd.github.io/Papers/EYE.pdf
+
+### Foundations & academic provenance / neuro-symbolic
+
+- ProbLog (theory + tabled-proof inference) — https://arxiv.org/pdf/1304.6810 · https://arxiv.org/pdf/1202.3719
+- DeepProbLog (neural predicates) — https://arxiv.org/abs/1805.10872 · https://www.sciencedirect.com/science/article/pii/S0004370221000552
+- Why-provenance for Datalog (proof-tree classes; complexity) — https://arxiv.org/pdf/2303.12773
+- Incremental why-provenance via SAT (AAAI) — https://ojs.aaai.org/index.php/AAAI/article/view/28914/29739
+- Revisiting Semiring Provenance for Datalog (KR 2022) — https://proceedings.kr.org/2022/10/kr2022-0010-bourgaux-et-al.pdf
+- Semiring provenance for lightweight Description Logics — https://arxiv.org/abs/2310.16472 · ELHr (IJCAI 2020): https://www.ijcai.org/Proceedings/2020/0258.pdf
+- Provenance for Ontology-Based Data Access (IJCAI 2019) — https://www.ijcai.org/proceedings/2019/0224.pdf
+- Provenance for SPARQL: SPARQLprov + how-provenance polynomials — https://vldb.org/pvldb/vol14/p3389-galarraga.pdf · https://arxiv.org/pdf/1209.0378
+- xclingo — explainable ASP (ICLP 2020) — https://arxiv.org/abs/2009.10242 · https://github.com/bramucas/xclingo2
+- Reason maintenance — JTMS (Doyle 1979) / ATMS (de Kleer 1986) — https://en.wikipedia.org/wiki/Reason_maintenance · https://dekleer.org/Publications/Problem%20Solving%20with%20the%20ATMS.pdf
+- OWL justifications: laconic & precise (Horridge) — http://owl.cs.manchester.ac.uk/research/explanation/ · https://link.springer.com/chapter/10.1007/978-3-540-88564-1_21 · https://cdn.bcs.org/bcs-org-media/2146/dd-2012-matthew-horridge.pdf
+- Neuro-symbolic verifiable reasoning framing — VeriCoT — https://arxiv.org/pdf/2511.04662 · Proof-of-Thought — https://arxiv.org/pdf/2409.17270
+
+### RDF/OWL reasoners & proofs
+
+- EYE reasoner — https://eyereasoner.github.io/eye/ · https://josd.github.io/Papers/EYE.pdf · Euler/SWAP: https://eulersharp.sourceforge.net/2006/02swap/
+- cwm (`--why`) — https://www.w3.org/2000/10/swap/doc/cwm.html
+- RDFox reasoning / explain — https://docs.oxfordsemantic.tech/reasoning.html · https://docs.oxfordsemantic.tech/rdfox-shell.html · scalable reasoning paper: https://www.cs.ox.ac.uk/people/boris.motik/pubs/npmhwb15RDFox-scalable.pdf
 - Stardog reasoning explain — https://docs.stardog.com/inference-engine/advanced-reasoning-features · https://docs.stardog.com/stardog-cli-reference/reasoning/reasoning-explain
-- GraphDB Proof plugin — https://graphdb.ontotext.com/documentation/11.3/inference.html
-- Jena inference/derivation — https://jena.apache.org/documentation/inference/
-- OWL Explanation / justifications — http://owl.cs.manchester.ac.uk/research/explanation/
-- Nemo trace — https://github.com/knowsys/nemo · https://proceedings.kr.org/2024/70/kr2024-0070-ivliev-et-al.pdf
+- Ontotext GraphDB Proof plugin & Provenance plugin — https://graphdb.ontotext.com/documentation/11.3/inference.html · https://graphdb.ontotext.com/documentation/6.6/standard/provenance-plugin.html
+- Apache Jena derivation / `RuleDerivation` — https://jena.apache.org/documentation/inference/ · https://jena.apache.org/documentation/javadoc/jena/org/apache/jena/reasoner/rulesys/RuleDerivation.html
+- Pellet / ELK reasoners — https://github.com/stardog-union/pellet · https://github.com/liveontologies/elk-reasoner
+- Nemo trace / VLog / Rulewerk — https://github.com/knowsys/nemo · https://proceedings.kr.org/2024/70/kr2024-0070-ivliev-et-al.pdf · https://iccl.inf.tu-dresden.de/web/VLog/en · Evonne proof viz: https://imld.de/cnt/uploads/2024-XLoKR-EvonNemo.pdf
 
-Engines / commercial:
-- RDFox scalable reasoning — https://www.cs.ox.ac.uk/people/boris.motik/pubs/npmhwb15RDFox-scalable.pdf
-- Samsung acquires Oxford Semantic — https://news.samsung.com/global/samsung-electronics-announces-acquisition-of-oxford-semantic-technologies-uk-based-knowledge-graph-startup
-- Stardog explainable AI / Voicebox — https://www.stardog.com/blog/explainable-ai-in-stardog/ · https://www.stardog.com/blog/safety-rag-improving-ai-safety-by-extending-ais-data-reach/
-- AllegroGraph 8 neuro-symbolic — https://allegrograph.com/press_room/franz-unveils-allegrograph-8-0-the-first-neuro-symbolic-ai-platform-merging-knowledge-graphs-generative-ai-and-vector-storage/
-- Cyc justification — https://cyc.com/wp-content/uploads/2021/04/Cyc-Technology-Overview.pdf · https://arxiv.org/pdf/2308.04445
-- TerminusDB — https://github.com/terminusdb/terminusdb
-- ProvSQL — https://provsql.org/ · https://inria.hal.science/hal-01851538/document
-- LogicBlox / Vadalog — https://www.cs.ox.ac.uk/dan.olteanu/papers/logicblox-sigmod15.pdf · https://www.vldb.org/pvldb/vol11/p975-bellomarini.pdf
+### Engines / commercial
 
-Cryptographic / verifiable:
+- Samsung acquires Oxford Semantic (RDFox) — https://news.samsung.com/global/samsung-electronics-announces-acquisition-of-oxford-semantic-technologies-uk-based-knowledge-graph-startup
+- Stardog explainable AI / Voicebox Safety RAG — https://www.stardog.com/blog/explainable-ai-in-stardog/ · https://www.stardog.com/blog/safety-rag-improving-ai-safety-by-extending-ais-data-reach/
+- AllegroGraph 8 neuro-symbolic — https://allegrograph.com/press_room/franz-unveils-allegrograph-8-0-the-first-neuro-symbolic-ai-platform-merging-knowledge-graphs-generative-ai-and-vector-storage/ · reasoner: https://franz.com/agraph/support/documentation/reasoner-tutorial.html
+- Cambridge Semantics AnzoGraph inferences — https://docs.cambridgesemantics.com/anzograph/v3.1/userdoc/inferences.htm
+- Cyc justification / argumentation — https://cyc.com/wp-content/uploads/2021/04/Cyc-Technology-Overview.pdf · http://dev.cyc.com/api/samples/core/query/justification/ · Cyc-vs-LLM (2023): https://arxiv.org/pdf/2308.04445
+- TerminusDB (content-addressed lineage) — https://github.com/terminusdb/terminusdb · https://terminusdb.org/docs/terminusdb-explanation/
+- metaphacts metis / eccenca + xpSHACL — https://metaphacts.com/introducing-metis · https://eccenca.com/products/enterprise-knowledge-graph-platform-corporate-memory · https://arxiv.org/pdf/2507.08432
+- ProvSQL (PostgreSQL provenance circuits) — https://provsql.org/ · https://inria.hal.science/hal-01851538/document
+- LogicBlox / Vadalog / DLV / Datomic / DDlog — https://www.cs.ox.ac.uk/dan.olteanu/papers/logicblox-sigmod15.pdf · https://developer.logicblox.com/2010/03/querying-data-provenance/ · https://www.vldb.org/pvldb/vol11/p975-bellomarini.pdf · https://arxiv.org/pdf/cs/0003036 · https://docs.datomic.com/transactions/model.html · https://github.com/vmware-archive/differential-datalog
+
+### Cryptographic / verifiable
+
 - zkSPARQL — https://zksparql.org/ · https://github.com/jeswr/zkSPARQL-bench/
-- ESWC 2025 selective disclosure — https://link.springer.com/chapter/10.1007/978-3-032-25156-5_16
-- ZKSQL (VLDB 2023) — https://www.vldb.org/pvldb/vol16/p1804-li.pdf
-- VeriDKG (VLDB 2024) — https://www.vldb.org/pvldb/vol17/p912-zhou.pdf
+- ESWC 2025 selective disclosure (see Key papers) — https://link.springer.com/chapter/10.1007/978-3-032-25156-5_16
+- ZKSQL — verifiable SQL via ZK (VLDB 2023) — https://www.vldb.org/pvldb/vol16/p1804-li.pdf
+- VeriDKG — verifiable SPARQL over decentralized KGs (VLDB 2024) — https://www.vldb.org/pvldb/vol17/p912-zhou.pdf · https://dl.acm.org/doi/10.14778/3636218.3636242
+- vChain — verifiable queries over blockchain (authenticated data structures) — https://arxiv.org/pdf/1812.02386
 - OriginTrail DKG — https://docs.origintrail.io/dkg-knowledge-hub/learn-more/readme/decentralized-knowledge-graph-dkg
-- Secure Network Provenance (SOSP 2011) — https://haeberlen.cis.upenn.edu/papers/snp-tr2.pdf
-- RDF Dataset Canonicalization (RDFC-1.0) — https://www.w3.org/news/2024/rdf-dataset-canonicalization-is-a-w3c-recommendation/
-- PROV-O — https://www.w3.org/TR/prov-o/
-- Verifiable Credentials 2.0 — https://www.w3.org/news/2025/the-verifiable-credentials-2-0-family-of-specifications-is-now-a-w3c-recommendation/
-- Binder / SecPAL — https://www.cs.umd.edu/sites/default/files/scholarly_papers/VKolovski_1.pdf
+- Secure Network Provenance / SNooPy (SOSP 2011) — tamper-evident signed Datalog provenance — https://haeberlen.cis.upenn.edu/papers/snp-tr2.pdf · ExSPAN: https://netdb.cis.upenn.edu/papers/netProvenance.pdf
+- Content-addressed RDF — IPLD / IPFS Merkle DAG — https://github.com/ipld/specs/blob/main/IPLD.md · https://docs.ipfs.tech/concepts/merkle-dag/
+- RDF Dataset Canonicalization (RDFC-1.0, W3C Rec 2024) — https://www.w3.org/news/2024/rdf-dataset-canonicalization-is-a-w3c-recommendation/ · https://www.w3.org/TR/rdf-canon/
+- PROV-O (W3C Rec) — https://www.w3.org/TR/prov-o/
+- Verifiable Credentials 2.0 family (W3C Rec 2025) — https://www.w3.org/news/2025/the-verifiable-credentials-2-0-family-of-specifications-is-now-a-w3c-recommendation/ · https://www.w3.org/TR/vc-data-model-2.0/
+- Datalog proof-carrying authorization — Binder — https://www.cs.umd.edu/sites/default/files/scholarly_papers/VKolovski_1.pdf · SecPAL: https://courses.cs.vt.edu/cs5204/fall08-kafura/Papers/Security/SecPal-Reference.pdf · Soutei: https://link.springer.com/chapter/10.1007/11737414_10
