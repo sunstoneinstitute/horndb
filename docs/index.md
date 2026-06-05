@@ -17,6 +17,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 - [`adr/`](adr/README.md) — Architecture Decision Records (15 so far), one decision per file in Nygard format. Read these for the rationale behind a choice; read `architecture.md` for its current status.
 - [`rdflib.md`](rdflib.md) — compare common rdflib workflows with the current HornDB surface area; read SPEC-10 for the compatibility contract.
 - [`silicondb-horndb-claim-layer.md`](silicondb-horndb-claim-layer.md) — design sketch for a probabilistic claim layer with HornDB certification.
+- [`../specs/2026-06-05-provenance-symbolic-reasoning-landscape.md`](../specs/2026-06-05-provenance-symbolic-reasoning-landscape.md) — competitive landscape: who else combines provenance proof with symbolic reasoning (EYE, RDFox, Stardog, GraphDB, Soufflé, Scallop, ZK-SPARQL). Read before scoping verifiable-justification work in SPEC-04/SPEC-08.
 
 ## Where to go next
 
