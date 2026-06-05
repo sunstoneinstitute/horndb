@@ -74,6 +74,15 @@ if [[ "${SPB_BUILD_DRIVER:-0}" == "1" ]]; then
         exit 2
     fi
     echo "building SPB driver JAR with Ant (this takes a few minutes)…"
+    # SPB v2.0's build.xml pins javac to source/target 1.7, which JDK 9+
+    # rejects ("Source option 7 is no longer supported"). Bump it to 1.8
+    # (the oldest level modern JDKs still accept) so the build works on a
+    # current default-jdk. Idempotent: only rewrites the 1.7 lines.
+    if grep -q 'source="1.7"' "$SPB_DIR/build.xml" 2>/dev/null; then
+        sed -i -e 's/source="1.7"/source="1.8"/' -e 's/target="1.7"/target="1.8"/' \
+            "$SPB_DIR/build.xml"
+        echo "patched build.xml: javac source/target 1.7 -> 1.8 (JDK 9+ compat)"
+    fi
     # build-basic-querymix produces dist/<jar>-basic-standard.jar; that is
     # the driver the run scripts invoke as a single positional arg.
     ( cd "$SPB_DIR" && ant build-basic-querymix )

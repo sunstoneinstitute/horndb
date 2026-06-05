@@ -93,6 +93,14 @@ pub fn run(cfg: &SpbConfig<'_>) -> Result<SpbResult> {
             cfg.driver_jar.display()
         );
     }
+    // Resolve the jar to an absolute path: we run the driver with a
+    // different working directory (the scenario's dir, see below), so a
+    // relative `--driver-jar` would otherwise fail to resolve.
+    let driver_jar = cfg
+        .driver_jar
+        .canonicalize()
+        .with_context(|| format!("resolving SPB driver JAR {}", cfg.driver_jar.display()))?;
+
     let base = std::fs::read_to_string(cfg.scenario)
         .with_context(|| format!("reading SPB scenario file {}", cfg.scenario.display()))?;
 
@@ -109,10 +117,23 @@ pub fn run(cfg: &SpbConfig<'_>) -> Result<SpbResult> {
         ],
     );
 
+    // The driver resolves the relative path keys in the scenario file
+    // (`ontologiesPath=./data/...`, `definitionsPath=./...`, the
+    // dictionary one level up from `referenceDatasetsPath`, etc.) against
+    // its *working directory*. The conventional layout (the Ant build's
+    // self-contained `dist/`) puts those paths relative to the scenario
+    // file, so we run the driver with CWD = the scenario's directory and
+    // co-locate the merged temp file there.
+    let scenario_dir = cfg
+        .scenario
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
     let mut merged_file = tempfile::Builder::new()
         .prefix("spb-scenario-")
         .suffix(".properties")
-        .tempfile()
+        .tempfile_in(scenario_dir)
         .context("creating merged SPB scenario temp file")?;
     use std::io::Write as _;
     merged_file
@@ -124,8 +145,9 @@ pub fn run(cfg: &SpbConfig<'_>) -> Result<SpbResult> {
 
     let output = Command::new("java")
         .arg("-jar")
-        .arg(cfg.driver_jar)
+        .arg(&driver_jar)
         .arg(merged_file.path())
+        .current_dir(scenario_dir)
         .output()
         .with_context(|| "spawning `java` for the SPB driver (is a JRE installed and on PATH?)")?;
     if !output.status.success() {
