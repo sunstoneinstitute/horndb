@@ -84,3 +84,21 @@ fn select_limit_offset() {
     let rows = run("SELECT ?o WHERE { ?s <http://ex/knows> ?o } LIMIT 2", &s);
     assert_eq!(rows.len(), 2);
 }
+
+#[test]
+fn literal_object_roundtrips_as_literal_not_uri() {
+    // A literal object must surface as Term::Literal, not Term::Iri,
+    // so the SPARQL-XML writer emits <literal> rather than <uri>.
+    let mut s = MemStore::default();
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/name"),
+        Term::Literal("\"Alice\"".into()),
+    );
+    let rows = run("SELECT ?n WHERE { ?s <http://ex/name> ?n }", &s);
+    assert_eq!(rows.len(), 1);
+    match rows[0].get("n").unwrap() {
+        Term::Literal(raw) => assert_eq!(raw, "\"Alice\""),
+        other => panic!("expected Term::Literal, got {other:?}"),
+    }
+}
