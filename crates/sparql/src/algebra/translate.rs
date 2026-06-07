@@ -322,6 +322,20 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
         E::SameTerm(a, b) => Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Less(a, b) => Expr::Lt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Greater(a, b) => Expr::Gt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
+        E::LessOrEqual(a, b) => {
+            Expr::Le(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?))
+        }
+        E::GreaterOrEqual(a, b) => {
+            Expr::Ge(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?))
+        }
+        E::In(a, list) => {
+            let head = Box::new(translate_expr(a)?);
+            let items = list
+                .iter()
+                .map(translate_expr)
+                .collect::<Result<Vec<_>>>()?;
+            Expr::In(head, items)
+        }
         E::And(a, b) => Expr::And(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Or(a, b) => Expr::Or(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Not(a) => Expr::Not(Box::new(translate_expr(a)?)),

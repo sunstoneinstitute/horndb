@@ -211,13 +211,21 @@ fn decimal_literal(x: f64) -> Term {
 }
 
 /// Extract the lexical value of a literal term for numeric/string
-/// aggregation. For a `"v"^^<dt>` or `"v"@lang` literal, returns the
-/// inner `v`; for a plain literal (no quotes), returns it as-is; for
-/// IRIs/bnodes returns the lexical form unchanged.
+/// comparison and aggregation. For a `"v"^^<dt>` or `"v"@lang` literal,
+/// returns the inner `v`; for a plain literal (no quotes), returns it
+/// as-is.
+///
+/// Stage-1 note: the `MemStore` erases term kinds on scan, so a bound
+/// literal object arrives as `Term::Iri("\"10\"^^<…>")` — the literal's
+/// full N-Triples form wrapped in the wrong variant. We therefore run
+/// `literal_lexical` over the `Iri`/`BlankNode` lexical forms too; a
+/// genuine IRI does not start with `"` so it is returned unchanged. Once
+/// the term-kind preservation (rung 4 / SPEC-02) lands this collapses to
+/// just the `Literal` arm.
 fn literal_value(t: &Term) -> String {
     match t {
         Term::Literal(raw) => literal_lexical(raw),
-        Term::Iri(s) | Term::BlankNode(s) => s.clone(),
+        Term::Iri(s) | Term::BlankNode(s) => literal_lexical(s),
         Term::Var(v) => v.name().to_owned(),
         Term::Triple(_) => String::new(),
     }
@@ -405,7 +413,7 @@ fn compare_by_keys(a: &Bindings, b: &Bindings, keys: &[(Expr, OrderDir)]) -> std
         let ta = eval_expr_to_term(e, a).ok().flatten();
         let tb = eval_expr_to_term(e, b).ok().flatten();
         let ord = match (ta, tb) {
-            (Some(x), Some(y)) => lex(&x).cmp(&lex(&y)),
+            (Some(x), Some(y)) => compare_terms(&x, &y),
             (None, Some(_)) => Ordering::Less,
             (Some(_), None) => Ordering::Greater,
             (None, None) => Ordering::Equal,
@@ -434,21 +442,45 @@ fn lex(t: &Term) -> String {
 }
 
 fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
+    use std::cmp::Ordering;
+    let cmp = |a: &Expr, c: &Expr| -> Result<Option<Ordering>> {
+        Ok(match (eval_expr_to_term(a, b)?, eval_expr_to_term(c, b)?) {
+            (Some(x), Some(y)) => Some(compare_terms(&x, &y)),
+            _ => None,
+        })
+    };
     Ok(match e {
         Expr::Eq(a, c) => eval_expr_to_term(a, b)? == eval_expr_to_term(c, b)?,
         Expr::Ne(a, c) => eval_expr_to_term(a, b)? != eval_expr_to_term(c, b)?,
-        Expr::Lt(a, c) => match (eval_expr_to_term(a, b)?, eval_expr_to_term(c, b)?) {
-            (Some(x), Some(y)) => lex(&x) < lex(&y),
-            _ => false,
-        },
-        Expr::Gt(a, c) => match (eval_expr_to_term(a, b)?, eval_expr_to_term(c, b)?) {
-            (Some(x), Some(y)) => lex(&x) > lex(&y),
-            _ => false,
-        },
+        Expr::Lt(a, c) => cmp(a, c)? == Some(Ordering::Less),
+        Expr::Gt(a, c) => cmp(a, c)? == Some(Ordering::Greater),
+        Expr::Le(a, c) => matches!(cmp(a, c)?, Some(Ordering::Less | Ordering::Equal)),
+        Expr::Ge(a, c) => matches!(cmp(a, c)?, Some(Ordering::Greater | Ordering::Equal)),
         Expr::And(a, c) => eval_expr(a, b)? && eval_expr(c, b)?,
         Expr::Or(a, c) => eval_expr(a, b)? || eval_expr(c, b)?,
         Expr::Not(a) => !eval_expr(a, b)?,
         Expr::Bound(v) => b.get(v.name()).is_some(),
+        Expr::In(a, list) => {
+            let lhs = eval_expr_to_term(a, b)?;
+            match lhs {
+                None => false,
+                Some(x) => {
+                    let mut found = false;
+                    for item in list {
+                        if let Some(y) = eval_expr_to_term(item, b)? {
+                            // Value equality (not variant equality): the
+                            // Stage-1 store may bind the LHS as a
+                            // different term kind than the constant RHS.
+                            if x == y || compare_terms(&x, &y) == std::cmp::Ordering::Equal {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                }
+            }
+        }
         Expr::Term(t) => match t {
             // Bare term in boolean context: treat IRI/Literal as
             // truthy; var resolves to its binding.
@@ -456,6 +488,47 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
             _ => true,
         },
     })
+}
+
+/// Order two terms for SPARQL relational operators. Numeric when both
+/// coerce to numbers, then xsd:dateTime when both look like ISO-8601
+/// instants, otherwise lexical comparison of the literal value. This is
+/// a Stage-1 best effort — it covers the SPB datetime-range filters and
+/// ordinary numeric/string comparisons without a full XSD type lattice.
+fn compare_terms(x: &Term, y: &Term) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Some(a), Some(b)) = (numeric_value(x), numeric_value(y)) {
+        return a.partial_cmp(&b).unwrap_or(Ordering::Equal);
+    }
+    let (lx, ly) = (literal_value(x), literal_value(y));
+    if let (Some(a), Some(b)) = (datetime_key(&lx), datetime_key(&ly)) {
+        return a.cmp(&b);
+    }
+    lx.cmp(&ly)
+}
+
+/// Normalise an xsd:dateTime lexical form into a sortable key. Returns
+/// `None` if the string does not look like an ISO-8601 instant. We do
+/// not parse offsets fully; the lexical form sorts correctly for the
+/// common `YYYY-MM-DDThh:mm:ss(.fff)?(Z)?` shape used by SPB, so we just
+/// validate the prefix and key on the original string.
+fn datetime_key(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    // Minimum `YYYY-MM-DDThh:mm:ss` is 19 chars.
+    if bytes.len() < 19 {
+        return None;
+    }
+    let is_shape = bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && (bytes[10] == b'T' || bytes[10] == b' ')
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[..4].iter().all(|c| c.is_ascii_digit());
+    if is_shape {
+        Some(s.to_owned())
+    } else {
+        None
+    }
 }
 
 fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
@@ -470,6 +543,9 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::Ne(_, _)
         | Expr::Lt(_, _)
         | Expr::Gt(_, _)
+        | Expr::Le(_, _)
+        | Expr::Ge(_, _)
+        | Expr::In(_, _)
         | Expr::And(_, _)
         | Expr::Or(_, _)
         | Expr::Not(_)
