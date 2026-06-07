@@ -246,7 +246,17 @@ fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<(
     let file = File::create(path)?;
     let mut w = std::io::BufWriter::new(file);
     let mut line = String::new();
+    let mut skipped_literal_subject = 0usize;
     for (s, p, o) in triples {
+        // OWL 2 RL datatype rules (dt-type*) can derive `rdf:type` triples
+        // whose subject is a literal (e.g. a dateTime literal typed as
+        // xsd:date). N-Triples forbids literal subjects, and such triples
+        // are not addressable as subjects in standard SPARQL, so drop them
+        // from the flat dump rather than emit illegal syntax.
+        if s.starts_with('"') {
+            skipped_literal_subject += 1;
+            continue;
+        }
         line.clear();
         push_term(&mut line, s);
         line.push(' ');
@@ -258,17 +268,59 @@ fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<(
         w.write_all(line.as_bytes())?;
     }
     w.flush()?;
+    if skipped_literal_subject > 0 {
+        eprintln!(
+            "write_ntriples: skipped {skipped_literal_subject} triple(s) with a literal subject \
+             (not representable in N-Triples)"
+        );
+    }
     Ok(())
 }
 
-/// Append one N-Triples term. Blank nodes (`_:`) and literals (`"`) pass
-/// through; everything else is treated as an IRI and angle-bracketed.
+/// Append one N-Triples term.
+///
+/// Blank nodes (`_:`) pass through. Literals (engine key form
+/// `"value"^^<dt>` or `"value"@lang`) are re-emitted with the value's
+/// inner specials (`"`, `\`, newlines, …) escaped — the engine stores the
+/// raw lexical value verbatim, which can contain unescaped quotes that
+/// would otherwise produce invalid N-Triples. Everything else is treated
+/// as an IRI and angle-bracketed.
 fn push_term(out: &mut String, term: &str) {
-    if term.starts_with("_:") || term.starts_with('"') {
+    if let Some(rest) = term.strip_prefix('"') {
+        // Split the value from the trailing `"^^<dt>` or `"@lang` suffix
+        // at the *last* unescaped — here, last literal — closing quote.
+        // The engine never escapes, so find the final `"` that precedes
+        // `^^` or `@` (or end of string).
+        if let Some(close) = rest.rfind('"') {
+            let value = &rest[..close];
+            let suffix = &rest[close + 1..]; // `^^<dt>` or `@lang` or empty
+            out.push('"');
+            escape_nt_literal(out, value);
+            out.push('"');
+            out.push_str(suffix);
+        } else {
+            // Malformed — emit verbatim and let the consumer complain.
+            out.push_str(term);
+        }
+    } else if term.starts_with("_:") {
         out.push_str(term);
     } else {
         out.push('<');
         out.push_str(term);
         out.push('>');
+    }
+}
+
+/// Escape a literal value for an N-Triples quoted string (RDF 1.1 §3.3).
+fn escape_nt_literal(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
     }
 }
