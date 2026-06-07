@@ -59,7 +59,7 @@ fn bench_insert(c: &mut Criterion) {
                     circuit.assert_triple((i, P, i + 1));
                 }
                 circuit.tick();
-                criterion::black_box(circuit.derived_base().len())
+                std::hint::black_box(circuit.derived_base().len())
             })
         });
     }
