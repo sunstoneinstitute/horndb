@@ -1289,9 +1289,11 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "clap",
  "hyper",
  "insta",
  "oxrdf",
+ "oxttl",
  "pretty_assertions",
  "serde",
  "serde_json",

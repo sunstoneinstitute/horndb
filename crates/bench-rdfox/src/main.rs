@@ -26,7 +26,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use oxrdf::{Dataset, GraphName, Quad};
-use oxttl::NTriplesParser;
+use oxttl::{NTriplesParser, TurtleParser};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -60,6 +60,12 @@ enum Cmd {
         /// One or more N-Triples files; concatenated into one default graph.
         #[arg(long = "data", required = true, num_args = 1..)]
         data: Vec<PathBuf>,
+        /// Optional: write the full materialized closure to this path as
+        /// N-Triples (asserted base + everything inferred). Lets a
+        /// lightweight serve binary load an already-reasoned graph without
+        /// linking the OWL/GraphBLAS stack.
+        #[arg(long = "dump-nt")]
+        dump_nt: Option<PathBuf>,
     },
 }
 
@@ -67,7 +73,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Import { data } => run_import(&data),
         Cmd::Transitive { data, predicate } => run_transitive(&data, &predicate),
-        Cmd::Materialize { data } => run_materialize(&data),
+        Cmd::Materialize { data, dump_nt } => run_materialize(&data, dump_nt.as_deref()),
     }
 }
 
@@ -156,19 +162,33 @@ fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_materialize(files: &[PathBuf]) -> Result<()> {
+fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>) -> Result<()> {
     let mut dataset = Dataset::new();
     let parse_start = Instant::now();
     let mut input: u64 = 0;
     for f in files {
         let reader =
             BufReader::new(File::open(f).with_context(|| format!("opening {}", f.display()))?);
-        for triple in NTriplesParser::new().for_reader(reader) {
-            let t = triple.with_context(|| format!("parsing {}", f.display()))?;
-            dataset.insert(
-                Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
-            );
-            input += 1;
+        // Format by extension: `.ttl` → Turtle, everything else → N-Triples.
+        // SPB ontologies and reference datasets ship as Turtle; the
+        // generated Creative Works are N-Triples.
+        let is_turtle = f.extension().and_then(|e| e.to_str()) == Some("ttl");
+        if is_turtle {
+            for triple in TurtleParser::new().for_reader(reader) {
+                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
+                dataset.insert(
+                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+                );
+                input += 1;
+            }
+        } else {
+            for triple in NTriplesParser::new().for_reader(reader) {
+                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
+                dataset.insert(
+                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+                );
+                input += 1;
+            }
         }
     }
     let parse = parse_start.elapsed();
@@ -181,6 +201,16 @@ fn run_materialize(files: &[PathBuf]) -> Result<()> {
     let asserted = engine.asserted_len().unwrap_or(0);
     let total = engine.materialized_len().unwrap_or(0);
     let inferred = total.saturating_sub(asserted);
+
+    // Optional: dump the materialized closure to N-Triples so a
+    // lightweight serve binary can load it without the OWL/GraphBLAS stack.
+    if let Some(path) = dump_nt {
+        let triples = engine
+            .materialized_triples()
+            .context("materialized_triples returned None after a successful load")?;
+        write_ntriples(path, &triples)
+            .with_context(|| format!("writing materialized N-Triples to {}", path.display()))?;
+    }
     let secs = reason.as_secs_f64();
     // Throughput on *input* facts (comparable to RDFox "facts/sec" on the
     // asserted base) and on *output* facts (total closure size / time).
@@ -202,4 +232,95 @@ fn run_materialize(files: &[PathBuf]) -> Result<()> {
         ("output_tps", format!("{tps_out:.1}")),
     ]);
     Ok(())
+}
+
+/// Serialize lexical `(s, p, o)` triples (as produced by
+/// `Engine::materialized_triples`) to an N-Triples file.
+///
+/// The term lexical convention from the engine is: IRIs are bare,
+/// blank nodes carry the `_:` prefix, and literals already arrive in
+/// N-Triples object form (`"v"@lang` or `"v"^^<dt>`). We only need to
+/// angle-bracket IRIs; blank nodes and literals pass through verbatim.
+fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<()> {
+    use std::io::Write;
+    let file = File::create(path)?;
+    let mut w = std::io::BufWriter::new(file);
+    let mut line = String::new();
+    let mut skipped_literal_subject = 0usize;
+    for (s, p, o) in triples {
+        // OWL 2 RL datatype rules (dt-type*) can derive `rdf:type` triples
+        // whose subject is a literal (e.g. a dateTime literal typed as
+        // xsd:date). N-Triples forbids literal subjects, and such triples
+        // are not addressable as subjects in standard SPARQL, so drop them
+        // from the flat dump rather than emit illegal syntax.
+        if s.starts_with('"') {
+            skipped_literal_subject += 1;
+            continue;
+        }
+        line.clear();
+        push_term(&mut line, s);
+        line.push(' ');
+        // Predicates are always IRIs.
+        push_term(&mut line, p);
+        line.push(' ');
+        push_term(&mut line, o);
+        line.push_str(" .\n");
+        w.write_all(line.as_bytes())?;
+    }
+    w.flush()?;
+    if skipped_literal_subject > 0 {
+        eprintln!(
+            "write_ntriples: skipped {skipped_literal_subject} triple(s) with a literal subject \
+             (not representable in N-Triples)"
+        );
+    }
+    Ok(())
+}
+
+/// Append one N-Triples term.
+///
+/// Blank nodes (`_:`) pass through. Literals (engine key form
+/// `"value"^^<dt>` or `"value"@lang`) are re-emitted with the value's
+/// inner specials (`"`, `\`, newlines, …) escaped — the engine stores the
+/// raw lexical value verbatim, which can contain unescaped quotes that
+/// would otherwise produce invalid N-Triples. Everything else is treated
+/// as an IRI and angle-bracketed.
+fn push_term(out: &mut String, term: &str) {
+    if let Some(rest) = term.strip_prefix('"') {
+        // Split the value from the trailing `"^^<dt>` or `"@lang` suffix
+        // at the *last* unescaped — here, last literal — closing quote.
+        // The engine never escapes, so find the final `"` that precedes
+        // `^^` or `@` (or end of string).
+        if let Some(close) = rest.rfind('"') {
+            let value = &rest[..close];
+            let suffix = &rest[close + 1..]; // `^^<dt>` or `@lang` or empty
+            out.push('"');
+            escape_nt_literal(out, value);
+            out.push('"');
+            out.push_str(suffix);
+        } else {
+            // Malformed — emit verbatim and let the consumer complain.
+            out.push_str(term);
+        }
+    } else if term.starts_with("_:") {
+        out.push_str(term);
+    } else {
+        out.push('<');
+        out.push_str(term);
+        out.push('>');
+    }
+}
+
+/// Escape a literal value for an N-Triples quoted string (RDF 1.1 §3.3).
+fn escape_nt_literal(out: &mut String, value: &str) {
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
 }

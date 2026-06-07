@@ -31,6 +31,18 @@ axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
+# Used only by the `serve` binary (gated on the `server` feature). Kept
+# non-optional for simplicity — they are small, pure-Rust deps and the
+# library code does not reference them.
+oxttl = { workspace = true }
+clap = { workspace = true }
+
+[[bin]]
+name = "serve"
+path = "src/bin/serve.rs"
+# The server (axum/tokio) lives behind the `server` feature; the binary
+# cannot build without it.
+required-features = ["server"]
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
