@@ -66,10 +66,15 @@ pub enum Expr {
     Ne(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
+    Le(Box<Expr>, Box<Expr>),
+    Ge(Box<Expr>, Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     Bound(Var),
+    /// `expr IN (a, b, …)` — true when `expr` equals any list element.
+    /// `NOT IN` is lowered by spargebra as `Not(In(...))`.
+    In(Box<Expr>, Vec<Expr>),
 }
 
 /// Algebra operators supported in Stage 1.
