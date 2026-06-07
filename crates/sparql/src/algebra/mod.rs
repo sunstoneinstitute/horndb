@@ -66,10 +66,15 @@ pub enum Expr {
     Ne(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
+    Le(Box<Expr>, Box<Expr>),
+    Ge(Box<Expr>, Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     Bound(Var),
+    /// `expr IN (a, b, …)` — true when `expr` equals any list element.
+    /// `NOT IN` is lowered by spargebra as `Not(In(...))`.
+    In(Box<Expr>, Vec<Expr>),
 }
 
 /// Algebra operators supported in Stage 1.
@@ -129,10 +134,49 @@ pub enum Algebra {
         vars: Vec<Var>,
         rows: Vec<Vec<Option<Term>>>,
     },
+    /// `GROUP BY` + aggregates. `keys` are the grouping variables (empty
+    /// for implicit grouping, e.g. `SELECT (COUNT(*) AS ?c) WHERE {…}`,
+    /// which yields a single group). Each output row carries the key
+    /// bindings plus one binding per `aggregate`.
+    Group {
+        inner: Box<Algebra>,
+        keys: Vec<Var>,
+        aggregates: Vec<Aggregate>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderDir {
     Asc,
     Desc,
+}
+
+/// A single aggregate to compute over a group, with the output variable
+/// it is bound to. `distinct` applies the SPARQL DISTINCT modifier to
+/// the aggregate's input multiset before folding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Aggregate {
+    /// The variable the aggregate's value is bound to in the output row.
+    pub out: Var,
+    pub func: AggFunc,
+    /// `true` for `COUNT(DISTINCT ?x)`, `SUM(DISTINCT ?x)`, etc.
+    pub distinct: bool,
+}
+
+/// The aggregate functions Stage 1 evaluates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggFunc {
+    /// `COUNT(*)` — count solutions, no inner expression.
+    CountStar,
+    /// `COUNT(?x)` — count rows where the expression is bound.
+    Count(Box<Expr>),
+    Sum(Box<Expr>),
+    Min(Box<Expr>),
+    Max(Box<Expr>),
+    Avg(Box<Expr>),
+    Sample(Box<Expr>),
+    GroupConcat {
+        expr: Box<Expr>,
+        separator: String,
+    },
 }

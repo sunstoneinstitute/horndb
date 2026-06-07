@@ -3,7 +3,7 @@
 
 pub mod planner;
 
-use crate::algebra::{Expr, OrderDir, Term, TriplePattern, Var};
+use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
@@ -58,5 +58,11 @@ pub enum PhysicalPlan {
     Values {
         vars: Vec<Var>,
         rows: Vec<Vec<Option<Term>>>,
+    },
+    /// GROUP BY + aggregates.
+    Group {
+        inner: Box<PhysicalPlan>,
+        keys: Vec<Var>,
+        aggregates: Vec<Aggregate>,
     },
 }

@@ -60,6 +60,15 @@ pub fn plan(alg: &Algebra) -> Result<PhysicalPlan> {
             vars: vars.clone(),
             rows: rows.clone(),
         },
+        Algebra::Group {
+            inner,
+            keys,
+            aggregates,
+        } => PhysicalPlan::Group {
+            inner: Box::new(plan(inner)?),
+            keys: keys.clone(),
+            aggregates: aggregates.clone(),
+        },
     })
 }
 
