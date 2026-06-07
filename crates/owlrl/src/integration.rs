@@ -207,6 +207,43 @@ impl Engine {
         Ok(iter.next().is_none())
     }
 
+    /// Return the full materialized triple set (asserted base plus
+    /// everything inferred) as lexical `(subject, predicate, object)`
+    /// triples, decoded back from the dictionary.
+    ///
+    /// The lexical forms match the dictionary keys built during
+    /// [`load`](Self::load):
+    /// - IRIs are bare (no angle brackets), e.g. `http://ex/x`.
+    /// - Blank nodes carry the `_:` prefix, e.g. `_:b0`.
+    /// - Literals are N-Triples-style, e.g. `"hi"@en` or
+    ///   `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`.
+    ///
+    /// `None` if nothing has been loaded yet. O(triples) — intended for
+    /// dumping / benchmarking, not a hot path.
+    pub fn materialized_triples(&self) -> Option<Vec<(String, String, String)>> {
+        let state = self.state.as_ref()?;
+        // Invert the dictionary: TermId → lexical key. The dict maps the
+        // canonical lexical key to its id, so just flip it. Vocabulary
+        // IRIs live in here too (seeded from `base_dict`), so OWL/RDF/RDFS
+        // terms decode correctly.
+        let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+        for (lex, &id) in &state.dict {
+            rev.insert(id, lex.as_str());
+        }
+        let mut out = Vec::new();
+        for t in state.store.all_triples() {
+            let (Some(&s), Some(&p), Some(&o)) = (rev.get(&t.s), rev.get(&t.p), rev.get(&t.o))
+            else {
+                // A term with no lexical key should not happen — every id
+                // is interned through the dict. Skip defensively rather
+                // than panic in a serving path.
+                continue;
+            };
+            out.push((s.to_string(), p.to_string(), o.to_string()));
+        }
+        Some(out)
+    }
+
     /// Stub-grade SPARQL ASK: returns true iff anything was loaded.
     ///
     /// Full SPARQL evaluation lives in SPEC-07's `horndb-sparql`; wiring
@@ -547,6 +584,52 @@ mod tests {
         let mut engine = Engine::new();
         engine.load(&Dataset::new()).unwrap();
         assert!(!engine.ask("ASK { ?s ?p ?o }").unwrap());
+    }
+
+    #[test]
+    fn materialized_triples_includes_inferred() {
+        let mut engine = Engine::new();
+        let mut premise = Dataset::new();
+        premise.insert(&nq("http://ex/A", RDFS_SUB_CLASS_OF, "http://ex/B"));
+        premise.insert(&nq("http://ex/x", RDF_TYPE, "http://ex/A"));
+        engine.load(&premise).unwrap();
+        let triples = engine.materialized_triples().unwrap();
+        // Asserted base survives.
+        assert!(triples.contains(&(
+            "http://ex/x".to_string(),
+            RDF_TYPE.to_string(),
+            "http://ex/A".to_string(),
+        )));
+        // Inferred `:x a :B` shows up (cax-sco).
+        assert!(triples.contains(&(
+            "http://ex/x".to_string(),
+            RDF_TYPE.to_string(),
+            "http://ex/B".to_string(),
+        )));
+    }
+
+    #[test]
+    fn materialized_triples_none_before_load() {
+        let engine = Engine::new();
+        assert!(engine.materialized_triples().is_none());
+    }
+
+    #[test]
+    fn materialized_triples_round_trips_literals() {
+        let mut engine = Engine::new();
+        let mut premise = Dataset::new();
+        premise.insert(&Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/x").unwrap()),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_simple_literal("hi"),
+            GraphName::DefaultGraph,
+        ));
+        engine.load(&premise).unwrap();
+        let triples = engine.materialized_triples().unwrap();
+        // Simple literal decodes with the xsd:string datatype suffix.
+        assert!(triples.iter().any(|(s, p, o)| {
+            s == "http://ex/x" && p == "http://ex/p" && o.starts_with("\"hi\"")
+        }));
     }
 
     #[test]
