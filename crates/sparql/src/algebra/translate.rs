@@ -5,10 +5,13 @@
 //! `UnsupportedPathOp` for the Kleene-star property paths) so the
 //! planner never has to defend against them.
 
-use crate::algebra::{Algebra, Expr, OrderDir, Term, TriplePattern, Var};
+use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, OrderDir, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
 use crate::SparqlConfig;
-use spargebra::algebra::{Expression, GraphPattern, OrderExpression, PropertyPathExpression};
+use spargebra::algebra::{
+    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+    PropertyPathExpression,
+};
 use spargebra::term::{
     GroundTerm, NamedNodePattern, TermPattern, TriplePattern as SpgTriplePattern, Variable,
 };
@@ -192,9 +195,24 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             }
             Ok(Algebra::Values { vars, rows })
         }
+        GraphPattern::Group {
+            inner,
+            variables,
+            aggregates,
+        } => {
+            let keys = variables.iter().map(translate_var).collect();
+            let mut aggs = Vec::with_capacity(aggregates.len());
+            for (out_var, agg_expr) in aggregates {
+                aggs.push(translate_aggregate(out_var, agg_expr)?);
+            }
+            Ok(Algebra::Group {
+                inner: Box::new(translate_pattern(inner, cfg)?),
+                keys,
+                aggregates: aggs,
+            })
+        }
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
-        GraphPattern::Group { .. } => Err(SparqlError::UnsupportedAlgebra("Group".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
         GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra("Graph".into())),
         GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
@@ -249,6 +267,47 @@ fn ground_term_to_term(gt: &GroundTerm) -> Result<Term> {
             return Err(SparqlError::UnsupportedAlgebra(
                 "ground triple-term in VALUES (RDF 1.2)".into(),
             ));
+        }
+    })
+}
+
+fn translate_aggregate(out_var: &Variable, agg: &AggregateExpression) -> Result<Aggregate> {
+    let out = translate_var(out_var);
+    Ok(match agg {
+        AggregateExpression::CountSolutions { distinct } => Aggregate {
+            out,
+            func: AggFunc::CountStar,
+            distinct: *distinct,
+        },
+        AggregateExpression::FunctionCall {
+            name,
+            expr,
+            distinct,
+        } => {
+            let e = Box::new(translate_expr(expr)?);
+            let func = match name {
+                AggregateFunction::Count => AggFunc::Count(e),
+                AggregateFunction::Sum => AggFunc::Sum(e),
+                AggregateFunction::Min => AggFunc::Min(e),
+                AggregateFunction::Max => AggFunc::Max(e),
+                AggregateFunction::Avg => AggFunc::Avg(e),
+                AggregateFunction::Sample => AggFunc::Sample(e),
+                AggregateFunction::GroupConcat { separator } => AggFunc::GroupConcat {
+                    expr: e,
+                    separator: separator.clone().unwrap_or_else(|| " ".to_string()),
+                },
+                AggregateFunction::Custom(n) => {
+                    return Err(SparqlError::UnsupportedAlgebra(format!(
+                        "custom aggregate {}",
+                        n.as_str()
+                    )));
+                }
+            };
+            Aggregate {
+                out,
+                func,
+                distinct: *distinct,
+            }
         }
     })
 }
