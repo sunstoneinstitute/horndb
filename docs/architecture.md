@@ -259,8 +259,10 @@ HTTP server (`server` feature, on by default).
 | Component | Status | Notes |
 |---|---|---|
 | Parser (spargebra) → AST | **implemented** | `parser.rs`. |
-| Algebra translation (BGP, Join, LeftJoin, Filter, Project, Distinct, Slice, Group, OrderBy, Union, Minus) | **implemented** | `algebra/`. |
-| Planner + runtime executor | **implemented** | `plan/`, `exec/`. BGPs route to the WCOJ executor. |
+| Algebra translation (BGP, Join, LeftJoin, Filter, Project, Distinct, Slice, OrderBy, Union, Extend, Values) | **implemented** | `algebra/translate.rs`. |
+| Aggregation / `GROUP BY` (`COUNT`/`SUM`/…), `MINUS`, `GRAPH` named-graph patterns | **planned** | `translate.rs` returns `UnsupportedAlgebra`. Block the LDBC SPB aggregation mix (incl. the driver's `COUNT` warm-up query). `TASKS.md` #66. |
+| `FILTER` expression coverage | **implemented (partial)** | `translate_expr` handles `= sameTerm < > && \|\| ! BOUND` only; `<=`/`>=`/`IN`/`NOT IN`/arithmetic/functions return `UnsupportedAlgebra`. `TASKS.md` #66. |
+| Planner + runtime executor | **implemented (Stage-1 slice)** | `plan/`, `exec/`. Executes against the in-memory `exec/mem.rs::MemStore` (naive nested-loop `scan_bgp`); **not** yet wired to the SPEC-03 `horndb-wcoj` executor or to `horndb-storage`/`horndb-owlrl` (decoupled stores; `MemStore` also coerces terms to IRI form). `TASKS.md` #67. |
 | SELECT / CONSTRUCT / ASK | **implemented** | Result formats in `results/`. |
 | Entailment regimes: OWL 2 RL/RDF + simple | **implemented** | `regime/owl_rl.rs`, `regime/simple.rs` (materialized mode). |
 | SPARQL Update `INSERT/DELETE DATA` | **implemented** | `update.rs`. |
