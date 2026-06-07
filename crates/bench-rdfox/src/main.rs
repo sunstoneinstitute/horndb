@@ -26,7 +26,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use oxrdf::{Dataset, GraphName, Quad};
-use oxttl::NTriplesParser;
+use oxttl::{NTriplesParser, TurtleParser};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -169,12 +169,26 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>) -> Result<()> {
     for f in files {
         let reader =
             BufReader::new(File::open(f).with_context(|| format!("opening {}", f.display()))?);
-        for triple in NTriplesParser::new().for_reader(reader) {
-            let t = triple.with_context(|| format!("parsing {}", f.display()))?;
-            dataset.insert(
-                Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
-            );
-            input += 1;
+        // Format by extension: `.ttl` → Turtle, everything else → N-Triples.
+        // SPB ontologies and reference datasets ship as Turtle; the
+        // generated Creative Works are N-Triples.
+        let is_turtle = f.extension().and_then(|e| e.to_str()) == Some("ttl");
+        if is_turtle {
+            for triple in TurtleParser::new().for_reader(reader) {
+                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
+                dataset.insert(
+                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+                );
+                input += 1;
+            }
+        } else {
+            for triple in NTriplesParser::new().for_reader(reader) {
+                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
+                dataset.insert(
+                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+                );
+                input += 1;
+            }
         }
     }
     let parse = parse_start.elapsed();
