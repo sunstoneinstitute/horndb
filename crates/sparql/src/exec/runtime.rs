@@ -2,10 +2,11 @@
 //! yields a `Vec<Bindings>` because Stage 1 materialises per-node;
 //! true streaming is a Future Work item.
 
-use crate::algebra::{Expr, OrderDir, Term, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Bindings, Executor};
 use crate::plan::PhysicalPlan;
+use std::collections::BTreeMap;
 
 pub struct Runtime<'a, E: Executor + ?Sized> {
     exec: &'a E,
@@ -134,8 +135,254 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 }
                 Ok(out)
             }
+            PhysicalPlan::Group {
+                inner,
+                keys,
+                aggregates,
+            } => {
+                let v = self.eval(inner)?;
+                eval_group(v, keys, aggregates)
+            }
         }
     }
+}
+
+/// Evaluate `GROUP BY` + aggregates over a materialised input.
+///
+/// Rows are partitioned by the lexical form of the key-variable
+/// bindings (an unbound key contributes a `None` slot, so rows that are
+/// both unbound in a key fall in the same group). Implicit grouping
+/// (`keys` empty) yields exactly one group — even over zero input rows,
+/// per SPARQL 1.1 §11.2: `SELECT (COUNT(*) AS ?c) WHERE { … }` returns
+/// a single row with `?c = 0` when nothing matches.
+fn eval_group(
+    rows: Vec<Bindings>,
+    keys: &[Var],
+    aggregates: &[Aggregate],
+) -> Result<Vec<Bindings>> {
+    // Group key -> (representative key bindings, member rows).
+    // BTreeMap keeps output order deterministic.
+    let mut groups: BTreeMap<Vec<Option<String>>, (Bindings, Vec<Bindings>)> = BTreeMap::new();
+
+    for row in rows {
+        let group_key: Vec<Option<String>> =
+            keys.iter().map(|k| row.get(k.name()).map(lex)).collect();
+        let entry = groups.entry(group_key).or_insert_with(|| {
+            let mut key_bindings = Bindings::new();
+            for k in keys {
+                if let Some(t) = row.get(k.name()) {
+                    key_bindings.set(k.name().to_owned(), t.clone());
+                }
+            }
+            (key_bindings, Vec::new())
+        });
+        entry.1.push(row);
+    }
+
+    // Implicit grouping with no input rows still yields one (empty) group.
+    if keys.is_empty() && groups.is_empty() {
+        groups.insert(Vec::new(), (Bindings::new(), Vec::new()));
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for (_, (mut binding, members)) in groups {
+        for agg in aggregates {
+            if let Some(t) = eval_aggregate(agg, &members)? {
+                binding.set(agg.out.name().to_owned(), t);
+            }
+        }
+        out.push(binding);
+    }
+    Ok(out)
+}
+
+/// Render an `xsd:integer` typed literal in N-Triples lexical form.
+fn integer_literal(n: i64) -> Term {
+    Term::Literal(format!(
+        "\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    ))
+}
+
+/// Render an `xsd:decimal` typed literal.
+fn decimal_literal(x: f64) -> Term {
+    Term::Literal(format!(
+        "\"{x}\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+    ))
+}
+
+/// Extract the lexical value of a literal term for numeric/string
+/// aggregation. For a `"v"^^<dt>` or `"v"@lang` literal, returns the
+/// inner `v`; for a plain literal (no quotes), returns it as-is; for
+/// IRIs/bnodes returns the lexical form unchanged.
+fn literal_value(t: &Term) -> String {
+    match t {
+        Term::Literal(raw) => literal_lexical(raw),
+        Term::Iri(s) | Term::BlankNode(s) => s.clone(),
+        Term::Var(v) => v.name().to_owned(),
+        Term::Triple(_) => String::new(),
+    }
+}
+
+/// Parse the lexical part out of an N-Triples literal string.
+fn literal_lexical(raw: &str) -> String {
+    let raw = raw.trim();
+    if !raw.starts_with('"') {
+        return raw.to_owned();
+    }
+    let bytes = raw.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return raw[1..i].to_owned();
+        }
+        i += 1;
+    }
+    raw.to_owned()
+}
+
+/// Best-effort numeric coercion of a term for SUM/AVG/MIN/MAX.
+fn numeric_value(t: &Term) -> Option<f64> {
+    literal_value(t).trim().parse::<f64>().ok()
+}
+
+/// Compute one aggregate over a group's member rows.
+fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>> {
+    // Collect the aggregate's input multiset (the values of the inner
+    // expression over the members), applying DISTINCT if requested.
+    // For COUNT(*) the "input" is the rows themselves.
+    let collect_values = |expr: &Expr| -> Result<Vec<Term>> {
+        let mut vals = Vec::new();
+        for m in members {
+            if let Some(t) = eval_expr_to_term(expr, m)? {
+                vals.push(t);
+            }
+        }
+        if agg.distinct {
+            dedup_terms(&mut vals);
+        }
+        Ok(vals)
+    };
+
+    Ok(match &agg.func {
+        AggFunc::CountStar => {
+            let n = if agg.distinct {
+                // COUNT(DISTINCT *) — distinct whole solution rows.
+                let mut seen: Vec<&Bindings> = Vec::new();
+                for m in members {
+                    if !seen.contains(&m) {
+                        seen.push(m);
+                    }
+                }
+                seen.len()
+            } else {
+                members.len()
+            };
+            Some(integer_literal(n as i64))
+        }
+        AggFunc::Count(e) => {
+            let vals = collect_values(e)?;
+            Some(integer_literal(vals.len() as i64))
+        }
+        AggFunc::Sum(e) => {
+            let vals = collect_values(e)?;
+            let sum: f64 = vals.iter().filter_map(numeric_value).sum();
+            Some(numeric_term(sum))
+        }
+        AggFunc::Avg(e) => {
+            let vals = collect_values(e)?;
+            let nums: Vec<f64> = vals.iter().filter_map(numeric_value).collect();
+            if nums.is_empty() {
+                Some(integer_literal(0))
+            } else {
+                Some(decimal_literal(
+                    nums.iter().sum::<f64>() / nums.len() as f64,
+                ))
+            }
+        }
+        AggFunc::Min(e) => {
+            let vals = collect_values(e)?;
+            aggregate_extreme(&vals, true)
+        }
+        AggFunc::Max(e) => {
+            let vals = collect_values(e)?;
+            aggregate_extreme(&vals, false)
+        }
+        AggFunc::Sample(e) => {
+            let vals = collect_values(e)?;
+            vals.into_iter().next()
+        }
+        AggFunc::GroupConcat { expr, separator } => {
+            let vals = collect_values(expr)?;
+            let joined = vals
+                .iter()
+                .map(literal_value)
+                .collect::<Vec<_>>()
+                .join(separator);
+            Some(Term::Literal(format!(
+                "\"{}\"",
+                joined.replace('"', "\\\"")
+            )))
+        }
+    })
+}
+
+/// Pick MIN (`min == true`) or MAX of an input multiset. Numeric when
+/// every value parses as a number, otherwise lexical ordering.
+fn aggregate_extreme(vals: &[Term], min: bool) -> Option<Term> {
+    if vals.is_empty() {
+        return None;
+    }
+    let all_numeric = vals.iter().all(|t| numeric_value(t).is_some());
+    if all_numeric {
+        let mut best_idx = 0;
+        let mut best = numeric_value(&vals[0]).unwrap();
+        for (i, t) in vals.iter().enumerate().skip(1) {
+            let n = numeric_value(t).unwrap();
+            if (min && n < best) || (!min && n > best) {
+                best = n;
+                best_idx = i;
+            }
+        }
+        Some(vals[best_idx].clone())
+    } else {
+        let mut best = &vals[0];
+        for t in &vals[1..] {
+            let ord = lex(t).cmp(&lex(best));
+            if (min && ord == std::cmp::Ordering::Less)
+                || (!min && ord == std::cmp::Ordering::Greater)
+            {
+                best = t;
+            }
+        }
+        Some(best.clone())
+    }
+}
+
+/// Render a numeric aggregate result as an integer literal when it has
+/// no fractional part, otherwise a decimal literal.
+fn numeric_term(x: f64) -> Term {
+    if x.fract() == 0.0 && x.abs() < 9.007e15 {
+        integer_literal(x as i64)
+    } else {
+        decimal_literal(x)
+    }
+}
+
+/// Deduplicate a term multiset by value, preserving first-seen order.
+fn dedup_terms(vals: &mut Vec<Term>) {
+    let mut seen: Vec<Term> = Vec::new();
+    vals.retain(|t| {
+        if seen.contains(t) {
+            false
+        } else {
+            seen.push(t.clone());
+            true
+        }
+    });
 }
 
 fn project(b: &Bindings, vars: &[Var]) -> Bindings {
