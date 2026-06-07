@@ -478,9 +478,25 @@ list when the corresponding Stage-1 slice is settled.
     [#56](https://github.com/sunstoneinstitute/horndb/issues/56) streaming
     result serialization;
     [#57](https://github.com/sunstoneinstitute/horndb/issues/57) SPARQL XML
-    results + Turtle CONSTRUCT/DESCRIBE. Parent stays `[v]` until #48–#57
-    close. `SERVICE` federation, the RDF 1.2 SPARQL surface, and GeoSPARQL
-    remain out of scope per SPEC-07.
+    results + Turtle CONSTRUCT/DESCRIBE;
+    [#66](https://github.com/sunstoneinstitute/horndb/issues/66) SPARQL
+    aggregation (`GROUP BY` / `COUNT` / `SUM` / …), expanded `FILTER`
+    expressions (`<=` / `>=` / `IN` / `NOT IN` / arithmetic / functions
+    beyond `= < > && || ! BOUND`), and `GRAPH` named-graph patterns — all
+    return `UnsupportedAlgebra` in `crates/sparql/src/algebra/translate.rs`;
+    surfaced 2026-06-07 measuring the LDBC SPB aggregation mix against the
+    new `start-engine.sh` endpoint (0/12 queries ran, and the `COUNT`-based
+    warm-up system query blocks the SPB driver before any timed phase);
+    [#67](https://github.com/sunstoneinstitute/horndb/issues/67) wire the
+    SPARQL frontend off the standalone in-memory `exec/mem.rs::MemStore`
+    (naive nested-loop `scan_bgp`, no `horndb-wcoj` / `horndb-storage` /
+    `horndb-owlrl` dependency) onto the real SPEC-03 WCOJ executor + the
+    materialized closure — fixes decoupled data (today the served store must
+    be repopulated from a flat dump), naive-executor timeouts at ~500K
+    triples (SPB Q1/Q2/Q11), and literal-as-IRI term coercion (wrong
+    `ORDER BY` / literal comparisons; results-format side under #57). Parent
+    stays `[v]` until #48–#57, #66, #67 close. `SERVICE` federation, the
+    RDF 1.2 SPARQL surface, and GeoSPARQL remain out of scope per SPEC-07.
 - [ ] **SPEC-08 ML** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)): F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
   `CandidateGenerator`, HTTP audit endpoint, cost reporting, training-data
   leakage controls.
