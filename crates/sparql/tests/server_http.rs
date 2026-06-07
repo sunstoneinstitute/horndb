@@ -7,7 +7,7 @@ use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
 
 fn iri(s: &str) -> Term {
@@ -18,7 +18,7 @@ fn router_with_data() -> axum::Router {
     let mut s = MemStore::default();
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState {
-        store: Arc::new(Mutex::new(s)),
+        store: Arc::new(RwLock::new(s)),
     };
     build_router(state)
 }

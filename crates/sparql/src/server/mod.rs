@@ -10,14 +10,15 @@ pub mod update;
 use crate::exec::mem::MemStore;
 use axum::routing::{get, post};
 use axum::Router;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
-/// Shared state: the store is wrapped in a `Mutex` because SPARQL
-/// Update is mutating and `MemStore` is not internally synchronised.
-/// SPEC-02 will replace this with MVCC.
+/// Shared state: the store is wrapped in an `RwLock` so concurrent
+/// SPARQL queries take the read lock and run in parallel, while SPARQL
+/// Update takes the write lock. `MemStore` is not internally
+/// synchronised. SPEC-02 will replace this with MVCC.
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Mutex<MemStore>>,
+    pub store: Arc<RwLock<MemStore>>,
 }
 
 /// Build the axum router. Callers attach it to a `tokio::net::TcpListener`.

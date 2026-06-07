@@ -95,11 +95,16 @@ fn percent_decode(s: &str) -> String {
 }
 
 async fn run(state: AppState, q: &str, headers: &HeaderMap) -> axum::response::Response {
-    let store = state.store.lock().unwrap();
-    let ans = match execute_query(q, &*store) {
-        Ok(a) => a,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    // Scope the read guard to the execution only; results are
+    // materialised into `ans`, so serialization below holds no lock and
+    // never blocks a concurrent writer.
+    let ans = {
+        let store = state.store.read().unwrap();
+        match execute_query(q, &*store) {
+            Ok(a) => a,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+            }
         }
     };
 

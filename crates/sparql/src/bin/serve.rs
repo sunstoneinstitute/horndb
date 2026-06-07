@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::server::{build_router, AppState};
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let total = store.len();
 
     let state = AppState {
-        store: Arc::new(Mutex::new(store)),
+        store: Arc::new(RwLock::new(store)),
     };
     let app = build_router(state);
 
