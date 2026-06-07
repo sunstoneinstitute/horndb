@@ -84,6 +84,36 @@ pub trait Store {
 pub trait FullBackend: Executor + Store {}
 impl<T: Executor + Store> FullBackend for T {}
 
+/// Classify a stored lexical value back into the term kind it encodes.
+///
+/// The Stage-1 store keeps triples as `(String, String, String)` in
+/// N-Triples lexical form, which loses the term's syntactic kind. We
+/// recover the kind from the lexical shape so a bound value surfaces as
+/// the right `Term` variant (IRI vs literal vs blank node) — enough for
+/// correct SPARQL-XML element types and value-aware ORDER BY without
+/// widening the storage representation. SPEC-02's dictionary store will
+/// carry the kind explicitly and make this unnecessary.
+///
+/// Rules (N-Triples object lexical forms):
+///   * starts with `"` → a literal (`"v"`, `"v"@lang`, `"v"^^<dt>`);
+///   * otherwise → an IRI.
+///
+/// Scope note (rung 4): this recovers only the IRI-vs-literal
+/// distinction, which is what the SPARQL-XML element type and
+/// value-aware comparison need. Blank nodes are stored as bare labels
+/// (oxrdf's `BlankNode::as_str()` drops the `_:`), so they are
+/// indistinguishable from IRIs at this lexical layer and remain
+/// classified as IRIs — the same behaviour as before this change.
+/// Faithful blank-node round-tripping is deferred to the dictionary
+/// store (SPEC-02), which carries the kind explicitly.
+pub(crate) fn classify_lexical(val: &str) -> Term {
+    if val.starts_with('"') {
+        Term::Literal(val.to_owned())
+    } else {
+        Term::Iri(val.to_owned())
+    }
+}
+
 /// Helper used by the executor: bind a single pattern against a
 /// concrete triple, returning the new bindings or `None` if the
 /// constants don't match.
@@ -100,23 +130,17 @@ pub(crate) fn unify_one(
     ] {
         match term {
             Term::Var(v) => {
-                let new = Term::Iri(val.clone());
+                // Recover the term kind from the stored lexical form so a
+                // bound literal surfaces as `Term::Literal`, not as an
+                // IRI. Stored blank nodes carry their `_:` prefix.
+                let new = classify_lexical(val);
                 match out.get(v.name()) {
                     Some(existing) if existing != &new => return None,
                     _ => out.set(v.name().to_owned(), new),
                 }
             }
-            Term::Iri(s) => {
-                if s != val {
-                    return None;
-                }
-            }
-            Term::Literal(s) => {
-                if s != val {
-                    return None;
-                }
-            }
-            Term::BlankNode(s) => {
+            // A constant pattern term matches the stored lexical value.
+            Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => {
                 if s != val {
                     return None;
                 }
