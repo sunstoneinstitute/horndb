@@ -90,7 +90,7 @@ fn bench_four_cycle(c: &mut Criterion) {
             for batch in exec.into_iter() {
                 rows += batch.unwrap().num_rows() as u64;
             }
-            criterion::black_box(rows);
+            std::hint::black_box(rows);
         });
     });
 
@@ -106,7 +106,7 @@ fn bench_four_cycle(c: &mut Criterion) {
             for batch in exec.into_iter() {
                 rows += batch.unwrap().num_rows() as u64;
             }
-            criterion::black_box(rows);
+            std::hint::black_box(rows);
         });
     });
 
