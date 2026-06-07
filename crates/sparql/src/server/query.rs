@@ -7,7 +7,7 @@ use super::AppState;
 use crate::api::{execute_query, QueryAnswer};
 use crate::results::{
     csv::write_select_csv, json::write_ask_json, json::write_select_json, tsv::write_select_tsv,
-    ResultFormat,
+    xml::write_ask_xml, xml::write_select_xml, ResultFormat,
 };
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -113,17 +113,21 @@ async fn run(state: AppState, q: &str, headers: &HeaderMap) -> axum::response::R
         QueryAnswer::Solutions { vars, rows } => {
             let body = match fmt {
                 ResultFormat::Json => write_select_json(&vars, &rows),
+                ResultFormat::Xml => write_select_xml(&vars, &rows),
                 ResultFormat::Csv => write_select_csv(&vars, &rows),
                 ResultFormat::Tsv => write_select_tsv(&vars, &rows),
             };
             (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
         }
-        QueryAnswer::Boolean(b) => (
-            StatusCode::OK,
-            [("content-type", ResultFormat::Json.content_type())],
-            write_ask_json(b),
-        )
-            .into_response(),
+        QueryAnswer::Boolean(b) => {
+            // CSV/TSV have no boolean serialisation; fall back to XML
+            // (the protocol default for ASK in many clients) for those.
+            let (ctype, body) = match fmt {
+                ResultFormat::Json => (ResultFormat::Json.content_type(), write_ask_json(b)),
+                _ => (ResultFormat::Xml.content_type(), write_ask_xml(b)),
+            };
+            (StatusCode::OK, [("content-type", ctype)], body).into_response()
+        }
         QueryAnswer::Triples(triples) => {
             // Stage 1: serialise CONSTRUCT as N-Triples.
             let mut s = String::new();
