@@ -92,8 +92,13 @@ enum Cmd {
         driver_jar: PathBuf,
         #[arg(long)]
         scenario: PathBuf,
+        /// SPARQL query endpoint (overrides `endpointURL`).
         #[arg(long)]
         endpoint: String,
+        /// SPARQL update endpoint (overrides `endpointUpdateURL`).
+        /// Defaults to the query endpoint when omitted.
+        #[arg(long)]
+        endpoint_update: Option<String>,
         #[arg(long, default_value_t = 600)]
         duration: u64,
         /// Label used as the `dataset` column so we can A/B
@@ -262,6 +267,7 @@ fn real_main() -> Result<ExitCode> {
             driver_jar,
             scenario,
             endpoint,
+            endpoint_update,
             duration,
             label,
         } => {
@@ -269,6 +275,7 @@ fn real_main() -> Result<ExitCode> {
                 driver_jar: &driver_jar,
                 scenario: &scenario,
                 endpoint: &endpoint,
+                endpoint_update: endpoint_update.as_deref(),
                 duration_seconds: duration,
             };
             let result = horndb_harness::ldbc_spb::run(&cfg)?;
@@ -276,8 +283,10 @@ fn real_main() -> Result<ExitCode> {
             let run_id = db.start_run(&commit_sha, &hardware_fingerprint(), &label)?;
             horndb_harness::ldbc_spb::record(&db, &run_id, &label, &result)?;
             println!(
-                "spb-run: run_id={run_id} editorial_qps={} aggregation_qps={} update_qps={}",
-                result.editorial_qps, result.aggregation_qps, result.update_qps
+                "spb-run: run_id={run_id} editorial_ops_per_sec={} aggregation_queries_per_sec={} duration_s={}",
+                result.editorial_ops_per_sec,
+                result.aggregation_queries_per_sec,
+                result.run_duration_seconds
             );
             Ok(ExitCode::SUCCESS)
         }
