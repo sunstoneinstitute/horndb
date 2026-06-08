@@ -139,9 +139,12 @@ impl PredicatePartition {
     /// existing subject-major rows by `(object, subject)`.
     fn build_object_major(&self) -> ObjectMajor {
         let n = self.len();
-        let mut idx: Vec<u32> = (0..n as u32).collect();
+        // `usize` indices, not `u32`: a single hot predicate on LUBM-8000-scale
+        // data can exceed `u32::MAX` rows, and narrowing here would silently
+        // drop rows from the object-major layout while the subject-major
+        // columns still report the full partition.
+        let mut idx: Vec<usize> = (0..n).collect();
         idx.sort_unstable_by(|&a, &b| {
-            let (a, b) = (a as usize, b as usize);
             self.objects
                 .value(a)
                 .cmp(&self.objects.value(b))
@@ -150,8 +153,8 @@ impl PredicatePartition {
         let mut o_col = Vec::with_capacity(n);
         let mut s_col = Vec::with_capacity(n);
         for &i in &idx {
-            o_col.push(self.objects.value(i as usize));
-            s_col.push(self.subjects.value(i as usize));
+            o_col.push(self.objects.value(i));
+            s_col.push(self.subjects.value(i));
         }
         ObjectMajor {
             objects: Arc::new(UInt64Array::from(o_col)),
