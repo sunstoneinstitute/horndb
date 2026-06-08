@@ -137,7 +137,7 @@ foundation every other crate reads/writes through.
 | Predicate-partitioned columnar `(s_id, o_id)` storage | **implemented** | `partition.rs`, `store.rs`. |
 | In-memory tiering scaffolding | **implemented** | `tier.rs`, `memory_tier.rs` — single warm tier in Stage 1. |
 | N-Triples bulk loader (incl. RDF 1.2 `<<( s p o )>>` objects) | **implemented** | `loader/`; fixture `tests/fixtures/triple_term.nt`. |
-| Six index orderings on demand (for hot predicates) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-02 storage". |
+| Six index orderings on demand (for hot predicates) | **implemented** | `ordering.rs`, `partition.rs` — object-major layout eager for hot predicates, lazy (`OnceLock`) for cold; `Store::scan_predicate_ordered` / `top_predicates`. [#16](https://github.com/sunstoneinstitute/horndb/issues/16) (SPEC-02 F4 + acceptance #6). |
 | HDT cold tier, CXL/NVMe tiering, snapshot HDT export | **planned / deferred** | Cold-tier/tiering is Stage 2+; CXL/NVMe placement is SPEC-09 (Stage 3). |
 | MVCC with per-tuple visibility (Stage 1 uses copy-on-write snapshots) | **deferred** | Stage 2; intersects SPEC-06. |
 | Persistent on-disk dictionary (Marisa-trie / FST) | **deferred** | Stage 2. |

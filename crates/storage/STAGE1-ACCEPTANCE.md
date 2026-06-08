@@ -13,7 +13,7 @@ Date: <fill in>
 | 3 | LUBM-8000 footprint ≤55 GB | DEFERRED | Stage 2 |
 | 4 | Sequential scan ≥80% of STREAM Triad | DEFERRED | Stage 2 (needs the hot tier in a NUMA-pinned bench) |
 | 5 | HDT round-trip isomorphism | DEFERRED | Stage 2 (no HDT support in Stage 1) |
-| 6 | All-six orderings for top-10 predicates | DEFERRED | Stage 2 |
+| 6 | All-six orderings for top-10 predicates | IMPLEMENTED | F4 delivered ([#16](https://github.com/sunstoneinstitute/horndb/issues/16)): `ordering.rs` + `partition.rs` materialise the object-major layout (eager for hot predicates, lazy for cold); `Store::top_predicates` + `scan_predicate_ordered` query any of the six orderings. Covered by `crates/storage/tests/six_orderings.rs`. |
 
 ## Stage-1 surfaced figures
 
@@ -28,7 +28,6 @@ Date: <fill in>
 - HDT cold-tier (SPEC-02 F9)
 - CXL/NVMe tiering (SPEC-02 NF4)
 - MVCC, copy-on-write snapshots (SPEC-02 risks/open questions)
-- All-six index orderings (SPEC-02 F4)
 - Snapshot HDT export (SPEC-02 F9)
 - Persistent on-disk dictionary (SPEC-02 risks/open questions)
 - Turtle, N-Quads, HDT input formats (SPEC-02 F8 — only N-Triples in Stage 1)
