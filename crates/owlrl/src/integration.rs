@@ -15,7 +15,7 @@ use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
-use crate::engine::reset_and_materialize;
+use crate::engine::{reset_and_materialize, Stats};
 use crate::store::{MemStore, TripleStore};
 use crate::types::{TermId, Triple};
 use crate::vocab::Vocabulary;
@@ -98,6 +98,9 @@ pub struct Engine {
     base_dict: FxHashMap<String, TermId>,
     /// Closure backend selection, applied on every [`load`](Self::load).
     backend: BackendChoice,
+    /// Materialize statistics (incl. per-phase timings) from the most recent
+    /// [`load`](Self::load). `None` until the first load.
+    last_stats: Option<Stats>,
     /// Per-load state.
     state: Option<LoadState>,
 }
@@ -122,8 +125,16 @@ impl Engine {
             vocab,
             base_dict,
             backend,
+            last_stats: None,
             state: None,
         }
+    }
+
+    /// Materialize statistics — including the per-phase wall-clock attribution
+    /// in [`Stats::timings`] — from the most recent [`load`](Self::load).
+    /// `None` if nothing has been loaded yet.
+    pub fn last_stats(&self) -> Option<&Stats> {
+        self.last_stats.as_ref()
     }
 
     /// Discard prior state and load `dataset`'s default graph into a fresh
@@ -174,17 +185,18 @@ impl Engine {
                 t
             });
         }
-        match self.backend {
+        let stats = match self.backend {
             BackendChoice::RuleFiring => {
                 let mut backend = RuleFiringBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend);
+                reset_and_materialize(&mut state.store, &mut backend)
             }
             #[cfg(feature = "graphblas-backend")]
             BackendChoice::GraphBlas => {
                 let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend);
+                reset_and_materialize(&mut state.store, &mut backend)
             }
-        }
+        };
+        self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
     }

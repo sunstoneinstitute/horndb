@@ -66,14 +66,47 @@ enum Cmd {
         /// linking the OWL/GraphBLAS stack.
         #[arg(long = "dump-nt")]
         dump_nt: Option<PathBuf>,
+        /// Closure backend: `rulefiring` (nested-loop reference) or
+        /// `graphblas` (SuiteSparse:GraphBLAS, SPEC-05). The emitted
+        /// `*_ms` phase timings let an A/B run attribute the materialize cost.
+        #[arg(long = "backend", value_enum, default_value_t = BackendArg::Rulefiring)]
+        backend: BackendArg,
     },
+}
+
+/// Closure backend selector for the `materialize` subcommand.
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum BackendArg {
+    /// In-crate nested-loop rule firing (`RuleFiringBackend`).
+    Rulefiring,
+    /// GraphBLAS sparse-matrix closure (`GraphBlasBackend`).
+    Graphblas,
+}
+
+impl BackendArg {
+    fn choice(self) -> horndb_owlrl::BackendChoice {
+        match self {
+            BackendArg::Rulefiring => horndb_owlrl::BackendChoice::RuleFiring,
+            BackendArg::Graphblas => horndb_owlrl::BackendChoice::GraphBlas,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            BackendArg::Rulefiring => "rulefiring",
+            BackendArg::Graphblas => "graphblas",
+        }
+    }
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Import { data } => run_import(&data),
         Cmd::Transitive { data, predicate } => run_transitive(&data, &predicate),
-        Cmd::Materialize { data, dump_nt } => run_materialize(&data, dump_nt.as_deref()),
+        Cmd::Materialize {
+            data,
+            dump_nt,
+            backend,
+        } => run_materialize(&data, dump_nt.as_deref(), backend),
     }
 }
 
@@ -162,7 +195,7 @@ fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>) -> Result<()> {
+fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendArg) -> Result<()> {
     let mut dataset = Dataset::new();
     let parse_start = Instant::now();
     let mut input: u64 = 0;
@@ -193,10 +226,16 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>) -> Result<()> {
     }
     let parse = parse_start.elapsed();
 
-    let mut engine = horndb_owlrl::Engine::new();
+    let mut engine = horndb_owlrl::Engine::with_backend(backend.choice());
     let reason_start = Instant::now();
     engine.load(&dataset).context("materializing")?;
     let reason = reason_start.elapsed();
+    // Per-phase wall-clock attribution (summed across semi-naïve rounds).
+    let timings = engine
+        .last_stats()
+        .map(|s| s.timings.clone())
+        .unwrap_or_default();
+    let rounds = engine.last_stats().map(|s| s.rounds).unwrap_or(0);
 
     let asserted = engine.asserted_len().unwrap_or(0);
     let total = engine.materialized_len().unwrap_or(0);
@@ -222,12 +261,19 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>) -> Result<()> {
     let tps_out = if secs > 0.0 { total as f64 / secs } else { 0.0 };
     emit(&[
         ("kind", "\"materialize\"".into()),
+        ("backend", format!("\"{}\"", backend.label())),
         ("parsed_triples", input.to_string()),
         ("asserted", asserted.to_string()),
         ("inferred", inferred.to_string()),
         ("total", total.to_string()),
+        ("rounds", rounds.to_string()),
         ("parse_ms", ms(parse)),
         ("reason_ms", ms(reason)),
+        // Phase attribution within reason_ms (#61). Sums across all rounds.
+        ("compiled_rules_ms", ms(timings.compiled_rules)),
+        ("list_rules_ms", ms(timings.list_rules)),
+        ("closure_backend_ms", ms(timings.closure_backend)),
+        ("apply_ms", ms(timings.apply)),
         ("input_tps", format!("{tps_in:.1}")),
         ("output_tps", format!("{tps_out:.1}")),
     ]);
