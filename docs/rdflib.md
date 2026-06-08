@@ -163,8 +163,8 @@ This is the short list of things you should not assume exist yet:
 ## What to read next
 
 - [`../crates/sparql/README.md`](../crates/sparql/README.md) for the current SPARQL feature list.
-- [`../specs/SPEC-07-sparql-frontend.md`](../specs/SPEC-07-sparql-frontend.md) for the full frontend contract.
-- [`../specs/SPEC-02-storage.md`](../specs/SPEC-02-storage.md) if you are working on persistence or triple representation.
+- [`specs/SPEC-07-sparql-frontend.md`](specs/SPEC-07-sparql-frontend.md) for the full frontend contract.
+- [`specs/SPEC-02-storage.md`](specs/SPEC-02-storage.md) if you are working on persistence or triple representation.
 - [`../CLAUDE.md`](../CLAUDE.md) for repo-wide working rules.
 
 ## Bottom line
