@@ -32,7 +32,7 @@ here in the same commit.
 - [x] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
 - [x] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
-- [v] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61)) — _wip: session 61d88f5e · task-61-graphblas-closure-backend · 2026-06-08_
+- [x] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
@@ -122,10 +122,28 @@ here in the same commit.
 
 ## HIGH — Performance gaps
 
-- [v] **Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine
+- [x] **Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine
   (Stage-1 LUBM timing gate).**
   ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
-  — _wip: session 61d88f5e · task-61-graphblas-closure-backend · 2026-06-08_
+  *Resolved 2026-06-08 — backend wired + injectable + differential-proven equal;
+  profiling shows the timing gate is NOT closure-bound.* The closure backend is
+  now injectable (`Engine::with_backend(BackendChoice::GraphBlas)`,
+  `graphblas-backend` feature) with a `horndb-closure`-backed `GraphBlasBackend`
+  (`crates/owlrl/src/graphblas_backend.rs`) that computes `scm-sco`/`scm-spo`/
+  `eq-sym`/`eq-trans`/`prp-trp` via strict `transitive_closure` over a dense
+  `BoolMatrix`. Parity with `RuleFiringBackend` is gated by
+  `crates/owlrl/tests/closure_backend_differential.rs` (8 fixtures, byte-identical
+  closures). Per-phase profiling (`horndb-bench materialize --backend …`; see
+  `BENCHMARKS.md`) shows that on a LUBM-shaped workload the closure phase is
+  ~0.3% of reason time — the materialize cost is dominated by the compiled
+  `cax-sco` type-expansion and delta application, so the backend swap alone does
+  **not** clear the 3× gate. That remaining gap is the SPEC-04 F5
+  `rdf:type`-partition scan tracked in
+  [#2](https://github.com/sunstoneinstitute/horndb/issues/2). The GraphBLAS
+  backend is a decisive win (~318× on the closure phase) only when closure
+  itself dominates. (LUBM-100, the literal gate, still needs a run with real
+  LUBM data — Jena `riot` was unavailable in the implementation sandbox.)
+  Original task follows.
   Timing follow-up to [#59](https://github.com/sunstoneinstitute/horndb/issues/59):
   that fix made the LUBM(1) closure-count **parity** gate exact (delta 0); what
   remains is the **separate** Stage-1 "within 3×" *timing* gate, which HornDB
