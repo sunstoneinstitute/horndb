@@ -27,7 +27,7 @@ pub async fn handle_update(
         body
     };
 
-    let mut store = state.store.lock().unwrap();
+    let mut store = state.store.write().unwrap();
     match execute_update(&update, &mut *store) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),

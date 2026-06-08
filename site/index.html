@@ -52,7 +52,7 @@
         Forward <em>and</em> backward chaining over OWL&nbsp;2&nbsp;RL semantics, with a
         SPARQL&nbsp;1.1 frontend. Apache-2.0, EU-developed, open from the start.
       </p>
-      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 — feasibility prototype running; OWL&nbsp;2&nbsp;RL subset green</p>
+      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 — feasibility prototype running; 78 of 91 W3C OWL&nbsp;2&nbsp;RL cases green, the WCOJ engine clearing its acceptance gate</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/sunstoneinstitute/horndb/blob/main/docs/specs/SPEC-00-vision.md">Read the vision</a>
@@ -115,8 +115,42 @@
       </div>
     </section>
 
-    <!-- Goals / roadmap -->
+    <!-- What works today -->
     <section class="band">
+      <div class="wrap">
+        <h2>What runs today</h2>
+        <p class="section-lede">Stage&nbsp;1 is a working engine, not a paper design. Every subsystem below has code in the repository, exercised by tests and the conformance harness.</p>
+        <ul class="cards">
+          <li class="card">
+            <h3>Tiered storage <span class="badge">shipping</span></h3>
+            <p>Dictionary-encoded terms and predicate-partitioned columnar triples, with an N-Triples loader that already ingests RDF&nbsp;1.2 triple terms.</p>
+          </li>
+          <li class="card">
+            <h3>Worst-case-optimal joins <span class="badge">shipping</span></h3>
+            <p>Leapfrog Triejoin with cost-based fallback to a binary hash join. Clears its acceptance gate — ≥10× a binary-join baseline on the canonical four-cycle workload (~34× measured on a skewed 10⁶-edge graph).</p>
+          </li>
+          <li class="card">
+            <h3>Compiled OWL&nbsp;2&nbsp;RL rules <span class="badge">shipping</span></h3>
+            <p>Entailment rules compiled ahead-of-time to native Rust — no interpreter in the hot path — evaluated semi-naïvely to a fixpoint. 78 of 91 selected W3C OWL&nbsp;2&nbsp;RL cases pass.</p>
+          </li>
+          <li class="card">
+            <h3>GraphBLAS closure <span class="badge">shipping</span></h3>
+            <p>Schema-level transitive closure runs as a semiring matrix multiply on SuiteSparse:GraphBLAS, linked in natively.</p>
+          </li>
+          <li class="card">
+            <h3>Incremental maintenance <span class="badge">insertion-only</span></h3>
+            <p>DBSP-style Z-set deltas update only what changed. Insertions ship today; retraction is Stage&nbsp;2.</p>
+          </li>
+          <li class="card">
+            <h3>SPARQL&nbsp;1.1 frontend <span class="badge">shipping</span></h3>
+            <p>Parser, algebra, planner and an HTTP endpoint answering SELECT&nbsp;/&nbsp;ASK&nbsp;/&nbsp;CONSTRUCT — including GROUP&nbsp;BY and aggregates — driven end-to-end against the LDBC Semantic Publishing Benchmark.</p>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Goals / roadmap -->
+    <section class="band band-alt">
       <div class="wrap narrow">
         <h2>Where it's going</h2>
         <p class="section-lede">
