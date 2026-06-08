@@ -3,17 +3,19 @@
 //! Provides:
 //!   * 64-bit kind-tagged term IDs (`term`).
 //!   * Concurrent term↔ID dictionary (`dictionary`).
-//!   * Predicate-partitioned, columnar in-memory triple storage (`partition`).
+//!   * Predicate-partitioned, columnar in-memory triple storage (`partition`),
+//!     with all six trie orderings queryable per predicate (`ordering`).
 //!   * A `Tier` trait with one in-memory implementation (`tier`, `memory_tier`).
 //!   * A public `Store` facade (`store`) and an N-Triples bulk loader (`loader::ntriples`).
 //!
-//! Out of Stage-1 scope: HDT cold tier, all-six index orderings, MVCC,
-//! CXL/NVMe tiering, persistent dictionary.
+//! Out of Stage-1 scope: HDT cold tier, MVCC, CXL/NVMe tiering, persistent
+//! dictionary.
 
 pub mod dictionary;
 pub mod error;
 pub mod loader;
 pub mod memory_tier;
+pub mod ordering;
 pub mod partition;
 pub mod store;
 pub mod term;
@@ -25,7 +27,8 @@ pub mod tier;
 pub use dictionary::Dictionary;
 pub use error::StorageError;
 pub use memory_tier::MemoryTier;
-pub use partition::PredicatePartition;
+pub use ordering::{Ordering, PartitionAxis};
+pub use partition::{OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 pub use store::{FootprintReport, Store};
 pub use term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{Tier, TierStats};

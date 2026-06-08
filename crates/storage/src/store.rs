@@ -7,6 +7,7 @@
 use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
+use crate::ordering::Ordering;
 use crate::term::{GraphId, DEFAULT_GRAPH};
 use crate::tier::{Tier, TierStats};
 use oxrdf::Term;
@@ -28,6 +29,16 @@ impl Store {
         Self {
             dictionary: Dictionary::new(),
             tier: Box::new(MemoryTier::new()),
+        }
+    }
+
+    /// In-memory store with a custom hot-predicate threshold (SPEC-02 F4):
+    /// predicates with at least `hot_threshold` triples eagerly materialise all
+    /// six index orderings.
+    pub fn in_memory_with_hot_threshold(hot_threshold: usize) -> Self {
+        Self {
+            dictionary: Dictionary::new(),
+            tier: Box::new(MemoryTier::with_hot_threshold(hot_threshold)),
         }
     }
 
@@ -101,6 +112,63 @@ impl Store {
                 .lookup(o_id)
                 .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {o_id:?}")))?;
             out.push((s, o));
+        }
+        Ok(out)
+    }
+
+    /// Scan a single predicate in the default graph in the requested index
+    /// ordering (SPEC-02 F4), returning materialized `(subject, predicate,
+    /// object)` `Term` triples. Rows come back in the global order implied by
+    /// `ord` (the predicate is constant within a partition, so the ordering is
+    /// determined by the subject/object axis). For object-major orderings on a
+    /// cold predicate the layout is materialised lazily on first call.
+    pub fn scan_predicate_ordered(
+        &self,
+        predicate: &Term,
+        ord: Ordering,
+    ) -> Result<Vec<(Term, Term, Term)>> {
+        let p_id = self.dictionary.intern(predicate)?;
+        let mt = self
+            .tier
+            .as_any()
+            .downcast_ref::<MemoryTier>()
+            .expect("Stage-1 store always wraps MemoryTier");
+        let cols = match mt.ordered_predicate(DEFAULT_GRAPH, p_id, ord) {
+            Some(cols) => cols,
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::with_capacity(cols.len());
+        for (s_id, o_id) in cols.subject_object() {
+            let s = self
+                .dictionary
+                .lookup(s_id)
+                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {s_id:?}")))?;
+            let o = self
+                .dictionary
+                .lookup(o_id)
+                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {o_id:?}")))?;
+            out.push((s, predicate.clone(), o));
+        }
+        Ok(out)
+    }
+
+    /// The top-`n` predicates in the default graph by triple count (descending),
+    /// as `(predicate Term, triple_count)`. Used to demonstrate SPEC-02
+    /// acceptance #6 (top predicates queryable in all six orderings).
+    pub fn top_predicates(&self, n: usize) -> Result<Vec<(Term, u64)>> {
+        let mt = self
+            .tier
+            .as_any()
+            .downcast_ref::<MemoryTier>()
+            .expect("Stage-1 store always wraps MemoryTier");
+        let top = mt.top_predicates(DEFAULT_GRAPH, n);
+        let mut out = Vec::with_capacity(top.len());
+        for (p_id, count) in top {
+            let p = self
+                .dictionary
+                .lookup(p_id)
+                .ok_or_else(|| crate::StorageError::InvalidTerm(format!("unknown id {p_id:?}")))?;
+            out.push((p, count));
         }
         Ok(out)
     }

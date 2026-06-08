@@ -36,7 +36,7 @@ here in the same commit.
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
-- [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: session d35c4dd9 · tracking #3 (increment #16) · task-16-six-index-orderings · 2026-06-08_
+- [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _epic in progress: #15 + #16 delivered; #17–#19 remain_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
@@ -375,7 +375,7 @@ list when the corresponding Stage-1 slice is settled.
 - [v] **SPEC-02 storage** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)): HDT cold tier (F9), CXL/NVMe tiering, MVCC with
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).
-  — _wip: session d35c4dd9 · tracking #3 (increment #16) · task-16-six-index-orderings · 2026-06-08_
+  — _epic in progress: #15 + #16 delivered; #17–#19 remain_
   - **Epic breakdown (2026-05-31, tracked under [#3](https://github.com/sunstoneinstitute/horndb/issues/3)):**
     ✅ [#15](https://github.com/sunstoneinstitute/horndb/issues/15) compressed
     columnar source — **delivered 2026-05-31** (`horndb-wcoj`
@@ -385,16 +385,22 @@ list when the corresponding Stage-1 slice is settled.
     own — [#1](https://github.com/sunstoneinstitute/horndb/issues/1) was
     subsequently closed by reshaping the benchmark graph into the canonical
     skewed win case (PR #22, ~34×), not by compression;
-    [#16](https://github.com/sunstoneinstitute/horndb/issues/16) six index
-    orderings on demand (F4);
+    ✅ [#16](https://github.com/sunstoneinstitute/horndb/issues/16) six index
+    orderings on demand (F4) — **delivered 2026-06-08**: within a predicate
+    partition the six global orderings collapse to two physical layouts
+    (subject-major / object-major); the object-major layout is materialised
+    eagerly for hot predicates (triple count ≥ a configurable threshold) and
+    lazily, via `OnceLock`, for cold ones (`crates/storage/src/{ordering,partition}.rs`).
+    `Store::scan_predicate_ordered` / `top_predicates` query any of the six
+    orderings (acceptance #6); covered by `crates/storage/tests/six_orderings.rs`;
     [#17](https://github.com/sunstoneinstitute/horndb/issues/17) HDT cold tier +
     snapshot export (F9);
     [#18](https://github.com/sunstoneinstitute/horndb/issues/18) Turtle / N-Quads
     import (F8);
     [#19](https://github.com/sunstoneinstitute/horndb/issues/19) copy-on-write
-    snapshot isolation. Parent stays open `[ ]` until all five close; CXL/NVMe
-    placement (SPEC-09), persistent dictionary, and true per-tuple MVCC remain
-    deferred.
+    snapshot isolation. Parent stays open until all five close (#15 + #16
+    delivered; #17–#19 remain); CXL/NVMe placement (SPEC-09), persistent
+    dictionary, and true per-tuple MVCC remain deferred.
 - [ ] **SPEC-04 rules** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)): full `dt-*` datatype rules, `cls-int*`/`cls-uni*`
   list-walking rules, `rdf:type` skew parallelism (F5), production proof
   recording (F4 — Stage-1 ships a stub `Provenance` enum), user-defined
