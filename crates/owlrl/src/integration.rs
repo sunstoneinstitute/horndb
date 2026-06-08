@@ -74,12 +74,30 @@ const USER_TERMS_BASE: u64 = 46;
 ///
 /// Each `load` discards prior state and re-materializes from scratch.
 /// `entails`, `is_consistent`, and `ask` query the materialized closure.
+/// Which [`ClosureBackend`](crate::backend::ClosureBackend) the [`Engine`] uses
+/// to close the transitive-closure-shaped rules (`scm-sco`, `scm-spo`, `eq-*`,
+/// `prp-trp`). The default is the always-available, GraphBLAS-free
+/// [`RuleFiringBackend`]; `GraphBlas` is gated on the `graphblas-backend`
+/// feature (SPEC-05, #61) and produces an identical closure (see
+/// `crates/owlrl/tests/closure_backend_differential.rs`).
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub enum BackendChoice {
+    /// In-crate nested-loop rule firing — "slow but obviously correct".
+    #[default]
+    RuleFiring,
+    /// SuiteSparse:GraphBLAS sparse-matrix closure (`horndb-closure`).
+    #[cfg(feature = "graphblas-backend")]
+    GraphBlas,
+}
+
 pub struct Engine {
     vocab: Vocabulary,
     /// Maps a canonical RDF term key (see [`term_key`]) to its dictionary ID.
     /// Pre-populated with the OWL/RDF/RDFS vocabulary IRIs so user data
     /// referencing them gets the same IDs the vocab uses.
     base_dict: FxHashMap<String, TermId>,
+    /// Closure backend selection, applied on every [`load`](Self::load).
+    backend: BackendChoice,
     /// Per-load state.
     state: Option<LoadState>,
 }
@@ -93,10 +111,17 @@ struct LoadState {
 
 impl Engine {
     pub fn new() -> Self {
+        Self::with_backend(BackendChoice::default())
+    }
+
+    /// Construct an `Engine` that uses the given closure backend on every
+    /// [`load`](Self::load). `Engine::new()` is `with_backend(RuleFiring)`.
+    pub fn with_backend(backend: BackendChoice) -> Self {
         let (vocab, base_dict) = build_vocab();
         Self {
             vocab,
             base_dict,
+            backend,
             state: None,
         }
     }
@@ -149,8 +174,17 @@ impl Engine {
                 t
             });
         }
-        let mut backend = RuleFiringBackend::new();
-        reset_and_materialize(&mut state.store, &mut backend);
+        match self.backend {
+            BackendChoice::RuleFiring => {
+                let mut backend = RuleFiringBackend::new();
+                reset_and_materialize(&mut state.store, &mut backend);
+            }
+            #[cfg(feature = "graphblas-backend")]
+            BackendChoice::GraphBlas => {
+                let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
+                reset_and_materialize(&mut state.store, &mut backend);
+            }
+        }
         self.state = Some(state);
         Ok(())
     }

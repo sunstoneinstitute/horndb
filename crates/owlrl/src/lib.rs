@@ -59,4 +59,4 @@ pub const COMPILED_RULES_SOURCE: &str =
 pub use engine::{
     materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts, Stats,
 };
-pub use integration::Engine;
+pub use integration::{BackendChoice, Engine};
