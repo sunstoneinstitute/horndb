@@ -17,6 +17,15 @@ thiserror = { workspace = true }
 oxrdf = { workspace = true }
 rustc-hash = "2"
 smallvec = "1.13"
+# Optional: the SPEC-05 GraphBLAS closure backend. Off by default so a plain
+# `cargo build -p horndb-owlrl` stays GraphBLAS-free and `Engine::new()` keeps
+# firing the in-crate `RuleFiringBackend`. Enable `graphblas-backend` to make
+# `BackendChoice::GraphBlas` / `GraphBlasBackend` available (see SPEC-05, #61).
+horndb-closure = { path = "../closure", optional = true }
+
+[features]
+default = []
+graphblas-backend = ["dep:horndb-closure"]
 
 [build-dependencies]
 anyhow = { workspace = true }
