@@ -40,13 +40,27 @@ claim, complete, unclaim, and any free-form edit — must go through
   TASKS.md;
 - fast-forwards `main` before mutating, and refuses a `claim` whose task is not
   open (exit 9) — the anti-collision check;
+- stamps each claim with `session@host · branch · UTC-timestamp` so orphaned
+  work is identifiable;
 - pushes TASKS.md-only commits with `--no-verify` (no Rust changed, so the
   clippy/build pre-push hook is skipped — that keeps the lock held for seconds,
   not minutes).
 
 Subcommands: `claim` (prints `claim_sha=<sha>`), `complete`, `unclaim`,
-`with-lock --message M -- CMD` (escape hatch for free-form edits). Run
-`.claude/scripts/tasks.sh help` for the full contract.
+`claims` (list active claims with who/where/when/age), `reap --older-than DUR
+[--apply]` (release stale claims), `with-lock --message M -- CMD` (escape hatch
+for free-form edits). Run `.claude/scripts/tasks.sh help` for the full contract.
+
+**Orphan detection.** Because each claim records session + host + time, a dead
+session's `[v]` is recoverable. In Phase 0, after fetching, list claims and
+sweep obvious orphans (sized above your longest real task so a slow-but-live
+agent is never reaped):
+
+```bash
+.claude/scripts/tasks.sh claims                       # who holds what, and for how long
+.claude/scripts/tasks.sh reap --older-than 12h        # dry run: what looks orphaned
+# .claude/scripts/tasks.sh reap --older-than 12h --apply   # release them
+```
 
 Consequence for this workflow: **TASKS.md never appears in a feature branch.**
 The claim is a locked commit on `main` (Phase 3); the `[v]`→`[x]` (or epic
@@ -74,6 +88,12 @@ conflicts on the index region.
    ```
 3. `git fetch origin` and fast-forward `main` so you claim against the latest
    state (avoids racing another agent). Re-read `TASKS.md` after.
+4. Sweep for orphaned claims left by dead sessions (see "Orphan detection"):
+   ```bash
+   .claude/scripts/tasks.sh claims                  # who holds what, and how long
+   .claude/scripts/tasks.sh reap --older-than 12h   # dry run; add --apply to release
+   ```
+   Reaping is optional but keeps the board honest before you select.
 
 ## Phase 1 — Select the task
 
@@ -137,17 +157,24 @@ fast-forwards `main` first, and **refuses the claim if the task is not open**
 (exit 9). That refusal is the anti-collision mechanism: if another agent claimed
 the task between your Phase-1 selection and now, you lose the race cleanly.
 
-Run it **from the main worktree, on `main`**. The `--tag` value is the inner
-text; the script wraps it as ` — _<tag>_` on the index line.
+Run it **from the main worktree, on `main`**. The script stamps the claim with
+an identity tag — `session@host · branch · UTC-timestamp` — on the index line so
+orphaned claims (dead session / crashed host) are detectable and reapable (see
+"Orphan detection" below).
 
 ```bash
 OUT="$(.claude/scripts/tasks.sh claim \
   --issue <N> \
-  --title "<short title>" \
-  --tag "wip: session <SESSION> · <branch> · <DATE>")"     # epic: append " · #<increment>"
+  --branch "<branch>" \
+  --session "<SESSION>" \
+  --title "<short title>")"
 echo "$OUT"                     # -> claim_sha=<sha>
 CLAIM_SHA="${OUT#claim_sha=}"   # the exact commit the worktree must fork from
 ```
+
+`--session` defaults to `${CLAUDE_CODE_SESSION_ID:0:8}` if omitted; host and
+timestamp are filled in by the script. For an epic increment the tag still
+identifies the parent claim — note the sub-issue in the cmux tab and PR.
 
 `<N>` is the **TASKS.md task line's** issue number — for an epic increment that
 is the **parent** issue (the line carrying the `[ ]`), not the sub-issue. On a
