@@ -32,7 +32,7 @@ here in the same commit.
 - [x] **HIGH** · _Correctness_ — HornDB OWL 2 RL closure over-derives vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59))
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` is red
 - [x] **HIGH** · _Performance_ — SPEC-03 WCOJ 4-cycle bench far from ≥10× acceptance gate ([#1](https://github.com/sunstoneinstitute/horndb/issues/1))
-- [ ] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
+- [v] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61)) — _wip: session 61d88f5e · task-61-graphblas-closure-backend · 2026-06-08_
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
@@ -122,9 +122,10 @@ here in the same commit.
 
 ## HIGH — Performance gaps
 
-- [ ] **Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine
+- [v] **Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine
   (Stage-1 LUBM timing gate).**
   ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
+  — _wip: session 61d88f5e · task-61-graphblas-closure-backend · 2026-06-08_
   Timing follow-up to [#59](https://github.com/sunstoneinstitute/horndb/issues/59):
   that fix made the LUBM(1) closure-count **parity** gate exact (delta 0); what
   remains is the **separate** Stage-1 "within 3×" *timing* gate, which HornDB
