@@ -35,6 +35,9 @@ here in the same commit.
 - [x] **HIGH** · _Performance_ — Wire SPEC-05 GraphBLAS closure backend into the owlrl Engine (Stage-1 LUBM timing gate) ([#61](https://github.com/sunstoneinstitute/horndb/issues/61))
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
+- [ ] **HIGH** · _Completeness_ — SPEC-07 SPARQL aggregation (`GROUP BY`/`COUNT`/`SUM`) + expanded `FILTER`/`BIND`/`IF` expressions (trainmarks-blocking) ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
+- [ ] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
+- [ ] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
@@ -340,6 +343,45 @@ here in the same commit.
     when the trees they cover acquire a real exercise (e.g. when the
     bulk loader grows a Turtle path).
 
+## HIGH — SPARQL query surface (trainmarks-blocking)
+
+These three SPEC-07 increments were promoted from MEDIUM (2026-06-08) because
+they gate running the **trainmarks** RDF benchmark
+(`https://datatreehouse.github.io/trainmarks/`): a six-query, three-scale
+(~100K / ~1M / ~10M triple) SPARQL throughput suite with **no OWL reasoning**.
+Four of its six queries need machinery the Stage-1 SPARQL frontend lacks, and
+its 10M-triple scale needs the frontend off the naive `MemStore`. They remain
+tracked as increments of the SPEC-07 epic ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
+— see that entry's breakdown below — but carry their own HIGH index lines now.
+
+- [ ] **SPARQL aggregation + expanded expressions.**
+  ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
+  `GROUP BY` / `COUNT` / `SUM` / `DISTINCT`-count and the `FILTER`/`BIND`
+  expression surface (`<=` / `>=` / `IN` / `NOT IN` / arithmetic / `IF` /
+  functions beyond `= < > && || ! BOUND`) all return `UnsupportedAlgebra` in
+  `crates/sparql/src/algebra/translate.rs`. trainmarks leans on aggregation in
+  several queries and on nested `IF`/`BIND` in its conditional update; without
+  this, four of the six queries do not parse. (Originally surfaced 2026-06-07
+  against the LDBC SPB aggregation mix — same blocker.)
+
+- [ ] **Wire the SPARQL frontend onto real storage + WCOJ + closure.**
+  ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
+  The runtime executes against the standalone in-memory
+  `crates/sparql/src/exec/mem.rs::MemStore` (naive nested-loop `scan_bgp`, no
+  `horndb-wcoj` / `horndb-storage` / `horndb-owlrl` dependency). trainmarks'
+  top scale is ~10M triples / 1.1 GB; the naive executor already times out at
+  ~500K triples (SPB Q1/Q2/Q11), so this is a hard prerequisite for the large
+  scale — plus it fixes decoupled data (the served store must be repopulated
+  from a flat dump today) and literal-as-IRI term coercion (wrong `ORDER BY` /
+  literal comparisons).
+
+- [ ] **Pattern-based Update (`INSERT`/`DELETE … WHERE`).**
+  ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
+  Only `INSERT DATA` / `DELETE DATA` ship today; trainmarks includes a
+  `DELETE`/`INSERT … WHERE` update with conditional `BIND` + nested `IF`
+  (the expression half of that is #66). Needed for the update query in the
+  suite.
+
 ## MEDIUM — Stage-2 scope explicitly deferred per plans
 
 Items that were marked Future Work in the per-spec plans. Pull from this
@@ -520,8 +562,11 @@ list when the corresponding Stage-1 slice is settled.
     be repopulated from a flat dump), naive-executor timeouts at ~500K
     triples (SPB Q1/Q2/Q11), and literal-as-IRI term coercion (wrong
     `ORDER BY` / literal comparisons; results-format side under #57). Parent
-    stays open `[ ]` until #48–#57, #66, #67 close. `SERVICE` federation, the
-    RDF 1.2 SPARQL surface, and GeoSPARQL remain out of scope per SPEC-07.
+    stays open `[ ]` until #48–#57, #66, #67 close. **Promoted to HIGH
+    (2026-06-08): #51, #66, #67** now carry their own HIGH index lines as
+    trainmarks-blocking — see "HIGH — SPARQL query surface" above; they stay
+    listed here as epic increments for closure tracking. `SERVICE` federation,
+    the RDF 1.2 SPARQL surface, and GeoSPARQL remain out of scope per SPEC-07.
 - [ ] **SPEC-08 ML** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)): F3 LLM → SPARQL endpoint (HTTP), real FAISS-backed
   `CandidateGenerator`, HTTP audit endpoint, cost reporting, training-data
   leakage controls.
