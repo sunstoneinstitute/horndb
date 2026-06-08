@@ -13,7 +13,7 @@ These files drive the project — keep them in mind when planning work:
 - `docs/specs/SPEC-00..10-*.md` — subsystem contracts. Each ends with **Acceptance criteria** that gate the spec.
 - `docs/plans/2026-05-24-SPEC-*.md` — the one-per-spec implementation plans the Stage-1 pass executed.
 - `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and `TASKS.md` (outstanding work).
-- `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit.
+- `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit. You can push commits that only contain task claims/updates to origin without asking.
 - `BENCHMARKS.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
 - `harness/curation/owl2-rl-50.md` and `harness/selected.toml` — the conformance subset every spec is graded against.
 
