@@ -15,7 +15,7 @@ use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
-use crate::engine::reset_and_materialize;
+use crate::engine::{reset_and_materialize, Stats};
 use crate::store::{MemStore, TripleStore};
 use crate::types::{TermId, Triple};
 use crate::vocab::Vocabulary;
@@ -74,12 +74,33 @@ const USER_TERMS_BASE: u64 = 46;
 ///
 /// Each `load` discards prior state and re-materializes from scratch.
 /// `entails`, `is_consistent`, and `ask` query the materialized closure.
+/// Which [`ClosureBackend`](crate::backend::ClosureBackend) the [`Engine`] uses
+/// to close the transitive-closure-shaped rules (`scm-sco`, `scm-spo`, `eq-*`,
+/// `prp-trp`). The default is the always-available, GraphBLAS-free
+/// [`RuleFiringBackend`]; `GraphBlas` is gated on the `graphblas-backend`
+/// feature (SPEC-05, #61) and produces an identical closure (see
+/// `crates/owlrl/tests/closure_backend_differential.rs`).
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub enum BackendChoice {
+    /// In-crate nested-loop rule firing — "slow but obviously correct".
+    #[default]
+    RuleFiring,
+    /// SuiteSparse:GraphBLAS sparse-matrix closure (`horndb-closure`).
+    #[cfg(feature = "graphblas-backend")]
+    GraphBlas,
+}
+
 pub struct Engine {
     vocab: Vocabulary,
     /// Maps a canonical RDF term key (see [`term_key`]) to its dictionary ID.
     /// Pre-populated with the OWL/RDF/RDFS vocabulary IRIs so user data
     /// referencing them gets the same IDs the vocab uses.
     base_dict: FxHashMap<String, TermId>,
+    /// Closure backend selection, applied on every [`load`](Self::load).
+    backend: BackendChoice,
+    /// Materialize statistics (incl. per-phase timings) from the most recent
+    /// [`load`](Self::load). `None` until the first load.
+    last_stats: Option<Stats>,
     /// Per-load state.
     state: Option<LoadState>,
 }
@@ -93,12 +114,27 @@ struct LoadState {
 
 impl Engine {
     pub fn new() -> Self {
+        Self::with_backend(BackendChoice::default())
+    }
+
+    /// Construct an `Engine` that uses the given closure backend on every
+    /// [`load`](Self::load). `Engine::new()` is `with_backend(RuleFiring)`.
+    pub fn with_backend(backend: BackendChoice) -> Self {
         let (vocab, base_dict) = build_vocab();
         Self {
             vocab,
             base_dict,
+            backend,
+            last_stats: None,
             state: None,
         }
+    }
+
+    /// Materialize statistics — including the per-phase wall-clock attribution
+    /// in [`Stats::timings`] — from the most recent [`load`](Self::load).
+    /// `None` if nothing has been loaded yet.
+    pub fn last_stats(&self) -> Option<&Stats> {
+        self.last_stats.as_ref()
     }
 
     /// Discard prior state and load `dataset`'s default graph into a fresh
@@ -149,8 +185,18 @@ impl Engine {
                 t
             });
         }
-        let mut backend = RuleFiringBackend::new();
-        reset_and_materialize(&mut state.store, &mut backend);
+        let stats = match self.backend {
+            BackendChoice::RuleFiring => {
+                let mut backend = RuleFiringBackend::new();
+                reset_and_materialize(&mut state.store, &mut backend)
+            }
+            #[cfg(feature = "graphblas-backend")]
+            BackendChoice::GraphBlas => {
+                let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
+                reset_and_materialize(&mut state.store, &mut backend)
+            }
+        };
+        self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
     }

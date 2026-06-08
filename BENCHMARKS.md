@@ -47,12 +47,27 @@ These are the project-level go/no-go thresholds from `specs/SPEC-00-vision.md`.
 > wall-clock cap on HornDB. The N=1 wiring run completes end-to-end. The
 > closure-count **parity** gate now passes exactly (delta 0) — the earlier
 > over-derivation was a harness-completeness gap, resolved in
-> [#59](https://github.com/sunstoneinstitute/horndb/issues/59). The **timing**
-> gate does **not** yet pass: HornDB's nested-loop rule-firing backend is over
-> the 3× target at N=1 (tracked in `TASKS.md`/[#61](https://github.com/sunstoneinstitute/horndb/issues/61)
-> — wire the SPEC-05 GraphBLAS closure backend into the owlrl `Engine`).
-> LUBM-100 (the literal gate) not yet run. RDFox comparison numbers are
-> internal only (DeWitt clause) and are never recorded here.
+> [#59](https://github.com/sunstoneinstitute/horndb/issues/59).
+>
+> The SPEC-05 GraphBLAS closure backend is now **injectable** into the owlrl
+> `Engine` (`Engine::with_backend(BackendChoice::GraphBlas)`, `graphblas-backend`
+> feature) and **differential-proven equal** to the nested-loop reference
+> ([#61](https://github.com/sunstoneinstitute/horndb/issues/61);
+> `crates/owlrl/tests/closure_backend_differential.rs`). Per-phase profiling
+> (`horndb-bench materialize --backend …`, see the *Measured* table below)
+> attributes the materialize cost and shows the **timing** gate is **not** a
+> closure-backend problem: on a LUBM-shaped workload (shallow class hierarchy +
+> many typed instances) the closure phase is ~0.3% of reason time, dominated by
+> the compiled `cax-sco` type-expansion and delta application — so swapping the
+> closure backend alone does **not** clear the 3× gate. That gap is the
+> SPEC-04 F5 `rdf:type`-partition-scan work tracked in
+> [#2](https://github.com/sunstoneinstitute/horndb/issues/2). The GraphBLAS
+> backend is a large win only when closure itself dominates (a transitive-property
+> chain: ~318× on the closure phase vs nested-loop). LUBM-100 (the literal gate)
+> not yet run — LUBM generation needs Jena `riot`, unavailable in the current
+> sandbox; the attribution above is from synthetic stand-ins of each regime.
+> RDFox comparison numbers are internal only (DeWitt clause) and are never
+> recorded here.
 
 ## Per-subsystem targets (Stage 2 unless noted)
 
@@ -160,6 +175,7 @@ Honest accounting. Updated when a bench moves.
 | 4-cycle, ~10⁶-edge synthetic (`benches/four_cycle.rs`) | `horndb-wcoj` | WCOJ ≥10× binary-hash | _macOS dev workstation (2026-05-31, [#1](https://github.com/sunstoneinstitute/horndb/issues/1), canonical skewed win case, 1,021,610 edges, `hub_out=32`):_ WCOJ **0.55 s** (median; [0.45, 0.68]) vs binary-hash **18.8 s** ([17.6, 20.2]) → **~34× faster**. _Earlier on the old uniform low-degree graph the ratio was only ~1.15× (dense) / 1.11× (compressed, [#15](https://github.com/sunstoneinstitute/horndb/issues/15))._ | **GREEN — Stage-1 acceptance #2 met** ([#1](https://github.com/sunstoneinstitute/horndb/issues/1)). The gate is a *graph-shape* problem, not bandwidth: a uniform low-degree graph never forces the intermediate-result blow-up. The canonical skewed win case (`SyntheticGraph::skewed_four_cycle`: high-out-degree hubs + a thin, dedicated closure) makes a binary join materialise the full `#2-paths · hub_out ≈ 3.2·10⁷` 3-path relation over every source, while WCOJ evaluates depth-first and never materialises an intermediate — the cycle-closing intersection is empty for almost every `(a,b,c)` prefix, so it backtracks in O(1) without expanding the hubs (a ≈`hub_out` advantage). Correctness vs an independent brute-force count (including the rotational matches a single-predicate cycle admits) is pinned by `tests/skewed_four_cycle.rs`. |
 | Differential fuzzer, 1024 random BGPs (`tests/differential_fuzz.rs`) | `horndb-wcoj` | zero mismatches vs binary-hash | green at 256 cases on default seed; `#[ignore]` removed; regression file deleted | **GREEN — Stage-1 acceptance #3 met** (TASKS.md CRITICAL closed) |
 | `spec05_incremental_append` — single-edge append on a 2,000-node chain | `horndb-closure` | incremental ≪ full recompute | this PR (macOS dev workstation, 2026-06-01): incremental_insert **393 µs** vs full_recompute **453 ms** (~**1,153×**) | **GREEN** — insertion-only F6; differential-proven equal to GraphBLAS closure (`tests/incremental.rs`). |
+| owlrl materialize A/B, closure-backend swap (`horndb-bench materialize --backend rulefiring\|graphblas`) | `horndb-owlrl` + `horndb-closure` | RuleFiring vs GraphBLAS — identical closure; attribute LUBM materialize cost ([#61](https://github.com/sunstoneinstitute/horndb/issues/61)) | _Linux dev server (Debian 13), release, 2026-06-08, **synthetic** stand-ins (Jena `riot` unavailable → LUBM not generated):_ **(a) LUBM-shaped** (12-class chain + 40 k typed instances, 440,117 inferred — **identical** both backends): reason **528 ms** RuleFiring vs **505 ms** GraphBLAS; phase split ≈ compiled-rules **282 ms** / apply **200 ms** / **closure 1.6 ms**. **(b) closure-heavy** (600-node transitive-property chain, 182,463 inferred — **identical** both backends): closure phase **49,649 ms** RuleFiring vs **156 ms** GraphBLAS (**~318×**), total **49.7 s → 0.25 s**. | **Backend wired + parity GREEN; LUBM 3× timing gate still open and NOT closure-bound.** On LUBM-shaped work the closure phase is ~0.3% of reason time, so the GraphBLAS swap is within noise — the gap is the compiled `cax-sco`/`rdf:type`-scan + delta-apply cost ([#2](https://github.com/sunstoneinstitute/horndb/issues/2), SPEC-04 F5). GraphBLAS wins decisively only when closure dominates (regime b). Differential parity: `crates/owlrl/tests/closure_backend_differential.rs`. |
 
 ### Scaffolded but not yet evaluated against targets
 

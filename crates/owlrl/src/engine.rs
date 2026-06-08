@@ -15,6 +15,24 @@ pub struct Stats {
     pub rounds: usize,
     pub triples_inferred: usize,
     pub rule_fires: usize,
+    /// Wall-clock attribution across the materialize phases. Collected
+    /// unconditionally — the `Instant` overhead is a few nanoseconds per round
+    /// and negligible against any real workload. Used by `crates/bench-rdfox`
+    /// to attribute the LUBM materialize cost (#61).
+    pub timings: PhaseTimings,
+}
+
+/// Per-phase wall-clock totals summed across every semi-naïve round.
+#[derive(Debug, Default, Clone)]
+pub struct PhaseTimings {
+    /// Time in the compiled `rules.toml` fire functions (incl. `eq-rep-p`).
+    pub compiled_rules: std::time::Duration,
+    /// Time in the hand-written list-axiom rules (`list_rules::fire_all`).
+    pub list_rules: std::time::Duration,
+    /// Time in `ClosureBackend::close` (the transitive-closure rules).
+    pub closure_backend: std::time::Duration,
+    /// Time applying the round delta to the store (`insert_inferred`).
+    pub apply: std::time::Duration,
 }
 
 /// How the engine evaluates the `eq-rep-p` rule.
@@ -60,6 +78,7 @@ pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
         let mut round_delta = Delta::new();
 
         // 1. Compiled rules.
+        let t_compiled = std::time::Instant::now();
         for rule in RULES {
             if rule.delegated {
                 continue;
@@ -83,20 +102,26 @@ pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
             let d = (rule.fire)(store_as_dyn(store), &Delta::new());
             round_delta.merge(d);
         }
+        stats.timings.compiled_rules += t_compiled.elapsed();
 
         // 2. Hand-written list-axiom rules (prp-spo2, prp-key, cls-int1,
         //    cls-uni, cax-adc, eq-diff2/3). See `list_rules.rs` for why
         //    these live outside `rules.toml`.
+        let t_list = std::time::Instant::now();
         if list_rules_relevant(&axioms, dirty.as_ref(), &vocab) {
             let d = list_rules::fire_all(store_as_dyn(store), &axioms, &vocab, dirty.as_ref());
             round_delta.merge(d);
         }
+        stats.timings.list_rules += t_list.elapsed();
 
         // 3. Closure backend (handles delegated rules).
+        let t_closure = std::time::Instant::now();
         let backend_delta = backend.close(store_as_dyn(store));
         round_delta.merge(backend_delta);
+        stats.timings.closure_backend += t_closure.elapsed();
 
         // 4. Apply to store.
+        let t_apply = std::time::Instant::now();
         let mut new_count = 0;
         let mut applied = Delta::new();
         for (t, prov) in round_delta.iter() {
@@ -106,6 +131,7 @@ pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
             }
         }
         stats.triples_inferred += new_count;
+        stats.timings.apply += t_apply.elapsed();
 
         if applied.is_empty() {
             break;

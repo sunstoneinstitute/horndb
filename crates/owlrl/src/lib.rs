@@ -37,6 +37,8 @@ pub mod datatypes;
 pub mod delta;
 pub mod engine;
 pub mod eq_rep_p_opt;
+#[cfg(feature = "graphblas-backend")]
+pub mod graphblas_backend;
 pub mod integration;
 pub mod list_rules;
 pub mod provenance;
@@ -55,6 +57,7 @@ pub const COMPILED_RULES_SOURCE: &str =
     include_str!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
 
 pub use engine::{
-    materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts, Stats,
+    materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts,
+    PhaseTimings, Stats,
 };
-pub use integration::Engine;
+pub use integration::{BackendChoice, Engine};

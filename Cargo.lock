@@ -1270,6 +1270,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "criterion",
+ "horndb-closure",
  "oxrdf",
  "prettyplease",
  "proc-macro2",

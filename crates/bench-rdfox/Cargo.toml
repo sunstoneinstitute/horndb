@@ -20,4 +20,4 @@ oxrdf = { workspace = true }
 oxttl = { workspace = true }
 horndb-storage = { path = "../storage" }
 horndb-closure = { path = "../closure" }
-horndb-owlrl = { path = "../owlrl" }
+horndb-owlrl = { path = "../owlrl", features = ["graphblas-backend"] }
