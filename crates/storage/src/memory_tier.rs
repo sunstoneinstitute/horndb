@@ -1,7 +1,7 @@
 //! In-memory tier — Stage 1 sole implementation of `Tier`.
 
 use crate::error::Result;
-use crate::partition::{PartitionBuilder, PredicatePartition};
+use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 use crate::term::{GraphId, TermId};
 use crate::tier::{Tier, TierStats};
 use parking_lot::RwLock;
@@ -14,6 +14,10 @@ struct GraphStore {
 
 pub struct MemoryTier {
     inner: RwLock<Inner>,
+    /// Predicates with at least this many triples eagerly materialise all six
+    /// orderings; smaller ones materialise the object-major layout lazily
+    /// (SPEC-02 F4).
+    hot_threshold: usize,
 }
 
 #[derive(Default)]
@@ -23,9 +27,20 @@ struct Inner {
 
 impl MemoryTier {
     pub fn new() -> Self {
+        Self::with_hot_threshold(DEFAULT_HOT_THRESHOLD)
+    }
+
+    /// Construct a tier with a custom hot-predicate threshold (SPEC-02 F4).
+    pub fn with_hot_threshold(hot_threshold: usize) -> Self {
         Self {
             inner: RwLock::new(Inner::default()),
+            hot_threshold,
         }
+    }
+
+    /// The hot-predicate triple-count threshold in effect for this tier.
+    pub fn hot_threshold(&self) -> usize {
+        self.hot_threshold
     }
 }
 
@@ -51,7 +66,8 @@ impl Tier for MemoryTier {
                     builder.append(s, o);
                 }
             }
-            gs.partitions.insert(p, builder.build());
+            gs.partitions
+                .insert(p, builder.build_with_hot_threshold(self.hot_threshold));
         }
         Ok(())
     }
@@ -106,8 +122,16 @@ impl Tier for MemoryTier {
             .flat_map(|g| g.partitions.values())
             .map(|p| p.len() as u64)
             .sum();
-        // Each row: 8 bytes subject + 8 bytes object = 16 bytes; plus ~16 bytes/predicate overhead.
-        let bytes_estimated = triples * 16 + predicates * 16;
+        // Per-partition column footprint (16 B/row, doubled when the
+        // object-major layout is materialised for a hot predicate); plus
+        // ~16 bytes/predicate overhead.
+        let column_bytes: u64 = inner
+            .graphs
+            .values()
+            .flat_map(|g| g.partitions.values())
+            .map(|p| p.estimated_bytes())
+            .sum();
+        let bytes_estimated = column_bytes + predicates * 16;
         TierStats {
             graphs,
             predicates,
@@ -129,6 +153,49 @@ impl MemoryTier {
             .get(&graph)
             .and_then(|gs| gs.partitions.get(&predicate))
             .map(f)
+    }
+
+    /// Ordered access to a predicate partition in any of the six trie orderings
+    /// (SPEC-02 F4). Returns [`crate::partition::OrderedColumns`], which owns
+    /// `Arc` clones of the columns and so outlives the read-lock taken here.
+    ///
+    /// For a cold predicate's object-major orderings this materialises (and
+    /// caches) the object-major layout on first call; the materialisation runs
+    /// under the read-lock but is internally synchronised, so it never blocks
+    /// concurrent readers of *other* partitions.
+    pub fn ordered_predicate(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        let inner = self.inner.read();
+        inner
+            .graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|part| part.ordered(ord))
+    }
+
+    /// The top-`n` predicates in `graph` by triple count, descending. Ties are
+    /// broken by predicate id for a deterministic order. Drives the SPEC-02
+    /// acceptance check that the hottest predicates are queryable in all six
+    /// orderings.
+    pub fn top_predicates(&self, graph: GraphId, n: usize) -> Vec<(TermId, u64)> {
+        let inner = self.inner.read();
+        let mut counts: Vec<(TermId, u64)> = inner
+            .graphs
+            .get(&graph)
+            .map(|gs| {
+                gs.partitions
+                    .iter()
+                    .map(|(p, part)| (*p, part.len() as u64))
+                    .collect()
+            })
+            .unwrap_or_default();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0 .0.cmp(&b.0 .0)));
+        counts.truncate(n);
+        counts
     }
 }
 
