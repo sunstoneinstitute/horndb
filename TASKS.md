@@ -36,7 +36,7 @@ here in the same commit.
 - [x] **HIGH** · _Completeness_ — Migrate workspace to oxrdf 0.3 + end-to-end triple-term support
 - [x] **HIGH** · _Conformance_ — W3C RDF 1.2 conformance subset in `harness/selected.toml`
 - [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew (correctness preserved; partition blow-up) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
-- [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _epic in progress: #15 + #16 delivered; #17–#19 remain_
+- [ ] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-int*`/`cls-uni*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (incremental updates, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (closure deltas, retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
@@ -372,10 +372,9 @@ list when the corresponding Stage-1 slice is settled.
     SPEC-05's EQREL union-find once that lands; and the sibling `eq-rep-s`/
     `eq-rep-o` subject/object-position variants (same pattern, different
     partitions).
-- [v] **SPEC-02 storage** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)): HDT cold tier (F9), CXL/NVMe tiering, MVCC with
+- [ ] **SPEC-02 storage** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)): HDT cold tier (F9), CXL/NVMe tiering, MVCC with
   per-tuple visibility, all-6 trie orderings for hot predicates, snapshot
   HDT export, persistent dictionary (Marisa-trie / FST).
-  — _epic in progress: #15 + #16 delivered; #17–#19 remain_
   - **Epic breakdown (2026-05-31, tracked under [#3](https://github.com/sunstoneinstitute/horndb/issues/3)):**
     ✅ [#15](https://github.com/sunstoneinstitute/horndb/issues/15) compressed
     columnar source — **delivered 2026-05-31** (`horndb-wcoj`
