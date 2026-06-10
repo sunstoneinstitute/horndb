@@ -247,7 +247,10 @@ fn unescape_ntriples(s: &str) -> String {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000C}'),
             Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
             Some('\\') => out.push('\\'),
             Some(u @ ('u' | 'U')) => {
                 let len = if u == 'u' { 4 } else { 8 };
@@ -369,7 +372,9 @@ fn plain_literal(s: &str) -> Term {
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('\t', "\\t");
+        .replace('\t', "\\t")
+        .replace('\u{0008}', "\\b")
+        .replace('\u{000C}', "\\f");
     Term::Literal(format!("\"{escaped}\""))
 }
 

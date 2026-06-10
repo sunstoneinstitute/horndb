@@ -451,3 +451,18 @@ fn select_star_keeps_graph_var_visible() {
         other => panic!("expected solutions, got {other:?}"),
     }
 }
+
+#[test]
+fn unescape_covers_all_ntriples_echars() {
+    let mut s = MemStore::default();
+    // Stored escaped form covers \b and \f ECHARs: lexical value is
+    // backspace + form feed (2 chars).
+    s.insert_triple(
+        Term::Iri("http://example.org/x".into()),
+        Term::Iri("http://example.org/v".into()),
+        Term::Literal("\"\\b\\f\"".into()),
+    );
+    let q = "SELECT ?l WHERE { ?x <http://example.org/v> ?v . BIND(STRLEN(?v) AS ?l) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "l"), "2");
+}
