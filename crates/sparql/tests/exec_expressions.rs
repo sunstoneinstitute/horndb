@@ -320,6 +320,21 @@ fn datetime_accessors() {
 }
 
 #[test]
+fn round_half_rounds_toward_positive_infinity() {
+    let mut s = MemStore::default();
+    s.insert_triple(
+        Term::Iri("http://example.org/x".into()),
+        Term::Iri("http://example.org/v".into()),
+        Term::Literal("\"2.5\"^^<http://www.w3.org/2001/XMLSchema#decimal>".into()),
+    );
+    let q = "SELECT ?r ?nr WHERE { ?x <http://example.org/v> ?v . \
+             BIND(ROUND(?v) AS ?r) BIND(ROUND(-?v) AS ?nr) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "r"), "3");
+    assert_eq!(lexical(&got[0], "nr"), "-2");
+}
+
+#[test]
 fn string_builtins_see_unescaped_lexical_values() {
     let mut s = MemStore::default();
     // Stored N-Triples form "a\nb" — lexical value is a, newline, b.

@@ -943,7 +943,9 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
         Func::Abs => num(0)?.map(|n| numeric_term(n.abs())),
         Func::Ceil => num(0)?.map(|n| numeric_term(n.ceil())),
         Func::Floor => num(0)?.map(|n| numeric_term(n.floor())),
-        Func::Round => num(0)?.map(|n| numeric_term(n.round())),
+        // fn:round rounds half toward positive infinity (ROUND(-2.5) =
+        // -2), unlike Rust's round-half-away-from-zero.
+        Func::Round => num(0)?.map(|n| numeric_term((n + 0.5).floor())),
         Func::IsIri => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Iri)),
         Func::IsBlank => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Blank)),
         Func::IsLiteral => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Literal)),
