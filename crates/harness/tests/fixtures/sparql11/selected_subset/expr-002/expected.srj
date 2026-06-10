@@ -1,0 +1,9 @@
+{
+  "head": { "vars": ["total"] },
+  "results": {
+    "bindings": [
+      { "total": { "type": "literal", "value": "26",
+                   "datatype": "http://www.w3.org/2001/XMLSchema#integer" } }
+    ]
+  }
+}

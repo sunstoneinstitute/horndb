@@ -143,3 +143,5 @@ w3c_case!(basic_002, "basic-002");
 w3c_case!(basic_003, "basic-003");
 w3c_case!(basic_004, "basic-004");
 w3c_case!(basic_005, "basic-005");
+w3c_case!(expr_001, "expr-001");
+w3c_case!(expr_002, "expr-002");

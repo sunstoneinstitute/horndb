@@ -1,0 +1,4 @@
+<http://example.org/o1> <http://example.org/qty> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://example.org/o1> <http://example.org/price> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://example.org/o2> <http://example.org/qty> "5"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<http://example.org/o2> <http://example.org/price> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
