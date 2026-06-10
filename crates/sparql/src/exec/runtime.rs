@@ -2,7 +2,7 @@
 //! yields a `Vec<Bindings>` because Stage 1 materialises per-node;
 //! true streaming is a Future Work item.
 
-use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Bindings, Executor};
 use crate::plan::PhysicalPlan;
@@ -257,6 +257,33 @@ fn numeric_value(t: &Term) -> Option<f64> {
     literal_value(t).trim().parse::<f64>().ok()
 }
 
+/// SPARQL effective boolean value, best effort over lexical forms:
+/// "true"/"false" literals, numeric ≠ 0, otherwise non-empty string.
+fn ebv(t: &Term) -> bool {
+    let v = literal_value(t);
+    match v.as_str() {
+        "true" => true,
+        "false" => false,
+        _ => match v.trim().parse::<f64>() {
+            Ok(n) => n != 0.0,
+            Err(_) => !v.is_empty(),
+        },
+    }
+}
+
+/// Wrap a lexical value as a plain (unquoted-form) literal term,
+/// escaping interior quotes, matching the GroupConcat output style.
+#[allow(dead_code)] // used by eval_func (builtin surface, next commit)
+fn plain_literal(s: &str) -> Term {
+    Term::Literal(format!("\"{}\"", s.replace('"', "\\\"")))
+}
+
+/// Binary arithmetic over the Stage-1 f64 model. `None` (expression
+/// error) when either side is non-numeric or on division by zero.
+fn arith(op: fn(f64, f64) -> f64, a: Option<f64>, b: Option<f64>) -> Option<Term> {
+    Some(numeric_term(op(a?, b?)))
+}
+
 /// Compute one aggregate over a group's member rows.
 fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>> {
     // Collect the aggregate's input multiset (the values of the inner
@@ -481,6 +508,17 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
                 }
             }
         }
+        Expr::Add(..)
+        | Expr::Sub(..)
+        | Expr::Mul(..)
+        | Expr::Div(..)
+        | Expr::Neg(..)
+        | Expr::If(..)
+        | Expr::Coalesce(..)
+        | Expr::Func(..) => match eval_expr_to_term(e, b)? {
+            Some(t) => ebv(&t),
+            None => false,
+        },
         Expr::Term(t) => match t {
             // Bare term in boolean context: treat IRI/Literal as
             // truthy; var resolves to its binding.
@@ -552,7 +590,63 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::Bound(_) => Some(Term::Literal(
             if eval_expr(e, b)? { "true" } else { "false" }.into(),
         )),
+        Expr::Add(x, y) => arith(
+            |a, b| a + b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Sub(x, y) => arith(
+            |a, b| a - b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Mul(x, y) => arith(
+            |a, b| a * b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Div(x, y) => {
+            let d = eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value);
+            match d {
+                Some(d) if d != 0.0 => arith(
+                    |a, b| a / b,
+                    eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+                    Some(d),
+                ),
+                _ => None, // division by zero / non-numeric divisor
+            }
+        }
+        Expr::Neg(x) => eval_expr_to_term(x, b)?
+            .as_ref()
+            .and_then(numeric_value)
+            .map(|n| numeric_term(-n)),
+        Expr::If(c, t, f) => {
+            if eval_expr(c, b)? {
+                eval_expr_to_term(t, b)?
+            } else {
+                eval_expr_to_term(f, b)?
+            }
+        }
+        Expr::Coalesce(args) => {
+            let mut found = None;
+            for a in args {
+                if let Some(t) = eval_expr_to_term(a, b)? {
+                    found = Some(t);
+                    break;
+                }
+            }
+            found
+        }
+        Expr::Func(f, args) => eval_func(*f, args, b)?,
     })
+}
+
+/// Evaluate a builtin function call. `Ok(None)` is "expression error"
+/// (the SPARQL error value): the binding stays unbound / the filter
+/// row drops.
+fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
+    let _ = (f, args, b);
+    Ok(None)
 }
 
 // Type-witness so we don't drop SparqlError from this module.
