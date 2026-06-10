@@ -1010,10 +1010,17 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
             bool_lit(ok)
         }),
         Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
-            let v = match s(0)? {
-                Some(v) => v,
+            // The accessors are defined on xsd:dateTime — a plain
+            // string that merely looks like a timestamp is a type
+            // error, matching the ISNUMERIC datatype strictness.
+            let t = match term(0)? {
+                Some(t) => t,
                 None => return Ok(None),
             };
+            let (v, _, dt) = literal_parts(&lex(&t));
+            if dt.as_deref() != Some("http://www.w3.org/2001/XMLSchema#dateTime") {
+                return Ok(None);
+            }
             if datetime_key(&v).is_none() {
                 return Ok(None);
             }

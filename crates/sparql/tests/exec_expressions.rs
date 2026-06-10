@@ -466,3 +466,16 @@ fn unescape_covers_all_ntriples_echars() {
     let got = rows(q, &s);
     assert_eq!(lexical(&got[0], "l"), "2");
 }
+
+#[test]
+fn datetime_accessors_require_datetime_datatype() {
+    let s = store_with_prices();
+    // A plain string that looks like a timestamp is a type error:
+    // the BIND leaves ?y unbound.
+    let q = "SELECT ?s ?y WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(YEAR(\"2026-06-10T12:34:56\") AS ?y) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert!(got[0].get("y").is_none());
+}
