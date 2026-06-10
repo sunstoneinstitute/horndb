@@ -707,6 +707,10 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
             .as_ref()
             .and_then(numeric_value)
             .map(|n| numeric_term(-n)),
+        // Stage-1 note: an erroring condition evaluates as false (the
+        // crate-wide error→false EBV convention) and takes the else
+        // branch, rather than propagating the error as SPARQL §17.4.1.2
+        // specifies.
         Expr::If(c, t, f) => {
             if eval_expr(c, b)? {
                 eval_expr_to_term(t, b)?
