@@ -320,6 +320,28 @@ fn datetime_accessors() {
 }
 
 #[test]
+fn if_condition_uses_effective_boolean_value() {
+    let s = store_with_prices();
+    // A boolean false literal as the condition takes the else branch.
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(IF(\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>, \"t\", \"f\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "f");
+    // Numeric zero is false; non-zero is true.
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(IF(0, \"t\", \"f\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "f");
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(IF(?p, \"t\", \"f\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "t"); // ?p = 4 → truthy
+}
+
+#[test]
 fn graph_iri_lowers_to_inner_pattern() {
     let s = store_with_prices();
     let got = rows(

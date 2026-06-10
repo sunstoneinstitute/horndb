@@ -259,7 +259,13 @@ fn numeric_value(t: &Term) -> Option<f64> {
 
 /// SPARQL effective boolean value, best effort over lexical forms:
 /// "true"/"false" literals, numeric ≠ 0, otherwise non-empty string.
+/// EBV of a non-literal (IRI / blank node) is a type error per SPARQL
+/// §17.2.2 — under the crate-wide error→false convention it yields
+/// `false`.
 fn ebv(t: &Term) -> bool {
+    if term_kind(t) != TermKind::Literal {
+        return false;
+    }
     let v = literal_value(t);
     match v.as_str() {
         "true" => true,
@@ -607,10 +613,11 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
             None => false,
         },
         Expr::Term(t) => match t {
-            // Bare term in boolean context: treat IRI/Literal as
-            // truthy; var resolves to its binding.
-            Term::Var(v) => b.get(v.name()).is_some(),
-            _ => true,
+            // Bare term in boolean context: SPARQL effective boolean
+            // value of the bound value (unbound var is an error →
+            // false) or of the constant itself.
+            Term::Var(v) => b.get(v.name()).map(ebv).unwrap_or(false),
+            other => ebv(other),
         },
     })
 }
@@ -764,6 +771,11 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
             let (_, lang, _) = literal_parts(&lex(&t));
             Some(plain_literal(&lang.unwrap_or_default()))
         }),
+        // RFC 4647 *basic* filtering per SPARQL §17.4.3.7: "*" matches
+        // any non-empty tag, otherwise exact or prefix-before-'-'
+        // match. Extended ranges with embedded wildcards ("en-*") are
+        // deliberately out of scope — basic filtering does not define
+        // them.
         Func::LangMatches => match (s(0)?, s(1)?) {
             (Some(tag), Some(range)) => {
                 let tag = tag.to_ascii_lowercase();
