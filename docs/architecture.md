@@ -261,8 +261,10 @@ HTTP server (`server` feature, on by default).
 |---|---|---|
 | Parser (spargebra) → AST | **implemented** | `parser.rs`. |
 | Algebra translation (BGP, Join, LeftJoin, Filter, Project, Distinct, Slice, OrderBy, Union, Extend, Values) | **implemented** | `algebra/translate.rs`. |
-| Aggregation / `GROUP BY` (`COUNT`/`SUM`/…), `MINUS`, `GRAPH` named-graph patterns | **planned** | `translate.rs` returns `UnsupportedAlgebra`. Block the LDBC SPB aggregation mix (incl. the driver's `COUNT` warm-up query). `TASKS.md` #66. |
-| `FILTER` expression coverage | **implemented (partial)** | `translate_expr` handles `= sameTerm < > && \|\| ! BOUND` only; `<=`/`>=`/`IN`/`NOT IN`/arithmetic/functions return `UnsupportedAlgebra`. `TASKS.md` #66. |
+| Aggregation / `GROUP BY` (`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`/`SAMPLE`/`GROUP_CONCAT`, `DISTINCT` modifiers) | **implemented** | `algebra/translate.rs` + `exec/runtime.rs::eval_group`. Unblocks the LDBC SPB aggregation mix (incl. the driver's `COUNT` warm-up query). #66. |
+| `FILTER`/`BIND` expression coverage | **implemented (Stage-1 surface)** | Comparisons (incl. `<=`/`>=`), `IN`/`NOT IN`, boolean connectives, arithmetic, `IF`, `COALESCE`, and 30 builtins (string/regex/numeric/type-check/datetime accessors) over the best-effort f64 lexical model — `algebra/mod.rs::Func`, `exec/runtime.rs::eval_func`. `EXISTS`, non-deterministic builtins (`RAND`/`NOW`/`UUID`/…), hashing, `STRLANG`/`STRDT`, and custom functions still return `UnsupportedAlgebra`. #66. |
+| `GRAPH` named-graph patterns | **implemented (Stage-1 merged-graph)** | Lower transparently to the inner pattern; a graph-name variable stays unbound. True named-graph scoping (zero solutions for absent graphs, per-graph `?g` bindings) deferred to the storage wiring (#67) — see `crates/sparql/INTEGRATION-NOTES.md`. #66. |
+| `MINUS` | **planned** | `translate.rs` returns `UnsupportedAlgebra`. Part of the SPEC-07 umbrella (#7). |
 | Planner + runtime executor | **implemented (Stage-1 slice)** | `plan/`, `exec/`. Executes against the in-memory `exec/mem.rs::MemStore` (naive nested-loop `scan_bgp`); **not** yet wired to the SPEC-03 `horndb-wcoj` executor or to `horndb-storage`/`horndb-owlrl` (decoupled stores; `MemStore` also coerces terms to IRI form). `TASKS.md` #67. |
 | SELECT / CONSTRUCT / ASK | **implemented** | Result formats in `results/`. |
 | Entailment regimes: OWL 2 RL/RDF + simple | **implemented** | `regime/owl_rl.rs`, `regime/simple.rs` (materialized mode). |
