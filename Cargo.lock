@@ -1296,6 +1296,7 @@ dependencies = [
  "oxrdf",
  "oxttl",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "sparesults",

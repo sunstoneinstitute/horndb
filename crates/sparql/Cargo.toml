@@ -36,6 +36,7 @@ hyper = { workspace = true, optional = true }
 # library code does not reference them.
 oxttl = { workspace = true }
 clap = { workspace = true }
+regex = { workspace = true }
 
 [[bin]]
 name = "serve"
