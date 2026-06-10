@@ -231,6 +231,46 @@ fn literal_value(t: &Term) -> String {
     }
 }
 
+/// Decode N-Triples string escapes (`\\`, `\"`, `\n`, `\t`, `\r`,
+/// `\uXXXX`, `\UXXXXXXXX`) in a literal's lexical form. Unknown
+/// escapes pass through verbatim (best-effort, mirroring the lenient
+/// Stage-1 parsing elsewhere).
+fn unescape_ntriples(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(u @ ('u' | 'U')) => {
+                let len = if u == 'u' { 4 } else { 8 };
+                let hex: String = chars.by_ref().take(len).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        out.push('\\');
+                        out.push(u);
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Parse the lexical part out of an N-Triples literal string.
 fn literal_lexical(raw: &str) -> String {
     let raw = raw.trim();
@@ -245,7 +285,7 @@ fn literal_lexical(raw: &str) -> String {
             continue;
         }
         if bytes[i] == b'"' {
-            return raw[1..i].to_owned();
+            return unescape_ntriples(&raw[1..i]);
         }
         i += 1;
     }
@@ -278,9 +318,16 @@ fn ebv(t: &Term) -> bool {
 }
 
 /// Wrap a lexical value as a plain (unquoted-form) literal term,
-/// escaping interior quotes, matching the GroupConcat output style.
+/// re-applying N-Triples string escapes so the stored form round-trips
+/// through `literal_lexical`.
 fn plain_literal(s: &str) -> Term {
-    Term::Literal(format!("\"{}\"", s.replace('"', "\\\"")))
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    Term::Literal(format!("\"{escaped}\""))
 }
 
 /// Binary arithmetic over the Stage-1 f64 model. `None` (expression

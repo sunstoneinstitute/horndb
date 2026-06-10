@@ -320,6 +320,23 @@ fn datetime_accessors() {
 }
 
 #[test]
+fn string_builtins_see_unescaped_lexical_values() {
+    let mut s = MemStore::default();
+    // Stored N-Triples form "a\nb" — lexical value is a, newline, b.
+    s.insert_triple(
+        Term::Iri("http://example.org/x".into()),
+        Term::Iri("http://example.org/v".into()),
+        Term::Literal("\"a\\nb\"".into()),
+    );
+    let q = "SELECT ?l ?up WHERE { ?x <http://example.org/v> ?v . \
+             BIND(STRLEN(?v) AS ?l) BIND(UCASE(?v) AS ?up) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "l"), "3"); // not 4: \n is one char
+                                            // UCASE round-trips the escape: stored form is "A\nB".
+    assert_eq!(got[0].get("up"), Some(&Term::Literal("\"A\\nB\"".into())));
+}
+
+#[test]
 fn if_condition_uses_effective_boolean_value() {
     let s = store_with_prices();
     // A boolean false literal as the condition takes the else branch.
