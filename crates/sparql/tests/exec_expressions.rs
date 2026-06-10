@@ -318,3 +318,25 @@ fn datetime_accessors() {
     assert_eq!(lexical(&got[0], "mi"), "34");
     assert_eq!(lexical(&got[0], "sec"), "56");
 }
+
+#[test]
+fn graph_iri_lowers_to_inner_pattern() {
+    let s = store_with_prices();
+    let got = rows(
+        "SELECT ?s WHERE { GRAPH <http://example.org/g> { ?s <http://example.org/price> ?p } }",
+        &s,
+    );
+    // Stage-1 merged-graph semantics: GRAPH is transparent.
+    assert_eq!(got.len(), 2);
+}
+
+#[test]
+fn graph_var_lowers_with_unbound_graph_var() {
+    let s = store_with_prices();
+    let got = rows(
+        "SELECT ?g ?s WHERE { GRAPH ?g { ?s <http://example.org/price> ?p } }",
+        &s,
+    );
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|b| b.get("g").is_none()));
+}

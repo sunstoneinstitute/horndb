@@ -214,7 +214,13 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
-        GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra("Graph".into())),
+        // Stage-1 merged-graph semantics: the executor holds a single
+        // graph (SPB/W3C corpora are loaded from flat dumps), so
+        // `GRAPH <iri> { P }` and `GRAPH ?g { P }` lower to `P`. A
+        // graph-name variable stays unbound in the results. True
+        // named-graph scoping arrives with the storage wiring (#67) —
+        // see INTEGRATION-NOTES.md.
+        GraphPattern::Graph { name: _, inner } => translate_pattern(inner, cfg),
         GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
     }
 }
