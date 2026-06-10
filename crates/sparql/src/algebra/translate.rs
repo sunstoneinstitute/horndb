@@ -471,8 +471,16 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             | GraphPattern::Slice { inner, .. }
             | GraphPattern::OrderBy { inner, .. }
             | GraphPattern::Reduced { inner }
-            | GraphPattern::Graph { inner, .. }
             | GraphPattern::Group { inner, .. } => walk(inner, acc),
+            GraphPattern::Graph { name, inner } => {
+                // The graph-name variable is in scope (and projected by
+                // `SELECT *`) even though the Stage-1 merged-graph
+                // lowering never binds it.
+                if let NamedNodePattern::Variable(v) = name {
+                    push(v, acc);
+                }
+                walk(inner, acc);
+            }
             GraphPattern::Project { variables, .. } => {
                 for v in variables {
                     push(v, acc);

@@ -429,3 +429,25 @@ fn isnumeric_requires_numeric_datatype() {
     let got = rows(q, &s);
     assert_eq!(lexical(&got[0], "v"), "true");
 }
+
+#[test]
+fn select_star_keeps_graph_var_visible() {
+    let s = store_with_prices();
+    let got = execute_query(
+        "SELECT * WHERE { GRAPH ?g { ?s <http://example.org/price> ?p } }",
+        &s,
+    )
+    .expect("query should run");
+    match got {
+        QueryAnswer::Solutions { vars, rows } => {
+            assert!(
+                vars.iter().any(|v| v == "g"),
+                "?g missing from head.vars: {vars:?}"
+            );
+            assert!(vars.iter().any(|v| v == "s"));
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|b| b.get("g").is_none()));
+        }
+        other => panic!("expected solutions, got {other:?}"),
+    }
+}
