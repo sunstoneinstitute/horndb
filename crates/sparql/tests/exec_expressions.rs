@@ -394,3 +394,38 @@ fn graph_var_lowers_with_unbound_graph_var() {
     assert_eq!(got.len(), 2);
     assert!(got.iter().all(|b| b.get("g").is_none()));
 }
+
+#[test]
+fn ebv_is_datatype_aware() {
+    let s = store_with_prices();
+    // A plain string "0" is a non-empty string: EBV true (§17.2.2) —
+    // boolean/numeric rules apply only to boolean/numeric datatypes.
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(IF(\"0\", \"t\", \"f\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "t");
+    // The empty string is false.
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(IF(\"\", \"t\", \"f\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "f");
+}
+
+#[test]
+fn isnumeric_requires_numeric_datatype() {
+    let s = store_with_prices();
+    // A plain string that merely looks numeric is NOT numeric (§17.4.2.4).
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(ISNUMERIC(\"42\") AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "false");
+    // A typed numeric literal is.
+    let q = "SELECT ?v WHERE { ?s <http://example.org/price> ?p . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(ISNUMERIC(?p) AS ?v) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "v"), "true");
+}

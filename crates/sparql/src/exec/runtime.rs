@@ -297,23 +297,66 @@ fn numeric_value(t: &Term) -> Option<f64> {
     literal_value(t).trim().parse::<f64>().ok()
 }
 
-/// SPARQL effective boolean value, best effort over lexical forms:
-/// "true"/"false" literals, numeric ≠ 0, otherwise non-empty string.
-/// EBV of a non-literal (IRI / blank node) is a type error per SPARQL
-/// §17.2.2 — under the crate-wide error→false convention it yields
-/// `false`.
+/// The numeric XSD datatypes for datatype-aware EBV and `ISNUMERIC`.
+fn is_numeric_datatype(dt: &str) -> bool {
+    let Some(local) = dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") else {
+        return false;
+    };
+    matches!(
+        local,
+        "integer"
+            | "decimal"
+            | "double"
+            | "float"
+            | "long"
+            | "int"
+            | "short"
+            | "byte"
+            | "nonNegativeInteger"
+            | "nonPositiveInteger"
+            | "negativeInteger"
+            | "positiveInteger"
+            | "unsignedLong"
+            | "unsignedInt"
+            | "unsignedShort"
+            | "unsignedByte"
+    )
+}
+
+/// SPARQL effective boolean value (§17.2.2), datatype-aware:
+/// `xsd:boolean` → its value, numeric datatypes → value ≠ 0, plain /
+/// `xsd:string` / lang-tagged → non-empty lexical form (so the *string*
+/// `"false"` is true). EBV of a non-literal (IRI / blank node) or of a
+/// non-boolean/numeric/string datatype is a type error — under the
+/// crate-wide error→false convention it yields `false`.
 fn ebv(t: &Term) -> bool {
     if term_kind(t) != TermKind::Literal {
         return false;
     }
-    let v = literal_value(t);
-    match v.as_str() {
-        "true" => true,
-        "false" => false,
-        _ => match v.trim().parse::<f64>() {
-            Ok(n) => n != 0.0,
-            Err(_) => !v.is_empty(),
-        },
+    let raw = lex(t);
+    if !raw.starts_with('"') {
+        // Internal unquoted boolean results (`bool_lit`, the
+        // comparison-expression terms): not an N-Triples form, so
+        // keep the legacy lexical rules.
+        return match raw.as_str() {
+            "true" => true,
+            "false" => false,
+            other => match other.trim().parse::<f64>() {
+                Ok(n) => n != 0.0,
+                Err(_) => !other.is_empty(),
+            },
+        };
+    }
+    let (value, _lang, dt) = literal_parts(&raw);
+    match dt.as_deref() {
+        Some("http://www.w3.org/2001/XMLSchema#boolean") => value == "true" || value == "1",
+        Some(dt) if is_numeric_datatype(dt) => value
+            .trim()
+            .parse::<f64>()
+            .map(|n| n != 0.0 && !n.is_nan())
+            .unwrap_or(false),
+        Some("http://www.w3.org/2001/XMLSchema#string") | None => !value.is_empty(),
+        Some(_) => false, // other datatypes: type error
     }
 }
 
@@ -949,9 +992,18 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
         Func::IsIri => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Iri)),
         Func::IsBlank => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Blank)),
         Func::IsLiteral => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Literal)),
-        Func::IsNumeric => term(0)?
-            .as_ref()
-            .and_then(|t| bool_lit(numeric_value(t).is_some())),
+        // ISNUMERIC is true only for literals with a numeric XSD
+        // datatype whose lexical form parses (§17.4.2.4) — a plain
+        // string that merely looks numeric ("42") is false.
+        Func::IsNumeric => term(0)?.and_then(|t| {
+            if term_kind(&t) != TermKind::Literal {
+                return bool_lit(false);
+            }
+            let (value, _, dt) = literal_parts(&lex(&t));
+            let ok = dt.as_deref().is_some_and(is_numeric_datatype)
+                && value.trim().parse::<f64>().is_ok();
+            bool_lit(ok)
+        }),
         Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
             let v = match s(0)? {
                 Some(v) => v,
