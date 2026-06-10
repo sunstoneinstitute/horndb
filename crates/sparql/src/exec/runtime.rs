@@ -346,7 +346,9 @@ enum TermKind {
 
 /// Compile a SPARQL REGEX/REPLACE pattern with its flags string.
 /// Unsupported flag characters or an invalid pattern yield `None`
-/// (expression error).
+/// (expression error). Called per evaluated row — a compiled-pattern
+/// cache is a future optimisation once FILTER throughput matters
+/// (Stage-1 result sets are small).
 fn compile_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
     let mut b = regex::RegexBuilder::new(pattern);
     for f in flags.chars() {
@@ -749,9 +751,14 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
 
     Ok(match f {
         Func::Str => term(0)?.map(|t| plain_literal(&literal_value(&t))),
-        Func::Lang => term(0)?.map(|t| {
+        Func::Lang => term(0)?.and_then(|t| {
+            // LANG on a non-literal is a type error (SPARQL §17.4.1.1),
+            // mirroring the DATATYPE arm below.
+            if term_kind(&t) != TermKind::Literal {
+                return None;
+            }
             let (_, lang, _) = literal_parts(&lex(&t));
-            plain_literal(&lang.unwrap_or_default())
+            Some(plain_literal(&lang.unwrap_or_default()))
         }),
         Func::LangMatches => match (s(0)?, s(1)?) {
             (Some(tag), Some(range)) => {
@@ -897,12 +904,14 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
                 Func::Hours => field(11, 13).map(integer_literal),
                 Func::Minutes => field(14, 16).map(integer_literal),
                 _ => {
-                    // SECONDS — keep any fractional part.
+                    // SECONDS — keep any fractional part. Always
+                    // xsd:decimal per SPARQL §17.4.5.6 (numeric_term
+                    // would promote whole seconds to xsd:integer).
                     let tail: String = v[17..]
                         .chars()
                         .take_while(|c| c.is_ascii_digit() || *c == '.')
                         .collect();
-                    tail.parse::<f64>().ok().map(numeric_term)
+                    tail.parse::<f64>().ok().map(decimal_literal)
                 }
             }
         }
