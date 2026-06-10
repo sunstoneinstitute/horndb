@@ -56,6 +56,7 @@ pub struct TriplePattern {
 /// A SPARQL expression — Stage 1 covers comparisons, boolean connectives,
 /// arithmetic, IF, COALESCE and the common builtin functions. EXISTS,
 /// non-deterministic builtins and custom functions are out of scope.
+/// See [`Func`] for the full builtin list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Term(Term),

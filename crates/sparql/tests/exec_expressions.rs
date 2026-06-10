@@ -28,6 +28,7 @@ fn rows(q: &str, s: &MemStore) -> Vec<horndb_sparql::exec::Bindings> {
 }
 
 /// Lexical value of a binding, ignoring term kind and literal decoration.
+/// Note: does not handle escaped quotes inside lexical values (fine for these fixtures).
 fn lexical(b: &horndb_sparql::exec::Bindings, var: &str) -> String {
     let t = b.get(var).unwrap_or_else(|| panic!("unbound ?{var}"));
     let raw = match t {
@@ -162,4 +163,158 @@ fn sum_of_products_aggregate() {
     );
     assert_eq!(got.len(), 1);
     assert_eq!(lexical(&got[0], "total"), "26");
+}
+
+fn store_with_names() -> MemStore {
+    let mut s = MemStore::default();
+    let data = [
+        ("a", "\"Alice\"@en"),
+        ("b", "\"bob\""),
+        ("c", "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+    ];
+    for (subj, lit) in data {
+        s.insert_triple(
+            Term::Iri(format!("http://example.org/{subj}")),
+            Term::Iri("http://example.org/name".into()),
+            Term::Literal(lit.to_owned()),
+        );
+    }
+    s
+}
+
+#[test]
+fn string_functions() {
+    let s = store_with_names();
+    let q = "SELECT ?s ?len ?up WHERE { ?s <http://example.org/name> ?n . \
+             BIND(STRLEN(?n) AS ?len) BIND(UCASE(?n) AS ?up) \
+             FILTER(?s = <http://example.org/b>) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "len"), "3");
+    assert_eq!(lexical(&got[0], "up"), "BOB");
+}
+
+#[test]
+fn substr_and_concat() {
+    let s = store_with_names();
+    let q = "SELECT ?x WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(CONCAT(SUBSTR(?n, 1, 2), \"!\") AS ?x) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "x"), "Al!");
+}
+
+#[test]
+fn str_starts_ends_contains_before_after() {
+    let s = store_with_names();
+    let q = "SELECT ?s WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(STRSTARTS(?n, \"Al\") && STRENDS(?n, \"ce\") && CONTAINS(?n, \"lic\")) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "s"), "http://example.org/a");
+
+    let q = "SELECT ?b ?a WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(STRBEFORE(?n, \"i\") AS ?b) BIND(STRAFTER(?n, \"i\") AS ?a) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "b"), "Al");
+    assert_eq!(lexical(&got[0], "a"), "ce");
+}
+
+#[test]
+fn regex_and_replace() {
+    let s = store_with_names();
+    // Case-insensitive match.
+    let q =
+        "SELECT ?s WHERE { ?s <http://example.org/name> ?n . FILTER(REGEX(?n, \"^ali\", \"i\")) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "s"), "http://example.org/a");
+    // Invalid pattern is an expression error: filter drops all rows.
+    let q = "SELECT ?s WHERE { ?s <http://example.org/name> ?n . FILTER(REGEX(?n, \"(\")) }";
+    assert_eq!(rows(q, &s).len(), 0);
+    // REPLACE with a capture group.
+    let q = "SELECT ?x WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(?s = <http://example.org/b>) \
+             BIND(REPLACE(?n, \"b(o)\", \"B$1\") AS ?x) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "x"), "Bob");
+}
+
+#[test]
+fn str_lang_datatype() {
+    let s = store_with_names();
+    let q = "SELECT ?lang ?dt WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(?s = <http://example.org/a>) \
+             BIND(LANG(?n) AS ?lang) BIND(DATATYPE(?n) AS ?dt) }";
+    let got = rows(q, &s);
+    assert_eq!(lexical(&got[0], "lang"), "en");
+    assert_eq!(
+        lexical(&got[0], "dt"),
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+    );
+    let q = "SELECT ?dt WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(?s = <http://example.org/c>) BIND(DATATYPE(?n) AS ?dt) }";
+    let got = rows(q, &s);
+    assert_eq!(
+        lexical(&got[0], "dt"),
+        "http://www.w3.org/2001/XMLSchema#integer"
+    );
+    // LANGMATCHES
+    let q = "SELECT ?s WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(LANGMATCHES(LANG(?n), \"en\")) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "s"), "http://example.org/a");
+}
+
+#[test]
+fn numeric_functions() {
+    let s = store_with_prices();
+    let q = "SELECT ?abs ?ceil ?floor ?round WHERE { \
+             <http://example.org/a> <http://example.org/price> ?p . \
+             BIND(ABS(0 - ?p) AS ?abs) BIND(CEIL(?p / 2) AS ?ceil) \
+             BIND(FLOOR(?p / 2) AS ?floor) BIND(ROUND(?p / 2) AS ?round) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "abs"), "4"); // |0-4| = 4
+    assert_eq!(lexical(&got[0], "ceil"), "2"); // ceil(2.0)
+    assert_eq!(lexical(&got[0], "floor"), "2"); // floor(2.0)
+    assert_eq!(lexical(&got[0], "round"), "2"); // round(2.0)
+}
+
+#[test]
+fn type_check_functions() {
+    let s = store_with_names();
+    // isLITERAL on a literal-valued object; isIRI on the subject.
+    let q = "SELECT ?s WHERE { ?s <http://example.org/name> ?n . \
+             FILTER(ISLITERAL(?n) && ISIRI(?s) && !ISBLANK(?s)) \
+             FILTER(?s = <http://example.org/c>) FILTER(ISNUMERIC(?n)) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "s"), "http://example.org/c");
+}
+
+#[test]
+fn datetime_accessors() {
+    let mut s = MemStore::default();
+    s.insert_triple(
+        Term::Iri("http://example.org/e".into()),
+        Term::Iri("http://example.org/at".into()),
+        Term::Literal(
+            "\"2026-06-10T12:34:56\"^^<http://www.w3.org/2001/XMLSchema#dateTime>".into(),
+        ),
+    );
+    let q = "SELECT ?y ?mo ?d ?h ?mi ?sec WHERE { ?e <http://example.org/at> ?t . \
+             BIND(YEAR(?t) AS ?y) BIND(MONTH(?t) AS ?mo) BIND(DAY(?t) AS ?d) \
+             BIND(HOURS(?t) AS ?h) BIND(MINUTES(?t) AS ?mi) BIND(SECONDS(?t) AS ?sec) }";
+    let got = rows(q, &s);
+    assert_eq!(got.len(), 1);
+    assert_eq!(lexical(&got[0], "y"), "2026");
+    assert_eq!(lexical(&got[0], "mo"), "6");
+    assert_eq!(lexical(&got[0], "d"), "10");
+    assert_eq!(lexical(&got[0], "h"), "12");
+    assert_eq!(lexical(&got[0], "mi"), "34");
+    assert_eq!(lexical(&got[0], "sec"), "56");
 }
