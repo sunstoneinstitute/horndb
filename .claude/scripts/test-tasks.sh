@@ -72,7 +72,8 @@ age_s="$(echo "$json" | grep -o '"age_seconds":[0-9-]*' | head -1 | cut -d: -f2 
                                       || fail "claims --json age_seconds > 0 (got ${age_s:-none})"
 
 # --- 3. reap: detects + releases the stale claim ----------------------------
-"$T" reap --older-than 12h | grep -q 'stale: #22' \
+out="$("$T" reap --older-than 12h)"
+echo "$out" | grep -q 'stale: #22' \
   && ok "reap dry-run finds stale #22" || fail "reap dry-run finds stale #22"
 "$T" reap --older-than 12h --apply >/dev/null
 grep -q '^- \[ \].*issues/22' TASKS.md \

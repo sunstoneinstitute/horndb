@@ -343,7 +343,7 @@ case "$CMD" in
       exit 0
     fi
     if [ "$APPLY" != 1 ]; then
-      echo "reap: ${#STALE[@]} stale claim(s) above (dry run — re-run with --apply to release)." >&2
+      echo "reap: ${#STALE[@]} stale claim(s) above (dry run — re-run with --apply to release)."
       exit 0
     fi
     for issue in "${STALE[@]}"; do
