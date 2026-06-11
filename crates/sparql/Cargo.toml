@@ -38,6 +38,9 @@ hyper = { workspace = true, optional = true }
 # library code does not reference them.
 oxttl = { workspace = true }
 clap = { workspace = true }
+horndb-storage = { path = "../storage" }
+horndb-wcoj = { path = "../wcoj" }
+arrow = { workspace = true }
 
 [[bin]]
 name = "serve"

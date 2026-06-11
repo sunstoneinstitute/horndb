@@ -4,6 +4,7 @@
 //! over a `HashSet<(s,p,o)>`. SPEC-03 (WCOJ engine) will provide a
 //! production implementation through the same trait.
 
+pub mod horn;
 pub mod mem;
 pub mod runtime;
 
