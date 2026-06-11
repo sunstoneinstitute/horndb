@@ -8,7 +8,7 @@ use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
-use crate::term::{GraphId, DEFAULT_GRAPH};
+use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
 use crate::tier::{Tier, TierStats};
 use oxrdf::Term;
 
@@ -185,5 +185,50 @@ impl Store {
             bytes_estimated: stats.bytes_estimated,
             bytes_per_triple: bpt,
         }
+    }
+
+    /// Dump every default-graph triple as raw `TermId`s, in arbitrary
+    /// order. O(triples) and materialized — intended for snapshot
+    /// builders (e.g. the SPARQL frontend's WCOJ source), not hot paths.
+    pub fn scan_all_term_ids(&self) -> Vec<(TermId, TermId, TermId)> {
+        let mt = self
+            .tier
+            .as_any()
+            .downcast_ref::<MemoryTier>()
+            .expect("Stage-1 store always wraps MemoryTier");
+        let mut out = Vec::with_capacity(self.tier.triple_count() as usize);
+        for p_id in self.tier.predicates(DEFAULT_GRAPH) {
+            mt.with_predicate(DEFAULT_GRAPH, p_id, |part| {
+                out.extend(part.scan().map(|(s, o)| (s, p_id, o)));
+            });
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::NamedNode;
+
+    fn iri(s: &str) -> Term {
+        Term::NamedNode(NamedNode::new(s).unwrap())
+    }
+
+    #[test]
+    fn scan_all_term_ids_returns_every_default_graph_triple() {
+        let store = Store::in_memory();
+        store
+            .insert_triples(&[
+                (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")),
+                (iri("http://ex/a"), iri("http://ex/q"), iri("http://ex/c")),
+            ])
+            .unwrap();
+        let all = store.scan_all_term_ids();
+        assert_eq!(all.len(), 2);
+        let p = store.dictionary().get(&iri("http://ex/p")).unwrap();
+        let q = store.dictionary().get(&iri("http://ex/q")).unwrap();
+        let preds: Vec<TermId> = all.iter().map(|t| t.1).collect();
+        assert!(preds.contains(&p) && preds.contains(&q));
     }
 }
