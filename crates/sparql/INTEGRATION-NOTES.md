@@ -65,12 +65,16 @@ seam on top of `horndb-storage` and `horndb-wcoj`.
 ### Term identity and dictionary
 
 All term identity lives in `horndb_storage::Dictionary` (kind-tagged
-`TermId`s). This fixes the Stage-1 `MemStore` behaviour where literals
-were coerced to IRI form and lost their type information. Two literals
-with the same value but different `xsd:integer` lexical spellings (e.g.
-`"042"` and `"42"`) share an inline-int `TermId`; bound values decode
-to the canonical form. This is closer to SPARQL value semantics than
-pure lexical matching.
+`TermId`s). This fixes the Stage-1 `MemStore` behaviour where terms
+were stored as bare lexical strings and term kinds were recovered
+heuristically from lexical shape (`classify_lexical` in `exec/mod.rs`).
+Literals (leading `"`) were recovered correctly, but blank nodes were
+stored as bare labels indistinguishable from IRIs and therefore surfaced
+as `Term::Iri`. The dictionary's kind-tagged `TermId`s make recovery
+exact for all three kinds. Two literals with the same value but different
+`xsd:integer` lexical spellings (e.g. `"042"` and `"42"`) additionally
+share an inline-int `TermId`; bound values decode to the canonical form.
+This is closer to SPARQL value semantics than pure lexical matching.
 
 ### Tombstone deletes over insertion-only storage
 
@@ -87,8 +91,9 @@ BGP execution requires all six sort orderings (SPO, SOP, PSO, POS,
 OSP, OPS). `HornBackend` builds a `VecTripleSource` lazily on the first
 query after any mutation and caches it behind a `Mutex<Option<Arc<…>>>`.
 The snapshot holds all six orderings eagerly sorted; at ~144 bytes/triple
-transient peak this is a documented Stage-1 cost. The snapshot is
-invalidated (set to `None`) on every write (insert or delete).
+steady-state snapshot cost (construction briefly peaks ~168 B/triple
+while the input vec is still alive) this is a documented Stage-1 cost.
+The snapshot is invalidated (set to `None`) on every write (insert or delete).
 
 A follow-up item exists to replace this with a direct `TripleSource`
 over the columnar partitions, avoiding the full-copy rebuild.
