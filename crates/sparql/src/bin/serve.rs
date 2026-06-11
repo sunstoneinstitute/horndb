@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use oxrdf::{GraphName, NamedOrBlankNode, Quad, Term as OxTerm};
+#[cfg(feature = "reasoner")]
+use oxrdf::{GraphName, Quad};
+use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
 use std::sync::{Arc, RwLock};
 
@@ -76,7 +78,7 @@ async fn main() -> Result<()> {
                 "serve: materialized closure — {} asserted, {} total loaded",
                 stats.asserted, stats.loaded
             );
-            total = store.len();
+            total = stats.loaded;
         }
         #[cfg(not(feature = "reasoner"))]
         {
