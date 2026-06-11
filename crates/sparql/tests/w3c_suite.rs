@@ -1,11 +1,16 @@
 //! Drives the Stage-1 W3C SPARQL Query subset committed in
 //! `crates/harness/tests/fixtures/sparql11/`. Diffs each query's
 //! answer against the vendored expected SPARQL-JSON file.
+//!
+//! Two backends are exercised:
+//! * [`MemStore`] — the original Stage-1 hash-set backend.
+//! * [`HornBackend`] — the storage/WCOJ backend wired in by issue #67.
 
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::{FullBackend, Store};
 use horndb_sparql::results::json::{write_ask_json, write_select_json};
 use std::path::{Path, PathBuf};
 
@@ -17,8 +22,8 @@ fn fixtures_root() -> PathBuf {
     p
 }
 
-fn load_ntriples(path: &Path) -> MemStore {
-    let mut s = MemStore::default();
+fn load_ntriples<S: Store + Default>(path: &Path) -> S {
+    let mut s = S::default();
     let body = std::fs::read_to_string(path).expect("read data.nt");
     for line in body.lines() {
         let line = line.trim();
@@ -106,14 +111,14 @@ fn assert_select_equal(got: &str, expected: &str) {
     assert_eq!(gb, eb, "bindings differ");
 }
 
-fn run_one(name: &str) {
+fn run_one<B: FullBackend + Default>(name: &str) {
     let dir = fixtures_root().join(name);
-    let store = load_ntriples(&dir.join("data.nt"));
+    let backend: B = load_ntriples(&dir.join("data.nt"));
     let q = std::fs::read_to_string(dir.join("query.rq")).expect("read query.rq");
     let expected = std::fs::read_to_string(dir.join("expected.srj")).expect("read expected.srj");
     let form = read_form(&dir);
 
-    let ans = execute_query(&q, &store).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let ans = execute_query(&q, &backend).unwrap_or_else(|e| panic!("{name}: {e}"));
     match (form.as_str(), ans) {
         ("select", QueryAnswer::Solutions { vars, rows }) => {
             let got = write_select_json(&vars, &rows);
@@ -129,11 +134,13 @@ fn run_one(name: &str) {
     }
 }
 
+// ── MemStore leg (original; keep this name so CI references stay valid) ──────
+
 macro_rules! w3c_case {
     ($name:ident, $dir:expr) => {
         #[test]
         fn $name() {
-            run_one($dir);
+            run_one::<MemStore>($dir);
         }
     };
 }
@@ -145,3 +152,22 @@ w3c_case!(basic_004, "basic-004");
 w3c_case!(basic_005, "basic-005");
 w3c_case!(expr_001, "expr-001");
 w3c_case!(expr_002, "expr-002");
+
+// ── HornBackend leg ───────────────────────────────────────────────────────────
+
+macro_rules! w3c_case_horn {
+    ($name:ident, $dir:expr) => {
+        #[test]
+        fn $name() {
+            run_one::<HornBackend>($dir);
+        }
+    };
+}
+
+w3c_case_horn!(basic_001_hornbackend, "basic-001");
+w3c_case_horn!(basic_002_hornbackend, "basic-002");
+w3c_case_horn!(basic_003_hornbackend, "basic-003");
+w3c_case_horn!(basic_004_hornbackend, "basic-004");
+w3c_case_horn!(basic_005_hornbackend, "basic-005");
+w3c_case_horn!(expr_001_hornbackend, "expr-001");
+w3c_case_horn!(expr_002_hornbackend, "expr-002");
