@@ -27,7 +27,6 @@ use oxrdf::{BlankNode, Literal, NamedNode, Term as OxTerm};
 ///
 /// Callers that persist or compare the algebra `Term::Literal` form after a
 /// round-trip should expect these normalizations rather than byte identity.
-#[allow(dead_code)] // used by HornBackend (Task 5/6)
 pub(crate) fn algebra_to_oxrdf(t: &Term) -> Result<OxTerm> {
     match t {
         Term::Iri(s) => Ok(OxTerm::NamedNode(NamedNode::new_unchecked(s.clone()))),
@@ -45,7 +44,6 @@ pub(crate) fn algebra_to_oxrdf(t: &Term) -> Result<OxTerm> {
 
 /// N-Triples literal lexical form -> oxrdf::Literal.
 /// `literal_parts` keeps the value escaped; unescape before building.
-#[allow(dead_code)] // used by HornBackend (Task 5/6)
 fn parse_literal(raw: &str) -> Literal {
     let (escaped, lang, dt) = literal_parts(raw);
     let value = unescape_ntriples(&escaped);
@@ -58,7 +56,6 @@ fn parse_literal(raw: &str) -> Literal {
 }
 
 /// oxrdf::Term -> algebra::Term, preserving kind (the point of #67).
-#[allow(dead_code)] // used by HornBackend (Task 5/6)
 pub(crate) fn oxrdf_to_algebra(t: &OxTerm) -> Term {
     match t {
         OxTerm::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
@@ -74,7 +71,6 @@ pub(crate) fn oxrdf_to_algebra(t: &OxTerm) -> Term {
 /// One lexical term in the `Engine::materialized_triples()` convention:
 /// leading `"` = literal (N-Triples form), leading `_:` = blank node
 /// (prefix stripped), anything else = bare IRI.
-#[allow(dead_code)] // used by HornBackend (Task 5/6)
 pub(crate) fn lexical_to_oxrdf(s: &str) -> OxTerm {
     if s.starts_with('"') {
         OxTerm::Literal(parse_literal(s))
@@ -85,11 +81,17 @@ pub(crate) fn lexical_to_oxrdf(s: &str) -> OxTerm {
     }
 }
 
-use crate::exec::Store;
-use horndb_storage::Store as ColumnStore;
+use crate::algebra::TriplePattern;
+use crate::exec::{Bindings, Executor, Store};
+use arrow::array::UInt64Array;
+use horndb_storage::{Store as ColumnStore, TermId};
+use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::executor::Executor as WcojExecutor;
 use horndb_wcoj::ids::Triple as WTriple;
+use horndb_wcoj::pattern::{Bgp as WBgp, Term as WTerm, TriplePattern as WPattern, Var as WVar};
+use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Storage + WCOJ backed SPARQL backend (issue #67).
@@ -216,7 +218,6 @@ impl HornBackend {
     }
 
     /// Get-or-build the WCOJ snapshot.
-    #[allow(dead_code)] // used by the Executor impl (Task 6)
     pub(crate) fn wcoj_snapshot(&self) -> Arc<VecTripleSource> {
         let mut guard = self.snapshot.lock().expect("snapshot lock poisoned");
         if let Some(s) = guard.as_ref() {
@@ -270,6 +271,158 @@ impl Store for HornBackend {
             self.live -= 1;
             self.invalidate();
         }
+    }
+}
+
+impl Executor for HornBackend {
+    fn scan_bgp(
+        &self,
+        patterns: &[TriplePattern],
+    ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+        // The empty BGP is the unit of join: exactly one empty solution
+        // (parity with MemStore and the SPARQL algebra).
+        if patterns.is_empty() {
+            return Ok(Box::new(std::iter::once(Bindings::new())));
+        }
+
+        let snapshot = self.wcoj_snapshot();
+        let dict = self.store.dictionary();
+
+        // SPARQL variable name -> WCOJ var index, first-appearance order.
+        let mut var_index: HashMap<String, u8> = HashMap::new();
+        // (original, alias) pairs introduced for variables repeated
+        // *within a single pattern* — the trie executor must not see the
+        // same WVar twice in one pattern, so the repeat becomes a fresh
+        // alias plus a post-filter to the diagonal.
+        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
+        let mut wpatterns: Vec<WPattern> = Vec::new();
+        let mut ground: Vec<WTriple> = Vec::new();
+
+        for pattern in patterns {
+            let mut seen_here: HashSet<&str> = HashSet::new();
+            let mut slots = [WTerm::Var(WVar(0)); 3];
+            let mut all_bound = true;
+            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+            for (slot_no, term) in slot_terms.into_iter().enumerate() {
+                slots[slot_no] = match term {
+                    Term::Var(v) => {
+                        all_bound = false;
+                        let name = v.name();
+                        let effective = if seen_here.contains(name) {
+                            let alias = format!("__horndb_dup_{name}_{slot_no}");
+                            diagonal_filters.push((name.to_owned(), alias.clone()));
+                            alias
+                        } else {
+                            seen_here.insert(name);
+                            name.to_owned()
+                        };
+                        let idx = match var_index.get(&effective) {
+                            Some(&i) => i,
+                            None => {
+                                let next = var_index.len();
+                                if next > u8::MAX as usize {
+                                    return Err(SparqlError::Executor(
+                                        "BGP exceeds 256 distinct variables".into(),
+                                    ));
+                                }
+                                var_index.insert(effective, next as u8);
+                                next as u8
+                            }
+                        };
+                        WTerm::Var(WVar(idx))
+                    }
+                    constant => {
+                        let ox = algebra_to_oxrdf(constant)?;
+                        match dict.get(&ox) {
+                            Some(id) => WTerm::Bound(id.0),
+                            // A constant the dictionary has never seen
+                            // cannot match any stored triple.
+                            None => return Ok(Box::new(std::iter::empty())),
+                        }
+                    }
+                };
+            }
+            if all_bound {
+                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
+                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
+            } else {
+                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+            }
+        }
+
+        // Fully-ground patterns are membership tests against the snapshot;
+        // any miss zeroes the whole BGP.
+        if ground.iter().any(|t| !snapshot.contains(t)) {
+            return Ok(Box::new(std::iter::empty()));
+        }
+        // All patterns ground and present: one empty row (ASK semantics).
+        if wpatterns.is_empty() {
+            return Ok(Box::new(std::iter::once(Bindings::new())));
+        }
+
+        let bgp = WBgp::new(wpatterns);
+        let mut rows: Vec<Bindings> = Vec::new();
+        for batch in WcojExecutor::for_bgp(
+            snapshot.as_ref(),
+            &bgp,
+            &Planner::default(),
+            CancelToken::new(),
+        ) {
+            let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
+            let schema = batch.schema();
+            // Resolve each variable's column once per batch.
+            let mut cols: Vec<(&str, &UInt64Array)> = Vec::with_capacity(var_index.len());
+            for (name, idx) in &var_index {
+                // Defensive: skip vars the executor produced no column for.
+                let Some((col_idx, _)) = schema.column_with_name(&format!("v{idx}")) else {
+                    continue;
+                };
+                let arr = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| {
+                        SparqlError::Executor(format!("wcoj batch column v{idx} is not UInt64"))
+                    })?;
+                cols.push((name.as_str(), arr));
+            }
+            for row in 0..batch.num_rows() {
+                let mut b = Bindings::new();
+                for &(name, arr) in &cols {
+                    let id = TermId(arr.value(row));
+                    let ox = dict
+                        .lookup(id)
+                        .ok_or_else(|| SparqlError::Executor(format!("dangling TermId {id:?}")))?;
+                    b.set(name, oxrdf_to_algebra(&ox));
+                }
+                rows.push(b);
+            }
+        }
+
+        // Diagonal filters: keep rows where each alias equals its
+        // original, then strip the alias bindings from the output.
+        if !diagonal_filters.is_empty() {
+            rows.retain(|b| {
+                diagonal_filters
+                    .iter()
+                    .all(|(orig, alias)| b.get(orig) == b.get(alias))
+            });
+            let aliases: HashSet<&str> = diagonal_filters.iter().map(|(_, a)| a.as_str()).collect();
+            rows = rows
+                .into_iter()
+                .map(|b| {
+                    let mut out = Bindings::new();
+                    for (k, v) in b.vars() {
+                        if !aliases.contains(k) {
+                            out.set(k, v.clone());
+                        }
+                    }
+                    out
+                })
+                .collect();
+        }
+
+        Ok(Box::new(rows.into_iter()))
     }
 }
 
