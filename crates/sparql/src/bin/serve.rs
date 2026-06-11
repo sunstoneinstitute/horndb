@@ -85,11 +85,13 @@ async fn main() -> Result<()> {
             anyhow::bail!("--materialize requires the `reasoner` feature");
         }
     } else {
+        let mut loaded: u64 = 0;
         for f in &files {
             let n = load_file(&mut store, f).with_context(|| format!("loading {}", f.display()))?;
             eprintln!("serve: loaded {n} triples from {}", f.display());
+            loaded += n;
         }
-        total = store.len();
+        total = loaded;
     }
 
     let state = AppState::<HornBackend> {
@@ -134,35 +136,36 @@ fn collect_data_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Parse one file and insert each triple into the store. Returns the
-/// number of triples inserted. Format is chosen by extension; anything
-/// other than `.ttl` is parsed as N-Triples.
-fn load_file(store: &mut HornBackend, path: &Path) -> Result<usize> {
+/// Parse one file and bulk-insert all triples into the store in a single
+/// batch (O(n) partitions rebuilt, not O(n²)). Returns the number of
+/// newly-live triples. Format is chosen by extension; anything other than
+/// `.ttl` is parsed as N-Triples.
+fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
-    let mut count = 0usize;
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
     if is_turtle {
         for triple in TurtleParser::new().for_reader(reader) {
-            let t = triple?;
-            let s = named_or_blank_to_term(&t.subject);
-            let p = OxTerm::NamedNode(t.predicate);
-            store
-                .insert_oxrdf(&s, &p, &t.object)
-                .with_context(|| format!("inserting triple from {}", path.display()))?;
-            count += 1;
+            let t = triple.with_context(|| format!("parsing {}", path.display()))?;
+            batch.push((
+                named_or_blank_to_term(&t.subject),
+                OxTerm::NamedNode(t.predicate),
+                t.object,
+            ));
         }
     } else {
         for triple in NTriplesParser::new().for_reader(reader) {
-            let t = triple?;
-            let s = named_or_blank_to_term(&t.subject);
-            let p = OxTerm::NamedNode(t.predicate);
-            store
-                .insert_oxrdf(&s, &p, &t.object)
-                .with_context(|| format!("inserting triple from {}", path.display()))?;
-            count += 1;
+            let t = triple.with_context(|| format!("parsing {}", path.display()))?;
+            batch.push((
+                named_or_blank_to_term(&t.subject),
+                OxTerm::NamedNode(t.predicate),
+                t.object,
+            ));
         }
     }
-    Ok(count)
+    store
+        .insert_oxrdf_batch(batch)
+        .with_context(|| format!("bulk inserting triples from {}", path.display()))
 }
 
 fn named_or_blank_to_term(n: &NamedOrBlankNode) -> OxTerm {
