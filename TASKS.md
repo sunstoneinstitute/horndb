@@ -46,7 +46,7 @@ they gate running the **trainmarks** RDF benchmark
 (~100K / ~1M / ~10M triple) SPARQL throughput suite with **no OWL reasoning**.
 They stay listed as increments of the SPEC-07 epic ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)).
 
-- [ ] **SPARQL aggregation + expanded expressions.**
+- [x] **SPARQL aggregation + expanded expressions.**
   ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
   `GROUP BY` / `COUNT` / `SUM` / `DISTINCT`-count and the `FILTER`/`BIND`
   expression surface (`<=` / `>=` / `IN` / `NOT IN` / arithmetic / `IF` /
@@ -54,7 +54,7 @@ They stay listed as increments of the SPEC-07 epic ([#7](https://github.com/suns
   `crates/sparql/src/algebra/translate.rs`. Blocks four of the six trainmarks
   queries (and the LDBC SPB aggregation mix).
 
-- [ ] **Wire the SPARQL frontend onto real storage + WCOJ + closure.**
+- [x] **Wire the SPARQL frontend onto real storage + WCOJ + closure.**
   ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
   The runtime executes against the standalone in-memory
   `crates/sparql/src/exec/mem.rs::MemStore` (naive nested-loop `scan_bgp`, no
