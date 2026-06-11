@@ -21,6 +21,9 @@ ok()   { PASS=$((PASS + 1)); echo "ok   - $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL - $1"; }
 
 # --- Sandbox: bare origin + clone that satisfies tasks.sh's guards ----------
+# Shield the sandbox from the user's global/system git config (gpgsign,
+# hooksPath, …) — sandbox commits must never touch real keys or hooks.
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 git init --quiet --bare "$SANDBOX/origin.git"
 git clone --quiet "$SANDBOX/origin.git" "$SANDBOX/repo" 2>/dev/null
 cd "$SANDBOX/repo"
@@ -93,10 +96,12 @@ grep -q '^- \[ \].*issues/11' TASKS.md \
 # --- 5. lock: perl fallback works; both tools mutually exclude (#78 item 1) --
 TASKS_LOCK_TOOL=perl "$T" claims >/dev/null \
   && ok "perl lock fallback acquires"  || fail "perl lock fallback acquires"
+# Holder sleeps far longer than the assertions need; killed explicitly below
+# so a slow runner can never see the lock released mid-test.
 perl -e '
   open(my $fh, ">>", ".git/tasks.lock") or die $!;
   use Fcntl qw(:flock); flock($fh, LOCK_EX) or die $!;
-  sleep 4;' &
+  sleep 30;' &
 HOLDER=$!
 sleep 1
 rc=0; TASKS_LOCK_TOOL=perl TASKS_LOCK_TIMEOUT=1 "$T" claims >/dev/null 2>&1 || rc=$?
@@ -107,6 +112,7 @@ if command -v flock >/dev/null 2>&1; then
 else
   echo "skip - flock(1) not installed; cross-tool exclusion not tested"
 fi
+kill "$HOLDER" 2>/dev/null || true
 wait "$HOLDER" 2>/dev/null || true
 
 echo
