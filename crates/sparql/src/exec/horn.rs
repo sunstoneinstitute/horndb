@@ -13,6 +13,20 @@ use oxrdf::{BlankNode, Literal, NamedNode, Term as OxTerm};
 
 /// algebra::Term constant -> oxrdf::Term (dictionary key form).
 /// Errors on variables and RDF 1.2 triple terms.
+///
+/// # Literal normalization
+///
+/// oxrdf applies two normalizations that are consistent on both the data path
+/// and the query path (both go through oxrdf), so matching stays correct even
+/// though the lexical strings may not be byte-identical to the original input:
+///
+/// * **`xsd:string` collapsing** — `"v"^^<http://www.w3.org/2001/XMLSchema#string>`
+///   round-trips as the plain form `"v"` (RDF 1.1 §3.3 says plain literals and
+///   `xsd:string` literals are the same node).
+/// * **BCP-47 language-tag lowercasing** — `"x"@EN` round-trips as `"x"@en`.
+///
+/// Callers that persist or compare the algebra `Term::Literal` form after a
+/// round-trip should expect these normalizations rather than byte identity.
 #[allow(dead_code)] // used by HornBackend (Task 5/6)
 pub(crate) fn algebra_to_oxrdf(t: &Term) -> Result<OxTerm> {
     match t {
@@ -36,8 +50,8 @@ fn parse_literal(raw: &str) -> Literal {
     let (escaped, lang, dt) = literal_parts(raw);
     let value = unescape_ntriples(&escaped);
     match (lang, dt) {
-        (Some(lang), _) => Literal::new_language_tagged_literal(value, lang)
-            .unwrap_or_else(|_| Literal::new_simple_literal(raw)),
+        (Some(lang), _) => Literal::new_language_tagged_literal(&value, lang)
+            .unwrap_or_else(|_| Literal::new_simple_literal(value)),
         (None, Some(dt)) => Literal::new_typed_literal(value, NamedNode::new_unchecked(dt)),
         (None, None) => Literal::new_simple_literal(value),
     }
@@ -116,5 +130,12 @@ mod tests {
     #[test]
     fn variables_are_rejected() {
         assert!(algebra_to_oxrdf(&Term::Var(Var::new("x"))).is_err());
+    }
+
+    #[test]
+    fn explicit_xsd_string_normalizes_to_plain_form() {
+        let raw = "\"v\"^^<http://www.w3.org/2001/XMLSchema#string>";
+        let ox = algebra_to_oxrdf(&Term::Literal(raw.to_owned())).unwrap();
+        assert_eq!(oxrdf_to_algebra(&ox), Term::Literal("\"v\"".to_owned()));
     }
 }
