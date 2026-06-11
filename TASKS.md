@@ -34,7 +34,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
-- [ ] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
+- [v] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78)) — _wip: 6b05d083@Stigs-MacBook-Pro.local · task-78-tasks-sh-macos-portability · 2026-06-11T04:15:45Z_
 
 Closed tasks are listed in [Done](#done-for-traceability).
 
@@ -180,7 +180,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   keep the app foregrounded during long sessions, or pre-cache an unencrypted
   signing key for CI. (Bypassing signing is not acceptable — global rule.)
 
-- [ ] **tasks.sh portability on macOS.** ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
+- [v] **tasks.sh portability on macOS.** ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
   `.claude/scripts/tasks.sh` needs `flock(1)` (absent on Darwin — installed
   locally via Homebrew), and its `claims`/`reap` subcommands silently fail on
   BSD awk (gawk-only 3-arg `match()`) and BSD `date` (no `-d`). Make the lock
