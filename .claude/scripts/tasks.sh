@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# .claude/scripts/tasks.sh — flock-serialized TASKS.md transitions for the
-# /next-task workflow, with identifiable claims for orphan detection.
+# .claude/scripts/tasks.sh — lock-serialized (flock(2)) TASKS.md transitions
+# for the /next-task workflow, with identifiable claims for orphan detection.
 #
 # Multiple /next-task agents share the *main* worktree's working tree and race
 # on TASKS.md claim/complete lines. This script makes every TASKS.md mutation
@@ -54,7 +54,9 @@
 # Exit codes: 0 ok · 2 usage/guard · 3 dirty TASKS.md · 4 lock timeout ·
 #             5 fast-forward failed · 9 task not in expected state.
 #
-# Env: TASKS_LOCK_TIMEOUT (seconds, default 180) · TASKS_REMOTE (default origin).
+# Env: TASKS_LOCK_TIMEOUT (seconds, default 180) · TASKS_REMOTE (default origin)
+#      · TASKS_LOCK_TOOL (auto|flock|perl, default auto — auto prefers flock(1)
+#        when installed and falls back to perl, so macOS needs no extra deps).
 #
 # TASKS.md carries no Rust, so these commits/pushes use `--no-verify` — the
 # pre-commit (`cargo fmt --check`) and pre-push (workspace clippy + build) hooks
@@ -122,6 +124,15 @@ to_seconds() {
   esac
 }
 
+# --- ISO-8601 UTC ("…Z") -> epoch seconds, GNU or BSD date ------------------
+# Probed once: GNU date has -d; BSD/macOS date needs -j -u -f <fmt>. Prints 0
+# when the timestamp is unparseable (legacy "?" tags), matching prior behavior.
+if date -u -d "1970-01-01T00:00:00Z" +%s >/dev/null 2>&1; then
+  iso_to_epoch() { date -u -d "$1" +%s 2>/dev/null || echo 0; }
+else
+  iso_to_epoch() { date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo 0; }
+fi
+
 # --- Helpers (run inside the lock) ----------------------------------------
 require_tasks_clean() {
   if ! git -C "$REPO_ROOT" diff --quiet -- TASKS.md \
@@ -175,11 +186,13 @@ flip_checkbox() {
 }
 
 # Emit "issue<TAB>session<TAB>host<TAB>branch<TAB>iso" for each active claim.
+# POSIX awk only (BSD awk has no 3-arg match()): capture via RSTART/RLENGTH,
+# then split the tag payload on its " · " separators.
 parse_claims() {
   awk -v sep="$SEP" -v wip="$WIP" '
     /^- \[v\]/ {
-      if (!match($0, /\/issues\/([0-9]+)\)/, mi)) next
-      issue = mi[1]
+      if (!match($0, /\/issues\/[0-9]+\)/)) next
+      issue = substr($0, RSTART + 8, RLENGTH - 9)   # strip "/issues/" and ")"
       # A task has two [v] lines (index + body heading); the index line comes
       # first and carries the tag. Emit one row per issue.
       if (issue in seen) next
@@ -188,11 +201,14 @@ parse_claims() {
       marker = sep wip
       t = index($0, marker)
       if (t > 0) {
-        payload = substr($0, t + length(marker))           # "<sess>@<host> · <branch> · <iso>_"
+        payload = substr($0, t + length(marker))     # "<sess>@<host> · <branch> · <iso>_"
         sub(/_[ \t]*$/, "", payload)
-        if (match(payload, /^([^@]*)@([^ ]*) · ([^ ]*) · (.*)$/, m)) {
-          sess = m[1]; host = m[2]; branch = m[3]; iso = m[4]
-        } else { sess = payload }                            # legacy / free-form tag
+        n = split(payload, parts, / · /)
+        at = index(parts[1], "@")
+        if (n == 3 && at > 0) {
+          sess = substr(parts[1], 1, at - 1); host = substr(parts[1], at + 1)
+          branch = parts[2]; iso = parts[3]
+        } else { sess = payload }                    # legacy / free-form tag
       }
       print issue "\t" sess "\t" host "\t" branch "\t" iso
     }
@@ -200,9 +216,34 @@ parse_claims() {
 }
 
 # --- Acquire the lock for the whole transaction ---------------------------
+# flock(1) is not part of macOS. Prefer it when present, otherwise fall back
+# to perl (ships on both Linux and Darwin): perl flocks the shell's inherited
+# FD 9 and exits — the lock survives because this shell keeps the same open
+# file description, and it still auto-releases if the shell dies. Both tools
+# take the same flock(2) lock, so mixed fleets mutually exclude correctly.
+# TASKS_LOCK_TOOL=auto|flock|perl overrides the probe (used by test-tasks.sh).
+LOCK_TOOL="${TASKS_LOCK_TOOL:-auto}"
+if [ "$LOCK_TOOL" = "auto" ]; then
+  if command -v flock >/dev/null 2>&1; then LOCK_TOOL=flock; else LOCK_TOOL=perl; fi
+fi
 exec 9>"$LOCKFILE"
-if ! flock -w "$LOCK_TIMEOUT" 9; then
-  echo "tasks.sh: could not acquire $LOCKFILE within ${LOCK_TIMEOUT}s" >&2
+acquire_lock() {
+  case "$LOCK_TOOL" in
+    flock) flock -w "$LOCK_TIMEOUT" 9;;
+    perl)
+      perl -e '
+        use Fcntl qw(:flock);
+        open(my $fh, ">&=", 9) or die "tasks.sh: cannot adopt fd 9: $!\n";
+        my $deadline = time() + $ARGV[0];
+        until (flock($fh, LOCK_EX | LOCK_NB)) {
+          exit 1 if time() >= $deadline;
+          sleep 1;
+        }' "$LOCK_TIMEOUT";;
+    *) die "TASKS_LOCK_TOOL must be auto, flock or perl (got '$LOCK_TOOL')";;
+  esac
+}
+if ! acquire_lock; then
+  echo "tasks.sh: could not acquire $LOCKFILE within ${LOCK_TIMEOUT}s (lock tool: $LOCK_TOOL)" >&2
   exit 4
 fi
 
@@ -258,7 +299,7 @@ case "$CMD" in
     if [ "$JSON" = 1 ]; then
       first=1; printf '['
       while IFS=$'\t' read -r issue sess host branch iso; do
-        epoch="$(date -d "$iso" +%s 2>/dev/null || echo 0)"
+        epoch="$(iso_to_epoch "$iso")"
         age=$(( epoch > 0 ? now - epoch : -1 ))
         [ "$first" = 1 ] || printf ','; first=0
         printf '{"issue":%s,"session":"%s","host":"%s","branch":"%s","claimed":"%s","age_seconds":%s}' \
@@ -270,7 +311,7 @@ case "$CMD" in
       any=0
       while IFS=$'\t' read -r issue sess host branch iso; do
         any=1
-        epoch="$(date -d "$iso" +%s 2>/dev/null || echo 0)"
+        epoch="$(iso_to_epoch "$iso")"
         if [ "$epoch" -gt 0 ]; then
           age=$(( now - epoch )); age_h="$(( age / 3600 ))h$(( (age % 3600) / 60 ))m"
         else age_h="?"; fi
@@ -288,7 +329,7 @@ case "$CMD" in
     now="$(date -u +%s)"
     declare -a STALE=()
     while IFS=$'\t' read -r issue sess host branch iso; do
-      epoch="$(date -d "$iso" +%s 2>/dev/null || echo 0)"
+      epoch="$(iso_to_epoch "$iso")"
       [ "$epoch" -gt 0 ] || continue
       age=$(( now - epoch ))
       if [ "$age" -ge "$threshold" ]; then
@@ -327,7 +368,7 @@ case "$CMD" in
     ;;
 
   ""|-h|--help|help)
-    sed -n '3,60p' "$0"
+    sed -n '3,64p' "$0"
     [ "$CMD" = "" ] && exit 2 || exit 0
     ;;
 
