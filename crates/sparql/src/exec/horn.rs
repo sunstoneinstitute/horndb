@@ -68,12 +68,55 @@ pub(crate) fn oxrdf_to_algebra(t: &OxTerm) -> Term {
     }
 }
 
+/// Split an engine-key literal (`"<raw>"@lang` or `"<raw>"^^<dt>` with the
+/// value RAW, not N-Triples-escaped) into its parts. The suffix is found by
+/// scanning from the END: a datatype suffix is the last `"^^<` (datatype
+/// IRIs cannot contain `"`), a language suffix is a trailing `@[A-Za-z0-9-]+`
+/// immediately preceded by `"`. Embedded quotes in the raw value therefore
+/// never mis-split.
+fn engine_key_literal(key: &str) -> Literal {
+    // Typed form: `"<raw>"^^<dt>`. Split at the LAST `"^^<` — the datatype
+    // IRI cannot contain `"`, so anything before it belongs to the value.
+    if key.ends_with('>') {
+        if let Some(split) = key.rfind("\"^^<") {
+            if split >= 1 {
+                let value = &key[1..split]; // raw — no unescaping
+                let dt = &key[split + 4..key.len() - 1];
+                // oxrdf normalizes xsd:string typed literals to plain — fine.
+                return Literal::new_typed_literal(value, NamedNode::new_unchecked(dt));
+            }
+        }
+    }
+    // Language form: `"<raw>"@lang` with lang = [A-Za-z0-9-]+ and the char
+    // before the `@` being the closing quote.
+    if let Some(at) = key.rfind('@') {
+        let lang = &key[at + 1..];
+        if !lang.is_empty()
+            && lang.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && at >= 2
+            && key.as_bytes()[at - 1] == b'"'
+        {
+            let value = &key[1..at - 1]; // raw — no unescaping
+            return Literal::new_language_tagged_literal(value, lang)
+                .unwrap_or_else(|_| Literal::new_simple_literal(value));
+        }
+    }
+    // Plain form: `"<raw>"`.
+    if key.len() >= 2 && key.ends_with('"') {
+        Literal::new_simple_literal(&key[1..key.len() - 1])
+    } else {
+        // Malformed key (no trailing quote) — degrade, don't panic.
+        Literal::new_simple_literal(&key[1..])
+    }
+}
+
 /// One lexical term in the `Engine::materialized_triples()` convention:
-/// leading `"` = literal (N-Triples form), leading `_:` = blank node
-/// (prefix stripped), anything else = bare IRI.
+/// leading `"` = literal in engine-key form (`"<raw>"@lang` /
+/// `"<raw>"^^<dt>` with the value RAW, **not** N-Triples-escaped), leading
+/// `_:` = blank node (prefix stripped), anything else = bare IRI.
 pub(crate) fn lexical_to_oxrdf(s: &str) -> OxTerm {
     if s.starts_with('"') {
-        OxTerm::Literal(parse_literal(s))
+        OxTerm::Literal(engine_key_literal(s))
     } else if let Some(label) = s.strip_prefix("_:") {
         OxTerm::BlankNode(BlankNode::new_unchecked(label))
     } else {
@@ -324,7 +367,8 @@ impl HornBackend {
     }
 
     /// Bulk-load lexical triples in the `Engine::materialized_triples()`
-    /// convention (IRIs bare, bnodes `_:`-prefixed, literals N-Triples).
+    /// convention (IRIs bare, bnodes `_:`-prefixed, literals in engine-key
+    /// form — quoted RAW value, not N-Triples-escaped).
     pub fn load_lexical_triples(
         &mut self,
         triples: impl Iterator<Item = (String, String, String)>,
@@ -670,6 +714,30 @@ mod tests {
             other => panic!("expected bnode, got {other:?}"),
         }
         assert!(matches!(lexical_to_oxrdf("\"x\"@en"), OxTerm::Literal(_)));
+    }
+
+    #[test]
+    fn engine_key_literals_parse_raw_values() {
+        // Embedded quotes and backslashes are raw, not escapes.
+        match lexical_to_oxrdf(
+            "\"a \"quoted\" \\ value\"^^<http://www.w3.org/2001/XMLSchema#string>",
+        ) {
+            OxTerm::Literal(l) => assert_eq!(l.value(), "a \"quoted\" \\ value"),
+            other => panic!("expected literal, got {other:?}"),
+        }
+        // Lang form with a raw value that itself ends in something @-like.
+        match lexical_to_oxrdf("\"x\"@de\"@en") {
+            OxTerm::Literal(l) => {
+                assert_eq!(l.value(), "x\"@de");
+                assert_eq!(l.language(), Some("en"));
+            }
+            other => panic!("expected literal, got {other:?}"),
+        }
+        // Typed key whose raw value contains a full quoted-lang-looking chunk.
+        match lexical_to_oxrdf("\"say \"hi\"@en\"^^<http://www.w3.org/2001/XMLSchema#string>") {
+            OxTerm::Literal(l) => assert_eq!(l.value(), "say \"hi\"@en"),
+            other => panic!("expected literal, got {other:?}"),
+        }
     }
 
     #[test]

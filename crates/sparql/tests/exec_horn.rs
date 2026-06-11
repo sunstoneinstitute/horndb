@@ -243,3 +243,28 @@ fn materialized_closure_is_queryable() {
         other => panic!("expected boolean, got {other:?}"),
     }
 }
+
+#[cfg(feature = "reasoner")]
+#[test]
+fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {
+    use oxrdf::{Dataset, GraphName, Literal, NamedNode, NamedOrBlankNode, Quad};
+    let raw = "a \"quoted\" \\ value";
+    let mut dataset = Dataset::default();
+    dataset.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/x").unwrap()),
+        NamedNode::new("http://ex/p").unwrap(),
+        Literal::new_simple_literal(raw),
+        GraphName::DefaultGraph,
+    ));
+    let mut backend = HornBackend::new();
+    horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset).unwrap();
+    // NB: the local `iri` helper prepends "http://ex/".
+    let patterns = vec![pat(iri("x"), iri("p"), var("v"))];
+    let rows: Vec<_> = backend.scan_bgp(&patterns).unwrap().collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("v"),
+        Some(&Term::Literal(Literal::new_simple_literal(raw).to_string())),
+        "engine-key literal must round-trip with correct N-Triples escaping on the algebra side"
+    );
+}
