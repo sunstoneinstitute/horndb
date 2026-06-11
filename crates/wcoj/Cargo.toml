@@ -8,7 +8,7 @@ publish = false
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-arrow = "53"
+arrow = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

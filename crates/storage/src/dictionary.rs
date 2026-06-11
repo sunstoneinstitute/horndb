@@ -56,6 +56,18 @@ impl Dictionary {
         Ok(id)
     }
 
+    /// Resolve a term to its `TermId` **without** interning it. Returns
+    /// `None` if the term has never been interned (inline-int literals
+    /// always resolve — they are value-encoded, not dictionary-allocated).
+    /// Used by query frontends to look up constants: an absent constant
+    /// means no stored triple can match it.
+    pub fn get(&self, term: &Term) -> Option<TermId> {
+        if let Some(id) = try_inline_int(term) {
+            return Some(id);
+        }
+        self.forward.get(term).map(|e| *e)
+    }
+
     pub fn lookup(&self, id: TermId) -> Option<Term> {
         if id.kind() == TermKind::InlineInt {
             let v = id.as_inline_int().unwrap();
@@ -105,9 +117,70 @@ fn try_inline_int(term: &Term) -> Option<TermId> {
     if let Term::Literal(lit) = term {
         if lit.datatype().as_str() == XSD_INTEGER {
             if let Ok(v) = lit.value().parse::<i32>() {
-                return Some(TermId::inline_int(v));
+                // Inline only the canonical lexical form: non-canonical
+                // variants ("042", "+42") must keep their own dictionary
+                // identity, because RDF term equality is lexical and the
+                // inline encoding can only round-trip the canonical form.
+                if lit.value() == v.to_string() {
+                    return Some(TermId::inline_int(v));
+                }
             }
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::NamedNode;
+
+    #[test]
+    fn get_returns_id_without_interning() {
+        let d = Dictionary::new();
+        let t = Term::NamedNode(NamedNode::new("http://ex/a").unwrap());
+        assert_eq!(d.get(&t), None);
+        assert_eq!(d.len(), 0, "get must not intern");
+        let id = d.intern(&t).unwrap();
+        assert_eq!(d.get(&t), Some(id));
+    }
+
+    #[test]
+    fn get_resolves_inline_int_without_interning() {
+        let d = Dictionary::new();
+        let t = Term::Literal(Literal::new_typed_literal(
+            "42",
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ));
+        let id = d.get(&t).expect("inline ints always resolve");
+        assert_eq!(id, TermId::inline_int(42));
+        assert_eq!(d.len(), 0);
+    }
+
+    #[test]
+    fn non_canonical_integer_keeps_distinct_identity() {
+        let d = Dictionary::new();
+        let canon = Term::Literal(Literal::new_typed_literal(
+            "42",
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ));
+        let padded = Term::Literal(Literal::new_typed_literal(
+            "042",
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ));
+        let plus = Term::Literal(Literal::new_typed_literal(
+            "+42",
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ));
+        let id_canon = d.intern(&canon).unwrap();
+        let id_padded = d.intern(&padded).unwrap();
+        let id_plus = d.intern(&plus).unwrap();
+        assert_eq!(id_canon, TermId::inline_int(42));
+        assert_ne!(id_padded, id_canon);
+        assert_ne!(id_plus, id_canon);
+        assert_ne!(id_padded, id_plus);
+        // Exact lexical round-trip for the non-canonical forms.
+        assert_eq!(d.lookup(id_padded), Some(padded));
+        assert_eq!(d.lookup(id_plus), Some(plus));
+    }
 }

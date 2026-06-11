@@ -7,8 +7,9 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["server"]
+default = ["server", "reasoner"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper"]
+reasoner = ["dep:horndb-owlrl"]
 
 [dependencies]
 # `sep-0006` enables spargebra's `GraphPattern::Lateral` variant. The
@@ -38,6 +39,10 @@ hyper = { workspace = true, optional = true }
 # library code does not reference them.
 oxttl = { workspace = true }
 clap = { workspace = true }
+horndb-owlrl = { path = "../owlrl", optional = true }
+horndb-storage = { path = "../storage" }
+horndb-wcoj = { path = "../wcoj" }
+arrow = { workspace = true }
 
 [[bin]]
 name = "serve"

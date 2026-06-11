@@ -55,5 +55,90 @@ from flat triple dumps), so there is no named-graph store to scope
 against; a graph-name variable remains unbound in results. This makes
 the SPB named-graph queries (Q10/Q12) translate and run. Correct
 named-graph scoping (zero solutions for absent graphs, `?g` binding
-per named graph) is deliberately deferred to the storage wiring
-increment (#67), where quads exist.
+per named graph) is deferred to the named-graph epic (#7).
+
+## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)
+
+`crates/sparql/src/exec/horn.rs` implements the `Executor` + `Store`
+seam on top of `horndb-storage` and `horndb-wcoj`.
+
+### Term identity and dictionary
+
+All term identity lives in `horndb_storage::Dictionary` (kind-tagged
+`TermId`s). This fixes the Stage-1 `MemStore` behaviour where terms
+were stored as bare lexical strings and term kinds were recovered
+heuristically from lexical shape (`classify_lexical` in `exec/mod.rs`).
+Literals (leading `"`) were recovered correctly, but blank nodes were
+stored as bare labels indistinguishable from IRIs and therefore surfaced
+as `Term::Iri`. The dictionary's kind-tagged `TermId`s make recovery
+exact for all three kinds. RDF term identity is preserved for typed
+literals: only canonical-form `xsd:integer` literals (e.g. `"42"`)
+take the inline-int `TermId` fast path, while non-canonical lexical
+spellings (`"042"`, `"+42"`) keep distinct dictionary identities and
+round-trip their exact lexical form. BGP matching is therefore
+term-based (lexical form + datatype), as SPARQL semantics require.
+
+### Tombstone deletes over insertion-only storage
+
+`horndb-storage` is insertion-only at Stage 1. `DELETE DATA` is
+implemented by a `tombstones: HashSet<(u64, u64, u64)>` overlay in
+`HornBackend`. The overlay is applied when building the WCOJ snapshot:
+tombstoned triples are filtered out before the sorted `VecTripleSource`
+is constructed. A `stored_keys` mirror of every physically written key
+gives O(1) membership tests without re-scanning the storage columns.
+
+### Lazily-rebuilt VecTripleSource snapshot
+
+BGP execution requires all six sort orderings (SPO, SOP, PSO, POS,
+OSP, OPS). `HornBackend` builds a `VecTripleSource` lazily on the first
+query after any mutation and caches it behind a `Mutex<Option<Arc<…>>>`.
+The snapshot holds all six orderings eagerly sorted; at ~144 bytes/triple
+steady-state snapshot cost (construction briefly peaks ~168 B/triple
+while the input vec is still alive) this is a documented Stage-1 cost.
+The snapshot is invalidated (set to `None`) on every write (insert or delete).
+
+A follow-up item exists to replace this with a direct `TripleSource`
+over the columnar partitions, avoiding the full-copy rebuild.
+
+### Batched-insert core (`insert_oxrdf_batch`)
+
+Inserting triples one at a time via `Store::insert_triple` triggers a
+per-predicate partition rebuild in `horndb-storage` on each call, giving
+O(n²) cost for a bulk load. `insert_oxrdf_batch` addresses this with a
+read-compute / write-commit split:
+
+1. Phase 1 (read-only): intern all terms; classify each triple as
+   new-to-storage or tombstone-resurrection; collect the storage batch.
+   Intern failures skip the triple (lenient for bulk loads — the
+   single-triple `insert_oxrdf` propagates intern errors instead).
+2. Phase 2 (write): call `store.insert_triples` once for the whole
+   batch, rebuilding each predicate partition at most once.
+3. Phase 3: invalidate the WCOJ snapshot once iff any triple became
+   newly live.
+
+`load_lexical_triples` and `insert_algebra_triples_bulk` both delegate
+to `insert_oxrdf_batch`. The `serve` binary uses it for the initial load.
+
+Known Stage-1 limits of the update path: HTTP `INSERT DATA` / `DELETE
+DATA` (`update.rs::apply_update`) still applies triples one at a time
+through the `Store` trait, so a very large update body pays the
+per-call partition-rebuild cost the bulk loaders avoid — batching
+`apply_update` is a candidate follow-up under the SPEC-07 epic (#7).
+Likewise, a store populated via `--materialize` is not re-reasoned on
+subsequent updates; incremental maintenance of the closure is SPEC-06
+territory.
+
+### `reasoner` feature and `load_with_reasoning`
+
+The `reasoner` feature (default-on) adds a `load_with_reasoning`
+function that drives the `horndb_owlrl::integration::Engine` (RuleFiring
+backend) over an `oxrdf::Dataset` and loads the full materialized closure
+— asserted base plus all inferred triples — into the `HornBackend` in a
+single `insert_oxrdf_batch` call. GraphBLAS is not required; only the
+compiled-rule RuleFiring backend is used here. The `serve` binary exposes
+this path via the `--materialize` flag.
+
+### GRAPH patterns
+
+Named-graph patterns remain unscoped (unchanged Stage-1 behaviour).
+See the GRAPH patterns section above.

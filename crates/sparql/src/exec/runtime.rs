@@ -235,7 +235,7 @@ fn literal_value(t: &Term) -> String {
 /// `\uXXXX`, `\UXXXXXXXX`) in a literal's lexical form. Unknown
 /// escapes pass through verbatim (best-effort, mirroring the lenient
 /// Stage-1 parsing elsewhere).
-fn unescape_ntriples(s: &str) -> String {
+pub(crate) fn unescape_ntriples(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -388,7 +388,7 @@ fn arith(op: fn(f64, f64) -> f64, a: Option<f64>, b: Option<f64>) -> Option<Term
 
 /// Split an N-Triples literal raw form into (lexical, lang, datatype).
 /// Non-literal raw forms (no leading quote) yield (raw, None, None).
-fn literal_parts(raw: &str) -> (String, Option<String>, Option<String>) {
+pub(crate) fn literal_parts(raw: &str) -> (String, Option<String>, Option<String>) {
     let raw = raw.trim();
     if !raw.starts_with('"') {
         return (raw.to_owned(), None, None);

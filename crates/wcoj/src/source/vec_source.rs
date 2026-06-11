@@ -27,6 +27,12 @@ impl VecTripleSource {
         }
         Self { sorted, total }
     }
+
+    /// O(log n) membership test against the SPO-sorted ordering.
+    pub fn contains(&self, t: &Triple) -> bool {
+        let spo = &self.sorted[&Ordering::Spo];
+        spo.binary_search(&(t.s, t.p, t.o)).is_ok()
+    }
 }
 
 impl TripleSource for VecTripleSource {
@@ -157,5 +163,22 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
     fn rewind(&mut self, depth: u8) {
         let d = depth as usize;
         self.cursor[d] = self.range[d].0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_finds_present_and_rejects_absent() {
+        let src = VecTripleSource::from_triples(vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ]);
+        assert!(src.contains(&Triple::new(1, 2, 4)));
+        assert!(!src.contains(&Triple::new(1, 2, 5)));
+        assert!(!src.contains(&Triple::new(9, 9, 9)));
     }
 }
