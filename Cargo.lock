@@ -1199,6 +1199,7 @@ dependencies = [
  "arrow",
  "axum",
  "clap",
+ "horndb-owlrl",
  "horndb-storage",
  "horndb-wcoj",
  "hyper",

@@ -146,3 +146,34 @@ fn empty_pattern_list_yields_single_empty_row() {
     let rows: Vec<_> = st.scan_bgp(&[]).unwrap().collect();
     assert_eq!(rows.len(), 1);
 }
+
+#[cfg(feature = "reasoner")]
+#[test]
+fn materialized_closure_is_queryable() {
+    use oxrdf::{Dataset, GraphName, NamedNode, NamedOrBlankNode, Quad};
+    let nn = |s: &str| NamedNode::new(s).unwrap();
+    let nb = |s: &str| NamedOrBlankNode::NamedNode(nn(s));
+    let mut dataset = Dataset::default();
+    // :Penguin rdfs:subClassOf :Bird . :pingu a :Penguin .
+    dataset.insert(&Quad::new(
+        nb("http://ex/Penguin"),
+        nn("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
+        nn("http://ex/Bird"),
+        GraphName::DefaultGraph,
+    ));
+    dataset.insert(&Quad::new(
+        nb("http://ex/pingu"),
+        nn("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
+        nn("http://ex/Penguin"),
+        GraphName::DefaultGraph,
+    ));
+    let mut backend = HornBackend::new();
+    let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset).unwrap();
+    assert!(stats.loaded >= 2);
+    // cax-sco: pingu must now be a Bird, visible through SPARQL.
+    let q = "ASK { <http://ex/pingu> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Bird> }";
+    match execute_query(q, &backend).unwrap() {
+        QueryAnswer::Boolean(b) => assert!(b, "inferred triple must be queryable"),
+        other => panic!("expected boolean, got {other:?}"),
+    }
+}

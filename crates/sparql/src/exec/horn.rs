@@ -81,6 +81,36 @@ pub(crate) fn lexical_to_oxrdf(s: &str) -> OxTerm {
     }
 }
 
+/// Statistics returned by [`load_with_reasoning`].
+#[cfg(feature = "reasoner")]
+#[derive(Debug, Clone, Copy)]
+pub struct ReasonStats {
+    /// Triples loaded into the backend (asserted base + inferred).
+    pub loaded: u64,
+    /// Asserted triples in the input dataset's default graph.
+    pub asserted: usize,
+}
+
+/// Run the OWL 2 RL `horndb_owlrl` `Engine` (RuleFiring backend) over
+/// `dataset`'s default graph and load the full materialized closure —
+/// asserted base plus everything inferred — into `backend`.
+#[cfg(feature = "reasoner")]
+pub fn load_with_reasoning(
+    backend: &mut HornBackend,
+    dataset: &oxrdf::Dataset,
+) -> Result<ReasonStats> {
+    let mut engine = horndb_owlrl::integration::Engine::new();
+    engine
+        .load(dataset)
+        .map_err(|e| SparqlError::Executor(format!("owlrl load: {e}")))?;
+    let asserted = engine.asserted_len().unwrap_or(0);
+    let triples = engine
+        .materialized_triples()
+        .ok_or_else(|| SparqlError::Executor("owlrl produced no state".into()))?;
+    let loaded = backend.load_lexical_triples(triples.into_iter())?;
+    Ok(ReasonStats { loaded, asserted })
+}
+
 use crate::algebra::TriplePattern;
 use crate::exec::{Bindings, Executor, Store};
 use arrow::array::UInt64Array;
