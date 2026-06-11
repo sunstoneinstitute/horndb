@@ -54,7 +54,9 @@
 # Exit codes: 0 ok · 2 usage/guard · 3 dirty TASKS.md · 4 lock timeout ·
 #             5 fast-forward failed · 9 task not in expected state.
 #
-# Env: TASKS_LOCK_TIMEOUT (seconds, default 180) · TASKS_REMOTE (default origin).
+# Env: TASKS_LOCK_TIMEOUT (seconds, default 180) · TASKS_REMOTE (default origin)
+#      · TASKS_LOCK_TOOL (auto|flock|perl, default auto — auto prefers flock(1)
+#        when installed and falls back to perl, so macOS needs no extra deps).
 #
 # TASKS.md carries no Rust, so these commits/pushes use `--no-verify` — the
 # pre-commit (`cargo fmt --check`) and pre-push (workspace clippy + build) hooks
@@ -200,9 +202,34 @@ parse_claims() {
 }
 
 # --- Acquire the lock for the whole transaction ---------------------------
+# flock(1) is not part of macOS. Prefer it when present, otherwise fall back
+# to perl (ships on both Linux and Darwin): perl flocks the shell's inherited
+# FD 9 and exits — the lock survives because this shell keeps the same open
+# file description, and it still auto-releases if the shell dies. Both tools
+# take the same flock(2) lock, so mixed fleets mutually exclude correctly.
+# TASKS_LOCK_TOOL=auto|flock|perl overrides the probe (used by test-tasks.sh).
+LOCK_TOOL="${TASKS_LOCK_TOOL:-auto}"
+if [ "$LOCK_TOOL" = "auto" ]; then
+  if command -v flock >/dev/null 2>&1; then LOCK_TOOL=flock; else LOCK_TOOL=perl; fi
+fi
 exec 9>"$LOCKFILE"
-if ! flock -w "$LOCK_TIMEOUT" 9; then
-  echo "tasks.sh: could not acquire $LOCKFILE within ${LOCK_TIMEOUT}s" >&2
+acquire_lock() {
+  case "$LOCK_TOOL" in
+    flock) flock -w "$LOCK_TIMEOUT" 9;;
+    perl)
+      perl -e '
+        use Fcntl qw(:flock);
+        open(my $fh, ">&=", 9) or die "tasks.sh: cannot adopt fd 9: $!\n";
+        my $deadline = time() + $ARGV[0];
+        until (flock($fh, LOCK_EX | LOCK_NB)) {
+          exit 1 if time() >= $deadline;
+          sleep 1;
+        }' "$LOCK_TIMEOUT";;
+    *) die "TASKS_LOCK_TOOL must be auto, flock or perl (got '$LOCK_TOOL')";;
+  esac
+}
+if ! acquire_lock; then
+  echo "tasks.sh: could not acquire $LOCKFILE within ${LOCK_TIMEOUT}s (lock tool: $LOCK_TOOL)" >&2
   exit 4
 fi
 
@@ -327,7 +354,7 @@ case "$CMD" in
     ;;
 
   ""|-h|--help|help)
-    sed -n '3,60p' "$0"
+    sed -n '3,64p' "$0"
     [ "$CMD" = "" ] && exit 2 || exit 0
     ;;
 
