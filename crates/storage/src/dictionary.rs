@@ -56,6 +56,18 @@ impl Dictionary {
         Ok(id)
     }
 
+    /// Resolve a term to its `TermId` **without** interning it. Returns
+    /// `None` if the term has never been interned (inline-int literals
+    /// always resolve — they are value-encoded, not dictionary-allocated).
+    /// Used by query frontends to look up constants: an absent constant
+    /// means no stored triple can match it.
+    pub fn get(&self, term: &Term) -> Option<TermId> {
+        if let Some(id) = try_inline_int(term) {
+            return Some(id);
+        }
+        self.forward.get(term).map(|e| *e)
+    }
+
     pub fn lookup(&self, id: TermId) -> Option<Term> {
         if id.kind() == TermKind::InlineInt {
             let v = id.as_inline_int().unwrap();
@@ -110,4 +122,32 @@ fn try_inline_int(term: &Term) -> Option<TermId> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxrdf::NamedNode;
+
+    #[test]
+    fn get_returns_id_without_interning() {
+        let d = Dictionary::new();
+        let t = Term::NamedNode(NamedNode::new("http://ex/a").unwrap());
+        assert_eq!(d.get(&t), None);
+        assert_eq!(d.len(), 0, "get must not intern");
+        let id = d.intern(&t).unwrap();
+        assert_eq!(d.get(&t), Some(id));
+    }
+
+    #[test]
+    fn get_resolves_inline_int_without_interning() {
+        let d = Dictionary::new();
+        let t = Term::Literal(Literal::new_typed_literal(
+            "42",
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ));
+        let id = d.get(&t).expect("inline ints always resolve");
+        assert_eq!(id, TermId::inline_int(42));
+        assert_eq!(d.len(), 0);
+    }
 }
