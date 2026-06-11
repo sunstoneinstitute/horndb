@@ -27,6 +27,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+# SPARQL REGEX/REPLACE builtins (`exec::runtime::compile_regex`).
+regex = { workspace = true }
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }

@@ -1,0 +1,4 @@
+SELECT ?s ?label WHERE {
+  ?s <http://example.org/price> ?p .
+  BIND(IF(?p * 2 > 20, "expensive", "cheap") AS ?label)
+}

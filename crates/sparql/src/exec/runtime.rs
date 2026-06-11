@@ -2,7 +2,7 @@
 //! yields a `Vec<Bindings>` because Stage 1 materialises per-node;
 //! true streaming is a Future Work item.
 
-use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Bindings, Executor};
 use crate::plan::PhysicalPlan;
@@ -231,6 +231,49 @@ fn literal_value(t: &Term) -> String {
     }
 }
 
+/// Decode N-Triples string escapes (`\\`, `\"`, `\n`, `\t`, `\r`,
+/// `\uXXXX`, `\UXXXXXXXX`) in a literal's lexical form. Unknown
+/// escapes pass through verbatim (best-effort, mirroring the lenient
+/// Stage-1 parsing elsewhere).
+fn unescape_ntriples(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000C}'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('\\') => out.push('\\'),
+            Some(u @ ('u' | 'U')) => {
+                let len = if u == 'u' { 4 } else { 8 };
+                let hex: String = chars.by_ref().take(len).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(decoded) => out.push(decoded),
+                    None => {
+                        out.push('\\');
+                        out.push(u);
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
 /// Parse the lexical part out of an N-Triples literal string.
 fn literal_lexical(raw: &str) -> String {
     let raw = raw.trim();
@@ -245,7 +288,7 @@ fn literal_lexical(raw: &str) -> String {
             continue;
         }
         if bytes[i] == b'"' {
-            return raw[1..i].to_owned();
+            return unescape_ntriples(&raw[1..i]);
         }
         i += 1;
     }
@@ -255,6 +298,178 @@ fn literal_lexical(raw: &str) -> String {
 /// Best-effort numeric coercion of a term for SUM/AVG/MIN/MAX.
 fn numeric_value(t: &Term) -> Option<f64> {
     literal_value(t).trim().parse::<f64>().ok()
+}
+
+/// The numeric XSD datatypes for datatype-aware EBV and `ISNUMERIC`.
+fn is_numeric_datatype(dt: &str) -> bool {
+    let Some(local) = dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") else {
+        return false;
+    };
+    matches!(
+        local,
+        "integer"
+            | "decimal"
+            | "double"
+            | "float"
+            | "long"
+            | "int"
+            | "short"
+            | "byte"
+            | "nonNegativeInteger"
+            | "nonPositiveInteger"
+            | "negativeInteger"
+            | "positiveInteger"
+            | "unsignedLong"
+            | "unsignedInt"
+            | "unsignedShort"
+            | "unsignedByte"
+    )
+}
+
+/// SPARQL effective boolean value (§17.2.2), datatype-aware:
+/// `xsd:boolean` → its value, numeric datatypes → value ≠ 0, plain /
+/// `xsd:string` / lang-tagged → non-empty lexical form (so the *string*
+/// `"false"` is true). EBV of a non-literal (IRI / blank node) or of a
+/// non-boolean/numeric/string datatype is a type error — under the
+/// crate-wide error→false convention it yields `false`.
+fn ebv(t: &Term) -> bool {
+    if term_kind(t) != TermKind::Literal {
+        return false;
+    }
+    let raw = lex(t);
+    if !raw.starts_with('"') {
+        // Internal unquoted boolean results (`bool_lit`, the
+        // comparison-expression terms): not an N-Triples form, so
+        // keep the legacy lexical rules.
+        return match raw.as_str() {
+            "true" => true,
+            "false" => false,
+            other => match other.trim().parse::<f64>() {
+                Ok(n) => n != 0.0,
+                Err(_) => !other.is_empty(),
+            },
+        };
+    }
+    let (value, _lang, dt) = literal_parts(&raw);
+    match dt.as_deref() {
+        Some("http://www.w3.org/2001/XMLSchema#boolean") => value == "true" || value == "1",
+        Some(dt) if is_numeric_datatype(dt) => value
+            .trim()
+            .parse::<f64>()
+            .map(|n| n != 0.0 && !n.is_nan())
+            .unwrap_or(false),
+        Some("http://www.w3.org/2001/XMLSchema#string") | None => !value.is_empty(),
+        Some(_) => false, // other datatypes: type error
+    }
+}
+
+/// Wrap a lexical value as a plain (unquoted-form) literal term,
+/// re-applying N-Triples string escapes so the stored form round-trips
+/// through `literal_lexical`.
+fn plain_literal(s: &str) -> Term {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace('\u{0008}', "\\b")
+        .replace('\u{000C}', "\\f");
+    Term::Literal(format!("\"{escaped}\""))
+}
+
+/// Binary arithmetic over the Stage-1 f64 model. `None` (expression
+/// error) when either side is non-numeric or on division by zero.
+/// Overflow/NaN edge cases (e.g. inf - inf) are accepted Stage-1 f64-model
+/// behavior and can render as "NaN"/"inf" literals.
+fn arith(op: fn(f64, f64) -> f64, a: Option<f64>, b: Option<f64>) -> Option<Term> {
+    Some(numeric_term(op(a?, b?)))
+}
+
+/// Split an N-Triples literal raw form into (lexical, lang, datatype).
+/// Non-literal raw forms (no leading quote) yield (raw, None, None).
+fn literal_parts(raw: &str) -> (String, Option<String>, Option<String>) {
+    let raw = raw.trim();
+    if !raw.starts_with('"') {
+        return (raw.to_owned(), None, None);
+    }
+    let bytes = raw.as_bytes();
+    let mut i = 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            let value = raw[1..i].to_owned();
+            let tail = &raw[i + 1..];
+            if let Some(lang) = tail.strip_prefix('@') {
+                return (value, Some(lang.to_owned()), None);
+            }
+            if let Some(dt) = tail.strip_prefix("^^") {
+                let dt = dt.trim_start_matches('<').trim_end_matches('>');
+                return (value, None, Some(dt.to_owned()));
+            }
+            return (value, None, None);
+        }
+        i += 1;
+    }
+    (raw.to_owned(), None, None)
+}
+
+/// Best-effort term-kind classification on the raw lexical form. The
+/// Stage-1 `MemStore` erases kinds on scan, so this looks at the string
+/// shape rather than the enum variant.
+fn term_kind(t: &Term) -> TermKind {
+    match t {
+        Term::Literal(_) => TermKind::Literal,
+        Term::BlankNode(_) => TermKind::Blank,
+        Term::Iri(s) => {
+            if s.starts_with('"') {
+                TermKind::Literal
+            } else if s.starts_with("_:") {
+                TermKind::Blank
+            } else {
+                TermKind::Iri
+            }
+        }
+        Term::Var(_) | Term::Triple(_) => TermKind::Other,
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum TermKind {
+    Iri,
+    Blank,
+    Literal,
+    Other,
+}
+
+/// Compile a SPARQL REGEX/REPLACE pattern with its flags string.
+/// Unsupported flag characters or an invalid pattern yield `None`
+/// (expression error). Called per evaluated row — a compiled-pattern
+/// cache is a future optimisation once FILTER throughput matters
+/// (Stage-1 result sets are small).
+fn compile_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
+    let mut b = regex::RegexBuilder::new(pattern);
+    for f in flags.chars() {
+        match f {
+            'i' => {
+                b.case_insensitive(true);
+            }
+            's' => {
+                b.dot_matches_new_line(true);
+            }
+            'm' => {
+                b.multi_line(true);
+            }
+            'x' => {
+                b.ignore_whitespace(true);
+            }
+            _ => return None,
+        }
+    }
+    b.build().ok()
 }
 
 /// Compute one aggregate over a group's member rows.
@@ -481,11 +696,23 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
                 }
             }
         }
+        Expr::Add(..)
+        | Expr::Sub(..)
+        | Expr::Mul(..)
+        | Expr::Div(..)
+        | Expr::Neg(..)
+        | Expr::If(..)
+        | Expr::Coalesce(..)
+        | Expr::Func(..) => match eval_expr_to_term(e, b)? {
+            Some(t) => ebv(&t),
+            None => false,
+        },
         Expr::Term(t) => match t {
-            // Bare term in boolean context: treat IRI/Literal as
-            // truthy; var resolves to its binding.
-            Term::Var(v) => b.get(v.name()).is_some(),
-            _ => true,
+            // Bare term in boolean context: SPARQL effective boolean
+            // value of the bound value (unbound var is an error →
+            // false) or of the constant itself.
+            Term::Var(v) => b.get(v.name()).map(ebv).unwrap_or(false),
+            other => ebv(other),
         },
     })
 }
@@ -552,6 +779,271 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::Bound(_) => Some(Term::Literal(
             if eval_expr(e, b)? { "true" } else { "false" }.into(),
         )),
+        Expr::Add(x, y) => arith(
+            |a, b| a + b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Sub(x, y) => arith(
+            |a, b| a - b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Mul(x, y) => arith(
+            |a, b| a * b,
+            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
+        ),
+        Expr::Div(x, y) => {
+            let d = eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value);
+            match d {
+                Some(d) if d != 0.0 => arith(
+                    |a, b| a / b,
+                    eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
+                    Some(d),
+                ),
+                _ => None, // division by zero / non-numeric divisor
+            }
+        }
+        Expr::Neg(x) => eval_expr_to_term(x, b)?
+            .as_ref()
+            .and_then(numeric_value)
+            .map(|n| numeric_term(-n)),
+        // Stage-1 note: an erroring condition evaluates as false (the
+        // crate-wide error→false EBV convention) and takes the else
+        // branch, rather than propagating the error as SPARQL §17.4.1.2
+        // specifies.
+        Expr::If(c, t, f) => {
+            if eval_expr(c, b)? {
+                eval_expr_to_term(t, b)?
+            } else {
+                eval_expr_to_term(f, b)?
+            }
+        }
+        Expr::Coalesce(args) => {
+            // `?` is safe here because runtime expression errors are represented
+            // as Ok(None), never Err — so error-skipping per SPARQL §17.4.1.6
+            // still holds.
+            let mut found = None;
+            for a in args {
+                if let Some(t) = eval_expr_to_term(a, b)? {
+                    found = Some(t);
+                    break;
+                }
+            }
+            found
+        }
+        Expr::Func(f, args) => eval_func(*f, args, b)?,
+    })
+}
+
+/// Evaluate a builtin function call. `Ok(None)` is "expression error"
+/// (the SPARQL error value): the binding stays unbound / the filter
+/// row drops. All value extraction goes through the raw lexical form
+/// because the Stage-1 `MemStore` erases term kinds on scan.
+fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
+    // Evaluate one argument to a term; `None` short-circuits the call.
+    let term = |i: usize| -> Result<Option<Term>> {
+        match args.get(i) {
+            Some(e) => eval_expr_to_term(e, b),
+            None => Ok(None),
+        }
+    };
+    // The argument's plain string value (literal lexical form).
+    let s = |i: usize| -> Result<Option<String>> { Ok(term(i)?.as_ref().map(literal_value)) };
+    // The argument as a number.
+    let num = |i: usize| -> Result<Option<f64>> { Ok(term(i)?.as_ref().and_then(numeric_value)) };
+    let bool_lit = |v: bool| Some(Term::Literal(if v { "true" } else { "false" }.into()));
+
+    Ok(match f {
+        Func::Str => term(0)?.map(|t| plain_literal(&literal_value(&t))),
+        Func::Lang => term(0)?.and_then(|t| {
+            // LANG on a non-literal is a type error (SPARQL §17.4.1.1),
+            // mirroring the DATATYPE arm below.
+            if term_kind(&t) != TermKind::Literal {
+                return None;
+            }
+            let (_, lang, _) = literal_parts(&lex(&t));
+            Some(plain_literal(&lang.unwrap_or_default()))
+        }),
+        // RFC 4647 *basic* filtering per SPARQL §17.4.3.7: "*" matches
+        // any non-empty tag, otherwise exact or prefix-before-'-'
+        // match. Extended ranges with embedded wildcards ("en-*") are
+        // deliberately out of scope — basic filtering does not define
+        // them.
+        Func::LangMatches => match (s(0)?, s(1)?) {
+            (Some(tag), Some(range)) => {
+                let tag = tag.to_ascii_lowercase();
+                let range = range.to_ascii_lowercase();
+                let ok = if range == "*" {
+                    !tag.is_empty()
+                } else {
+                    tag == range || tag.starts_with(&format!("{range}-"))
+                };
+                bool_lit(ok)
+            }
+            _ => None,
+        },
+        Func::Datatype => term(0)?.and_then(|t| {
+            if term_kind(&t) != TermKind::Literal {
+                return None;
+            }
+            let (_, lang, dt) = literal_parts(&lex(&t));
+            let iri = if let Some(dt) = dt {
+                dt
+            } else if lang.is_some() {
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".to_owned()
+            } else {
+                "http://www.w3.org/2001/XMLSchema#string".to_owned()
+            };
+            Some(Term::Iri(iri))
+        }),
+        Func::StrLen => s(0)?.map(|v| integer_literal(v.chars().count() as i64)),
+        Func::SubStr => {
+            let (text, start) = match (s(0)?, num(1)?) {
+                (Some(t), Some(s)) => (t, s),
+                _ => return Ok(None),
+            };
+            // SPARQL SUBSTR is 1-based; len is optional (to end).
+            let start = (start.round() as i64 - 1).max(0) as usize;
+            let chars: Vec<char> = text.chars().collect();
+            let taken: String = match args.len() {
+                2 => chars.iter().skip(start).collect(),
+                3 => match num(2)? {
+                    Some(l) => chars
+                        .iter()
+                        .skip(start)
+                        .take(l.round().max(0.0) as usize)
+                        .collect(),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            };
+            Some(plain_literal(&taken))
+        }
+        Func::UCase => s(0)?.map(|v| plain_literal(&v.to_uppercase())),
+        Func::LCase => s(0)?.map(|v| plain_literal(&v.to_lowercase())),
+        Func::StrStarts => match (s(0)?, s(1)?) {
+            (Some(a), Some(b)) => bool_lit(a.starts_with(&b)),
+            _ => None,
+        },
+        Func::StrEnds => match (s(0)?, s(1)?) {
+            (Some(a), Some(b)) => bool_lit(a.ends_with(&b)),
+            _ => None,
+        },
+        Func::Contains => match (s(0)?, s(1)?) {
+            (Some(a), Some(b)) => bool_lit(a.contains(&b)),
+            _ => None,
+        },
+        Func::StrBefore => match (s(0)?, s(1)?) {
+            (Some(a), Some(b)) => Some(plain_literal(
+                a.find(&b).map(|i| &a[..i]).unwrap_or_default(),
+            )),
+            _ => None,
+        },
+        Func::StrAfter => match (s(0)?, s(1)?) {
+            (Some(a), Some(b)) => Some(plain_literal(
+                a.find(&b).map(|i| &a[i + b.len()..]).unwrap_or_default(),
+            )),
+            _ => None,
+        },
+        Func::Concat => {
+            let mut out = String::new();
+            for (i, _) in args.iter().enumerate() {
+                match s(i)? {
+                    Some(v) => out.push_str(&v),
+                    None => return Ok(None),
+                }
+            }
+            Some(plain_literal(&out))
+        }
+        Func::Replace => {
+            let (text, pat, repl) = match (s(0)?, s(1)?, s(2)?) {
+                (Some(t), Some(p), Some(r)) => (t, p, r),
+                _ => return Ok(None),
+            };
+            let flags = if args.len() == 4 {
+                match s(3)? {
+                    Some(f) => f,
+                    None => return Ok(None),
+                }
+            } else {
+                String::new()
+            };
+            compile_regex(&pat, &flags)
+                .map(|re| plain_literal(&re.replace_all(&text, repl.as_str())))
+        }
+        Func::Regex => {
+            let (text, pat) = match (s(0)?, s(1)?) {
+                (Some(t), Some(p)) => (t, p),
+                _ => return Ok(None),
+            };
+            let flags = if args.len() == 3 {
+                match s(2)? {
+                    Some(f) => f,
+                    None => return Ok(None),
+                }
+            } else {
+                String::new()
+            };
+            compile_regex(&pat, &flags).and_then(|re| bool_lit(re.is_match(&text)))
+        }
+        Func::Abs => num(0)?.map(|n| numeric_term(n.abs())),
+        Func::Ceil => num(0)?.map(|n| numeric_term(n.ceil())),
+        Func::Floor => num(0)?.map(|n| numeric_term(n.floor())),
+        // fn:round rounds half toward positive infinity (ROUND(-2.5) =
+        // -2), unlike Rust's round-half-away-from-zero.
+        Func::Round => num(0)?.map(|n| numeric_term((n + 0.5).floor())),
+        Func::IsIri => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Iri)),
+        Func::IsBlank => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Blank)),
+        Func::IsLiteral => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Literal)),
+        // ISNUMERIC is true only for literals with a numeric XSD
+        // datatype whose lexical form parses (§17.4.2.4) — a plain
+        // string that merely looks numeric ("42") is false.
+        Func::IsNumeric => term(0)?.and_then(|t| {
+            if term_kind(&t) != TermKind::Literal {
+                return bool_lit(false);
+            }
+            let (value, _, dt) = literal_parts(&lex(&t));
+            let ok = dt.as_deref().is_some_and(is_numeric_datatype)
+                && value.trim().parse::<f64>().is_ok();
+            bool_lit(ok)
+        }),
+        Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds => {
+            // The accessors are defined on xsd:dateTime — a plain
+            // string that merely looks like a timestamp is a type
+            // error, matching the ISNUMERIC datatype strictness.
+            let t = match term(0)? {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+            let (v, _, dt) = literal_parts(&lex(&t));
+            if dt.as_deref() != Some("http://www.w3.org/2001/XMLSchema#dateTime") {
+                return Ok(None);
+            }
+            if datetime_key(&v).is_none() {
+                return Ok(None);
+            }
+            // Validated shape: YYYY-MM-DDThh:mm:ss(.fff…)?
+            let field = |a: usize, z: usize| v[a..z].parse::<i64>().ok();
+            match f {
+                Func::Year => field(0, 4).map(integer_literal),
+                Func::Month => field(5, 7).map(integer_literal),
+                Func::Day => field(8, 10).map(integer_literal),
+                Func::Hours => field(11, 13).map(integer_literal),
+                Func::Minutes => field(14, 16).map(integer_literal),
+                _ => {
+                    // SECONDS — keep any fractional part. Always
+                    // xsd:decimal per SPARQL §17.4.5.6 (numeric_term
+                    // would promote whole seconds to xsd:integer).
+                    let tail: String = v[17..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    tail.parse::<f64>().ok().map(decimal_literal)
+                }
+            }
+        }
     })
 }
 

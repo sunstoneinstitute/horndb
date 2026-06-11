@@ -57,6 +57,7 @@ dashmap = "6"
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 spargebra = "0.4"
+regex = "1"
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = "0.5"

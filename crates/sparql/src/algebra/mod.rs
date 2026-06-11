@@ -53,12 +53,10 @@ pub struct TriplePattern {
     pub object: Term,
 }
 
-/// A SPARQL expression — Stage 1 supports a deliberately tiny subset
-/// (variable refs, term constants, equality, conjunction/disjunction,
-/// arithmetic comparisons over the lexical form).
-///
-/// Aggregates, builtin call functions beyond the listed comparisons,
-/// regex, etc. are out of scope for this plan.
+/// A SPARQL expression — Stage 1 covers comparisons, boolean connectives,
+/// arithmetic, IF, COALESCE and the common builtin functions. EXISTS,
+/// non-deterministic builtins and custom functions are out of scope.
+/// See [`Func`] for the full builtin list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Term(Term),
@@ -75,6 +73,60 @@ pub enum Expr {
     /// `expr IN (a, b, …)` — true when `expr` equals any list element.
     /// `NOT IN` is lowered by spargebra as `Not(In(...))`.
     In(Box<Expr>, Vec<Expr>),
+    /// Numeric arithmetic over the Stage-1 best-effort f64 model.
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Neg(Box<Expr>),
+    /// `IF(cond, then, else)`.
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    /// `COALESCE(e1, e2, …)` — first argument that evaluates without
+    /// error to a bound term.
+    Coalesce(Vec<Expr>),
+    /// A builtin function call, e.g. `STRLEN(?x)` or `REGEX(?x, "p", "i")`.
+    Func(Func, Vec<Expr>),
+}
+
+/// Builtin functions evaluated in Stage 1. Argument arity is checked
+/// at evaluation time; wrong arity is an expression error (unbound
+/// result), matching the general best-effort error model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Func {
+    // Strings
+    Str,
+    Lang,
+    LangMatches,
+    Datatype,
+    StrLen,
+    SubStr,
+    UCase,
+    LCase,
+    StrStarts,
+    StrEnds,
+    Contains,
+    StrBefore,
+    StrAfter,
+    Concat,
+    Replace,
+    Regex,
+    // Numerics
+    Abs,
+    Ceil,
+    Floor,
+    Round,
+    // Term type checks
+    IsIri,
+    IsBlank,
+    IsLiteral,
+    IsNumeric,
+    // xsd:dateTime accessors
+    Year,
+    Month,
+    Day,
+    Hours,
+    Minutes,
+    Seconds,
 }
 
 /// Algebra operators supported in Stage 1.

@@ -1,0 +1,4 @@
+SELECT (SUM(?q * ?p) AS ?total) WHERE {
+  ?o <http://example.org/qty> ?q .
+  ?o <http://example.org/price> ?p .
+}

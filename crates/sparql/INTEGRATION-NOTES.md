@@ -46,3 +46,14 @@ adds it, the implementation should:
 
 For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.
+
+## GRAPH patterns (Stage 1, #66)
+
+`GRAPH <iri> { P }` and `GRAPH ?g { P }` lower transparently to `P`.
+The Stage-1 executor holds a single merged graph (corpora are loaded
+from flat triple dumps), so there is no named-graph store to scope
+against; a graph-name variable remains unbound in results. This makes
+the SPB named-graph queries (Q10/Q12) translate and run. Correct
+named-graph scoping (zero solutions for absent graphs, `?g` binding
+per named graph) is deliberately deferred to the storage wiring
+increment (#67), where quads exist.

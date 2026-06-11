@@ -210,4 +210,6 @@ tests = [
     "selected_subset/basic-003",
     "selected_subset/basic-004",
     "selected_subset/basic-005",
+    "selected_subset/expr-001",
+    "selected_subset/expr-002",
 ]

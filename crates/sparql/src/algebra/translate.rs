@@ -5,11 +5,11 @@
 //! `UnsupportedPathOp` for the Kleene-star property paths) so the
 //! planner never has to defend against them.
 
-use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, OrderDir, Term, TriplePattern, Var};
+use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
 use crate::SparqlConfig;
 use spargebra::algebra::{
-    AggregateExpression, AggregateFunction, Expression, GraphPattern, OrderExpression,
+    AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
     PropertyPathExpression,
 };
 use spargebra::term::{
@@ -214,7 +214,13 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
-        GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra("Graph".into())),
+        // Stage-1 merged-graph semantics: the executor holds a single
+        // graph (SPB/W3C corpora are loaded from flat dumps), so
+        // `GRAPH <iri> { P }` and `GRAPH ?g { P }` lower to `P`. A
+        // graph-name variable stays unbound in the results. True
+        // named-graph scoping arrives with the storage wiring (#67) —
+        // see INTEGRATION-NOTES.md.
+        GraphPattern::Graph { name: _, inner } => translate_pattern(inner, cfg),
         GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
     }
 }
@@ -340,9 +346,78 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
         E::Or(a, b) => Expr::Or(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
         E::Not(a) => Expr::Not(Box::new(translate_expr(a)?)),
         E::Bound(v) => Expr::Bound(translate_var(v)),
+        E::Add(a, b) => Expr::Add(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
+        E::Subtract(a, b) => Expr::Sub(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
+        E::Multiply(a, b) => Expr::Mul(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
+        E::Divide(a, b) => Expr::Div(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
+        E::UnaryPlus(a) => translate_expr(a)?,
+        E::UnaryMinus(a) => Expr::Neg(Box::new(translate_expr(a)?)),
+        E::If(c, t, f) => Expr::If(
+            Box::new(translate_expr(c)?),
+            Box::new(translate_expr(t)?),
+            Box::new(translate_expr(f)?),
+        ),
+        E::Coalesce(args) => Expr::Coalesce(
+            args.iter()
+                .map(translate_expr)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        E::FunctionCall(func, args) => {
+            let f = translate_function(func)?;
+            Expr::Func(
+                f,
+                args.iter()
+                    .map(translate_expr)
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        }
         other => {
             return Err(SparqlError::UnsupportedAlgebra(format!(
                 "expression: {other:?}"
+            )));
+        }
+    })
+}
+
+/// Map a spargebra builtin to the Stage-1 [`Func`] set. Functions
+/// outside the set (non-deterministic, hashing, SPARQL 1.2 triple
+/// accessors, custom IRIs) are rejected here so the planner and
+/// runtime never see them.
+fn translate_function(f: &Function) -> Result<Func> {
+    Ok(match f {
+        Function::Str => Func::Str,
+        Function::Lang => Func::Lang,
+        Function::LangMatches => Func::LangMatches,
+        Function::Datatype => Func::Datatype,
+        Function::StrLen => Func::StrLen,
+        Function::SubStr => Func::SubStr,
+        Function::UCase => Func::UCase,
+        Function::LCase => Func::LCase,
+        Function::StrStarts => Func::StrStarts,
+        Function::StrEnds => Func::StrEnds,
+        Function::Contains => Func::Contains,
+        Function::StrBefore => Func::StrBefore,
+        Function::StrAfter => Func::StrAfter,
+        Function::Concat => Func::Concat,
+        Function::Replace => Func::Replace,
+        Function::Regex => Func::Regex,
+        Function::Abs => Func::Abs,
+        Function::Ceil => Func::Ceil,
+        Function::Floor => Func::Floor,
+        Function::Round => Func::Round,
+        Function::IsIri => Func::IsIri,
+        Function::IsBlank => Func::IsBlank,
+        Function::IsLiteral => Func::IsLiteral,
+        Function::IsNumeric => Func::IsNumeric,
+        Function::Year => Func::Year,
+        Function::Month => Func::Month,
+        Function::Day => Func::Day,
+        Function::Hours => Func::Hours,
+        Function::Minutes => Func::Minutes,
+        Function::Seconds => Func::Seconds,
+        other => {
+            return Err(SparqlError::UnsupportedAlgebra(format!(
+                "function: {other:?}"
             )));
         }
     })
@@ -396,8 +471,16 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             | GraphPattern::Slice { inner, .. }
             | GraphPattern::OrderBy { inner, .. }
             | GraphPattern::Reduced { inner }
-            | GraphPattern::Graph { inner, .. }
             | GraphPattern::Group { inner, .. } => walk(inner, acc),
+            GraphPattern::Graph { name, inner } => {
+                // The graph-name variable is in scope (and projected by
+                // `SELECT *`) even though the Stage-1 merged-graph
+                // lowering never binds it.
+                if let NamedNodePattern::Variable(v) = name {
+                    push(v, acc);
+                }
+                walk(inner, acc);
+            }
             GraphPattern::Project { variables, .. } => {
                 for v in variables {
                     push(v, acc);
