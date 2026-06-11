@@ -247,7 +247,7 @@ impl HornBackend {
             for (s, p, o) in triples {
                 let (si, pi, oi) = match (d.intern(&s), d.intern(&p), d.intern(&o)) {
                     (Ok(a), Ok(b), Ok(c)) => (a.0, b.0, c.0),
-                    _ => continue, // intern failure — skip (consistent with insert_oxrdf)
+                    _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
                 };
                 let key = (si, pi, oi);
                 if !intra_batch.insert(key) {
