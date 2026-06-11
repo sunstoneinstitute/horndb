@@ -108,6 +108,11 @@ use std::sync::{Arc, Mutex};
 /// semantics than the Stage-1 MemStore's pure lexical matching.
 pub struct HornBackend {
     store: ColumnStore,
+    /// Mirror of every `(s, p, o)` TermId key ever physically written to
+    /// `store` (updated after each successful `insert_triples`; never
+    /// shrinks — storage is insertion-only). Enables O(1) membership
+    /// tests without re-scanning the storage columns.
+    stored_keys: HashSet<(u64, u64, u64)>,
     /// Raw `(s, p, o)` TermId payloads currently deleted.
     tombstones: HashSet<(u64, u64, u64)>,
     /// Live triple count (storage's count minus active tombstones).
@@ -126,6 +131,7 @@ impl HornBackend {
     pub fn new() -> Self {
         Self {
             store: ColumnStore::in_memory(),
+            stored_keys: HashSet::new(),
             tombstones: HashSet::new(),
             live: 0,
             snapshot: Mutex::new(None),
@@ -153,12 +159,13 @@ impl HornBackend {
         o: &oxrdf::Term,
     ) -> Result<bool> {
         let key = self.intern_key(s, p, o)?;
-        let existed = self.contains_key(key);
+        let existed = self.is_in_storage(key);
         let was_tombstoned = self.tombstones.remove(&key);
         if !existed {
             self.store
                 .insert_triples(&[(s.clone(), p.clone(), o.clone())])
                 .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
+            self.stored_keys.insert(key);
         }
         let newly_live = !existed || was_tombstoned;
         if newly_live {
@@ -202,23 +209,10 @@ impl HornBackend {
         ))
     }
 
-    /// Membership against the *storage* layer (ignores tombstones).
-    fn contains_key(&self, key: (u64, u64, u64)) -> bool {
-        // Cheap path: consult the snapshot if it is current; otherwise
-        // scan the (small) predicate partition.
-        if let Some(snap) = self
-            .snapshot
-            .lock()
-            .expect("snapshot lock poisoned")
-            .as_ref()
-        {
-            return snap.contains(&WTriple::new(key.0, key.1, key.2))
-                || self.tombstones.contains(&key);
-        }
-        self.store
-            .scan_all_term_ids()
-            .iter()
-            .any(|t| (t.0 .0, t.1 .0, t.2 .0) == key)
+    /// True iff the triple is physically present in the insertion-only storage
+    /// layer, whether live or tombstoned.
+    fn is_in_storage(&self, key: (u64, u64, u64)) -> bool {
+        self.stored_keys.contains(&key)
     }
 
     /// Get-or-build the WCOJ snapshot.
@@ -271,7 +265,8 @@ impl Store for HornBackend {
             return;
         };
         let key = (s.0, p.0, o.0);
-        if self.contains_key(key) && self.tombstones.insert(key) {
+        if !self.tombstones.contains(&key) && self.is_in_storage(key) {
+            self.tombstones.insert(key);
             self.live -= 1;
             self.invalidate();
         }
@@ -282,6 +277,7 @@ impl Store for HornBackend {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+    use horndb_wcoj::source::TripleSource;
 
     #[test]
     fn insert_and_delete_round_trip() {
@@ -382,5 +378,49 @@ mod tests {
         let raw = "\"v\"^^<http://www.w3.org/2001/XMLSchema#string>";
         let ox = algebra_to_oxrdf(&Term::Literal(raw.to_owned())).unwrap();
         assert_eq!(oxrdf_to_algebra(&ox), Term::Literal("\"v\"".to_owned()));
+    }
+
+    #[test]
+    fn double_delete_does_not_underflow_live() {
+        let mut b = HornBackend::new();
+        b.insert_triple(
+            Term::Iri("http://ex/s".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/o".into()),
+        );
+        b.delete_triple(
+            &Term::Iri("http://ex/s".into()),
+            &Term::Iri("http://ex/p".into()),
+            &Term::Iri("http://ex/o".into()),
+        );
+        b.delete_triple(
+            &Term::Iri("http://ex/s".into()),
+            &Term::Iri("http://ex/p".into()),
+            &Term::Iri("http://ex/o".into()),
+        );
+        assert_eq!(b.len(), 0);
+    }
+
+    #[test]
+    fn mutations_with_warm_snapshot_stay_consistent() {
+        let mut b = HornBackend::new();
+        b.insert_triple(
+            Term::Iri("http://ex/s".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/o".into()),
+        );
+        let _ = b.wcoj_snapshot(); // warm the cache
+        b.delete_triple(
+            &Term::Iri("http://ex/s".into()),
+            &Term::Iri("http://ex/p".into()),
+            &Term::Iri("http://ex/o".into()),
+        );
+        assert_eq!(b.len(), 0);
+        let snap = b.wcoj_snapshot();
+        assert_eq!(
+            snap.total_triples(),
+            0,
+            "rebuilt snapshot must reflect the delete"
+        );
     }
 }
