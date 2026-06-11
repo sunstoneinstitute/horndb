@@ -117,6 +117,15 @@ read-compute / write-commit split:
 `load_lexical_triples` and `insert_algebra_triples_bulk` both delegate
 to `insert_oxrdf_batch`. The `serve` binary uses it for the initial load.
 
+Known Stage-1 limits of the update path: HTTP `INSERT DATA` / `DELETE
+DATA` (`update.rs::apply_update`) still applies triples one at a time
+through the `Store` trait, so a very large update body pays the
+per-call partition-rebuild cost the bulk loaders avoid — batching
+`apply_update` is a candidate follow-up under the SPEC-07 epic (#7).
+Likewise, a store populated via `--materialize` is not re-reasoned on
+subsequent updates; incremental maintenance of the closure is SPEC-06
+territory.
+
 ### `reasoner` feature and `load_with_reasoning`
 
 The `reasoner` feature (default-on) adds a `load_with_reasoning`
