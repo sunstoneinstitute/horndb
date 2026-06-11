@@ -3,6 +3,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use horndb_sparql::algebra::Term;
+use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
@@ -81,4 +82,27 @@ async fn parse_error_returns_400() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn get_query_returns_json_hornbackend() {
+    let mut backend = HornBackend::new();
+    backend.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    let state = AppState::<HornBackend> {
+        store: Arc::new(RwLock::new(backend)),
+    };
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/b");
 }

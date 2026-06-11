@@ -5,6 +5,7 @@
 
 use super::AppState;
 use crate::api::{execute_query, QueryAnswer};
+use crate::exec::FullBackend;
 use crate::results::{
     csv::write_select_csv, json::write_ask_json, json::write_select_json, tsv::write_select_tsv,
     xml::write_ask_xml, xml::write_select_xml, ResultFormat,
@@ -19,8 +20,8 @@ pub struct QueryParams {
     pub query: Option<String>,
 }
 
-pub async fn handle_query_get(
-    State(state): State<AppState>,
+pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
     Query(p): Query<QueryParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
@@ -34,8 +35,8 @@ pub async fn handle_query_get(
     run(state, &q, &headers).await
 }
 
-pub async fn handle_query_post(
-    State(state): State<AppState>,
+pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
@@ -94,7 +95,11 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn run(state: AppState, q: &str, headers: &HeaderMap) -> axum::response::Response {
+async fn run<B: FullBackend + Send + Sync + 'static>(
+    state: AppState<B>,
+    q: &str,
+    headers: &HeaderMap,
+) -> axum::response::Response {
     // Scope the read guard to the execution only; results are
     // materialised into `ans`, so serialization below holds no lock and
     // never blocks a concurrent writer.

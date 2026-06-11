@@ -1,11 +1,11 @@
 //! `serve` — a thin HTTP wrapper that loads one or more already-materialized
-//! RDF files into the Stage-1 `MemStore` and exposes the SPARQL 1.1 query
-//! endpoint built by [`horndb_sparql::server::build_router`].
+//! RDF files into the dictionary-encoded `HornBackend` and exposes the
+//! SPARQL 1.1 query endpoint built by [`horndb_sparql::server::build_router`].
 //!
-//! This binary intentionally does **no** reasoning. It loads flat
-//! N-Triples / Turtle files (typically produced by
-//! `horndb-bench materialize --dump-nt`) so it needs no link against the
-//! OWL 2 RL / GraphBLAS stack. Materialization is a separate, heavier step.
+//! The storage and join execution are backed by `horndb-storage` (dictionary
+//! encoding) and `horndb-wcoj` (Leapfrog Triejoin). This binary intentionally
+//! does **no** OWL 2 RL reasoning. A `--materialize` flag (forward-chaining
+//! before serving) will arrive in the next task; do not add it here.
 //!
 //! The SPARQL query endpoint is `http://<bind>/query` (GET or POST) — NOT
 //! `/sparql`. SPARQL Update is at `/update`.
@@ -18,13 +18,13 @@ use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
 use std::sync::{Arc, RwLock};
 
-use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::server::{build_router, AppState};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "serve",
-    about = "Load flat RDF file(s) into an in-memory store and serve SPARQL 1.1 over HTTP."
+    about = "Load flat RDF file(s) into the HornBackend store and serve SPARQL 1.1 over HTTP."
 )]
 struct Cli {
     /// One or more N-Triples (`.nt`) or Turtle (`.ttl`) files, or
@@ -41,7 +41,7 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut store = MemStore::default();
+    let mut store = HornBackend::new();
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
         collect_data_files(path, &mut files)
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     }
     let total = store.len();
 
-    let state = AppState {
+    let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(store)),
     };
     let app = build_router(state);
@@ -101,60 +101,37 @@ fn collect_data_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// Parse one file and insert each triple into the store. Returns the
 /// number of triples inserted. Format is chosen by extension; anything
 /// other than `.ttl` is parsed as N-Triples.
-fn load_file(store: &mut MemStore, path: &Path) -> Result<usize> {
+fn load_file(store: &mut HornBackend, path: &Path) -> Result<usize> {
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
     let mut count = 0usize;
     if is_turtle {
         for triple in TurtleParser::new().for_reader(reader) {
             let t = triple?;
-            store.insert(lex_triple(&t.subject, t.predicate.as_str(), &t.object));
+            let s = named_or_blank_to_term(&t.subject);
+            let p = OxTerm::NamedNode(t.predicate);
+            store
+                .insert_oxrdf(&s, &p, &t.object)
+                .with_context(|| format!("inserting triple from {}", path.display()))?;
             count += 1;
         }
     } else {
         for triple in NTriplesParser::new().for_reader(reader) {
             let t = triple?;
-            store.insert(lex_triple(&t.subject, t.predicate.as_str(), &t.object));
+            let s = named_or_blank_to_term(&t.subject);
+            let p = OxTerm::NamedNode(t.predicate);
+            store
+                .insert_oxrdf(&s, &p, &t.object)
+                .with_context(|| format!("inserting triple from {}", path.display()))?;
             count += 1;
         }
     }
     Ok(count)
 }
 
-/// Convert an oxrdf triple into the lexical `(s, p, o)` strings the
-/// `MemStore` query path compares against.
-///
-/// The convention must match `horndb_sparql::algebra::translate`: IRIs
-/// are the bare IRI string, blank nodes the bare label, literals their
-/// N-Triples Display form (`oxrdf::Literal::to_string`). Routing both the
-/// loader and the query translator through `to_string()` keeps datatype
-/// normalisation (e.g. dropping the redundant `xsd:string`) consistent on
-/// both sides.
-fn lex_triple(
-    subject: &NamedOrBlankNode,
-    predicate: &str,
-    object: &OxTerm,
-) -> (String, String, String) {
-    (
-        subject_lex(subject),
-        predicate.to_owned(),
-        object_lex(object),
-    )
-}
-
-fn subject_lex(s: &NamedOrBlankNode) -> String {
-    match s {
-        NamedOrBlankNode::NamedNode(n) => n.as_str().to_owned(),
-        NamedOrBlankNode::BlankNode(b) => b.as_str().to_owned(),
-    }
-}
-
-fn object_lex(o: &OxTerm) -> String {
-    match o {
-        OxTerm::NamedNode(n) => n.as_str().to_owned(),
-        OxTerm::BlankNode(b) => b.as_str().to_owned(),
-        OxTerm::Literal(l) => l.to_string(),
-        #[allow(unreachable_patterns)]
-        other => other.to_string(),
+fn named_or_blank_to_term(n: &NamedOrBlankNode) -> OxTerm {
+    match n {
+        NamedOrBlankNode::NamedNode(nn) => OxTerm::NamedNode(nn.clone()),
+        NamedOrBlankNode::BlankNode(b) => OxTerm::BlankNode(b.clone()),
     }
 }

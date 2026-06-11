@@ -2,12 +2,13 @@
 
 use super::AppState;
 use crate::api::execute_update;
+use crate::exec::FullBackend;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 
-pub async fn handle_update(
-    State(state): State<AppState>,
+pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
+    State(state): State<AppState<B>>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
