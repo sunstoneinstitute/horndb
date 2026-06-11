@@ -133,11 +133,12 @@ use std::sync::{Arc, Mutex};
 /// * Writes: storage is insertion-only at Stage 1, so `DELETE DATA`
 ///   maintains a tombstone overlay applied at snapshot-build time.
 ///
-/// Two literals with the same *value* but different lexical forms of
-/// `xsd:integer` (e.g. `"042"` vs `"42"`) share an inline-int TermId;
-/// matching is value-based for small integers and bound values decode
-/// to the canonical lexical form. This is closer to SPARQL value
-/// semantics than the Stage-1 MemStore's pure lexical matching.
+/// RDF term identity is preserved: canonical-form `xsd:integer`
+/// literals (e.g. `"42"`) use the dictionary's inline-int fast path,
+/// while non-canonical lexical forms (`"042"`, `"+42"`) keep distinct
+/// dictionary identities and round-trip their exact lexical form.
+/// Matching is therefore term-based (lexical form + datatype), as
+/// SPARQL BGP semantics require.
 pub struct HornBackend {
     store: ColumnStore,
     /// Mirror of every `(s, p, o)` TermId key ever physically written to
@@ -453,7 +454,13 @@ impl Executor for HornBackend {
                         all_bound = false;
                         let name = v.name();
                         let effective = if seen_here.contains(name) {
-                            let alias = format!("__horndb_dup_{name}_{slot_no}");
+                            // The leading space guarantees freshness: SPARQL
+                            // VARNAME can never contain U+0020, so this alias
+                            // cannot collide with any parsed user variable.
+                            // It lives only in the internal var table and the
+                            // diagonal-filter list, and is stripped from rows
+                            // before they leave scan_bgp.
+                            let alias = format!(" dup_{name}_{slot_no}");
                             diagonal_filters.push((name.to_owned(), alias.clone()));
                             alias
                         } else {

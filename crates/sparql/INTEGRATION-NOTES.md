@@ -71,10 +71,12 @@ heuristically from lexical shape (`classify_lexical` in `exec/mod.rs`).
 Literals (leading `"`) were recovered correctly, but blank nodes were
 stored as bare labels indistinguishable from IRIs and therefore surfaced
 as `Term::Iri`. The dictionary's kind-tagged `TermId`s make recovery
-exact for all three kinds. Two literals with the same value but different
-`xsd:integer` lexical spellings (e.g. `"042"` and `"42"`) additionally
-share an inline-int `TermId`; bound values decode to the canonical form.
-This is closer to SPARQL value semantics than pure lexical matching.
+exact for all three kinds. RDF term identity is preserved for typed
+literals: only canonical-form `xsd:integer` literals (e.g. `"42"`)
+take the inline-int `TermId` fast path, while non-canonical lexical
+spellings (`"042"`, `"+42"`) keep distinct dictionary identities and
+round-trip their exact lexical form. BGP matching is therefore
+term-based (lexical form + datatype), as SPARQL semantics require.
 
 ### Tombstone deletes over insertion-only storage
 

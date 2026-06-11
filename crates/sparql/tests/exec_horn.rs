@@ -110,6 +110,26 @@ fn repeated_variable_within_pattern_filters_to_diagonal() {
 }
 
 #[test]
+fn user_variable_resembling_alias_does_not_collide() {
+    let mut st = HornBackend::new();
+    st.insert_triple(iri("a"), iri("likes"), iri("a"));
+    st.insert_triple(iri("a"), iri("likes"), iri("b"));
+    // ?x repeats within the first pattern (diagonal); the second pattern
+    // binds a user variable spelled like the OLD alias scheme.
+    let patterns = vec![
+        pat(var("x"), iri("likes"), var("x")),
+        pat(var("x"), iri("likes"), var("__horndb_dup_x_2")),
+    ];
+    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    // Diagonal pins ?x = a; ?__horndb_dup_x_2 ranges over {a, b}.
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        assert_eq!(r.get("x"), Some(&iri("a")));
+        assert!(r.get("__horndb_dup_x_2").is_some(), "user var must survive");
+    }
+}
+
+#[test]
 fn unknown_constant_yields_empty_not_error() {
     let st = store();
     let patterns = vec![pat(var("x"), iri("never-seen"), var("y"))];
