@@ -147,6 +147,52 @@ fn empty_pattern_list_yields_single_empty_row() {
     assert_eq!(rows.len(), 1);
 }
 
+/// #67 consequence-2 regression: a multi-pattern query over a
+/// six-figure store must complete in test-grade time (the Stage-1
+/// MemStore nested loop needed >20 s at this scale). Debug-build
+/// timings are noisy, so the bound is generous; the point is
+/// "seconds, not minutes".
+///
+/// The load uses `insert_algebra_triples_bulk` (one `insert_triples`
+/// call per predicate group) rather than per-triple inserts to avoid
+/// the O(n²) columnar-rebuild cost that makes the Stage-1 MemStore
+/// insert path slow at this scale.
+#[test]
+fn six_figure_store_multi_pattern_smoke() {
+    let mut st = HornBackend::new();
+    let n: usize = 100_000;
+    let mut triples: Vec<(Term, Term, Term)> = Vec::with_capacity(3 * n);
+    for i in 0..n {
+        let s = iri(&format!("e{i}"));
+        triples.push((s.clone(), iri("a"), iri(&format!("T{}", i % 50))));
+        triples.push((
+            s.clone(),
+            iri("score"),
+            Term::Literal(format!(
+                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                i % 1000
+            )),
+        ));
+        triples.push((s, iri("next"), iri(&format!("e{}", (i + 1) % n))));
+    }
+    st.insert_algebra_triples_bulk(triples);
+    let started = std::time::Instant::now();
+    let q = "SELECT ?x ?y WHERE { \
+        ?x <http://ex/a> <http://ex/T7> . \
+        ?x <http://ex/next> ?y . \
+        ?y <http://ex/a> <http://ex/T8> . \
+        ?x <http://ex/score> ?s . }";
+    match execute_query(q, &st).unwrap() {
+        QueryAnswer::Solutions { rows, .. } => assert_eq!(rows.len(), 2000),
+        other => panic!("expected solutions, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "query took {:?}",
+        started.elapsed()
+    );
+}
+
 #[cfg(feature = "reasoner")]
 #[test]
 fn materialized_closure_is_queryable() {

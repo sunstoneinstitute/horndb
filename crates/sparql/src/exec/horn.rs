@@ -207,6 +207,68 @@ impl HornBackend {
         Ok(newly_live)
     }
 
+    /// Bulk-insert algebra triples in one pass — O(n) cost versus O(n²) for
+    /// repeated `insert_triple` calls when many triples share a predicate.
+    ///
+    /// Uses the same duplicate-suppression and tombstone-removal semantics as
+    /// `insert_oxrdf`, but collects all triples into a single
+    /// `store.insert_triples` call so the columnar tier rebuilds each
+    /// predicate partition at most once. The snapshot is invalidated once after
+    /// all inserts rather than once per triple.
+    ///
+    /// Variables and RDF 1.2 triple terms are silently ignored (same as
+    /// `Store::insert_triple`).
+    pub fn insert_algebra_triples_bulk(&mut self, triples: Vec<(Term, Term, Term)>) {
+        // Translate algebra terms to oxrdf, skipping anything untranslatable.
+        let ox_triples: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> = triples
+            .iter()
+            .filter_map(|(s, p, o)| {
+                Some((
+                    algebra_to_oxrdf(s).ok()?,
+                    algebra_to_oxrdf(p).ok()?,
+                    algebra_to_oxrdf(o).ok()?,
+                ))
+            })
+            .collect();
+
+        // Phase 1 (shared borrow): intern all terms to get (key, index) pairs.
+        // We collect the results so the shared borrow on `self.store` ends
+        // before the mutable phase begins.
+        let keyed: Vec<Option<(u64, u64, u64)>> = {
+            let d = self.store.dictionary();
+            ox_triples
+                .iter()
+                .map(|(s, p, o)| match (d.intern(s), d.intern(p), d.intern(o)) {
+                    (Ok(si), Ok(pi), Ok(oi)) => Some((si.0, pi.0, oi.0)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Phase 2 (mutable): apply de-dup / tombstone semantics; collect truly
+        // new triples for the storage batch.
+        let mut to_store: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> =
+            Vec::with_capacity(ox_triples.len());
+        for (maybe_key, (s, p, o)) in keyed.into_iter().zip(ox_triples.iter()) {
+            let Some(key) = maybe_key else { continue };
+            let existed = self.is_in_storage(key);
+            let was_tombstoned = self.tombstones.remove(&key);
+            if !existed {
+                self.stored_keys.insert(key);
+                to_store.push((s.clone(), p.clone(), o.clone()));
+            }
+            if !existed || was_tombstoned {
+                self.live += 1;
+            }
+        }
+
+        if to_store.is_empty() {
+            return;
+        }
+        let _ = self.store.insert_triples(&to_store);
+        self.invalidate();
+    }
+
     /// Bulk-load lexical triples in the `Engine::materialized_triples()`
     /// convention (IRIs bare, bnodes `_:`-prefixed, literals N-Triples).
     pub fn load_lexical_triples(
