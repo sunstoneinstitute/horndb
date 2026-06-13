@@ -167,7 +167,7 @@ fn apply_delete_insert<B: FullBackend>(
     for row in &rows {
         for q in delete {
             if let (Some(s), Some(p), Some(o)) = (
-                resolve_ground(&q.subject, row),
+                resolve_ground(&q.subject, row).and_then(subject_or_skip),
                 resolve_pred(&q.predicate, row),
                 resolve_ground(&q.object, row),
             ) {
@@ -180,7 +180,7 @@ fn apply_delete_insert<B: FullBackend>(
     for (i, row) in rows.iter().enumerate() {
         for q in insert {
             if let (Some(s), Some(p), Some(o)) = (
-                resolve_term(&q.subject, row, i),
+                resolve_term(&q.subject, row, i).and_then(subject_or_skip),
                 resolve_pred(&q.predicate, row),
                 resolve_term(&q.object, row, i),
             ) {
@@ -309,6 +309,24 @@ fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<Term> {
             Some(Term::Iri(s)) => Some(Term::Iri(s.clone())),
             _ => None,
         },
+    }
+}
+
+/// Position-aware subject guard. An instantiated template triple is a
+/// legal RDF triple only if its subject is an IRI or a blank node; a
+/// literal (or RDF 1.2 triple term) in subject position is illegal. Per
+/// SPARQL 1.1 Update's illegal-RDF-construct rule (§4.1.4 / §10.2.1, the
+/// same rule CONSTRUCT applies), such a template triple is **silently
+/// skipped** — not an error — so the update still succeeds and the other
+/// valid template triples in the same solution are still applied.
+///
+/// Returning `None` drops the whole triple in the caller's `if let`. Note
+/// the object slot needs no such guard (literals are legal objects) and
+/// predicate validity already lives in `resolve_pred` (IRI-only).
+fn subject_or_skip(s: Term) -> Option<Term> {
+    match s {
+        Term::Iri(_) | Term::BlankNode(_) => Some(s),
+        Term::Literal(_) | Term::Var(_) | Term::Triple(_) => None,
     }
 }
 

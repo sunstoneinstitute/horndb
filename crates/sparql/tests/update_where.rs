@@ -103,6 +103,110 @@ fn ground_safety_drops_unbound<B: FullBackend + Default>() {
     );
 }
 
+/// Return the set of `?s` IRIs for `?s <pred> ?o` (any object) as sorted
+/// strings — used to assert presence/absence of a predicate edge.
+fn subjects_with_pred<B: FullBackend>(store: &B, pred: &str) -> Vec<String> {
+    let q = format!("SELECT ?s WHERE {{ ?s <{pred}> ?o }}");
+    let QueryAnswer::Solutions { rows, .. } = execute_query(&q, store).unwrap() else {
+        panic!("expected solutions");
+    };
+    let mut out: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r.get("s") {
+            Some(horndb_sparql::algebra::Term::Iri(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Seed a single triple with a literal object, matching the N-Triples
+/// lexical convention the store uses (`"x"`).
+fn seed_literal_object<B: FullBackend + Default>(s: &str, p: &str, lit: &str) -> B {
+    use horndb_sparql::algebra::Term;
+    let mut b = B::default();
+    b.insert_triple(
+        Term::Iri(s.to_owned()),
+        Term::Iri(p.to_owned()),
+        Term::Literal(lit.to_owned()),
+    );
+    b
+}
+
+/// An INSERT template that would place a literal in subject position
+/// produces an illegal RDF triple. Per the illegal-RDF-construct skip rule
+/// (SPARQL 1.1 Update §4.1.4 / §10.2.1) it must be *silently skipped* — the
+/// update still returns `Ok` and no `<…q…>` triple is created.
+fn literal_subject_insert_skipped<B: FullBackend + Default>() {
+    // `<a> <p> "x"` — ?o binds to the literal "x".
+    let mut store: B = seed_literal_object("http://ex/a", "http://ex/p", "\"x\"");
+    let u = parse_update(
+        "INSERT { ?o <http://ex/q> <http://ex/z> } WHERE { <http://ex/a> <http://ex/p> ?o }",
+    )
+    .unwrap();
+    // Must succeed, not error.
+    apply_update(&u, &mut store).unwrap();
+    // The illegal literal-subject triple was skipped: no <q> edge exists.
+    assert!(
+        subjects_with_pred(&store, "http://ex/q").is_empty(),
+        "literal-subject triple must be skipped, not inserted"
+    );
+}
+
+/// Control: in the *same* update, a valid template triple (literal in
+/// object position is legal) is still inserted even though a sibling
+/// triple in the same solution is skipped for an illegal literal subject.
+fn literal_subject_insert_skips_only_illegal<B: FullBackend + Default>() {
+    let mut store: B = seed_literal_object("http://ex/a", "http://ex/p", "\"x\"");
+    let u = parse_update(
+        "INSERT { ?o <http://ex/q> <http://ex/z> . <http://ex/a> <http://ex/r> ?o } \
+         WHERE { <http://ex/a> <http://ex/p> ?o }",
+    )
+    .unwrap();
+    apply_update(&u, &mut store).unwrap();
+    // Illegal triple skipped.
+    assert!(
+        subjects_with_pred(&store, "http://ex/q").is_empty(),
+        "literal-subject triple must be skipped"
+    );
+    // Legal triple (`<a> <r> "x"`, literal in object position) inserted.
+    let QueryAnswer::Solutions { rows, .. } =
+        execute_query("SELECT ?o WHERE { <http://ex/a> <http://ex/r> ?o }", &store).unwrap()
+    else {
+        panic!("expected solutions");
+    };
+    let objs: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r.get("o") {
+            Some(horndb_sparql::algebra::Term::Literal(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        objs,
+        vec!["\"x\"".to_owned()],
+        "valid literal-object triple must still be inserted"
+    );
+}
+
+#[test]
+fn mem_literal_subject_insert_skipped() {
+    literal_subject_insert_skipped::<MemStore>()
+}
+#[test]
+fn horn_literal_subject_insert_skipped() {
+    literal_subject_insert_skipped::<HornBackend>()
+}
+#[test]
+fn mem_literal_subject_insert_skips_only_illegal() {
+    literal_subject_insert_skips_only_illegal::<MemStore>()
+}
+#[test]
+fn horn_literal_subject_insert_skips_only_illegal() {
+    literal_subject_insert_skips_only_illegal::<HornBackend>()
+}
+
 fn named_graph_template_rejected<B: FullBackend + Default>() {
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     let u = parse_update(
