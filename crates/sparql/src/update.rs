@@ -1,44 +1,52 @@
-//! SPARQL Update — Stage 1 supports only `INSERT DATA` and
-//! `DELETE DATA` literal forms.
+//! SPARQL Update — `INSERT DATA` / `DELETE DATA` plus pattern-based
+//! `INSERT`/`DELETE … WHERE` (SPEC-07 F5).
 //!
-//! `LOAD`, `CLEAR`, `DROP`, and template `INSERT { … } WHERE { … }` /
-//! `DELETE { … } WHERE { … }` are explicitly deferred (see SPEC-07
-//! Future Work). The parser still accepts them; this module
-//! rejects them at apply time.
+//! Graph-management verbs (`LOAD`, `CLEAR`, `DROP`, `CREATE`, …) and
+//! multi-operation updates are still parsed but rejected at apply time
+//! (see `parser::ParsedUpdate::UnsupportedForm` and SPEC-07 Future Work).
 
+use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
 use crate::error::{Result, SparqlError};
-use crate::exec::Store;
+use crate::exec::runtime::Runtime;
+use crate::exec::{Bindings, FullBackend};
 use crate::parser::ParsedUpdate;
-use spargebra::term::{GroundTerm, NamedOrBlankNode, Term as SpgTerm};
+use crate::plan::planner;
+use crate::SparqlConfig;
+use spargebra::term::{
+    GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, NamedNodePattern,
+    NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
+};
 
-/// Lexical form for an RDF 1.2 triple term embedded in INSERT DATA /
-/// DELETE DATA. SPARQL 1.1 Update has no triple-term syntax; under the
-/// default SPARQL 1.1 mode we bail. Even with `SparqlConfig::rdf12` on,
-/// the Stage-1 `MemStore` carries `Term::Literal(String)` slots only —
-/// there is no in-store representation for a triple term in this crate.
-/// Tracked as a follow-up alongside the SPEC-07 store→dataset extractor.
+/// Lexical form for an RDF 1.2 triple term embedded in an update. The
+/// Stage-1 store carries `Term::Literal(String)` slots only, so there is
+/// no in-store representation for a triple term in this crate.
 fn triple_term_unsupported() -> SparqlError {
+    SparqlError::UnsupportedAlgebra("RDF 1.2 triple term in update (SPARQL 1.1 mode)".into())
+}
+
+fn named_graph_unsupported() -> SparqlError {
     SparqlError::UnsupportedAlgebra(
-        "RDF 1.2 triple term in INSERT/DELETE DATA (SPARQL 1.1 mode)".into(),
+        "named-graph target in update (Stage-1 default graph only)".into(),
     )
 }
 
-/// Apply an update to a [`Store`]. Returns `Ok(())` on success.
-pub fn apply_update<S: Store>(u: &ParsedUpdate, store: &mut S) -> Result<()> {
+/// Apply an update with the default [`SparqlConfig`] (SPARQL 1.1).
+pub fn apply_update<B: FullBackend>(u: &ParsedUpdate, store: &mut B) -> Result<()> {
+    apply_update_with(u, store, &SparqlConfig::default())
+}
+
+/// Apply an update, taking an explicit [`SparqlConfig`].
+pub fn apply_update_with<B: FullBackend>(
+    u: &ParsedUpdate,
+    store: &mut B,
+    cfg: &SparqlConfig,
+) -> Result<()> {
     use spargebra::GraphUpdateOperation;
     let ops = match u {
-        ParsedUpdate::InsertData { inner } | ParsedUpdate::DeleteData { inner } => {
-            &inner.operations
-        }
-        // Pattern-based forms are wired in the following commit; until then
-        // they are rejected so the crate stays compilable and behaviour is
-        // unchanged.
-        ParsedUpdate::DeleteInsert { .. } => {
-            return Err(SparqlError::UnsupportedAlgebra(
-                "pattern-based update not yet wired".into(),
-            ));
-        }
+        ParsedUpdate::InsertData { inner }
+        | ParsedUpdate::DeleteData { inner }
+        | ParsedUpdate::DeleteInsert { inner } => &inner.operations,
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),
@@ -63,6 +71,14 @@ pub fn apply_update<S: Store>(u: &ParsedUpdate, store: &mut S) -> Result<()> {
                     store.delete_triple(&s, &p, &o);
                 }
             }
+            GraphUpdateOperation::DeleteInsert {
+                delete,
+                insert,
+                using: _,
+                pattern,
+            } => {
+                apply_delete_insert(store, cfg, delete, insert, pattern)?;
+            }
             other => {
                 return Err(SparqlError::UnsupportedAlgebra(format!(
                     "update operation: {other:?}"
@@ -71,6 +87,111 @@ pub fn apply_update<S: Store>(u: &ParsedUpdate, store: &mut S) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Evaluate the WHERE pattern, then instantiate the DELETE/INSERT
+/// templates per solution. Per SPARQL 1.1 §3.1.3 the deletions are
+/// computed and applied before the insertions; both are derived from the
+/// WHERE solutions over the *pre-update* graph (we collect every row
+/// first, which also releases the immutable read borrow before mutating).
+fn apply_delete_insert<B: FullBackend>(
+    store: &mut B,
+    cfg: &SparqlConfig,
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    pattern: &spargebra::algebra::GraphPattern,
+) -> Result<()> {
+    // Reject named-graph templates up front (Stage-1 default graph only),
+    // so a partially-applied update can't leave the store inconsistent.
+    for q in delete {
+        require_default_graph(&q.graph_name)?;
+    }
+    for q in insert {
+        require_default_graph(&q.graph_name)?;
+    }
+
+    let alg = translate_where(pattern, cfg)?;
+    let plan = planner::plan(&alg)?;
+    let rows: Vec<Bindings> = Runtime::new(store).run(&plan)?.collect();
+
+    // Compute deletions from the original bindings first.
+    let mut deletions: Vec<(Term, Term, Term)> = Vec::new();
+    for row in &rows {
+        for q in delete {
+            if let (Some(s), Some(p), Some(o)) = (
+                resolve_ground(&q.subject, row),
+                resolve_pred(&q.predicate, row),
+                resolve_ground(&q.object, row),
+            ) {
+                deletions.push((s, p, o));
+            }
+        }
+    }
+    // Insertions allocate fresh blank nodes per solution row.
+    let mut insertions: Vec<(Term, Term, Term)> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        for q in insert {
+            if let (Some(s), Some(p), Some(o)) = (
+                resolve_term(&q.subject, row, i),
+                resolve_pred(&q.predicate, row),
+                resolve_term(&q.object, row, i),
+            ) {
+                insertions.push((s, p, o));
+            }
+        }
+    }
+
+    for (s, p, o) in &deletions {
+        store.delete_triple(s, p, o);
+    }
+    for (s, p, o) in insertions {
+        store.insert_triple(s, p, o);
+    }
+    Ok(())
+}
+
+fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
+    match g {
+        GraphNamePattern::DefaultGraph => Ok(()),
+        GraphNamePattern::NamedNode(_) | GraphNamePattern::Variable(_) => {
+            Err(named_graph_unsupported())
+        }
+    }
+}
+
+/// Resolve an INSERT-template `TermPattern` against a solution row.
+/// `row_ix` scopes per-solution blank nodes so each row's template
+/// blank node is distinct (SPARQL 1.1 §4.1.4). Returns `None` when a
+/// variable slot is unbound (the caller drops the triple).
+fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> {
+    match t {
+        TermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
+        TermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
+        TermPattern::BlankNode(b) => Some(Term::BlankNode(format!("{}_r{row_ix}", b.as_str()))),
+        TermPattern::Variable(v) => row.get(v.as_str()).cloned(),
+        TermPattern::Triple(_) => None,
+    }
+}
+
+/// Resolve a DELETE-template `GroundTermPattern` (no blank nodes allowed
+/// in DELETE templates) against a solution row.
+fn resolve_ground(t: &GroundTermPattern, row: &Bindings) -> Option<Term> {
+    match t {
+        GroundTermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
+        GroundTermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
+        GroundTermPattern::Variable(v) => row.get(v.as_str()).cloned(),
+        GroundTermPattern::Triple(_) => None,
+    }
+}
+
+fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<Term> {
+    match p {
+        NamedNodePattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
+        NamedNodePattern::Variable(v) => match row.get(v.as_str()) {
+            Some(Term::Iri(s)) => Some(Term::Iri(s.clone())),
+            _ => None,
+        },
+    }
 }
 
 fn subject_to_term(s: &NamedOrBlankNode) -> Term {
