@@ -157,9 +157,38 @@ fn using_named_graph_rejected<B: FullBackend + Default>() {
     )
     .unwrap();
     let err = apply_update(&u, &mut store).unwrap_err();
-    assert!(format!("{err}").to_lowercase().contains("graph"));
+    let msg = format!("{err}");
+    assert!(msg.to_lowercase().contains("graph"));
+    // Also assert the message identifies the USING path, so a future swap
+    // of the two rejection error paths (USING vs. named-graph template) is
+    // caught here. `using_named_graph_unsupported()` contains "USING".
+    assert!(msg.contains("USING"));
     // The default-graph triple must be intact (USING was rejected, not
     // silently applied against the default graph).
+    assert_eq!(
+        objects_of(&store, "http://ex/a", "http://ex/p"),
+        vec!["http://ex/b"]
+    );
+}
+
+/// A `WITH <named-graph>` clause on a combined DELETE/INSERT … WHERE must
+/// be rejected at Stage 1. spargebra desugars `WITH <g>` into both the
+/// quad graph names *and* `using.default`, so it trips the named-graph
+/// template / USING guards (Stage-1 is default-graph only). A *positive*
+/// `WITH` test is impossible at Stage 1: any `WITH <iri>` names a
+/// non-default graph by construction, so there is no accepted form to
+/// assert against.
+fn with_named_graph_rejected<B: FullBackend + Default>() {
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let u = parse_update(
+        "WITH <http://ex/g> DELETE { ?s <http://ex/p> ?o } \
+         INSERT { ?s <http://ex/q> ?o } WHERE { ?s <http://ex/p> ?o }",
+    )
+    .unwrap();
+    let err = apply_update(&u, &mut store).unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("graph"));
+    // The default-graph triple must be intact (WITH was rejected up front,
+    // not partially applied).
     assert_eq!(
         objects_of(&store, "http://ex/a", "http://ex/p"),
         vec!["http://ex/b"]
@@ -181,4 +210,12 @@ fn mem_using_named_graph_rejected() {
 #[test]
 fn horn_using_named_graph_rejected() {
     using_named_graph_rejected::<HornBackend>()
+}
+#[test]
+fn mem_with_named_graph_rejected() {
+    with_named_graph_rejected::<MemStore>()
+}
+#[test]
+fn horn_with_named_graph_rejected() {
+    with_named_graph_rejected::<HornBackend>()
 }

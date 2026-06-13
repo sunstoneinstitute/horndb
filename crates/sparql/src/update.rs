@@ -181,10 +181,21 @@ fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
 /// `row_ix` scopes per-solution blank nodes so each row's template
 /// blank node is distinct (SPARQL 1.1 §4.1.4). Returns `None` when a
 /// variable slot is unbound (the caller drops the triple).
+///
+/// Lockstep invariant: mirrors `runtime.rs::construct_triples`'s
+/// `resolve_term`. They differ deliberately (this returns `Term` and
+/// scopes blank nodes per row; construct returns `String`), but must stay
+/// in lockstep on shared rules — especially when `Term::Triple` support
+/// lands.
 fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> {
     match t {
         TermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
         TermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
+        // Per-row blank-node scoping satisfies SPARQL §4.1.4 within one
+        // solution (each row gets a distinct node) and assumes
+        // spargebra-normalized template labels. Freshness *across*
+        // separate updates is a known Stage-1 parity limit shared with
+        // `runtime.rs::construct_triples`.
         TermPattern::BlankNode(b) => Some(Term::BlankNode(format!("{}_r{row_ix}", b.as_str()))),
         TermPattern::Variable(v) => row.get(v.as_str()).cloned(),
         TermPattern::Triple(_) => None,
@@ -193,6 +204,8 @@ fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> 
 
 /// Resolve a DELETE-template `GroundTermPattern` (no blank nodes allowed
 /// in DELETE templates) against a solution row.
+///
+/// Lockstep invariant: see `resolve_pred` / `runtime.rs::construct_triples`.
 fn resolve_ground(t: &GroundTermPattern, row: &Bindings) -> Option<Term> {
     match t {
         GroundTermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
@@ -202,6 +215,13 @@ fn resolve_ground(t: &GroundTermPattern, row: &Bindings) -> Option<Term> {
     }
 }
 
+/// Resolve a predicate template slot. Shared invariant with
+/// `runtime.rs::construct_triples`'s `resolve_pred`: a predicate variable
+/// binding is only valid if it resolves to an IRI (a literal or blank node
+/// in predicate position drops the triple). The two copies legitimately
+/// differ (this returns `Term`, construct returns `String`) but encode the
+/// *same* rule and must stay in lockstep — especially when `Term::Triple`
+/// support lands. See `runtime.rs::construct_triples`.
 fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<Term> {
     match p {
         NamedNodePattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
