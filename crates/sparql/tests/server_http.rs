@@ -57,6 +57,49 @@ async fn post_update_then_query() {
 }
 
 #[tokio::test]
+async fn post_pattern_update_where_form() {
+    // 1. Seed via INSERT DATA POSTed to /update.
+    let app = router_with_data();
+    let seed = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from(
+            "INSERT DATA { <http://ex/s> <http://ex/p> <http://ex/o> }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(seed).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // 2. Pattern-based INSERT … WHERE: copy every <p> edge onto <q>.
+    let update = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from(
+            "INSERT { ?s <http://ex/q> ?o } WHERE { ?s <http://ex/p> ?o }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(update).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // 3. SELECT the freshly-inserted <s> <q> ?o triple.
+    // SELECT ?o WHERE { <http://ex/s> <http://ex/q> ?o }
+    let select = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Chttp%3A%2F%2Fex%2Fs%3E%20%3Chttp%3A%2F%2Fex%2Fq%3E%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(select).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/o");
+}
+
+#[tokio::test]
 async fn get_describe_returns_ntriples() {
     let app = router_with_data();
     // DESCRIBE <http://ex/a> — percent-encoded.
