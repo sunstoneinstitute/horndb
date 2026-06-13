@@ -6,10 +6,10 @@
 use crate::algebra::translate::translate_query_with;
 use crate::error::Result;
 use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
-use crate::exec::{Bindings, Executor, Store};
+use crate::exec::{Bindings, Executor, FullBackend};
 use crate::parser::{parse_query, parse_update, ParsedQuery};
 use crate::plan::planner;
-use crate::update::apply_update;
+use crate::update::apply_update_with;
 use crate::SparqlConfig;
 
 /// What `execute_query` returns. Variant chosen by query form.
@@ -83,9 +83,18 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     }
 }
 
-pub fn execute_update<S: Store>(update: &str, store: &mut S) -> Result<()> {
+pub fn execute_update<B: FullBackend>(update: &str, store: &mut B) -> Result<()> {
+    execute_update_with(update, store, &SparqlConfig::default())
+}
+
+/// Like [`execute_update`] but takes an explicit [`SparqlConfig`].
+pub fn execute_update_with<B: FullBackend>(
+    update: &str,
+    store: &mut B,
+    cfg: &SparqlConfig,
+) -> Result<()> {
     let parsed = parse_update(update)?;
-    apply_update(&parsed, store)
+    apply_update_with(&parsed, store, cfg)
 }
 
 fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
