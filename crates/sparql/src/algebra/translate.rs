@@ -94,6 +94,14 @@ fn translate_projection(pattern: &GraphPattern, cfg: &SparqlConfig) -> Result<Al
     }
 }
 
+/// Lower a bare WHERE `GraphPattern` (as carried by `DELETE/INSERT … WHERE`
+/// updates) to our `Algebra`. Unlike [`translate_query_with`], there is no
+/// surrounding query form / projection — the caller plans and runs it to
+/// obtain the solution rows that instantiate the update templates.
+pub(crate) fn translate_where(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
+    translate_pattern(p, cfg)
+}
+
 /// Lower a `GraphPattern` (spargebra) to our `Algebra`.
 fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
     match p {
