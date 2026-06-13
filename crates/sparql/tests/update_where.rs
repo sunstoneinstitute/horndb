@@ -195,6 +195,66 @@ fn with_named_graph_rejected<B: FullBackend + Default>() {
     );
 }
 
+/// A `GRAPH` pattern in the WHERE clause must be rejected before any
+/// mutation. The query translator lowers `GraphPattern::Graph { name, inner }`
+/// to its inner pattern over the single default graph — fine for a read
+/// query, but for a mutating update it would delete default-graph triples
+/// even though the named graph isn't represented (data corruption).
+fn graph_in_where_rejected<B: FullBackend + Default>() {
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let u = parse_update(
+        "DELETE { ?s <http://ex/p> ?o } \
+         WHERE { GRAPH <http://ex/g> { ?s <http://ex/p> ?o } }",
+    )
+    .unwrap();
+    let err = apply_update(&u, &mut store).unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("graph"));
+    // The default-graph triple must be intact (GRAPH-in-WHERE was rejected
+    // up front, not silently applied against the default graph).
+    assert_eq!(
+        objects_of(&store, "http://ex/a", "http://ex/p"),
+        vec!["http://ex/b"]
+    );
+}
+
+/// A triple-term slot in an INSERT/DELETE template must be rejected before
+/// any mutation (the Stage-1 store has no triple-term slot). Silently
+/// dropping the triple while reporting success would be inconsistent with
+/// INSERT DATA / DELETE DATA.
+fn triple_term_template_rejected<B: FullBackend + Default>() {
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let u = parse_update(
+        "INSERT { <<( ?s <http://ex/p> ?o )>> <http://ex/r> ?o } \
+         WHERE { ?s <http://ex/p> ?o }",
+    )
+    .unwrap();
+    let err = apply_update(&u, &mut store).unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("triple term"));
+    // The original triple must be intact and no bogus triple added.
+    assert_eq!(
+        objects_of(&store, "http://ex/a", "http://ex/p"),
+        vec!["http://ex/b"]
+    );
+    assert!(objects_of(&store, "http://ex/a", "http://ex/r").is_empty());
+}
+
+#[test]
+fn mem_graph_in_where_rejected() {
+    graph_in_where_rejected::<MemStore>()
+}
+#[test]
+fn horn_graph_in_where_rejected() {
+    graph_in_where_rejected::<HornBackend>()
+}
+#[test]
+fn mem_triple_term_template_rejected() {
+    triple_term_template_rejected::<MemStore>()
+}
+#[test]
+fn horn_triple_term_template_rejected() {
+    triple_term_template_rejected::<HornBackend>()
+}
+
 #[test]
 fn mem_named_graph_rejected() {
     named_graph_template_rejected::<MemStore>()

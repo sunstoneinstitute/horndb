@@ -128,6 +128,36 @@ fn apply_delete_insert<B: FullBackend>(
         require_default_graph(&q.graph_name)?;
     }
 
+    // Reject a GRAPH pattern anywhere in the WHERE clause before mutating.
+    // `translate_where` lowers `GraphPattern::Graph { name, inner }` to its
+    // inner pattern over the single default graph — an accepted Stage-1
+    // simplification for *read* queries, but for a mutating update it would
+    // make e.g. `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
+    // default-graph triples even though the named graph isn't represented
+    // (silent data corruption). Stage-1 is default-graph only.
+    if where_has_graph_pattern(pattern) {
+        return Err(SparqlError::UnsupportedAlgebra(
+            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
+        ));
+    }
+
+    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template before
+    // mutating. The Stage-1 store has no triple-term slot, so silently
+    // dropping such a template triple (the `resolve_*` `Triple(_) => None`
+    // arms) while reporting success is inconsistent with INSERT DATA /
+    // DELETE DATA, which return `triple_term_unsupported()`. The up-front
+    // scan makes those `None` arms unreachable for the triple-term reason.
+    for q in delete {
+        if ground_quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+    for q in insert {
+        if quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
     let rows: Vec<Bindings> = Runtime::new(store).run(&plan)?.collect();
@@ -168,6 +198,52 @@ fn apply_delete_insert<B: FullBackend>(
     Ok(())
 }
 
+/// Recursively scan a WHERE pattern for any `GraphPattern::Graph` node.
+/// Exhaustive over spargebra 0.4.6's `GraphPattern` variants so a new
+/// variant forces a compile error here rather than silently passing.
+fn where_has_graph_pattern(p: &spargebra::algebra::GraphPattern) -> bool {
+    use spargebra::algebra::GraphPattern as GP;
+    match p {
+        // GRAPH node — the thing we reject.
+        GP::Graph { .. } => true,
+        // Leaves: no nested patterns.
+        GP::Bgp { .. } | GP::Path { .. } | GP::Values { .. } => false,
+        // Two children.
+        GP::Join { left, right }
+        | GP::LeftJoin { left, right, .. }
+        | GP::Lateral { left, right }
+        | GP::Union { left, right }
+        | GP::Minus { left, right } => {
+            where_has_graph_pattern(left) || where_has_graph_pattern(right)
+        }
+        // One inner child.
+        GP::Filter { inner, .. }
+        | GP::Extend { inner, .. }
+        | GP::OrderBy { inner, .. }
+        | GP::Project { inner, .. }
+        | GP::Distinct { inner }
+        | GP::Reduced { inner }
+        | GP::Slice { inner, .. }
+        | GP::Group { inner, .. } => where_has_graph_pattern(inner),
+        // Service wraps a GRAPH-like remote target and an inner pattern;
+        // the translator already rejects Service, but recurse for safety.
+        GP::Service { inner, .. } => where_has_graph_pattern(inner),
+    }
+}
+
+/// True if any subject/object slot of an INSERT-template quad is an RDF 1.2
+/// triple term.
+fn quad_has_triple_term(q: &QuadPattern) -> bool {
+    matches!(q.subject, TermPattern::Triple(_)) || matches!(q.object, TermPattern::Triple(_))
+}
+
+/// True if any subject/object slot of a DELETE-template quad is an RDF 1.2
+/// triple term.
+fn ground_quad_has_triple_term(q: &GroundQuadPattern) -> bool {
+    matches!(q.subject, GroundTermPattern::Triple(_))
+        || matches!(q.object, GroundTermPattern::Triple(_))
+}
+
 fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
     match g {
         GraphNamePattern::DefaultGraph => Ok(()),
@@ -198,6 +274,9 @@ fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> 
         // `runtime.rs::construct_triples`.
         TermPattern::BlankNode(b) => Some(Term::BlankNode(format!("{}_r{row_ix}", b.as_str()))),
         TermPattern::Variable(v) => row.get(v.as_str()).cloned(),
+        // Triple-term template slots are rejected up front in
+        // `apply_delete_insert` (triple_term_unsupported); this arm is
+        // therefore unreachable for that reason but kept exhaustive.
         TermPattern::Triple(_) => None,
     }
 }
@@ -211,6 +290,7 @@ fn resolve_ground(t: &GroundTermPattern, row: &Bindings) -> Option<Term> {
         GroundTermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
         GroundTermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
         GroundTermPattern::Variable(v) => row.get(v.as_str()).cloned(),
+        // Rejected up front in `apply_delete_insert`; see `resolve_term`.
         GroundTermPattern::Triple(_) => None,
     }
 }
