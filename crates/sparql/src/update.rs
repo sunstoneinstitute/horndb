@@ -31,6 +31,14 @@ pub fn apply_update<S: Store>(u: &ParsedUpdate, store: &mut S) -> Result<()> {
         ParsedUpdate::InsertData { inner } | ParsedUpdate::DeleteData { inner } => {
             &inner.operations
         }
+        // Pattern-based forms are wired in the following commit; until then
+        // they are rejected so the crate stays compilable and behaviour is
+        // unchanged.
+        ParsedUpdate::DeleteInsert { .. } => {
+            return Err(SparqlError::UnsupportedAlgebra(
+                "pattern-based update not yet wired".into(),
+            ));
+        }
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),

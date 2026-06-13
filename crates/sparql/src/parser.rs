@@ -45,6 +45,14 @@ pub enum ParsedUpdate {
     DeleteData {
         inner: Update,
     },
+    /// Pattern-based update: `INSERT { … } WHERE { … }`,
+    /// `DELETE { … } WHERE { … }`, `DELETE WHERE { … }`, or the
+    /// combined `WITH/DELETE/INSERT … WHERE` form. spargebra lowers all
+    /// of these (including the `DELETE WHERE` shorthand) into a single
+    /// `GraphUpdateOperation::DeleteInsert`.
+    DeleteInsert {
+        inner: Update,
+    },
     /// Any other update form (LOAD/CLEAR/DROP/INSERT WHERE/...) is
     /// parsed but flagged as out-of-scope at runtime.
     UnsupportedForm {
@@ -70,10 +78,13 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery> {
 
 /// Parse a SPARQL 1.1 update string.
 ///
-/// In Stage 1 we recognise `INSERT DATA` and `DELETE DATA` only.
-/// Other update forms parse successfully but are classified as
-/// `UnsupportedForm`; the executor returns an explicit error when
-/// asked to apply them.
+/// In Stage 1 we recognise `INSERT DATA`, `DELETE DATA`, and the
+/// single-operation pattern-based forms (`INSERT { … } WHERE { … }`,
+/// `DELETE { … } WHERE { … }`, `DELETE WHERE { … }`, and the combined
+/// `WITH/DELETE/INSERT … WHERE` form, all lowered by spargebra to one
+/// `GraphUpdateOperation::DeleteInsert`). Other update forms parse
+/// successfully but are classified as `UnsupportedForm`; the executor
+/// returns an explicit error when asked to apply them.
 pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
     let u = SparqlParser::new()
         .parse_update(input)
@@ -90,6 +101,9 @@ pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
         }
         Some(GraphUpdateOperation::DeleteData { .. }) if u.operations.len() == 1 => {
             Ok(ParsedUpdate::DeleteData { inner: u })
+        }
+        Some(GraphUpdateOperation::DeleteInsert { .. }) if u.operations.len() == 1 => {
+            Ok(ParsedUpdate::DeleteInsert { inner: u })
         }
         Some(_) => Ok(ParsedUpdate::UnsupportedForm { inner: u }),
         None => Err(SparqlError::Parse("update contains no operations".into())),
