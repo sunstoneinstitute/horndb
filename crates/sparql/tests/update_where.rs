@@ -146,6 +146,26 @@ fn mem_ground_safety() {
 fn horn_ground_safety() {
     ground_safety_drops_unbound::<HornBackend>()
 }
+/// A `USING <named-graph>` clause redefines the dataset the WHERE reads
+/// from; Stage-1 is default-graph only, so it must be rejected up front
+/// (not silently ignored, which would delete from the default graph).
+fn using_named_graph_rejected<B: FullBackend + Default>() {
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let u = parse_update(
+        "DELETE { ?s <http://ex/p> ?o } USING <http://ex/g> \
+         WHERE { ?s <http://ex/p> ?o }",
+    )
+    .unwrap();
+    let err = apply_update(&u, &mut store).unwrap_err();
+    assert!(format!("{err}").to_lowercase().contains("graph"));
+    // The default-graph triple must be intact (USING was rejected, not
+    // silently applied against the default graph).
+    assert_eq!(
+        objects_of(&store, "http://ex/a", "http://ex/p"),
+        vec!["http://ex/b"]
+    );
+}
+
 #[test]
 fn mem_named_graph_rejected() {
     named_graph_template_rejected::<MemStore>()
@@ -153,4 +173,12 @@ fn mem_named_graph_rejected() {
 #[test]
 fn horn_named_graph_rejected() {
     named_graph_template_rejected::<HornBackend>()
+}
+#[test]
+fn mem_using_named_graph_rejected() {
+    using_named_graph_rejected::<MemStore>()
+}
+#[test]
+fn horn_using_named_graph_rejected() {
+    using_named_graph_rejected::<HornBackend>()
 }

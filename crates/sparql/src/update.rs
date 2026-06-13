@@ -31,6 +31,12 @@ fn named_graph_unsupported() -> SparqlError {
     )
 }
 
+fn using_named_graph_unsupported() -> SparqlError {
+    SparqlError::UnsupportedAlgebra(
+        "USING named-graph dataset in update (Stage-1 default graph only)".into(),
+    )
+}
+
 /// Apply an update with the default [`SparqlConfig`] (SPARQL 1.1).
 pub fn apply_update<B: FullBackend>(u: &ParsedUpdate, store: &mut B) -> Result<()> {
     apply_update_with(u, store, &SparqlConfig::default())
@@ -74,10 +80,10 @@ pub fn apply_update_with<B: FullBackend>(
             GraphUpdateOperation::DeleteInsert {
                 delete,
                 insert,
-                using: _,
+                using,
                 pattern,
             } => {
-                apply_delete_insert(store, cfg, delete, insert, pattern)?;
+                apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
             }
             other => {
                 return Err(SparqlError::UnsupportedAlgebra(format!(
@@ -99,8 +105,20 @@ fn apply_delete_insert<B: FullBackend>(
     cfg: &SparqlConfig,
     delete: &[GroundQuadPattern],
     insert: &[QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
 ) -> Result<()> {
+    // Reject a USING/USING NAMED dataset that redefines the graphs the
+    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
+    // default graph only). A vacuous dataset (`None`, or one naming no
+    // graphs) stays a no-op. This must run before any mutation so an
+    // ignored USING can never silently target the wrong graph.
+    if let Some(ds) = using {
+        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
+            return Err(using_named_graph_unsupported());
+        }
+    }
+
     // Reject named-graph templates up front (Stage-1 default graph only),
     // so a partially-applied update can't leave the store inconsistent.
     for q in delete {

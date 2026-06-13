@@ -53,7 +53,7 @@ pub enum ParsedUpdate {
     DeleteInsert {
         inner: Update,
     },
-    /// Any other update form (LOAD/CLEAR/DROP/INSERT WHERE/...) is
+    /// Any other update form (LOAD/CLEAR/DROP/...) is
     /// parsed but flagged as out-of-scope at runtime.
     UnsupportedForm {
         inner: Update,
