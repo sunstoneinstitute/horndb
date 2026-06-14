@@ -204,6 +204,35 @@ impl Store {
         }
         out
     }
+
+    /// True if any non-default graph holds at least one triple. The snapshot
+    /// format currently covers the default graph only; export refuses to run
+    /// (rather than silently dropping data) when this is true.
+    pub fn has_named_graph_data(&self) -> bool {
+        self.tier.graphs().into_iter().any(|g| {
+            g != DEFAULT_GRAPH
+                && self.tier.predicates(g).into_iter().any(|p| {
+                    self.tier
+                        .predicate(g, p)
+                        .map(|part| part.scan().next().is_some())
+                        .unwrap_or(false)
+                })
+        })
+    }
+
+    /// Export the default graph to a writer in the HDT-derived snapshot format
+    /// (SPEC-02 F9). See `crate::snapshot`.
+    pub fn export_snapshot<W: std::io::Write>(
+        &self,
+        w: &mut W,
+    ) -> Result<crate::snapshot::SnapshotStats> {
+        crate::snapshot::export_snapshot(self, w)
+    }
+
+    /// Import a snapshot into this store (default graph).
+    pub fn import_snapshot<R: std::io::Read>(&self, r: &mut R) -> Result<()> {
+        crate::snapshot::import_snapshot_into(self, r)
+    }
 }
 
 #[cfg(test)]

@@ -30,6 +30,7 @@ pub use error::StorageError;
 pub use memory_tier::MemoryTier;
 pub use ordering::{Ordering, PartitionAxis};
 pub use partition::{OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD};
+pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store};
 pub use term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{Tier, TierStats};
