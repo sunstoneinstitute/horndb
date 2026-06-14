@@ -7,9 +7,10 @@
 //!     with all six trie orderings queryable per predicate (`ordering`).
 //!   * A `Tier` trait with one in-memory implementation (`tier`, `memory_tier`).
 //!   * A public `Store` facade (`store`) and an N-Triples bulk loader (`loader::ntriples`).
+//!   * An HDT-derived compact snapshot export/import (`snapshot`, SPEC-02 F9).
 //!
-//! Out of Stage-1 scope: HDT cold tier, MVCC, CXL/NVMe tiering, persistent
-//! dictionary.
+//! Out of Stage-1 scope: MVCC, CXL/NVMe tiering, persistent dictionary,
+//! named-graph snapshots, rdfhdt wire-format compatibility.
 
 pub mod dictionary;
 pub mod error;

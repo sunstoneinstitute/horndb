@@ -12,7 +12,7 @@ Date: <fill in>
 | 2 | LUBM-8000 import ≤30 min | DEFERRED | Stage 2 — bench harness exists, just not run yet |
 | 3 | LUBM-8000 footprint ≤55 GB | DEFERRED | Stage 2 |
 | 4 | Sequential scan ≥80% of STREAM Triad | DEFERRED | Stage 2 (needs the hot tier in a NUMA-pinned bench) |
-| 5 | HDT round-trip isomorphism | DEFERRED | Stage 2 (no HDT support in Stage 1) |
+| 5 | HDT round-trip isomorphism | IMPLEMENTED | F9 delivered: `snapshot/` exports the default graph to an HDT-*derived* compact format and re-imports it. Blank-node labels are preserved, so round-trip yields exact triple-set equality (a strictly stronger property than isomorphism under blank-node renaming). Covered by `crates/storage/tests/snapshot_roundtrip.rs`. Named-graph snapshots remain a follow-up — export errors rather than silently dropping non-default-graph data. |
 | 6 | All-six orderings for top-10 predicates | IMPLEMENTED | F4 delivered ([#16](https://github.com/sunstoneinstitute/horndb/issues/16)): `ordering.rs` + `partition.rs` materialise the object-major layout (eager for hot predicates, lazy for cold); `Store::top_predicates` + `scan_predicate_ordered` query any of the six orderings. Covered by `crates/storage/tests/six_orderings.rs`. |
 
 ## Stage-1 surfaced figures
@@ -25,10 +25,10 @@ Date: <fill in>
 
 ## Out-of-scope items tracked as Future Work
 
-- HDT cold-tier (SPEC-02 F9)
-- CXL/NVMe tiering (SPEC-02 NF4)
+- CXL/NVMe cold-tier placement (SPEC-02 NF4, SPEC-09 — Stage 3)
 - MVCC, copy-on-write snapshots (SPEC-02 risks/open questions)
-- Snapshot HDT export (SPEC-02 F9)
+- Named-graph / quad snapshots (SPEC-02 F9 — Stage-1 snapshot export covers the default graph only; export errors on named-graph data)
+- rdfhdt wire-format compatibility (cross-tool interop — explicit non-goal of the Stage-1 snapshot)
 - Persistent on-disk dictionary (SPEC-02 risks/open questions)
-- Turtle, N-Quads, HDT input formats (SPEC-02 F8 — only N-Triples in Stage 1)
+- Turtle, N-Quads, HDT input formats as bulk-import paths (SPEC-02 F8 — only N-Triples in Stage 1)
 - Crash-consistent checkpointing (SPEC-02 NF5 — Stage 1 is in-memory only)

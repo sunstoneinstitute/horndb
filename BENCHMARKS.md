@@ -81,7 +81,7 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | LUBM-100 bulk-import (~13 M triples) | ≤**30 s** on reference workstation | acceptance #1 |
 | LUBM-8000 bulk-import (~1.1B triples) | ≤**30 minutes** on reference workstation | acceptance #2 |
 | Warm-tier memory footprint | ≤**50 bytes/triple** | RDFox: 36.9 (NF1; we accept ~35% headroom for all 6 orderings) |
-| Cold-tier (HDT) footprint | ≤**6 bytes/triple** amortised | NF1 |
+| Cold-tier (HDT) footprint | ≤**6 bytes/triple** amortised | NF1; measured **5.440 B/triple** on a 40k-triple synthetic LUBM-shaped corpus (`snapshot/`, SPEC-02 F9) — synthetic, validate against real LUBM |
 | LUBM-8000 warm footprint | ≤**55 GB** | acceptance #3 |
 | `rdf:type` partition scan throughput | ≥**80% of STREAM Triad** bandwidth | NF2, acceptance #4 |
 | Tiering write amplification | ≤**1 rewrite/tier**, ≤**2× read amp** from cold | NF4 |

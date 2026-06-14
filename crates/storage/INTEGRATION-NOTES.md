@@ -35,3 +35,39 @@ future variants must take new bytes, never reuse `0x00` or `0x01`.
 With `ml.enabled = false` the call returns an empty `Vec` (no-op);
 tier placement therefore uses recent-access stats only — bit-identical
 to a build with no advisor wired.
+
+## Snapshot format (SPEC-02 F9)
+
+`snapshot/` exports the default graph of a `Store` to a compact byte
+stream and re-imports it (`Store::export_snapshot` / `import_snapshot`,
+free fns `export_snapshot` / `import_snapshot`, accounting via
+`SnapshotStats`). Design decisions that aren't in the spec:
+
+- **HDT-*derived*, not rdfhdt wire-compatible.** The three-section layout
+  mirrors HDT (Header / Dictionary / Triples) but is our own encoding.
+  Cross-tool interop with rdfhdt and friends is an explicit non-goal of
+  this increment — do not assume a `.hdt` produced elsewhere will load.
+- **Default graph only.** Export *errors* if the store holds named-graph
+  data (`has_named_graph_data` guard) rather than silently dropping it.
+  Named-graph / quad snapshots are a documented follow-up.
+- **Operates at the `oxrdf::Term` level**, not the internal `TermId`
+  level. This makes the format robust to dictionary id reassignment:
+  the dictionary stores terms by their labels, so a round-trip is
+  label-preserving and reduces to exact triple-set equality (which
+  trivially satisfies acceptance #5's "isomorphic under blank-node
+  renaming").
+- **Three sections:** a 32-byte fixed header; a dictionary of distinct
+  terms sorted by a canonical kind-tagged byte encoding and front-coded
+  (shared-prefix elision exploits common IRI prefixes); and an SPO
+  adjacency list over dense local ids, gap-coded with VByte (LEB128).
+  Inline-int terms (`TermKind::InlineInt`) get a compact value-encoded
+  dictionary entry so int-heavy data stays small.
+- **Measured footprint: 5.440 B/triple** on a 40k-triple LUBM-shaped
+  synthetic corpus (NF1 budget is ≤6 B/triple). Caveat: the triples
+  section dominates and per-id VByte width grows with the id space, so
+  this is *synthetic* — validate against a real LUBM corpus before
+  treating NF1 as comfortably banked.
+
+Full byte-level layout and the canonical term encoding are specified in
+`docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md` (see its "Format
+specification" section).
