@@ -91,6 +91,11 @@ pub fn decode_term(bytes: &[u8]) -> Result<Term> {
 }
 
 /// Decode one term from the front of `bytes`, returning it and the unconsumed tail.
+///
+/// The variable-length kinds (URI/BLANK/PLAIN/LANG/TYPED) consume to the end of
+/// their byte slice and are therefore only valid as the final or a
+/// length-delimited field — which is why the s/p subterms in the triple-term
+/// encoding carry explicit length prefixes.
 fn decode_term_prefix(bytes: &[u8]) -> Result<(Term, &[u8])> {
     let (&kind, rest) = bytes
         .split_first()
@@ -157,18 +162,28 @@ fn decode_term_prefix(bytes: &[u8]) -> Result<(Term, &[u8])> {
             let mut cur = Cursor::new(rest);
             let s_len = read_uvarint(&mut cur).map_err(|e| snap_err(e.to_string()))? as usize;
             let after_slen = cur.position() as usize;
+            let s_end = after_slen
+                .checked_add(s_len)
+                .ok_or_else(|| snap_err("triple subject length overflow"))?;
             let s_bytes = rest
-                .get(after_slen..after_slen + s_len)
+                .get(after_slen..s_end)
                 .ok_or_else(|| snap_err("triple subject truncated"))?;
             let (s_term, _) = decode_term_prefix(s_bytes)?;
-            let mut cur = Cursor::new(&rest[after_slen + s_len..]);
+            let mut cur = Cursor::new(&rest[s_end..]);
             let p_len = read_uvarint(&mut cur).map_err(|e| snap_err(e.to_string()))? as usize;
-            let p_off = after_slen + s_len + cur.position() as usize;
+            let p_off = s_end
+                .checked_add(cur.position() as usize)
+                .ok_or_else(|| snap_err("triple predicate offset overflow"))?;
+            let p_end = p_off
+                .checked_add(p_len)
+                .ok_or_else(|| snap_err("triple predicate length overflow"))?;
             let p_bytes = rest
-                .get(p_off..p_off + p_len)
+                .get(p_off..p_end)
                 .ok_or_else(|| snap_err("triple predicate truncated"))?;
             let (p_term, _) = decode_term_prefix(p_bytes)?;
-            let o_bytes = &rest[p_off + p_len..];
+            let o_bytes = rest
+                .get(p_end..)
+                .ok_or_else(|| snap_err("triple object truncated"))?;
             let (o_term, _) = decode_term_prefix(o_bytes)?;
             let subject = match s_term {
                 Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
@@ -262,5 +277,38 @@ mod tests {
     #[test]
     fn empty_encoding_errors() {
         assert!(decode_term(&[]).is_err());
+    }
+
+    #[test]
+    fn truncated_lang_literal_errors() {
+        // KIND_LANG with a lang_len varint (= 10) larger than the remaining bytes.
+        let mut buf = vec![KIND_LANG];
+        write_uvarint(&mut buf, 10).unwrap();
+        buf.extend_from_slice(b"fr"); // only 2 bytes follow, not 10
+        assert!(decode_term(&buf).is_err());
+    }
+
+    #[test]
+    fn truncated_typed_literal_errors() {
+        // KIND_TYPED with a dt_len varint (= 20) larger than the remaining bytes.
+        let mut buf = vec![KIND_TYPED];
+        write_uvarint(&mut buf, 20).unwrap();
+        buf.extend_from_slice(b"http://x"); // far fewer than 20 bytes
+        assert!(decode_term(&buf).is_err());
+    }
+
+    #[test]
+    fn unknown_kind_tag_errors() {
+        assert!(decode_term(&[0xFF]).is_err());
+    }
+
+    #[test]
+    fn triple_term_subject_overflow_does_not_panic() {
+        // KIND_TRIPLE with an s_len varint that overruns the buffer. Must return
+        // Err (not panic) in both debug and release — exercises the checked-arith path.
+        let mut buf = vec![KIND_TRIPLE];
+        write_uvarint(&mut buf, u64::MAX).unwrap();
+        buf.extend_from_slice(b"junk");
+        assert!(decode_term(&buf).is_err());
     }
 }
