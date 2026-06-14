@@ -75,10 +75,10 @@ Each line is an epic; delivered increments are noted, remaining increments are
 the open work. Pull from this list when the corresponding Stage-1 slice settles.
 
 - [ ] **SPEC-02 storage.** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
-  Remaining: HDT cold tier + snapshot export ([#17](https://github.com/sunstoneinstitute/horndb/issues/17)),
-  Turtle / N-Quads import ([#18](https://github.com/sunstoneinstitute/horndb/issues/18)),
+  Remaining: Turtle / N-Quads import ([#18](https://github.com/sunstoneinstitute/horndb/issues/18)),
   copy-on-write snapshot isolation ([#19](https://github.com/sunstoneinstitute/horndb/issues/19)).
-  Delivered: compressed columnar source (#15), six index orderings (#16).
+  Delivered: compressed columnar source (#15), six index orderings (#16),
+  HDT-derived snapshot export/import ([#17](https://github.com/sunstoneinstitute/horndb/issues/17)).
   Deferred: CXL/NVMe placement (SPEC-09), persistent dictionary (Marisa/FST),
   true per-tuple MVCC.
 
