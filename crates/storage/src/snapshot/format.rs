@@ -90,10 +90,24 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
         if shared > prev.len() {
             return Err(snap_err("front-coding shared prefix exceeds previous term"));
         }
-        let mut cur = Vec::with_capacity(shared + suffix_len);
+        // Reserve only the bounded part eagerly; `suffix_len` is untrusted, so
+        // capping the reservation keeps a crafted header from triggering a huge
+        // allocation before any suffix bytes are read.
+        let mut cur = Vec::with_capacity(shared + suffix_len.min(MAX_PREALLOC));
         cur.extend_from_slice(&prev[..shared]);
-        let mut suffix = vec![0u8; suffix_len];
-        r.read_exact(&mut suffix).map_err(StorageError::from)?;
+        // Read at most `suffix_len` bytes via a bounded, geometrically-growing
+        // read. A crafted stream declaring a huge `suffix_len` only allocates the
+        // bytes that actually arrive (then we error), instead of pre-allocating
+        // `suffix_len` eagerly and risking an OOM/abort.
+        let mut suffix = Vec::new();
+        let got = r
+            .by_ref()
+            .take(suffix_len as u64)
+            .read_to_end(&mut suffix)
+            .map_err(StorageError::from)?;
+        if got != suffix_len {
+            return Err(snap_err("dictionary suffix truncated"));
+        }
         cur.extend_from_slice(&suffix);
         prev = cur.clone();
         terms.push(cur);
@@ -314,5 +328,30 @@ mod tests {
         // No body follows.
         let err = read_snapshot(&mut &buf[..]);
         assert!(err.is_err(), "expected absurd header to error, not panic");
+    }
+
+    #[test]
+    fn read_snapshot_rejects_huge_suffix_len() {
+        // Header claims a single term, then the dictionary entry declares an
+        // enormous suffix_len but supplies only a couple of bytes. The reader
+        // must fail cleanly (bounded read) instead of eagerly allocating
+        // suffix_len bytes and panicking/aborting.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.extend_from_slice(&1u64.to_le_bytes()); // num_terms = 1
+        buf.extend_from_slice(&0u64.to_le_bytes()); // num_triples = 0
+        assert_eq!(buf.len(), 32);
+        // Dictionary entry: shared_prefix_len = 0, suffix_len = absurd.
+        write_uvarint(&mut buf, 0).unwrap(); // shared_prefix_len
+        write_uvarint(&mut buf, u64::MAX).unwrap(); // suffix_len = absurd
+        buf.extend_from_slice(&[0xAB, 0xCD]); // only two bytes of "suffix"
+
+        let err = read_snapshot(&mut &buf[..]);
+        assert!(
+            err.is_err(),
+            "expected huge suffix_len to error, not panic/abort"
+        );
     }
 }
