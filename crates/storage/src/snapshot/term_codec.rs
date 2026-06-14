@@ -17,6 +17,7 @@ const KIND_LANG: u8 = 0x03;
 const KIND_TYPED: u8 = 0x04;
 const KIND_INLINE_INT: u8 = 0x05;
 const KIND_TRIPLE: u8 = 0x06;
+const KIND_DIR_LANG: u8 = 0x07;
 
 fn snap_err(msg: impl Into<String>) -> StorageError {
     StorageError::Snapshot(msg.into())
@@ -51,7 +52,22 @@ pub fn encode_term(buf: &mut Vec<u8>, term: &Term) {
             buf.extend_from_slice(b.as_str().as_bytes());
         }
         Term::Literal(lit) => {
-            if let Some(lang) = lit.language() {
+            if let Some(dir) = lit.direction() {
+                // A directional language-tagged literal (RDF 1.2 rdf:dirLangString)
+                // reports BOTH a language and a base direction, so check direction
+                // first to avoid falling into the plain-lang branch and dropping it.
+                let lang = lit
+                    .language()
+                    .expect("directional language literal always has a language tag");
+                buf.push(KIND_DIR_LANG);
+                buf.push(match dir {
+                    oxrdf::BaseDirection::Ltr => 0u8,
+                    oxrdf::BaseDirection::Rtl => 1u8,
+                });
+                write_uvarint(buf, lang.len() as u64).expect("Vec write is infallible");
+                buf.extend_from_slice(lang.as_bytes());
+                buf.extend_from_slice(lit.value().as_bytes());
+            } else if let Some(lang) = lit.language() {
                 buf.push(KIND_LANG);
                 write_uvarint(buf, lang.len() as u64).expect("Vec write is infallible");
                 buf.extend_from_slice(lang.as_bytes());
@@ -93,7 +109,7 @@ pub fn decode_term(bytes: &[u8]) -> Result<Term> {
 
 /// Decode one term from the front of `bytes`, returning it and the unconsumed tail.
 ///
-/// The variable-length kinds (URI/BLANK/PLAIN/LANG/TYPED) consume to the end of
+/// The variable-length kinds (URI/BLANK/PLAIN/LANG/DIR_LANG/TYPED) consume to the end of
 /// their byte slice and are therefore only valid as the final or a
 /// length-delimited field — which is why the s/p subterms in the triple-term
 /// encoding carry explicit length prefixes.
@@ -128,6 +144,31 @@ fn decode_term_prefix(bytes: &[u8]) -> Result<(Term, &[u8])> {
             let value =
                 std::str::from_utf8(&body[lang_len..]).map_err(|e| snap_err(e.to_string()))?;
             let lit = Literal::new_language_tagged_literal(value, lang)
+                .map_err(|e| snap_err(e.to_string()))?;
+            Ok((Term::Literal(lit), &[]))
+        }
+        // DirLang (0x07): [0x07][dir: u8 (0=Ltr, 1=Rtl)] ++ VByte(lang_len) ++
+        // lang_utf8 ++ value_utf8. The value runs to the end of the slice.
+        KIND_DIR_LANG => {
+            let (&dir_byte, after_dir) = rest
+                .split_first()
+                .ok_or_else(|| snap_err("dir-lang literal missing direction byte"))?;
+            let dir = match dir_byte {
+                0 => oxrdf::BaseDirection::Ltr,
+                1 => oxrdf::BaseDirection::Rtl,
+                _ => return Err(snap_err("invalid base direction byte")),
+            };
+            let mut cur = Cursor::new(after_dir);
+            let lang_len = read_uvarint(&mut cur).map_err(|e| snap_err(e.to_string()))? as usize;
+            let body = &after_dir[cur.position() as usize..];
+            if body.len() < lang_len {
+                return Err(snap_err("dir-lang literal truncated"));
+            }
+            let lang =
+                std::str::from_utf8(&body[..lang_len]).map_err(|e| snap_err(e.to_string()))?;
+            let value =
+                std::str::from_utf8(&body[lang_len..]).map_err(|e| snap_err(e.to_string()))?;
+            let lit = Literal::new_directional_language_tagged_literal(value, lang, dir)
                 .map_err(|e| snap_err(e.to_string()))?;
             Ok((Term::Literal(lit), &[]))
         }
@@ -243,6 +284,34 @@ mod tests {
         assert_eq!(rt(&plain), plain);
         assert_eq!(rt(&lang), lang);
         assert_eq!(rt(&typed), typed);
+    }
+
+    #[test]
+    fn round_trips_directional_language_literal() {
+        for dir in [oxrdf::BaseDirection::Ltr, oxrdf::BaseDirection::Rtl] {
+            let lit = Literal::new_directional_language_tagged_literal("שלום", "he", dir).unwrap();
+            let t = Term::Literal(lit);
+            assert_eq!(rt(&t), t);
+        }
+    }
+
+    #[test]
+    fn plain_lang_literal_uses_kind_lang_not_dir_lang() {
+        let mut buf = Vec::new();
+        encode_term(
+            &mut buf,
+            &Term::Literal(Literal::new_language_tagged_literal("bonjour", "fr").unwrap()),
+        );
+        assert_eq!(buf[0], KIND_LANG);
+    }
+
+    #[test]
+    fn invalid_direction_byte_errors() {
+        // KIND_DIR_LANG with an invalid direction byte (2).
+        let mut buf = vec![KIND_DIR_LANG, 2u8];
+        write_uvarint(&mut buf, 2).unwrap();
+        buf.extend_from_slice(b"hevalue");
+        assert!(decode_term(&buf).is_err());
     }
 
     #[test]
