@@ -37,3 +37,18 @@ fn parses_delete_data() {
         .expect("must parse");
     assert!(matches!(u, ParsedUpdate::DeleteData { .. }));
 }
+
+#[test]
+fn classifies_delete_insert_where() {
+    let u = parse_update(
+        "DELETE { ?s <http://ex/p> ?o } INSERT { ?s <http://ex/q> ?o } WHERE { ?s <http://ex/p> ?o }",
+    )
+    .unwrap();
+    assert!(matches!(u, ParsedUpdate::DeleteInsert { .. }));
+}
+
+#[test]
+fn classifies_delete_where_shorthand() {
+    let u = parse_update("DELETE WHERE { ?s <http://ex/p> ?o }").unwrap();
+    assert!(matches!(u, ParsedUpdate::DeleteInsert { .. }));
+}

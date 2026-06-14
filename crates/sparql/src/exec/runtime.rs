@@ -1091,6 +1091,8 @@ pub fn construct_triples(
             TermPattern::Triple(_) => None,
         }
     }
+    // See also update.rs::resolve_pred — same "predicate var binding must
+    // be an IRI" invariant; keep the two in lockstep.
     fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<String> {
         match p {
             NamedNodePattern::NamedNode(n) => Some(n.as_str().to_owned()),
