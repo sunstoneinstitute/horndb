@@ -63,7 +63,7 @@ They stay listed as increments of the SPEC-07 epic ([#7](https://github.com/suns
   decoupled data (served store repopulated from a flat dump) and literal-as-IRI
   term coercion (wrong `ORDER BY` / literal comparisons).
 
-- [ ] **Pattern-based Update (`INSERT`/`DELETE … WHERE`).**
+- [x] **Pattern-based Update (`INSERT`/`DELETE … WHERE`).**
   ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
   Only `INSERT DATA` / `DELETE DATA` ship today; trainmarks includes a
   conditional `DELETE`/`INSERT … WHERE` update (the `BIND`/`IF` expression half
