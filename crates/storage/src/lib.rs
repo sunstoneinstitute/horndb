@@ -17,6 +17,7 @@ pub mod loader;
 pub mod memory_tier;
 pub mod ordering;
 pub mod partition;
+pub mod snapshot;
 pub mod store;
 pub mod term;
 pub mod tier;
