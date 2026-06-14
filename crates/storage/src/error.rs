@@ -12,6 +12,8 @@ pub enum StorageError {
     NtriplesParse(String),
     #[error("invalid term for storage: {0}")]
     InvalidTerm(String),
+    #[error("snapshot error: {0}")]
+    Snapshot(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
