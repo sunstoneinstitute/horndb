@@ -77,7 +77,13 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
     if version != FORMAT_VERSION {
         return Err(snap_err(format!("unsupported snapshot version {version}")));
     }
-    let _flags = read_u32(r)?;
+    let flags = read_u32(r)?;
+    if flags != 0 {
+        // No flag bits are defined for v1. A nonzero value means a corrupt
+        // header or a future writer using flags for new sections/compression;
+        // refuse rather than silently misinterpret the body as plain v1.
+        return Err(snap_err(format!("unsupported snapshot flags {flags:#x}")));
+    }
     let num_terms = read_u64(r)?;
     let num_triples = read_u64(r)?;
 
@@ -353,5 +359,21 @@ mod tests {
             err.is_err(),
             "expected huge suffix_len to error, not panic/abort"
         );
+    }
+
+    #[test]
+    fn read_snapshot_rejects_nonzero_flags() {
+        // No flag bits are defined for v1; a nonzero flags word means a corrupt
+        // header or a future layout, and must be rejected rather than silently
+        // misinterpreted as plain v1.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // flags = nonzero
+        buf.extend_from_slice(&0u64.to_le_bytes()); // num_terms
+        buf.extend_from_slice(&0u64.to_le_bytes()); // num_triples
+        assert_eq!(buf.len(), 32);
+        let err = read_snapshot(&mut &buf[..]);
+        assert!(err.is_err(), "expected nonzero flags to be rejected");
     }
 }
