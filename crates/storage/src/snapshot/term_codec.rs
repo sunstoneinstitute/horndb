@@ -32,14 +32,15 @@ fn subject_to_term(subject: &oxrdf::NamedOrBlankNode) -> Term {
     }
 }
 
-/// Encode a term to canonical bytes. `inline_int` is `Some(v)` when the caller's
-/// `TermId` was value-encoded (`TermKind::InlineInt`); then `term` is ignored.
-pub fn encode_term(buf: &mut Vec<u8>, term: &Term, inline_int: Option<i32>) {
-    if let Some(v) = inline_int {
-        buf.push(KIND_INLINE_INT);
-        write_uvarint(buf, zigzag_encode(v)).expect("Vec write is infallible");
-        return;
-    }
+/// Encode a value-encoded integer (`TermKind::InlineInt`) to canonical bytes:
+/// the `KIND_INLINE_INT` tag followed by the zigzag-encoded value.
+pub fn encode_inline_int(buf: &mut Vec<u8>, value: i32) {
+    buf.push(KIND_INLINE_INT);
+    write_uvarint(buf, zigzag_encode(value)).expect("Vec write is infallible");
+}
+
+/// Encode a term to canonical bytes.
+pub fn encode_term(buf: &mut Vec<u8>, term: &Term) {
     match term {
         Term::NamedNode(n) => {
             buf.push(KIND_URI);
@@ -69,14 +70,14 @@ pub fn encode_term(buf: &mut Vec<u8>, term: &Term, inline_int: Option<i32>) {
         Term::Triple(t) => {
             buf.push(KIND_TRIPLE);
             let mut s = Vec::new();
-            encode_term(&mut s, &subject_to_term(&t.subject), None);
+            encode_term(&mut s, &subject_to_term(&t.subject));
             let mut p = Vec::new();
-            encode_term(&mut p, &Term::NamedNode(t.predicate.clone()), None);
+            encode_term(&mut p, &Term::NamedNode(t.predicate.clone()));
             write_uvarint(buf, s.len() as u64).expect("Vec write is infallible");
             buf.extend_from_slice(&s);
             write_uvarint(buf, p.len() as u64).expect("Vec write is infallible");
             buf.extend_from_slice(&p);
-            encode_term(buf, &t.object.clone(), None);
+            encode_term(buf, &t.object.clone());
         }
     }
 }
@@ -215,7 +216,7 @@ mod tests {
 
     fn rt(term: &Term) -> Term {
         let mut buf = Vec::new();
-        encode_term(&mut buf, term, None);
+        encode_term(&mut buf, term);
         decode_term(&buf).unwrap()
     }
 
@@ -247,11 +248,7 @@ mod tests {
     #[test]
     fn inline_int_encodes_as_canonical_integer() {
         let mut buf = Vec::new();
-        encode_term(
-            &mut buf,
-            &Term::NamedNode(NamedNode::new("http://x").unwrap()),
-            Some(-42),
-        );
+        encode_inline_int(&mut buf, -42);
         assert_eq!(buf[0], KIND_INLINE_INT);
         let decoded = decode_term(&buf).unwrap();
         assert_eq!(

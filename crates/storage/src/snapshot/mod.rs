@@ -57,13 +57,13 @@ pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotSta
         let mut buf = Vec::new();
         if id.kind() == TermKind::InlineInt {
             let v = id.as_inline_int().expect("inline int id");
-            term_codec::encode_term(&mut buf, &dummy_term(), Some(v));
+            term_codec::encode_inline_int(&mut buf, v);
         } else {
             let term = store
                 .dictionary()
                 .lookup(id)
                 .ok_or_else(|| StorageError::Snapshot(format!("dangling term id {id:?}")))?;
-            term_codec::encode_term(&mut buf, &term, None);
+            term_codec::encode_term(&mut buf, &term);
         }
         enc_by_id.insert(id, buf);
         Ok(())
@@ -133,9 +133,4 @@ pub fn import_snapshot_into<R: Read>(store: &Store, r: &mut R) -> Result<()> {
     }
     store.insert_triples(&batch)?;
     Ok(())
-}
-
-/// A throwaway term passed to `encode_term` on the inline-int path (ignored).
-fn dummy_term() -> oxrdf::Term {
-    oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://horndb/inline").unwrap())
 }

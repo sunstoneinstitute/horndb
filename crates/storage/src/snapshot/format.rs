@@ -9,6 +9,10 @@ use std::io::{Read, Write};
 pub const MAGIC: [u8; 8] = *b"HDBSNAP\x01";
 pub const FORMAT_VERSION: u32 = 1;
 
+/// Upper bound on elements pre-reserved from untrusted header counts, so a
+/// crafted header can't trigger a huge allocation before any data is read.
+const MAX_PREALLOC: usize = 1 << 20;
+
 fn snap_err(msg: impl Into<String>) -> StorageError {
     StorageError::Snapshot(msg.into())
 }
@@ -78,7 +82,7 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
     let num_triples = read_u64(r)?;
 
     // Dictionary.
-    let mut terms: Vec<Vec<u8>> = Vec::with_capacity(num_terms as usize);
+    let mut terms: Vec<Vec<u8>> = Vec::with_capacity((num_terms as usize).min(MAX_PREALLOC));
     let mut prev: Vec<u8> = Vec::new();
     for _ in 0..num_terms {
         let shared = read_uvarint(r).map_err(StorageError::from)? as usize;
@@ -100,7 +104,17 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
     Ok((terms, triples))
 }
 
+/// Write the SPO adjacency (gap-coded) for `sorted`.
+///
+/// Precondition: `sorted` must be sorted ascending by `(s, p, o)`. The dedup of
+/// distinct subjects/predicates below is only correct for sorted input.
 fn write_adjacency<W: Write>(w: &mut W, sorted: &[LocalTriple]) -> Result<()> {
+    debug_assert!(
+        sorted
+            .windows(2)
+            .all(|w| (w[0].s, w[0].p, w[0].o) <= (w[1].s, w[1].p, w[1].o)),
+        "write_adjacency requires SPO-sorted input"
+    );
     // Count distinct subjects.
     let subjects: Vec<u64> = {
         let mut v: Vec<u64> = sorted.iter().map(|t| t.s).collect();
@@ -151,19 +165,25 @@ fn read_adjacency<R: Read>(
     num_terms: u64,
     num_triples: u64,
 ) -> Result<Vec<LocalTriple>> {
-    let mut out = Vec::with_capacity(num_triples as usize);
+    let mut out = Vec::with_capacity((num_triples as usize).min(MAX_PREALLOC));
     let num_subjects = read_uvarint(r).map_err(StorageError::from)?;
     let mut prev_s = 0u64;
     for _ in 0..num_subjects {
-        let s = prev_s + read_uvarint(r).map_err(StorageError::from)?;
+        let s = prev_s
+            .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+            .ok_or_else(|| snap_err("local-id gap overflow"))?;
         let num_preds = read_uvarint(r).map_err(StorageError::from)?;
         let mut prev_p = 0u64;
         for _ in 0..num_preds {
-            let p = prev_p + read_uvarint(r).map_err(StorageError::from)?;
+            let p = prev_p
+                .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+                .ok_or_else(|| snap_err("local-id gap overflow"))?;
             let num_objs = read_uvarint(r).map_err(StorageError::from)?;
             let mut prev_o = 0u64;
             for _ in 0..num_objs {
-                let o = prev_o + read_uvarint(r).map_err(StorageError::from)?;
+                let o = prev_o
+                    .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+                    .ok_or_else(|| snap_err("local-id gap overflow"))?;
                 if s == 0 || p == 0 || o == 0 || s > num_terms || p > num_terms || o > num_terms {
                     return Err(snap_err("triple references out-of-range local id"));
                 }
@@ -277,5 +297,22 @@ mod tests {
 
         let err = read_snapshot(&mut &buf[..]);
         assert!(err.is_err(), "expected out-of-range local id to error");
+    }
+
+    #[test]
+    fn read_snapshot_rejects_absurd_header() {
+        // Hand-craft a 32-byte header claiming u64::MAX terms but with no body.
+        // The reader must NOT panic/abort on the huge with_capacity; it should
+        // fail cleanly once read_exact runs out of dictionary bytes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // num_terms = absurd
+        buf.extend_from_slice(&u64::MAX.to_le_bytes()); // num_triples = absurd
+        assert_eq!(buf.len(), 32);
+        // No body follows.
+        let err = read_snapshot(&mut &buf[..]);
+        assert!(err.is_err(), "expected absurd header to error, not panic");
     }
 }
