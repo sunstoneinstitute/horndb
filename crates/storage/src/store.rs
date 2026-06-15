@@ -212,9 +212,13 @@ impl StoreSnapshot<'_> {
     }
 
     /// Scan a single predicate in the default graph, returning materialized
-    /// (subject, object) `Term` pairs.
+    /// (subject, object) `Term` pairs. A read transaction never mutates the
+    /// dictionary: an absent predicate (never interned) yields no rows.
     pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
-        let p_id = self.dictionary.intern(predicate)?;
+        let p_id = match self.dictionary.get(predicate) {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
         let pairs = self
             .tier
             .with_predicate(DEFAULT_GRAPH, p_id, |part| part.scan().collect::<Vec<_>>())
@@ -233,7 +237,10 @@ impl StoreSnapshot<'_> {
         predicate: &Term,
         ord: Ordering,
     ) -> Result<Vec<(Term, Term, Term)>> {
-        let p_id = self.dictionary.intern(predicate)?;
+        let p_id = match self.dictionary.get(predicate) {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
         let cols = match self.tier.ordered_predicate(DEFAULT_GRAPH, p_id, ord) {
             Some(cols) => cols,
             None => return Ok(Vec::new()),
@@ -315,6 +322,34 @@ mod tests {
         let q = store.dictionary().get(&iri("http://ex/q")).unwrap();
         let preds: Vec<TermId> = all.iter().map(|t| t.1).collect();
         assert!(preds.contains(&p) && preds.contains(&q));
+    }
+
+    #[test]
+    fn scanning_absent_predicate_does_not_mutate_dictionary() {
+        let store = Store::in_memory();
+        store
+            .insert_triples(&[(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"))])
+            .unwrap();
+        let absent = iri("http://ex/never-interned");
+
+        // A read of an absent predicate yields no rows and must NOT intern the
+        // query term (a read transaction is non-mutating).
+        let snap = store.snapshot();
+        assert!(snap
+            .scan_predicate_default_graph(&absent)
+            .unwrap()
+            .is_empty());
+        assert!(snap
+            .scan_predicate_ordered(&absent, Ordering::Spo)
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .scan_predicate_default_graph(&absent)
+            .unwrap()
+            .is_empty());
+
+        // The absent term was never added to the dictionary by those reads.
+        assert!(store.dictionary().get(&absent).is_none());
     }
 
     #[test]
