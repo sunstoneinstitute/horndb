@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use crate::backend::RuleFiringBackend;
 use crate::engine::{reset_and_materialize, Stats};
 use crate::store::{MemStore, TripleStore};
-use crate::types::{TermId, Triple};
+use crate::types::{MaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -185,6 +185,11 @@ impl Engine {
                 t
             });
         }
+        // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
+        // restrictions now, while the dictionary can still parse the literal
+        // value. The resolved list rides on the store for the firing loop.
+        let restrictions = resolve_max_card_restrictions(&state.store, &self.vocab, &state.dict);
+        state.store.set_card_restrictions(restrictions);
         let stats = match self.backend {
             BackendChoice::RuleFiring => {
                 let mut backend = RuleFiringBackend::new();
@@ -331,6 +336,58 @@ fn infer_owl_thing_from_named_individuals(store: &mut MemStore, vocab: &Vocabula
             vocab.owl_thing,
         ));
     }
+}
+
+/// Resolve unqualified max-cardinality restrictions for `cls-maxc1`/`cls-maxc2`.
+///
+/// Scans `?x owl:maxCardinality ?n`, parses the literal value of `?n` (any
+/// XSD integer datatype — the OWL 2 RL/RDF rules write
+/// `"0"^^xsd:nonNegativeInteger`, but we accept other integer spellings of
+/// the same value), and joins with `?x owl:onProperty ?p`. Only values `0`
+/// and `1` are retained — higher cardinalities have no OWL 2 RL rule.
+///
+/// Runs at load time because the literal value is only recoverable from the
+/// dictionary (`TermId → lexical key`); the resolved list then rides on the
+/// store through `TripleStore::card_restrictions`.
+fn resolve_max_card_restrictions(
+    store: &MemStore,
+    vocab: &Vocabulary,
+    dict: &FxHashMap<String, TermId>,
+) -> Vec<MaxCardRestriction> {
+    // Invert the dictionary once: TermId → lexical key.
+    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+    for (lex, &id) in dict {
+        rev.insert(id, lex.as_str());
+    }
+    let mut out = Vec::new();
+    for card in store.scan_predicate(vocab.owl_max_cardinality) {
+        let class = card.s;
+        let Some(max) = rev.get(&card.o).and_then(|lex| parse_card_literal(lex)) else {
+            continue;
+        };
+        if max > 1 {
+            continue;
+        }
+        // Join with onProperty (there should be exactly one per restriction).
+        for op in store.probe(Some(class), vocab.owl_on_property, None) {
+            out.push(MaxCardRestriction {
+                class,
+                property: op.o,
+                max,
+            });
+        }
+    }
+    out
+}
+
+/// Parse the integer value out of a dictionary literal key of the form
+/// `"<value>"^^<<datatype>>` (see `intern_literal`). Returns `None` for
+/// non-literals, language-tagged literals, or non-integer lexical values.
+fn parse_card_literal(lex: &str) -> Option<u8> {
+    let rest = lex.strip_prefix('"')?;
+    let close = rest.find("\"^^<")?;
+    let value = &rest[..close];
+    value.parse::<u8>().ok()
 }
 
 fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
@@ -551,6 +608,76 @@ mod tests {
             NamedNode::new(o).unwrap(),
             GraphName::DefaultGraph,
         )
+    }
+
+    const XSD_NNI: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
+    const OWL_MAX_CARDINALITY_IRI: &str = "http://www.w3.org/2002/07/owl#maxCardinality";
+    const OWL_ON_PROPERTY_IRI: &str = "http://www.w3.org/2002/07/owl#onProperty";
+
+    fn nq_card(s: &str, value: &str) -> Quad {
+        Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
+            NamedNode::new(OWL_MAX_CARDINALITY_IRI).unwrap(),
+            Literal::new_typed_literal(value, NamedNode::new(XSD_NNI).unwrap()),
+            GraphName::DefaultGraph,
+        )
+    }
+
+    fn nq_on_prop(s: &str, p: &str) -> Quad {
+        Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
+            NamedNode::new(OWL_ON_PROPERTY_IRI).unwrap(),
+            NamedNode::new(p).unwrap(),
+            GraphName::DefaultGraph,
+        )
+    }
+
+    #[test]
+    fn cls_maxc1_makes_inconsistent_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // :R maxCardinality 0 onProperty :p ; :u a :R ; :u :p :y
+        data.insert(&nq_card("http://ex/R", "0"));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y"));
+        engine.load(&data).unwrap();
+        assert!(
+            !engine.is_consistent().unwrap(),
+            "maxCardinality 0 with a value ⇒ inconsistent (cls-maxc1)"
+        );
+    }
+
+    #[test]
+    fn cls_maxc2_entails_sameas_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // :R maxCardinality 1 onProperty :p ; :u a :R ; :u :p :y1 ; :u :p :y2
+        data.insert(&nq_card("http://ex/R", "1"));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y1"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y2"));
+        engine.load(&data).unwrap();
+        let mut concl = Dataset::new();
+        concl.insert(&nq("http://ex/y1", OWL_SAME_AS, "http://ex/y2"));
+        assert!(
+            engine.entails(&concl).unwrap(),
+            "maxCardinality 1 with two values ⇒ y1 owl:sameAs y2 (cls-maxc2)"
+        );
+    }
+
+    #[test]
+    fn max_cardinality_two_is_ignored() {
+        // Only 0 and 1 are acted on; maxCardinality 2 is a no-op in Stage-1.
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        data.insert(&nq_card("http://ex/R", "2"));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y"));
+        engine.load(&data).unwrap();
+        assert!(engine.is_consistent().unwrap());
     }
 
     #[test]
