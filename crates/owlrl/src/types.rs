@@ -27,6 +27,20 @@ impl Triple {
     }
 }
 
+/// A resolved unqualified max-cardinality restriction (`cls-maxc1`/`cls-maxc2`).
+///
+/// `class` is the restriction class `?x` (`T(?x, owl:maxCardinality, n)` and
+/// `T(?x, owl:onProperty, property)`); `max` is the cardinality value, which
+/// the rules only act on for `0` and `1`. Resolved at load time in
+/// `integration.rs` (where the dictionary can parse the literal value) and
+/// fired by `list_rules.rs` in the semi-naïve loop.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct MaxCardRestriction {
+    pub class: TermId,
+    pub property: TermId,
+    pub max: u8,
+}
+
 /// A slot inside a triple pattern: either a variable (referenced by index 0..=2)
 /// or a constant term. Used by the codegen, not by the runtime hot path.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -60,5 +74,16 @@ mod tests {
     #[test]
     fn slot_variants_distinct() {
         assert_ne!(Slot::Var(0), Slot::Const(TermId(0)));
+    }
+
+    #[test]
+    fn max_card_restriction_fields() {
+        let r = MaxCardRestriction {
+            class: TermId(1),
+            property: TermId(2),
+            max: 1,
+        };
+        assert_eq!(r.max, 1);
+        assert_ne!(r.class, r.property);
     }
 }
