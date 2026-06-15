@@ -380,13 +380,40 @@ fn resolve_max_card_restrictions(
     out
 }
 
+/// XSD integer datatypes accepted for `owl:maxCardinality`. The OWL 2 RL/RDF
+/// rules write the cardinality literal as `"0"^^xsd:nonNegativeInteger`; we
+/// additionally accept the value-equal integer-tower spellings. Datatypes
+/// outside this set (e.g. `xsd:string`, `xsd:decimal`, or a user datatype)
+/// are rejected so a numeric *lexical* value under the wrong datatype does
+/// not spuriously match the cardinality-literal shape and fire
+/// `cls-maxc1`/`cls-maxc2`.
+const XSD_CARD_INTEGER_DATATYPES: &[&str] = &[
+    "http://www.w3.org/2001/XMLSchema#integer",
+    "http://www.w3.org/2001/XMLSchema#nonNegativeInteger",
+    "http://www.w3.org/2001/XMLSchema#positiveInteger",
+    "http://www.w3.org/2001/XMLSchema#long",
+    "http://www.w3.org/2001/XMLSchema#int",
+    "http://www.w3.org/2001/XMLSchema#short",
+    "http://www.w3.org/2001/XMLSchema#byte",
+    "http://www.w3.org/2001/XMLSchema#unsignedLong",
+    "http://www.w3.org/2001/XMLSchema#unsignedInt",
+    "http://www.w3.org/2001/XMLSchema#unsignedShort",
+    "http://www.w3.org/2001/XMLSchema#unsignedByte",
+];
+
 /// Parse the integer value out of a dictionary literal key of the form
 /// `"<value>"^^<<datatype>>` (see `intern_literal`). Returns `None` for
-/// non-literals, language-tagged literals, or non-integer lexical values.
+/// non-literals, language-tagged literals, non-integer datatypes (so a
+/// numeric value under e.g. `xsd:string` does not match), or non-integer
+/// lexical values.
 fn parse_card_literal(lex: &str) -> Option<u8> {
     let rest = lex.strip_prefix('"')?;
     let close = rest.find("\"^^<")?;
     let value = &rest[..close];
+    let datatype = rest[close + 4..].strip_suffix('>')?;
+    if !XSD_CARD_INTEGER_DATATYPES.contains(&datatype) {
+        return None;
+    }
     value.parse::<u8>().ok()
 }
 
@@ -704,6 +731,49 @@ mod tests {
         assert_eq!(
             super::parse_card_literal("\"x\"^^<http://www.w3.org/2001/XMLSchema#string>"),
             None
+        );
+        // Numeric lexical value but a NON-integer datatype must be rejected,
+        // else a `"1"^^xsd:string` literal would spuriously fire cls-maxc.
+        assert_eq!(
+            super::parse_card_literal("\"1\"^^<http://www.w3.org/2001/XMLSchema#string>"),
+            None
+        );
+        assert_eq!(
+            super::parse_card_literal("\"0\"^^<http://www.w3.org/2001/XMLSchema#decimal>"),
+            None
+        );
+        // A user/custom datatype with a numeric value is likewise rejected.
+        assert_eq!(
+            super::parse_card_literal("\"1\"^^<http://example.org/myType>"),
+            None
+        );
+    }
+
+    #[test]
+    fn max_cardinality_one_with_string_datatype_is_ignored() {
+        // A `"1"^^xsd:string`-typed maxCardinality is not the OWL 2 RL
+        // cardinality-literal shape; it must NOT entail owl:sameAs.
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        data.insert(&Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/R").unwrap()),
+            NamedNode::new(OWL_MAX_CARDINALITY_IRI).unwrap(),
+            Literal::new_typed_literal(
+                "1",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#string").unwrap(),
+            ),
+            GraphName::DefaultGraph,
+        ));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y1"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y2"));
+        engine.load(&data).unwrap();
+        let mut concl = Dataset::new();
+        concl.insert(&nq("http://ex/y1", OWL_SAME_AS, "http://ex/y2"));
+        assert!(
+            !engine.entails(&concl).unwrap(),
+            "maxCardinality \"1\"^^xsd:string must not fire cls-maxc2"
         );
     }
 
