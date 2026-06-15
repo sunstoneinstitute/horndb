@@ -681,6 +681,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_card_literal_handles_integer_spellings() {
+        assert_eq!(
+            super::parse_card_literal(
+                "\"0\"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>"
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            super::parse_card_literal("\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+            Some(1)
+        );
+        assert_eq!(
+            super::parse_card_literal("\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
+            Some(2)
+        );
+        // Not a literal key.
+        assert_eq!(super::parse_card_literal("http://ex/x"), None);
+        // Language-tagged literal — no `^^<…>` suffix.
+        assert_eq!(super::parse_card_literal("\"hi\"@en"), None);
+        // Non-integer lexical value.
+        assert_eq!(
+            super::parse_card_literal("\"x\"^^<http://www.w3.org/2001/XMLSchema#string>"),
+            None
+        );
+    }
+
+    #[test]
     fn empty_entails_empty() {
         let mut engine = Engine::new();
         engine.load(&Dataset::new()).unwrap();
