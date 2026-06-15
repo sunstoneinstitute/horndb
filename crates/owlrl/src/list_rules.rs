@@ -688,14 +688,52 @@ fn fire_cls_maxc1(
     }
 }
 
+// ---------------------------------------------------------------------------
+// cls-maxc2 — `?x owl:maxCardinality "1" ∧ ?x owl:onProperty ?p ∧
+// ?u rdf:type ?x ∧ ?u ?p ?y1 ∧ ?u ?p ?y2 ⇒ ?y1 owl:sameAs ?y2`.
+//
+// For each ?u typed as the restriction class, gather every value on the
+// restricted property and emit `owl:sameAs` for each ordered distinct pair.
+// `owl:sameAs` symmetry/transitivity is closed downstream by the closure
+// backend (eq-sym/eq-trans), so emitting distinct pairs suffices; the
+// reflexive case (y == y) is skipped as trivial.
+// ---------------------------------------------------------------------------
 fn fire_cls_maxc2(
-    _store: &dyn TripleStore,
-    _vocab: &Vocabulary,
-    _class: TermId,
-    _property: TermId,
-    _out: &mut Delta,
+    store: &dyn TripleStore,
+    vocab: &Vocabulary,
+    class: TermId,
+    property: TermId,
+    out: &mut Delta,
 ) {
-    // Implemented in Task 4.
+    let us: Vec<TermId> = store
+        .probe(None, vocab.rdf_type, Some(class))
+        .map(|t| t.s)
+        .collect();
+    for u in us {
+        let ys: Vec<TermId> = store.probe(Some(u), property, None).map(|t| t.o).collect();
+        if ys.len() < 2 {
+            continue;
+        }
+        for (i, &y1) in ys.iter().enumerate() {
+            for &y2 in &ys[i + 1..] {
+                if y1 == y2 {
+                    continue;
+                }
+                for (a, b) in [(y1, y2), (y2, y1)] {
+                    let head = Triple::new(a, vocab.owl_same_as, b);
+                    if !out.contains(&head) && !store.contains(&head) {
+                        out.insert(
+                            head,
+                            Provenance {
+                                rule_id: "cls-maxc2",
+                                premises: smallvec![],
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +996,59 @@ mod tests {
         assert!(
             !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "cls-maxc1: no p-value ⇒ no inconsistency"
+        );
+    }
+
+    #[test]
+    fn cls_maxc2_one_cardinality_merges() {
+        use crate::types::MaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let u = TermId(100);
+        let y1 = TermId(101);
+        let y2 = TermId(102);
+        // u : x, u p y1, u p y2  with maxCardinality 1 on p ⇒ y1 sameAs y2.
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y1.0));
+        s.assert(t(u.0, p.0, y2.0));
+        s.set_card_restrictions(vec![MaxCardRestriction {
+            class: x,
+            property: p,
+            max: 1,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
+                || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
+            "cls-maxc2: two p-values under maxCard 1 ⇒ y1 sameAs y2"
+        );
+    }
+
+    #[test]
+    fn cls_maxc2_single_value_no_merge() {
+        use crate::types::MaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let u = TermId(100);
+        let y1 = TermId(101);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y1.0));
+        s.set_card_restrictions(vec![MaxCardRestriction {
+            class: x,
+            property: p,
+            max: 1,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        // No second value → no sameAs, and certainly no reflexive sameAs.
+        assert!(!d.contains(&t(y1.0, v.owl_same_as.0, y1.0)));
+        assert_eq!(
+            d.iter().filter(|(tr, _)| tr.p == v.owl_same_as).count(),
+            0,
+            "cls-maxc2: a single p-value derives no sameAs"
         );
     }
 
