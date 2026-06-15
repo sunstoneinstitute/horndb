@@ -156,3 +156,29 @@ fn checkpoint_export_is_internally_consistent_under_writes() {
     let reimported = horndb_storage::snapshot::import_snapshot(&mut Cursor::new(&buf)).unwrap();
     assert_eq!(reimported.triple_count(), 700);
 }
+
+/// A pinned snapshot's named-graph view is stable: a named-graph insert that
+/// lands after the snapshot is taken is invisible to it. This is the property
+/// that makes `export_snapshot` race-free — it checks `has_named_graph_data`
+/// and scans the default graph against ONE pinned snapshot.
+#[test]
+fn pinned_snapshot_named_graph_view_is_stable() {
+    let store = Store::in_memory();
+    store
+        .insert_triples(&[(subj(0), p(), iri("http://ex/o"))])
+        .unwrap();
+
+    // Snapshot taken while the store has only default-graph data.
+    let snap = store.snapshot();
+    assert!(!snap.has_named_graph_data());
+
+    // Commit a named-graph triple AFTER pinning.
+    let g = store.intern_graph_uri(&iri("http://ex/g")).unwrap();
+    store
+        .insert_quads(&[(g, subj(1), p(), iri("http://ex/o"))])
+        .unwrap();
+
+    // The pinned snapshot still sees no named-graph data; a fresh one does.
+    assert!(!snap.has_named_graph_data());
+    assert!(store.snapshot().has_named_graph_data());
+}

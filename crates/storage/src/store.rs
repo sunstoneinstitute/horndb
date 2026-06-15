@@ -168,10 +168,9 @@ impl Store {
         // NB: `Tier::predicate` is a Stage-1 stub that always returns `None`
         // (real partition access is via `MemoryTier::with_predicate`), so this
         // guard relies on `predicates(g)` rather than scanning a partition.
-        self.tier
-            .graphs()
-            .into_iter()
-            .any(|g| g != DEFAULT_GRAPH && !self.tier.predicates(g).is_empty())
+        // Routed through a pinned snapshot so the public method and the
+        // snapshot-pinned exporter check share one implementation.
+        self.snapshot().has_named_graph_data()
     }
 
     /// Export the default graph to a writer in the HDT-derived snapshot format
@@ -267,6 +266,22 @@ impl StoreSnapshot<'_> {
             });
         }
         out
+    }
+
+    /// True if any non-default graph in this pinned snapshot holds at least one
+    /// triple. Mirrors [`Store::has_named_graph_data`] but against the pinned
+    /// tier state, so an exporter can check this and scan the default graph from
+    /// the *same* snapshot (no TOCTOU between the check and the scan).
+    pub fn has_named_graph_data(&self) -> bool {
+        self.tier
+            .graphs()
+            .into_iter()
+            .any(|g| g != DEFAULT_GRAPH && !self.tier.predicates(g).is_empty())
+    }
+
+    /// The append-only dictionary backing this snapshot, for term materialization.
+    pub fn dictionary(&self) -> &Dictionary {
+        self.dictionary
     }
 
     fn term(&self, id: TermId) -> Result<Term> {

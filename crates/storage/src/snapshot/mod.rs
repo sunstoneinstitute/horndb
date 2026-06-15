@@ -41,12 +41,17 @@ impl SnapshotStats {
 
 /// Export the default graph of `store` to `w` in the snapshot format.
 pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotStats> {
-    if store.has_named_graph_data() {
+    // Pin one snapshot for the whole export: the named-graph guard and the
+    // default-graph scan must observe the SAME store state, or a named-graph
+    // insert landing between them could let us emit a default-graph-only
+    // checkpoint from a store that also holds named-graph data (TOCTOU).
+    let snap = store.snapshot();
+    if snap.has_named_graph_data() {
         return Err(StorageError::Snapshot(
             "named-graph snapshot export not yet supported (default graph only)".into(),
         ));
     }
-    let raw = store.scan_all_term_ids();
+    let raw = snap.scan_all_term_ids();
 
     // Collect distinct term ids and their canonical encodings.
     let mut enc_by_id: HashMap<TermId, Vec<u8>> = HashMap::new();
@@ -59,7 +64,7 @@ pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotSta
             let v = id.as_inline_int().expect("inline int id");
             term_codec::encode_inline_int(&mut buf, v);
         } else {
-            let term = store
+            let term = snap
                 .dictionary()
                 .lookup(id)
                 .ok_or_else(|| StorageError::Snapshot(format!("dangling term id {id:?}")))?;
