@@ -89,10 +89,34 @@ pub fn load_turtle_reader_with_base<R: Read>(
 }
 
 /// Best-effort `file://` base IRI for a Turtle document. Returns `None` when the
-/// path cannot be canonicalised or rendered as UTF-8; spaces (the common
-/// path character that breaks an IRI) are percent-encoded.
+/// path cannot be canonicalised or rendered as UTF-8. Every path byte outside
+/// the RFC 3986 unreserved set (and the `/` separator) is percent-encoded, so a
+/// path containing IRI-reserved characters (`#`, `?`, `%`, space, …) produces a
+/// correct base rather than one where, e.g., a literal `#` is misread as a
+/// fragment delimiter.
 fn file_base_iri(path: &Path) -> Option<String> {
     let abs = std::fs::canonicalize(path).ok()?;
     let s = abs.to_str()?;
-    Some(format!("file://{}", s.replace(' ', "%20")))
+    let mut out = String::from("file://");
+    for &b in s.as_bytes() {
+        match b {
+            b'/' | b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(
+                    char::from_digit((b >> 4) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((b & 0xf) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+    Some(out)
 }

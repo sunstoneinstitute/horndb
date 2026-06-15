@@ -1,7 +1,9 @@
 use horndb_storage::loader::turtle::{
     load_turtle_file, load_turtle_reader, load_turtle_reader_with_base,
 };
-use horndb_storage::Store;
+use horndb_storage::{Store, TermId};
+use oxrdf::Term;
+use std::io::Write;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -107,5 +109,47 @@ fn explicit_invalid_base_is_rejected() {
     assert!(
         err.is_err(),
         "an explicit invalid base must be a hard error"
+    );
+}
+
+#[test]
+fn file_base_percent_encodes_reserved_path_chars() {
+    // A path containing an IRI-reserved character (`#`) must be percent-encoded
+    // before it becomes the document base, otherwise the raw `#` would be read
+    // as a fragment delimiter and relative IRIs would resolve against a
+    // truncated, wrong base. Write such a file and confirm the subject of the
+    // relative-IRI triple resolves to the encoded form.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc#frag.ttl");
+    {
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"<#alice> <http://example.org/p> <http://example.org/o> .\n")
+            .unwrap();
+    }
+
+    let store = Store::in_memory();
+    let stats = load_turtle_file(&store, &path).unwrap();
+    assert_eq!(stats.triples, 1);
+
+    // Collect the single subject IRI back out of the store.
+    let triples = store.scan_all_term_ids();
+    assert_eq!(triples.len(), 1);
+    let s_id: TermId = triples[0].0;
+    let subject = store.dictionary().lookup(s_id).unwrap();
+    let iri = match subject {
+        Term::NamedNode(n) => n.into_string(),
+        other => panic!("expected a NamedNode subject, got {other:?}"),
+    };
+
+    // The `#` in the file name is encoded as %23; `#alice` is the document
+    // fragment appended to the (encoded) base, so the resolved IRI ends with
+    // `doc%23frag.ttl#alice` and never contains the raw `doc#frag.ttl`.
+    assert!(
+        iri.contains("doc%23frag.ttl#alice"),
+        "subject IRI should resolve against the percent-encoded base: {iri}"
+    );
+    assert!(
+        !iri.contains("doc#frag.ttl"),
+        "raw `#` must not leak into the base: {iri}"
     );
 }
