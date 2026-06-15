@@ -4,7 +4,7 @@
 //! production backend implementing the same trait.
 
 use crate::provenance::Provenance;
-use crate::types::{TermId, Triple};
+use crate::types::{MaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -42,6 +42,13 @@ pub trait TripleStore {
 
     /// All triples currently in the store, asserted + inferred. Stage 1 only.
     fn all_triples(&self) -> FxHashSet<Triple>;
+
+    /// Resolved unqualified max-cardinality restrictions (`cls-maxc1`/`cls-maxc2`).
+    /// Populated at load time by the embedder (`integration.rs`); empty for
+    /// stores built directly without restriction resolution.
+    fn card_restrictions(&self) -> &[MaxCardRestriction] {
+        &[]
+    }
 }
 
 /// Simple in-memory store keyed by predicate. Used by tests and by the
@@ -54,6 +61,8 @@ pub struct MemStore {
     proofs: FxHashMap<Triple, Provenance>,
     /// inferred set (subset of by_pred entries)
     inferred: FxHashSet<Triple>,
+    /// Resolved max-cardinality restrictions (see `TripleStore::card_restrictions`).
+    card_restrictions: Vec<MaxCardRestriction>,
 }
 
 impl MemStore {
@@ -63,6 +72,7 @@ impl MemStore {
             by_pred: FxHashMap::default(),
             proofs: FxHashMap::default(),
             inferred: FxHashSet::default(),
+            card_restrictions: Vec::new(),
         }
     }
 
@@ -84,6 +94,12 @@ impl MemStore {
 
     pub fn proof(&self, t: &Triple) -> Option<&Provenance> {
         self.proofs.get(t)
+    }
+
+    /// Set the resolved max-cardinality restrictions. Called once at load
+    /// time (`integration.rs`) or directly by tests.
+    pub fn set_card_restrictions(&mut self, restrictions: Vec<MaxCardRestriction>) {
+        self.card_restrictions = restrictions;
     }
 }
 
@@ -166,6 +182,10 @@ impl TripleStore for MemStore {
         }
         out
     }
+
+    fn card_restrictions(&self) -> &[MaxCardRestriction] {
+        &self.card_restrictions
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +230,20 @@ mod tests {
         assert_eq!(got.len(), 2);
         let got: Vec<_> = s.probe(None, TermId(2), Some(TermId(3))).collect();
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn card_restrictions_round_trip() {
+        use crate::types::MaxCardRestriction;
+        let mut s = store();
+        assert!(s.card_restrictions().is_empty());
+        s.set_card_restrictions(vec![MaxCardRestriction {
+            class: TermId(1),
+            property: TermId(2),
+            max: 1,
+        }]);
+        assert_eq!(s.card_restrictions().len(), 1);
+        assert_eq!(s.card_restrictions()[0].max, 1);
     }
 
     #[test]
