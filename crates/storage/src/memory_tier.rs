@@ -4,119 +4,112 @@ use crate::error::Result;
 use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 use crate::term::{GraphId, TermId};
 use crate::tier::{Tier, TierStats};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::sync::Arc;
 
+/// One graph's predicate partitions. Immutable once built; copy-on-write
+/// replaces the whole map (sharing untouched partitions by `Arc`) on each write.
 #[derive(Default)]
 struct GraphStore {
-    partitions: HashMap<TermId, PredicatePartition>,
+    partitions: HashMap<TermId, Arc<PredicatePartition>>,
 }
 
-pub struct MemoryTier {
-    inner: RwLock<Inner>,
-    /// Predicates with at least this many triples eagerly materialise all six
-    /// orderings; smaller ones materialise the object-major layout lazily
-    /// (SPEC-02 F4).
-    hot_threshold: usize,
+/// An immutable, versioned view of the entire tier. Readers clone the `Arc`
+/// once and are thereafter isolated from concurrent writers, which allocate a
+/// fresh `TierSnapshot` and atomically swap the live pointer (copy-on-write).
+/// Untouched graphs and partitions are shared between successive snapshots via
+/// `Arc`, so a write copies only the affected graph's partition map.
+pub struct TierSnapshot {
+    version: u64,
+    graphs: HashMap<GraphId, Arc<GraphStore>>,
 }
 
-#[derive(Default)]
-struct Inner {
-    graphs: HashMap<GraphId, GraphStore>,
-}
-
-impl MemoryTier {
-    pub fn new() -> Self {
-        Self::with_hot_threshold(DEFAULT_HOT_THRESHOLD)
-    }
-
-    /// Construct a tier with a custom hot-predicate threshold (SPEC-02 F4).
-    pub fn with_hot_threshold(hot_threshold: usize) -> Self {
+impl TierSnapshot {
+    fn empty() -> Self {
         Self {
-            inner: RwLock::new(Inner::default()),
-            hot_threshold,
+            version: 0,
+            graphs: HashMap::new(),
         }
     }
 
-    /// The hot-predicate triple-count threshold in effect for this tier.
-    pub fn hot_threshold(&self) -> usize {
-        self.hot_threshold
-    }
-}
-
-impl Default for MemoryTier {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Tier for MemoryTier {
-    fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
-        // Group by (graph, predicate) into builders, merging with any existing
-        // partition by replaying its existing pairs into the new builder.
-        let mut groups: HashMap<(GraphId, TermId), PartitionBuilder> = HashMap::new();
-        for &(g, s, p, o) in quads {
-            groups.entry((g, p)).or_default().append(s, o);
-        }
-        let mut inner = self.inner.write();
-        for ((g, p), mut builder) in groups {
-            let gs = inner.graphs.entry(g).or_default();
-            if let Some(existing) = gs.partitions.remove(&p) {
-                for (s, o) in existing.scan() {
-                    builder.append(s, o);
-                }
-            }
-            gs.partitions
-                .insert(p, builder.build_with_hot_threshold(self.hot_threshold));
-        }
-        Ok(())
+    /// Monotonic version (snapshot id). `0` is the empty store; each successful
+    /// `insert_quad_batch` produces the next integer.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
-    fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
-        // SAFETY caveat: returning `&PredicatePartition` across the RwLock
-        // would require a guard-bound borrow. For Stage 1 we expose a guarded
-        // accessor via `with_predicate` below; this trait method returns None
-        // and is kept only for forward compatibility with a future ArcSwap
-        // layout. Callers in Stage 1 use `MemoryTier::with_predicate`.
-        None
+    /// Run `f` against the partition for `(graph, predicate)`, if present.
+    pub fn with_predicate<F, R>(&self, graph: GraphId, predicate: TermId, f: F) -> Option<R>
+    where
+        F: FnOnce(&PredicatePartition) -> R,
+    {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|p| f(p))
     }
 
-    fn predicates(&self, graph: GraphId) -> Vec<TermId> {
-        let inner = self.inner.read();
-        inner
-            .graphs
+    /// Ordered access to a partition in any of the six trie orderings
+    /// (SPEC-02 F4). The returned [`crate::partition::OrderedColumns`] owns
+    /// `Arc` clones of the columns and so outlives this snapshot borrow.
+    pub fn ordered_predicate(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|part| part.ordered(ord))
+    }
+
+    pub fn predicates(&self, graph: GraphId) -> Vec<TermId> {
+        self.graphs
             .get(&graph)
             .map(|gs| gs.partitions.keys().copied().collect())
             .unwrap_or_default()
     }
 
-    fn graphs(&self) -> Vec<GraphId> {
-        self.inner.read().graphs.keys().copied().collect()
+    pub fn graphs(&self) -> Vec<GraphId> {
+        self.graphs.keys().copied().collect()
     }
 
-    fn triple_count(&self) -> u64 {
-        let inner = self.inner.read();
-        inner
-            .graphs
+    pub fn triple_count(&self) -> u64 {
+        self.graphs
             .values()
             .flat_map(|g| g.partitions.values())
             .map(|p| p.len() as u64)
             .sum()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    /// The top-`n` predicates in `graph` by triple count, descending. Ties are
+    /// broken by predicate id for a deterministic order.
+    pub fn top_predicates(&self, graph: GraphId, n: usize) -> Vec<(TermId, u64)> {
+        let mut counts: Vec<(TermId, u64)> = self
+            .graphs
+            .get(&graph)
+            .map(|gs| {
+                gs.partitions
+                    .iter()
+                    .map(|(p, part)| (*p, part.len() as u64))
+                    .collect()
+            })
+            .unwrap_or_default();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0 .0.cmp(&b.0 .0)));
+        counts.truncate(n);
+        counts
     }
 
-    fn stats(&self) -> TierStats {
-        let inner = self.inner.read();
-        let graphs = inner.graphs.len() as u64;
-        let predicates: u64 = inner
+    pub fn stats(&self) -> TierStats {
+        let graphs = self.graphs.len() as u64;
+        let predicates: u64 = self
             .graphs
             .values()
             .map(|g| g.partitions.len() as u64)
             .sum();
-        let triples: u64 = inner
+        let triples: u64 = self
             .graphs
             .values()
             .flat_map(|g| g.partitions.values())
@@ -125,7 +118,7 @@ impl Tier for MemoryTier {
         // Per-partition column footprint (16 B/row, doubled when the
         // object-major layout is materialised for a hot predicate); plus
         // ~16 bytes/predicate overhead.
-        let column_bytes: u64 = inner
+        let column_bytes: u64 = self
             .graphs
             .values()
             .flat_map(|g| g.partitions.values())
@@ -141,61 +134,164 @@ impl Tier for MemoryTier {
     }
 }
 
+pub struct MemoryTier {
+    /// The live snapshot pointer. Readers clone the `Arc` under a (cheap,
+    /// shared) read lock; the writer swaps in a freshly-built snapshot under the
+    /// write lock — held only for the pointer assignment, not the build.
+    current: RwLock<Arc<TierSnapshot>>,
+    /// Serializes writers (single-writer model): the read-modify-swap in
+    /// `insert_quad_batch` must be atomic so concurrent batches can't lose
+    /// updates by building from the same base.
+    writer: Mutex<()>,
+    /// Predicates with at least this many triples eagerly materialise all six
+    /// orderings; smaller ones materialise the object-major layout lazily
+    /// (SPEC-02 F4).
+    hot_threshold: usize,
+}
+
 impl MemoryTier {
-    /// Guarded accessor for a partition. The closure runs with a read-lock held.
+    pub fn new() -> Self {
+        Self::with_hot_threshold(DEFAULT_HOT_THRESHOLD)
+    }
+
+    /// Construct a tier with a custom hot-predicate threshold (SPEC-02 F4).
+    pub fn with_hot_threshold(hot_threshold: usize) -> Self {
+        Self {
+            current: RwLock::new(Arc::new(TierSnapshot::empty())),
+            writer: Mutex::new(()),
+            hot_threshold,
+        }
+    }
+
+    /// The hot-predicate triple-count threshold in effect for this tier.
+    pub fn hot_threshold(&self) -> usize {
+        self.hot_threshold
+    }
+
+    /// Pin the current immutable tier state. The returned `Arc` isolates the
+    /// caller from later writes (copy-on-write): subsequent `insert_quad_batch`
+    /// calls allocate a new snapshot and never mutate this one.
+    pub fn snapshot(&self) -> Arc<TierSnapshot> {
+        self.current.read().clone()
+    }
+}
+
+impl Default for MemoryTier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Tier for MemoryTier {
+    fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
+        if quads.is_empty() {
+            return Ok(());
+        }
+        // Group incoming pairs by graph, then predicate, into builders.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, PartitionBuilder>> = HashMap::new();
+        for &(g, s, p, o) in quads {
+            by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .append(s, o);
+        }
+
+        // Serialize writers so the read-modify-swap is atomic.
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+
+        // Copy-on-write: clone the top-level graph map (Arc clones of untouched
+        // graphs), then rebuild only the affected graphs' partition maps.
+        let mut graphs = cur.graphs.clone();
+        for (g, pred_builders) in by_graph {
+            let mut new_partitions = graphs
+                .get(&g)
+                .map(|gs| gs.partitions.clone())
+                .unwrap_or_default();
+            for (p, mut builder) in pred_builders {
+                if let Some(existing) = new_partitions.get(&p) {
+                    for (s, o) in existing.scan() {
+                        builder.append(s, o);
+                    }
+                }
+                new_partitions.insert(
+                    p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+            }
+            graphs.insert(
+                g,
+                Arc::new(GraphStore {
+                    partitions: new_partitions,
+                }),
+            );
+        }
+
+        let next = Arc::new(TierSnapshot {
+            version: cur.version + 1,
+            graphs,
+        });
+        *self.current.write() = next;
+        Ok(())
+    }
+
+    fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
+        // Returning `&PredicatePartition` across the snapshot pointer would
+        // require a guard-bound borrow. Stage-1 callers use the guarded
+        // accessors on `TierSnapshot` (`with_predicate` / `ordered_predicate`)
+        // obtained via `MemoryTier::snapshot`; this stub stays for forward
+        // compatibility with the `Tier` trait.
+        None
+    }
+
+    fn predicates(&self, graph: GraphId) -> Vec<TermId> {
+        self.snapshot().predicates(graph)
+    }
+
+    fn graphs(&self) -> Vec<GraphId> {
+        self.snapshot().graphs()
+    }
+
+    fn triple_count(&self) -> u64 {
+        self.snapshot().triple_count()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn stats(&self) -> TierStats {
+        self.snapshot().stats()
+    }
+}
+
+impl MemoryTier {
+    /// Guarded accessor for a partition in the **current** snapshot. The closure
+    /// runs against a pinned snapshot, so it is consistent for its duration.
     pub fn with_predicate<F, R>(&self, graph: GraphId, predicate: TermId, f: F) -> Option<R>
     where
         F: FnOnce(&PredicatePartition) -> R,
     {
-        let inner = self.inner.read();
-        inner
-            .graphs
-            .get(&graph)
-            .and_then(|gs| gs.partitions.get(&predicate))
-            .map(f)
+        self.snapshot().with_predicate(graph, predicate, f)
     }
 
-    /// Ordered access to a predicate partition in any of the six trie orderings
-    /// (SPEC-02 F4). Returns [`crate::partition::OrderedColumns`], which owns
-    /// `Arc` clones of the columns and so outlives the read-lock taken here.
-    ///
-    /// For a cold predicate's object-major orderings this materialises (and
-    /// caches) the object-major layout on first call; the materialisation runs
-    /// under the read-lock but is internally synchronised, so it never blocks
-    /// concurrent readers of *other* partitions.
+    /// Ordered access to a predicate partition in the current snapshot
+    /// (SPEC-02 F4). See [`TierSnapshot::ordered_predicate`].
     pub fn ordered_predicate(
         &self,
         graph: GraphId,
         predicate: TermId,
         ord: crate::ordering::Ordering,
     ) -> Option<crate::partition::OrderedColumns> {
-        let inner = self.inner.read();
-        inner
-            .graphs
-            .get(&graph)
-            .and_then(|gs| gs.partitions.get(&predicate))
-            .map(|part| part.ordered(ord))
+        self.snapshot().ordered_predicate(graph, predicate, ord)
     }
 
-    /// The top-`n` predicates in `graph` by triple count, descending. Ties are
-    /// broken by predicate id for a deterministic order. Drives the SPEC-02
-    /// acceptance check that the hottest predicates are queryable in all six
-    /// orderings.
+    /// The top-`n` predicates in `graph` by triple count in the current
+    /// snapshot, descending (deterministic tie-break by predicate id).
     pub fn top_predicates(&self, graph: GraphId, n: usize) -> Vec<(TermId, u64)> {
-        let inner = self.inner.read();
-        let mut counts: Vec<(TermId, u64)> = inner
-            .graphs
-            .get(&graph)
-            .map(|gs| {
-                gs.partitions
-                    .iter()
-                    .map(|(p, part)| (*p, part.len() as u64))
-                    .collect()
-            })
-            .unwrap_or_default();
-        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0 .0.cmp(&b.0 .0)));
-        counts.truncate(n);
-        counts
+        self.snapshot().top_predicates(graph, n)
     }
 }
 
@@ -207,6 +303,35 @@ mod tests {
 
     fn id(payload: u64) -> TermId {
         TermId::new(TermKind::Uri, payload)
+    }
+
+    #[test]
+    fn snapshot_is_pinned_against_later_writes() {
+        let tier = MemoryTier::new();
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        // Pin a snapshot of the one-triple state.
+        let snap = tier.snapshot();
+        assert_eq!(snap.version(), 1);
+        assert_eq!(snap.triple_count(), 1);
+
+        // A later write must not change the pinned snapshot.
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(3), id(100), id(4))])
+            .unwrap();
+        assert_eq!(snap.triple_count(), 1, "pinned snapshot saw a later write");
+        assert_eq!(snap.version(), 1);
+
+        // The live tier reflects the write and a newer version.
+        let live = tier.snapshot();
+        assert_eq!(live.triple_count(), 2);
+        assert_eq!(live.version(), 2);
+    }
+
+    #[test]
+    fn empty_tier_starts_at_version_zero() {
+        let tier = MemoryTier::new();
+        assert_eq!(tier.snapshot().version(), 0);
+        assert_eq!(tier.snapshot().triple_count(), 0);
     }
 
     #[test]
