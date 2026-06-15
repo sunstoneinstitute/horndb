@@ -40,7 +40,7 @@ use smallvec::smallvec;
 use crate::delta::Delta;
 use crate::provenance::Provenance;
 use crate::store::TripleStore;
-use crate::types::{TermId, Triple};
+use crate::types::{MaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 
 /// All list-axiom shapes resolved at load time. One `Vec` per W3C rule kind.
@@ -60,6 +60,10 @@ pub struct SchemaAxioms {
     /// `[x1, ..., xn]` — one entry per `?ad rdf:type owl:AllDifferent` with
     /// an `owl:members` or `owl:distinctMembers` list.
     pub all_different: Vec<Vec<TermId>>,
+    /// Resolved unqualified max-cardinality restrictions (`cls-maxc1`/`cls-maxc2`).
+    /// Resolved at load time (`integration.rs`) and carried on the store; copied
+    /// here by `resolve` so they ride the same semi-naïve dirty-prune path.
+    pub max_card_restrictions: Vec<MaxCardRestriction>,
 }
 
 impl SchemaAxioms {
@@ -98,6 +102,14 @@ impl SchemaAxioms {
             s.insert(vocab.owl_same_as);
             s.insert(vocab.owl_different_from);
         }
+        // cls-maxc1/cls-maxc2 read rdf:type (for ?u : ?x) and each restricted
+        // property (for ?u ?p ?y). Re-fire whenever either becomes dirty.
+        if !self.max_card_restrictions.is_empty() {
+            s.insert(vocab.rdf_type);
+            for r in &self.max_card_restrictions {
+                s.insert(r.property);
+            }
+        }
         s
     }
 
@@ -108,6 +120,7 @@ impl SchemaAxioms {
             && self.unions.is_empty()
             && self.all_disjoint_classes.is_empty()
             && self.all_different.is_empty()
+            && self.max_card_restrictions.is_empty()
     }
 }
 
@@ -192,6 +205,10 @@ pub fn resolve(store: &dyn TripleStore, vocab: &Vocabulary) -> SchemaAxioms {
             }
         }
     }
+
+    // Max-cardinality restrictions are classified at load time (integration.rs),
+    // where the dictionary can parse the literal value; carry them through.
+    out.max_card_restrictions = store.card_restrictions().to_vec();
 
     out
 }
@@ -283,6 +300,29 @@ pub fn fire_all(
     if !axioms.all_different.is_empty() && dirty.is_none() {
         for xs in &axioms.all_different {
             fire_eq_diff_list(vocab, xs, &mut out);
+        }
+    }
+
+    // cls-maxc1 — maxCardinality 0 restriction with any p-value ⇒ inconsistency.
+    // cls-maxc2 — maxCardinality 1 restriction with two distinct p-values ⇒ sameAs.
+    if !axioms.max_card_restrictions.is_empty() && is_dirty(dirty, vocab.rdf_type) {
+        for r in &axioms.max_card_restrictions {
+            match r.max {
+                0 => fire_cls_maxc1(store, vocab, r.class, r.property, &mut out),
+                1 => fire_cls_maxc2(store, vocab, r.class, r.property, &mut out),
+                _ => {}
+            }
+        }
+    } else if !axioms.max_card_restrictions.is_empty() {
+        // rdf:type not dirty, but a restricted property might be.
+        for r in &axioms.max_card_restrictions {
+            if is_dirty(dirty, r.property) {
+                match r.max {
+                    0 => fire_cls_maxc1(store, vocab, r.class, r.property, &mut out),
+                    1 => fire_cls_maxc2(store, vocab, r.class, r.property, &mut out),
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -615,6 +655,50 @@ fn fire_cax_adc(store: &dyn TripleStore, vocab: &Vocabulary, cs: &[TermId], out:
 }
 
 // ---------------------------------------------------------------------------
+// cls-maxc1 — `?x owl:maxCardinality "0" ∧ ?x owl:onProperty ?p ∧
+// ?u rdf:type ?x ∧ ?u ?p ?y ⇒ false`. Materialised, like every other OWL 2 RL
+// `false`-rule in this engine, as `?u rdf:type owl:Nothing` so
+// `Engine::is_consistent()` reports the inconsistency.
+// ---------------------------------------------------------------------------
+fn fire_cls_maxc1(
+    store: &dyn TripleStore,
+    vocab: &Vocabulary,
+    class: TermId,
+    property: TermId,
+    out: &mut Delta,
+) {
+    let us: Vec<TermId> = store
+        .probe(None, vocab.rdf_type, Some(class))
+        .map(|t| t.s)
+        .collect();
+    for u in us {
+        // Any single value on the restricted property violates max 0.
+        if store.probe(Some(u), property, None).next().is_some() {
+            let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
+            if !out.contains(&head) && !store.contains(&head) {
+                out.insert(
+                    head,
+                    Provenance {
+                        rule_id: "cls-maxc1",
+                        premises: smallvec![],
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn fire_cls_maxc2(
+    _store: &dyn TripleStore,
+    _vocab: &Vocabulary,
+    _class: TermId,
+    _property: TermId,
+    _out: &mut Delta,
+) {
+    // Implemented in Task 4.
+}
+
+// ---------------------------------------------------------------------------
 // eq-diff2 / eq-diff3 — `_:ad rdf:type owl:AllDifferent ∧
 // _:ad owl:members|owl:distinctMembers (x1 ... xn) ⇒ ?xi owl:differentFrom ?xj`
 // for every i ≠ j. The downstream `eq-diff1` (compiled) reports
@@ -828,6 +912,52 @@ mod tests {
         assert!(
             d.contains(&t(x.0, v.rdf_type.0, v.owl_nothing.0)),
             "cax-adc: x : c1 ∧ x : c2 with AllDisjointClasses ⇒ x : owl:Nothing"
+        );
+    }
+
+    #[test]
+    fn cls_maxc1_zero_cardinality_violation() {
+        use crate::types::MaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50); // restriction class
+        let p = TermId(51); // onProperty
+        let u = TermId(100);
+        let y = TermId(101);
+        // u : x, u p y  with maxCardinality 0 on p ⇒ inconsistency.
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y.0));
+        s.set_card_restrictions(vec![MaxCardRestriction {
+            class: x,
+            property: p,
+            max: 0,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "cls-maxc1: maxCard 0 with a p-value ⇒ u : owl:Nothing"
+        );
+    }
+
+    #[test]
+    fn cls_maxc1_no_value_is_consistent() {
+        use crate::types::MaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let u = TermId(100);
+        // u : x but NO u p ? — no violation.
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.set_card_restrictions(vec![MaxCardRestriction {
+            class: x,
+            property: p,
+            max: 0,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "cls-maxc1: no p-value ⇒ no inconsistency"
         );
     }
 
