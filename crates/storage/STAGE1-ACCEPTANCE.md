@@ -26,7 +26,7 @@ Date: <fill in>
 ## Out-of-scope items tracked as Future Work
 
 - CXL/NVMe cold-tier placement (SPEC-02 NF4, SPEC-09 — Stage 3)
-- MVCC, copy-on-write snapshots (SPEC-02 risks/open questions)
+- True per-tuple-visibility MVCC (SPEC-02 risks/open questions — Stage 2, intersects SPEC-06). The Stage-1 substitute, copy-on-write snapshot isolation (SPEC-02 #19), is **delivered**: `Store::snapshot()` / `StoreSnapshot` pin a stable read transaction over an immutable versioned `TierSnapshot` (see `INTEGRATION-NOTES.md`).
 - Named-graph / quad snapshots (SPEC-02 F9 — Stage-1 snapshot export covers the default graph only; export errors on named-graph data)
 - rdfhdt wire-format compatibility (cross-tool interop — explicit non-goal of the Stage-1 snapshot)
 - Persistent on-disk dictionary (SPEC-02 risks/open questions)

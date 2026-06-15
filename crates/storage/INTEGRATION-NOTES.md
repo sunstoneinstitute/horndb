@@ -71,3 +71,16 @@ free fns `export_snapshot` / `import_snapshot`, accounting via
 Full byte-level layout and the canonical term encoding are specified in
 `docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md` (see its "Format
 specification" section).
+
+## Copy-on-write snapshot isolation (SPEC-02 #19, delivered)
+
+`MemoryTier` holds an immutable, versioned `Arc<TierSnapshot>` behind
+`RwLock<Arc<…>>` plus a writer `Mutex`. `insert_quad_batch` is copy-on-write:
+it clones the top-level graph map (Arc clones of untouched graphs), rebuilds
+only the affected graphs' partition maps, bumps the version, and atomically
+swaps the live pointer. `Store::snapshot()` / `StoreSnapshot` pin a stable,
+internally-consistent read view; concurrent writers never disturb a pinned
+snapshot, which stays readable until dropped. The dictionary is append-only, so
+pinned term ids never change meaning. HDT export reads one pinned snapshot, so a
+checkpoint taken under concurrent writes is internally consistent (NF5). True
+per-tuple-visibility MVCC remains deferred to Stage 2 (SPEC-06).
