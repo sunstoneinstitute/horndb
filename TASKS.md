@@ -22,7 +22,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — SPEC-07 SPARQL aggregation (`GROUP BY`/`COUNT`/`SUM`) + expanded `FILTER`/`BIND`/`IF` expressions (trainmarks-blocking) ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
-- [v] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)) — _wip: 9d2235f1@Stigs-MacBook-Pro.local · task-3-cow-snapshot-isolation · 2026-06-15T21:52:25Z_
+- [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
@@ -74,7 +74,7 @@ They stay listed as increments of the SPEC-07 epic ([#7](https://github.com/suns
 Each line is an epic; delivered increments are noted, remaining increments are
 the open work. Pull from this list when the corresponding Stage-1 slice settles.
 
-- [v] **SPEC-02 storage.** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
+- [x] **SPEC-02 storage.** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
   Remaining: copy-on-write snapshot isolation ([#19](https://github.com/sunstoneinstitute/horndb/issues/19)).
   Delivered: compressed columnar source (#15), six index orderings (#16),
   HDT-derived snapshot export/import ([#17](https://github.com/sunstoneinstitute/horndb/issues/17)),
