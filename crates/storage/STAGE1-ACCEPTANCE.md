@@ -30,5 +30,5 @@ Date: <fill in>
 - Named-graph / quad snapshots (SPEC-02 F9 — Stage-1 snapshot export covers the default graph only; export errors on named-graph data)
 - rdfhdt wire-format compatibility (cross-tool interop — explicit non-goal of the Stage-1 snapshot)
 - Persistent on-disk dictionary (SPEC-02 risks/open questions)
-- Turtle, N-Quads, HDT input formats as bulk-import paths (SPEC-02 F8 — only N-Triples in Stage 1)
+- HDT input format as a bulk-import path (SPEC-02 F8 — Turtle and N-Quads now ship via `loader::{turtle, nquads}`, [#18](https://github.com/sunstoneinstitute/horndb/issues/18); HDT ingest remains a follow-up)
 - Crash-consistent checkpointing (SPEC-02 NF5 — Stage 1 is in-memory only)

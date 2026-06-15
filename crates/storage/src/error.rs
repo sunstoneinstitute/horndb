@@ -10,6 +10,10 @@ pub enum StorageError {
     Io(#[from] std::io::Error),
     #[error("n-triples parse error: {0}")]
     NtriplesParse(String),
+    #[error("turtle parse error: {0}")]
+    TurtleParse(String),
+    #[error("n-quads parse error: {0}")]
+    NquadsParse(String),
     #[error("invalid term for storage: {0}")]
     InvalidTerm(String),
     #[error("snapshot error: {0}")]

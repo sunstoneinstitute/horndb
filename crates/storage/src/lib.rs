@@ -6,11 +6,13 @@
 //!   * Predicate-partitioned, columnar in-memory triple storage (`partition`),
 //!     with all six trie orderings queryable per predicate (`ordering`).
 //!   * A `Tier` trait with one in-memory implementation (`tier`, `memory_tier`).
-//!   * A public `Store` facade (`store`) and an N-Triples bulk loader (`loader::ntriples`).
+//!   * A public `Store` facade (`store`) and N-Triples / Turtle / N-Quads bulk
+//!     loaders (`loader::{ntriples, turtle, nquads}`, SPEC-02 F8); N-Quads
+//!     routes to the graph named by its fourth term (SPEC-02 F7).
 //!   * An HDT-derived compact snapshot export/import (`snapshot`, SPEC-02 F9).
 //!
 //! Out of Stage-1 scope: MVCC, CXL/NVMe tiering, persistent dictionary,
-//! named-graph snapshots, rdfhdt wire-format compatibility.
+//! named-graph snapshots, rdfhdt wire-format compatibility, HDT bulk import.
 
 pub mod dictionary;
 pub mod error;

@@ -1,0 +1,7 @@
+@prefix ex: <http://example.org/> .
+
+ex:Alice ex:knows ex:Bob , ex:Carol ;
+         ex:age 30 .
+ex:Bob ex:knows ex:Alice ;
+       ex:age 31 .
+ex:Carol ex:age 29 .
