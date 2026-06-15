@@ -75,12 +75,13 @@ Each line is an epic; delivered increments are noted, remaining increments are
 the open work. Pull from this list when the corresponding Stage-1 slice settles.
 
 - [x] **SPEC-02 storage.** ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
-  Remaining: copy-on-write snapshot isolation ([#19](https://github.com/sunstoneinstitute/horndb/issues/19)).
-  Delivered: compressed columnar source (#15), six index orderings (#16),
+  Stage-1 increments all delivered: compressed columnar source (#15),
+  six index orderings (#16),
   HDT-derived snapshot export/import ([#17](https://github.com/sunstoneinstitute/horndb/issues/17)),
-  Turtle / N-Quads import ([#18](https://github.com/sunstoneinstitute/horndb/issues/18)).
-  Deferred: CXL/NVMe placement (SPEC-09), persistent dictionary (Marisa/FST),
-  true per-tuple MVCC.
+  Turtle / N-Quads import ([#18](https://github.com/sunstoneinstitute/horndb/issues/18)),
+  copy-on-write snapshot isolation ([#19](https://github.com/sunstoneinstitute/horndb/issues/19)).
+  Deferred to Stage 2/3 (open a new task when pulled in): CXL/NVMe placement
+  (SPEC-09), persistent dictionary (Marisa/FST), true per-tuple MVCC.
 
 - [ ] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
   Remaining: `cls-maxc1`/`cls-maxc2` ([#35](https://github.com/sunstoneinstitute/horndb/issues/35)),
