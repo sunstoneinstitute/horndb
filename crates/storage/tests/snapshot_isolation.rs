@@ -105,3 +105,54 @@ fn older_snapshot_outlives_newer_writes() {
     assert_eq!(early.triple_count(), 1);
     assert_eq!(early.scan_predicate_default_graph(&p()).unwrap().len(), 1);
 }
+
+/// A checkpoint (HDT export) taken while a writer is appending must be
+/// internally consistent: the exported snapshot round-trips to a store whose
+/// triple set is exactly some committed prefix — never a torn mix where the
+/// dictionary and triples disagree. We assert the strongest available property:
+/// export → import yields a triple count that is itself a valid committed
+/// count, and the round-trip is loss-free for whatever was captured.
+#[test]
+fn checkpoint_export_is_internally_consistent_under_writes() {
+    use std::io::Cursor;
+
+    let store = Arc::new(Store::in_memory());
+    store
+        .insert_triples(
+            &(0..200)
+                .map(|i| (subj(i), p(), iri("http://ex/o")))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    let writer = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            for i in 200..700 {
+                store
+                    .insert_triples(&[(subj(i), p(), iri("http://ex/o"))])
+                    .unwrap();
+            }
+        })
+    };
+
+    // Take several checkpoints while the writer runs.
+    for _ in 0..20 {
+        let mut buf = Vec::new();
+        let stats = store.export_snapshot(&mut buf).unwrap();
+        let reimported = horndb_storage::snapshot::import_snapshot(&mut Cursor::new(&buf)).unwrap();
+        // Loss-free round trip for the captured checkpoint.
+        assert_eq!(reimported.triple_count(), stats.triples);
+        // The captured count is between the seed and the final totals.
+        assert!((200..=700).contains(&stats.triples));
+    }
+
+    writer.join().unwrap();
+
+    // Final checkpoint captures everything and round-trips exactly.
+    let mut buf = Vec::new();
+    let stats = store.export_snapshot(&mut buf).unwrap();
+    assert_eq!(stats.triples, 700);
+    let reimported = horndb_storage::snapshot::import_snapshot(&mut Cursor::new(&buf)).unwrap();
+    assert_eq!(reimported.triple_count(), 700);
+}
