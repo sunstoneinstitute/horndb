@@ -1,27 +1,20 @@
 //! Streaming N-Triples bulk loader.
 //!
 //! Uses `oxttl::NTriplesParser` to stream triples from any `Read` source,
-//! batching into the dictionary + tier in chunks of `BATCH_SIZE`.
+//! batching into the dictionary + tier in chunks of [`BATCH_SIZE`].
 
 use crate::error::{Result, StorageError};
+use crate::loader::{subject_to_term, BATCH_SIZE};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
-use oxrdf::{NamedOrBlankNode, Term};
+use oxrdf::Term;
 use oxttl::NTriplesParser;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::time::Instant;
 
-const BATCH_SIZE: usize = 65_536;
-
-#[derive(Debug, Clone, Copy)]
-pub struct LoadStats {
-    pub triples: u64,
-    pub bytes_read: u64,
-    pub elapsed_ms: u64,
-    pub dictionary_size: u64,
-}
+pub use crate::loader::LoadStats;
 
 pub fn load_ntriples_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
@@ -68,14 +61,4 @@ pub fn load_ntriples_reader<R: Read>(store: &Store, reader: R) -> Result<LoadSta
         elapsed_ms: start.elapsed().as_millis() as u64,
         dictionary_size: store.dictionary().len() as u64,
     })
-}
-
-fn subject_to_term(s: NamedOrBlankNode) -> Term {
-    // RDF 1.2's data model (oxrdf 0.3 with `rdf-12`) keeps subjects as the
-    // 1.1-shaped `NamedOrBlankNode`: triple terms appear only in the
-    // object position (oxrdf's `Term::Triple`). The match is exhaustive.
-    match s {
-        NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n),
-        NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b),
-    }
 }

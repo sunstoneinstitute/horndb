@@ -142,7 +142,8 @@ foundation every other crate reads/writes through.
 | HDT cold tier, CXL/NVMe tiering (placement) | **planned / deferred** | Cold-tier/tiering is Stage 2+; CXL/NVMe placement is SPEC-09 (Stage 3). |
 | MVCC with per-tuple visibility (Stage 1 uses copy-on-write snapshots) | **deferred** | Stage 2; intersects SPEC-06. |
 | Persistent on-disk dictionary (Marisa-trie / FST) | **deferred** | Stage 2. |
-| Turtle / N-Quads / HDT bulk-import paths | **planned** | Tracked under SPEC-02 completeness; add when a consumer needs them. |
+| Turtle / N-Quads bulk-import paths (SPEC-02 F8) | **implemented** | `loader/turtle.rs`, `loader/nquads.rs` (streaming, via `oxttl`); N-Quads routes each quad to the graph named by its fourth term (F7), default-graph triples to the reserved sentinel. Shared `LoadStats`/`BATCH_SIZE`/`subject_to_term` hoisted to `loader/mod.rs`; N-Triples path unchanged. Fixtures `tests/fixtures/{tiny.ttl, with_literals.ttl, named_graphs.nq}`. [#18](https://github.com/sunstoneinstitute/horndb/issues/18). |
+| HDT bulk-import path | **planned** | Tracked under SPEC-02 completeness ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)); add when a consumer needs HDT ingest (export side ships, row above). |
 
 > **Note:** SPEC-03's 4-cycle ≥10× performance gate was first hypothesised to
 > be blocked here — that closing it needed a compressed columnar warm tier
