@@ -44,6 +44,14 @@ Stage-1 engine intentionally defers:
 
 Total: **19 cases**.
 
+> **2026-06-16 — unqualified max-cardinality implemented (`cls-maxc1`/`cls-maxc2`, issue #35).**
+> No W3C case in the synthesised `owl2-w3c-rl` suite is gated on *unqualified*
+> max-cardinality (the only cardinality case, `New-Feature-ObjectQCR-002`, is
+> *qualified* — `owl:maxQualifiedCardinality` + `owl:onClass` — and remains
+> blocked on `cls-maxqc1..4`). So this batch adds no `selected.toml` entry; the
+> rules are covered by unit + integration tests in `crates/owlrl`. The total
+> above is unchanged.
+
 Three Stage-1 rule batches landed on 2026-05-25 and together flipped 11
 cases from red to green:
 
