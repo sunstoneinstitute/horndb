@@ -3,9 +3,14 @@
 //! Uses `oxttl::TurtleParser` to stream triples from any `Read` source,
 //! batching into the dictionary + tier in chunks of [`BATCH_SIZE`]. Turtle
 //! carries no graph component, so every triple lands in the default graph
-//! (SPEC-02 F7's reserved sentinel). Prefixes, the base IRI, `a`, collections,
-//! and blank-node property lists are all expanded by the parser before they
-//! reach the dictionary.
+//! (SPEC-02 F7's reserved sentinel). Prefixes, `a`, collections, and blank-node
+//! property lists are expanded by the parser before they reach the dictionary.
+//!
+//! Relative IRIs resolve against a base IRI. [`load_turtle_file`] derives a
+//! best-effort `file://` base from the document path (the conventional RDF
+//! base), so files that use document-relative IRIs load. [`load_turtle_reader`]
+//! has no inherent base and parses base-less (relative IRIs error);
+//! [`load_turtle_reader_with_base`] lets a caller supply one explicitly.
 
 use crate::error::{Result, StorageError};
 use crate::loader::{subject_to_term, LoadStats, BATCH_SIZE};
@@ -22,14 +27,34 @@ pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
     let reader = BufReader::with_capacity(1 << 20, file);
-    let mut stats = load_turtle_reader(store, reader)?;
+    // Best-effort document base so relative IRIs resolve against the file's own
+    // location. Drop it if it does not form a valid base IRI (rather than
+    // failing the import), leaving base-less parsing for that pathological path.
+    let base = file_base_iri(path).filter(|b| TurtleParser::new().with_base_iri(b).is_ok());
+    let mut stats = load_turtle_reader_with_base(store, reader, base.as_deref())?;
     stats.bytes_read = bytes;
     Ok(stats)
 }
 
 pub fn load_turtle_reader<R: Read>(store: &Store, reader: R) -> Result<LoadStats> {
+    load_turtle_reader_with_base(store, reader, None)
+}
+
+/// Load Turtle with an explicit base IRI for relative-IRI resolution. An
+/// invalid `base_iri` is a hard error (unlike the best-effort path base used by
+/// [`load_turtle_file`]); pass `None` to parse base-less.
+pub fn load_turtle_reader_with_base<R: Read>(
+    store: &Store,
+    reader: R,
+    base_iri: Option<&str>,
+) -> Result<LoadStats> {
     let start = Instant::now();
-    let parser = TurtleParser::new();
+    let mut parser = TurtleParser::new();
+    if let Some(base) = base_iri {
+        parser = parser
+            .with_base_iri(base)
+            .map_err(|e| StorageError::TurtleParse(format!("invalid base IRI {base:?}: {e}")))?;
+    }
     let iter = parser.for_reader(reader);
 
     let mut batch: Vec<(crate::term::GraphId, _, _, _)> = Vec::with_capacity(BATCH_SIZE);
@@ -61,4 +86,13 @@ pub fn load_turtle_reader<R: Read>(store: &Store, reader: R) -> Result<LoadStats
         elapsed_ms: start.elapsed().as_millis() as u64,
         dictionary_size: store.dictionary().len() as u64,
     })
+}
+
+/// Best-effort `file://` base IRI for a Turtle document. Returns `None` when the
+/// path cannot be canonicalised or rendered as UTF-8; spaces (the common
+/// path character that breaks an IRI) are percent-encoded.
+fn file_base_iri(path: &Path) -> Option<String> {
+    let abs = std::fs::canonicalize(path).ok()?;
+    let s = abs.to_str()?;
+    Some(format!("file://{}", s.replace(' ', "%20")))
 }

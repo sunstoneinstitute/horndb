@@ -1,0 +1,4 @@
+@prefix ex: <http://example.org/> .
+
+<#alice> ex:knows <#bob> .
+<#bob> ex:knows <#alice> .
