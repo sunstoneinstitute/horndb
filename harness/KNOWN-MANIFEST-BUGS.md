@@ -33,7 +33,7 @@ Stage-1 engine intentionally defers:
 |---|---|
 | Datatype value-space *intersection* narrowing (`I5.8-008/009-pe`) — genuine interval reasoning, deferred (issue #4) | 2 |
 | Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`, `ObjectQCR-002-pe`) | 3 |
-| `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) | 3 |
+| `differentFrom`/`AllDifferent` entailment from disjoint properties (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) — not an OWL 2 RL rule; `prp-pdw`/`prp-adp` only derive `owl:Nothing` on a *shared* `(u, w)` pair | 3 |
 | Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
 | `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
 | `prp-key` + functional-property literal disequality (`Keys-006-incons`, needs `dt-not-type`) | 1 |
@@ -160,12 +160,19 @@ these need Stage-2 work.
   implemented but only emit `owl:sameAs`/`owl:Nothing`, so this case
   stays red on the fresh-bnode gap, not on missing cardinality rules.
 
-### `prp-pdw`/`prp-adp` over derived property assertions
+### `differentFrom`/`AllDifferent` from disjoint properties
 
-`prp-pdw` is implemented (2026-05-25); the W3C `*-incons` cases for
-explicit data-property disjointness pass. The `-pe` variants below
-require the engine to first *derive* the offending pair (via a chain
-or class-expression rule), then trigger the disjointness check.
+`prp-pdw` (pairwise, `owl:propertyDisjointWith`) and `prp-adp` (list,
+`owl:AllDisjointProperties`) are both implemented; the W3C `*-incons` and
+`*-cons` cases for explicit property disjointness pass. The `-pe` variants
+below are *not* reachable by OWL 2 RL property-disjointness rules: both
+`prp-pdw` and `prp-adp` only derive an inconsistency (`owl:Nothing`) when a
+*single* individual pair `(u, w)` is related by two disjoint properties
+(`u pi w ∧ u pj w`). These cases instead assert `Peter owl:differentFrom
+Lois` / an `owl:AllDifferent` list over the *objects* of disjoint-property
+assertions on a shared subject (`Stewie hasFather Peter ∧ Stewie hasMother
+Lois ⇒ Peter ≠ Lois`). That is an OWL 2 DL entailment, with no
+corresponding OWL 2 RL rule — Stage-2/DL territory.
 
 - `#New-Feature-DisjointDataProperties-002-pe`
 - `#New-Feature-DisjointObjectProperties-001-pe`
