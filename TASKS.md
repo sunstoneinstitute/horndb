@@ -84,13 +84,13 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   (SPEC-09), persistent dictionary (Marisa/FST), true per-tuple MVCC.
 
 - [ ] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
-  Remaining: `cls-maxqc1`–`cls-maxqc4` ([#36](https://github.com/sunstoneinstitute/horndb/issues/36)),
-  `prp-adp` ([#37](https://github.com/sunstoneinstitute/horndb/issues/37)),
+  Remaining: `prp-adp` ([#37](https://github.com/sunstoneinstitute/horndb/issues/37)),
   production proof recording (F4) + `proof(t)` API ([#38](https://github.com/sunstoneinstitute/horndb/issues/38)),
   `rdf:type` skew parallelism (F5) ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)),
   literal-value rules `dt-eq`/`dt-diff`/`dt-not-type` ([#40](https://github.com/sunstoneinstitute/horndb/issues/40)).
   Delivered: `dt-type1`/`dt-type2` subsumption + `scm-eqc-rev` (#34),
   unqualified max-cardinality `cls-maxc1`/`cls-maxc2` (#35).
+  qualified max-cardinality `cls-maxqc1`-`cls-maxqc4` (#36).
   Deferred: datatype value-space *intersection* (`I5.8-008/009-pe`),
   user-defined Datalog frontend (Stage-2).
 
