@@ -808,6 +808,14 @@ fn fire_cls_maxqc_zero(
         .probe(None, vocab.rdf_type, Some(r.class))
         .map(|t| t.s)
         .collect();
+    // The owl:Thing-filler variant is cls-maxqc2; the class-filler variant is
+    // cls-maxqc1. Both materialise `?u rdf:type owl:Nothing`; only the recorded
+    // provenance rule id differs (consumed by SPEC-08 / the proof API).
+    let rule_id = if r.filler == vocab.owl_thing {
+        "cls-maxqc2"
+    } else {
+        "cls-maxqc1"
+    };
     for u in us {
         let has_qualifying_value = store
             .probe(Some(u), r.property, None)
@@ -818,7 +826,7 @@ fn fire_cls_maxqc_zero(
                 out.insert(
                     head,
                     Provenance {
-                        rule_id: "cls-maxqc1",
+                        rule_id,
                         premises: smallvec![],
                     },
                 );
@@ -839,6 +847,14 @@ fn fire_cls_maxqc_one(
     r: &QualMaxCardRestriction,
     out: &mut Delta,
 ) {
+    // The owl:Thing-filler variant is cls-maxqc4; the class-filler variant is
+    // cls-maxqc3. Both emit `owl:sameAs`; only the recorded provenance rule id
+    // differs (consumed by SPEC-08 / the proof API).
+    let rule_id = if r.filler == vocab.owl_thing {
+        "cls-maxqc4"
+    } else {
+        "cls-maxqc3"
+    };
     let us: Vec<TermId> = store
         .probe(None, vocab.rdf_type, Some(r.class))
         .map(|t| t.s)
@@ -863,7 +879,7 @@ fn fire_cls_maxqc_one(
                         out.insert(
                             head,
                             Provenance {
-                                rule_id: "cls-maxqc3",
+                                rule_id,
                                 premises: smallvec![],
                             },
                         );
@@ -1326,6 +1342,14 @@ mod tests {
             d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
                 || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
             "cls-maxqc4: owl:Thing filler ⇒ sameAs over any two values"
+        );
+        // The owl:Thing-filler variant must record cls-maxqc4 provenance, not
+        // cls-maxqc3 (which is the class-filler variant).
+        assert!(
+            d.iter()
+                .filter(|(tr, _)| tr.p == v.owl_same_as)
+                .all(|(_, prov)| prov.rule_id == "cls-maxqc4"),
+            "owl:Thing filler under maxQC 1 ⇒ provenance rule id is cls-maxqc4"
         );
     }
 }
