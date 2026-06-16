@@ -17,7 +17,7 @@ use rustc_hash::FxHashMap;
 use crate::backend::RuleFiringBackend;
 use crate::engine::{reset_and_materialize, Stats};
 use crate::store::{MemStore, TripleStore};
-use crate::types::{MaxCardRestriction, TermId, Triple};
+use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -54,6 +54,8 @@ const OWL_ALL_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#allValuesFrom";
 const OWL_HAS_VALUE: &str = "http://www.w3.org/2002/07/owl#hasValue";
 const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
 const OWL_MAX_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#maxCardinality";
+const OWL_MAX_QUALIFIED_CARDINALITY: &str = "http://www.w3.org/2002/07/owl#maxQualifiedCardinality";
+const OWL_ON_CLASS: &str = "http://www.w3.org/2002/07/owl#onClass";
 const OWL_SOURCE_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#sourceIndividual";
 const OWL_ASSERTION_PROPERTY: &str = "http://www.w3.org/2002/07/owl#assertionProperty";
 const OWL_TARGET_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#targetIndividual";
@@ -67,8 +69,8 @@ const OWL_MEMBERS: &str = "http://www.w3.org/2002/07/owl#members";
 const OWL_DISTINCT_MEMBERS: &str = "http://www.w3.org/2002/07/owl#distinctMembers";
 const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=45`.
-const USER_TERMS_BASE: u64 = 46;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=47`.
+const USER_TERMS_BASE: u64 = 48;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -190,6 +192,9 @@ impl Engine {
         // value. The resolved list rides on the store for the firing loop.
         let restrictions = resolve_max_card_restrictions(&state.store, &self.vocab, &state.dict);
         state.store.set_card_restrictions(restrictions);
+        let qual_restrictions =
+            resolve_qual_max_card_restrictions(&state.store, &self.vocab, &state.dict);
+        state.store.set_qual_card_restrictions(qual_restrictions);
         let stats = match self.backend {
             BackendChoice::RuleFiring => {
                 let mut backend = RuleFiringBackend::new();
@@ -380,6 +385,46 @@ fn resolve_max_card_restrictions(
     out
 }
 
+/// Resolve qualified max-cardinality restrictions for `cls-maxqc1`–`cls-maxqc4`.
+///
+/// Scans `?x owl:maxQualifiedCardinality ?n`, parses the literal value (reusing
+/// `parse_card_literal`; only `0` and `1` have OWL 2 RL rules), then joins with
+/// `?x owl:onProperty ?p` and `?x owl:onClass ?c`. The `owl:Thing` filler
+/// (cls-maxqc2/maxqc4) is carried through as `filler == vocab.owl_thing`.
+fn resolve_qual_max_card_restrictions(
+    store: &MemStore,
+    vocab: &Vocabulary,
+    dict: &FxHashMap<String, TermId>,
+) -> Vec<QualMaxCardRestriction> {
+    // Invert the dictionary once: TermId → lexical key.
+    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+    for (lex, &id) in dict {
+        rev.insert(id, lex.as_str());
+    }
+    let mut out = Vec::new();
+    for card in store.scan_predicate(vocab.owl_max_qualified_cardinality) {
+        let class = card.s;
+        let Some(max) = rev.get(&card.o).and_then(|lex| parse_card_literal(lex)) else {
+            continue;
+        };
+        if max > 1 {
+            continue;
+        }
+        // Join with onProperty and onClass (one of each per restriction).
+        for op in store.probe(Some(class), vocab.owl_on_property, None) {
+            for oc in store.probe(Some(class), vocab.owl_on_class, None) {
+                out.push(QualMaxCardRestriction {
+                    class,
+                    property: op.o,
+                    filler: oc.o,
+                    max,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// XSD integer datatypes accepted for `owl:maxCardinality`. The OWL 2 RL/RDF
 /// rules write the cardinality literal as `"0"^^xsd:nonNegativeInteger`; we
 /// additionally accept the value-equal integer-tower spellings. Datatypes
@@ -460,6 +505,8 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_has_value: alloc(OWL_HAS_VALUE, &mut id, &mut dict),
         owl_on_property: alloc(OWL_ON_PROPERTY, &mut id, &mut dict),
         owl_max_cardinality: alloc(OWL_MAX_CARDINALITY, &mut id, &mut dict),
+        owl_max_qualified_cardinality: alloc(OWL_MAX_QUALIFIED_CARDINALITY, &mut id, &mut dict),
+        owl_on_class: alloc(OWL_ON_CLASS, &mut id, &mut dict),
         owl_source_individual: alloc(OWL_SOURCE_INDIVIDUAL, &mut id, &mut dict),
         owl_assertion_property: alloc(OWL_ASSERTION_PROPERTY, &mut id, &mut dict),
         owl_target_individual: alloc(OWL_TARGET_INDIVIDUAL, &mut id, &mut dict),
@@ -659,6 +706,28 @@ mod tests {
         )
     }
 
+    const OWL_MAX_QUALIFIED_CARDINALITY_IRI: &str =
+        "http://www.w3.org/2002/07/owl#maxQualifiedCardinality";
+    const OWL_ON_CLASS_IRI: &str = "http://www.w3.org/2002/07/owl#onClass";
+
+    fn nq_qual_card(s: &str, value: &str) -> Quad {
+        Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
+            NamedNode::new(OWL_MAX_QUALIFIED_CARDINALITY_IRI).unwrap(),
+            Literal::new_typed_literal(value, NamedNode::new(XSD_NNI).unwrap()),
+            GraphName::DefaultGraph,
+        )
+    }
+
+    fn nq_on_class(s: &str, c: &str) -> Quad {
+        Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
+            NamedNode::new(OWL_ON_CLASS_IRI).unwrap(),
+            NamedNode::new(c).unwrap(),
+            GraphName::DefaultGraph,
+        )
+    }
+
     #[test]
     fn cls_maxc1_makes_inconsistent_via_engine() {
         let mut engine = Engine::new();
@@ -691,6 +760,48 @@ mod tests {
         assert!(
             engine.entails(&concl).unwrap(),
             "maxCardinality 1 with two values ⇒ y1 owl:sameAs y2 (cls-maxc2)"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc3_entails_sameas_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // :R maxQualifiedCardinality 1 onProperty :p onClass :c ;
+        // :u a :R ; :u :p :y1 ; :u :p :y2 ; :y1 a :c ; :y2 a :c
+        data.insert(&nq_qual_card("http://ex/R", "1"));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq_on_class("http://ex/R", "http://ex/c"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y1"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y2"));
+        data.insert(&nq("http://ex/y1", RDF_TYPE, "http://ex/c"));
+        data.insert(&nq("http://ex/y2", RDF_TYPE, "http://ex/c"));
+        engine.load(&data).unwrap();
+        let mut concl = Dataset::new();
+        concl.insert(&nq("http://ex/y1", OWL_SAME_AS, "http://ex/y2"));
+        assert!(
+            engine.entails(&concl).unwrap(),
+            "maxQualifiedCardinality 1 with two typed values ⇒ y1 owl:sameAs y2 (cls-maxqc3)"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc1_makes_inconsistent_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // :R maxQualifiedCardinality 0 onProperty :p onClass :c ;
+        // :u a :R ; :u :p :y ; :y a :c
+        data.insert(&nq_qual_card("http://ex/R", "0"));
+        data.insert(&nq_on_prop("http://ex/R", "http://ex/p"));
+        data.insert(&nq_on_class("http://ex/R", "http://ex/c"));
+        data.insert(&nq("http://ex/u", RDF_TYPE, "http://ex/R"));
+        data.insert(&nq("http://ex/u", "http://ex/p", "http://ex/y"));
+        data.insert(&nq("http://ex/y", RDF_TYPE, "http://ex/c"));
+        engine.load(&data).unwrap();
+        assert!(
+            !engine.is_consistent().unwrap(),
+            "maxQualifiedCardinality 0 with a typed value ⇒ inconsistent (cls-maxqc1)"
         );
     }
 

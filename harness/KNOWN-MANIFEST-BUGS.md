@@ -32,14 +32,13 @@ Stage-1 engine intentionally defers:
 | Missing capability | Cases blocked |
 |---|---|
 | Datatype value-space *intersection* narrowing (`I5.8-008/009-pe`) — genuine interval reasoning, deferred (issue #4) | 2 |
-| Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`) | 2 |
+| Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`, `ObjectQCR-002-pe`) | 3 |
 | `prp-pdw`/`prp-adp` over class- or chain-derived property assertions (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) | 3 |
 | Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
 | `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
 | `prp-key` + functional-property literal disequality (`Keys-006-incons`, needs `dt-not-type`) | 1 |
 | Self-chain → `owl:TransitiveProperty` meta-rule (`chain2trans1-pe`) — not in W3C OWL 2 RL | 1 |
 | `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
-| `cls-maxqc1..4` (qualified cardinality, `ObjectQCR-002-pe`) | 1 |
 | `owl:imports` external resolution (`imports-011-pe`) | 1 |
 
 Total: **19 cases**.
@@ -47,10 +46,22 @@ Total: **19 cases**.
 > **2026-06-16 — unqualified max-cardinality implemented (`cls-maxc1`/`cls-maxc2`, issue #35).**
 > No W3C case in the synthesised `owl2-w3c-rl` suite is gated on *unqualified*
 > max-cardinality (the only cardinality case, `New-Feature-ObjectQCR-002`, is
-> *qualified* — `owl:maxQualifiedCardinality` + `owl:onClass` — and remains
-> blocked on `cls-maxqc1..4`). So this batch adds no `selected.toml` entry; the
-> rules are covered by unit + integration tests in `crates/owlrl`. The total
-> above is unchanged.
+> *qualified* — `owl:maxQualifiedCardinality` + `owl:onClass`). So this batch
+> adds no `selected.toml` entry; the rules are covered by unit + integration
+> tests in `crates/owlrl`. The total above is unchanged. (Update: the qualified
+> `cls-maxqc1..4` rules later landed in #36 — see the next note — but
+> `ObjectQCR-002-pe` stays red on fresh-bnode `owl:complementOf` generation,
+> not on the cardinality rules.)
+
+> **2026-06-16 — qualified max-cardinality implemented (`cls-maxqc1`–`cls-maxqc4`, issue #36).**
+> Covered by unit + integration tests in `crates/owlrl`. No `selected.toml`
+> entry was added: the only qualified-cardinality W3C case,
+> `New-Feature-ObjectQCR-002-pe`, is blocked on fresh-bnode
+> `owl:complementOf` generation (a TGD), not on the cardinality rules — its
+> conclusion asserts `Stewie a [owl:complementOf Woman]`, which `cls-maxqc1..4`
+> cannot emit (they only produce `owl:sameAs`/`owl:Nothing`). It has therefore
+> been reclassified into the fresh-bnode `owl:complementOf` bucket above. The
+> total above is unchanged at 19.
 
 Three Stage-1 rule batches landed on 2026-05-25 and together flipped 11
 cases from red to green:
@@ -143,6 +154,11 @@ these need Stage-2 work.
   `_:X owl:complementOf Girl`.
 - `#DisjointClasses-003-pe` — same shape over an `AllDisjointClasses`
   premise.
+- `#New-Feature-ObjectQCR-002-pe` — conclusion asserts
+  `Stewie a [owl:complementOf Woman]`, a contrapositive derivation
+  requiring a fresh complement class (TGD). `cls-maxqc1..4` are now
+  implemented but only emit `owl:sameAs`/`owl:Nothing`, so this case
+  stays red on the fresh-bnode gap, not on missing cardinality rules.
 
 ### `prp-pdw`/`prp-adp` over derived property assertions
 
@@ -208,10 +224,6 @@ SPEC-04).
 
 - `#WebOnt-I5.5-005-pe` — equivalentClass derivation over a
   generated `owl:unionOf`.
-
-### Object qualified cardinality (`cls-maxqc1..4`)
-
-- `#New-Feature-ObjectQCR-002-pe`
 
 ### `owl:imports` external resolution
 

@@ -40,7 +40,7 @@ use smallvec::smallvec;
 use crate::delta::Delta;
 use crate::provenance::Provenance;
 use crate::store::TripleStore;
-use crate::types::{MaxCardRestriction, TermId, Triple};
+use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 
 /// All list-axiom shapes resolved at load time. One `Vec` per W3C rule kind.
@@ -64,6 +64,10 @@ pub struct SchemaAxioms {
     /// Resolved at load time (`integration.rs`) and carried on the store; copied
     /// here by `resolve` so they ride the same semi-naïve dirty-prune path.
     pub max_card_restrictions: Vec<MaxCardRestriction>,
+    /// Resolved qualified max-cardinality restrictions (`cls-maxqc1`–`cls-maxqc4`).
+    /// Resolved at load time (`integration.rs`); copied here by `resolve` so they
+    /// ride the same semi-naïve dirty-prune path.
+    pub qual_max_card_restrictions: Vec<crate::types::QualMaxCardRestriction>,
 }
 
 impl SchemaAxioms {
@@ -110,6 +114,14 @@ impl SchemaAxioms {
                 s.insert(r.property);
             }
         }
+        // cls-maxqc1..4 read rdf:type (for ?u : ?x and ?y : ?filler) and each
+        // restricted property (for ?u ?p ?y). Re-fire whenever any becomes dirty.
+        if !self.qual_max_card_restrictions.is_empty() {
+            s.insert(vocab.rdf_type);
+            for r in &self.qual_max_card_restrictions {
+                s.insert(r.property);
+            }
+        }
         s
     }
 
@@ -121,6 +133,7 @@ impl SchemaAxioms {
             && self.all_disjoint_classes.is_empty()
             && self.all_different.is_empty()
             && self.max_card_restrictions.is_empty()
+            && self.qual_max_card_restrictions.is_empty()
     }
 }
 
@@ -209,6 +222,7 @@ pub fn resolve(store: &dyn TripleStore, vocab: &Vocabulary) -> SchemaAxioms {
     // Max-cardinality restrictions are classified at load time (integration.rs),
     // where the dictionary can parse the literal value; carry them through.
     out.max_card_restrictions = store.card_restrictions().to_vec();
+    out.qual_max_card_restrictions = store.qual_card_restrictions().to_vec();
 
     out
 }
@@ -322,6 +336,22 @@ pub fn fire_all(
                     1 => fire_cls_maxc2(store, vocab, r.class, r.property, &mut out),
                     _ => {}
                 }
+            }
+        }
+    }
+
+    // cls-maxqc1/maxqc2 — maxQualifiedCardinality 0 ⇒ inconsistency.
+    // cls-maxqc3/maxqc4 — maxQualifiedCardinality 1 ⇒ sameAs.
+    if !axioms.qual_max_card_restrictions.is_empty() {
+        let type_dirty = is_dirty(dirty, vocab.rdf_type);
+        for r in &axioms.qual_max_card_restrictions {
+            if !type_dirty && !is_dirty(dirty, r.property) {
+                continue;
+            }
+            match r.max {
+                0 => fire_cls_maxqc_zero(store, vocab, r, &mut out),
+                1 => fire_cls_maxqc_one(store, vocab, r, &mut out),
+                _ => {}
             }
         }
     }
@@ -762,6 +792,117 @@ fn fire_eq_diff_list(vocab: &Vocabulary, xs: &[TermId], out: &mut Delta) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// cls-maxqc1 / cls-maxqc2 — `?x owl:maxQualifiedCardinality "0" ∧
+// ?x owl:onProperty ?p ∧ ?x owl:onClass ?c ∧ ?u rdf:type ?x ∧ ?u ?p ?y ∧
+// (?y rdf:type ?c, or ?c = owl:Thing) ⇒ false`. Materialised as
+// `?u rdf:type owl:Nothing` so `Engine::is_consistent()` reports it.
+// ---------------------------------------------------------------------------
+fn fire_cls_maxqc_zero(
+    store: &dyn TripleStore,
+    vocab: &Vocabulary,
+    r: &QualMaxCardRestriction,
+    out: &mut Delta,
+) {
+    let us: Vec<TermId> = store
+        .probe(None, vocab.rdf_type, Some(r.class))
+        .map(|t| t.s)
+        .collect();
+    // The owl:Thing-filler variant is cls-maxqc2; the class-filler variant is
+    // cls-maxqc1. Both materialise `?u rdf:type owl:Nothing`; only the recorded
+    // provenance rule id differs (consumed by SPEC-08 / the proof API).
+    let rule_id = if r.filler == vocab.owl_thing {
+        "cls-maxqc2"
+    } else {
+        "cls-maxqc1"
+    };
+    for u in us {
+        let has_qualifying_value = store
+            .probe(Some(u), r.property, None)
+            .any(|t| qualifies(store, vocab, t.o, r.filler));
+        if has_qualifying_value {
+            let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
+            if !out.contains(&head) && !store.contains(&head) {
+                out.insert(
+                    head,
+                    Provenance {
+                        rule_id,
+                        premises: smallvec![],
+                    },
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cls-maxqc3 / cls-maxqc4 — `?x owl:maxQualifiedCardinality "1" ∧
+// ?x owl:onProperty ?p ∧ ?x owl:onClass ?c ∧ ?u rdf:type ?x ∧
+// ?u ?p ?y1 ∧ ?u ?p ?y2 ∧ (?yi rdf:type ?c, or ?c = owl:Thing)
+// ⇒ ?y1 owl:sameAs ?y2`. sameAs symmetry/transitivity is closed downstream.
+// ---------------------------------------------------------------------------
+fn fire_cls_maxqc_one(
+    store: &dyn TripleStore,
+    vocab: &Vocabulary,
+    r: &QualMaxCardRestriction,
+    out: &mut Delta,
+) {
+    // The owl:Thing-filler variant is cls-maxqc4; the class-filler variant is
+    // cls-maxqc3. Both emit `owl:sameAs`; only the recorded provenance rule id
+    // differs (consumed by SPEC-08 / the proof API).
+    let rule_id = if r.filler == vocab.owl_thing {
+        "cls-maxqc4"
+    } else {
+        "cls-maxqc3"
+    };
+    let us: Vec<TermId> = store
+        .probe(None, vocab.rdf_type, Some(r.class))
+        .map(|t| t.s)
+        .collect();
+    for u in us {
+        let ys: Vec<TermId> = store
+            .probe(Some(u), r.property, None)
+            .map(|t| t.o)
+            .filter(|&y| qualifies(store, vocab, y, r.filler))
+            .collect();
+        if ys.len() < 2 {
+            continue;
+        }
+        for (i, &y1) in ys.iter().enumerate() {
+            for &y2 in &ys[i + 1..] {
+                if y1 == y2 {
+                    continue;
+                }
+                for (a, b) in [(y1, y2), (y2, y1)] {
+                    let head = Triple::new(a, vocab.owl_same_as, b);
+                    if !out.contains(&head) && !store.contains(&head) {
+                        out.insert(
+                            head,
+                            Provenance {
+                                rule_id,
+                                premises: smallvec![],
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A property value `y` counts toward a qualified-cardinality restriction iff
+/// the filler is `owl:Thing` (count every value — cls-maxqc2/maxqc4) or `y` is
+/// typed as the filler class (cls-maxqc1/maxqc3).
+fn qualifies(store: &dyn TripleStore, vocab: &Vocabulary, y: TermId, filler: TermId) -> bool {
+    if filler == vocab.owl_thing {
+        return true;
+    }
+    store
+        .probe(Some(y), vocab.rdf_type, Some(filler))
+        .next()
+        .is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,5 +1206,150 @@ mod tests {
         let d = fire_all(&s, &ax, &v, None);
         assert!(d.contains(&t(a.0, v.owl_different_from.0, b.0)));
         assert!(d.contains(&t(b.0, v.owl_different_from.0, a.0)));
+    }
+
+    #[test]
+    fn cls_maxqc_zero_class_filler_violation() {
+        use crate::types::QualMaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let c = TermId(52);
+        let u = TermId(100);
+        let y = TermId(101);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y.0));
+        s.assert(t(y.0, v.rdf_type.0, c.0));
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: x,
+            property: p,
+            filler: c,
+            max: 0,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "cls-maxqc1: maxQC 0 with a filler-typed value ⇒ u : owl:Nothing"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc_zero_non_filler_value_is_consistent() {
+        use crate::types::QualMaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let c = TermId(52);
+        let u = TermId(100);
+        let y = TermId(101);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y.0));
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: x,
+            property: p,
+            filler: c,
+            max: 0,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "cls-maxqc1: value not of filler class ⇒ no inconsistency"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc_one_class_filler_merges() {
+        use crate::types::QualMaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let c = TermId(52);
+        let u = TermId(100);
+        let y1 = TermId(101);
+        let y2 = TermId(102);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y1.0));
+        s.assert(t(u.0, p.0, y2.0));
+        s.assert(t(y1.0, v.rdf_type.0, c.0));
+        s.assert(t(y2.0, v.rdf_type.0, c.0));
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: x,
+            property: p,
+            filler: c,
+            max: 1,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
+                || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
+            "cls-maxqc3: two filler-typed values under maxQC 1 ⇒ sameAs"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc_one_only_one_qualifies_no_merge() {
+        use crate::types::QualMaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let c = TermId(52);
+        let u = TermId(100);
+        let y1 = TermId(101);
+        let y2 = TermId(102);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y1.0));
+        s.assert(t(u.0, p.0, y2.0));
+        s.assert(t(y1.0, v.rdf_type.0, c.0));
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: x,
+            property: p,
+            filler: c,
+            max: 1,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert_eq!(
+            d.iter().filter(|(tr, _)| tr.p == v.owl_same_as).count(),
+            0,
+            "cls-maxqc3: only one qualifying value ⇒ no sameAs"
+        );
+    }
+
+    #[test]
+    fn cls_maxqc_one_thing_filler_merges_any_value() {
+        use crate::types::QualMaxCardRestriction;
+        let (mut s, v) = fresh();
+        let x = TermId(50);
+        let p = TermId(51);
+        let u = TermId(100);
+        let y1 = TermId(101);
+        let y2 = TermId(102);
+        s.assert(t(u.0, v.rdf_type.0, x.0));
+        s.assert(t(u.0, p.0, y1.0));
+        s.assert(t(u.0, p.0, y2.0));
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: x,
+            property: p,
+            filler: v.owl_thing,
+            max: 1,
+        }]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
+                || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
+            "cls-maxqc4: owl:Thing filler ⇒ sameAs over any two values"
+        );
+        // The owl:Thing-filler variant must record cls-maxqc4 provenance, not
+        // cls-maxqc3 (which is the class-filler variant).
+        assert!(
+            d.iter()
+                .filter(|(tr, _)| tr.p == v.owl_same_as)
+                .all(|(_, prov)| prov.rule_id == "cls-maxqc4"),
+            "owl:Thing filler under maxQC 1 ⇒ provenance rule id is cls-maxqc4"
+        );
     }
 }

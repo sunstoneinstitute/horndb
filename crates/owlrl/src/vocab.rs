@@ -90,6 +90,10 @@ pub struct Vocabulary {
     pub owl_on_property: TermId,
     /// `owl:maxCardinality`
     pub owl_max_cardinality: TermId,
+    /// `owl:maxQualifiedCardinality`
+    pub owl_max_qualified_cardinality: TermId,
+    /// `owl:onClass`
+    pub owl_on_class: TermId,
 
     /// `owl:sourceIndividual`
     pub owl_source_individual: TermId,
@@ -165,6 +169,8 @@ impl Vocabulary {
             owl_has_value: next(),
             owl_on_property: next(),
             owl_max_cardinality: next(),
+            owl_max_qualified_cardinality: next(),
+            owl_on_class: next(),
             owl_source_individual: next(),
             owl_assertion_property: next(),
             owl_target_individual: next(),
