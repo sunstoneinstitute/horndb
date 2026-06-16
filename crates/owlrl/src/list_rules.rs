@@ -763,12 +763,14 @@ fn fire_prp_adp(store: &dyn TripleStore, vocab: &Vocabulary, props: &[TermId], o
             continue;
         }
         for &pj in props.iter().skip(i + 1) {
-            // A property is trivially disjoint with itself only across distinct
-            // list members; `pi == pj` (the same property listed twice) carries
-            // no constraint, so skip it.
-            if pj == pi {
-                continue;
-            }
+            // W3C `prp-adp` ranges `i < j` over *list positions*, not property
+            // identity — so a list that repeats a property, e.g. `(:p :p)`,
+            // declares `:p` disjoint with itself, and any single `?u :p ?w`
+            // matches both body atoms (`?u pi ?w ∧ ?u pj ?w`) and is therefore
+            // inconsistent. We intentionally do *not* skip `pi == pj`: when the
+            // two positions carry the same property, `store.contains(u, pj, w)`
+            // is trivially the just-scanned triple, which is the correct
+            // self-disjoint behaviour (and matches the compiled `prp-pdw`).
             for &(u, w) in &pairs {
                 if store.contains(&Triple::new(u, pj, w)) {
                     let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
@@ -1284,6 +1286,29 @@ mod tests {
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "prp-adp: must check all i<j pairs, including non-adjacent p1/p3"
+        );
+    }
+
+    #[test]
+    fn prp_adp_self_disjoint_member_violates() {
+        // A list that repeats the same property — `(p1 p1)` — declares p1
+        // disjoint with itself. W3C `prp-adp` ranges i<j over list *positions*,
+        // so a single `u p1 w` satisfies both body atoms ⇒ inconsistency.
+        let (mut s, v) = fresh();
+        let adp = TermId(50);
+        let p1 = TermId(51);
+        let u = TermId(100);
+        let w = TermId(101);
+        s.assert(t(adp.0, v.rdf_type.0, v.owl_all_disjoint_properties.0));
+        s.assert(t(adp.0, v.owl_members.0, 1000));
+        assert_list(&mut s, &v, 1000, &[p1.0, p1.0]);
+        s.assert(t(u.0, p1.0, w.0));
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "prp-adp: a property listed twice is disjoint with itself ⇒ any \
+             assertion on it is inconsistent"
         );
     }
 
