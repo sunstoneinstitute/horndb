@@ -41,6 +41,21 @@ pub struct MaxCardRestriction {
     pub max: u8,
 }
 
+/// A resolved qualified max-cardinality restriction (`cls-maxqc1`–`cls-maxqc4`).
+///
+/// Like `MaxCardRestriction` but also names an `owl:onClass` filler `?c`:
+/// only property values that are instances of `?c` count toward the
+/// cardinality.  When `filler` equals the `owl:Thing` term ID the rules apply
+/// to every property value regardless of type (`cls-maxqc2`/`cls-maxqc4`).
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct QualMaxCardRestriction {
+    pub class: TermId,
+    pub property: TermId,
+    /// `owl:onClass` filler; equals `owl:Thing` for the "any value" variants.
+    pub filler: TermId,
+    pub max: u8,
+}
+
 /// A slot inside a triple pattern: either a variable (referenced by index 0..=2)
 /// or a constant term. Used by the codegen, not by the runtime hot path.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
