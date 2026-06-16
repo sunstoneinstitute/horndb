@@ -46,10 +46,12 @@ Total: **19 cases**.
 > **2026-06-16 — unqualified max-cardinality implemented (`cls-maxc1`/`cls-maxc2`, issue #35).**
 > No W3C case in the synthesised `owl2-w3c-rl` suite is gated on *unqualified*
 > max-cardinality (the only cardinality case, `New-Feature-ObjectQCR-002`, is
-> *qualified* — `owl:maxQualifiedCardinality` + `owl:onClass` — and remains
-> blocked on `cls-maxqc1..4`). So this batch adds no `selected.toml` entry; the
-> rules are covered by unit + integration tests in `crates/owlrl`. The total
-> above is unchanged.
+> *qualified* — `owl:maxQualifiedCardinality` + `owl:onClass`). So this batch
+> adds no `selected.toml` entry; the rules are covered by unit + integration
+> tests in `crates/owlrl`. The total above is unchanged. (Update: the qualified
+> `cls-maxqc1..4` rules later landed in #36 — see the next note — but
+> `ObjectQCR-002-pe` stays red on fresh-bnode `owl:complementOf` generation,
+> not on the cardinality rules.)
 
 > **2026-06-16 — qualified max-cardinality implemented (`cls-maxqc1`–`cls-maxqc4`, issue #36).**
 > Covered by unit + integration tests in `crates/owlrl`. No `selected.toml`
