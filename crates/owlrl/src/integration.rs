@@ -64,13 +64,14 @@ const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty"
 const OWL_PROPERTY_CHAIN_AXIOM: &str = "http://www.w3.org/2002/07/owl#propertyChainAxiom";
 const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
 const OWL_ALL_DISJOINT_CLASSES: &str = "http://www.w3.org/2002/07/owl#AllDisjointClasses";
+const OWL_ALL_DISJOINT_PROPERTIES: &str = "http://www.w3.org/2002/07/owl#AllDisjointProperties";
 const OWL_ALL_DIFFERENT: &str = "http://www.w3.org/2002/07/owl#AllDifferent";
 const OWL_MEMBERS: &str = "http://www.w3.org/2002/07/owl#members";
 const OWL_DISTINCT_MEMBERS: &str = "http://www.w3.org/2002/07/owl#distinctMembers";
 const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=47`.
-const USER_TERMS_BASE: u64 = 48;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=48`.
+const USER_TERMS_BASE: u64 = 49;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -515,6 +516,7 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_property_chain_axiom: alloc(OWL_PROPERTY_CHAIN_AXIOM, &mut id, &mut dict),
         owl_has_key: alloc(OWL_HAS_KEY, &mut id, &mut dict),
         owl_all_disjoint_classes: alloc(OWL_ALL_DISJOINT_CLASSES, &mut id, &mut dict),
+        owl_all_disjoint_properties: alloc(OWL_ALL_DISJOINT_PROPERTIES, &mut id, &mut dict),
         owl_all_different: alloc(OWL_ALL_DIFFERENT, &mut id, &mut dict),
         owl_members: alloc(OWL_MEMBERS, &mut id, &mut dict),
         owl_distinct_members: alloc(OWL_DISTINCT_MEMBERS, &mut id, &mut dict),
@@ -741,6 +743,48 @@ mod tests {
         assert!(
             !engine.is_consistent().unwrap(),
             "maxCardinality 0 with a value ⇒ inconsistent (cls-maxc1)"
+        );
+    }
+
+    #[test]
+    fn prp_adp_makes_inconsistent_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // _:adp a owl:AllDisjointProperties ; owl:members (:p1 :p2) .
+        // :u :p1 :w ; :u :p2 :w  ⇒ inconsistent (shared (u, w) pair).
+        data.insert(&nq("http://ex/adp", RDF_TYPE, OWL_ALL_DISJOINT_PROPERTIES));
+        data.insert(&nq("http://ex/adp", OWL_MEMBERS, "http://ex/l1"));
+        data.insert(&nq("http://ex/l1", RDF_FIRST, "http://ex/p1"));
+        data.insert(&nq("http://ex/l1", RDF_REST, "http://ex/l2"));
+        data.insert(&nq("http://ex/l2", RDF_FIRST, "http://ex/p2"));
+        data.insert(&nq("http://ex/l2", RDF_REST, RDF_NIL));
+        data.insert(&nq("http://ex/u", "http://ex/p1", "http://ex/w"));
+        data.insert(&nq("http://ex/u", "http://ex/p2", "http://ex/w"));
+        engine.load(&data).unwrap();
+        assert!(
+            !engine.is_consistent().unwrap(),
+            "AllDisjointProperties with a shared (u, w) pair ⇒ inconsistent (prp-adp)"
+        );
+    }
+
+    #[test]
+    fn prp_adp_distinct_objects_consistent_via_engine() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // Same disjoint-properties axiom, but :u relates to distinct objects —
+        // the W3C `DisjointObjectProperties-*-cons` shape; must stay consistent.
+        data.insert(&nq("http://ex/adp", RDF_TYPE, OWL_ALL_DISJOINT_PROPERTIES));
+        data.insert(&nq("http://ex/adp", OWL_MEMBERS, "http://ex/l1"));
+        data.insert(&nq("http://ex/l1", RDF_FIRST, "http://ex/p1"));
+        data.insert(&nq("http://ex/l1", RDF_REST, "http://ex/l2"));
+        data.insert(&nq("http://ex/l2", RDF_FIRST, "http://ex/p2"));
+        data.insert(&nq("http://ex/l2", RDF_REST, RDF_NIL));
+        data.insert(&nq("http://ex/u", "http://ex/p1", "http://ex/w1"));
+        data.insert(&nq("http://ex/u", "http://ex/p2", "http://ex/w2"));
+        engine.load(&data).unwrap();
+        assert!(
+            engine.is_consistent().unwrap(),
+            "AllDisjointProperties with distinct objects ⇒ consistent"
         );
     }
 

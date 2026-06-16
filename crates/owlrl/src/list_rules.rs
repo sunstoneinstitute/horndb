@@ -57,6 +57,10 @@ pub struct SchemaAxioms {
     /// `[c1, ..., cn]` — one entry per `?adc rdf:type owl:AllDisjointClasses`
     /// with an `owl:members` list.
     pub all_disjoint_classes: Vec<Vec<TermId>>,
+    /// `[p1, ..., pn]` — one entry per `?adp rdf:type owl:AllDisjointProperties`
+    /// with an `owl:members` list. Drives `prp-adp` (the list-walking analogue
+    /// of the pairwise `prp-pdw`).
+    pub all_disjoint_properties: Vec<Vec<TermId>>,
     /// `[x1, ..., xn]` — one entry per `?ad rdf:type owl:AllDifferent` with
     /// an `owl:members` or `owl:distinctMembers` list.
     pub all_different: Vec<Vec<TermId>>,
@@ -100,6 +104,13 @@ impl SchemaAxioms {
         {
             s.insert(vocab.rdf_type);
         }
+        // prp-adp reads each disjoint property `p_i` (the `?u p_i ?w` body
+        // patterns) — not rdf:type. Re-fire whenever any becomes dirty.
+        for props in &self.all_disjoint_properties {
+            for p in props {
+                s.insert(*p);
+            }
+        }
         // eq-diff2/3 emits differentFrom; downstream eq-diff1 (compiled)
         // chains off that + owl:sameAs.
         if !self.all_different.is_empty() {
@@ -131,6 +142,7 @@ impl SchemaAxioms {
             && self.intersections.is_empty()
             && self.unions.is_empty()
             && self.all_disjoint_classes.is_empty()
+            && self.all_disjoint_properties.is_empty()
             && self.all_different.is_empty()
             && self.max_card_restrictions.is_empty()
             && self.qual_max_card_restrictions.is_empty()
@@ -193,6 +205,27 @@ pub fn resolve(store: &dyn TripleStore, vocab: &Vocabulary) -> SchemaAxioms {
                 if let Some(cs) = walk_list(store, vocab, head) {
                     if cs.len() >= 2 {
                         out.all_disjoint_classes.push(cs);
+                    }
+                }
+            }
+        }
+    }
+
+    // ?adp rdf:type owl:AllDisjointProperties + ?adp owl:members ?head.
+    {
+        let adps: Vec<TermId> = store
+            .probe(
+                None,
+                vocab.rdf_type,
+                Some(vocab.owl_all_disjoint_properties),
+            )
+            .map(|t| t.s)
+            .collect();
+        for adp in adps {
+            if let Some(head) = first_object(store, adp, vocab.owl_members) {
+                if let Some(ps) = walk_list(store, vocab, head) {
+                    if ps.len() >= 2 {
+                        out.all_disjoint_properties.push(ps);
                     }
                 }
             }
@@ -307,6 +340,15 @@ pub fn fire_all(
         }
     }
 
+    // prp-adp — body reads each disjoint property `p_i` (`?u p_i ?w`).
+    if !axioms.all_disjoint_properties.is_empty()
+        && any_dirty_for_disjoint_properties(axioms, dirty)
+    {
+        for props in &axioms.all_disjoint_properties {
+            fire_prp_adp(store, vocab, props, &mut out);
+        }
+    }
+
     // eq-diff2 / eq-diff3: assert pairwise differentFrom from the resolved
     // list. The differentFrom triples are schema-derived and constant
     // across rounds, so we fire on the first round only — subsequent
@@ -368,6 +410,23 @@ fn any_dirty_for_chains(axioms: &SchemaAxioms, dirty: Option<&FxHashSet<TermId>>
             return true;
         }
         for p in chain {
+            if dirty.contains(p) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn any_dirty_for_disjoint_properties(
+    axioms: &SchemaAxioms,
+    dirty: Option<&FxHashSet<TermId>>,
+) -> bool {
+    let Some(dirty) = dirty else {
+        return true;
+    };
+    for props in &axioms.all_disjoint_properties {
+        for p in props {
             if dirty.contains(p) {
                 return true;
             }
@@ -674,6 +733,50 @@ fn fire_cax_adc(store: &dyn TripleStore, vocab: &Vocabulary, cs: &[TermId], out:
                             head,
                             Provenance {
                                 rule_id: "cax-adc",
+                                premises: smallvec![],
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// prp-adp — `_:adp rdf:type owl:AllDisjointProperties ∧ _:adp owl:members
+// (p1 ... pn) ∧ ?u pi ?w ∧ ?u pj ?w (i ≠ j) ⇒ false`. Materialised, like
+// every other OWL 2 RL `false`-rule in this engine, as `?u rdf:type
+// owl:Nothing` so `Engine::is_consistent()` reports the inconsistency. This
+// is the list-walking analogue of the pairwise `prp-pdw` (which keys off
+// `owl:propertyDisjointWith`); both head `?u rdf:type owl:Nothing`.
+//
+// Implementation: enumerate every pair (i, j) with i < j; scan `p_i` to
+// collect each `(u, w)` pair, then check the store for `u p_j w`. A shared
+// `(u, w)` across two distinct list members violates disjointness.
+// ---------------------------------------------------------------------------
+fn fire_prp_adp(store: &dyn TripleStore, vocab: &Vocabulary, props: &[TermId], out: &mut Delta) {
+    for i in 0..props.len() {
+        let pi = props[i];
+        let pairs: Vec<(TermId, TermId)> = store.scan_predicate(pi).map(|t| (t.s, t.o)).collect();
+        if pairs.is_empty() {
+            continue;
+        }
+        for &pj in props.iter().skip(i + 1) {
+            // A property is trivially disjoint with itself only across distinct
+            // list members; `pi == pj` (the same property listed twice) carries
+            // no constraint, so skip it.
+            if pj == pi {
+                continue;
+            }
+            for &(u, w) in &pairs {
+                if store.contains(&Triple::new(u, pj, w)) {
+                    let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
+                    if !out.contains(&head) && !store.contains(&head) {
+                        out.insert(
+                            head,
+                            Provenance {
+                                rule_id: "prp-adp",
                                 premises: smallvec![],
                             },
                         );
@@ -1091,6 +1194,96 @@ mod tests {
         assert!(
             d.contains(&t(x.0, v.rdf_type.0, v.owl_nothing.0)),
             "cax-adc: x : c1 ∧ x : c2 with AllDisjointClasses ⇒ x : owl:Nothing"
+        );
+    }
+
+    #[test]
+    fn resolve_all_disjoint_properties() {
+        let (mut s, v) = fresh();
+        let adp = TermId(50);
+        let p1 = TermId(51);
+        let p2 = TermId(52);
+        let p3 = TermId(53);
+        s.assert(t(adp.0, v.rdf_type.0, v.owl_all_disjoint_properties.0));
+        s.assert(t(adp.0, v.owl_members.0, 1000));
+        assert_list(&mut s, &v, 1000, &[p1.0, p2.0, p3.0]);
+        let ax = resolve(&s, &v);
+        assert_eq!(ax.all_disjoint_properties.len(), 1);
+        assert_eq!(ax.all_disjoint_properties[0], vec![p1, p2, p3]);
+    }
+
+    #[test]
+    fn prp_adp_shared_pair_violation() {
+        // _:adp a owl:AllDisjointProperties ; owl:members (p1 p2 p3) .
+        // u p1 w ∧ u p2 w  ⇒  u : owl:Nothing  (shared (u, w) across two
+        // disjoint members).
+        let (mut s, v) = fresh();
+        let adp = TermId(50);
+        let p1 = TermId(51);
+        let p2 = TermId(52);
+        let p3 = TermId(53);
+        let u = TermId(100);
+        let w = TermId(101);
+        s.assert(t(adp.0, v.rdf_type.0, v.owl_all_disjoint_properties.0));
+        s.assert(t(adp.0, v.owl_members.0, 1000));
+        assert_list(&mut s, &v, 1000, &[p1.0, p2.0, p3.0]);
+        s.assert(t(u.0, p1.0, w.0));
+        s.assert(t(u.0, p2.0, w.0));
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "prp-adp: u p1 w ∧ u p2 w with AllDisjointProperties ⇒ u : owl:Nothing"
+        );
+    }
+
+    #[test]
+    fn prp_adp_distinct_objects_are_consistent() {
+        // u p1 w1 ∧ u p2 w2 (w1 ≠ w2): no shared (u, w) pair, so disjointness
+        // is not violated. This is the shape of the W3C
+        // `New-Feature-DisjointObjectProperties-*-cons` cases, which must stay
+        // green: Stewie hasFather Peter, hasMother Lois — different objects.
+        let (mut s, v) = fresh();
+        let adp = TermId(50);
+        let p1 = TermId(51);
+        let p2 = TermId(52);
+        let u = TermId(100);
+        let w1 = TermId(101);
+        let w2 = TermId(102);
+        s.assert(t(adp.0, v.rdf_type.0, v.owl_all_disjoint_properties.0));
+        s.assert(t(adp.0, v.owl_members.0, 1000));
+        assert_list(&mut s, &v, 1000, &[p1.0, p2.0]);
+        s.assert(t(u.0, p1.0, w1.0));
+        s.assert(t(u.0, p2.0, w2.0));
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "prp-adp: distinct objects across disjoint properties ⇒ consistent"
+        );
+    }
+
+    #[test]
+    fn prp_adp_non_adjacent_members_violate() {
+        // The violating pair is p1/p3 (non-adjacent list members). The pairwise
+        // i<j walk must catch every pair, not just neighbours.
+        let (mut s, v) = fresh();
+        let adp = TermId(50);
+        let p1 = TermId(51);
+        let p2 = TermId(52);
+        let p3 = TermId(53);
+        let u = TermId(100);
+        let w = TermId(101);
+        s.assert(t(adp.0, v.rdf_type.0, v.owl_all_disjoint_properties.0));
+        s.assert(t(adp.0, v.owl_members.0, 1000));
+        assert_list(&mut s, &v, 1000, &[p1.0, p2.0, p3.0]);
+        s.assert(t(u.0, p1.0, w.0));
+        s.assert(t(u.0, p3.0, w.0));
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+        assert!(
+            d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
+            "prp-adp: must check all i<j pairs, including non-adjacent p1/p3"
         );
     }
 

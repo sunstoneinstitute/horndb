@@ -584,7 +584,7 @@ library is using.
 - **Stage-1 leading pattern must have a constant predicate.** See
   §2.5; relaxing this is gated on SPEC-03 (WCOJ).
 - **List-walking rules (`scm-int`, `cls-int1`, `cls-uni`, `cax-adc`,
-  `prp-spo2`, `prp-key`, `eq-diff2/3`) are implemented** in `src/list_rules.rs`
+  `prp-adp`, `prp-spo2`, `prp-key`, `eq-diff2/3`) are implemented** in `src/list_rules.rs`
   (resolved once per `load`, fired in the semi-naïve loop — see `engine.rs`).
   The remaining gap is `cls-svf*` / `cls-avf*` (someValuesFrom / allValuesFrom
   restrictions), still Stage-2. The `dt-type1`/`dt-type2` datatype base is

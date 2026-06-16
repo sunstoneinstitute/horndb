@@ -114,6 +114,8 @@ pub struct Vocabulary {
     pub owl_has_key: TermId,
     /// `owl:AllDisjointClasses`
     pub owl_all_disjoint_classes: TermId,
+    /// `owl:AllDisjointProperties`
+    pub owl_all_disjoint_properties: TermId,
     /// `owl:AllDifferent`
     pub owl_all_different: TermId,
     /// `owl:members`
@@ -179,6 +181,7 @@ impl Vocabulary {
             owl_property_chain_axiom: next(),
             owl_has_key: next(),
             owl_all_disjoint_classes: next(),
+            owl_all_disjoint_properties: next(),
             owl_all_different: next(),
             owl_members: next(),
             owl_distinct_members: next(),
