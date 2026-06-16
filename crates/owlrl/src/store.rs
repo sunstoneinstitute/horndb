@@ -4,7 +4,7 @@
 //! production backend implementing the same trait.
 
 use crate::provenance::Provenance;
-use crate::types::{MaxCardRestriction, TermId, Triple};
+use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -49,6 +49,13 @@ pub trait TripleStore {
     fn card_restrictions(&self) -> &[MaxCardRestriction] {
         &[]
     }
+
+    /// Resolved qualified max-cardinality restrictions (`cls-maxqc1`–`cls-maxqc4`).
+    /// Populated at load time by the embedder (`integration.rs`); empty for
+    /// stores built directly without restriction resolution.
+    fn qual_card_restrictions(&self) -> &[crate::types::QualMaxCardRestriction] {
+        &[]
+    }
 }
 
 /// Simple in-memory store keyed by predicate. Used by tests and by the
@@ -63,6 +70,8 @@ pub struct MemStore {
     inferred: FxHashSet<Triple>,
     /// Resolved max-cardinality restrictions (see `TripleStore::card_restrictions`).
     card_restrictions: Vec<MaxCardRestriction>,
+    /// Resolved qualified max-cardinality restrictions (see `TripleStore::qual_card_restrictions`).
+    qual_card_restrictions: Vec<QualMaxCardRestriction>,
 }
 
 impl MemStore {
@@ -73,6 +82,7 @@ impl MemStore {
             proofs: FxHashMap::default(),
             inferred: FxHashSet::default(),
             card_restrictions: Vec::new(),
+            qual_card_restrictions: Vec::new(),
         }
     }
 
@@ -100,6 +110,12 @@ impl MemStore {
     /// time (`integration.rs`) or directly by tests.
     pub fn set_card_restrictions(&mut self, restrictions: Vec<MaxCardRestriction>) {
         self.card_restrictions = restrictions;
+    }
+
+    /// Set the resolved qualified max-cardinality restrictions. Called once at
+    /// load time (`integration.rs`) or directly by tests.
+    pub fn set_qual_card_restrictions(&mut self, restrictions: Vec<QualMaxCardRestriction>) {
+        self.qual_card_restrictions = restrictions;
     }
 }
 
@@ -186,6 +202,10 @@ impl TripleStore for MemStore {
     fn card_restrictions(&self) -> &[MaxCardRestriction] {
         &self.card_restrictions
     }
+
+    fn qual_card_restrictions(&self) -> &[QualMaxCardRestriction] {
+        &self.qual_card_restrictions
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +264,21 @@ mod tests {
         }]);
         assert_eq!(s.card_restrictions().len(), 1);
         assert_eq!(s.card_restrictions()[0].max, 1);
+    }
+
+    #[test]
+    fn qual_card_restrictions_round_trip() {
+        use crate::types::QualMaxCardRestriction;
+        let mut s = store();
+        assert!(s.qual_card_restrictions().is_empty());
+        s.set_qual_card_restrictions(vec![QualMaxCardRestriction {
+            class: TermId(1),
+            property: TermId(2),
+            filler: TermId(3),
+            max: 1,
+        }]);
+        assert_eq!(s.qual_card_restrictions().len(), 1);
+        assert_eq!(s.qual_card_restrictions()[0].filler, TermId(3));
     }
 
     #[test]
