@@ -96,9 +96,11 @@ pub struct Circuit {
     /// paid only when a reader actually acquires a snapshot, and is reused by
     /// further acquires until the next tick.
     version_cache: RefCell<Option<Arc<Zset<TripleId>>>>,
-    /// Logical time the current `version` represents: the max asserted-record
-    /// timestamp merged so far (advances only on ticks that merge asserted
-    /// records).
+    /// Logical time the current `version` represents (SPEC-06 F7, INCLUSIVE):
+    /// the last committed asserted-record timestamp. A snapshot reflects every
+    /// record with timestamp ≤ this value. Advances only on ticks that merge
+    /// asserted records (derived-only ticks leave it unchanged; an empty circuit
+    /// stays at 0).
     version_time: LogicalTime,
 }
 
@@ -425,22 +427,18 @@ impl Circuit {
         // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
         // (O(1), no allocation). The presence set is rebuilt lazily on the next
         // snapshot() acquire — so steady-state ticks stay delta-sized and the O(n)
-        // build is only paid when a reader needs it. version_time (exclusive
-        // frontier) still advances here on asserted merges.
+        // build is only paid when a reader needs it.
         //
-        // `version_time` is an **exclusive frontier**: the snapshot reflects
-        // every asserted record with timestamp < this value. We use the log's
-        // `current_time()` (the next timestamp to be issued = count of records
-        // committed so far), which starts at 0 for an empty circuit and strictly
-        // increases on every asserted tick. This avoids the collision of using
-        // the last record's timestamp, which is 0 for the very first record and
-        // would make the pre-first-commit and post-first-commit views
-        // indistinguishable. Advances only when asserted records merged
-        // (derived-only ticks add no new records).
+        // `version_time` is the **last committed asserted timestamp** (INCLUSIVE):
+        // a snapshot reflects every record with timestamp ≤ `version_time`
+        // (SPEC-06 F7). `logical_time` is the timestamp of the last asserted
+        // record merged this tick — exactly that inclusive `t`. It advances only
+        // when asserted records merged: a derived-only tick adds no new asserted
+        // records and leaves it unchanged, and an empty circuit stays at 0.
         if asserted_merged > 0 || derived_merged > 0 {
             *self.version_cache.borrow_mut() = None;
             if asserted_merged > 0 {
-                self.version_time = self.log.current_time();
+                self.version_time = logical_time;
             }
         }
 

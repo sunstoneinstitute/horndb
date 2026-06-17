@@ -197,32 +197,32 @@ fn snapshot_is_a_presence_set_not_a_multiset() {
     assert_eq!(deduped.len(), distinct, "set view has no duplicate triples");
 }
 
-// The logical-time frontier is an exclusive upper bound that never collides
-// with the first record's timestamp (0): the empty view is frontier 0 and the
-// post-first-commit view is frontier 1, so the two are distinguishable even
-// though the first asserted record carries timestamp 0.
+// `logical_time()` is INCLUSIVE (SPEC-06 F7): the snapshot reflects every
+// asserted record with timestamp ≤ logical_time(). The first asserted record
+// carries timestamp 0, so the post-first-commit view reports logical_time() == 0
+// — the same value as the empty view. That is SPEC-faithful: an empty store has
+// no records, and the two views are told apart by their contents, not by logical
+// time alone.
 #[test]
-fn empty_frontier_is_distinct_from_first_commit() {
+fn first_commit_logical_time_is_the_committed_timestamp() {
     let mut circuit = Circuit::new();
     let empty = circuit.snapshot();
-    assert_eq!(empty.logical_time(), 0, "empty view frontier is 0");
+    assert_eq!(empty.logical_time(), 0, "empty view is at logical time 0");
+    assert!(empty.is_empty(), "empty view holds no triples");
 
     circuit.assert_triple((1, P, 2));
     circuit.tick();
     let after = circuit.snapshot();
 
-    assert!(
-        after.logical_time() > empty.logical_time(),
-        "first commit must advance the frontier past the empty view"
-    );
     assert_eq!(
         after.logical_time(),
-        1,
-        "frontier is the exclusive upper bound"
+        0,
+        "first record's committed timestamp is 0 (inclusive ≤ t)"
     );
-    // And the empty snapshot stayed pinned (still empty, still frontier 0).
-    assert!(empty.is_empty());
-    assert_eq!(empty.logical_time(), 0);
+    assert!(
+        after.contains(&(1, P, 2)),
+        "the record at ts ≤ 0 is present in the snapshot"
+    );
 }
 
 // A retraction of a triple that was never asserted drives the asserted Z-set
