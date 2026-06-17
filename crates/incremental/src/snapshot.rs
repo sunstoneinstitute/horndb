@@ -2,10 +2,15 @@
 //!
 //! A [`Snapshot`] pins the materialized `(asserted ∪ derived)` **set** of
 //! triples present in a [`crate::circuit::Circuit`] at the logical time it was
-//! acquired. It is refcount-backed: acquiring clones an `Arc` (O(1)), and the
-//! pinned version is immutable, so subsequent `tick()`s that publish a *new*
-//! version leave this handle's view untouched until it is dropped. Readers
-//! (snapshot holders) and writers (`tick`) therefore never block each other.
+//! acquired. It is refcount-backed: the pinned view is an immutable `Arc`, so
+//! acquiring is amortized O(1) (an `Arc` clone). The presence view is built
+//! lazily and cached — a state-changing `tick()` invalidates the cache in O(1)
+//! (so steady-state writes stay delta-sized), and the *first* `snapshot()` after
+//! a write pays one O(|asserted| + |derived|) build, reused by later acquires
+//! until the next tick. Because the pinned version is immutable, subsequent
+//! `tick()`s that publish a *new* version leave this handle's view untouched
+//! until it is dropped. Readers (snapshot holders) and writers (`tick`)
+//! therefore never block each other.
 //!
 //! ## Set semantics (presence), not Z-set multiplicity
 //!
