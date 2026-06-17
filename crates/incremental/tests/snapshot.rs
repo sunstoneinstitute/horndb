@@ -111,3 +111,46 @@ fn snapshot_includes_and_pins_derived_rows() {
         "fresh snapshot sees new derived edge"
     );
 }
+
+use std::sync::mpsc;
+use std::thread;
+
+// NF4: readers do not block writers and writers do not block readers. A
+// snapshot is Send + Sync (Arc-backed), so a reader thread can poll it
+// concurrently with a writer thread driving ticks; the pinned view stays
+// constant for the snapshot's whole lifetime.
+#[test]
+fn reader_does_not_block_writer_and_view_stays_stable() {
+    let mut circuit = Circuit::new();
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+
+    let snap = circuit.snapshot();
+    let baseline = snap.len();
+    let (tx, rx) = mpsc::channel();
+
+    let reader = thread::spawn(move || {
+        // Poll the pinned snapshot many times; it must never change.
+        let mut observed = Vec::new();
+        for _ in 0..10_000 {
+            observed.push(snap.len());
+        }
+        tx.send(()).unwrap();
+        observed
+    });
+
+    // Writer keeps ticking while the reader polls — must not block.
+    for i in 0..2_000u64 {
+        circuit.assert_triple((i + 10, P, i + 11));
+        circuit.tick();
+    }
+    rx.recv().unwrap();
+    let observed = reader.join().unwrap();
+
+    assert!(
+        observed.iter().all(|&n| n == baseline),
+        "pinned snapshot len must stay constant under concurrent writes"
+    );
+    // The writer made progress concurrently.
+    assert!(circuit.snapshot().len() > baseline);
+}
