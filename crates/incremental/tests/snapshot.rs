@@ -154,3 +154,42 @@ fn reader_does_not_block_writer_and_view_stays_stable() {
     // The writer made progress concurrently.
     assert!(circuit.snapshot().len() > baseline);
 }
+
+// The snapshot is a *presence* union `asserted ∪ derived`: a triple present in
+// both bases (derived, then asserted by the user) or asserted more than once is
+// exposed exactly once at multiplicity 1 — not summed.
+#[test]
+fn snapshot_is_presence_union_not_multiplicity_sum() {
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(P)));
+
+    // Derive (1,P,3) via the transitive closure of 1->2->3.
+    circuit.assert_triple((1, P, 2));
+    circuit.assert_triple((2, P, 3));
+    circuit.tick();
+    assert_eq!(circuit.snapshot().get(&(1, P, 3)), 1, "derived once");
+
+    // Now the user *also* asserts the already-derived triple, and double-asserts
+    // a fresh one. Neither must inflate the snapshot multiplicity past 1.
+    circuit.assert_triple((1, P, 3)); // overlaps the derived row
+    circuit.assert_triple((9, P, 9));
+    circuit.assert_triple((9, P, 9)); // duplicate assertion
+    circuit.tick();
+
+    let snap = circuit.snapshot();
+    assert_eq!(
+        snap.get(&(1, P, 3)),
+        1,
+        "asserted∩derived stays multiplicity 1"
+    );
+    assert_eq!(
+        snap.get(&(9, P, 9)),
+        1,
+        "double-asserted stays multiplicity 1"
+    );
+    // Every row in the view is presence (multiplicity exactly 1).
+    assert!(
+        snap.iter().all(|(_, m)| m == 1),
+        "presence union: every triple at multiplicity 1"
+    );
+}

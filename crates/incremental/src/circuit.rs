@@ -388,9 +388,27 @@ impl Circuit {
         // snapshots acquired before keep their (now-superseded) Arc. Skip the
         // O(n) rebuild on no-op ticks. logical_time is 0 when no asserted
         // records were merged; only advance version_time on real progress.
+        //
+        // The view is the *presence* union `asserted ∪ derived`: every present
+        // triple appears exactly once at multiplicity 1. Summing the two Z-sets
+        // (raw `add_assign`) would expose multiplicity 2+ for a triple that is
+        // both asserted and derived (e.g. derived first, then asserted by the
+        // user) or asserted more than once — which contradicts the set-union
+        // semantics the rest of the store uses (`get(t) != 0` = present) and
+        // would surprise snapshot readers. Net-zero (asserted then retracted)
+        // triples are absent.
         if asserted_merged > 0 || derived_merged > 0 {
-            let mut materialized = self.asserted_base.clone();
-            materialized.add_assign(&self.derived_base);
+            let mut materialized: Zset<TripleId> = Zset::new();
+            for (triple, mult) in self.asserted_base.iter() {
+                if mult != 0 {
+                    materialized.add(*triple, 1);
+                }
+            }
+            for (triple, mult) in self.derived_base.iter() {
+                if mult != 0 && materialized.get(triple) == 0 {
+                    materialized.add(*triple, 1);
+                }
+            }
             self.version = Arc::new(materialized);
             if asserted_merged > 0 {
                 self.version_time = logical_time;
