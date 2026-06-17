@@ -35,7 +35,7 @@
 //!   separate follow-up.
 
 use rustc_hash::FxHashSet;
-use smallvec::smallvec;
+use smallvec::{smallvec, SmallVec};
 
 use crate::delta::Delta;
 use crate::provenance::Provenance;
@@ -50,8 +50,12 @@ pub struct SchemaAxioms {
     pub property_chains: Vec<(TermId, Vec<TermId>)>,
     /// `(c, [p1, ..., pn])` — one entry per `?c owl:hasKey ?list`.
     pub keys: Vec<(TermId, Vec<TermId>)>,
-    /// `(c, [c1, ..., cn])` — one entry per `?c owl:intersectionOf ?list`.
-    pub intersections: Vec<(TermId, Vec<TermId>)>,
+    /// `(c, listhead, [c1, ..., cn])` — one entry per `?c owl:intersectionOf
+    /// ?list`. `listhead` is the `rdf:List` head term of the originating axiom
+    /// triple `?c owl:intersectionOf listhead`; it is recorded as the premise
+    /// of the schema-only `scm-int` rule so its proof bottoms out at the
+    /// asserted axiom.
+    pub intersections: Vec<(TermId, TermId, Vec<TermId>)>,
     /// `(c, [c1, ..., cn])` — one entry per `?c owl:unionOf ?list`.
     pub unions: Vec<(TermId, Vec<TermId>)>,
     /// `[c1, ..., cn]` — one entry per `?adc rdf:type owl:AllDisjointClasses`
@@ -61,9 +65,15 @@ pub struct SchemaAxioms {
     /// with an `owl:members` list. Drives `prp-adp` (the list-walking analogue
     /// of the pairwise `prp-pdw`).
     pub all_disjoint_properties: Vec<Vec<TermId>>,
-    /// `[x1, ..., xn]` — one entry per `?ad rdf:type owl:AllDifferent` with
-    /// an `owl:members` or `owl:distinctMembers` list.
-    pub all_different: Vec<Vec<TermId>>,
+    /// `(ad, members_pred, listhead, [x1, ..., xn])` — one entry per
+    /// `?ad rdf:type owl:AllDifferent` with an `owl:members` or
+    /// `owl:distinctMembers` list. `members_pred` is the predicate (`owl:members`
+    /// or `owl:distinctMembers`) this list came from and `listhead` is the
+    /// `rdf:List` head; together they form the originating axiom triple
+    /// `?ad members_pred listhead`, recorded as the premise of the schema-only
+    /// `eq-diff2`/`eq-diff3` derivations so their proofs bottom out at the
+    /// asserted axiom.
+    pub all_different: Vec<(TermId, TermId, TermId, Vec<TermId>)>,
     /// Resolved unqualified max-cardinality restrictions (`cls-maxc1`/`cls-maxc2`).
     /// Resolved at load time (`integration.rs`) and carried on the store; copied
     /// here by `resolve` so they ride the same semi-naïve dirty-prune path.
@@ -178,7 +188,7 @@ pub fn resolve(store: &dyn TripleStore, vocab: &Vocabulary) -> SchemaAxioms {
     for t in store.scan_predicate(vocab.owl_intersection_of) {
         if let Some(cs) = walk_list(store, vocab, t.o) {
             if !cs.is_empty() {
-                out.intersections.push((t.s, cs));
+                out.intersections.push((t.s, t.o, cs));
             }
         }
     }
@@ -240,12 +250,17 @@ pub fn resolve(store: &dyn TripleStore, vocab: &Vocabulary) -> SchemaAxioms {
             .map(|t| t.s)
             .collect();
         for ad in ads {
-            let head = first_object(store, ad, vocab.owl_distinct_members)
-                .or_else(|| first_object(store, ad, vocab.owl_members));
-            if let Some(head) = head {
+            // Record which predicate carried this members list so the
+            // eq-diff2/3 premise names the axiom triple correctly.
+            let head_pred = first_object(store, ad, vocab.owl_distinct_members)
+                .map(|h| (vocab.owl_distinct_members, h))
+                .or_else(|| {
+                    first_object(store, ad, vocab.owl_members).map(|h| (vocab.owl_members, h))
+                });
+            if let Some((members_pred, head)) = head_pred {
                 if let Some(xs) = walk_list(store, vocab, head) {
                     if xs.len() >= 2 {
-                        out.all_different.push(xs);
+                        out.all_different.push((ad, members_pred, head, xs));
                     }
                 }
             }
@@ -312,7 +327,7 @@ pub fn fire_all(
 
     // cls-int1 — body reads rdf:type for each c_i.
     if !axioms.intersections.is_empty() && is_dirty(dirty, vocab.rdf_type) {
-        for (c, cs) in &axioms.intersections {
+        for (c, _listhead, cs) in &axioms.intersections {
             fire_cls_int1(store, vocab, *c, cs, &mut out);
         }
     }
@@ -321,8 +336,8 @@ pub fn fire_all(
     // member of its list. Output is fully determined by the resolved schema
     // so we fire once, on the first round.
     if !axioms.intersections.is_empty() && dirty.is_none() {
-        for (c, cs) in &axioms.intersections {
-            fire_scm_int(store, vocab, *c, cs, &mut out);
+        for (c, listhead, cs) in &axioms.intersections {
+            fire_scm_int(store, vocab, *c, *listhead, cs, &mut out);
         }
     }
 
@@ -354,8 +369,8 @@ pub fn fire_all(
     // across rounds, so we fire on the first round only — subsequent
     // applies are no-ops via `store.contains`.
     if !axioms.all_different.is_empty() && dirty.is_none() {
-        for xs in &axioms.all_different {
-            fire_eq_diff_list(vocab, xs, &mut out);
+        for (ad, members_pred, listhead, xs) in &axioms.all_different {
+            fire_eq_diff_list(vocab, *ad, *members_pred, *listhead, xs, &mut out);
         }
     }
 
@@ -475,23 +490,32 @@ fn is_dirty(dirty: Option<&FxHashSet<TermId>>, p: TermId) -> bool {
 fn fire_prp_spo2(store: &dyn TripleStore, head_pred: TermId, chain: &[TermId], out: &mut Delta) {
     debug_assert!(!chain.is_empty());
 
-    let mut frontier: Vec<(TermId, TermId)> = Vec::new();
+    // Each frontier entry carries `(u0, u_mid, path)` where `path` is the
+    // accumulated body triples `?u(i-1) p_i ?ui` walked so far — recorded as
+    // the premises for the derived `?u0 ?p ?un`.
+    type Path = SmallVec<[Triple; 4]>;
+    let mut frontier: Vec<(TermId, TermId, Path)> = Vec::new();
     for t in store.scan_predicate(chain[0]) {
-        frontier.push((t.s, t.o));
+        let mut path: Path = SmallVec::new();
+        path.push(Triple::new(t.s, chain[0], t.o));
+        frontier.push((t.s, t.o, path));
     }
     if chain.len() == 1 {
-        // Chain of length 1 is just sub-property propagation.
-        for (u0, un) in frontier {
-            emit_pair(out, "prp-spo2", u0, head_pred, un);
+        // Chain of length 1 is just sub-property propagation: the single
+        // `(u0, chain[0], un)` triple is the lone premise.
+        for (u0, un, path) in frontier {
+            emit_pair(out, "prp-spo2", u0, head_pred, un, path);
         }
         return;
     }
-    let mut next: Vec<(TermId, TermId)> = Vec::new();
+    let mut next: Vec<(TermId, TermId, Path)> = Vec::new();
     for &p_i in &chain[1..] {
         next.clear();
-        for &(u0, u_mid) in &frontier {
-            for t in store.probe(Some(u_mid), p_i, None) {
-                next.push((u0, t.o));
+        for (u0, u_mid, prefix) in &frontier {
+            for t in store.probe(Some(*u_mid), p_i, None) {
+                let mut path = prefix.clone();
+                path.push(Triple::new(*u_mid, p_i, t.o));
+                next.push((*u0, t.o, path));
             }
         }
         std::mem::swap(&mut frontier, &mut next);
@@ -499,25 +523,22 @@ fn fire_prp_spo2(store: &dyn TripleStore, head_pred: TermId, chain: &[TermId], o
             return;
         }
     }
-    for (u0, un) in frontier {
-        emit_pair(out, "prp-spo2", u0, head_pred, un);
+    for (u0, un, path) in frontier {
+        emit_pair(out, "prp-spo2", u0, head_pred, un, path);
     }
 }
 
-fn emit_pair(out: &mut Delta, rule_id: &'static str, s: TermId, p: TermId, o: TermId) {
+fn emit_pair(
+    out: &mut Delta,
+    rule_id: &'static str,
+    s: TermId,
+    p: TermId,
+    o: TermId,
+    premises: SmallVec<[Triple; 4]>,
+) {
     let head = Triple::new(s, p, o);
     if !out.contains(&head) {
-        out.insert(
-            head,
-            Provenance {
-                rule_id,
-                // Premises are runtime-dependent on the resolved schema
-                // list; recording the head suffices for Stage-1
-                // provenance (full proof tree reconstruction is Stage-2
-                // per SPEC-04 F4).
-                premises: smallvec![],
-            },
-        );
+        out.insert(head, Provenance { rule_id, premises });
     }
 }
 
@@ -573,11 +594,26 @@ fn fire_prp_key(
                 for y in survivors {
                     let head = Triple::new(x, vocab.owl_same_as, y);
                     if !out.contains(&head) && !store.contains(&head) {
+                        // Body atoms: ?x : c, ?y : c, the shared ps[0] value,
+                        // and the matched ?z_i on every remaining key property
+                        // (the `x_choice` values, which survivors were filtered
+                        // against on the `(y, p_i, z_i)` side).
+                        let mut premises: SmallVec<[Triple; 4]> = smallvec![
+                            Triple::new(x, vocab.rdf_type, c),
+                            Triple::new(y, vocab.rdf_type, c),
+                            Triple::new(x, ps[0], z0),
+                            Triple::new(y, ps[0], z0),
+                        ];
+                        for (i, &z_i) in x_choice.iter().enumerate() {
+                            let p_i = ps[1 + i];
+                            premises.push(Triple::new(x, p_i, z_i));
+                            premises.push(Triple::new(y, p_i, z_i));
+                        }
                         out.insert(
                             head,
                             Provenance {
                                 rule_id: "prp-key",
-                                premises: smallvec![],
+                                premises,
                             },
                         );
                     }
@@ -639,11 +675,17 @@ fn fire_cls_int1(
         {
             let head = Triple::new(x, vocab.rdf_type, c);
             if !out.contains(&head) && !store.contains(&head) {
+                // Body atoms: ?x rdf:type ci for every member ci of the list.
+                let mut premises: SmallVec<[Triple; 4]> =
+                    smallvec![Triple::new(x, vocab.rdf_type, cs[0])];
+                for &c_i in &cs[1..] {
+                    premises.push(Triple::new(x, vocab.rdf_type, c_i));
+                }
                 out.insert(
                     head,
                     Provenance {
                         rule_id: "cls-int1",
-                        premises: smallvec![],
+                        premises,
                     },
                 );
             }
@@ -664,9 +706,13 @@ fn fire_scm_int(
     store: &dyn TripleStore,
     vocab: &Vocabulary,
     c: TermId,
+    listhead: TermId,
     cs: &[TermId],
     out: &mut Delta,
 ) {
+    // Schema-only: the sole antecedent is the axiom triple `?c owl:intersectionOf
+    // listhead`. Record it so the proof bottoms out at the asserted axiom.
+    let axiom = Triple::new(c, vocab.owl_intersection_of, listhead);
     for &ci in cs {
         let head = Triple::new(c, vocab.rdfs_sub_class_of, ci);
         if !out.contains(&head) && !store.contains(&head) {
@@ -674,7 +720,7 @@ fn fire_scm_int(
                 head,
                 Provenance {
                     rule_id: "scm-int",
-                    premises: smallvec![],
+                    premises: smallvec![axiom],
                 },
             );
         }
@@ -695,11 +741,12 @@ fn fire_cls_uni(
         for t in store.probe(None, vocab.rdf_type, Some(c_i)) {
             let head = Triple::new(t.s, vocab.rdf_type, c);
             if !out.contains(&head) && !store.contains(&head) {
+                // Body atom: the single matched membership ?x rdf:type ci.
                 out.insert(
                     head,
                     Provenance {
                         rule_id: "cls-uni",
-                        premises: smallvec![],
+                        premises: smallvec![Triple::new(t.s, vocab.rdf_type, c_i)],
                     },
                 );
             }
@@ -729,11 +776,15 @@ fn fire_cax_adc(store: &dyn TripleStore, vocab: &Vocabulary, cs: &[TermId], out:
                 if store.contains(&Triple::new(x, vocab.rdf_type, cj)) {
                     let head = Triple::new(x, vocab.rdf_type, vocab.owl_nothing);
                     if !out.contains(&head) && !store.contains(&head) {
+                        // Body atoms: ?x rdf:type ci and ?x rdf:type cj.
                         out.insert(
                             head,
                             Provenance {
                                 rule_id: "cax-adc",
-                                premises: smallvec![],
+                                premises: smallvec![
+                                    Triple::new(x, vocab.rdf_type, cs[i]),
+                                    Triple::new(x, vocab.rdf_type, cj),
+                                ],
                             },
                         );
                     }
@@ -775,11 +826,13 @@ fn fire_prp_adp(store: &dyn TripleStore, vocab: &Vocabulary, props: &[TermId], o
                 if store.contains(&Triple::new(u, pj, w)) {
                     let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
                     if !out.contains(&head) && !store.contains(&head) {
+                        // Body atoms: ?u pi ?w and ?u pj ?w (the shared pair
+                        // across two disjoint list members).
                         out.insert(
                             head,
                             Provenance {
                                 rule_id: "prp-adp",
-                                premises: smallvec![],
+                                premises: smallvec![Triple::new(u, pi, w), Triple::new(u, pj, w),],
                             },
                         );
                     }
@@ -808,14 +861,23 @@ fn fire_cls_maxc1(
         .collect();
     for u in us {
         // Any single value on the restricted property violates max 0.
-        if store.probe(Some(u), property, None).next().is_some() {
+        if let Some(viol) = store.probe(Some(u), property, None).next() {
             let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
             if !out.contains(&head) && !store.contains(&head) {
+                // Instance-level body atoms: ?u rdf:type class and the violating
+                // value ?u property ?y. The restriction declaration
+                // (owl:maxCardinality / owl:onProperty) is an asserted schema
+                // side condition the resolved `MaxCardRestriction` does not carry
+                // the restriction-class node for — elided here; a follow-up may
+                // record it.
                 out.insert(
                     head,
                     Provenance {
                         rule_id: "cls-maxc1",
-                        premises: smallvec![],
+                        premises: smallvec![
+                            Triple::new(u, vocab.rdf_type, class),
+                            Triple::new(u, property, viol.o),
+                        ],
                     },
                 );
             }
@@ -857,11 +919,21 @@ fn fire_cls_maxc2(
                 for (a, b) in [(y1, y2), (y2, y1)] {
                     let head = Triple::new(a, vocab.owl_same_as, b);
                     if !out.contains(&head) && !store.contains(&head) {
+                        // Instance-level body atoms: ?u rdf:type class and the two
+                        // distinct values ?u property y1/y2. The restriction
+                        // declaration (owl:maxCardinality / owl:onProperty) is an
+                        // asserted schema side condition elided here (the resolved
+                        // `MaxCardRestriction` does not carry the restriction node);
+                        // a follow-up may record it.
                         out.insert(
                             head,
                             Provenance {
                                 rule_id: "cls-maxc2",
-                                premises: smallvec![],
+                                premises: smallvec![
+                                    Triple::new(u, vocab.rdf_type, class),
+                                    Triple::new(u, property, y1),
+                                    Triple::new(u, property, y2),
+                                ],
                             },
                         );
                     }
@@ -877,7 +949,19 @@ fn fire_cls_maxc2(
 // for every i ≠ j. The downstream `eq-diff1` (compiled) reports
 // inconsistency if any ?xi owl:sameAs ?xj also holds.
 // ---------------------------------------------------------------------------
-fn fire_eq_diff_list(vocab: &Vocabulary, xs: &[TermId], out: &mut Delta) {
+fn fire_eq_diff_list(
+    vocab: &Vocabulary,
+    ad: TermId,
+    members_pred: TermId,
+    listhead: TermId,
+    xs: &[TermId],
+    out: &mut Delta,
+) {
+    // Schema-only: the sole antecedent is the axiom triple `?ad members_pred
+    // listhead` (members_pred is whichever of owl:members / owl:distinctMembers
+    // this list came from). Record it so the proof bottoms out at the asserted
+    // axiom.
+    let axiom = Triple::new(ad, members_pred, listhead);
     for i in 0..xs.len() {
         for j in 0..xs.len() {
             if i == j {
@@ -889,7 +973,7 @@ fn fire_eq_diff_list(vocab: &Vocabulary, xs: &[TermId], out: &mut Delta) {
                     head,
                     Provenance {
                         rule_id: "eq-diff2",
-                        premises: smallvec![],
+                        premises: smallvec![axiom],
                     },
                 );
             }
@@ -922,17 +1006,27 @@ fn fire_cls_maxqc_zero(
         "cls-maxqc1"
     };
     for u in us {
-        let has_qualifying_value = store
+        let qualifying_value = store
             .probe(Some(u), r.property, None)
-            .any(|t| qualifies(store, vocab, t.o, r.filler));
-        if has_qualifying_value {
+            .find(|t| qualifies(store, vocab, t.o, r.filler))
+            .map(|t| t.o);
+        if let Some(y) = qualifying_value {
             let head = Triple::new(u, vocab.rdf_type, vocab.owl_nothing);
             if !out.contains(&head) && !store.contains(&head) {
+                // Instance-level body atoms: ?u rdf:type r.class and the
+                // qualifying value ?u r.property ?y. The restriction declaration
+                // (owl:maxQualifiedCardinality / owl:onProperty / owl:onClass) is
+                // an asserted schema side condition the resolved
+                // `QualMaxCardRestriction` does not carry the restriction-class
+                // node for — elided here; a follow-up may record it.
                 out.insert(
                     head,
                     Provenance {
                         rule_id,
-                        premises: smallvec![],
+                        premises: smallvec![
+                            Triple::new(u, vocab.rdf_type, r.class),
+                            Triple::new(u, r.property, y),
+                        ],
                     },
                 );
             }
@@ -981,11 +1075,22 @@ fn fire_cls_maxqc_one(
                 for (a, b) in [(y1, y2), (y2, y1)] {
                     let head = Triple::new(a, vocab.owl_same_as, b);
                     if !out.contains(&head) && !store.contains(&head) {
+                        // Instance-level body atoms: ?u rdf:type r.class and the
+                        // two qualifying values ?u r.property y1/y2. The
+                        // restriction declaration (owl:maxQualifiedCardinality /
+                        // owl:onProperty / owl:onClass) is an asserted schema side
+                        // condition elided here (the resolved
+                        // `QualMaxCardRestriction` does not carry the restriction
+                        // node); a follow-up may record it.
                         out.insert(
                             head,
                             Provenance {
                                 rule_id,
-                                premises: smallvec![],
+                                premises: smallvec![
+                                    Triple::new(u, vocab.rdf_type, r.class),
+                                    Triple::new(u, r.property, y1),
+                                    Triple::new(u, r.property, y2),
+                                ],
                             },
                         );
                     }
@@ -1568,6 +1673,98 @@ mod tests {
                 .filter(|(tr, _)| tr.p == v.owl_same_as)
                 .all(|(_, prov)| prov.rule_id == "cls-maxqc4"),
             "owl:Thing filler under maxQC 1 ⇒ provenance rule id is cls-maxqc4"
+        );
+    }
+}
+
+#[cfg(test)]
+mod premise_tests {
+    use super::*;
+    use crate::store::MemStore;
+
+    fn t(s: u64, p: u64, o: u64) -> Triple {
+        Triple::new(TermId(s), TermId(p), TermId(o))
+    }
+
+    fn fresh() -> (MemStore, Vocabulary) {
+        let v = Vocabulary::synthetic(10_000);
+        (MemStore::new(v), v)
+    }
+
+    fn assert_list(s: &mut MemStore, v: &Vocabulary, head: u64, items: &[u64]) {
+        for (idx, &item) in items.iter().enumerate() {
+            let cell = head + idx as u64;
+            s.assert(t(cell, v.rdf_first.0, item));
+            let next = if idx + 1 == items.len() {
+                v.rdf_nil.0
+            } else {
+                head + (idx as u64) + 1
+            };
+            s.assert(t(cell, v.rdf_rest.0, next));
+        }
+    }
+
+    #[test]
+    fn cls_int1_records_instance_premises() {
+        let (mut s, v) = fresh();
+        let c = TermId(50);
+        let c1 = TermId(51);
+        let c2 = TermId(52);
+        let x = TermId(100);
+        s.assert(t(c.0, v.owl_intersection_of.0, 1000));
+        assert_list(&mut s, &v, 1000, &[c1.0, c2.0]);
+        s.assert(t(x.0, v.rdf_type.0, c1.0));
+        s.assert(t(x.0, v.rdf_type.0, c2.0));
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+
+        let head = Triple::new(x, v.rdf_type, c);
+        let prov = d
+            .iter()
+            .find(|(tr, _)| **tr == head)
+            .map(|(_, p)| p)
+            .expect("cls-int1 should derive x rdf:type c");
+        assert_eq!(prov.rule_id, "cls-int1");
+        assert!(
+            !prov.premises.is_empty(),
+            "cls-int1 premises must be non-empty"
+        );
+        assert!(
+            prov.premises.contains(&Triple::new(x, v.rdf_type, c1)),
+            "cls-int1 premises must contain (x rdf:type c1)"
+        );
+        assert!(
+            prov.premises.contains(&Triple::new(x, v.rdf_type, c2)),
+            "cls-int1 premises must contain (x rdf:type c2)"
+        );
+    }
+
+    #[test]
+    fn scm_int_records_axiom_premise() {
+        let (mut s, v) = fresh();
+        let c = TermId(50);
+        let c1 = TermId(51);
+        let listhead = TermId(1000);
+        s.assert(t(c.0, v.owl_intersection_of.0, listhead.0));
+        assert_list(&mut s, &v, listhead.0, &[c1.0]);
+        let ax = resolve(&s, &v);
+        let d = fire_all(&s, &ax, &v, None);
+
+        let head = Triple::new(c, v.rdfs_sub_class_of, c1);
+        let prov = d
+            .iter()
+            .find(|(tr, _)| **tr == head)
+            .map(|(_, p)| p)
+            .expect("scm-int should derive c rdfs:subClassOf c1");
+        assert_eq!(prov.rule_id, "scm-int");
+        assert!(
+            !prov.premises.is_empty(),
+            "scm-int premises must be non-empty"
+        );
+        assert!(
+            prov.premises
+                .contains(&Triple::new(c, v.owl_intersection_of, listhead)),
+            "scm-int premises must contain the originating axiom triple"
         );
     }
 }
