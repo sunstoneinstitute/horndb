@@ -145,6 +145,16 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   `rdflib-compat` harness subset differential-tested against upstream `rdflib`.
   No crate exists yet; SPEC-10 has no Stage-1 plan. Open decision: import-path
   strategy (shim vs. literal `rdflib` name).
+  Driving use case: the `rdf-registry` repo (Sunstone GTIO/SKOS publishing
+  pipeline) currently runs on pyoxigraph for RDF 1.2 Turtle parse + triple-term
+  lowering, SPARQL discovery, and serialization, and hand-rolls
+  `owl:inverseOf`/`owl:SymmetricProperty` materialization that OWL 2 RL covers
+  natively. It is the natural first real consumer to validate the SPEC-10 API
+  shape: real reified GTIO edges (`rdf:reifies <<( s p o )>>`) exercise the
+  RDF 1.2 surface, and its inverse/symmetric needs are a direct OWL 2 RL
+  subset. Near-term it can drive the HTTP SPARQL endpoint over N-Triples
+  (Turtle 1.2 is Stage-2); the in-process binding is the longer-term swap.
+  Cross-refs: SPEC-05 valued closure (#11/#12), rdf-registry.
 
 - [ ] **SPEC-01 harness.** ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
   Replace the hand-picked 50-case OWL 2 RL subset with the full W3C OWL 2 +
