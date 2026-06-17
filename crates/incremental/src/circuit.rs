@@ -386,32 +386,41 @@ impl Circuit {
         // SPEC-06 F7: publish a new immutable materialized version when this
         // tick changed state, so snapshots acquired afterwards see it and
         // snapshots acquired before keep their (now-superseded) Arc. Skip the
-        // O(n) rebuild on no-op ticks. logical_time is 0 when no asserted
-        // records were merged; only advance version_time on real progress.
+        // O(n) rebuild on no-op ticks.
         //
-        // The view is the *presence* union `asserted ∪ derived`: every present
-        // triple appears exactly once at multiplicity 1. Summing the two Z-sets
-        // (raw `add_assign`) would expose multiplicity 2+ for a triple that is
-        // both asserted and derived (e.g. derived first, then asserted by the
-        // user) or asserted more than once — which contradicts the set-union
-        // semantics the rest of the store uses (`get(t) != 0` = present) and
-        // would surprise snapshot readers. Net-zero (asserted then retracted)
-        // triples are absent.
+        // The view is the *presence* set `asserted ∪ derived`: every present
+        // triple appears exactly once. We take only **positive** multiplicities
+        // (`m > 0`) — the same presence rule `recompute_rule_closure` uses for
+        // asserted rows. A net-negative count (a retraction of a triple that
+        // was not asserted, or duplicate retractions) is *not* present, and a
+        // net-zero (asserted then retracted) triple is absent. Summing the two
+        // Z-sets (raw `add_assign`) would instead expose multiplicity 2+ for a
+        // triple that is both asserted and derived, or asserted twice — a
+        // multiset, which an RDF reader surface must not be.
         if asserted_merged > 0 || derived_merged > 0 {
             let mut materialized: Zset<TripleId> = Zset::new();
             for (triple, mult) in self.asserted_base.iter() {
-                if mult != 0 {
+                if mult > 0 {
                     materialized.add(*triple, 1);
                 }
             }
             for (triple, mult) in self.derived_base.iter() {
-                if mult != 0 && materialized.get(triple) == 0 {
+                if mult > 0 && materialized.get(triple) == 0 {
                     materialized.add(*triple, 1);
                 }
             }
             self.version = Arc::new(materialized);
+            // `version_time` is an **exclusive frontier**: the snapshot reflects
+            // every asserted record with timestamp < this value. We use the
+            // log's `current_time()` (the next timestamp to be issued = count of
+            // records committed so far), which starts at 0 for an empty circuit
+            // and strictly increases on every asserted tick. This avoids the
+            // collision of using the last record's timestamp, which is 0 for the
+            // very first record and would make the pre-first-commit and
+            // post-first-commit views indistinguishable. Advances only when
+            // asserted records merged (derived-only ticks add no new records).
             if asserted_merged > 0 {
-                self.version_time = logical_time;
+                self.version_time = self.log.current_time();
             }
         }
 

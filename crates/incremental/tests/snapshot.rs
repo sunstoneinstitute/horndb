@@ -196,3 +196,55 @@ fn snapshot_is_a_presence_set_not_a_multiset() {
     deduped.dedup();
     assert_eq!(deduped.len(), distinct, "set view has no duplicate triples");
 }
+
+// The logical-time frontier is an exclusive upper bound that never collides
+// with the first record's timestamp (0): the empty view is frontier 0 and the
+// post-first-commit view is frontier 1, so the two are distinguishable even
+// though the first asserted record carries timestamp 0.
+#[test]
+fn empty_frontier_is_distinct_from_first_commit() {
+    let mut circuit = Circuit::new();
+    let empty = circuit.snapshot();
+    assert_eq!(empty.logical_time(), 0, "empty view frontier is 0");
+
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+    let after = circuit.snapshot();
+
+    assert!(
+        after.logical_time() > empty.logical_time(),
+        "first commit must advance the frontier past the empty view"
+    );
+    assert_eq!(
+        after.logical_time(),
+        1,
+        "frontier is the exclusive upper bound"
+    );
+    // And the empty snapshot stayed pinned (still empty, still frontier 0).
+    assert!(empty.is_empty());
+    assert_eq!(empty.logical_time(), 0);
+}
+
+// A retraction of a triple that was never asserted drives the asserted Z-set
+// multiplicity negative; the presence set must NOT expose it as a ghost row.
+#[test]
+fn over_retracted_triple_is_not_present() {
+    let mut circuit = Circuit::new();
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+
+    // Retract a triple that is not in the store.
+    circuit.retract_triple((7, P, 8));
+    circuit.tick();
+
+    let snap = circuit.snapshot();
+    assert!(
+        !snap.contains(&(7, P, 8)),
+        "over-retracted triple is absent"
+    );
+    assert!(
+        snap.contains(&(1, P, 2)),
+        "the real triple is still present"
+    );
+    assert_eq!(snap.len(), 1, "no ghost row from the negative count");
+}

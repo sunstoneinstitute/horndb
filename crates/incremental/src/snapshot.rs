@@ -48,8 +48,13 @@ impl Snapshot {
         Self { time, view }
     }
 
-    /// The logical time this snapshot represents: it reflects every asserted
-    /// record with timestamp ≤ this value (SPEC-06 F7).
+    /// The logical-time **exclusive frontier** this snapshot represents: it
+    /// reflects every asserted record with timestamp `< logical_time()`
+    /// (SPEC-06 F7). It is `0` for the empty, pre-first-commit view and strictly
+    /// increases on every tick that merges asserted records, so it doubles as a
+    /// monotonic "as-of" token: equal frontiers denote the same committed state,
+    /// and the first commit's view (frontier `1`) is distinct from the empty
+    /// view (frontier `0`) even though the first record carries timestamp `0`.
     pub fn logical_time(&self) -> LogicalTime {
         self.time
     }
