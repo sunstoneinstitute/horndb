@@ -25,7 +25,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: 8642e92d@Stigs-MacBook-Pro.local · task-38-proof-recording · 2026-06-17T10:27:12Z_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
-- [v] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)) — _wip: a175a6d8@Stigs-MacBook-Pro.local · task-6-f6-retraction-across-joins · 2026-06-17T10:46:50Z_
+- [ ] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
@@ -100,7 +100,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Deferred: GPU GraphBLAS backend (SPEC-09), LAGraph adoption, perf tuning
   (`GrB_Matrix_dup` clone, `(min,+)` semiring, nnz-threshold routing).
 
-- [v] **SPEC-06 incremental.** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
+- [ ] **SPEC-06 incremental.** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
   Remaining: F6 correct retraction across joins ([#45](https://github.com/sunstoneinstitute/horndb/issues/45)),
   F7 in-flight reader visibility / MVCC snapshots ([#46](https://github.com/sunstoneinstitute/horndb/issues/46)).
   Delivered: F5 closure-operator deltas (#44).
