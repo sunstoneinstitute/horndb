@@ -33,6 +33,7 @@
 //!   `add_closure_plan` / `ClosureRule` (insertion-only). Closure↔rule
 //!   cross-feedback within one tick remains a Stage-2 concern.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -88,11 +89,13 @@ pub struct Circuit {
     /// whose closure support is intact (Finding 2). Only *written* by the
     /// closure pass; only *read* on retraction ticks.
     closure_support: BTreeSet<TripleId>,
-    /// SPEC-06 F7 — current immutable materialized version, `asserted_base ∪
-    /// derived_base`, shared with all live [`Snapshot`]s. A state-changing
-    /// `tick()` replaces this Arc with a fresh one; snapshots holding the old
-    /// Arc keep their pinned view (writers never block readers).
-    version: Arc<Zset<TripleId>>,
+    /// SPEC-06 F7 — lazily-built, cached presence view shared with live
+    /// [`Snapshot`]s. `None` means "stale": the next `snapshot()` rebuilds it
+    /// from the current bases. A state-changing `tick()` invalidates it in O(1)
+    /// (no allocation) so steady-state ticks stay delta-sized; the O(n) build is
+    /// paid only when a reader actually acquires a snapshot, and is reused by
+    /// further acquires until the next tick.
+    version_cache: RefCell<Option<Arc<Zset<TripleId>>>>,
     /// Logical time the current `version` represents: the max asserted-record
     /// timestamp merged so far (advances only on ticks that merge asserted
     /// records).
@@ -117,7 +120,7 @@ impl Circuit {
             derived_clock: 0,
             rule_attr: BTreeMap::new(),
             closure_support: BTreeSet::new(),
-            version: Arc::new(Zset::new()),
+            version_cache: RefCell::new(None),
             version_time: 0,
         }
     }
@@ -151,11 +154,47 @@ impl Circuit {
     }
 
     /// Acquire an MVCC [`Snapshot`] (SPEC-06 F7): a refcounted, consistent
-    /// `(asserted ∪ derived)` view pinned at the current logical time. O(1) —
-    /// it clones an `Arc` of the current version. The snapshot survives
-    /// subsequent `tick()`s until dropped; readers and writers never block.
+    /// `(asserted ∪ derived)` view pinned at the current logical time. The
+    /// snapshot survives subsequent `tick()`s until dropped; readers and
+    /// writers never block.
+    ///
+    /// Amortized O(1) when the cache is warm (clones an `Arc` of the already
+    /// materialized presence set), O(|asserted| + |derived|) on the first
+    /// acquire after a state-changing `tick()` invalidated the cache. The build
+    /// is paid lazily here rather than on every tick, so steady-state writes
+    /// stay delta-sized.
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot::new(self.version_time, Arc::clone(&self.version))
+        let mut cache = self.version_cache.borrow_mut();
+        let view = cache
+            .get_or_insert_with(|| Arc::new(self.materialize_presence()))
+            .clone();
+        Snapshot::new(self.version_time, view)
+    }
+
+    /// Build the presence-set view `asserted ∪ derived` (each present triple at
+    /// multiplicity 1). Positive multiplicities only: a net-zero/negative triple
+    /// is absent. O(|asserted| + |derived|); called lazily from `snapshot()`.
+    ///
+    /// We take only **positive** multiplicities (`m > 0`) — the same presence
+    /// rule `recompute_rule_closure` uses for asserted rows. A net-negative
+    /// count (a retraction of a triple that was not asserted, or duplicate
+    /// retractions) is *not* present, and a net-zero (asserted then retracted)
+    /// triple is absent. Summing the two Z-sets (raw `add_assign`) would instead
+    /// expose multiplicity 2+ for a triple that is both asserted and derived, or
+    /// asserted twice — a multiset, which an RDF reader surface must not be.
+    fn materialize_presence(&self) -> Zset<TripleId> {
+        let mut materialized: Zset<TripleId> = Zset::new();
+        for (triple, mult) in self.asserted_base.iter() {
+            if mult > 0 {
+                materialized.add(*triple, 1);
+            }
+        }
+        for (triple, mult) in self.derived_base.iter() {
+            if mult > 0 && materialized.get(triple) == 0 {
+                materialized.add(*triple, 1);
+            }
+        }
+        materialized
     }
 
     /// Append an insertion to the pending log. Kind = Asserted.
@@ -383,42 +422,23 @@ impl Circuit {
         }
         self.closure_plans = closure_plans;
 
-        // SPEC-06 F7: publish a new immutable materialized version when this
-        // tick changed state, so snapshots acquired afterwards see it and
-        // snapshots acquired before keep their (now-superseded) Arc. Skip the
-        // O(n) rebuild on no-op ticks.
+        // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
+        // (O(1), no allocation). The presence set is rebuilt lazily on the next
+        // snapshot() acquire — so steady-state ticks stay delta-sized and the O(n)
+        // build is only paid when a reader needs it. version_time (exclusive
+        // frontier) still advances here on asserted merges.
         //
-        // The view is the *presence* set `asserted ∪ derived`: every present
-        // triple appears exactly once. We take only **positive** multiplicities
-        // (`m > 0`) — the same presence rule `recompute_rule_closure` uses for
-        // asserted rows. A net-negative count (a retraction of a triple that
-        // was not asserted, or duplicate retractions) is *not* present, and a
-        // net-zero (asserted then retracted) triple is absent. Summing the two
-        // Z-sets (raw `add_assign`) would instead expose multiplicity 2+ for a
-        // triple that is both asserted and derived, or asserted twice — a
-        // multiset, which an RDF reader surface must not be.
+        // `version_time` is an **exclusive frontier**: the snapshot reflects
+        // every asserted record with timestamp < this value. We use the log's
+        // `current_time()` (the next timestamp to be issued = count of records
+        // committed so far), which starts at 0 for an empty circuit and strictly
+        // increases on every asserted tick. This avoids the collision of using
+        // the last record's timestamp, which is 0 for the very first record and
+        // would make the pre-first-commit and post-first-commit views
+        // indistinguishable. Advances only when asserted records merged
+        // (derived-only ticks add no new records).
         if asserted_merged > 0 || derived_merged > 0 {
-            let mut materialized: Zset<TripleId> = Zset::new();
-            for (triple, mult) in self.asserted_base.iter() {
-                if mult > 0 {
-                    materialized.add(*triple, 1);
-                }
-            }
-            for (triple, mult) in self.derived_base.iter() {
-                if mult > 0 && materialized.get(triple) == 0 {
-                    materialized.add(*triple, 1);
-                }
-            }
-            self.version = Arc::new(materialized);
-            // `version_time` is an **exclusive frontier**: the snapshot reflects
-            // every asserted record with timestamp < this value. We use the
-            // log's `current_time()` (the next timestamp to be issued = count of
-            // records committed so far), which starts at 0 for an empty circuit
-            // and strictly increases on every asserted tick. This avoids the
-            // collision of using the last record's timestamp, which is 0 for the
-            // very first record and would make the pre-first-commit and
-            // post-first-commit views indistinguishable. Advances only when
-            // asserted records merged (derived-only ticks add no new records).
+            *self.version_cache.borrow_mut() = None;
             if asserted_merged > 0 {
                 self.version_time = self.log.current_time();
             }
