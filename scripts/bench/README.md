@@ -72,6 +72,13 @@ gen_workload.py ──┬─► chain.nt ──────────► hornd
   both engines. `chain N` is a single-predicate path (closure = N·(N−1)/2);
   `taxonomy D I` is an `rdfs:subClassOf` chain of depth `D` with `I` instances
   typed at the bottom class (drives `cax-sco` + `scm-sco`).
+  - A bare `chain` is for `horndb-bench transitive` (it closes the predicate
+    directly). To drive `horndb-bench materialize` (OWL 2 RL) with the same
+    chain you **must** add `--transitive`, which declares the predicate
+    `owl:TransitiveProperty` so `prp-trp` fires — that is the
+    closure-dominated regime in BENCHMARKS.md's owlrl materialize A/B. Without
+    it `materialize` infers ~nothing and the GraphBLAS backend looks *slower*
+    than rule-firing (there is no closure to do).
 - `rules/owl2rl-core.dlog` — the two OWL 2 RL rules (`cax-sco`, `scm-sco`) the
   taxonomy workload exercises, in RDFox Datalog, so RDFox runs the same closure.
 - `horndb-bench` (`crates/bench-rdfox`) — the HornDB-side micro-runner. One
