@@ -61,3 +61,4 @@ pub use engine::{
     PhaseTimings, Stats,
 };
 pub use integration::{BackendChoice, Engine};
+pub use provenance::ProofTree;
