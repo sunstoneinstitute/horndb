@@ -33,7 +33,7 @@
 //!   `add_closure_plan` / `ClosureRule` (insertion-only). Closure↔rule
 //!   cross-feedback within one tick remains a Stage-2 concern.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx};
 use crate::closure_plan::ClosureRule;
@@ -63,6 +63,16 @@ pub struct Circuit {
     /// recompute to (a) recover the prior rule-derived set to diff and
     /// (b) attribute withdrawal records to the right `RuleId`.
     rule_attr: BTreeMap<TripleId, RuleId>,
+    /// Every triple ever emitted by a closure plan. Because the closure
+    /// pass is insertion-only (closure-path retraction is deferred under
+    /// parent #6), this set only ever grows — matching the "closure rows
+    /// persist" semantics. The retraction path reads it for two reasons:
+    /// (1) it seeds `recompute_rule_closure` so rules can join against
+    /// closure-derived inputs exactly as the forward path does (Finding 1),
+    /// and (2) it lets the withdrawal diff retain a triple whose rule
+    /// ownership lapsed but whose closure support is intact (Finding 2).
+    /// Only *written* by the closure pass; only *read* on retraction ticks.
+    closure_support: BTreeSet<TripleId>,
 }
 
 impl Default for Circuit {
@@ -82,6 +92,7 @@ impl Circuit {
             feed: ChangeFeed::new(),
             derived_clock: 0,
             rule_attr: BTreeMap::new(),
+            closure_support: BTreeSet::new(),
         }
     }
 
@@ -251,9 +262,17 @@ impl Circuit {
             }
             // No-longer-derivable rows → withdraw to zero + publish a
             // negative RuleInferred attributed to the rule that had derived
-            // it.
+            // it. EXCEPT rows still in `closure_support`: the row keeps its
+            // closure derivation (closure-path retraction is deferred under
+            // parent #6), so only its rule ownership lapses. `rule_attr`
+            // already drops it (it is absent from `new_rule`); we must NOT
+            // zero `derived_base` or publish a withdrawal, or we would
+            // destroy still-valid closure support (Finding 2).
             for (triple, old_rid) in &old_rule {
                 if !new_rule.contains_key(triple) {
+                    if self.closure_support.contains(triple) {
+                        continue;
+                    }
                     let cur = self.derived_base.get(triple);
                     if cur != 0 {
                         self.derived_base.add(*triple, -cur);
@@ -298,6 +317,12 @@ impl Circuit {
         for rule in &mut closure_plans {
             let inferred = rule.apply_insert_delta(&asserted_delta_for_closure);
             for triple in inferred {
+                // Record closure ownership for EVERY emitted triple, even
+                // when a rule already produced the row (the dedup-skip below
+                // would otherwise hide the overlap). The retraction path
+                // reads this set to keep closure-supported rows alive
+                // (Finding 2) and to seed the rule recompute (Finding 1).
+                self.closure_support.insert(triple);
                 if combined_base.get(&triple) != 0 {
                     continue;
                 }
@@ -332,6 +357,17 @@ impl Circuit {
     /// the forward path, which excludes asserted triples from
     /// `derived_base`. The returned map therefore contains exactly the
     /// rule-derived rows, suitable for diffing against `rule_attr`.
+    ///
+    /// The seed is `asserted_base ∪ closure_support` (Finding 1): the
+    /// forward path runs rules over `asserted ∪ derived`, and
+    /// closure-derived rows live in `derived` and persist (closure-path
+    /// retraction is deferred). Seeding the recompute with `closure_support`
+    /// therefore reproduces the forward path's input extent — rules can join
+    /// against closure-derived inputs, and a rule consequence that depends
+    /// on a closure row is not spuriously withdrawn when an unrelated (or
+    /// the closure's own asserted-edge) retraction lands. Closure-supported
+    /// triples are seeded at multiplicity 1 and, like asserted triples, get
+    /// no attribution entry, so they are treated as stable base inputs.
     fn recompute_rule_closure(&self) -> BTreeMap<TripleId, RuleId> {
         // Bound the naïve fixpoint. The retraction path operates on small
         // working sets; a runaway means a non-terminating ruleset, which we
@@ -342,7 +378,8 @@ impl Circuit {
             self.asserted_base
                 .iter()
                 .filter(|(_, m)| *m > 0)
-                .map(|(t, _)| (*t, 1)),
+                .map(|(t, _)| (*t, 1))
+                .chain(self.closure_support.iter().map(|t| (*t, 1))),
         );
         let mut attr: BTreeMap<TripleId, RuleId> = BTreeMap::new();
 
