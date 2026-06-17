@@ -8,10 +8,23 @@ When a task is picked up, move it to its own commit / PR and check it off here
 (and in the index) in the same commit.
 
 > **Maintenance:** the [Index](#index) is the TOC — one line per task, mirroring
-> its checkbox state, **priority**, and _category_. Each open task mirrors a
-> GitHub issue (`sunstoneinstitute/horndb`) via its `([#N](…))` link, labelled
-> `priority: …` + `category: …` to match. Add/complete/retitle/re-prioritise a
-> task and its issue together — see `CLAUDE.md` → "Keep the docs in sync".
+> its checkbox state, **priority**, and _category_. Each open task mirrors one
+> GitHub issue (`sunstoneinstitute/horndb`) via its `([#N](…))` link, on both the
+> index line and the body heading, labelled with one `priority:` label
+> (`critical`/`high`/`medium`/`low`) and one `category:` label to match. Keep task
+> and issue in lockstep, in the same change:
+>
+> - **Add a task** → open an issue with the matching `priority:` + `category:`
+>   labels, then put its `([#N](url))` link on both the index line and the body
+>   heading. `gh issue create --title … --label "priority: …" --label "category: …" --body-file …`.
+> - **Complete a task** (`[ ]` → `[x]`) → `gh issue close N`. Keep the link for traceability.
+> - **Retitle / re-prioritise / re-categorise** → `gh issue edit N` to update the
+>   title and swap the `priority:`/`category:` labels so they still match.
+> - **Remove a task** → `gh issue close N` (comment why) and drop its `TASKS.md` lines.
+>
+> The `priority:`/`category:` labels are the GitHub mirror of the taxonomy below; if
+> you add a new one here, `gh label create` it first. When a task changes, also
+> update `docs/architecture.md` — see `CLAUDE.md` → "Keep the docs in sync".
 >
 > **Priority** = urgency (CRITICAL/HIGH/MEDIUM/LOW). **Category** = type of work:
 > _Correctness_ · _Performance_ · _Completeness_ · _Conformance_ · _Tooling_ ·
