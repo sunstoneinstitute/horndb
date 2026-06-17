@@ -17,6 +17,12 @@
 //! 4. Merges `Δ_derived` into `derived_base`, publishing each record
 //!    (kind = RuleInferred(rule_id) for the originating plan).
 //!
+//! `tick()` has two regimes: insertion-only ticks take the forward
+//! semi-naïve path described above; any tick containing a retraction
+//! (`mult < 0`) instead recomputes the set-semantics rule closure of the
+//! post-delta base and diffs it against the prior rule-derived rows (F6,
+//! see `tick()`). Closure-path retraction stays insertion-only.
+//!
 //! Stage 1 simplifications:
 //! - One round of rule firing per tick. SPEC-04 will wrap this in a
 //!   semi-naïve fixed-point loop driven by its dirty-flag machinery.
