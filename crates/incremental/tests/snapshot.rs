@@ -27,3 +27,50 @@ fn snapshot_sees_asserted_rows_after_tick() {
     assert!(!snap.contains(&(9, P, 9)));
     assert_eq!(snap.get(&(1, P, 2)), 1);
 }
+
+#[test]
+fn snapshot_is_pinned_across_a_later_tick() {
+    let mut circuit = Circuit::new();
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+
+    let snap = circuit.snapshot();
+    assert_eq!(snap.len(), 1);
+
+    // A later tick adds a new triple. The pinned snapshot must NOT see it.
+    circuit.assert_triple((3, P, 4));
+    circuit.tick();
+
+    assert_eq!(snap.len(), 1, "snapshot must stay pinned across the tick");
+    assert!(snap.contains(&(1, P, 2)));
+    assert!(!snap.contains(&(3, P, 4)));
+
+    // A fresh snapshot does see both.
+    let fresh = circuit.snapshot();
+    assert_eq!(fresh.len(), 2);
+    assert!(fresh.contains(&(3, P, 4)));
+}
+
+#[test]
+fn overlapping_snapshots_stay_independent() {
+    let mut circuit = Circuit::new();
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+    let s1 = circuit.snapshot();
+
+    circuit.assert_triple((2, P, 3));
+    circuit.tick();
+    let s2 = circuit.snapshot();
+
+    circuit.assert_triple((3, P, 4));
+    circuit.tick();
+    let s3 = circuit.snapshot();
+
+    assert_eq!(s1.len(), 1, "s1 pinned at 1 triple");
+    assert_eq!(s2.len(), 2, "s2 pinned at 2 triples");
+    assert_eq!(s3.len(), 3, "s3 sees all 3");
+
+    // Logical time advances across ticks that merge asserted records.
+    assert!(s1.logical_time() < s2.logical_time());
+    assert!(s2.logical_time() < s3.logical_time());
+}
