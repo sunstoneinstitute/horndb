@@ -116,3 +116,71 @@ fn overlap_triple_retains_closure_support_on_rule_retraction() {
         "(1,SC,3) retained via closure_support after rule support lost"
     );
 }
+
+/// Ghost case: a closure plan emits a *direct* edge `(c,SC,d)` that is ALSO
+/// asserted by the user, so the edge is materialized only in `asserted_base`
+/// (the closure pass's dedup-skip means it never lands in `derived_base`). A
+/// rule `(a TYPE c) ∧ (c SC d) → (a TYPE d)` derives `(a,TYPE,d)` off that
+/// asserted edge.
+///
+/// When the asserted `(c,SC,d)` is retracted, its only support disappears —
+/// the closure plan does NOT independently materialize `(c,SC,d)` as a
+/// non-asserted derived row — so the rule consequence `(a,TYPE,d)` MUST be
+/// withdrawn.
+///
+/// Before the `closure_support ⊆ derived_base` fix, the closure pass recorded
+/// `(c,SC,d)` in `closure_support` unconditionally (even though it lived only
+/// in `asserted_base`). After retraction that ghost seeded
+/// `recompute_rule_closure`, re-deriving `(a,TYPE,d)` from a triple the
+/// materialized store says is gone. This test pins that the consequence is
+/// now withdrawn.
+#[test]
+fn stale_rule_consequence_on_retracted_asserted_edge_is_withdrawn() {
+    const A: u64 = 5;
+    const C: u64 = 1;
+    const D: u64 = 2;
+
+    let mut circuit = Circuit::new();
+    // SC closure plan: emits direct edges too, so an asserted (c,SC,d) is
+    // re-emitted by the closure pass on its insertion tick.
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
+    let mut plan = NaryPlan::new();
+    plan.push_join(Box::new(CaxScoRule { id: R3_CAX_SCO }));
+    circuit.add_plan(plan, R3_CAX_SCO);
+
+    // Assert the SC edge (c,SC,d) and the type (a,TYPE,c). The rule derives
+    // (a,TYPE,d) from the asserted SC edge.
+    circuit.assert_triple((C, SC, D));
+    circuit.assert_triple((A, TYPE, C));
+    circuit.tick();
+
+    assert_eq!(
+        circuit.derived_base().get(&(A, TYPE, D)),
+        1,
+        "rule derives (a,TYPE,d) from the asserted (c,SC,d)"
+    );
+    // (c,SC,d) is asserted, so the closure pass's dedup-skip keeps it out of
+    // derived_base — it lives only in asserted_base.
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, D)),
+        0,
+        "(c,SC,d) is asserted, not materialized in derived_base"
+    );
+
+    // Retract the asserted (c,SC,d). Its only support is gone; the closure
+    // plan does not independently materialize it as a derived row, so the
+    // rule consequence (a,TYPE,d) must be withdrawn.
+    circuit.retract_triple((C, SC, D));
+    circuit.tick();
+
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, D)),
+        0,
+        "(c,SC,d) must not be a ghost materialized row after retraction"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(A, TYPE, D)),
+        0,
+        "(a,TYPE,d) must be withdrawn — its only support (asserted (c,SC,d)) is gone"
+    );
+}
