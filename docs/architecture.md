@@ -47,7 +47,7 @@ Six bets define the project. Their current state:
 |---|---|---|---|
 | 1 | Hybrid execution (materialize the closure subset, backward-chain the rest with magic sets) | **partially implemented** | Forward materialization (SPEC-04) and GraphBLAS closure (SPEC-05) ship. Magic-sets / backward-chaining (SPEC-03 F4/F5, SPEC-07 backward mode) is **deferred**. |
 | 2 | Unified-memory hardware as a first-class target (HBM/DDR5/CXL/NVMe) | **specified / deferred** | Tier API scaffolding exists in SPEC-02; GPU/CXL/NVMe specialization is SPEC-09, Stage 3. |
-| 3 | DBSP-style incremental maintenance (Z-set deltas) | **partially implemented** | Insertion-only Z-set machinery ships (SPEC-06); retraction is **deferred**. |
+| 3 | DBSP-style incremental maintenance (Z-set deltas) | **partially implemented** | Insertion-only Z-set machinery ships (SPEC-06); **rule-path retraction across joins now works** via recompute-and-diff on retraction-containing ticks (SPEC-06 F6, [#45](https://github.com/sunstoneinstitute/horndb/issues/45)). Closure-path retraction and a fully delta-incremental retraction path remain **deferred**. |
 | 4 | GraphBLAS for the closure subset | **implemented** | SuiteSparse:GraphBLAS backend ships (SPEC-05). |
 | 5 | Soufflé-style ahead-of-time rule compilation (no interpreter) | **implemented** | `build.rs` codegen from `rules.toml` (SPEC-04). |
 | 6 | Provenance / correctability as a hard requirement | **partially implemented** | Stage-1 ships a stub `Provenance`; production proof recording (SPEC-04 F4) is **planned**. |
@@ -236,10 +236,14 @@ SuiteSparse:GraphBLAS. SPEC-04 routes those axioms here.
 
 ## 8. SPEC-06 — DBSP incremental maintenance
 
-**Crate:** `horndb-incremental` · **Spec:** `SPEC-06` · **Overall status: implemented (insertion-only)**
+**Crate:** `horndb-incremental` · **Spec:** `SPEC-06` · **Overall status: implemented; rule-path retraction across joins (F6) landed, closure-path retraction deferred**
 
 Maintains the materialized closure under updates using DBSP / Z-set
-semantics. **Insertion-only at Stage 1** — the highest-risk spec.
+semantics. Insertion is fully incremental; **rule-path retraction across
+joins** ([#45](https://github.com/sunstoneinstitute/horndb/issues/45))
+lands via recompute-and-diff on retraction-containing ticks. Closure-path
+retraction and a fully delta-incremental retraction path remain deferred —
+this is still the highest-risk spec.
 
 | Component | Status | Notes |
 |---|---|---|
@@ -248,8 +252,8 @@ semantics. **Insertion-only at Stage 1** — the highest-risk spec.
 | Bilinear rule operator (two-pattern bodies) | **implemented** | `operator.rs`, `circuit.rs`. |
 | Change feed (`(triple, mult, time, derivation_kind)`) | **implemented** | `change_feed.rs`. |
 | Checkpoint merge (collapse ±1 pairs) | **implemented** | `checkpoint.rs`, `delta_log.rs`. |
-| Retraction semantics (F6) | **deferred** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-06 incremental". Insertion only at Stage 1 (`FUTURE-WORK.md`). |
-| Closure-operator deltas (F5) | **implemented (insertion-only)** | `closure_plan.rs` (`ClosureRule` / `TransitiveClosureRule`) + `circuit.rs` (`add_closure_plan`, closure pass): wraps SPEC-05's `IncrementalClosureBackend` ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)), folds the asserted insertion delta into the retained per-predicate closure, emits only newly inferred triples tagged `ClosureInferred`. Differential proptest vs full recompute (`tests/closure_deltas_differential.rs`) ([#44](https://github.com/sunstoneinstitute/horndb/issues/44)). Retraction through the closure stays deferred (needs F6). |
+| Retraction semantics (F6) | **implemented (rule path)** | Recompute-and-diff on retraction-containing ticks: `circuit.rs` (`recompute_rule_closure`, `rule_attr`) recomputes the set-semantics rule closure of the post-delta base and diffs against prior rule-derived rows, publishing positive/negative `RuleInferred`. Order-independent and correct for arbitrary `(triple, ±k)`. Tests: `tests/retraction.rs` (acceptance #3 — insert 10K / retract 10K bit-identical) + tightened acceptance #4 (`tests/acceptance_differential.rs`, multiplicity equality over interleaved insert+retract). Increment [#45](https://github.com/sunstoneinstitute/horndb/issues/45) under epic [#6](https://github.com/sunstoneinstitute/horndb/issues/6). **Closure-path retraction and a fully delta-incremental retraction path stay deferred** (`FUTURE-WORK.md`). |
+| Closure-operator deltas (F5) | **implemented (insertion-only)** | `closure_plan.rs` (`ClosureRule` / `TransitiveClosureRule`) + `circuit.rs` (`add_closure_plan`, closure pass): wraps SPEC-05's `IncrementalClosureBackend` ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)), folds the asserted insertion delta into the retained per-predicate closure, emits only newly inferred triples tagged `ClosureInferred`. Differential proptest vs full recompute (`tests/closure_deltas_differential.rs`) ([#44](https://github.com/sunstoneinstitute/horndb/issues/44)). Retraction through the closure stays deferred as its own follow-up — F6 ([#45](https://github.com/sunstoneinstitute/horndb/issues/45)) delivered rule-path retraction but the `ClosureRule` operator is still insertion-only, so it needs the deletion half of SPEC-05's incremental closure rather than F6. |
 | MVCC for in-flight reads | **deferred** | Stage 2. |
 | Distributed timely-dataflow | **deferred** | SPEC-09, Stage 3. |
 

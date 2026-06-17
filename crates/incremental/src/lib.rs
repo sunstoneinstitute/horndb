@@ -7,16 +7,19 @@
 //! Stage 1 because:
 //!
 //! 1. The Stage-1 surface (linear + bilinear operators, checkpoint-boundary
-//!    snapshots, insertion only) is ~few hundred LOC and we want to read it
-//!    end-to-end when debugging the differential test (acceptance #4).
+//!    snapshots, insertion plus rule-path retraction-by-recompute-and-diff)
+//!    is ~few hundred LOC and we want to read it end-to-end when debugging
+//!    the differential test (acceptance #4).
 //! 2. `differential-dataflow` pulls `timely` plus ~30 transitive crates that
 //!    target distributed scheduling we defer to SPEC-09 (Stage 3).
 //! 3. The `BilinearRule` trait is the only contract SPEC-04 codegen depends
 //!    on; we can swap the implementation behind it in Stage 2 if needed.
 //!
-//! Re-evaluate this decision if F5 (closure deltas) or F6 (retraction across
-//! joins) forces us to duplicate `differential-dataflow`'s arrangement
-//! sharing logic. See FUTURE-WORK.md.
+//! F6 (rule-path retraction across joins) now works via recompute-and-diff
+//! on retraction-containing ticks (see [`circuit`]); closure-path retraction
+//! and a fully delta-incremental retraction path remain future. Re-evaluate
+//! this decision if either — or F5 (closure deltas) — forces us to duplicate
+//! `differential-dataflow`'s arrangement sharing logic. See FUTURE-WORK.md.
 //!
 //! # Module layout
 //!
