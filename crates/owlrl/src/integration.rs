@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
 use crate::engine::{reset_and_materialize, Stats};
+use crate::provenance::ProofTree;
 use crate::store::{MemStore, TripleStore};
 use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
@@ -91,6 +92,26 @@ pub enum BackendChoice {
     /// SuiteSparse:GraphBLAS sparse-matrix closure (`horndb-closure`).
     #[cfg(feature = "graphblas-backend")]
     GraphBlas,
+}
+
+/// A proof tree with terms decoded back to their lexical forms (the same
+/// lexical convention as [`Engine::materialized_triples`]).
+///
+/// Mirrors [`ProofTree`](crate::ProofTree) with each `(subject, predicate,
+/// object)` decoded from `TermId`s into lexical strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StringProofTree {
+    /// A base (asserted) triple, or a triple with no recorded derivation.
+    Asserted((String, String, String)),
+    /// A derived triple: the rule that produced it and the proofs of its
+    /// premises.
+    Derived {
+        triple: (String, String, String),
+        rule_id: String,
+        premises: Vec<StringProofTree>,
+    },
+    /// A derivation cycle, cut to keep the tree finite.
+    Cycle((String, String, String)),
 }
 
 pub struct Engine {
@@ -301,6 +322,34 @@ impl Engine {
         Some(out)
     }
 
+    /// Proof tree for the materialised triple `(s, p, o)`, given as lexical
+    /// keys per [`materialized_triples`](Self::materialized_triples), with
+    /// every node's terms decoded back to their lexical forms.
+    ///
+    /// Returns `None` if nothing has been loaded, if any of `s`/`p`/`o` was
+    /// never interned, or if the triple is not present in the materialised
+    /// store.
+    ///
+    /// Builds the full reverse dictionary on each call (O(dict)) — intended
+    /// for introspection / debugging, not a hot path.
+    pub fn proof(&self, s: &str, p: &str, o: &str) -> Option<StringProofTree> {
+        let state = self.state.as_ref()?;
+        let sid = *state.dict.get(s)?;
+        let pid = *state.dict.get(p)?;
+        let oid = *state.dict.get(o)?;
+        let triple = Triple::new(sid, pid, oid);
+        if !state.store.contains(&triple) {
+            return None;
+        }
+        // Invert the dictionary once: TermId → lexical key (see
+        // `materialized_triples`).
+        let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+        for (lex, &id) in &state.dict {
+            rev.insert(id, lex.as_str());
+        }
+        Some(decode_proof(&state.store.proof_tree(&triple), &rev))
+    }
+
     /// Stub-grade SPARQL ASK: returns true iff anything was loaded.
     ///
     /// Full SPARQL evaluation lives in SPEC-07's `horndb-sparql`; wiring
@@ -319,6 +368,30 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Decode a [`ProofTree`] into a [`StringProofTree`], mapping each node's
+/// `TermId`s through `rev` (the inverted dictionary). A term with no lexical
+/// key falls back to `"?"` — defensive only; every id is interned through
+/// the dict (mirrors the skip-defensively stance in `materialized_triples`).
+fn decode_proof(tree: &ProofTree, rev: &FxHashMap<TermId, &str>) -> StringProofTree {
+    let decode = |t: &Triple| -> (String, String, String) {
+        let lex = |id: TermId| rev.get(&id).map_or("?", |s| s).to_string();
+        (lex(t.s), lex(t.p), lex(t.o))
+    };
+    match tree {
+        ProofTree::Asserted(t) => StringProofTree::Asserted(decode(t)),
+        ProofTree::Cycle(t) => StringProofTree::Cycle(decode(t)),
+        ProofTree::Derived {
+            triple,
+            rule_id,
+            premises,
+        } => StringProofTree::Derived {
+            triple: decode(triple),
+            rule_id: rule_id.to_string(),
+            premises: premises.iter().map(|p| decode_proof(p, rev)).collect(),
+        },
     }
 }
 
@@ -1055,6 +1128,71 @@ mod tests {
         assert!(triples.iter().any(|(s, p, o)| {
             s == "http://ex/x" && p == "http://ex/p" && o.starts_with("\"hi\"")
         }));
+    }
+
+    fn leaves_all_asserted(tree: &StringProofTree) -> bool {
+        match tree {
+            StringProofTree::Asserted(_) | StringProofTree::Cycle(_) => true,
+            StringProofTree::Derived { premises, .. } => {
+                // An empty-premise Derived is treated as a leaf (acceptable).
+                premises.iter().all(leaves_all_asserted)
+            }
+        }
+    }
+
+    #[test]
+    fn engine_proof_decodes_multistep_derivation() {
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        // c1 ⊑ c2, c2 ⊑ c3, x a c1  ⇒  x a c3 (two-step scm-sco + cax-sco).
+        data.insert(&nq("http://ex/c1", RDFS_SUB_CLASS_OF, "http://ex/c2"));
+        data.insert(&nq("http://ex/c2", RDFS_SUB_CLASS_OF, "http://ex/c3"));
+        data.insert(&nq("http://ex/x", RDF_TYPE, "http://ex/c1"));
+        engine.load(&data).unwrap();
+
+        let proof = engine
+            .proof("http://ex/x", RDF_TYPE, "http://ex/c3")
+            .expect("x a c3 should be in the store with a proof");
+        match &proof {
+            StringProofTree::Derived {
+                triple, premises, ..
+            } => {
+                assert_eq!(
+                    *triple,
+                    (
+                        "http://ex/x".to_string(),
+                        RDF_TYPE.to_string(),
+                        "http://ex/c3".to_string(),
+                    )
+                );
+                assert!(!premises.is_empty(), "derivation should have premises");
+            }
+            other => panic!("expected Derived for x a c3, got {other:?}"),
+        }
+        assert!(
+            leaves_all_asserted(&proof),
+            "every leaf of the proof tree should be Asserted/Cycle"
+        );
+    }
+
+    #[test]
+    fn engine_proof_none_before_load_and_for_absent() {
+        let engine = Engine::new();
+        assert!(engine
+            .proof("http://ex/x", RDF_TYPE, "http://ex/c3")
+            .is_none());
+
+        let mut engine = Engine::new();
+        let mut data = Dataset::new();
+        data.insert(&nq("http://ex/x", RDF_TYPE, "http://ex/c1"));
+        engine.load(&data).unwrap();
+        // Predicate/term never interned, or triple simply absent.
+        assert!(engine
+            .proof("http://ex/x", RDF_TYPE, "http://ex/absent")
+            .is_none());
+        assert!(engine
+            .proof("http://ex/x", "http://ex/never", "http://ex/c1")
+            .is_none());
     }
 
     #[test]

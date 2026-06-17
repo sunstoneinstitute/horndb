@@ -60,5 +60,5 @@ pub use engine::{
     materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts,
     PhaseTimings, Stats,
 };
-pub use integration::{BackendChoice, Engine};
+pub use integration::{BackendChoice, Engine, StringProofTree};
 pub use provenance::ProofTree;
