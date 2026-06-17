@@ -1,6 +1,6 @@
 //! SPEC-06 F7 — in-flight reader visibility (MVCC snapshots).
 
-use horndb_incremental::Circuit;
+use horndb_incremental::{Circuit, TransitiveClosureRule};
 
 const P: u64 = 100;
 
@@ -73,4 +73,41 @@ fn overlapping_snapshots_stay_independent() {
     // Logical time advances across ticks that merge asserted records.
     assert!(s1.logical_time() < s2.logical_time());
     assert!(s2.logical_time() < s3.logical_time());
+}
+
+#[test]
+fn snapshot_includes_and_pins_derived_rows() {
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(P)));
+
+    // 1->2, 2->3 ⇒ transitive closure derives 1->3.
+    circuit.assert_triple((1, P, 2));
+    circuit.assert_triple((2, P, 3));
+    circuit.tick();
+
+    let snap = circuit.snapshot();
+    assert!(snap.contains(&(1, P, 2)), "asserted edge");
+    assert!(snap.contains(&(2, P, 3)), "asserted edge");
+    assert!(
+        snap.contains(&(1, P, 3)),
+        "derived transitive edge in snapshot"
+    );
+    let pinned_len = snap.len();
+
+    // Extend the chain; the derived 1->4/2->4/3->4 etc. must not leak into the
+    // pinned snapshot.
+    circuit.assert_triple((3, P, 4));
+    circuit.tick();
+
+    assert_eq!(snap.len(), pinned_len, "derived rows stay pinned");
+    assert!(
+        !snap.contains(&(1, P, 4)),
+        "new derived edge absent from old snap"
+    );
+
+    let fresh = circuit.snapshot();
+    assert!(
+        fresh.contains(&(1, P, 4)),
+        "fresh snapshot sees new derived edge"
+    );
 }
