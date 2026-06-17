@@ -36,7 +36,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
-- [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, proof recording, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: 8642e92d@Stigs-MacBook-Pro.local · task-38-proof-recording · 2026-06-17T10:27:12Z_
+- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [v] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6)) — _wip: 4db386cf@Stigs-MacBook-Pro.local · task-6-mvcc-snapshots · 2026-06-17T21:29:30Z_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
@@ -96,14 +96,14 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Deferred to Stage 2/3 (open a new task when pulled in): CXL/NVMe placement
   (SPEC-09), persistent dictionary (Marisa/FST), true per-tuple MVCC.
 
-- [v] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
-  Remaining: production proof recording (F4) + `proof(t)` API ([#38](https://github.com/sunstoneinstitute/horndb/issues/38)),
-  `rdf:type` skew parallelism (F5) ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)),
+- [ ] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
+  Remaining: `rdf:type` skew parallelism (F5) ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)),
   literal-value rules `dt-eq`/`dt-diff`/`dt-not-type` ([#40](https://github.com/sunstoneinstitute/horndb/issues/40)).
   Delivered: `dt-type1`/`dt-type2` subsumption + `scm-eqc-rev` (#34),
   unqualified max-cardinality `cls-maxc1`/`cls-maxc2` (#35),
   qualified max-cardinality `cls-maxqc1`-`cls-maxqc4` (#36),
-  `prp-adp` all-disjoint-properties (#37).
+  `prp-adp` all-disjoint-properties (#37),
+  production proof recording (F4) + `proof(t)`/`Engine::proof` API (#38).
   Deferred: datatype value-space *intersection* (`I5.8-008/009-pe`),
   user-defined Datalog frontend (Stage-2).
 
