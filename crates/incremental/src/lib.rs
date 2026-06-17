@@ -30,6 +30,7 @@
 //! - [`checkpoint`]: merge a delta log into the base store.
 //! - [`change_feed`]: ordered MPMC stream of committed deltas (F9).
 //! - [`circuit`]: top-level `Circuit` builder + tick driver.
+//! - [`snapshot`]: refcounted MVCC reader views pinned at a logical time (F7).
 
 pub mod change_feed;
 pub mod checkpoint;
@@ -37,6 +38,7 @@ pub mod circuit;
 pub mod closure_plan;
 pub mod delta_log;
 pub mod operator;
+pub mod snapshot;
 pub mod types;
 pub mod zset;
 
@@ -46,5 +48,6 @@ pub use circuit::{Circuit, TickReport};
 pub use closure_plan::{ClosureRule, TransitiveClosureRule};
 pub use delta_log::DeltaLog;
 pub use operator::{BilinearRule, LinearRule, NaryPlan};
+pub use snapshot::Snapshot;
 pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
 pub use zset::Zset;

@@ -34,11 +34,13 @@
 //!   cross-feedback within one tick remains a Stage-2 concern.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx};
 use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
 use crate::operator::NaryPlan;
+use crate::snapshot::Snapshot;
 use crate::types::{DerivationKind, LogicalTime, RuleId, TripleId};
 use crate::zset::Zset;
 
@@ -86,6 +88,15 @@ pub struct Circuit {
     /// whose closure support is intact (Finding 2). Only *written* by the
     /// closure pass; only *read* on retraction ticks.
     closure_support: BTreeSet<TripleId>,
+    /// SPEC-06 F7 — current immutable materialized version, `asserted_base ∪
+    /// derived_base`, shared with all live [`Snapshot`]s. A state-changing
+    /// `tick()` replaces this Arc with a fresh one; snapshots holding the old
+    /// Arc keep their pinned view (writers never block readers).
+    version: Arc<Zset<TripleId>>,
+    /// Logical time the current `version` represents: the max asserted-record
+    /// timestamp merged so far (advances only on ticks that merge asserted
+    /// records).
+    version_time: LogicalTime,
 }
 
 impl Default for Circuit {
@@ -106,6 +117,8 @@ impl Circuit {
             derived_clock: 0,
             rule_attr: BTreeMap::new(),
             closure_support: BTreeSet::new(),
+            version: Arc::new(Zset::new()),
+            version_time: 0,
         }
     }
 
@@ -135,6 +148,14 @@ impl Circuit {
     }
     pub fn derived_base(&self) -> &Zset<TripleId> {
         &self.derived_base
+    }
+
+    /// Acquire an MVCC [`Snapshot`] (SPEC-06 F7): a refcounted, consistent
+    /// `(asserted ∪ derived)` view pinned at the current logical time. O(1) —
+    /// it clones an `Arc` of the current version. The snapshot survives
+    /// subsequent `tick()`s until dropped; readers and writers never block.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot::new(self.version_time, Arc::clone(&self.version))
     }
 
     /// Append an insertion to the pending log. Kind = Asserted.
@@ -361,6 +382,20 @@ impl Circuit {
             }
         }
         self.closure_plans = closure_plans;
+
+        // SPEC-06 F7: publish a new immutable materialized version when this
+        // tick changed state, so snapshots acquired afterwards see it and
+        // snapshots acquired before keep their (now-superseded) Arc. Skip the
+        // O(n) rebuild on no-op ticks. logical_time is 0 when no asserted
+        // records were merged; only advance version_time on real progress.
+        if asserted_merged > 0 || derived_merged > 0 {
+            let mut materialized = self.asserted_base.clone();
+            materialized.add_assign(&self.derived_base);
+            self.version = Arc::new(materialized);
+            if asserted_merged > 0 {
+                self.version_time = logical_time;
+            }
+        }
 
         TickReport {
             asserted_merged,
