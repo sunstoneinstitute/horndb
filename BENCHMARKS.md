@@ -2,7 +2,7 @@
 
 Where we are, where we need to be, and what we measure against. This document is the single source of truth for the project's quantitative goals. Targets come from the per-subsystem SPECs (non-functional requirements and acceptance criteria); baselines come from the cited literature and vendor publications.
 
-> **Status — 2026-05-25.** Stage 1 is in flight. Two performance numbers have been measured against the canonical Stage-1 benches; the rest of this document is targets and baselines that the harness (SPEC-01) will fill in as the engine grows. Live gaps are tracked in [`TASKS.md`](TASKS.md).
+> **Status — 2026-06-17.** Stage 1 is in flight. Four numbers are now measured against the canonical Stage-1 benches — the WCOJ 4-cycle acceptance gate, the WCOJ differential fuzzer, incremental closure append, and the owlrl closure-backend A/B (all in the *Measured* table below); the rest of this document is targets and baselines that the harness (SPEC-01) will fill in as the engine grows. Live gaps are tracked in [`TASKS.md`](TASKS.md).
 
 ## Reference hardware
 
@@ -213,8 +213,8 @@ cargo bench -p horndb-wcoj --bench four_cycle
 # WCOJ NF1 — per-tuple overhead microbench
 cargo bench -p horndb-wcoj --bench per_tuple
 
-# WCOJ correctness — differential fuzzer (currently red, hence #[ignore])
-cargo test -p horndb-wcoj -- --ignored differential_fuzz
+# WCOJ correctness — differential fuzzer (green; #[ignore] removed, regression file deleted)
+cargo test -p horndb-wcoj --test differential_fuzz
 
 # SPEC-06 incremental insert throughput
 cargo bench -p horndb-incremental --bench insert_throughput

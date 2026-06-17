@@ -87,7 +87,7 @@ cargo clippy --workspace --all-targets -- -D warnings    # what CI runs
 cargo test --workspace                                   # all unit/integration tests
 cargo test -p horndb-sparql --features server          # SPARQL HTTP server tests (required for full SPARQL pass)
 cargo test -p <crate> <test_name>                        # single test
-cargo test -p horndb-wcoj -- --ignored                 # run the WCOJ differential fuzzer (currently red — see TASKS.md)
+cargo test -p horndb-wcoj --test differential_fuzz     # run the WCOJ differential fuzzer (green; #[ignore] removed in #1)
 cargo bench -p <crate> --bench <name>                    # criterion benches (e.g. `four_cycle`, `per_tuple`, `load_lubm`, `transitive`, `sameas`, `insert_throughput`)
 ```
 
@@ -138,7 +138,7 @@ Suite keys the runner recognises today (`crates/harness/src/runner.rs`): `owl2`,
   flock-guarded `crates/closure/vendor/.shared-build/<target>/<version>/` shared
   across worktrees (details in `INTEGRATION-NOTES.md`).
 - **`horndb-owlrl`** generates Rust source from `rules.toml` in `build.rs` (the codegen pipeline is in `codegen/`). When editing rules, expect a slower first build and check both `INTEGRATION-NOTES.md` and the generated code under `target/`.
-- **`horndb-wcoj`** has a known correctness bug on BGPs with repeated patterns (TASKS.md CRITICAL). The differential fuzzer in `tests/differential_fuzz.rs` is `#[ignore]`'d with a regression file checked into `tests/differential_fuzz.proptest-regressions`. The 4-cycle benchmark is also currently ~1.6× *slower* than the binary-hash reference — both gates block SPEC-03 acceptance.
+- **`horndb-wcoj`** cleared both SPEC-03 acceptance gates in [#1](https://github.com/sunstoneinstitute/horndb/issues/1): the repeated-pattern over-production bug is fixed and the differential fuzzer in `tests/differential_fuzz.rs` runs green (256 cases, `#[ignore]` removed, regression file deleted); the 4-cycle benchmark is now ~34× *faster* than the binary-hash reference on the canonical skewed win case (`benches/four_cycle.rs` → `SyntheticGraph::skewed_four_cycle`). Magic-sets / SLG tabling remain deferred.
 - **`horndb-sparql`** tracks the unified workspace versions (`oxrdf 0.3.x`, `oxrdfio 0.2.x`, `sparesults 0.3.x`) with `rdf-12` (and `sparesults/sparql-12`) features on workspace-wide after PR2 of the RDF 1.2 migration. The crate additionally enables `spargebra/sep-0006` (for `GraphPattern::Lateral`) and `spargebra/sparql-12` (for `TermPattern::Triple`). Triple-term patterns are accepted only when callers pass `SparqlConfig::rdf12()` — the default config rejects them so SPARQL 1.1 callers keep their semantics; see `crates/sparql/src/lib.rs::SparqlConfig` and `translate_query_with` / `execute_query_with`. Note: enabling `oxrdf/rdf-12` workspace-wide forces `oxigraph/rdf-12` too (sparopt/spareval need their own `sparql-12` arms gated on, and Cargo only unifies features upward).
 - **`horndb-incremental`** is **insertion-only at Stage 1**. Retraction semantics are deferred (see `FUTURE-WORK.md` and SPEC-06).
 

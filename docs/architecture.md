@@ -114,7 +114,7 @@ two engines: `--engine stub` (plumbing) and `--engine owlrl` (real, needs
 | W3C OWL 2 RL test-case runner (manifest parse, classify pass/fail/skip) | **implemented** | `runner.rs`, `manifest.rs`, `testcase.rs`. Suite keys: `owl2`, `owl2-w3c-rl`. |
 | SPARQL 1.1 test runner | **implemented** | Suite key `sparql11`; path-based `[sparql_query]` consumed by `crates/sparql/tests/w3c_suite.rs`. |
 | W3C RDF 1.2 N-Triples *syntax* suite | **implemented** | Suite key `rdf12-n-triples`; 4 positive + 6 negative cases via `oxttl::NTriplesParser`, no reasoner. |
-| W3C OWL 2 RL test-suite ingestion pipeline | **implemented** | `owl2_rl_extract.rs` + `harness extract-owl2-rl`; 91 W3C cases → 78 green in `[suites.owl2-w3c-rl]`, reds tracked in `harness/KNOWN-MANIFEST-BUGS.md`. |
+| W3C OWL 2 RL test-suite ingestion pipeline | **implemented** | `owl2_rl_extract.rs` + `harness extract-owl2-rl`; 115 W3C cases → 96 green in `[suites.owl2-w3c-rl]`, reds tracked in `harness/KNOWN-MANIFEST-BUGS.md`. |
 | Versioned selection manifest (`harness/selected.toml`) | **implemented** | Single canonical file at workspace root (manifest `[suites.*]` + `[sparql_query]`). |
 | Result DB (SQLite) + trend reports (`harness report`) | **implemented** | `db.rs`, `report.rs`; state in `target/harness.sqlite`, JUnit at `target/junit.xml`. |
 | Stub-engine smoke target | **implemented** | `stub.rs` (F12). |
