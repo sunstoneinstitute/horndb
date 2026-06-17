@@ -32,11 +32,13 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   them untouched (see the F5 entry below).
 
 ### F7 — In-flight reader visibility (MVCC)
-- **Now**: readers see either pre-tick or post-tick state via
-  `&Circuit` borrow; concurrent reads during a tick are not exposed.
-- **Stage 2**: arena-allocated `Snapshot` handles, refcounted; readers
-  hold a `Snapshot` that pins a consistent view across multiple ticks.
-  Intersects SPEC-02 MVCC design.
+- **Done (#46)**: refcounted `Snapshot` handles (`Circuit::snapshot()`,
+  `crate::snapshot::Snapshot`) pin a consistent `(asserted ∪ derived)` view at
+  a logical time across multiple ticks; readers and writers never block
+  (Arc-versioned view, O(1) acquire).
+- **Still deferred (parent #6)**: backing the snapshot interface onto SPEC-02
+  per-tuple storage MVCC, and point queries against partially-applied in-flight
+  deltas mid-tick.
 
 ### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion-only)
 - **Done (2026-06-01, #44)**: `Circuit::add_closure_plan(Box<dyn ClosureRule>)`
