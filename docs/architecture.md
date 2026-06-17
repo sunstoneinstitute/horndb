@@ -50,7 +50,7 @@ Six bets define the project. Their current state:
 | 3 | DBSP-style incremental maintenance (Z-set deltas) | **partially implemented** | Insertion-only Z-set machinery ships (SPEC-06); **rule-path retraction across joins now works** via recompute-and-diff on retraction-containing ticks (SPEC-06 F6, [#45](https://github.com/sunstoneinstitute/horndb/issues/45)). Closure-path retraction and a fully delta-incremental retraction path remain **deferred**. |
 | 4 | GraphBLAS for the closure subset | **implemented** | SuiteSparse:GraphBLAS backend ships (SPEC-05). |
 | 5 | Soufflé-style ahead-of-time rule compilation (no interpreter) | **implemented** | `build.rs` codegen from `rules.toml` (SPEC-04). |
-| 6 | Provenance / correctability as a hard requirement | **partially implemented** | Stage-1 ships a stub `Provenance`; production proof recording (SPEC-04 F4) is **planned**. |
+| 6 | Provenance / correctability as a hard requirement | **partially implemented** | Stage-1 ships per-triple `Provenance` and proof trees (SPEC-04 F4: `MemStore::proof_tree` / `Engine::proof`); production proof *persistence* (compressed side-table) is **planned**. |
 
 **Non-goals (explicit, unchanged):** beating RDFox on pure single-node
 materialization throughput; OWL 2 DL completeness; a rule-interpretation
@@ -198,7 +198,7 @@ Rust at build time from `rules.toml` (Soufflé-style) — no interpreter.
 | `owl:sameAs` routed to SPEC-05 EQREL (F6) | **implemented** | Rule engine does not re-derive `eq-sym`/`eq-trans`. |
 | Subset of rules (`eq-rep-*`, common `prp-*`/`cls-*`/`cax-*`/`scm-*`, incl. `scm-eqc-rev`) | **implemented** | 96 W3C OWL 2 RL cases green. `scm-eqc-rev` derives `owl:equivalentClass` from two-way `rdfs:subClassOf`. |
 | Stub `Provenance` (F4 placeholder) | **implemented** | `provenance.rs` — `struct Provenance`, not yet a production proof tree. |
-| Production proof recording (F4: `(rule_id, premise_ids[])`, on-demand re-derivation) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-04 rules". |
+| Proof recording (F4: `(rule_id, premises)` per derived triple → recursive proof tree) | **implemented** | Compiled + `list_rules.rs` rules record real body premises; `MemStore::proof_tree` / `Engine::proof` return a full proof tree bottoming out at asserted triples (`provenance.rs`, `integration.rs`; `tests/proof_tree.rs` covers NF4 depth + latency). Closure-backend nodes record empty premises by design; restriction-rule schema declarations are an elided side condition (instance premises still recorded). Production *persistence* (compressed side-table, on-demand re-derivation) remains Stage 2. |
 | Datatype subsumption (`dt-type1` + `dt-type2` XSD lattice) | **implemented** | Load-time injection of `byte ⊑ short ⊑ int ⊑ ... ⊑ decimal` (and unsigned/non-negative arms); flips `I5.8-006-pe`/`I5.8-011-pe` green. |
 | Max-cardinality (unqualified `cls-maxc1`/`cls-maxc2`, qualified `cls-maxqc1`–`cls-maxqc4`) | **implemented** | Hand-written in `list_rules.rs`; restriction literals (`owl:maxCardinality "0"`/`"1"`, and qualified `owl:maxQualifiedCardinality` + `owl:onClass`) classified at load time in `integration.rs`. `cls-maxc1`/`cls-maxqc1`/`cls-maxqc2` → `owl:Nothing` (inconsistency), `cls-maxc2`/`cls-maxqc3`/`cls-maxqc4` → `owl:sameAs`. The qualified rules ([#36](https://github.com/sunstoneinstitute/horndb/issues/36)) are covered by unit + integration tests; no `selected.toml` entry, because the only W3C qualified-cardinality case (`ObjectQCR-002-pe`) is blocked on fresh-bnode `owl:complementOf` generation, not on these rules. |
 | Disjoint properties (`prp-pdw` pairwise, `prp-adp` list `owl:AllDisjointProperties`) | **implemented** | `prp-pdw` compiled from `rules.toml`; `prp-adp` ([#37](https://github.com/sunstoneinstitute/horndb/issues/37)) hand-written in `list_rules.rs` (list-walking analogue), both head `?u rdf:type owl:Nothing` on a shared `(u, w)` pair. Covered by unit + engine tests; the W3C `DisjointObjectProperties-*-cons` / `DisjointDataProperties-*-cons` cases in the selection exercise the no-false-fire path. The `*-pe` variants stay red on a DL `differentFrom`/`AllDifferent` entailment with no OWL 2 RL rule (`harness/KNOWN-MANIFEST-BUGS.md`). |
@@ -358,10 +358,14 @@ workflows with the current HornDB surface. Tracked as a single task in
 ## 13. Cross-cutting concerns
 
 ### Provenance / correctability
-**Status: partially implemented.** Stage-1 ships a stub `Provenance`
+**Status: partially implemented.** Stage-1 ships per-triple `Provenance`
 (`owlrl/src/provenance.rs`) and an ML-derived-fact provenance hook
-(`ml/src/provenance.rs`). Production proof trees (SPEC-04 F4) and proof
-retrieval (NF4) are **planned** (`TASKS.md` SPEC-04 rules).
+(`ml/src/provenance.rs`). Proof trees (SPEC-04 F4) and proof retrieval
+(NF4) are **implemented**: `MemStore::proof_tree` / `Engine::proof` build
+a recursive proof bottoming out at asserted triples, within the NF4 100 ms
+budget (`owlrl/tests/proof_tree.rs`). Production *persistence* of proofs
+(compressed side-table, on-demand re-derivation) is **planned**
+(`TASKS.md` SPEC-04 rules).
 
 ### RDF 1.2 (triple terms)
 **Status: implemented end-to-end (Stage-1 surface).** We track W3C **RDF 1.2**,

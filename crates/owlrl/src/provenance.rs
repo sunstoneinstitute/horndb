@@ -1,6 +1,7 @@
-//! Per-inferred-triple proof annotation. Stage 1 keeps this in-memory only;
-//! production proof recording (compressed side-table, on-demand rederivation)
-//! is Future Work — see SPEC-04 F4.
+//! Per-inferred-triple proof annotation. These premises compose into a
+//! recursive [`ProofTree`] (SPEC-04 F4) via `MemStore::proof_tree`. Stage 1
+//! keeps this in-memory only; production *persistence* (compressed
+//! side-table, on-demand rederivation) is Future Work — see SPEC-04 F4.
 
 use crate::types::{RuleId, Triple};
 use smallvec::SmallVec;
