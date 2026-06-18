@@ -36,7 +36,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
-- [ ] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
+- [v] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-4-dt-value-rules · 2026-06-18T01:13:15Z_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [x] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
@@ -96,7 +96,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Deferred to Stage 2/3 (open a new task when pulled in): CXL/NVMe placement
   (SPEC-09), persistent dictionary (Marisa/FST), true per-tuple MVCC.
 
-- [ ] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
+- [v] **SPEC-04 rules.** ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
   Remaining: literal-value rules `dt-eq`/`dt-diff`/`dt-not-type` ([#40](https://github.com/sunstoneinstitute/horndb/issues/40)).
   Delivered: `rdf:type` skew parallelism for the list rules (F5) ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)),
   `dt-type1`/`dt-type2` subsumption + `scm-eqc-rev` (#34),
