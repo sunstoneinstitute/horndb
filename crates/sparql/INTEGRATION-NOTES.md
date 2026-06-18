@@ -186,7 +186,23 @@ Two design points worth recording:
    spuriously joined (a per-pattern counter would, e.g. with two `!` sets) —
    and **un-spellability**: every hidden name carries the `?pp` prefix, and `?`
    cannot appear in a SPARQL `VARNAME`, so a user variable can never collide
-   with (and thus never read or constrain) a hidden one.
+   with (and thus never read or constrain) a hidden one. Because `?pp…` is not
+   a valid `spargebra::Variable`, `translate_path` carries its endpoints as
+   already-lowered `Term`s (not `TermPattern`s) and mints the `Sequence` join
+   node as a `Term::Var` directly — routing it through `spargebra::Variable::new`
+   would reject the name and fail otherwise-valid nested paths like `(p/q)?`.
+
+4. **A single path expression is set-valued.** Several routes can connect the
+   same `(start, end)` pair — distinct `|` branches, several unexcluded
+   predicates of `!`, or the `?` zero-length/one-step overlap — and the lowering
+   emits one witness per route (the witnesses differ only in the *hidden*
+   columns). To match SPARQL's set semantics, `GraphPattern::Path` projects the
+   result down to the user-visible endpoint variables (`visible_path_vars`,
+   dropping the hidden witness columns) and wraps it in `Distinct`. When both
+   endpoints are ground the path is a pure existence test, collapsed to at most
+   one solution via `Slice(0, 1)` — `Project { vars: [] }` can't express this
+   because the runtime reads an empty projection as `SELECT *` and would keep
+   the hidden columns.
 
 Kleene `*`/`+` remain rejected (`UnsupportedPathOp`); they are recursive and
 route to closure under increment #50.

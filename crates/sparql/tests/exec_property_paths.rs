@@ -293,6 +293,96 @@ fn kleene_plus_still_rejected() {
     assert!(msg.contains("property-path"), "got: {msg}");
 }
 
+// ---- Nested non-recursive paths (reach the in-crate Sequence arm) ----
+
+#[test]
+fn nested_optional_over_sequence() {
+    // `(knows/knows)?` from alice: zero-length (alice) ∪ two-knows (dave).
+    // This `Sequence` is nested under `?`, so spargebra does NOT pre-flatten
+    // it — it reaches translate_path's Sequence arm, which must mint a valid
+    // internal join variable.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?o WHERE { <http://ex/alice> (<http://ex/knows>/<http://ex/knows>)? ?o }",
+        &s,
+    );
+    assert_eq!(names(&rows, "o"), vec!["alice", "dave"]);
+}
+
+#[test]
+fn alternative_with_nested_sequence_branch() {
+    // `knows | (knows/knows)` from alice: bob (one step) ∪ dave (two steps).
+    let s = make_store();
+    let rows = run(
+        "SELECT ?o WHERE { <http://ex/alice> (<http://ex/knows>|(<http://ex/knows>/<http://ex/knows>)) ?o }",
+        &s,
+    );
+    assert_eq!(names(&rows, "o"), vec!["bob", "dave"]);
+}
+
+// ---- Set-valued semantics: a single path matches each pair once --------
+
+#[test]
+fn alternative_dedups_shared_endpoint() {
+    // Two predicates connect alice→eve; `(p1|p2)` must yield eve ONCE.
+    let mut s = make_store();
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/p1"),
+        iri("http://ex/eve"),
+    );
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/p2"),
+        iri("http://ex/eve"),
+    );
+    let rows = run(
+        "SELECT ?o WHERE { <http://ex/alice> (<http://ex/p1>|<http://ex/p2>) <http://ex/eve> }",
+        &s,
+    );
+    assert_eq!(rows.len(), 1, "shared endpoint must dedup, got {rows:?}");
+}
+
+#[test]
+fn negated_set_dedups_shared_endpoint() {
+    // alice→eve via two non-excluded predicates; `!(knows)` yields eve ONCE.
+    let mut s = make_store();
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/p1"),
+        iri("http://ex/eve"),
+    );
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/p2"),
+        iri("http://ex/eve"),
+    );
+    let rows = run(
+        "SELECT ?o WHERE { <http://ex/alice> !(<http://ex/knows>) <http://ex/eve> }",
+        &s,
+    );
+    assert_eq!(rows.len(), 1, "shared endpoint must dedup, got {rows:?}");
+}
+
+#[test]
+fn optional_dedups_zero_and_one_overlap() {
+    // Self-loop alice-knows-alice: `knows?` zero-length and one-step both
+    // bind alice; the set-valued path returns alice exactly once.
+    let mut s = make_store();
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/knows"),
+        iri("http://ex/alice"),
+    );
+    let rows = run(
+        "SELECT ?o WHERE { <http://ex/alice> <http://ex/knows>? ?o }",
+        &s,
+    );
+    // alice (zero ∪ one, deduped) + bob (one step from the base graph).
+    assert_eq!(names(&rows, "o"), vec!["alice", "bob"]);
+    assert_eq!(rows.len(), 2, "alice must not appear twice, got {rows:?}");
+}
+
 #[test]
 fn user_var_named_like_old_hidden_var_does_not_collide() {
     // Hidden path/blank-node variables are user-unspellable now. A user
