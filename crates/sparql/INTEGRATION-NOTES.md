@@ -231,6 +231,11 @@ graph, with a uniform `SILENT` convention: an operation that would touch a
 named graph the Stage-1 store cannot represent is an **error** when not silent
 and a **no-op** when `SILENT`. Concretely:
 
+- **`INSERT DATA`/`DELETE DATA`** with a `GRAPH <g> { … }` block are rejected
+  (`require_default_graph_name`): the apply loop ignores `q.graph_name`, so a
+  named block would silently mutate the default graph. (Multi-op support newly
+  routes such quads through this path, so the check guards both single- and
+  multi-op data updates.)
 - **`CLEAR`/`DROP DEFAULT`/`ALL`** clear the store via the new
   `Store::clear_all` seam method. `MemStore::clear_all` resets its vector and
   indexes; `HornBackend::clear_all` tombstones every physically-written key
@@ -243,8 +248,10 @@ and a **no-op** when `SILENT`. Concretely:
 - **`LOAD <source> [INTO GRAPH <g>]`** fetches and parses `source`, merging its
   triples into the default graph. Only `file:` sources are fetched — the
   workspace carries no HTTP client, so remote (`http(s):`) sources are an error
-  unless `SILENT`. The file-IRI path is percent-decoded before reading (so
-  `file:///tmp/a%20b.nt` opens `/tmp/a b.nt`). The serialization is picked from
+  unless `SILENT`. The `file:` authority is parsed (`file_iri_to_path`):
+  `file:///abs`, `file://localhost/abs`, and `file:/abs` are local; a non-empty
+  non-`localhost` authority is rejected. The path is percent-decoded before
+  reading (so `file:///tmp/a%20b.nt` opens `/tmp/a b.nt`). The serialization is picked from
   the path extension (`.nt`/`.nq`/`.trig`, else Turtle) and parsed with `oxttl`
   (the same parser family `serve.rs` uses); all graph names in a quad source
   merge into the default graph. A named `INTO GRAPH` destination is an error

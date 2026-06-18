@@ -100,6 +100,9 @@ pub fn apply_update_with<B: FullBackend>(
         validate_op(op, cfg)?;
     }
 
+    // `validate_op` above has already rejected every error case (named-graph
+    // quads/templates, triple terms, unrepresentable LOAD/CREATE targets,
+    // untranslatable WHERE clauses), so the apply loop can mutate freely.
     for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
@@ -235,21 +238,10 @@ fn apply_load<B: FullBackend>(
 fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
     use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 
-    let raw = match source
-        .strip_prefix("file://")
-        .or_else(|| source.strip_prefix("file:"))
-    {
-        // `file:///abs/path` → `/abs/path`; the common absolute form.
-        Some(p) => p,
-        None => {
-            return Err(SparqlError::UnsupportedAlgebra(format!(
-                "LOAD of a non-file source (Stage-1 fetches file: IRIs only): {source}"
-            )));
-        }
-    };
+    let raw = file_iri_to_path(source)?;
     // A file IRI percent-encodes reserved characters (e.g. a space as `%20`);
     // decode to the real filesystem path before reading.
-    let path = percent_decode(raw);
+    let path = percent_decode(&raw);
 
     let bytes = std::fs::read(&path)
         .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
@@ -319,6 +311,41 @@ impl WithBase for oxttl::TriGParser {
 }
 fn with_base<P: WithBase>(parser: P, source: &str) -> Result<P> {
     parser.with_base_iri_checked(source)
+}
+
+/// Extract the local filesystem path from a `file:` IRI (still percent-encoded).
+///
+/// Handles the authority component: `file:///abs` (empty authority) and
+/// `file://localhost/abs` are local and yield `/abs`; `file:/abs` (no `//`)
+/// yields `/abs`. A non-empty, non-`localhost` authority (e.g. a remote host)
+/// is rejected. A non-`file:` source is rejected (Stage-1 fetches `file:` only).
+fn file_iri_to_path(source: &str) -> Result<String> {
+    let non_file = || {
+        SparqlError::UnsupportedAlgebra(format!(
+            "LOAD of a non-file source (Stage-1 fetches file: IRIs only): {source}"
+        ))
+    };
+    if let Some(rest) = source.strip_prefix("file://") {
+        // `rest` is `<authority><path>`; the authority runs up to the first `/`.
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            // No path slash at all (`file://host`): treat the whole thing as the
+            // authority with an empty path — not a usable local file.
+            None => (rest, ""),
+        };
+        if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+            Ok(path.to_owned())
+        } else {
+            Err(SparqlError::UnsupportedAlgebra(format!(
+                "LOAD of a non-local file authority (Stage-1 fetches local files only): {source}"
+            )))
+        }
+    } else if let Some(path) = source.strip_prefix("file:") {
+        // `file:/abs` or `file:relative` — no authority component.
+        Ok(path.to_owned())
+    } else {
+        Err(non_file())
+    }
 }
 
 /// Percent-decode a file-IRI path component (RFC 3986). A `%XX` escape becomes
@@ -403,12 +430,14 @@ fn validate_op(op: &spargebra::GraphUpdateOperation, cfg: &SparqlConfig) -> Resu
     match op {
         GraphUpdateOperation::InsertData { data } => {
             for q in data {
+                require_default_graph_name(&q.graph_name)?;
                 object_to_term(&q.object)?;
             }
             Ok(())
         }
         GraphUpdateOperation::DeleteData { data } => {
             for q in data {
+                require_default_graph_name(&q.graph_name)?;
                 ground_term_to_term(&q.object)?;
             }
             Ok(())
@@ -640,6 +669,17 @@ fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
         GraphNamePattern::NamedNode(_) | GraphNamePattern::Variable(_) => {
             Err(named_graph_unsupported())
         }
+    }
+}
+
+/// Reject a named graph on an `INSERT DATA` / `DELETE DATA` quad. The apply
+/// loop ignores `q.graph_name` (Stage-1 default-graph only), so a
+/// `GRAPH <g> { … }` block would silently mutate the default graph; reject it
+/// instead of mis-routing data.
+fn require_default_graph_name(g: &spargebra::term::GraphName) -> Result<()> {
+    match g {
+        spargebra::term::GraphName::DefaultGraph => Ok(()),
+        spargebra::term::GraphName::NamedNode(_) => Err(named_graph_unsupported()),
     }
 }
 

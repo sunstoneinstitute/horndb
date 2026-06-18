@@ -220,6 +220,26 @@ fn load_turtle_relative_iris_resolve_against_source() {
 }
 
 #[test]
+fn load_file_localhost_authority() {
+    // `file://localhost/...` is a valid local file IRI.
+    let path = write_tmp("auth.nt", "<http://ex/s> <http://ex/p> <http://ex/o> .\n");
+    let mut store = MemStore::default();
+    // path already begins with `/`, so `file://localhost` + path is well-formed.
+    let u = format!("LOAD <file://localhost{}>", path.display());
+    run(&u, &mut store).unwrap();
+    assert_eq!(count_all(&store), 1);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn load_file_remote_authority_errors() {
+    // A non-local authority is rejected (no remote fetch).
+    let mut store = MemStore::default();
+    let err = run("LOAD <file://remote.example.org/tmp/data.nt>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("authority"), "{err}");
+}
+
+#[test]
 fn load_percent_encoded_path() {
     // A file IRI percent-encodes reserved characters; LOAD must decode the path
     // back to the real filesystem name before reading it.
@@ -416,4 +436,48 @@ fn multi_op_update_applies_in_order() {
     };
     assert_eq!(rows.len(), 1);
     assert!(matches!(rows[0].get("s"), Some(Term::Iri(s)) if s == "http://ex/c"));
+}
+
+// ── Named-graph data updates are rejected (default-graph only) ───────────────
+
+#[test]
+fn insert_data_named_graph_errors_without_mutation() {
+    // `INSERT DATA { GRAPH <g> { … } }` must not silently write to the default
+    // graph: it is rejected, and the store is unchanged.
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("named-graph"), "{err}");
+    assert_eq!(count_all(&store), 1);
+}
+
+#[test]
+fn delete_data_named_graph_errors_without_mutation() {
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run(
+        "DELETE DATA { GRAPH <http://g/1> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("named-graph"), "{err}");
+    // The default-graph triple must survive — it was never targeted.
+    assert_eq!(count_all(&store), 1);
+}
+
+#[test]
+fn multi_op_insert_then_named_delete_data_aborts() {
+    // A default-graph INSERT DATA followed by a named-graph DELETE DATA: the
+    // whole update is rejected up front, so the insert never applies.
+    let mut store = MemStore::default();
+    let err = run(
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> } ; \
+         DELETE DATA { GRAPH <http://g/1> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("named-graph"), "{err}");
+    assert_eq!(count_all(&store), 0, "no op applies when a later op fails");
 }
