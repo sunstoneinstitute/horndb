@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::backend::RuleFiringBackend;
 use crate::engine::{reset_and_materialize, Stats};
@@ -209,6 +209,14 @@ impl Engine {
                 t
             });
         }
+        // dt-eq / dt-diff / dt-not-type: reason over the *values* of the
+        // instance literals now, while the dictionary can still recover each
+        // literal's datatype and lexical form. Asserts owl:sameAs /
+        // owl:differentFrom / owl:Nothing base facts that the compiled rules
+        // (eq-diff1, eq-rep-*) then propagate. Must run after the data is
+        // loaded (so all instance literals are present) and after the dt-type
+        // axioms (harmless either way — those are datatype IRIs, not literals).
+        inject_datatype_literal_axioms(&mut state.store, &self.vocab, &state.dict);
         // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
         // restrictions now, while the dictionary can still parse the literal
         // value. The resolved list rides on the store for the firing loop.
@@ -217,17 +225,32 @@ impl Engine {
         let qual_restrictions =
             resolve_qual_max_card_restrictions(&state.store, &self.vocab, &state.dict);
         state.store.set_qual_card_restrictions(qual_restrictions);
-        let stats = match self.backend {
+        let materialize_once = |store: &mut MemStore| match self.backend {
             BackendChoice::RuleFiring => {
                 let mut backend = RuleFiringBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend)
+                reset_and_materialize(store, &mut backend)
             }
             #[cfg(feature = "graphblas-backend")]
             BackendChoice::GraphBlas => {
                 let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend)
+                reset_and_materialize(store, &mut backend)
             }
         };
+        let mut stats = materialize_once(&mut state.store);
+        // dt-not-type over *derived* datatype memberships: materialization may
+        // have typed a literal as a narrower datatype via prp-rng / prp-dom
+        // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
+        // `"999" rdf:type xsd:byte`). The load-time pass above only validated
+        // each literal's *intrinsic* datatype, so re-check the materialized
+        // `?lit rdf:type ?D` edges now and assert `?lit rdf:type owl:Nothing`
+        // on any value-space violation. If that asserted anything, re-run the
+        // fixpoint once so the inconsistency propagates through eq-rep-* (e.g. a
+        // named resource `owl:sameAs` the offending literal also becomes
+        // `owl:Nothing`); the re-run is a no-op for the common case where the
+        // initial materialisation found no derived violations.
+        if validate_derived_datatype_memberships(&mut state.store, &self.vocab, &state.dict) {
+            stats = materialize_once(&mut state.store);
+        }
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -497,6 +520,169 @@ fn resolve_qual_max_card_restrictions(
         }
     }
     out
+}
+
+/// Inject the OWL 2 RL literal-value datatype rules (`dt-eq`, `dt-diff`,
+/// `dt-not-type`) as base axioms over the literals present in the store.
+///
+/// Runs at load time — like [`resolve_max_card_restrictions`] — because the
+/// datatype and parsed value behind a literal `TermId` are only recoverable
+/// from the dictionary (`TermId → lexical key`), which the rule-firing layer
+/// cannot see. Stage-1 is insertion-only (SPEC-06), so the literal set and
+/// their values do not change across materialisation rounds; asserting the
+/// conclusions once as base facts is sound and lets the existing compiled
+/// rules (`eq-diff1`, `eq-rep-*`) propagate them.
+///
+/// For each pair of *comparable* literals (see
+/// [`crate::datatype_literals::ValueClass`]):
+/// - same value  ⇒ `l1 owl:sameAs l2`        (`dt-eq`)
+/// - different value ⇒ `l1 owl:differentFrom l2` (`dt-diff`)
+///
+/// and for each literal whose lexical form is outside its datatype's value
+/// space ⇒ `l rdf:type owl:Nothing` (`dt-not-type`, a global inconsistency).
+///
+/// Only literals that actually occur as triple **objects** in the loaded data
+/// are considered — the datatype declarations injected by
+/// [`crate::datatypes`] never appear as objects, so this stays bounded by the
+/// instance literals. The pairwise comparison is O(k²) in the number of
+/// distinct object literals `k`; conformance graphs carry a handful, so this
+/// is not a hot path. A value-space-bucketed pass is a Stage-2 optimisation if
+/// `k` ever grows large.
+fn inject_datatype_literal_axioms(
+    store: &mut MemStore,
+    vocab: &Vocabulary,
+    dict: &FxHashMap<String, TermId>,
+) {
+    use crate::datatype_literals::{classify, parse_literal_key, ValueClass};
+
+    // Invert the dictionary once: TermId → lexical key.
+    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+    for (lex, &id) in dict {
+        rev.insert(id, lex.as_str());
+    }
+
+    // Collect the distinct literal object terms actually present in the data.
+    // A term is a literal iff its lexical key parses as one (`"…"^^<…>` or
+    // `"…"@lang`). We dedup by TermId so a literal used many times is
+    // classified once.
+    let mut literals: Vec<(TermId, ValueClass)> = Vec::new();
+    let mut seen: FxHashSet<TermId> = FxHashSet::default();
+    for t in store.all_triples() {
+        let o = t.o;
+        if !seen.insert(o) {
+            continue;
+        }
+        let Some(key) = rev.get(&o) else { continue };
+        let Some(parsed) = parse_literal_key(key) else {
+            continue;
+        };
+        match classify(&parsed) {
+            // Well-typed and placed into a comparable value class.
+            Ok(Some(vc)) => literals.push((o, vc)),
+            // Well-typed but opaque (user datatype / unhandled value space):
+            // no cross-lexical reasoning. Distinct TermIds are distinct
+            // lexical keys, so we neither sameAs nor differentFrom them.
+            Ok(None) => {}
+            // Ill-typed: dt-not-type → global inconsistency on this term.
+            Err(()) => {
+                store.assert(Triple::new(o, vocab.rdf_type, vocab.owl_nothing));
+            }
+        }
+    }
+
+    // Pairwise dt-eq / dt-diff over comparable literals. Two literals are
+    // *comparable* iff their `ValueClass` variants match (e.g. two integers,
+    // two strings) — we never compare across disjoint value spaces.
+    for i in 0..literals.len() {
+        for j in (i + 1)..literals.len() {
+            let (a_id, a_vc) = (&literals[i].0, &literals[i].1);
+            let (b_id, b_vc) = (&literals[j].0, &literals[j].1);
+            if !comparable(a_vc, b_vc) {
+                continue;
+            }
+            if a_vc == b_vc {
+                // dt-eq: symmetric `owl:sameAs` (eq-sym in the closure
+                // backend will mirror it, but assert both directions so the
+                // RuleFiring smoke path is order-independent).
+                store.assert(Triple::new(*a_id, vocab.owl_same_as, *b_id));
+                store.assert(Triple::new(*b_id, vocab.owl_same_as, *a_id));
+            } else {
+                // dt-diff: symmetric `owl:differentFrom`.
+                store.assert(Triple::new(*a_id, vocab.owl_different_from, *b_id));
+                store.assert(Triple::new(*b_id, vocab.owl_different_from, *a_id));
+            }
+        }
+    }
+}
+
+/// Post-materialization `dt-not-type` over *derived* datatype memberships.
+///
+/// Scans the materialized `?lit rdf:type ?D` edges. When `?lit` is a literal
+/// and `?D` is an XSD datatype IRI, validate the literal's *intrinsic value*
+/// against `?D`'s value space (via [`literal_in_datatype`], which preserves the
+/// literal's own datatype/language). A violation — e.g. `"999"^^xsd:integer`
+/// typed `xsd:byte` via `prp-rng`, or `"5"^^xsd:string` typed `xsd:integer` —
+/// asserts `?lit rdf:type owl:Nothing`.
+///
+/// Returns `true` iff at least one violation was asserted, so the caller can
+/// re-run the fixpoint to propagate the `owl:Nothing` through `eq-rep-*`.
+fn validate_derived_datatype_memberships(
+    store: &mut MemStore,
+    vocab: &Vocabulary,
+    dict: &FxHashMap<String, TermId>,
+) -> bool {
+    use crate::datatype_literals::{literal_in_datatype, parse_literal_key};
+
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+    // TermId → lexical key, for both literal subjects and datatype-IRI objects.
+    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+    for (lex, &id) in dict {
+        rev.insert(id, lex.as_str());
+    }
+
+    let mut violations: Vec<TermId> = Vec::new();
+    for t in store.scan_predicate(vocab.rdf_type) {
+        let (Some(lit_key), Some(dt_iri)) = (rev.get(&t.s), rev.get(&t.o)) else {
+            continue;
+        };
+        // Subject must be a literal; object must be an XSD datatype IRI.
+        let Some(parsed) = parse_literal_key(lit_key) else {
+            continue;
+        };
+        let Some(target_local) = dt_iri.strip_prefix(XSD) else {
+            continue;
+        };
+        // Check the literal's *intrinsic* value against the derived datatype's
+        // value space (preserving its own datatype/language — re-keying the
+        // lexical form under the target would wrongly accept e.g.
+        // `"5"^^xsd:string rdf:type xsd:integer`). `Some(false)` is a genuine
+        // value-space violation; `None` (undecidable in Stage-1) is left
+        // consistent to avoid false inconsistencies.
+        if literal_in_datatype(&parsed, target_local) == Some(false) {
+            violations.push(t.s);
+        }
+    }
+    let any = !violations.is_empty();
+    for lit in violations {
+        store.assert(Triple::new(lit, vocab.rdf_type, vocab.owl_nothing));
+    }
+    any
+}
+
+/// Two value classes are comparable (eligible for `dt-eq`/`dt-diff`) iff they
+/// are the same variant. Disjoint value spaces (string vs integer) are never
+/// declared `differentFrom` — OWL 2 RL `dt-diff` concludes disequality only
+/// for literals of a comparable kind, and a string is simply not a number.
+fn comparable(
+    a: &crate::datatype_literals::ValueClass,
+    b: &crate::datatype_literals::ValueClass,
+) -> bool {
+    use crate::datatype_literals::ValueClass::*;
+    matches!(
+        (a, b),
+        (Integer(_), Integer(_)) | (Boolean(_), Boolean(_)) | (Plain(_), Plain(_))
+    )
 }
 
 /// XSD integer datatypes accepted for `owl:maxCardinality`. The OWL 2 RL/RDF
