@@ -264,6 +264,18 @@ impl Circuit {
         // positive-only guard above). The closure retraction pass runs BEFORE
         // the rule recompute below so the recompute sees the shrunk
         // `closure_support`.
+        //
+        // P2 (multiplicity-aware base deletion): a base edge must be deleted
+        // from the closure backend ONLY when its POST-TICK asserted multiplicity
+        // reaches 0 (genuinely gone). `asserted_base` is a Z-set multiset —
+        // `assert_triple` appends `(triple, +1)` each call — so an edge asserted
+        // twice then retracted once still has multiplicity +1 and its base edge
+        // must SURVIVE. The asserted records were already merged into
+        // `asserted_base` in the drain loop above, so `asserted_base.get` is
+        // post-tick here; we keep only edges withdrawn this tick (`m < 0`) whose
+        // post-tick multiplicity is exactly 0. We negate to `-1` (the backend's
+        // `delete_transitive_edges` only checks `mult < 0`, not the magnitude;
+        // one logical deletion regardless of how many copies were withdrawn).
         let asserted_delta_for_closure_retract = if self.closure_plans.is_empty() || !has_retraction
         {
             Zset::new()
@@ -271,8 +283,8 @@ impl Circuit {
             Zset::from_iter(
                 asserted_delta
                     .iter()
-                    .filter(|(_, m)| *m < 0)
-                    .map(|(t, m)| (*t, m)),
+                    .filter(|(t, m)| *m < 0 && self.asserted_base.get(t) == 0)
+                    .map(|(t, _)| (*t, -1)),
             )
         };
 
@@ -359,8 +371,9 @@ impl Circuit {
             // `asserted_base`, not `derived_base`, so there is nothing to zero.
             let mut closure_plans = std::mem::take(&mut self.closure_plans);
             for rule in &mut closure_plans {
-                let withdrawn = rule.apply_retract_delta(&asserted_delta_for_closure_retract);
-                for triple in withdrawn {
+                let crate::closure_plan::ClosureRetractDelta { withdraw, promote } =
+                    rule.apply_retract_delta(&asserted_delta_for_closure_retract);
+                for triple in withdraw {
                     // Closure loses ownership regardless.
                     let was_support = self.closure_support.remove(&triple);
                     if !was_support {
@@ -386,6 +399,37 @@ impl Circuit {
                         .expect("derived-clock overflow");
                     self.feed
                         .publish(triple, -1, t, DerivationKind::ClosureInferred);
+                    derived_merged += 1;
+                }
+
+                // P1 — promote deleted-but-still-entailed asserted edges. The
+                // edge lost its asserted copy this tick but remains derivable in
+                // the closure; it had no materialized derived row (it lived only
+                // in `asserted_base`), so we must PROMOTE it to a `ClosureInferred`
+                // derived row. We materialize only when it is genuinely absent
+                // from BOTH bases now (the asserted copy is gone and no rule/
+                // closure row already owns it) and not already `closure_support`.
+                // Promotions ADD `closure_support`, so they run BEFORE the rule
+                // recompute below — rules can then join against the promoted
+                // closure edge (consistent with Finding-1).
+                for triple in promote {
+                    if self.closure_support.contains(&triple) {
+                        continue;
+                    }
+                    if self.asserted_base.get(&triple) != 0 || self.derived_base.get(&triple) != 0 {
+                        // Still present somewhere (e.g. asserted with surviving
+                        // multiplicity, or already a rule-derived row): no-op.
+                        continue;
+                    }
+                    self.derived_base.add(triple, 1);
+                    self.closure_support.insert(triple);
+                    let t = self.derived_clock;
+                    self.derived_clock = self
+                        .derived_clock
+                        .checked_add(1)
+                        .expect("derived-clock overflow");
+                    self.feed
+                        .publish(triple, 1, t, DerivationKind::ClosureInferred);
                     derived_merged += 1;
                 }
             }

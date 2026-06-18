@@ -20,6 +20,25 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Outcome of retracting one or more base edges from the closure.
+///
+/// `withdrawn` are closure pairs that lost ALL support and were dropped from
+/// the closed set (the negative delta; the SPEC-06 layer negates them).
+///
+/// `survived` are base edges that were just deleted this operation but REMAIN
+/// reachable in the post-delete closure — i.e. the deleted edge `(s, o)` is
+/// still in the closed set because `o` is still reachable from `s` over the
+/// remaining base. Only the directly-deleted edge can become such a survivor:
+/// transitively-implied pairs were already materialized in the closure
+/// (`derived_base`/`closure_support` at the SPEC-06 layer), whereas a deleted
+/// *asserted* edge that is still entailed has no materialized derived row, so
+/// the SPEC-06 layer must PROMOTE it to one (BUG P1).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    pub withdrawn: Vec<(u64, u64)>,
+    pub survived: Vec<(u64, u64)>,
+}
+
 /// Strict transitive closure over dense `u64` indices, maintained incrementally
 /// under edge insertion and retraction. "Strict" = no implicit identity; a
 /// self-loop `(x,x)` appears only when `x` lies on a cycle, matching
@@ -224,10 +243,12 @@ impl IncrementalTransitiveClosure {
         }
     }
 
-    /// Retract one asserted base edge `(s, o)` and return the **withdrawn**
-    /// closure pairs (positive `(x, y)` tuples the caller negates). Idempotent:
-    /// if `(s, o)` was not a base edge, returns empty and leaves state
-    /// unchanged. Maintains the invariant `closed == transitive_closure(base)`.
+    /// Retract one asserted base edge `(s, o)` and return the retraction
+    /// [`DeleteOutcome`]: the **withdrawn** closure pairs (positive `(x, y)`
+    /// tuples the caller negates) and any **survivor** — the just-deleted base
+    /// edge `(s, o)` that is STILL closed-reachable over the remaining base.
+    /// Idempotent: if `(s, o)` was not a base edge, returns an empty outcome and
+    /// leaves state unchanged. Maintains `closed == transitive_closure(base)`.
     ///
     /// Algorithm (correctness-first affected-region recompute):
     ///  1. Remove `(s, o)` from `base`. If it was absent, return empty.
@@ -238,8 +259,12 @@ impl IncrementalTransitiveClosure {
     ///  3. For each affected source `x`, recompute its forward reachability over
     ///     the **post-delete** base. A candidate pair `(x, y)` is withdrawn iff
     ///     `y` is no longer base-reachable from `x`.
-    ///  4. Drop the withdrawn pairs from the closed adjacency; return them.
-    pub fn delete_edge(&mut self, s: u64, o: u64) -> Vec<(u64, u64)> {
+    ///  4. Drop the withdrawn pairs from the closed adjacency.
+    ///  5. The deleted edge `(s, o)` is a **survivor** iff it remained in the
+    ///     closed set (i.e. it was NOT withdrawn) — `o` is still reachable from
+    ///     `s` over another base path. Report it so the SPEC-06 layer can
+    ///     promote it to a materialized derived row (BUG P1).
+    pub fn delete_edge(&mut self, s: u64, o: u64) -> DeleteOutcome {
         // 1. Remove from base; bail if it was not an asserted edge.
         let was_base = self
             .base
@@ -247,7 +272,7 @@ impl IncrementalTransitiveClosure {
             .map(|set| set.remove(&o))
             .unwrap_or(false);
         if !was_base {
-            return Vec::new();
+            return DeleteOutcome::default();
         }
         if self.base.get(&s).is_some_and(|set| set.is_empty()) {
             self.base.remove(&s);
@@ -294,20 +319,35 @@ impl IncrementalTransitiveClosure {
         for &(x, y) in &withdrawn {
             self.drop_closed(x, y);
         }
-        withdrawn
+
+        // 5. Survivor: the deleted edge `(s, o)` is still in the closed set iff
+        // it was NOT withdrawn — i.e. `o` is still reachable from `s` over the
+        // remaining base. Only the directly-deleted edge can be a survivor;
+        // transitively-implied pairs were already materialized.
+        let still_closed = self.fwd.get(&s).is_some_and(|set| set.contains(&o));
+        let survived = if still_closed {
+            vec![(s, o)]
+        } else {
+            Vec::new()
+        };
+
+        DeleteOutcome {
+            withdrawn,
+            survived,
+        }
     }
 
     /// Retract many base edges (folded one at a time so each deletion observes
-    /// the prior removals) and return the combined withdrawn delta.
-    pub fn delete_edges<I: IntoIterator<Item = (u64, u64)>>(
-        &mut self,
-        edges: I,
-    ) -> Vec<(u64, u64)> {
-        let mut withdrawn = Vec::new();
+    /// the prior removals) and return the combined retraction outcome
+    /// (withdrawn pairs + surviving deleted edges).
+    pub fn delete_edges<I: IntoIterator<Item = (u64, u64)>>(&mut self, edges: I) -> DeleteOutcome {
+        let mut out = DeleteOutcome::default();
         for (s, o) in edges {
-            withdrawn.extend(self.delete_edge(s, o));
+            let one = self.delete_edge(s, o);
+            out.withdrawn.extend(one.withdrawn);
+            out.survived.extend(one.survived);
         }
-        withdrawn
+        out
     }
 }
 
@@ -446,14 +486,19 @@ mod tests {
         // 1->2->3 closed; (1,3) is inferred, not a base edge.
         let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3)]);
         let pre = edge_set(&c);
-        let withdrawn = c.delete_edge(1, 3);
+        let out = c.delete_edge(1, 3);
         assert!(
-            withdrawn.is_empty(),
+            out.withdrawn.is_empty(),
             "deleting an inferred edge must withdraw nothing"
+        );
+        assert!(
+            out.survived.is_empty(),
+            "deleting a non-base edge has no survivor"
         );
         assert_eq!(edge_set(&c), pre, "state unchanged on no-op delete");
         // Deleting an edge never asserted at all is also a no-op.
-        assert!(c.delete_edge(7, 8).is_empty());
+        let out2 = c.delete_edge(7, 8);
+        assert!(out2.withdrawn.is_empty() && out2.survived.is_empty());
         assert_eq!(edge_set(&c), pre);
     }
 
@@ -462,10 +507,17 @@ mod tests {
         // Two base paths from 1 to 3: 1->2->3 and 1->3 (direct).
         // Deleting the direct 1->3 leaves (1,3) supported by 1->2->3.
         let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
-        let withdrawn = c.delete_edge(1, 3);
+        let out = c.delete_edge(1, 3);
         assert!(
-            withdrawn.is_empty(),
-            "(1,3) still derivable via 1->2->3, withdraw nothing; got {withdrawn:?}"
+            out.withdrawn.is_empty(),
+            "(1,3) still derivable via 1->2->3, withdraw nothing; got {:?}",
+            out.withdrawn
+        );
+        // (1,3) was the deleted edge AND is still closed-reachable → survivor.
+        assert_eq!(
+            out.survived,
+            vec![(1, 3)],
+            "(1,3) is a survivor: deleted base edge still entailed via 1->2->3"
         );
         assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
     }
@@ -475,10 +527,51 @@ mod tests {
         // Chain 1->2->3->4. Deleting 2->3 disconnects {1,2} from {3,4}.
         // Withdrawn: (2,3),(2,4),(1,3),(1,4). Surviving: (1,2),(3,4).
         let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (3, 4)]);
-        let mut withdrawn = c.delete_edge(2, 3);
-        withdrawn.sort_unstable();
-        assert_eq!(withdrawn, vec![(1, 3), (1, 4), (2, 3), (2, 4)]);
+        let mut out = c.delete_edge(2, 3);
+        out.withdrawn.sort_unstable();
+        assert_eq!(out.withdrawn, vec![(1, 3), (1, 4), (2, 3), (2, 4)]);
+        // The deleted edge (2,3) itself was withdrawn (no alternate path), so it
+        // is NOT a survivor.
+        assert!(
+            out.survived.is_empty(),
+            "deleted (2,3) was withdrawn, not a survivor"
+        );
         assert_eq!(edge_set(&c), [(1, 2), (3, 4)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_direct_edge_implied_by_path_reports_survivor() {
+        // Base 1->2, 2->3, and direct 1->3. Deleting the DIRECT 1->3 leaves it
+        // entailed via 1->2->3: nothing is withdrawn, and (1,3) is reported as a
+        // survivor so the SPEC-06 layer can promote it to a derived row (P1).
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        let out = c.delete_edge(1, 3);
+        assert!(
+            out.withdrawn.is_empty(),
+            "nothing withdrawn — alternate path"
+        );
+        assert_eq!(out.survived, vec![(1, 3)], "(1,3) survives via 1->2->3");
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_edges_folds_withdrawn_and_survived() {
+        // Two independent diamonds folded in one call.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        // Delete the direct 1->3 (survivor) and the chain edge 2->3 (withdraws
+        // the now-broken pairs). Order matters: fold deletes 1->3 first (still
+        // entailed via 2->3, survivor), then 2->3 (which now withdraws (1,3) and
+        // (2,3) — but (1,3) was already a survivor of the first delete).
+        let mut out = c.delete_edges([(1, 3), (2, 3)]);
+        out.withdrawn.sort_unstable();
+        // After both deletes only (1,2) remains; (1,3),(2,3) are gone.
+        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
+        // (1,3) survived the first delete (folded into `survived`).
+        assert!(
+            out.survived.contains(&(1, 3)),
+            "got survived={:?}",
+            out.survived
+        );
     }
 
     #[test]

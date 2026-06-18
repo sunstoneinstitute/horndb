@@ -14,6 +14,22 @@ use horndb_closure::types::{DictId, PredicateId, Triple};
 use crate::types::TripleId;
 use crate::zset::Zset;
 
+/// Result of a closure rule's retraction pass (SPEC-06 F6).
+///
+/// - `withdraw`: closure triples that lost ALL support and must be withdrawn
+///   (the caller negates the sign and zeroes the derived row).
+/// - `promote`: deleted *asserted* base edges that are STILL entailed by the
+///   post-delete closure and therefore must be PROMOTED to materialized
+///   `ClosureInferred` derived rows (BUG P1). They had no materialized derived
+///   row before (they lived only in `asserted_base`), so when the asserted copy
+///   is retracted the caller must add them to `derived_base` / `closure_support`
+///   and publish a POSITIVE `ClosureInferred`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ClosureRetractDelta {
+    pub withdraw: Vec<TripleId>,
+    pub promote: Vec<TripleId>,
+}
+
 /// A closure operator maintained incrementally (SPEC-06 F5/F6).
 ///
 /// Given the asserted insertion delta for a tick, [`apply_insert_delta`] returns
@@ -29,15 +45,17 @@ pub trait ClosureRule {
 
     /// Apply the retraction half of a tick's asserted delta: filter for the
     /// withdrawn (`mult < 0`) base edges this rule owns, update the retained
-    /// closure, and return the closure triples that lost ALL support and must
-    /// therefore be **withdrawn** (the caller negates the sign).
+    /// closure, and return a [`ClosureRetractDelta`] — the closure triples that
+    /// lost ALL support (`withdraw`, caller negates) and any deleted base edge
+    /// still entailed by the post-delete closure (`promote`, caller materializes
+    /// as a `ClosureInferred` derived row — BUG P1).
     ///
-    /// Default impl returns `Vec::new()` so an insertion-only closure rule
-    /// still compiles and never withdraws anything. `TransitiveClosureRule`
-    /// overrides it.
-    fn apply_retract_delta(&mut self, asserted_delta: &Zset<TripleId>) -> Vec<TripleId> {
+    /// Default impl returns an empty delta so an insertion-only closure rule
+    /// still compiles and never withdraws or promotes anything.
+    /// `TransitiveClosureRule` overrides it.
+    fn apply_retract_delta(&mut self, asserted_delta: &Zset<TripleId>) -> ClosureRetractDelta {
         let _ = asserted_delta;
-        Vec::new()
+        ClosureRetractDelta::default()
     }
 }
 
@@ -141,7 +159,7 @@ impl ClosureRule for TransitiveClosureRule {
             .collect()
     }
 
-    fn apply_retract_delta(&mut self, asserted_delta: &Zset<TripleId>) -> Vec<TripleId> {
+    fn apply_retract_delta(&mut self, asserted_delta: &Zset<TripleId>) -> ClosureRetractDelta {
         // Collect negative-multiplicity edges for this predicate (the base
         // edges being withdrawn this tick).
         let edges: Vec<(DictId, DictId)> = asserted_delta
@@ -150,19 +168,28 @@ impl ClosureRule for TransitiveClosureRule {
             .map(|((s, _, o), _)| (DictId(*s), DictId(*o)))
             .collect();
         if edges.is_empty() {
-            return Vec::new();
+            return ClosureRetractDelta::default();
         }
         let pid = PredicateId(self.predicate);
         // Mirror `apply_insert_delta`: a GraphBLAS-level failure is not
         // recoverable here, so surface it as a panic.
-        let withdrawn = self
+        let outcome = self
             .backend
             .delete_transitive_edges(pid, &edges)
             .expect("incremental closure delete failed");
-        withdrawn
-            .into_iter()
-            .map(|(s, o)| (s.0, self.predicate, o.0))
-            .collect()
+        let p = self.predicate;
+        ClosureRetractDelta {
+            withdraw: outcome
+                .withdrawn
+                .into_iter()
+                .map(|(s, o)| (s.0, p, o.0))
+                .collect(),
+            promote: outcome
+                .survived
+                .into_iter()
+                .map(|(s, o)| (s.0, p, o.0))
+                .collect(),
+        }
     }
 }
 
@@ -239,8 +266,10 @@ mod tests {
         let mut del: Zset<crate::types::TripleId> = Zset::new();
         del.add((2, 100, 3), -1);
         let mut got = rule.apply_retract_delta(&del);
-        got.sort_unstable();
-        assert_eq!(got, vec![(1, 100, 3), (2, 100, 3)]);
+        got.withdraw.sort_unstable();
+        assert_eq!(got.withdraw, vec![(1, 100, 3), (2, 100, 3)]);
+        // (2,3) was withdrawn (no alternate path), so nothing to promote.
+        assert!(got.promote.is_empty());
     }
 
     /// Diamond: 1->2, 1->3, 2->4, 3->4 closes (1,4) via two paths. Retracting
@@ -259,8 +288,36 @@ mod tests {
         del.add((2, 100, 4), -1);
         let got = rule.apply_retract_delta(&del);
         // (1,4) is still reachable via 1->3->4, so the only withdrawn pair is
-        // the direct (2,4).
-        assert_eq!(got, vec![(2, 100, 4)]);
+        // the direct (2,4); (2,4) itself was withdrawn, so nothing to promote.
+        assert_eq!(got.withdraw, vec![(2, 100, 4)]);
+        assert!(got.promote.is_empty());
+    }
+
+    /// P1 promote: assert chain 1->2->3 AND the direct 1->3. Retracting the
+    /// direct (1,p,3) — still entailed via 1->2->3 — withdraws nothing and
+    /// reports (1,p,3) as a PROMOTE (it had no derived row of its own).
+    #[test]
+    fn transitive_rule_retract_direct_edge_promotes_survivor() {
+        let mut rule = TransitiveClosureRule::new(100);
+        let mut ins: Zset<crate::types::TripleId> = Zset::new();
+        ins.add((1, 100, 2), 1);
+        ins.add((2, 100, 3), 1);
+        ins.add((1, 100, 3), 1);
+        let _ = rule.apply_insert_delta(&ins);
+
+        let mut del: Zset<crate::types::TripleId> = Zset::new();
+        del.add((1, 100, 3), -1);
+        let got = rule.apply_retract_delta(&del);
+        assert!(
+            got.withdraw.is_empty(),
+            "(1,3) still entailed via 1->2->3, withdraw nothing; got {:?}",
+            got.withdraw
+        );
+        assert_eq!(
+            got.promote,
+            vec![(1, 100, 3)],
+            "(1,3) survives and must be promoted to a derived row"
+        );
     }
 
     /// A retraction-only delta with no negative edge for this predicate
@@ -276,7 +333,7 @@ mod tests {
         del.add((1, 100, 2), 1); // positive: ignored by retract path
         del.add((1, 999, 2), -1); // other predicate: ignored
         let got = rule.apply_retract_delta(&del);
-        assert!(got.is_empty());
+        assert!(got.withdraw.is_empty() && got.promote.is_empty());
     }
 
     /// State is retained across calls: the second delta sees the first.

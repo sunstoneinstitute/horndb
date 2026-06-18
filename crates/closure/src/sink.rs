@@ -11,6 +11,7 @@
 use anyhow::Result;
 use rustc_hash::FxHashMap;
 
+pub use crate::closure::incremental::DeleteOutcome;
 use crate::closure::incremental::IncrementalTransitiveClosure;
 use crate::closure::schema::reflexive_transitive_closure;
 use crate::closure::transitive::transitive_closure;
@@ -180,6 +181,15 @@ pub fn default_backend() -> BackendImpl {
     BackendImpl::default()
 }
 
+/// Retraction outcome in `DictId` space (the [`DeleteOutcome`] mapped back from
+/// dense ids). `withdrawn` are closure pairs that lost all support; `survived`
+/// are deleted base edges still entailed via another path (PROMOTE candidates).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DictDeleteOutcome {
+    pub withdrawn: Vec<(DictId, DictId)>,
+    pub survived: Vec<(DictId, DictId)>,
+}
+
 /// Per-predicate retained closure state for the incremental path (SPEC-05 F6).
 #[derive(Default)]
 struct PredicateState {
@@ -288,25 +298,27 @@ impl IncrementalClosureBackend {
     }
 
     /// Retract `edges` (asserted base edges) from predicate `p`'s transitive
-    /// closure and **return** the withdrawn closure edges (mapped back to
-    /// `DictId`), i.e. the inferred pairs that lose all support. Mirrors
-    /// [`Self::insert_transitive_edges`] but for the negative direction.
+    /// closure and **return** the retraction [`DictDeleteOutcome`] (mapped back
+    /// to `DictId`): the `withdrawn` closure pairs that lose all support, and any
+    /// `survived` deleted base edge that remains entailed via another path.
+    /// Mirrors [`Self::insert_transitive_edges`] but for the negative direction.
     ///
     /// No sink parameter and nothing is written to a sink: the `+/-` sign lives
-    /// in the SPEC-06 Z-set layer, which negates these returned edges. If `p`
-    /// has no retained state, returns empty. Edges that were never asserted (or
-    /// were seeded via [`Self::seed_transitive_closure`], whose base is unknown)
+    /// in the SPEC-06 Z-set layer, which negates `withdrawn` and PROMOTES
+    /// `survived` to materialized derived rows (BUG P1). If `p` has no retained
+    /// state, returns an empty outcome. Edges that were never asserted (or were
+    /// seeded via [`Self::seed_transitive_closure`], whose base is unknown)
     /// withdraw nothing — see that method's retraction limitation.
     pub fn delete_transitive_edges(
         &mut self,
         p: PredicateId,
         edges: &[(DictId, DictId)],
-    ) -> Result<Vec<(DictId, DictId)>> {
+    ) -> Result<DictDeleteOutcome> {
         if edges.is_empty() {
-            return Ok(Vec::new());
+            return Ok(DictDeleteOutcome::default());
         }
         let Some(state) = self.predicates.get_mut(&p) else {
-            return Ok(Vec::new());
+            return Ok(DictDeleteOutcome::default());
         };
         // Map DictId endpoints to dense ids. An endpoint we have never interned
         // cannot be part of any base edge, so it contributes no deletion; skip it.
@@ -314,13 +326,21 @@ impl IncrementalClosureBackend {
             .iter()
             .filter_map(|&(s, o)| Some((state.map.to_dense(s)?.0, state.map.to_dense(o)?.0)))
             .collect();
-        let withdrawn = state.closure.delete_edges(dense);
+        let DeleteOutcome {
+            withdrawn,
+            survived,
+        } = state.closure.delete_edges(dense);
         let map = &state.map;
-        let out = withdrawn
-            .into_iter()
-            .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
-            .collect();
-        Ok(out)
+        let to_dict = |pairs: Vec<(u64, u64)>| -> Vec<(DictId, DictId)> {
+            pairs
+                .into_iter()
+                .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
+                .collect()
+        };
+        Ok(DictDeleteOutcome {
+            withdrawn: to_dict(withdrawn),
+            survived: to_dict(survived),
+        })
     }
 
     /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
