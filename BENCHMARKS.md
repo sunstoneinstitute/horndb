@@ -107,7 +107,8 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | Expansion ratio (OWL 2 RL workloads) | ≤**4×** asserted | GraphDB 1:3.2 (NF2, acceptance #3) |
 | Steady-state rule firing latency (LUBM-1000 warm store, single-triple insert) | ≤**1 s** | NF3 (jointly owned with SPEC-06) |
 | Proof-tree retrieval (depth ≤10) | ≤**100 ms** | NF4 |
-| `eq_rep_p_skew` bench — `eq-rep-p` class canonicalization (k=32 mutual-`owl:sameAs`, rows=8) | optimized path ≤ naive, identical closure (differential proptest) | this PR: **38.1 ms** optimized vs **48.7 ms** naive (~1.28×). Output blow-up is semantically irreducible; downstream F5 partition-scan still Stage-2 |
+| `eq_rep_p_skew` bench — `eq-rep-p` class canonicalization (k=32 mutual-`owl:sameAs`, rows=8) | optimized path ≤ naive, identical closure (differential proptest) | this PR: **38.1 ms** optimized vs **48.7 ms** naive (~1.28×). Output blow-up is semantically irreducible; downstream F5 partition-scan now parallelised (next row) |
+| `rdf_type_skew` bench — F5 `rdf:type` partition-by-class parallelism (`cls-int1` over a width-12 intersection, skewed `c1` extent) ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)) | parallel (`Auto`) ≤ serial, **identical** closure (`tests/rdf_type_skew_differential.rs`, incl. proptest) | _macOS dev workstation, 2026-06-18:_ 100 k subjects **175.8 ms** `Auto` vs **200.9 ms** `Serial` (~**1.14×**); 50 k **81.0 ms** vs **90.2 ms**. The win is over the whole `materialize` (apply + closure phases dominate, so the per-subject parallelism is diluted); the rule-local speedup is larger. Subject extents below `PAR_TYPE_THRESHOLD` (256) run sequentially. Compiled-rule (`cax-sco`-style) parallelism is a separate Stage-2 follow-up. |
 
 ### SPEC-05 — GraphBLAS closure backend (`horndb-closure`)
 

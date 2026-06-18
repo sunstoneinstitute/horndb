@@ -22,7 +22,11 @@
 //!   `Engine::proof` (see `tests/proof_tree.rs`). Still deferred to Stage 2 is
 //!   *persistence*: a compressed side-table with on-demand rederivation via
 //!   SPEC-03. Today's `Provenance` is in-memory only.
-//! - `rdf:type` skew optimization (partition-by-class-id parallelism) — Stage 2.
+//! - `rdf:type` skew optimization (partition-by-class-id parallelism) is
+//!   implemented for the hand-written list rules (`cls-int1` / `cls-uni` /
+//!   `cax-adc` / `prp-key` parallelise per-subject filtering across rayon — see
+//!   `list_rules.rs` and `ParallelStrategy`). The compiled `rules.toml` rules
+//!   (`cax-sco`-style) are not yet parallelised — Stage 2.
 //!   (`eq-rep-p`'s own class blow-up is mitigated — see `eq_rep_p_opt`.)
 //! - Incremental updates via Z-sets — SPEC-06 / Stage 2.
 //! - WCOJ join execution inside rule bodies — SPEC-03 / Stage 2.
@@ -61,7 +65,7 @@ pub const COMPILED_RULES_SOURCE: &str =
 
 pub use engine::{
     materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts,
-    PhaseTimings, Stats,
+    ParallelStrategy, PhaseTimings, Stats,
 };
 pub use integration::{BackendChoice, Engine, StringProofTree};
 pub use provenance::ProofTree;

@@ -24,7 +24,10 @@ fn closure_with(base: &[Triple], strat: EqRepPStrategy) -> FxHashSet<Triple> {
     materialize_with(
         &mut store,
         &mut backend,
-        MaterializeOpts { eq_rep_p: strat },
+        MaterializeOpts {
+            eq_rep_p: strat,
+            ..Default::default()
+        },
     );
     store.all_triples()
 }

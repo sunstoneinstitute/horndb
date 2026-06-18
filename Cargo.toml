@@ -24,6 +24,7 @@ authors = ["Sunstone Institute"]
 anyhow = "1"
 thiserror = "2"
 crossbeam-channel = "0.5"
+rayon = "1"
 proptest = "1"
 criterion = { version = "0.8", default-features = false, features = ["html_reports"] }
 serde = { version = "1", features = ["derive"] }

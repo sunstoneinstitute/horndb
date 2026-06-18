@@ -1183,6 +1183,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "quote",
+ "rayon",
  "rustc-hash 2.1.2",
  "serde",
  "smallvec",

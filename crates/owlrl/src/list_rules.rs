@@ -20,6 +20,16 @@
 //! via `store.probe(None, rdf_type, Some(c_i))` rather than scanning the
 //! entire `rdf:type` partition.
 //!
+//! Per SPEC-04 F5 (partition `rdf:type` work by class id and parallelise),
+//! the four `rdf:type`-driven rules — `cls-int1`, `cls-uni`, `cax-adc`,
+//! `prp-key` — run their per-subject filtering across rayon's pool when the
+//! class extent exceeds [`PAR_TYPE_THRESHOLD`], gated by
+//! [`crate::engine::ParallelStrategy`] (`Auto` default; `Serial` is the
+//! differential-test oracle). The store reads in a materialise round are
+//! immutable (the round delta applies only at round end — see `engine.rs`),
+//! so the per-subject work is data-parallel; the helpers [`map_subjects`] /
+//! [`extend_delta`] keep the parallel and serial paths' output identical.
+//!
 //! Per RDFox's ISWC 2015 paper this is also how production engines handle
 //! list-shaped rules; the engine internalises the ontology lists at load
 //! time and applies the resulting tabular rules in the same semi-naïve
@@ -34,10 +44,12 @@
 //!   insertion-only — SPEC-06). A Stage-2 delta-aware refresh is a
 //!   separate follow-up.
 
+use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use smallvec::{smallvec, SmallVec};
 
 use crate::delta::Delta;
+use crate::engine::ParallelStrategy;
 use crate::provenance::Provenance;
 use crate::store::TripleStore;
 use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
@@ -298,13 +310,26 @@ fn first_object(store: &dyn TripleStore, s: TermId, p: TermId) -> Option<TermId>
     store.probe(Some(s), p, None).next().map(|t| t.o)
 }
 
+/// Subject-count threshold above which the `rdf:type`-driven list rules
+/// (`cls-int1`, `cls-uni`, `cax-adc`, `prp-key`) parallelise their per-subject
+/// filtering across rayon's pool (SPEC-04 F5). Below it the rayon split +
+/// merge overhead outweighs the work, so the original sequential loop runs.
+/// Tuned by the `rdf_type_skew` bench; small enough that the differential test's
+/// skewed inputs still exercise the parallel path.
+pub(crate) const PAR_TYPE_THRESHOLD: usize = 256;
+
 /// Fire every list rule whose body predicates intersect `dirty` (or all of
 /// them if `dirty` is `None`, signalling the first round).
+///
+/// `store: &(dyn TripleStore + Sync)` so the SPEC-04 F5 parallel path can share
+/// it across rayon worker threads. `parallel` selects the per-subject
+/// parallelisation strategy for the `rdf:type`-driven rules.
 pub fn fire_all(
-    store: &dyn TripleStore,
+    store: &(dyn TripleStore + Sync),
     axioms: &SchemaAxioms,
     vocab: &Vocabulary,
     dirty: Option<&FxHashSet<TermId>>,
+    parallel: ParallelStrategy,
 ) -> Delta {
     let mut out = Delta::new();
     if axioms.is_empty() {
@@ -321,14 +346,14 @@ pub fn fire_all(
     // prp-key — body reads each p_i and rdf:type for ?x and ?y.
     if !axioms.keys.is_empty() && any_dirty_for_keys(axioms, vocab, dirty) {
         for (c, ps) in &axioms.keys {
-            fire_prp_key(store, vocab, *c, ps, &mut out);
+            fire_prp_key(store, vocab, *c, ps, parallel, &mut out);
         }
     }
 
     // cls-int1 — body reads rdf:type for each c_i.
     if !axioms.intersections.is_empty() && is_dirty(dirty, vocab.rdf_type) {
         for (c, _listhead, cs) in &axioms.intersections {
-            fire_cls_int1(store, vocab, *c, cs, &mut out);
+            fire_cls_int1(store, vocab, *c, cs, parallel, &mut out);
         }
     }
 
@@ -344,14 +369,14 @@ pub fn fire_all(
     // cls-uni — body reads rdf:type for each c_i.
     if !axioms.unions.is_empty() && is_dirty(dirty, vocab.rdf_type) {
         for (c, cs) in &axioms.unions {
-            fire_cls_uni(store, vocab, *c, cs, &mut out);
+            fire_cls_uni(store, vocab, *c, cs, parallel, &mut out);
         }
     }
 
     // cax-adc — body reads rdf:type for each c_i.
     if !axioms.all_disjoint_classes.is_empty() && is_dirty(dirty, vocab.rdf_type) {
         for cs in &axioms.all_disjoint_classes {
-            fire_cax_adc(store, vocab, cs, &mut out);
+            fire_cax_adc(store, vocab, cs, parallel, &mut out);
         }
     }
 
@@ -479,6 +504,41 @@ fn is_dirty(dirty: Option<&FxHashSet<TermId>>, p: TermId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// SPEC-04 F5 — `rdf:type` skew parallelism helpers.
+//
+// The `rdf:type`-driven list rules (`cls-int1`, `cls-uni`, `cax-adc`,
+// `prp-key`) gather a subject extent and run an independent per-subject test
+// that emits at most one derived triple per subject. `map_subjects` runs that
+// test in parallel across rayon's pool when the extent is large enough (and the
+// strategy permits), and sequentially otherwise; `extend_delta` folds the
+// produced candidates into the shared round delta (insert is idempotent, so the
+// triple set is identical to the serial `!out.contains` guard regardless of
+// the order rayon produces results in).
+// ---------------------------------------------------------------------------
+
+/// Apply `f` to every subject in `xs`, collecting the `Some` results. Uses
+/// rayon when `parallel == Auto` and `xs` is above `PAR_TYPE_THRESHOLD`;
+/// sequential otherwise. `f` must be a pure read over the (immutable) store.
+fn map_subjects<F>(xs: &[TermId], parallel: ParallelStrategy, f: F) -> Vec<(Triple, Provenance)>
+where
+    F: Fn(TermId) -> Option<(Triple, Provenance)> + Sync + Send,
+{
+    if parallel == ParallelStrategy::Auto && xs.len() >= PAR_TYPE_THRESHOLD {
+        xs.par_iter().filter_map(|&x| f(x)).collect()
+    } else {
+        xs.iter().filter_map(|&x| f(x)).collect()
+    }
+}
+
+/// Fold rule-produced `(triple, provenance)` candidates into `out`. `insert`
+/// dedups, so re-derivations and per-subject duplicates collapse to one entry.
+fn extend_delta(out: &mut Delta, produced: Vec<(Triple, Provenance)>) {
+    for (t, prov) in produced {
+        out.insert(t, prov);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // prp-spo2 — `?p owl:propertyChainAxiom (p1 ... pn) ∧ ?u0 p1 ?u1 ∧
 // ?u1 p2 ?u2 ∧ ... ∧ ?u(n-1) pn ?un ⇒ ?u0 ?p ?un`
 //
@@ -552,10 +612,11 @@ fn emit_pair(
 // match is cheap.
 // ---------------------------------------------------------------------------
 fn fire_prp_key(
-    store: &dyn TripleStore,
+    store: &(dyn TripleStore + Sync),
     vocab: &Vocabulary,
     c: TermId,
     ps: &[TermId],
+    parallel: ParallelStrategy,
     out: &mut Delta,
 ) {
     debug_assert!(!ps.is_empty());
@@ -567,7 +628,13 @@ fn fire_prp_key(
     if xs.len() < 2 {
         return;
     }
-    for &x in &xs {
+
+    // All `?x owl:sameAs ?y` derivations for a given `?x` are independent of any
+    // other `?x`, so the outer subject loop parallelises over the (skewed) keyed
+    // class extent. Each `?x` produces its own candidate list, flattened and
+    // deduped into the round delta by `extend_delta`.
+    let emit_for_x = |x: TermId| -> Vec<(Triple, Provenance)> {
+        let mut produced: Vec<(Triple, Provenance)> = Vec::new();
         for first_t in store.probe(Some(x), ps[0], None) {
             let z0 = first_t.o;
             let candidates: Vec<TermId> = store
@@ -593,7 +660,7 @@ fn fire_prp_key(
                 }
                 for y in survivors {
                     let head = Triple::new(x, vocab.owl_same_as, y);
-                    if !out.contains(&head) && !store.contains(&head) {
+                    if !store.contains(&head) {
                         // Body atoms: ?x : c, ?y : c, the shared ps[0] value,
                         // and the matched ?z_i on every remaining key property
                         // (the `x_choice` values, which survivors were filtered
@@ -609,18 +676,27 @@ fn fire_prp_key(
                             premises.push(Triple::new(x, p_i, z_i));
                             premises.push(Triple::new(y, p_i, z_i));
                         }
-                        out.insert(
+                        produced.push((
                             head,
                             Provenance {
                                 rule_id: "prp-key",
                                 premises,
                             },
-                        );
+                        ));
                     }
                 }
             }
         }
-    }
+        produced
+    };
+
+    let produced: Vec<(Triple, Provenance)> =
+        if parallel == ParallelStrategy::Auto && xs.len() >= PAR_TYPE_THRESHOLD {
+            xs.par_iter().flat_map_iter(|&x| emit_for_x(x)).collect()
+        } else {
+            xs.iter().flat_map(|&x| emit_for_x(x)).collect()
+        };
+    extend_delta(out, produced);
 }
 
 /// Cartesian product of `(x, p_i, ?z)` values for every `p_i` in `rest`.
@@ -657,40 +733,49 @@ fn cartesian_zs(store: &dyn TripleStore, x: TermId, rest: &[TermId]) -> Vec<Vec<
 // (SPEC-04 F5) should pre-sort by partition size.
 // ---------------------------------------------------------------------------
 fn fire_cls_int1(
-    store: &dyn TripleStore,
+    store: &(dyn TripleStore + Sync),
     vocab: &Vocabulary,
     c: TermId,
     cs: &[TermId],
+    parallel: ParallelStrategy,
     out: &mut Delta,
 ) {
     debug_assert!(!cs.is_empty());
+    // Seed on the first class extent (SPEC-04 F5: this is the skewed
+    // `rdf:type` partition the rule scans). The per-subject membership check
+    // against the remaining classes is independent across subjects, so it
+    // parallelises by class id once the extent is large enough.
     let xs: Vec<TermId> = store
         .probe(None, vocab.rdf_type, Some(cs[0]))
         .map(|t| t.s)
         .collect();
-    for x in xs {
-        if cs[1..]
+
+    let emit = |x: TermId| -> Option<(Triple, Provenance)> {
+        if !cs[1..]
             .iter()
             .all(|&c_i| store.contains(&Triple::new(x, vocab.rdf_type, c_i)))
         {
-            let head = Triple::new(x, vocab.rdf_type, c);
-            if !out.contains(&head) && !store.contains(&head) {
-                // Body atoms: ?x rdf:type ci for every member ci of the list.
-                let mut premises: SmallVec<[Triple; 4]> =
-                    smallvec![Triple::new(x, vocab.rdf_type, cs[0])];
-                for &c_i in &cs[1..] {
-                    premises.push(Triple::new(x, vocab.rdf_type, c_i));
-                }
-                out.insert(
-                    head,
-                    Provenance {
-                        rule_id: "cls-int1",
-                        premises,
-                    },
-                );
-            }
+            return None;
         }
-    }
+        let head = Triple::new(x, vocab.rdf_type, c);
+        if store.contains(&head) {
+            return None;
+        }
+        // Body atoms: ?x rdf:type ci for every member ci of the list.
+        let mut premises: SmallVec<[Triple; 4]> = smallvec![Triple::new(x, vocab.rdf_type, cs[0])];
+        for &c_i in &cs[1..] {
+            premises.push(Triple::new(x, vocab.rdf_type, c_i));
+        }
+        Some((
+            head,
+            Provenance {
+                rule_id: "cls-int1",
+                premises,
+            },
+        ))
+    };
+
+    extend_delta(out, map_subjects(&xs, parallel, emit));
 }
 
 // ---------------------------------------------------------------------------
@@ -731,27 +816,48 @@ fn fire_scm_int(
 // cls-uni — `?c owl:unionOf (c1 ... cn) ∧ ∃i. ?x rdf:type ci ⇒ ?x rdf:type ?c`
 // ---------------------------------------------------------------------------
 fn fire_cls_uni(
-    store: &dyn TripleStore,
+    store: &(dyn TripleStore + Sync),
     vocab: &Vocabulary,
     c: TermId,
     cs: &[TermId],
+    parallel: ParallelStrategy,
     out: &mut Delta,
 ) {
-    for &c_i in cs {
-        for t in store.probe(None, vocab.rdf_type, Some(c_i)) {
-            let head = Triple::new(t.s, vocab.rdf_type, c);
-            if !out.contains(&head) && !store.contains(&head) {
-                // Body atom: the single matched membership ?x rdf:type ci.
-                out.insert(
-                    head,
-                    Provenance {
-                        rule_id: "cls-uni",
-                        premises: smallvec![Triple::new(t.s, vocab.rdf_type, c_i)],
-                    },
-                );
-            }
+    // Gather every `(subject, member-class)` membership across the union list
+    // into an owned vec, then map per-membership. The member class is carried
+    // alongside the subject so each derived triple records the exact body atom
+    // (`?x rdf:type ci`) that fired it — identical to the serial path.
+    let memberships: Vec<(TermId, TermId)> = cs
+        .iter()
+        .flat_map(|&c_i| {
+            store
+                .probe(None, vocab.rdf_type, Some(c_i))
+                .map(move |t| (t.s, c_i))
+        })
+        .collect();
+
+    let emit = |(x, c_i): (TermId, TermId)| -> Option<(Triple, Provenance)> {
+        let head = Triple::new(x, vocab.rdf_type, c);
+        if store.contains(&head) {
+            return None;
         }
-    }
+        // Body atom: the single matched membership ?x rdf:type ci.
+        Some((
+            head,
+            Provenance {
+                rule_id: "cls-uni",
+                premises: smallvec![Triple::new(x, vocab.rdf_type, c_i)],
+            },
+        ))
+    };
+
+    let produced = if parallel == ParallelStrategy::Auto && memberships.len() >= PAR_TYPE_THRESHOLD
+    {
+        memberships.par_iter().filter_map(|&m| emit(m)).collect()
+    } else {
+        memberships.iter().filter_map(|&m| emit(m)).collect()
+    };
+    extend_delta(out, produced);
 }
 
 // ---------------------------------------------------------------------------
@@ -762,7 +868,13 @@ fn fire_cls_uni(
 // Implementation: enumerate every pair (i, j) with i < j; for each pair,
 // reuse the cax-dw shape on the (c_i, c_j) sub-extents.
 // ---------------------------------------------------------------------------
-fn fire_cax_adc(store: &dyn TripleStore, vocab: &Vocabulary, cs: &[TermId], out: &mut Delta) {
+fn fire_cax_adc(
+    store: &(dyn TripleStore + Sync),
+    vocab: &Vocabulary,
+    cs: &[TermId],
+    parallel: ParallelStrategy,
+    out: &mut Delta,
+) {
     for i in 0..cs.len() {
         let xs_i: Vec<TermId> = store
             .probe(None, vocab.rdf_type, Some(cs[i]))
@@ -771,25 +883,32 @@ fn fire_cax_adc(store: &dyn TripleStore, vocab: &Vocabulary, cs: &[TermId], out:
         if xs_i.is_empty() {
             continue;
         }
+        let ci = cs[i];
         for &cj in cs.iter().skip(i + 1) {
-            for &x in &xs_i {
-                if store.contains(&Triple::new(x, vocab.rdf_type, cj)) {
-                    let head = Triple::new(x, vocab.rdf_type, vocab.owl_nothing);
-                    if !out.contains(&head) && !store.contains(&head) {
-                        // Body atoms: ?x rdf:type ci and ?x rdf:type cj.
-                        out.insert(
-                            head,
-                            Provenance {
-                                rule_id: "cax-adc",
-                                premises: smallvec![
-                                    Triple::new(x, vocab.rdf_type, cs[i]),
-                                    Triple::new(x, vocab.rdf_type, cj),
-                                ],
-                            },
-                        );
-                    }
+            // For this disjoint pair (ci, cj), each subject of ci that is also a
+            // cj is an inconsistency. The per-subject test is independent, so it
+            // parallelises over the (skewed) ci extent.
+            let emit = |x: TermId| -> Option<(Triple, Provenance)> {
+                if !store.contains(&Triple::new(x, vocab.rdf_type, cj)) {
+                    return None;
                 }
-            }
+                let head = Triple::new(x, vocab.rdf_type, vocab.owl_nothing);
+                if store.contains(&head) {
+                    return None;
+                }
+                // Body atoms: ?x rdf:type ci and ?x rdf:type cj.
+                Some((
+                    head,
+                    Provenance {
+                        rule_id: "cax-adc",
+                        premises: smallvec![
+                            Triple::new(x, vocab.rdf_type, ci),
+                            Triple::new(x, vocab.rdf_type, cj),
+                        ],
+                    },
+                ))
+            };
+            extend_delta(out, map_subjects(&xs_i, parallel, emit));
         }
     }
 }
@@ -1185,7 +1304,7 @@ mod tests {
         s.assert(t(a.0, p1.0, b.0));
         s.assert(t(b.0, p2.0, c.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(d.contains(&t(a.0, p.0, c.0)), "prp-spo2: a-p->c");
     }
 
@@ -1222,7 +1341,7 @@ mod tests {
         s.assert(t(x.0, p.0, z.0));
         s.assert(t(y.0, p.0, z.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(x.0, v.owl_same_as.0, y.0)) || d.contains(&t(y.0, v.owl_same_as.0, x.0)),
             "prp-key: x sameAs y (or reverse)"
@@ -1241,7 +1360,7 @@ mod tests {
         s.assert(t(x.0, v.rdf_type.0, c1.0));
         s.assert(t(x.0, v.rdf_type.0, c2.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(d.contains(&t(x.0, v.rdf_type.0, c.0)), "cls-int1");
     }
 
@@ -1254,7 +1373,7 @@ mod tests {
         s.assert(t(c.0, v.owl_intersection_of.0, 1000));
         assert_list(&mut s, &v, 1000, &[c1.0, c2.0]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(c.0, v.rdfs_sub_class_of.0, c1.0)),
             "scm-int: c ⊑ c1"
@@ -1278,7 +1397,7 @@ mod tests {
         s.assert(t(x.0, v.rdf_type.0, c1.0));
         s.assert(t(y.0, v.rdf_type.0, c2.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(d.contains(&t(x.0, v.rdf_type.0, c.0)), "cls-uni via c1");
         assert!(d.contains(&t(y.0, v.rdf_type.0, c.0)), "cls-uni via c2");
     }
@@ -1297,7 +1416,7 @@ mod tests {
         s.assert(t(x.0, v.rdf_type.0, c1.0));
         s.assert(t(x.0, v.rdf_type.0, c2.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(x.0, v.rdf_type.0, v.owl_nothing.0)),
             "cax-adc: x : c1 ∧ x : c2 with AllDisjointClasses ⇒ x : owl:Nothing"
@@ -1337,7 +1456,7 @@ mod tests {
         s.assert(t(u.0, p1.0, w.0));
         s.assert(t(u.0, p2.0, w.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "prp-adp: u p1 w ∧ u p2 w with AllDisjointProperties ⇒ u : owl:Nothing"
@@ -1363,7 +1482,7 @@ mod tests {
         s.assert(t(u.0, p1.0, w1.0));
         s.assert(t(u.0, p2.0, w2.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "prp-adp: distinct objects across disjoint properties ⇒ consistent"
@@ -1387,7 +1506,7 @@ mod tests {
         s.assert(t(u.0, p1.0, w.0));
         s.assert(t(u.0, p3.0, w.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "prp-adp: must check all i<j pairs, including non-adjacent p1/p3"
@@ -1409,7 +1528,7 @@ mod tests {
         assert_list(&mut s, &v, 1000, &[p1.0, p1.0]);
         s.assert(t(u.0, p1.0, w.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "prp-adp: a property listed twice is disjoint with itself ⇒ any \
@@ -1434,7 +1553,7 @@ mod tests {
             max: 0,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "cls-maxc1: maxCard 0 with a p-value ⇒ u : owl:Nothing"
@@ -1456,7 +1575,7 @@ mod tests {
             max: 0,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "cls-maxc1: no p-value ⇒ no inconsistency"
@@ -1482,7 +1601,7 @@ mod tests {
             max: 1,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
                 || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
@@ -1506,7 +1625,7 @@ mod tests {
             max: 1,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         // No second value → no sameAs, and certainly no reflexive sameAs.
         assert!(!d.contains(&t(y1.0, v.owl_same_as.0, y1.0)));
         assert_eq!(
@@ -1526,7 +1645,7 @@ mod tests {
         s.assert(t(ad.0, v.owl_distinct_members.0, 1000));
         assert_list(&mut s, &v, 1000, &[a.0, b.0]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(d.contains(&t(a.0, v.owl_different_from.0, b.0)));
         assert!(d.contains(&t(b.0, v.owl_different_from.0, a.0)));
     }
@@ -1550,7 +1669,7 @@ mod tests {
             max: 0,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "cls-maxqc1: maxQC 0 with a filler-typed value ⇒ u : owl:Nothing"
@@ -1575,7 +1694,7 @@ mod tests {
             max: 0,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             !d.contains(&t(u.0, v.rdf_type.0, v.owl_nothing.0)),
             "cls-maxqc1: value not of filler class ⇒ no inconsistency"
@@ -1604,7 +1723,7 @@ mod tests {
             max: 1,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
                 || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
@@ -1633,7 +1752,7 @@ mod tests {
             max: 1,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert_eq!(
             d.iter().filter(|(tr, _)| tr.p == v.owl_same_as).count(),
             0,
@@ -1660,7 +1779,7 @@ mod tests {
             max: 1,
         }]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
         assert!(
             d.contains(&t(y1.0, v.owl_same_as.0, y2.0))
                 || d.contains(&t(y2.0, v.owl_same_as.0, y1.0)),
@@ -1716,7 +1835,7 @@ mod premise_tests {
         s.assert(t(x.0, v.rdf_type.0, c1.0));
         s.assert(t(x.0, v.rdf_type.0, c2.0));
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
 
         let head = Triple::new(x, v.rdf_type, c);
         let prov = d
@@ -1748,7 +1867,7 @@ mod premise_tests {
         s.assert(t(c.0, v.owl_intersection_of.0, listhead.0));
         assert_list(&mut s, &v, listhead.0, &[c1.0]);
         let ax = resolve(&s, &v);
-        let d = fire_all(&s, &ax, &v, None);
+        let d = fire_all(&s, &ax, &v, None, ParallelStrategy::Auto);
 
         let head = Triple::new(c, v.rdfs_sub_class_of, c1);
         let prov = d
