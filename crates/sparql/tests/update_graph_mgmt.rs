@@ -208,6 +208,18 @@ fn load_turtle_file() {
 }
 
 #[test]
+fn load_turtle_relative_iris_resolve_against_source() {
+    // Turtle with relative IRIs must resolve against the document (LOAD source)
+    // IRI; without a base the parse would fail.
+    let path = write_tmp("rel.ttl", "<s> <p> <o> .\n");
+    let mut store = MemStore::default();
+    let u = format!("LOAD <file://{}>", path.display());
+    run(&u, &mut store).unwrap();
+    assert_eq!(count_all(&store), 1);
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn load_percent_encoded_path() {
     // A file IRI percent-encodes reserved characters; LOAD must decode the path
     // back to the real filesystem name before reading it.
@@ -349,6 +361,25 @@ fn multi_op_failing_op_aborts_before_destructive_op() {
         count_all(&store),
         1,
         "CLEAR must not run when a later op fails"
+    );
+}
+
+#[test]
+fn multi_op_clear_then_unsupported_where_aborts() {
+    // A CLEAR followed by a DELETE WHERE whose WHERE uses an unsupported algebra
+    // construct (MINUS) must abort before the CLEAR mutates — the preflight
+    // translates/plans the WHERE, so the translation failure is caught up front.
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run(
+        "CLEAR DEFAULT ; DELETE { ?s ?p ?o } WHERE { ?s ?p ?o MINUS { ?s ?p ?o } }",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(!err.is_empty(), "expected an error");
+    assert_eq!(
+        count_all(&store),
+        1,
+        "CLEAR must not run when a later WHERE fails to translate"
     );
 }
 

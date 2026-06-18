@@ -265,6 +265,21 @@ and a **no-op** when `SILENT`. Concretely:
   way); preserving `SILENT` here would require re-parsing the verb and is
   out of scope while named graphs are unrepresentable.
 
+**Atomicity.** A multi-operation update must not partially apply on failure
+(SPARQL 1.1 §3.1.3). This matters here because spargebra desugars
+`COPY`/`MOVE <named> TO DEFAULT` into a destructive `Drop{DEFAULT}` *followed
+by* a `DeleteInsert` reading the unrepresentable named graph — applying op-by-op
+would clear the default graph and only then reject. `apply_update_with` runs a
+`validate_op` preflight over the whole sequence first: it mirrors every apply-
+time rejection (structural named-graph/triple-term checks, a non-silent `LOAD`
+fetch+parse, and the WHERE-clause `translate_where`+`planner::plan` so an
+unsupported algebra construct like `SERVICE`/`MINUS` is caught), and only mutates
+once the whole sequence is known-applyable.
+
+**Turtle/TriG base IRI.** `LOAD` passes the source IRI as the parser base, so a
+document with relative IRIs (`<s> <p> <o> .`) resolves against its own IRI —
+matching the storage Turtle loader. N-Triples/N-Quads need no base.
+
 **Deferred** (documented, out of scope here): true named-graph scoping and a
 quad-aware `Store` seam belong with the Graph Store Protocol increment (#54);
 remote `LOAD` waits on an HTTP client decision; and the W3C SPARQL 1.1 Update

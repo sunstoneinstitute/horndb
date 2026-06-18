@@ -22,6 +22,14 @@
 //! observationally identical to a default-graph-only store either way: no data
 //! moves). True named-graph scoping and remote (`http(s):`) `LOAD` stay
 //! deferred — see `INTEGRATION-NOTES.md`.
+//!
+//! A multi-operation update is applied **atomically**: `apply_update_with`
+//! preflights every operation (`validate_op`) for the failures it would hit at
+//! apply time — structural rejections, a non-silent `LOAD` whose fetch/parse
+//! fails, and a pattern update whose WHERE clause fails to translate/plan —
+//! before the first mutation, so e.g. `COPY <named> TO DEFAULT` (a desugared
+//! destructive `Drop{DEFAULT}` + a failing named read) can never clear the
+//! default graph on a failing update.
 
 use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
@@ -84,12 +92,12 @@ pub fn apply_update_with<B: FullBackend>(
     // destructive `Drop{DEFAULT}` *followed by* a `DeleteInsert` that reads the
     // unrepresentable named graph — so applying op-by-op would clear the
     // default graph and only then reject, losing data on a failing update.
-    // Preflight every operation for the rejections we can detect without
-    // mutating; only mutate once the whole sequence is known-applyable. (The
-    // remaining failure mode — a `LOAD` whose fetch/parse fails — is checked in
-    // its own pass below, before any op mutates.)
+    // Preflight every operation for the failures it would hit at apply time —
+    // structural rejections, a non-silent `LOAD` whose fetch/parse fails, and a
+    // pattern update whose WHERE clause fails to translate/plan — without
+    // mutating, so the whole sequence is known-applyable before the first write.
     for op in ops {
-        validate_op(op)?;
+        validate_op(op, cfg)?;
     }
 
     for op in ops {
@@ -255,6 +263,7 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
+        // N-Triples/N-Quads require absolute IRIs (no base).
         Some("nt") => {
             for t in NTriplesParser::new().for_slice(&bytes) {
                 let t = t.map_err(map_err)?;
@@ -267,21 +276,49 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
                 out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
             }
         }
+        // Turtle/TriG may carry relative IRIs resolved against the document IRI;
+        // use `source` as the base so `<s> <p> <o> .` loaded from
+        // `file:///tmp/data.ttl` resolves correctly (mirrors the storage loader).
         Some("trig") => {
-            for q in TriGParser::new().for_slice(&bytes) {
+            let parser = with_base(TriGParser::new(), source)?;
+            for q in parser.for_slice(&bytes) {
                 let q = q.map_err(map_err)?;
                 out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
             }
         }
         // `.ttl` and anything else default to Turtle.
         _ => {
-            for t in TurtleParser::new().for_slice(&bytes) {
+            let parser = with_base(TurtleParser::new(), source)?;
+            for t in parser.for_slice(&bytes) {
                 let t = t.map_err(map_err)?;
                 out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
             }
         }
     }
     Ok(out)
+}
+
+/// Set the document IRI as the parser's base so relative IRIs in Turtle/TriG
+/// resolve against `source`. `source` is the `LOAD <iri>` operand, which
+/// spargebra already validated as an IRI, so `with_base_iri` succeeds in
+/// practice; a rejected base is surfaced as a clear LOAD error.
+trait WithBase: Sized {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self>;
+}
+impl WithBase for oxttl::TurtleParser {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self> {
+        self.with_base_iri(base)
+            .map_err(|e| SparqlError::Executor(format!("LOAD base IRI invalid ({base}): {e}")))
+    }
+}
+impl WithBase for oxttl::TriGParser {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self> {
+        self.with_base_iri(base)
+            .map_err(|e| SparqlError::Executor(format!("LOAD base IRI invalid ({base}): {e}")))
+    }
+}
+fn with_base<P: WithBase>(parser: P, source: &str) -> Result<P> {
+    parser.with_base_iri_checked(source)
 }
 
 /// Percent-decode a file-IRI path component (RFC 3986). A `%XX` escape becomes
@@ -360,7 +397,7 @@ fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
 /// (a pure read); on success the parsed triples are discarded and re-fetched at
 /// apply time — acceptable because LOAD is not on a hot path and the alternative
 /// (threading the parsed triples through to apply) complicates the op loop.
-fn validate_op(op: &spargebra::GraphUpdateOperation) -> Result<()> {
+fn validate_op(op: &spargebra::GraphUpdateOperation, cfg: &SparqlConfig) -> Result<()> {
     use spargebra::term::GraphName;
     use spargebra::GraphUpdateOperation;
     match op {
@@ -381,7 +418,7 @@ fn validate_op(op: &spargebra::GraphUpdateOperation) -> Result<()> {
             insert,
             using,
             pattern,
-        } => validate_delete_insert(delete, insert, using.as_ref(), pattern),
+        } => validate_delete_insert(delete, insert, using.as_ref(), pattern, cfg),
         GraphUpdateOperation::Clear { silent, graph }
         | GraphUpdateOperation::Drop { silent, graph } => {
             use spargebra::algebra::GraphTarget;
@@ -433,6 +470,7 @@ fn validate_delete_insert(
     insert: &[QuadPattern],
     using: Option<&spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
+    cfg: &SparqlConfig,
 ) -> Result<()> {
     // Reject a USING/USING NAMED dataset that redefines the graphs the
     // WHERE clause reads from (Stage-1 evaluates WHERE over the single
@@ -481,6 +519,14 @@ fn validate_delete_insert(
             return Err(triple_term_unsupported());
         }
     }
+
+    // Translate and plan the WHERE clause now (pure — no store access) so an
+    // unsupported algebra construct (`SERVICE`, `MINUS`, an unsupported path op,
+    // …) aborts the whole update *before* any earlier operation mutates. The
+    // throwaway plan is recomputed in `apply_delete_insert`; planning is cheap
+    // relative to the safety it buys, and updates are not on a hot path.
+    let alg = translate_where(pattern, cfg)?;
+    planner::plan(&alg)?;
     Ok(())
 }
 
@@ -500,7 +546,7 @@ fn apply_delete_insert<B: FullBackend>(
     // All the rejections below must run before any mutation so a failing
     // update can't partially apply (and so the atomicity preflight in
     // `apply_update_with` can detect them without side effects).
-    validate_delete_insert(delete, insert, using, pattern)?;
+    validate_delete_insert(delete, insert, using, pattern, cfg)?;
 
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
