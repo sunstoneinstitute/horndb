@@ -126,8 +126,7 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             //   to `Union`; `!` (NegatedPropertySet) lowers to a wildcard
             //   predicate filtered by `NOT IN {…}`. Kleene `*`/`+`
             //   (recursive, route to closure) are still rejected.
-            let mut fresh = 0usize;
-            translate_path(subject, path, object, &mut fresh, cfg)
+            translate_path(subject, path, object, cfg)
         }
         GraphPattern::Join { left, right } => Ok(Algebra::Join {
             left: Box::new(translate_pattern(left, cfg)?),
@@ -535,14 +534,15 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
 /// Kleene `*`/`+` are recursive (route to closure) and remain rejected
 /// with [`SparqlError::UnsupportedPathOp`].
 ///
-/// `fresh` is a monotonically increasing counter used to mint the
-/// intermediate variables introduced by `Sequence`; threading it through
-/// the recursion keeps those names unique within a single path.
+/// Intermediate variables (the `Sequence` join node, the
+/// `NegatedPropertySet` predicate slot) are minted with
+/// [`fresh_path_var`], a process-global counter, so every hidden name is
+/// unique across the whole translated query — two distinct path patterns
+/// must never accidentally join on a reused hidden variable.
 fn translate_path(
     subject: &TermPattern,
     path: &PropertyPathExpression,
     object: &TermPattern,
-    fresh: &mut usize,
     cfg: &SparqlConfig,
 ) -> Result<Algebra> {
     use PropertyPathExpression as P;
@@ -556,25 +556,23 @@ fn translate_path(
         }),
         P::Reverse(inner) => {
             // `^p` between s and o == `p` between o and s.
-            translate_path(object, inner, subject, fresh, cfg)
+            translate_path(object, inner, subject, cfg)
         }
         P::Sequence(a, b) => {
             // `(a / b)` between s and o introduces a fresh var v with
             // `s -a-> v -b-> o`. Each side lowers independently; if both
             // are plain BGPs we merge their patterns, otherwise we `Join`.
-            let mid_name = format!("__path_seq_{}", *fresh);
-            *fresh += 1;
-            let mid_var = Variable::new(mid_name)
+            let mid_var = Variable::new(fresh_path_var("seq"))
                 .map_err(|e| SparqlError::UnsupportedAlgebra(format!("fresh var: {e}")))?;
             let mid_pattern = TermPattern::Variable(mid_var);
-            let left = translate_path(subject, a, &mid_pattern, fresh, cfg)?;
-            let right = translate_path(&mid_pattern, b, object, fresh, cfg)?;
+            let left = translate_path(subject, a, &mid_pattern, cfg)?;
+            let right = translate_path(&mid_pattern, b, object, cfg)?;
             Ok(join_algebra(left, right))
         }
         P::Alternative(a, b) => {
             // `(a | b)` between s and o is the union of the two paths.
-            let left = translate_path(subject, a, object, fresh, cfg)?;
-            let right = translate_path(subject, b, object, fresh, cfg)?;
+            let left = translate_path(subject, a, object, cfg)?;
+            let right = translate_path(subject, b, object, cfg)?;
             Ok(Algebra::Union {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -584,7 +582,7 @@ fn translate_path(
             // `p?` between s and o is the union of the zero-length path
             // (s and o denote the same node) with the single `p` step.
             let zero = zero_length_path(subject, object, cfg)?;
-            let one = translate_path(subject, inner, object, fresh, cfg)?;
+            let one = translate_path(subject, inner, object, cfg)?;
             Ok(Algebra::Union {
                 left: Box::new(zero),
                 right: Box::new(one),
@@ -596,9 +594,7 @@ fn translate_path(
             // spargebra carries only forward predicates here; an inverse
             // member `^p` is parsed as `Reverse(NegatedPropertySet([p]))`
             // and handled by the `Reverse` arm above.
-            let pred_name = format!("__path_neg_{}", *fresh);
-            *fresh += 1;
-            let pred_var = Var::new(pred_name);
+            let pred_var = Var::new(fresh_path_var("neg"));
             let bgp = Algebra::Bgp {
                 patterns: vec![TriplePattern {
                     subject: match_term(subject, cfg)?,
@@ -646,12 +642,14 @@ fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
 ///
 /// * both ground & equal → a single empty solution; both ground & unequal
 ///   → no solution;
-/// * one variable, one ground → bind the variable to the ground term;
-/// * both the *same* variable → a single empty solution (trivially equal).
+/// * one variable, one ground → bind the variable to the ground term.
 ///
-/// The genuinely unbounded case — two *distinct* variables, which would
-/// have to range over every node in the graph — is rejected; it belongs
-/// with the recursive `*`/`+` increment that routes through closure.
+/// The genuinely unbounded cases — two *distinct* variables, **or the same
+/// variable on both ends** (`?x p? ?x`) — are rejected. Both would have to
+/// range the variable over every node in the graph (a zero-length path
+/// binds `?x` to each node, not to an unbound row), which is out of
+/// Stage-1 scope; they belong with the recursive `*`/`+` increment that
+/// routes through closure.
 ///
 /// Endpoints are lowered through [`match_term`], so a
 /// blank-node endpoint minted by spargebra's sequence flattening is
@@ -674,16 +672,17 @@ fn zero_length_path(
     let s = match_term(subject, cfg)?;
     let o = match_term(object, cfg)?;
     match (s, o) {
-        (Term::Var(sv), Term::Var(ov)) => {
-            if sv == ov {
-                Ok(unit)
-            } else {
-                Err(SparqlError::UnsupportedPathOp(
-                    "zero-or-one path `?` between two distinct unbound variables \
-                     (would enumerate every node) — out of Stage-1 scope"
-                        .into(),
-                ))
-            }
+        (Term::Var(_), Term::Var(_)) => {
+            // Two variable endpoints (whether the same variable, `?x p? ?x`,
+            // or two distinct ones) require binding a variable to every node
+            // in the graph for the zero-length branch — out of Stage-1 scope.
+            // Returning the unit relation here would emit an *unbound* row
+            // instead of the per-node bindings, which is wrong, so reject.
+            Err(SparqlError::UnsupportedPathOp(
+                "zero-or-one path `?` with an unbound variable on both ends \
+                 (would enumerate every node) — out of Stage-1 scope"
+                    .into(),
+            ))
         }
         (Term::Var(v), other) | (other, Term::Var(v)) => Ok(Algebra::Values {
             vars: vec![v],
@@ -712,4 +711,18 @@ fn match_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
         TermPattern::BlankNode(b) => Ok(Term::Var(Var::new(format!("__pp_bnode_{}", b.as_str())))),
         other => term_pattern_to_term(other, cfg),
     }
+}
+
+/// Mint a hidden variable name for property-path lowering that is unique
+/// across the whole translated query. A process-global monotonic counter
+/// backs it: two distinct path patterns in one query (e.g. two `!` sets,
+/// or two `/` sequences) must not collide on a hidden name, or the join
+/// would force their unrelated hidden bindings to be equal and silently
+/// drop rows. The names start with `__path_` so they never clash with a
+/// user variable, and they are projected away before results are returned.
+fn fresh_path_var(kind: &str) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("__path_{kind}_{n}")
 }

@@ -153,6 +153,14 @@ fn optional_distinct_unbound_vars_rejected() {
     assert!(msg.contains("property-path"), "got: {msg}");
 }
 
+#[test]
+fn optional_same_unbound_var_both_ends_rejected() {
+    // `?x p? ?x` would bind ?x to every node via the zero-length branch;
+    // emitting the unit (unbound-?x) row would be wrong, so we reject it.
+    let msg = run_err("SELECT ?x WHERE { ?x <http://ex/knows>? ?x }");
+    assert!(msg.contains("property-path"), "got: {msg}");
+}
+
 // ---- Negated property set `!` ----------------------------------------
 
 #[test]
@@ -201,6 +209,25 @@ fn negated_set_inverse_member_excluded_edge() {
         &s,
     );
     assert!(rows.is_empty(), "got {rows:?}");
+}
+
+#[test]
+fn two_negated_sets_do_not_share_hidden_predicate_var() {
+    // Regression for the reused-hidden-var bug: two `!` patterns in one
+    // query must mint distinct hidden predicate variables, or the join
+    // forces their (unrelated) matched predicates to be equal and drops
+    // rows. Here alice's non-knows edge is `likes`, bob's non-knows edge
+    // is `admires` — different predicates, so a shared hidden var would
+    // yield zero rows. Correct answer binds both.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?a ?b WHERE { \
+           <http://ex/alice> !(<http://ex/knows>) ?a . \
+           <http://ex/bob>   !(<http://ex/knows>) ?b }",
+        &s,
+    );
+    assert_eq!(names(&rows, "a"), vec!["carol"]);
+    assert_eq!(names(&rows, "b"), vec!["alice"]);
 }
 
 // ---- Composition -----------------------------------------------------

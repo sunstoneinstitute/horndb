@@ -169,11 +169,20 @@ Two design points worth recording:
 
 2. **Zero-length `?` is bounded.** `p?` is `Union(zero-length, single-step)`.
    The zero-length branch is lowered without enumerating the graph: both
-   endpoints ground → equality test; one variable → bind it to the other
-   endpoint; same variable twice → the unit relation. Two *distinct* unbound
-   endpoints would have to range over every node in the graph, so that case is
-   rejected with `UnsupportedPathOp` — it belongs with the recursive `*`/`+`
-   increment (#50) that routes through closure.
+   endpoints ground → equality test; one variable + one ground → bind the
+   variable to the ground endpoint. Both endpoints being variables — whether
+   two *distinct* ones (`?s p? ?o`) or the *same* one (`?x p? ?x`) — would have
+   to range the variable over every node in the graph, so those cases are
+   rejected with `UnsupportedPathOp` (returning the unit relation for `?x p? ?x`
+   would wrongly emit an unbound `?x` row). They belong with the recursive
+   `*`/`+` increment (#50) that routes through closure.
+
+3. **Hidden path variables are query-globally unique.** The intermediate
+   variables minted during path lowering (the `Sequence` join node, the
+   `NegatedPropertySet` predicate slot) come from `fresh_path_var`, backed by a
+   process-global counter. A per-pattern counter would let two distinct path
+   patterns in one query reuse the same hidden name (e.g. two `!` sets) and get
+   spuriously joined on it, dropping valid rows.
 
 Kleene `*`/`+` remain rejected (`UnsupportedPathOp`); they are recursive and
 route to closure under increment #50.
