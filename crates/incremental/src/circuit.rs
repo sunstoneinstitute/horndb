@@ -21,7 +21,10 @@
 //! semi-naïve path described above; any tick containing a retraction
 //! (`mult < 0`) instead recomputes the set-semantics rule closure of the
 //! post-delta base and diffs it against the prior rule-derived rows (F6,
-//! see `tick()`). Closure-path retraction stays insertion-only.
+//! see `tick()`). On retraction ticks the closure plans also run their
+//! retraction pass (withdrawing `ClosureInferred` rows whose base support is
+//! gone) BEFORE the rule recompute, so the recompute joins only against
+//! still-supported closure edges.
 //!
 //! Stage 1 simplifications:
 //! - One round of rule firing per tick. SPEC-04 will wrap this in a
@@ -29,9 +32,15 @@
 //! - Derived deltas are not fed back as inputs to other plans within
 //!   the same tick. Multi-plan recursion is a Stage 2 concern that
 //!   intersects SPEC-04's evaluation order.
-//! - Closure deltas (F5) run after the rule fixed-point via
-//!   `add_closure_plan` / `ClosureRule` (insertion-only). Closure↔rule
-//!   cross-feedback within one tick remains a Stage-2 concern.
+//! - Closure deltas (F5): on insertion-only ticks the closure INSERTION pass
+//!   runs after the rule fixed-point via `add_closure_plan` / `ClosureRule`.
+//!   On retraction (mixed) ticks BOTH the closure retraction pass AND the
+//!   closure insertion pass run BEFORE the rule recompute, so the recompute
+//!   sees the post-tick closure (a rule consequence off a replacement closure
+//!   edge survives — Finding 2). The end-of-tick insertion pass is skipped on
+//!   retraction ticks so it never runs twice. Closure→rule cross-feedback
+//!   WITHIN a pure insertion tick (a closure edge feeding a rule body in the
+//!   same tick it is first derived) remains a Stage-2 concern.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,11 +87,12 @@ pub struct Circuit {
     /// `recompute_rule_closure` — a ghost input that keeps stale rule
     /// consequences alive.
     ///
-    /// Because the closure pass is insertion-only (closure-path retraction is
-    /// deferred under parent #6) it only ever *adds* here, and the rule
-    /// withdrawal diff never zeroes a `closure_support` row in `derived_base`
-    /// (it skips them), so the invariant is preserved across ticks. The
-    /// retraction path reads this set for two reasons: (1) it seeds
+    /// The insertion closure pass only ever *adds* here; the closure
+    /// **retraction** pass (F6) removes a row when its base support is gone,
+    /// zeroing the matching `derived_base` row unless a rule still owns it. The
+    /// rule withdrawal diff never zeroes a `closure_support` row in
+    /// `derived_base` (it skips them), so the invariant is preserved across
+    /// ticks. The retraction path reads this set for two reasons: (1) it seeds
     /// `recompute_rule_closure` so rules can join against closure-derived
     /// inputs exactly as the forward path does (Finding 1), and (2) it lets
     /// the withdrawal diff retain a triple whose rule ownership lapsed but
@@ -234,20 +244,70 @@ impl Circuit {
         let logical_time = asserted_records.last().map(|r| r.time).unwrap_or(0);
 
         // The closure pass (F5) is insertion-only and must only ever see
-        // the positive part of the asserted delta — closure-path
-        // retraction stays deferred under parent #6. We materialise the
-        // positive-only delta only when there are closure plans to feed
-        // (a no-closure circuit must not pay an O(|Δ|) clone per tick; the
-        // empty placeholder is never read because the closure loop has no
-        // iterations when `closure_plans` is empty).
+        // base edges that are PRESENT post-tick — closure-path retraction
+        // stays deferred under parent #6. We materialise this positive
+        // insertion delta only when there are closure plans to feed (a
+        // no-closure circuit must not pay an O(|Δ|) clone per tick; the empty
+        // placeholder is never read because the closure loop has no iterations
+        // when `closure_plans` is empty).
+        //
+        // Finding 1: filter by POST-TICK presence (`asserted_base.get(t) > 0`),
+        // not raw `m > 0` from this tick's delta. The asserted records were
+        // already merged into `asserted_base` in the drain loop above, so `get`
+        // is post-tick here. An edge over-retracted to a NEGATIVE multiplicity
+        // and then partially re-asserted so its NET post-tick multiplicity is
+        // `<= 0` is ABSENT; a raw `m > 0` filter would still feed it to the
+        // closure backend, deriving closure edges off an absent base edge. This
+        // is the same present/absent boundary `materialize_presence`,
+        // `recompute_rule_closure`, and the retraction gate all use. Normal
+        // inserts (an edge whose multiplicity becomes +1) still flow through:
+        // their post-tick presence holds.
         let asserted_delta_for_closure = if self.closure_plans.is_empty() {
             Zset::new()
         } else {
             Zset::from_iter(
                 asserted_delta
                     .iter()
-                    .filter(|(_, m)| *m > 0)
-                    .map(|(t, m)| (*t, m)),
+                    .filter(|(t, m)| *m > 0 && self.asserted_base.get(t) > 0)
+                    .map(|(t, _)| (*t, 1)),
+            )
+        };
+
+        // F6 closure-path retraction: the negative-only asserted delta the
+        // closure plans use to withdraw `ClosureInferred` rows. Built only when
+        // there are closure plans AND this tick actually withdraws something —
+        // a no-closure or insertion-only circuit pays nothing (mirrors the
+        // positive-only guard above). The closure retraction pass runs BEFORE
+        // the rule recompute below so the recompute sees the shrunk
+        // `closure_support`.
+        //
+        // P2 (multiplicity-aware base deletion): a base edge must be deleted
+        // from the closure backend ONLY when its POST-TICK asserted multiplicity
+        // reaches 0 (genuinely gone). `asserted_base` is a Z-set multiset —
+        // `assert_triple` appends `(triple, +1)` each call — so an edge asserted
+        // twice then retracted once still has multiplicity +1 and its base edge
+        // must SURVIVE. The asserted records were already merged into
+        // `asserted_base` in the drain loop above, so `asserted_base.get` is
+        // post-tick here; we keep only edges withdrawn this tick (`m < 0`) whose
+        // post-tick multiplicity is exactly 0. We negate to `-1` (the backend's
+        // `delete_transitive_edges` only checks `mult < 0`, not the magnitude;
+        // one logical deletion regardless of how many copies were withdrawn).
+        let asserted_delta_for_closure_retract = if self.closure_plans.is_empty() || !has_retraction
+        {
+            Zset::new()
+        } else {
+            Zset::from_iter(
+                asserted_delta
+                    .iter()
+                    // Presence boundary: the base edge is genuinely gone iff its
+                    // POST-TICK asserted multiplicity is non-positive (Finding 4).
+                    // `== 0` would wrongly suppress the deletion for an edge
+                    // over-retracted to a NEGATIVE multiplicity (asserted once,
+                    // retracted twice in one tick). This is the same
+                    // present/absent boundary `materialize_presence` and
+                    // `recompute_rule_closure` use (`m > 0` ⇒ present).
+                    .filter(|(t, m)| *m < 0 && self.asserted_base.get(t) <= 0)
+                    .map(|(t, _)| (*t, -1)),
             )
         };
 
@@ -315,9 +375,141 @@ impl Circuit {
             // asserted_base, then diff against the prior rule-derived rows".
             // This is order-independent and correct for arbitrary (t, ±k).
             //
+            // ---- Closure-path retraction (F6), BEFORE the rule recompute ----
+            //
+            // Withdraw `ClosureInferred` rows whose base support was retracted
+            // this tick, and shrink `closure_support` accordingly, so that
+            // `recompute_rule_closure` (which seeds from
+            // `asserted_base ∪ closure_support`) sees the already-shrunk support
+            // and does not re-derive a rule consequence off a withdrawn closure
+            // edge. Take the plans out via `mem::take` to satisfy the borrow
+            // checker (same pattern as the insertion closure pass below).
+            //
+            // A withdrawn closure edge is zeroed in `derived_base` and published
+            // as a negative `ClosureInferred` UNLESS the row is also currently
+            // rule-owned (`rule_attr`): that materialization belongs to the rule
+            // (Finding-2 dual), so closure only loses its ownership. We also only
+            // touch `derived_base` for rows actually materialized there
+            // (`get != 0`) — an edge that is also asserted lives in
+            // `asserted_base`, not `derived_base`, so there is nothing to zero.
+            let mut closure_plans = std::mem::take(&mut self.closure_plans);
+            for rule in &mut closure_plans {
+                let crate::closure_plan::ClosureRetractDelta { withdraw, promote } =
+                    rule.apply_retract_delta(&asserted_delta_for_closure_retract);
+                for triple in withdraw {
+                    // Closure loses ownership regardless.
+                    let was_support = self.closure_support.remove(&triple);
+                    if !was_support {
+                        // Closure did not own this as a materialized derived row
+                        // (e.g. it was only ever present as an asserted edge).
+                        // Nothing to zero or publish here.
+                        continue;
+                    }
+                    // If a rule still owns the row in derived_base, leave the
+                    // materialization to the rule (it will be re-confirmed or
+                    // withdrawn by the recompute-and-diff below).
+                    if self.rule_attr.contains_key(&triple) {
+                        continue;
+                    }
+                    let cur = self.derived_base.get(&triple);
+                    if cur != 0 {
+                        self.derived_base.add(triple, -cur);
+                    }
+                    let t = self.derived_clock;
+                    self.derived_clock = self
+                        .derived_clock
+                        .checked_add(1)
+                        .expect("derived-clock overflow");
+                    self.feed
+                        .publish(triple, -1, t, DerivationKind::ClosureInferred);
+                    derived_merged += 1;
+                }
+
+                // P1 — promote deleted-but-still-entailed asserted edges. The
+                // edge lost its asserted copy this tick but remains derivable in
+                // the closure; it had no materialized derived row (it lived only
+                // in `asserted_base`), so we must PROMOTE it to a `ClosureInferred`
+                // derived row. We materialize only when it is genuinely absent
+                // from BOTH bases now (the asserted copy is gone and no rule/
+                // closure row already owns it) and not already `closure_support`.
+                // Promotions ADD `closure_support`, so they run BEFORE the rule
+                // recompute below — rules can then join against the promoted
+                // closure edge (consistent with Finding-1).
+                for triple in promote {
+                    if self.closure_support.contains(&triple) {
+                        continue;
+                    }
+                    // Finding 4: an over-retracted edge with NEGATIVE asserted
+                    // multiplicity is absent; use the `> 0` presence boundary.
+                    if self.asserted_base.get(&triple) > 0 {
+                        // Still asserted with surviving positive multiplicity:
+                        // the base edge did not actually go away, no-op.
+                        continue;
+                    }
+                    if self.derived_base.get(&triple) > 0 {
+                        // Already materialized in derived_base because a rule (or
+                        // another closure row) owns it. Finding 3: record closure
+                        // ownership WITHOUT adding another multiplicity and WITHOUT
+                        // publishing — mirroring the insertion pass's "already
+                        // present, record ownership if materialized" logic. This
+                        // keeps `closure_support ⊆ derived_base` AND ensures a
+                        // later rule retraction does not zero a row the closure
+                        // backend still entails (the dual of Finding 2). Skipping
+                        // this (the previous no-op) lost the closure's ownership.
+                        self.closure_support.insert(triple);
+                        continue;
+                    }
+                    self.derived_base.add(triple, 1);
+                    self.closure_support.insert(triple);
+                    let t = self.derived_clock;
+                    self.derived_clock = self
+                        .derived_clock
+                        .checked_add(1)
+                        .expect("derived-clock overflow");
+                    self.feed
+                        .publish(triple, 1, t, DerivationKind::ClosureInferred);
+                    derived_merged += 1;
+                }
+            }
+            self.closure_plans = closure_plans;
+
+            // Closure INSERTION pass, run on mixed ticks BEFORE the rule
+            // recompute (Finding 2). A mixed tick that retracts one support edge
+            // and inserts a replacement path must let the rule recompute see the
+            // POST-TICK closure: fold the positive closure delta into the backend
+            // and into `closure_support`/`derived_base` now, so a re-derived
+            // closure edge (e.g. an edge still entailed via the replacement path)
+            // is already in the recompute's `asserted_base ∪ closure_support`
+            // seed. Without this the recompute would withdraw a rule consequence
+            // whose closure support the post-tick base actually entails, and the
+            // (formerly end-of-tick) insertion pass would re-add the closure edge
+            // only after rules had run. The end-of-tick insertion pass is skipped
+            // on retraction ticks so this does not run twice. `combined_base`
+            // currently reflects asserted ∪ derived (rebuilt below in the rule
+            // diff); rebuild it here first so the closure dedup is correct.
+            combined_base = self.asserted_base.clone();
+            combined_base.add_assign(&self.derived_base);
+            // Finding 2 (change-feed precision, NOT a final-state bug): in a
+            // single mixed tick that retracts one support path AND inserts a
+            // replacement path for the SAME closure edge, the deletion pass
+            // above already published a `ClosureInferred -1` and zeroed the
+            // edge; this insertion pass then re-adds it and publishes
+            // `ClosureInferred +1`. The FINAL `derived_base` state is correct
+            // (the edge is present, supported by the replacement path), but the
+            // change feed shows a transient -1 then +1 and `derived_merged`
+            // counts both. Reconciling the intra-tick withdraw/re-add to a
+            // net-zero feed delta means computing the closure delta against the
+            // FINAL post-tick base — a larger change that risks regressing this
+            // now-correct mixed-tick state handling. It is a documented Stage-2
+            // follow-up (see `FUTURE-WORK.md`, F5 "Still Stage 2").
+            derived_merged +=
+                self.run_closure_insertion_pass(&asserted_delta_for_closure, &mut combined_base);
+
             // Closure-inferred rows (F5) are NOT in `rule_attr`, so the rule
-            // diff leaves them untouched; closure-path retraction is
-            // explicitly deferred under parent #6.
+            // diff leaves them untouched. The closure-retraction pass above has
+            // already shrunk `closure_support`, and the closure insertion pass
+            // above has re-grown it with any post-tick replacement edges, so the
+            // recompute below joins against the correct post-tick closure.
             let new_rule = self.recompute_rule_closure();
             let old_rule: BTreeMap<TripleId, RuleId> = std::mem::take(&mut self.rule_attr);
 
@@ -338,11 +530,13 @@ impl Circuit {
             // No-longer-derivable rows → withdraw to zero + publish a
             // negative RuleInferred attributed to the rule that had derived
             // it. EXCEPT rows still in `closure_support`: the row keeps its
-            // closure derivation (closure-path retraction is deferred under
-            // parent #6), so only its rule ownership lapses. `rule_attr`
+            // closure derivation, so only its rule ownership lapses. `rule_attr`
             // already drops it (it is absent from `new_rule`); we must NOT
             // zero `derived_base` or publish a withdrawal, or we would
-            // destroy still-valid closure support (Finding 2).
+            // destroy still-valid closure support (Finding 2). Note the closure
+            // retraction pass above has already removed from `closure_support`
+            // any closure edge whose base support is gone, so a row that lost
+            // BOTH rule and closure support is correctly withdrawn here.
             for (triple, old_rid) in &old_rule {
                 if !new_rule.contains_key(triple) {
                     if self.closure_support.contains(triple) {
@@ -371,26 +565,70 @@ impl Circuit {
             combined_base.add_assign(&self.derived_base);
         }
 
-        // Closure pass (SPEC-06 F5): run each closure operator over the
-        // *positive-only* asserted insertion delta (`asserted_delta_for_closure`).
-        // Newly inferred triples not already present in the combined base are
-        // merged into derived_base and published as ClosureInferred.
-        // Insertion-only; closure↔rule cross-feedback within a tick is a Stage-2
-        // concern (see FUTURE-WORK.md). Closure-PATH retraction (withdrawing a
-        // closure-inferred row when its support is retracted) stays deferred
-        // under parent #6: `ClosureRule` is stateful and insertion-only, so we
-        // never hand it the negative part of the delta. Rule-path retraction
-        // above never disturbs closure-inferred rows — they are absent from
-        // `rule_attr`, so the rule diff leaves them alone.
+        // Closure INSERTION pass (SPEC-06 F5). On insertion-only ticks this runs
+        // here, AFTER the rule forward pass (closure→rule feedback within a pure
+        // insertion tick stays Stage-2). On retraction-containing (mixed) ticks
+        // it has ALREADY run above, before the rule recompute (see the regime
+        // block) — so the recompute joins against the post-tick closure and a
+        // rule consequence that depends on a replacement closure edge survives
+        // (Finding 2). We must not run it twice, so it is skipped here on
+        // retraction ticks.
+        if !has_retraction {
+            derived_merged +=
+                self.run_closure_insertion_pass(&asserted_delta_for_closure, &mut combined_base);
+        }
+
+        // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
+        // (O(1), no allocation). The presence set is rebuilt lazily on the next
+        // snapshot() acquire — so steady-state ticks stay delta-sized and the O(n)
+        // build is only paid when a reader needs it.
         //
-        // We take the closure_plans out of self to satisfy the borrow checker:
+        // `version_time` is the **last committed asserted timestamp** (INCLUSIVE):
+        // a snapshot reflects every record with timestamp ≤ `version_time`
+        // (SPEC-06 F7). `logical_time` is the timestamp of the last asserted
+        // record merged this tick — exactly that inclusive `t`. It advances only
+        // when asserted records merged: a derived-only tick adds no new asserted
+        // records and leaves it unchanged, and an empty circuit stays at 0.
+        if asserted_merged > 0 || derived_merged > 0 {
+            *self.version_cache.borrow_mut() = None;
+            if asserted_merged > 0 {
+                self.version_time = logical_time;
+            }
+        }
+
+        TickReport {
+            asserted_merged,
+            derived_merged,
+            logical_time,
+        }
+    }
+
+    /// Run the closure INSERTION pass (SPEC-06 F5) over the positive-only
+    /// asserted insertion delta: fold each closure plan's newly-inferred triples
+    /// into `derived_base` / `closure_support`, publish them as
+    /// `ClosureInferred`, and keep `combined_base` in sync. Returns the number of
+    /// derived rows merged (for `derived_merged`).
+    ///
+    /// Shared by both tick regimes: on insertion-only ticks it runs at end of
+    /// tick (after the rule forward pass); on retraction (mixed) ticks it runs
+    /// before the rule recompute so the recompute sees the post-tick closure
+    /// (Finding 2). It is therefore idempotent w.r.t. already-present rows: a
+    /// triple already in `combined_base` only (re)records closure ownership when
+    /// it is materialized in `derived_base`, never double-counting multiplicity.
+    fn run_closure_insertion_pass(
+        &mut self,
+        asserted_delta_for_closure: &Zset<TripleId>,
+        combined_base: &mut Zset<TripleId>,
+    ) -> usize {
+        let mut merged = 0;
+        // Take the closure_plans out of self to satisfy the borrow checker:
         // iterating over &mut closure_plans conflicts with borrowing
         // self.derived_base / self.feed / self.derived_clock mutably through
         // self at the same time (they are disjoint fields, but the compiler
         // can't see through `self` without NLL field disjointness for &mut).
         let mut closure_plans = std::mem::take(&mut self.closure_plans);
         for rule in &mut closure_plans {
-            let inferred = rule.apply_insert_delta(&asserted_delta_for_closure);
+            let inferred = rule.apply_insert_delta(asserted_delta_for_closure);
             for triple in inferred {
                 if combined_base.get(&triple) != 0 {
                     // Already present. Record closure ownership ONLY if it is
@@ -419,34 +657,11 @@ impl Circuit {
                     .expect("derived-clock overflow");
                 self.feed
                     .publish(triple, 1, t, DerivationKind::ClosureInferred);
-                derived_merged += 1;
+                merged += 1;
             }
         }
         self.closure_plans = closure_plans;
-
-        // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
-        // (O(1), no allocation). The presence set is rebuilt lazily on the next
-        // snapshot() acquire — so steady-state ticks stay delta-sized and the O(n)
-        // build is only paid when a reader needs it.
-        //
-        // `version_time` is the **last committed asserted timestamp** (INCLUSIVE):
-        // a snapshot reflects every record with timestamp ≤ `version_time`
-        // (SPEC-06 F7). `logical_time` is the timestamp of the last asserted
-        // record merged this tick — exactly that inclusive `t`. It advances only
-        // when asserted records merged: a derived-only tick adds no new asserted
-        // records and leaves it unchanged, and an empty circuit stays at 0.
-        if asserted_merged > 0 || derived_merged > 0 {
-            *self.version_cache.borrow_mut() = None;
-            if asserted_merged > 0 {
-                self.version_time = logical_time;
-            }
-        }
-
-        TickReport {
-            asserted_merged,
-            derived_merged,
-            logical_time,
-        }
+        merged
     }
 
     /// Recompute the set-semantics rule closure of the current

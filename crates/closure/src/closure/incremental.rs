@@ -1,4 +1,4 @@
-//! Insertion-only incremental transitive closure (SPEC-05 F6).
+//! Incremental transitive closure (SPEC-05 F6) — insertion and retraction.
 //!
 //! The initial bulk closure is computed on GraphBLAS (`closure/transitive.rs`).
 //! Once a relation is transitively closed, inserting a single edge `(s, o)`
@@ -6,18 +6,66 @@
 //! with everything reachable from `o` (inclusive) — a rank-1 outer-product OR.
 //! That is an inherently sparse pointwise update, so we maintain it directly in
 //! Rust (forward + backward adjacency) rather than paying GraphBLAS `mxm` cost
-//! per edge. Deletion is **not** handled here — it needs SPEC-06 DBSP deltas.
+//! per edge.
+//!
+//! Retraction is handled here too (closure-level; SPEC-06 owns the +/- sign).
+//! Because a closed pair `(x, y)` may be supported by several distinct base
+//! paths, we cannot tell from the closed set alone whether withdrawing a base
+//! edge actually removes it. We therefore retain the **asserted base edge set**
+//! alongside the closed adjacency. On `delete_edge` we recompute reachability
+//! for the affected region against the post-delete base and withdraw only the
+//! pairs that are genuinely no longer derivable. This is the DBSP
+//! "recompute the affected slice and diff" primitive (SPEC-05 F6: "Deletion
+//! uses SPEC-06's DBSP machinery rather than DRed").
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Outcome of retracting one or more base edges from the closure.
+///
+/// `withdrawn` are closure pairs that lost ALL support and were dropped from
+/// the closed set (the negative delta; the SPEC-06 layer negates them).
+///
+/// `survived` are base edges that were just deleted this operation but REMAIN
+/// reachable in the post-delete closure — i.e. the deleted edge `(s, o)` is
+/// still in the closed set because `o` is still reachable from `s` over the
+/// remaining base. Only the directly-deleted edge can become such a survivor:
+/// transitively-implied pairs were already materialized in the closure
+/// (`derived_base`/`closure_support` at the SPEC-06 layer), whereas a deleted
+/// *asserted* edge that is still entailed has no materialized derived row, so
+/// the SPEC-06 layer must PROMOTE it to one (BUG P1).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    pub withdrawn: Vec<(u64, u64)>,
+    pub survived: Vec<(u64, u64)>,
+}
+
 /// Strict transitive closure over dense `u64` indices, maintained incrementally
-/// under edge insertion. "Strict" = no implicit identity; a self-loop `(x,x)`
-/// appears only when `x` lies on a cycle, matching
+/// under edge insertion and retraction. "Strict" = no implicit identity; a
+/// self-loop `(x,x)` appears only when `x` lies on a cycle, matching
 /// [`crate::closure::transitive::transitive_closure`].
-#[derive(Default, Clone)]
+///
+/// `fwd`/`bwd` hold the **closed** adjacency. `base` holds the asserted (base)
+/// edges — the support needed for correct retraction. The closed set always
+/// equals `transitive_closure(base)` after any sequence of inserts/deletes.
+///
+/// For instances built from base edges ([`Self::new`] / [`Self::from_base_edges`]
+/// / [`Self::insert_edge`]) retraction is **exact**: `base` is the true asserted
+/// support. For an instance seeded via [`Self::from_closed_edges`] the asserted
+/// base is unknown, so the closed extent is seeded into `base` *as if* it were
+/// the base (a transitively-closed edge set is its own transitive closure, so
+/// the invariant `transitive_closure(base) == closed` still holds at seed time).
+/// Retraction then works uniformly: post-seed inserted edges retract exactly,
+/// and retracting a seeded edge is **sound** (it never withdraws a pair still
+/// entailed by the closed extent) but may **under-withdraw** because the seeded
+/// base contains redundant transitive edges that the true asserted base may not
+/// have had — see [`Self::from_closed_edges`].
+#[derive(Clone, Default)]
 pub struct IncrementalTransitiveClosure {
     fwd: FxHashMap<u64, FxHashSet<u64>>,
     bwd: FxHashMap<u64, FxHashSet<u64>>,
+    /// Asserted base edges (forward adjacency). For a closed-seeded instance
+    /// this holds the closed extent itself (used as a conservative base).
+    base: FxHashMap<u64, FxHashSet<u64>>,
     nnz: usize,
 }
 
@@ -30,15 +78,68 @@ impl IncrementalTransitiveClosure {
     /// Seed from a set of edges that is **already transitively closed** (e.g.
     /// the output of [`crate::closure::transitive::transitive_closure`]). The
     /// caller guarantees closure; this constructor does not re-close.
+    ///
+    /// The asserted base for the seeded extent is unknown, so the **closed
+    /// edges are seeded into `base` as a conservative stand-in**. A transitively
+    /// closed edge set is its own transitive closure, so `transitive_closure(base)
+    /// == closed` holds at seed time and no re-closure is needed — the closed
+    /// adjacency (`fwd`/`bwd`) and `base` are populated directly from the same
+    /// edges.
+    ///
+    /// Retraction (see [`Self::delete_edge`]) then works uniformly:
+    /// - **Post-seed inserted edges retract exactly** — an edge inserted after
+    ///   seeding is recorded in `base` like any asserted edge, and withdrawing
+    ///   it recomputes reachability over the remaining base correctly.
+    /// - **Retracting a seeded edge is sound but may under-withdraw.** Because
+    ///   the seeded base contains redundant transitive edges (e.g. `(1,3)`
+    ///   alongside `(1,2)`,`(2,3)`), removing one seeded edge may leave the pair
+    ///   still reachable via the others, so it survives even if the *true*
+    ///   (unknown) asserted base would have dropped it. This never withdraws a
+    ///   pair still entailed by the closed extent (sound), and is acceptable
+    ///   because the true base is unknown.
+    ///
+    /// Use [`Self::from_base_edges`] when the true asserted base is known and
+    /// exact retraction is required.
     pub fn from_closed_edges<I: IntoIterator<Item = (u64, u64)>>(edges: I) -> Self {
         let mut c = Self::default();
         for (s, o) in edges {
+            // Populate the closed adjacency directly (the input is already
+            // closed, so no re-closure via `insert_edge`).
             if c.fwd.entry(s).or_default().insert(o) {
                 c.bwd.entry(o).or_default().insert(s);
                 c.nnz += 1;
             }
+            // Seed the same edge into `base` as a conservative stand-in for the
+            // unknown asserted support. Keeps `transitive_closure(base) == closed`
+            // and makes retraction work uniformly (post-seed inserts retract
+            // exactly; seeded-edge retraction is sound but may under-withdraw).
+            c.base.entry(s).or_default().insert(o);
         }
         c
+    }
+
+    /// Seed from a set of **base (asserted)** edges and compute their transitive
+    /// closure. Unlike [`Self::from_closed_edges`], this retains the base edges,
+    /// so the resulting instance fully supports [`Self::delete_edge`]. Edges are
+    /// folded one at a time via the insertion logic (order-independent result).
+    pub fn from_base_edges<I: IntoIterator<Item = (u64, u64)>>(edges: I) -> Self {
+        let mut c = Self::default();
+        for (s, o) in edges {
+            c.insert_edge(s, o);
+        }
+        c
+    }
+
+    /// All asserted base edges as `(s, o)` pairs (unordered; caller sorts if
+    /// needed). Useful for tests/debugging and for re-seeding.
+    pub fn base_edges(&self) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        for (&s, os) in &self.base {
+            for &o in os {
+                out.push((s, o));
+            }
+        }
+        out
     }
 
     /// Number of edges (`nnz`) currently in the closure.
@@ -64,6 +165,21 @@ impl IncrementalTransitiveClosure {
     /// Insert one edge and return the **newly inferred** closure edges (the
     /// delta), i.e. pairs not already present. Maintains the closed invariant.
     pub fn insert_edge(&mut self, s: u64, o: u64) -> Vec<(u64, u64)> {
+        self.insert_edge_tracked(s, o).0
+    }
+
+    /// Like [`Self::insert_edge`] but also reports whether `(s, o)` was a
+    /// **newly added** base edge (`true`) or already present in `base`
+    /// (`false`). The flag drives transaction rollback: on a downstream
+    /// failure only the base edges this call genuinely added may be removed —
+    /// a re-inserted existing base edge must survive (see
+    /// [`Self::rollback_base_edges`]).
+    pub fn insert_edge_tracked(&mut self, s: u64, o: u64) -> (Vec<(u64, u64)>, bool) {
+        // Record the asserted base edge first, independently of the closure
+        // delta computation below (which is unchanged). The base set is what
+        // makes correct retraction possible.
+        let base_was_new = self.base.entry(s).or_default().insert(o);
+
         // B = {x : x reaches s} ∪ {s}; F = {y : o reaches y} ∪ {o}.
         let mut b: Vec<u64> = self
             .bwd
@@ -88,7 +204,25 @@ impl IncrementalTransitiveClosure {
                 }
             }
         }
-        delta
+        (delta, base_was_new)
+    }
+
+    /// Remove base edges that were just added by a failed transaction, restoring
+    /// the prior `base` set (Finding 5). Only pass edges that this same logical
+    /// operation reported as **newly added** (`insert_edge_tracked` returned
+    /// `true`) — removing a base edge that pre-existed the operation would
+    /// corrupt support for the surviving closure. Touches only `base`; the
+    /// closed adjacency is rolled back separately via
+    /// [`Self::rollback_inserted`].
+    pub fn rollback_base_edges(&mut self, edges: &[(u64, u64)]) {
+        for &(s, o) in edges {
+            if let Some(set) = self.base.get_mut(&s) {
+                set.remove(&o);
+                if set.is_empty() {
+                    self.base.remove(&s);
+                }
+            }
+        }
     }
 
     /// Undo a set of edges that were just inserted by this same logical
@@ -123,6 +257,175 @@ impl IncrementalTransitiveClosure {
             delta.extend(self.insert_edge(s, o));
         }
         delta
+    }
+
+    /// Forward-reachable set of `start` over the current **base** adjacency,
+    /// inclusive of `start` itself only when `start` lies on a cycle (strict
+    /// closure semantics — matches `insert_edge`/`transitive_closure`). The
+    /// returned set is the set of `y` such that there is a non-empty base path
+    /// `start -> ... -> y`.
+    fn base_reach(&self, start: u64) -> FxHashSet<u64> {
+        let mut reached: FxHashSet<u64> = FxHashSet::default();
+        let mut stack: Vec<u64> = self
+            .base
+            .get(&start)
+            .map(|os| os.iter().copied().collect())
+            .unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if reached.insert(n) {
+                if let Some(os) = self.base.get(&n) {
+                    for &m in os {
+                        if !reached.contains(&m) {
+                            stack.push(m);
+                        }
+                    }
+                }
+            }
+        }
+        reached
+    }
+
+    /// Drop the closed pair `(x, y)` from `fwd`/`bwd` and decrement `nnz`.
+    /// No-op if the pair is not present.
+    fn drop_closed(&mut self, x: u64, y: u64) {
+        let removed = self
+            .fwd
+            .get_mut(&x)
+            .map(|set| set.remove(&y))
+            .unwrap_or(false);
+        if removed {
+            if let Some(set) = self.bwd.get_mut(&y) {
+                set.remove(&x);
+            }
+            self.nnz -= 1;
+        }
+    }
+
+    /// Retract one asserted base edge `(s, o)` and return the retraction
+    /// [`DeleteOutcome`]: the **withdrawn** closure pairs (positive `(x, y)`
+    /// tuples the caller negates) and any **survivor** — the just-deleted base
+    /// edge `(s, o)` that is STILL closed-reachable over the remaining base.
+    /// Idempotent: if `(s, o)` was not a base edge, returns an empty outcome and
+    /// leaves state unchanged. Maintains `closed == transitive_closure(base)`.
+    ///
+    /// **Closed-seeded instances** ([`Self::from_closed_edges`]) seed `base`
+    /// from the closed extent, so retraction works uniformly: post-seed inserted
+    /// edges retract exactly; retracting a seeded edge is sound but may
+    /// under-withdraw (the seeded base's redundant transitive edges may keep a
+    /// pair reachable) — see that constructor's docs.
+    ///
+    /// Algorithm (correctness-first affected-region recompute):
+    ///  1. Remove `(s, o)` from `base`. If it was absent, return empty.
+    ///  2. Candidate region = closed pairs `(x, y)` that *could* lose support:
+    ///     `x ∈ closed-bwd[s] ∪ {s}` (everything that reached `s`) and
+    ///     `y ∈ closed-fwd[o] ∪ {o}` (everything `o` reached), intersected with
+    ///     the pre-delete closure.
+    ///  3. For each affected source `x`, recompute its forward reachability over
+    ///     the **post-delete** base. A candidate pair `(x, y)` is withdrawn iff
+    ///     `y` is no longer base-reachable from `x`.
+    ///  4. Drop the withdrawn pairs from the closed adjacency.
+    ///  5. The deleted edge `(s, o)` is a **survivor** iff it remained in the
+    ///     closed set (i.e. it was NOT withdrawn) — `o` is still reachable from
+    ///     `s` over another base path. Report it so the SPEC-06 layer can
+    ///     promote it to a materialized derived row (BUG P1).
+    pub fn delete_edge(&mut self, s: u64, o: u64) -> DeleteOutcome {
+        // 1. Remove from base; bail if it was not an asserted edge.
+        let was_base = self
+            .base
+            .get_mut(&s)
+            .map(|set| set.remove(&o))
+            .unwrap_or(false);
+        if !was_base {
+            return DeleteOutcome::default();
+        }
+        if self.base.get(&s).is_some_and(|set| set.is_empty()) {
+            self.base.remove(&s);
+        }
+
+        // 2. Affected sources X = closed-bwd[s] ∪ {s}; targets Y = closed-fwd[o] ∪ {o}.
+        // Use a set so that when `s` lies on a cycle/self-loop (closed-bwd[s]
+        // already contains `s`), `s` is visited exactly once. Without the dedup
+        // the source `s` is processed twice and any pair it withdraws is pushed to
+        // `withdrawn` twice (BUG A), producing duplicate negative deltas.
+        let mut sources: FxHashSet<u64> = self
+            .bwd
+            .get(&s)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        sources.insert(s);
+        let mut targets: FxHashSet<u64> = self
+            .fwd
+            .get(&o)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default();
+        targets.insert(o);
+
+        // 3 + 4. For each affected source, recompute reachability over the
+        // post-delete base and withdraw candidate pairs no longer derivable.
+        let mut withdrawn = Vec::new();
+        for &x in &sources {
+            // Candidate targets for this source: closed-fwd[x] ∩ targets.
+            let candidates: Vec<u64> = match self.fwd.get(&x) {
+                Some(set) => set
+                    .iter()
+                    .copied()
+                    .filter(|y| targets.contains(y))
+                    .collect(),
+                None => continue,
+            };
+            if candidates.is_empty() {
+                continue;
+            }
+            let reach = self.base_reach(x);
+            for y in candidates {
+                if !reach.contains(&y) {
+                    withdrawn.push((x, y));
+                }
+            }
+        }
+
+        for &(x, y) in &withdrawn {
+            self.drop_closed(x, y);
+        }
+
+        // 5. Survivor: the deleted edge `(s, o)` is still in the closed set iff
+        // it was NOT withdrawn — i.e. `o` is still reachable from `s` over the
+        // remaining base. Only the directly-deleted edge can be a survivor;
+        // transitively-implied pairs were already materialized.
+        let still_closed = self.fwd.get(&s).is_some_and(|set| set.contains(&o));
+        let survived = if still_closed {
+            vec![(s, o)]
+        } else {
+            Vec::new()
+        };
+
+        DeleteOutcome {
+            withdrawn,
+            survived,
+        }
+    }
+
+    /// Retract many base edges (folded one at a time so each deletion observes
+    /// the prior removals) and return the combined retraction outcome
+    /// (withdrawn pairs + surviving deleted edges).
+    pub fn delete_edges<I: IntoIterator<Item = (u64, u64)>>(&mut self, edges: I) -> DeleteOutcome {
+        let mut out = DeleteOutcome::default();
+        for (s, o) in edges {
+            let one = self.delete_edge(s, o);
+            out.withdrawn.extend(one.withdrawn);
+            out.survived.extend(one.survived);
+        }
+        // Finding 1: a survivor reported by an EARLIER deletion can be WITHDRAWN
+        // by a LATER deletion in the same batch (e.g. delete (1,3) [survives via
+        // 1->2->3] then delete (2,3) [withdraws (1,3)]). Fold one-at-a-time, then
+        // reconcile against the FINAL state: a survivor is only genuine if it is
+        // STILL in the closed set (`fwd[s]` contains `o`) at the very end. Anything
+        // that appears in the combined `withdrawn` is no longer closed by
+        // definition, so the closed-set filter subsumes it; we drop the explicit
+        // withdrawn-membership check in favour of the authoritative closed-set test.
+        out.survived
+            .retain(|&(s, o)| self.fwd.get(&s).is_some_and(|set| set.contains(&o)));
+        out
     }
 }
 
@@ -234,5 +537,314 @@ mod tests {
         let mut delta = c.insert_edge(3, 4);
         delta.sort_unstable();
         assert_eq!(delta, vec![(1, 4), (2, 4), (3, 4)]);
+    }
+
+    #[test]
+    fn insert_records_base_edges() {
+        let mut c = IncrementalTransitiveClosure::new();
+        c.insert_edge(1, 2);
+        c.insert_edge(2, 3);
+        let mut base = c.base_edges();
+        base.sort_unstable();
+        // Only the asserted edges, NOT the inferred (1,3).
+        assert_eq!(base, vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn from_base_edges_closes_and_retains_base() {
+        let c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3)]);
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
+        let mut base = c.base_edges();
+        base.sort_unstable();
+        assert_eq!(base, vec![(1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn delete_non_base_edge_is_noop() {
+        // 1->2->3 closed; (1,3) is inferred, not a base edge.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3)]);
+        let pre = edge_set(&c);
+        let out = c.delete_edge(1, 3);
+        assert!(
+            out.withdrawn.is_empty(),
+            "deleting an inferred edge must withdraw nothing"
+        );
+        assert!(
+            out.survived.is_empty(),
+            "deleting a non-base edge has no survivor"
+        );
+        assert_eq!(edge_set(&c), pre, "state unchanged on no-op delete");
+        // Deleting an edge never asserted at all is also a no-op.
+        let out2 = c.delete_edge(7, 8);
+        assert!(out2.withdrawn.is_empty() && out2.survived.is_empty());
+        assert_eq!(edge_set(&c), pre);
+    }
+
+    #[test]
+    fn delete_still_supported_via_another_path_withdraws_nothing() {
+        // Two base paths from 1 to 3: 1->2->3 and 1->3 (direct).
+        // Deleting the direct 1->3 leaves (1,3) supported by 1->2->3.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        let out = c.delete_edge(1, 3);
+        assert!(
+            out.withdrawn.is_empty(),
+            "(1,3) still derivable via 1->2->3, withdraw nothing; got {:?}",
+            out.withdrawn
+        );
+        // (1,3) was the deleted edge AND is still closed-reachable → survivor.
+        assert_eq!(
+            out.survived,
+            vec![(1, 3)],
+            "(1,3) is a survivor: deleted base edge still entailed via 1->2->3"
+        );
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_breaks_chain_withdraws_correct_pairs() {
+        // Chain 1->2->3->4. Deleting 2->3 disconnects {1,2} from {3,4}.
+        // Withdrawn: (2,3),(2,4),(1,3),(1,4). Surviving: (1,2),(3,4).
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (3, 4)]);
+        let mut out = c.delete_edge(2, 3);
+        out.withdrawn.sort_unstable();
+        assert_eq!(out.withdrawn, vec![(1, 3), (1, 4), (2, 3), (2, 4)]);
+        // The deleted edge (2,3) itself was withdrawn (no alternate path), so it
+        // is NOT a survivor.
+        assert!(
+            out.survived.is_empty(),
+            "deleted (2,3) was withdrawn, not a survivor"
+        );
+        assert_eq!(edge_set(&c), [(1, 2), (3, 4)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_direct_edge_implied_by_path_reports_survivor() {
+        // Base 1->2, 2->3, and direct 1->3. Deleting the DIRECT 1->3 leaves it
+        // entailed via 1->2->3: nothing is withdrawn, and (1,3) is reported as a
+        // survivor so the SPEC-06 layer can promote it to a derived row (P1).
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        let out = c.delete_edge(1, 3);
+        assert!(
+            out.withdrawn.is_empty(),
+            "nothing withdrawn — alternate path"
+        );
+        assert_eq!(out.survived, vec![(1, 3)], "(1,3) survives via 1->2->3");
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_edges_folds_withdrawn_and_survived() {
+        // A genuine batch survivor: two base paths support (1,3) — the direct
+        // 1->3 and the chain 1->2->3. Deleting the direct 1->3 AND the unrelated
+        // 3->4 in one call leaves (1,3) entailed via 1->2->3, so it is reported as
+        // a survivor that REMAINS closed at the end of the fold.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3), (3, 4)]);
+        let out = c.delete_edges([(1, 3), (3, 4)]);
+        // (1,3) is still entailed via 1->2->3 → genuine survivor.
+        assert!(
+            out.survived.contains(&(1, 3)),
+            "(1,3) still closed via 1->2->3; must remain a survivor; got {:?}",
+            out.survived
+        );
+        // (3,4) was removed and is no longer reachable → withdrawn, not survived.
+        assert!(
+            out.withdrawn.contains(&(3, 4)),
+            "(3,4) lost all support; must be withdrawn; got {:?}",
+            out.withdrawn
+        );
+        assert!(
+            !out.survived.contains(&(3, 4)),
+            "(3,4) is gone; must NOT be a survivor; got {:?}",
+            out.survived
+        );
+        // Closure after both deletes: 1->2->3 chain (with transitive 1->3); 4 gone.
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_then_reinsert_round_trips() {
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (3, 4)]);
+        let before = edge_set(&c);
+        let before_base = {
+            let mut b = c.base_edges();
+            b.sort_unstable();
+            b
+        };
+        c.delete_edge(2, 3);
+        c.insert_edge(2, 3);
+        assert_eq!(
+            edge_set(&c),
+            before,
+            "closure restored after delete+reinsert"
+        );
+        let after_base = {
+            let mut b = c.base_edges();
+            b.sort_unstable();
+            b
+        };
+        assert_eq!(
+            after_base, before_base,
+            "base restored after delete+reinsert"
+        );
+    }
+
+    #[test]
+    fn delete_edges_drops_survivor_later_withdrawn() {
+        // Finding 1: a survivor reported by an EARLIER deletion in a batch can be
+        // WITHDRAWN by a LATER deletion in the same batch. base {(1,2),(2,3),(1,3)};
+        // delete_edges([(1,3),(2,3)]):
+        //  - delete (1,3) first: still reachable via 1->2->3, reported as survivor.
+        //  - delete (2,3) next: withdraws (1,3) (no path left).
+        // The combined outcome must NOT report (1,3) in `survived` (it is gone), and
+        // MUST report it in `withdrawn`.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        let out = c.delete_edges([(1, 3), (2, 3)]);
+        assert!(
+            out.withdrawn.contains(&(1, 3)),
+            "(1,3) ultimately lost all support; must be withdrawn; got {:?}",
+            out.withdrawn
+        );
+        assert!(
+            !out.survived.contains(&(1, 3)),
+            "(1,3) was withdrawn by the later delete; must NOT remain a survivor; got {:?}",
+            out.survived
+        );
+        // Final closure: only (1,2) remains.
+        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
+    }
+
+    #[test]
+    fn delete_on_a_cycle_withdraws_self_loops() {
+        // 1->2->3->1 is a cycle; strict closure has diagonal {(1,1),(2,2),(3,3)}.
+        // Deleting 3->1 breaks the cycle, leaving the chain 1->2->3.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (3, 1)]);
+        c.delete_edge(3, 1);
+        assert_eq!(
+            edge_set(&c),
+            [(1, 2), (1, 3), (2, 3)].into_iter().collect(),
+            "after breaking the cycle the closure is just the chain"
+        );
+    }
+
+    #[test]
+    fn delete_edge_on_cycle_returns_no_duplicate_withdrawals() {
+        // BUG A: a 1<->2 cycle. Inserting (1,2) and (2,1) gives the closed set
+        // {(1,1),(1,2),(2,1),(2,2)}. When deleting (2,1), the affected source set
+        // is closed-bwd[2] ∪ {2}. Because 2 is on the cycle, bwd[2] ALREADY
+        // contains 2, so without dedup source 2 is visited twice and any pair it
+        // withdraws lands in `withdrawn` twice. Deleting (2,1) breaks the cycle,
+        // leaving only the chain 1->2, so {(1,1),(2,1),(2,2)} are withdrawn.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 1)]);
+        assert_eq!(
+            edge_set(&c),
+            [(1, 1), (1, 2), (2, 1), (2, 2)].into_iter().collect()
+        );
+        let out = c.delete_edge(2, 1);
+
+        // No duplicate pairs in the withdrawn Vec.
+        let dedup: std::collections::BTreeSet<(u64, u64)> = out.withdrawn.iter().copied().collect();
+        assert_eq!(
+            out.withdrawn.len(),
+            dedup.len(),
+            "withdrawn must contain no duplicate pairs; got {:?}",
+            out.withdrawn
+        );
+        // And the withdrawn set is exactly the correct one.
+        assert_eq!(
+            dedup,
+            [(1, 1), (2, 1), (2, 2)].into_iter().collect(),
+            "deleting (2,1) from the 1<->2 cycle withdraws (1,1),(2,1),(2,2)"
+        );
+        // Remaining closure is just the chain 1->2.
+        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
+    }
+
+    #[test]
+    fn from_closed_seeds_base_from_closed_extent() {
+        // The closed extent is seeded into `base` as a conservative stand-in for
+        // the unknown asserted base — `transitive_closure(base) == closed` holds
+        // because a closed edge set is its own transitive closure.
+        let seed = [(1, 2), (2, 3), (1, 3)];
+        let c = IncrementalTransitiveClosure::from_closed_edges(seed.iter().copied());
+        let mut base = c.base_edges();
+        base.sort_unstable();
+        assert_eq!(
+            base,
+            vec![(1, 2), (1, 3), (2, 3)],
+            "closed extent is seeded into base verbatim"
+        );
+    }
+
+    #[test]
+    fn post_seed_inserted_edge_retracts_over_seeded_base() {
+        // Replaces the former `closed_seeded_closure_noops_retraction`, which
+        // pinned the OLD (buggy) blanket no-op: a closed-seeded closure that then
+        // accepted a NEW insert silently refused to retract that inserted edge,
+        // leaking stale closure. With `base` seeded from the closed extent, a
+        // post-seed inserted edge now retracts exactly.
+        //
+        // Seed closed {1->2, 2->3, 1->3}; insert 3->4 (derives 1->4,2->4,3->4);
+        // retract 3->4 → the derived 1->4/2->4/3->4 are withdrawn and the seeded
+        // 1->2/2->3/1->3 survive.
+        let mut c = IncrementalTransitiveClosure::from_closed_edges(
+            [(1, 2), (2, 3), (1, 3)].iter().copied(),
+        );
+        let mut delta = c.insert_edge(3, 4);
+        delta.sort_unstable();
+        assert_eq!(delta, vec![(1, 4), (2, 4), (3, 4)]);
+        assert!(
+            [(1, 4), (2, 4), (3, 4)]
+                .iter()
+                .all(|p| edge_set(&c).contains(p)),
+            "the inserted (3,4) closure pairs are present pre-retraction"
+        );
+
+        let mut out = c.delete_edge(3, 4);
+        out.withdrawn.sort_unstable();
+        assert_eq!(
+            out.withdrawn,
+            vec![(1, 4), (2, 4), (3, 4)],
+            "retracting the post-seed insert withdraws exactly its derived pairs"
+        );
+        assert!(
+            out.survived.is_empty(),
+            "(3,4) lost all support, so it is not a survivor; got {:?}",
+            out.survived
+        );
+        assert_eq!(
+            edge_set(&c),
+            [(1, 2), (2, 3), (1, 3)].into_iter().collect(),
+            "the seeded closure survives; only the inserted edge's pairs are gone"
+        );
+    }
+
+    #[test]
+    fn seeded_edge_retraction_is_sound() {
+        // Retracting a SEEDED edge is sound but may under-withdraw: the seeded
+        // base is the redundant closed extent {1->2,2->3,1->3}. Deleting the
+        // seeded (1,3) removes it from base, but (1,3) stays reachable via the
+        // also-seeded 1->2,2->3, so it is NOT withdrawn (and survives). The
+        // oracle `transitive_closure(base) == closed` holds for base = seeded
+        // minus (1,3) = {(1,2),(2,3)}, whose closure is {(1,2),(2,3),(1,3)} — so
+        // the closed set is unchanged.
+        let mut c = IncrementalTransitiveClosure::from_closed_edges(
+            [(1, 2), (2, 3), (1, 3)].iter().copied(),
+        );
+        let out = c.delete_edge(1, 3);
+        assert!(
+            out.withdrawn.is_empty(),
+            "(1,3) still reachable via 1->2->3; withdraw nothing; got {:?}",
+            out.withdrawn
+        );
+        assert_eq!(
+            out.survived,
+            vec![(1, 3)],
+            "(1,3) is a survivor: deleted seeded edge still entailed via 1->2->3"
+        );
+        assert_eq!(
+            edge_set(&c),
+            [(1, 2), (2, 3), (1, 3)].into_iter().collect(),
+            "closed set unchanged: transitive_closure({{(1,2),(2,3)}}) == seeded closed set"
+        );
     }
 }

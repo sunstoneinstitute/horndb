@@ -1111,6 +1111,7 @@ dependencies = [
  "criterion",
  "fs4",
  "pkg-config",
+ "proptest",
  "rand",
  "rustc-hash 2.1.2",
  "thiserror",
