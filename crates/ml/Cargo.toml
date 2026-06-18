@@ -5,10 +5,27 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Off by default: the in-process traits + registry are usable without
+# pulling in axum/tokio. The HTTP boundary (F3 `/nl-query`, F6 `/ml-audit`)
+# lives behind `server`.
+default = []
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:serde", "dep:serde_json"]
+
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+# HTTP boundary deps — gated on the `server` feature.
+axum = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
 [dev-dependencies]
-# Tests use only std + chrono; nothing extra needed at Stage 1.
+# Server tests drive the axum router with tokio + tower::ServiceExt::oneshot.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true }
+serde_json = { workspace = true }

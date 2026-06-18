@@ -9,10 +9,19 @@ pub mod audit;
 pub mod candidate;
 pub mod config;
 pub mod hotset;
+pub mod nlquery;
 pub mod planner;
 pub mod provenance;
 pub mod registry;
 pub mod types;
 
-pub use config::{MlConfig, MlConfigError};
+/// HTTP boundary (SPEC-08 F3 `/nl-query`, F6 `/ml-audit`). Behind the
+/// `server` feature so the in-process traits stay axum/tokio-free.
+#[cfg(feature = "server")]
+pub mod server;
+
+pub use config::{LlmPrivacy, MlConfig, MlConfigError};
+pub use nlquery::{
+    CostReport, NlQuestion, SparqlExecutor, TranslateError, Translation, Translator,
+};
 pub use registry::MlRegistry;

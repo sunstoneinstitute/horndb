@@ -11,8 +11,9 @@
 
 use crate::audit::MlAuditLog;
 use crate::candidate::{CandidateGenerator, DisabledCandidateGenerator};
-use crate::config::MlConfig;
+use crate::config::{LlmPrivacy, MlConfig};
 use crate::hotset::{DisabledHotSetAdvisor, HotSetAdvisor};
+use crate::nlquery::{DisabledTranslator, Translator};
 use crate::planner::{DisabledPlanAdvisor, PlanAdvisor};
 use std::sync::{Arc, RwLock};
 
@@ -26,12 +27,14 @@ struct RegistryInner {
     candidate: Option<Arc<dyn CandidateGenerator>>,
     planner: Option<Arc<dyn PlanAdvisor>>,
     hotset: Option<Arc<dyn HotSetAdvisor>>,
+    translator: Option<Arc<dyn Translator>>,
 
     // Cached no-op fallbacks so the disabled hot path returns the
     // same Arc instance every time (no allocation per call).
     disabled_candidate: Arc<dyn CandidateGenerator>,
     disabled_planner: Arc<dyn PlanAdvisor>,
     disabled_hotset: Arc<dyn HotSetAdvisor>,
+    disabled_translator: Arc<dyn Translator>,
 }
 
 impl MlRegistry {
@@ -42,9 +45,11 @@ impl MlRegistry {
                 candidate: None,
                 planner: None,
                 hotset: None,
+                translator: None,
                 disabled_candidate: Arc::new(DisabledCandidateGenerator),
                 disabled_planner: Arc::new(DisabledPlanAdvisor),
                 disabled_hotset: Arc::new(DisabledHotSetAdvisor),
+                disabled_translator: Arc::new(DisabledTranslator),
             }),
             audit: Arc::new(MlAuditLog::new()),
         }
@@ -81,6 +86,11 @@ impl MlRegistry {
     pub fn register_hotset(&self, h: Arc<dyn HotSetAdvisor>) {
         let mut guard = self.inner.write().expect("registry rwlock poisoned");
         guard.hotset = Some(h);
+    }
+
+    pub fn register_translator(&self, t: Arc<dyn Translator>) {
+        let mut guard = self.inner.write().expect("registry rwlock poisoned");
+        guard.translator = Some(t);
     }
 
     pub fn candidate_generator(&self) -> Arc<dyn CandidateGenerator> {
@@ -120,6 +130,33 @@ impl MlRegistry {
         } else {
             guard.disabled_hotset.clone()
         }
+    }
+
+    /// The active NL→SPARQL translator (SPEC-08 F3). Like the other
+    /// accessors, routes to the `Disabled*` no-op when ML is off or
+    /// nothing is registered — so `/nl-query` fails closed rather than
+    /// silently guessing.
+    pub fn translator(&self) -> Arc<dyn Translator> {
+        let guard = self.inner.read().expect("registry rwlock poisoned");
+        if guard.config.enabled {
+            guard
+                .translator
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| guard.disabled_translator.clone())
+        } else {
+            guard.disabled_translator.clone()
+        }
+    }
+
+    /// The current LLM privacy / training-data-leakage policy (F3).
+    pub fn llm_privacy(&self) -> LlmPrivacy {
+        self.inner
+            .read()
+            .expect("registry rwlock poisoned")
+            .config
+            .llm_privacy
+            .clone()
     }
 
     pub fn audit_log(&self) -> Arc<MlAuditLog> {
@@ -187,5 +224,46 @@ mod tests {
         r.reload_config(MlConfig::disabled());
         r.reload_config(MlConfig::enabled());
         assert_eq!(r.candidate_generator().model_id().as_str(), "fake");
+    }
+
+    #[test]
+    fn disabled_returns_no_op_translator() {
+        let r = MlRegistry::new(MlConfig::disabled());
+        assert_eq!(
+            r.translator().model_id().as_str(),
+            crate::nlquery::DisabledTranslator::MODEL_ID
+        );
+    }
+
+    #[test]
+    fn enabled_with_registered_translator_returns_it() {
+        let r = MlRegistry::new(MlConfig::enabled());
+        r.register_translator(Arc::new(crate::nlquery::MockTranslator::new(
+            "mock-v1",
+            "SELECT * WHERE { ?s ?p ?o }",
+        )));
+        assert_eq!(r.translator().model_id().as_str(), "mock-v1");
+    }
+
+    #[test]
+    fn registered_translator_but_disabled_returns_no_op() {
+        let r = MlRegistry::new(MlConfig::enabled());
+        r.register_translator(Arc::new(crate::nlquery::MockTranslator::new(
+            "mock-v1",
+            "SELECT * WHERE { ?s ?p ?o }",
+        )));
+        r.reload_config(MlConfig::disabled());
+        assert_eq!(
+            r.translator().model_id().as_str(),
+            crate::nlquery::DisabledTranslator::MODEL_ID
+        );
+    }
+
+    #[test]
+    fn privacy_reflects_config() {
+        let r = MlRegistry::new(
+            MlConfig::enabled().with_privacy(crate::config::LlmPrivacy::retain_questions()),
+        );
+        assert!(r.llm_privacy().log_questions);
     }
 }

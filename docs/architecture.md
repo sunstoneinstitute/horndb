@@ -299,11 +299,15 @@ HTTP server (`server` feature, on by default).
 
 ## 10. SPEC-08 — ML / LLM integration boundary
 
-**Crate:** `horndb-ml` · **Spec:** `SPEC-08` · **Overall status: implemented (interfaces only, opt-in)**
+**Crate:** `horndb-ml` · **Spec:** `SPEC-08` · **Overall status: implemented (interfaces + HTTP boundary, opt-in)**
 
 The boundary where ML sits. Symbolic reasoning is the source of truth; ML
 proposes and advises. Disabling all ML must be bit-identical for correctness
-(NF1). The whole crate is opt-in via configuration.
+(NF1). The whole crate is opt-in via configuration. The HTTP boundary
+(`POST /nl-query`, `GET /ml-audit`) ships behind the off-by-default `server`
+feature; the LLM is never bundled (reached via the `Translator` trait, mock-tested
+hermetically). The one remaining piece is the real FAISS-backed candidate
+generator (Stage-2, native-linkage heavy) — see `TASKS.md` / SPEC-08.
 
 | Component | Status | Notes |
 |---|---|---|
@@ -312,10 +316,11 @@ proposes and advises. Disabling all ML must be bit-identical for correctness
 | `HotSetAdvisor` trait (tier-placement hints) | **implemented** | `hotset.rs`. |
 | Provenance for ML-derived facts (F5) | **implemented** | `provenance.rs`. |
 | Model registry + config (`ml.enabled`) | **implemented** | `registry.rs`, `config.rs`. |
-| LLM → SPARQL HTTP endpoint (`POST /nl-query`, F3) | **planned** | `TASKS.md` MEDIUM · *Completeness* — "SPEC-08 ML". |
-| Real FAISS-backed `CandidateGenerator` | **planned** | Same task. |
-| HTTP audit endpoint (`GET /ml-audit`, F6) + cost reporting | **planned** | Same task; `audit.rs` holds the in-process side. |
-| Training-data leakage controls | **planned** | Same task. |
+| LLM → SPARQL HTTP endpoint (`POST /nl-query`, F3) | **implemented** | `server/nlquery.rs` (`server` feature). `Translator`/`SparqlExecutor` traits in `nlquery.rs`; LLM never bundled, mock-tested (hermetic). Generated SPARQL always returned for audit. |
+| HTTP audit endpoint (`GET /ml-audit`, F6) | **implemented** | `server/audit.rs` wraps the in-process `MlAuditLog`; paginated, `since`-filtered. |
+| Cost reporting (token counts + est. USD) | **implemented** | `CostReport` surfaced in the `/nl-query` response. |
+| Training-data leakage controls | **implemented** | `config::LlmPrivacy` — no-retention default, redaction option; single `loggable_text` chokepoint. |
+| Real FAISS-backed `CandidateGenerator` | **planned** | Open increment under `TASKS.md` MEDIUM · *Completeness* — "SPEC-08 ML" (#8). Native FAISS linkage; separable from the HTTP boundary. |
 
 ---
 
