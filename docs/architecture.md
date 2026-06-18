@@ -407,6 +407,18 @@ runs workspace `clippy -D warnings` + `cargo build`. CI mirrors this plus a
 real-engine conformance run. The closure crate needs SuiteSparse:GraphBLAS
 locally (being moved to a vendored submodule — §7).
 
+### Integration-test runner (cargo nextest)
+**Status: implemented.** The workspace builds ~90 separate `crates/*/tests/*.rs`
+binaries; cargo's built-in runner executes them serially per binary, which
+dominated `cargo test --workspace` wall-clock. The standard runner is now
+`cargo nextest run`, which schedules all tests across the binaries in one
+concurrent pool — same test set, no source changes (locally ~40% faster on a
+quiet machine; more under contention / in CI). Config: `.config/nextest.toml`
+(`default` + `ci` profiles). nextest does not run doctests, so CI keeps a
+separate `cargo test --workspace --doc` step (zero runnable doctests today).
+Chosen over consolidating test files into fewer targets, which would touch test
+source and risk dropping coverage for a smaller, riskier win ([#108](https://github.com/sunstoneinstitute/horndb/issues/108)).
+
 ---
 
 ## 14. Roadmap stages

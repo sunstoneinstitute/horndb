@@ -15,6 +15,15 @@ The "reference workstation" referenced throughout the SPECs:
 
 The harness captures a hardware fingerprint per run; comparisons are valid only within identical fingerprints (SPEC-01 NF — "we normalise by capturing the fingerprint, not by trying to normalise across hardware").
 
+**Developer test-loop runner.** The integration test suite runs under
+`cargo nextest run` (parallel across the ~90 test binaries, vs cargo's serial
+per-binary default — [#108](https://github.com/sunstoneinstitute/horndb/issues/108)).
+This is a dev-loop wall-clock concern, not a product performance gate, so its
+before/after numbers are not tracked as authoritative rows here; the decision
+and a rough local measurement live in `docs/architecture.md` → "Integration-test
+runner". Any number recorded here as authoritative must still come from
+`hornbench`.
+
 **Where benchmarks are run.** All `cargo bench` runs that produce numbers
 recorded in this document are executed on the dedicated **`hornbench`** server
 (`ssh hornbench`; repo at `~/src/horndb`), *not* on a laptop — this keeps the

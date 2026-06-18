@@ -24,6 +24,15 @@ jobs:
           components: rustfmt, clippy
           cache: true
 
+      # cargo-nextest runs the workspace's ~90 integration-test binaries in one
+      # concurrently-scheduled pool instead of cargo's serial-per-binary default
+      # (task #108). install-action fetches a prebuilt binary, so the rustc-1.90
+      # pin does not constrain the nextest version (that limit is for building
+      # nextest from source, not running it).
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: cargo-nextest
+
       # The vendored GraphBLAS now builds into crates/closure/vendor/.shared-build/,
       # which lives outside target/ and so is NOT covered by rust-cache above.
       # Cache it explicitly, keyed on the submodule SHA so it invalidates exactly
@@ -48,14 +57,19 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: unit tests
-        run: cargo test --workspace
+      - name: unit + integration tests
+        run: cargo nextest run --profile ci --workspace
 
       - name: sparql tests (server feature)
-        run: cargo test -p horndb-sparql --features server
+        run: cargo nextest run --profile ci -p horndb-sparql --features server
 
       - name: ml tests (server feature)
-        run: cargo test -p horndb-ml --features server
+        run: cargo nextest run --profile ci -p horndb-ml --features server
+
+      # nextest does not run doctests; run them separately so doctest coverage
+      # can never silently regress (currently zero runnable doctests, fast).
+      - name: doctests
+        run: cargo test --workspace --doc
 
       - name: ml clippy (server feature)
         run: cargo clippy -p horndb-ml --all-targets --features server -- -D warnings
