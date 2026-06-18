@@ -42,7 +42,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [x] **MEDIUM** · _Completeness_ — SPEC-08 ML (HTTP boundary delivered; FAISS candidate generator deferred) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [x] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
-- [v] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-10-sparql11-syntax-suite · 2026-06-18T11:32:57Z_
+- [x] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
 - [ ] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
@@ -194,7 +194,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   (Turtle 1.2 is Stage-2); the in-process binding is the longer-term swap.
   Cross-refs: SPEC-05 valued closure (#11/#12), rdf-registry.
 
-- [v] **SPEC-01 harness.** ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
+- [x] **SPEC-01 harness.** ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
   Replace the hand-picked 50-case OWL 2 RL subset with the full W3C OWL 2 +
   SPARQL 1.1 suites, full ORE 2015 corpus, LDBC SPB SF3/SF5 runs, LUBM + UOBM
   coverage, and broader RDFox A/B (publication gated on license review).
