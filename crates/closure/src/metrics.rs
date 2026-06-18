@@ -97,6 +97,13 @@ pub enum ValuedKernel {
 ///
 /// The identity is **not** included (matches the Boolean `transitive_closure`
 /// convention): only reachable pairs appear.
+///
+/// **Weight contract:** edge weights are confidences/probabilities in `(0, 1]`.
+/// Under that contract the best-confidence weight of every pair is realised by
+/// a *simple* path, so the closure converges in ≤ `N` iterations. Out-of-range
+/// weights (`> 1` over a cycle) can make the `(max, ×)` product diverge; an
+/// `N`-iteration safety cap stops the loop rather than letting the readiness
+/// measurement spin forever.
 pub fn valued_transitive_closure(
     m: &ValuedMatrix,
     kernel: ValuedKernel,
@@ -139,6 +146,7 @@ pub fn valued_transitive_closure(
     let mut reach = ValuedMatrix::from_weighted_edges(n, &edges)?;
     let mut frontier = ValuedMatrix::from_weighted_edges(n, &edges)?;
     let mut iterations: u32 = 0;
+    let mut prev_sum = reach.reduce_sum()?;
 
     loop {
         // Frontier := Frontier ⊗ M (one more hop), timing just the MxM.
@@ -157,18 +165,29 @@ pub fn valued_transitive_closure(
             break;
         }
 
-        let prev_nnz = reach.nvals()?;
         reach.max_assign(&next_frontier)?;
         reach.wait()?;
-        let new_nnz = reach.nvals()?;
-        // Fixed point when the reachable set stops growing. (Weights can still
-        // shift toward the optimum, but `(max, ×)` with weights in `[0, 1]` is
-        // monotone non-increasing per hop, so the nnz frontier is the binding
-        // termination signal for the readiness measurement.)
-        if new_nnz == prev_nnz {
+        // Fixed point on the accumulator's *value*, not just its support: under
+        // the monotone `(max, ×)` accumulation the total sum strictly increases
+        // whenever any edge weight improves, including longer paths that
+        // overwrite an already-present pair with a better confidence. A pure
+        // `nnz`-stable check would stop too early on such weight-only gains.
+        let new_sum = reach.reduce_sum()?;
+        if new_sum == prev_sum {
             break;
         }
+        prev_sum = new_sum;
         frontier = next_frontier;
+
+        // Safety cap. With weights in `(0, 1]` the best-confidence weight of any
+        // pair is realised by a *simple* path (length ≤ N-1), so the value sum
+        // is monotone *bounded* and converges within N iterations. The cap only
+        // bites on out-of-contract inputs (weights > 1 over a cycle, where the
+        // `(max, ×)` product can grow without bound); it stops the readiness
+        // measurement from looping forever rather than silently diverging.
+        if iterations as u64 >= n {
+            break;
+        }
     }
 
     let closure_nnz = reach.nvals()?;

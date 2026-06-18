@@ -34,6 +34,46 @@ fn valued_closure_best_confidence_path() {
     assert!((w02 - 0.72).abs() < 1e-12, "expected 0.72, got {w02}");
 }
 
+/// Regression: the closure must keep iterating while *weights* still improve,
+/// even when the reachable *support* (nnz) has already stabilised. Here every
+/// reachable pair already exists after one hop (the graph is "complete" in
+/// support via direct shortcut edges), but the best-confidence path `0→1→2→3`
+/// (0.9·0.9·0.9 = 0.729) only beats the direct `0→3` shortcut (0.5) after the
+/// *third* MxM. A naive nnz-only termination would stop early and report the
+/// wrong weight for `0→3`.
+#[test]
+fn valued_closure_continues_on_weight_only_improvement() {
+    init_once().unwrap();
+    let edges = vec![
+        // The "real" high-confidence chain.
+        (0, 1, 0.9),
+        (1, 2, 0.9),
+        (2, 3, 0.9),
+        // Direct + 2-hop shortcuts that already populate the support, so nnz
+        // stops growing immediately, but with *lower* weight than the chain.
+        (0, 2, 0.5),
+        (0, 3, 0.5),
+        (1, 3, 0.5),
+    ];
+    let m = ValuedMatrix::from_weighted_edges(4, &edges).unwrap();
+
+    for kernel in [ValuedKernel::Builtin, ValuedKernel::Udf] {
+        let (star, _metrics) = valued_transitive_closure(&m, kernel).unwrap();
+        let out = star.extract_weighted_edges().unwrap();
+        let w03 = weight_of(&out, 0, 3).expect("0->3 reachable");
+        // 0.9^3 = 0.729 must win over every shorter shortcut.
+        assert!(
+            (w03 - 0.729).abs() < 1e-12,
+            "{kernel:?}: best-confidence 0->3 should be 0.729 (the 3-hop chain), got {w03}"
+        );
+        let w02 = weight_of(&out, 0, 2).expect("0->2 reachable");
+        assert!(
+            (w02 - 0.81).abs() < 1e-12,
+            "{kernel:?}: best-confidence 0->2 should be 0.81 (the 2-hop chain), got {w02}"
+        );
+    }
+}
+
 /// The built-in FactoryKernel and the user-defined-op generic kernel must
 /// produce bit-identical closures — they only differ in *speed*, which is the
 /// whole point of the readiness metric.

@@ -335,6 +335,28 @@ impl ValuedMatrix {
         }
     }
 
+    /// Sum of all stored entries (`PLUS` reduction over `f64`).
+    ///
+    /// Used as a *value* fixed-point signal: because the `(max, ×)`
+    /// accumulation in [`max_assign`](Self::max_assign) is monotone
+    /// non-decreasing per entry, the total sum strictly increases on any
+    /// iteration that improves *any* edge weight — even when the support
+    /// (`nnz`) is unchanged. Stopping only on stable `nnz` would miss longer
+    /// paths that improve an already-present pair.
+    pub fn reduce_sum(&self) -> Result<f64, GrbError> {
+        let mut acc: f64 = 0.0;
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_reduce_FP64(
+                &mut acc,
+                std::ptr::null_mut(),
+                ffi::GrB_PLUS_MONOID_FP64,
+                self.inner,
+                std::ptr::null_mut(),
+            ))?;
+        }
+        Ok(acc)
+    }
+
     /// Extract all stored entries as `(row, col, weight)` triples, row-major.
     pub fn extract_weighted_edges(&self) -> Result<Vec<(u64, u64, f64)>, GrbError> {
         let nvals = self.nvals()?;
