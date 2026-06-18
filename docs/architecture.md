@@ -91,7 +91,7 @@ pinned to Rust `1.90.0`. Dependency / build order:
         └────────────────────────────────────────────────────┘
 
         hardware-ext (09): empty placeholder, Stage 3.
-        python / rdflib API (10): planned, no crate yet.
+        python / rdflib API (10): partial — crates/python core surface; off-workspace.
 ```
 
 Layering rule (SPEC-00): **the harness (SPEC-01) comes first** — the test
@@ -344,25 +344,33 @@ on it; Stage 3 begins only after Stage 2 acceptance passes.
 
 ## 12. SPEC-10 — rdflib-compatible Python API
 
-**Crate:** none yet · **Spec:** `SPEC-10` · **Overall status: planned**
+**Crate:** `crates/python` (`horndb-python`) · **Spec:** `SPEC-10` ·
+**Overall status: partially implemented**
 
 A Python compatibility layer (PyO3/maturin) exposing rdflib-shaped term
-classes, `Graph`/`Dataset`, core operations, and SPARQL passthrough to the
-Rust engine. No code exists today; `docs/rdflib.md` compares common rdflib
-workflows with the current HornDB surface. Tracked as a single task in
-`TASKS.md` MEDIUM · *Completeness* — "SPEC-10 rdflib-compatible Python API".
+classes, a `Graph` facade, core operations, parse/serialize, and SPARQL
+passthrough to the Rust engine. The first increment ships the core
+graph-centric surface; `docs/rdflib.md` compares common rdflib workflows with
+the HornDB surface. Tracked as a MEDIUM *Completeness* epic in `TASKS.md`
+(#9), split into shippable increments.
+
+The binding crate is **excluded from the Cargo workspace** so the hermetic
+`cargo build/clippy/test --workspace` never needs a Python interpreter; it is
+built with maturin and exercised by a dedicated `python-rdflib-compat` CI job.
 
 | Component | Status | Notes |
 |---|---|---|
-| rdflib-shaped terms (`URIRef`, `BNode`, `Literal`, `Variable`, `Namespace`) | **planned** | SPEC-10 F1. |
-| `Graph` / `Dataset` / `ConjunctiveGraph` facades | **planned** | F2, F3. |
-| `parse` / `serialize` (Turtle, N-Triples) | **planned** | F4. |
-| `query` / `update` passthrough to SPEC-07 | **planned** | F5. |
-| `rdflib-compat` harness subset | **planned** | Acceptance #1. |
+| rdflib-shaped terms (`URIRef`, `BNode`, `Literal`, `Variable`, `Namespace`) | **implemented** | SPEC-10 F1; differential-tested vs upstream rdflib. |
+| `Graph` facade (add/remove/set/triples/subjects/objects/value/len/contains/iter) | **implemented** | F2. |
+| `Dataset` / `ConjunctiveGraph` named-graph facades | **planned** | F3; Stage-1 store is default-graph only. |
+| `parse` / `serialize` (Turtle, N-Triples) | **implemented** | F4; TriG/N-Quads/RDF-XML/JSON-LD deferred. |
+| `query` / `update` passthrough to SPEC-07 | **implemented** | F5; SELECT/ASK/CONSTRUCT + INSERT/DELETE DATA. |
+| Namespace binding (`bind`, `namespaces`, `Namespace`) | **implemented** | F6. |
+| `rdflib-compat` differential subset | **implemented** | Acceptance #1/#2/#6; `crates/python/tests/`, `harness/curation/rdflib-compat.md`. |
+| Multi-version CPython wheel matrix (macOS + Linux) | **planned** | Acceptance #7; one Linux CI job today. |
 
-> SPEC-10 is the only spec without a Stage-1 plan file. The single tracking
-> task covers the whole binding layer; split it into per-feature tasks when
-> implementation starts.
+> The tracking epic (#9) is split into per-increment sub-issues as
+> implementation lands; the first increment delivered the core surface above.
 
 ---
 

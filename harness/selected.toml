@@ -11,6 +11,17 @@
 #
 # IDs are suffix-matched against the manifest entry IRI so the same
 # selection survives any workspace root path (worktrees, CI checkouts).
+#
+# SPEC-10 `rdflib-compat` subset: the rdflib compatibility suite is a
+# Python-side *differential* gate (HornDB vs upstream `rdflib`), not a
+# manifest-driven Rust suite, so it does not appear as a `[suites.*]` entry
+# here — those map 1:1 to Rust `Suite` keys in `crates/harness/src/runner.rs`
+# with an RDF/SPARQL manifest. The rdflib-compat subset instead lives in
+# `crates/python/tests/test_rdflib_compat.py` and is run by the dedicated
+# `python-rdflib-compat` CI job (`.github/workflows/ci.yml`). Its curated case
+# list and grading rules are documented in
+# `harness/curation/rdflib-compat.md`. The harness-first rule still holds: that
+# Python suite is the SPEC-10 gate and must stay green.
 
 version = 1
 

@@ -149,16 +149,28 @@ If your `rdflib` mental model is "RDF graph as a bag of triples," adjust it here
 | You want query planning / join execution details | SPARQL algebra + planner + executor internals |
 | You want OWL 2 RL reasoning | HornDB’s core engine and specs, not `rdflib` |
 
+## Python API status
+
+The **first SPEC-10 increment now ships a Python API**: the `horndb-python`
+binding crate (`crates/python/`, importable as `horndb_rdflib`) provides
+rdflib-shaped terms (`URIRef`/`BNode`/`Literal`/`Variable`/`Namespace`), a
+`Graph` facade (`add`/`remove`/`set`/`triples`/`subjects`/`objects`/`value`/
+`__len__`/`__contains__`/iteration), `parse`/`serialize` for Turtle and
+N-Triples, SPARQL `query`/`update` passthrough, and `bind`/`namespaces`. It is
+differential-tested against upstream rdflib. Build it with maturin
+(`maturin develop --features extension-module`); see the crate README.
+
 ## What is missing compared with rdflib
 
 This is the short list of things you should not assume exist yet:
 
-- A Python API.
-- A general-purpose graph serializer surface.
+- `Dataset` / `ConjunctiveGraph` named-graph facades (Stage-1 store is
+  default-graph only).
+- Serializer/parser formats beyond Turtle and N-Triples (TriG, N-Quads,
+  RDF/XML, JSON-LD).
 - A wide plugin ecosystem for parsers, serializers, and stores.
-- A full `Graph.parse()` equivalent in the current Stage 1 public docs.
 - A complete SPARQL Update vocabulary.
-- `DESCRIBE` query support.
+- `DESCRIBE` query support in the Stage-1 in-crate API.
 
 ## What to read next
 

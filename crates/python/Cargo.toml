@@ -1,0 +1,47 @@
+# horndb-python — PyO3/maturin binding crate (SPEC-10).
+#
+# DELIBERATELY EXCLUDED from the workspace `members` list (see the root
+# `Cargo.toml`): building Python extension modules pulls in a Python-dev
+# dependency via PyO3, and `extension-module` produces a cdylib that does not
+# link a Python interpreter, which a plain `cargo build`/`cargo test` cannot
+# run. Keeping it out of the default workspace path means
+# `cargo build --workspace`, `cargo clippy --workspace`, and
+# `cargo test --workspace` stay hermetic and never need a Python interpreter.
+#
+# Build the wheel explicitly with maturin (see this crate's CLAUDE.md):
+#   maturin develop -m crates/python/Cargo.toml --features extension-module
+#
+# This crate IS a member of its own throwaway workspace (the empty
+# `[workspace]` table below) so `cargo`/`maturin` invoked from inside the
+# crate dir do not try to attach it to the root workspace.
+[workspace]
+
+[package]
+name = "horndb-python"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "Apache-2.0"
+repository = "https://github.com/sunstoneinstitute/horndb"
+authors = ["Sunstone Institute"]
+publish = false
+
+[lib]
+name = "horndb_rdflib"
+# cdylib for the Python extension module; rlib so the pure-Rust logic can be
+# unit-tested with `cargo test` (the test target does not need `extension-module`).
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `extension-module` tells PyO3 not to link libpython — required for a portable
+# wheel and abi3. It is OFF by default so `cargo test` inside this crate can
+# link against the venv's libpython and actually run the Rust unit tests.
+default = []
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+# abi3-py310: one wheel works on CPython 3.10+ (NF1 target 3.10–3.13).
+pyo3 = { version = "0.23", features = ["abi3-py310"] }
+horndb-sparql = { path = "../sparql", default-features = false, features = ["reasoner"] }
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+oxrdfio = { version = "0.2", features = ["rdf-12"] }
