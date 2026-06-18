@@ -131,7 +131,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   SPEC-02-backed per-tuple storage MVCC, distributed timely-dataflow (SPEC-09).
 
 - [ ] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
-  Kleene paths `*`/`+` via closure ([#50](https://github.com/sunstoneinstitute/horndb/issues/50)),
+  Remaining: Kleene paths `*`/`+` via closure ([#50](https://github.com/sunstoneinstitute/horndb/issues/50)),
   graph-management Update `LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY` ([#52](https://github.com/sunstoneinstitute/horndb/issues/52)),
   `EXPLAIN` pragma ([#53](https://github.com/sunstoneinstitute/horndb/issues/53)),
   Graph Store Protocol ([#54](https://github.com/sunstoneinstitute/horndb/issues/54)),
