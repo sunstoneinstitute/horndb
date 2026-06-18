@@ -6,12 +6,22 @@
 //! Under the Stage-1 default-graph-only model the graph-management verbs map
 //! onto the single merged default graph and honour the `SILENT` modifier:
 //! `CLEAR`/`DROP DEFAULT`/`ALL` empty the store; `LOAD` fetches a `file:`
-//! source and merges it into the default graph; and any verb that would touch
-//! an unrepresentable named graph is an error unless `SILENT` (then a no-op).
-//! `ADD`/`MOVE`/`COPY` desugar (in spargebra) to `Drop` + `DeleteInsert`
-//! sequences and are handled through those arms; the same-graph identity case
-//! desugars to zero operations (a valid no-op). True named-graph scoping and
-//! remote (`http(s):`) `LOAD` stay deferred — see `INTEGRATION-NOTES.md`.
+//! source and merges it into the default graph; and a `CLEAR`/`DROP`/`CREATE`/
+//! `LOAD` that would touch an unrepresentable named graph is an error unless
+//! `SILENT` (then a no-op).
+//!
+//! `ADD`/`MOVE`/`COPY` are not distinct spargebra variants: the parser rewrites
+//! them (per the W3C spec) into `Drop` + `DeleteInsert` sequences, with the
+//! same-graph identity case (`… <g> TO <g>`) collapsing to zero operations (a
+//! valid no-op). A named-graph operand surfaces as a named `GRAPH` pattern in
+//! the desugared `DeleteInsert` and is rejected by `apply_delete_insert`'s
+//! existing named-graph guards. **The `SILENT` flag is dropped by spargebra's
+//! desugaring**, so a named-operand `ADD`/`MOVE`/`COPY` errors even with
+//! `SILENT` — preserving it would require re-parsing the verb, which is out of
+//! scope while named graphs are unrepresentable (the no-op and the error are
+//! observationally identical to a default-graph-only store either way: no data
+//! moves). True named-graph scoping and remote (`http(s):`) `LOAD` stay
+//! deferred — see `INTEGRATION-NOTES.md`.
 
 use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
@@ -203,18 +213,21 @@ fn apply_load<B: FullBackend>(
 fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
     use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 
-    let path = match source
+    let raw = match source
         .strip_prefix("file://")
         .or_else(|| source.strip_prefix("file:"))
     {
         // `file:///abs/path` → `/abs/path`; the common absolute form.
-        Some(p) => p.to_owned(),
+        Some(p) => p,
         None => {
             return Err(SparqlError::UnsupportedAlgebra(format!(
                 "LOAD of a non-file source (Stage-1 fetches file: IRIs only): {source}"
             )));
         }
     };
+    // A file IRI percent-encodes reserved characters (e.g. a space as `%20`);
+    // decode to the real filesystem path before reading.
+    let path = percent_decode(raw);
 
     let bytes = std::fs::read(&path)
         .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
@@ -257,6 +270,30 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
     Ok(out)
 }
 
+/// Percent-decode a file-IRI path component (RFC 3986). A `%XX` escape becomes
+/// the decoded byte; a malformed escape is left verbatim. The decoded byte
+/// sequence is interpreted as UTF-8 (lossy), which covers ordinary filesystem
+/// paths; this is a minimal decoder sufficient for `file:` LOAD sources.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Lower a parsed `(subject, predicate, object)` from oxttl to algebra terms.
 fn oxrdf_triple_to_terms(
     subject: &oxrdf::NamedOrBlankNode,
@@ -271,6 +308,14 @@ fn oxrdf_triple_to_terms(
 }
 
 /// Lower an `oxrdf` subject (named node or blank node) to an algebra [`Term`].
+///
+/// Blank-node labels are carried through verbatim (`b.as_str()`). This shares
+/// the Stage-1 store's known blank-node approximation with the N-Triples/Turtle
+/// bulk loaders and `construct_triples`: labels are not freshened per loaded
+/// document, so a `_:b` in one `LOAD` is identified with the same label in
+/// another `LOAD` (or already in the store), and re-loading an identical
+/// blank-node triple dedups. Per-document blank-node scoping belongs with the
+/// dictionary store (SPEC-02), which carries blank-node identity explicitly.
 fn oxrdf_subject_to_term(s: &oxrdf::NamedOrBlankNode) -> Term {
     match s {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::Iri(n.as_str().to_owned()),

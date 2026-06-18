@@ -243,17 +243,27 @@ and a **no-op** when `SILENT`. Concretely:
 - **`LOAD <source> [INTO GRAPH <g>]`** fetches and parses `source`, merging its
   triples into the default graph. Only `file:` sources are fetched — the
   workspace carries no HTTP client, so remote (`http(s):`) sources are an error
-  unless `SILENT`. The serialization is picked from the path extension
-  (`.nt`/`.nq`/`.trig`, else Turtle) and parsed with `oxttl` (the same parser
-  family `serve.rs` uses); all graph names in a quad source merge into the
-  default graph. A named `INTO GRAPH` destination is an error unless `SILENT`.
+  unless `SILENT`. The file-IRI path is percent-decoded before reading (so
+  `file:///tmp/a%20b.nt` opens `/tmp/a b.nt`). The serialization is picked from
+  the path extension (`.nt`/`.nq`/`.trig`, else Turtle) and parsed with `oxttl`
+  (the same parser family `serve.rs` uses); all graph names in a quad source
+  merge into the default graph. A named `INTO GRAPH` destination is an error
+  unless `SILENT`. **Blank-node labels are carried through verbatim** — the same
+  Stage-1 approximation the bulk loaders use: labels are not freshened per
+  loaded document, so re-loading an identical blank-node triple dedups.
+  Per-document blank-node scoping belongs with the SPEC-02 dictionary store.
 - **`ADD`/`MOVE`/`COPY`** are not distinct spargebra variants; the parser
   rewrites them per the W3C spec into `Drop` + a `DeleteInsert` whose insert
   target / WHERE is a `GRAPH` pattern. Named-graph operands are therefore
   rejected by the existing `apply_delete_insert` named-graph guards. The
   same-graph identity case (`… <g> TO <g>`) is rewritten to **zero
   operations**, a valid no-op (`parse_update` admits an empty op list for this
-  reason).
+  reason). One spargebra-imposed limitation: the rewrite **drops the `SILENT`
+  flag**, so a named-operand `ADD`/`MOVE`/`COPY` errors even with `SILENT`
+  rather than swallowing the error. This is observationally identical to the
+  prescribed no-op for a default-graph-only store (no data can move either
+  way); preserving `SILENT` here would require re-parsing the verb and is
+  out of scope while named graphs are unrepresentable.
 
 **Deferred** (documented, out of scope here): true named-graph scoping and a
 quad-aware `Store` seam belong with the Graph Store Protocol increment (#54);

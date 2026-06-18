@@ -158,8 +158,17 @@ fn create_named_graph_silent_is_noop_nonsilent_errors() {
 // ── LOAD ────────────────────────────────────────────────────────────────────
 
 fn write_tmp(name: &str, body: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The default harness runs tests in parallel; a process-unique counter keeps
+    // two tests (e.g. the MemStore and HornBackend legs sharing `name`) from
+    // racing on one path.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
-    p.push(format!("horndb_load_test_{}_{name}", std::process::id()));
+    p.push(format!(
+        "horndb_load_test_{}_{seq}_{name}",
+        std::process::id()
+    ));
     std::fs::write(&p, body).unwrap();
     p
 }
@@ -196,6 +205,25 @@ fn load_turtle_file() {
     run(&u, &mut store).unwrap();
     assert_eq!(count_all(&store), 2);
     std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn load_percent_encoded_path() {
+    // A file IRI percent-encodes reserved characters; LOAD must decode the path
+    // back to the real filesystem name before reading it.
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("horndb load dir {}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a b.nt");
+    std::fs::write(&path, "<http://ex/s> <http://ex/p> <http://ex/o> .\n").unwrap();
+
+    let mut store = MemStore::default();
+    // Encode spaces as %20 in the IRI.
+    let encoded = path.display().to_string().replace(' ', "%20");
+    let u = format!("LOAD <file://{encoded}>");
+    run(&u, &mut store).unwrap();
+    assert_eq!(count_all(&store), 1);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -277,6 +305,20 @@ fn add_named_operand_errors() {
         err.to_lowercase().contains("graph"),
         "named operand should error: {err}"
     );
+    // The store is left untouched (the rejection happens before any mutation).
+    assert_eq!(count_all(&store), 1);
+}
+
+#[test]
+fn add_named_operand_silent_still_errors() {
+    // spargebra drops the SILENT flag when it desugars ADD/MOVE/COPY into a
+    // DeleteInsert, so SILENT is not preserved for a named operand: it errors
+    // like the non-silent form. Documented in update.rs. No data moves either
+    // way (named graphs are unrepresentable), so the store is unchanged.
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run("ADD SILENT <http://g/1> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("graph"), "{err}");
+    assert_eq!(count_all(&store), 1);
 }
 
 // ── Multi-operation update ──────────────────────────────────────────────────
