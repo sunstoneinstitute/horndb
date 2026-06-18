@@ -85,6 +85,8 @@ cargo test -p <crate> <test_name>                        # single test
 cargo bench -p <crate> --bench <name>                    # criterion benches (e.g. four_cycle, per_tuple, load_lubm, transitive, sameas, insert_throughput)
 ```
 
+**macOS dev tip:** the workspace builds ~90 separate test binaries, and each freshly-linked one triggers a Gatekeeper (`syspolicyd`) + XProtect scan on first run — which can pin those daemons near 100% CPU during `cargo test`/`build`. Add your terminal to System Settings → Privacy & Security → **Developer Tools** (or run `sudo spctl developer-mode enable-terminal` once) to exempt its child processes from Gatekeeper assessment.
+
 CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with the real engine; nightly runs LDBC SPB-256 on a self-hosted runner. **Pin every GitHub Action to a full 40-char commit SHA, never a floating tag** — full hygiene rules and the dependabot flow are in `.github/CLAUDE.md`.
 
 ## Workspace conventions
