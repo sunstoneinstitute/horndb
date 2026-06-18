@@ -130,21 +130,36 @@ fn strip_explain_pragma(input: &str) -> Option<(&str, bool)> {
 }
 
 /// If `s` starts with `kw` (ASCII-case-insensitive) followed by ASCII
-/// whitespace, return the slice after the whitespace boundary (the
-/// whitespace itself is left for the caller to trim). Returns `None` if
-/// `kw` is not a whitespace-delimited prefix of `s`.
+/// whitespace, return the slice after the keyword (the whitespace itself
+/// is left for the caller to trim). Returns `None` if `kw` is not a
+/// whitespace-delimited prefix of `s`.
+///
+/// `kw` must be ASCII (the callers pass `"EXPLAIN"` / `"JSON"`). The
+/// comparison is done byte-wise rather than by string slicing so that a
+/// non-ASCII `s` whose `kw.len()`-th byte falls in the middle of a
+/// multibyte UTF-8 character does not panic (`&s[..kw.len()]` would
+/// require a char boundary). The trailing-whitespace check and the
+/// `kw.len()` slice index are both at the keyword's byte length, which is
+/// a char boundary exactly when the leading bytes are all ASCII — which
+/// the per-byte `eq_ignore_ascii_case` guarantees on the matching path.
 fn strip_keyword_ci<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    debug_assert!(kw.is_ascii(), "strip_keyword_ci expects an ASCII keyword");
     let bytes = s.as_bytes();
-    if bytes.len() < kw.len() {
+    let kw_bytes = kw.as_bytes();
+    if bytes.len() < kw_bytes.len() {
         return None;
     }
-    if !s[..kw.len()].eq_ignore_ascii_case(kw) {
+    // Per-byte ASCII-case-insensitive compare — never slices `s`, so a
+    // multibyte char straddling the keyword length cannot panic.
+    if !bytes[..kw_bytes.len()].eq_ignore_ascii_case(kw_bytes) {
         return None;
     }
     // The character immediately after the keyword must be ASCII
     // whitespace, so `EXPLAINING` / `EXPLAIN(...)` are not matched.
-    match bytes.get(kw.len()) {
-        Some(c) if c.is_ascii_whitespace() => Some(&s[kw.len()..]),
+    // Because every keyword byte matched ASCII, `kw_bytes.len()` is a
+    // char boundary here and `&s[kw_bytes.len()..]` is safe.
+    match bytes.get(kw_bytes.len()) {
+        Some(c) if c.is_ascii_whitespace() => Some(&s[kw_bytes.len()..]),
         _ => None,
     }
 }

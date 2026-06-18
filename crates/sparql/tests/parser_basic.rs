@@ -116,3 +116,13 @@ fn bare_explain_with_no_query_is_a_parse_error() {
     let err = parse_query("EXPLAIN   ").unwrap_err();
     assert!(format!("{err}").contains("parse error"), "{err}");
 }
+
+#[test]
+fn non_ascii_leading_query_does_not_panic() {
+    // A query whose leading bytes are multibyte UTF-8 must not panic the
+    // pragma sniffer (regression: byte 7 of "élément…" could split a
+    // codepoint, and `&s[..7]` would panic). It is not EXPLAIN, so it
+    // falls through to spargebra (which rejects it as a parse error).
+    let err = parse_query("ééééééé not sparql").unwrap_err();
+    assert!(format!("{err}").contains("parse error"), "{err}");
+}
