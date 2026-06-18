@@ -13,7 +13,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use horndb_ml::audit::MlAuditEntry;
 use horndb_ml::config::{LlmPrivacy, MlConfig};
-use horndb_ml::nlquery::{MockTranslator, SparqlExecutor};
+use horndb_ml::nlquery::{
+    CostReport, MockTranslator, NlQuestion, SparqlExecutor, TranslateError, Translation, Translator,
+};
 use horndb_ml::registry::MlRegistry;
 use horndb_ml::server::{build_router, MlAppState};
 use horndb_ml::types::{Confidence, ModelId, TripleSubject};
@@ -31,6 +33,25 @@ impl SparqlExecutor for EchoExecutor {
         } else {
             Ok(format!("{{\"ran\":{sparql:?}}}"))
         }
+    }
+}
+
+/// An adversarial translator that echoes the raw question in its
+/// `explanation` — modelling a third-party translator that does not honour
+/// the question-free convention. The endpoint must enforce privacy itself.
+struct LeakyTranslator;
+impl Translator for LeakyTranslator {
+    fn model_id(&self) -> ModelId {
+        ModelId::new("leaky")
+    }
+    fn translate(&self, q: &NlQuestion) -> Result<Translation, TranslateError> {
+        Ok(Translation {
+            generated_sparql: "SELECT * WHERE { ?s ?p ?o }".to_string(),
+            confidence: Confidence::new(0.5),
+            explanation: format!("you asked: {}", q.question),
+            model: ModelId::new("leaky"),
+            cost: CostReport::zero(),
+        })
     }
 }
 
@@ -207,6 +228,48 @@ async fn nl_query_redacts_question_when_policy_redacts() {
     let log = v["question_log"].as_str().unwrap();
     assert_eq!(log, "[redacted: 5 chars]");
     assert!(!log.contains("abcde"));
+}
+
+#[tokio::test]
+async fn nl_query_suppresses_leaky_explanation_under_no_retention() {
+    // A translator that echoes the question in `explanation` must not leak
+    // it: under no-retention the endpoint suppresses the explanation field.
+    let reg = MlRegistry::new(MlConfig::enabled()); // default = no retention
+    reg.register_translator(Arc::new(LeakyTranslator));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(
+            serde_json::json!({"question": "secret PII question"}),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(resp).await;
+    assert!(
+        v.get("explanation").is_none(),
+        "explanation should be suppressed"
+    );
+    assert!(
+        !v.to_string().contains("secret PII question"),
+        "raw question leaked via explanation: {v}"
+    );
+    // Structured fields are unaffected.
+    assert_eq!(v["generated_sparql"], "SELECT * WHERE { ?s ?p ?o }");
+}
+
+#[tokio::test]
+async fn nl_query_returns_explanation_when_retention_allowed() {
+    let reg = MlRegistry::new(MlConfig::enabled().with_privacy(LlmPrivacy::retain_questions()));
+    reg.register_translator(Arc::new(LeakyTranslator));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(serde_json::json!({"question": "who is alice?"})))
+        .await
+        .unwrap();
+    let v = body_json(resp).await;
+    // Operator opted into retention — explanation is passed through.
+    assert_eq!(v["explanation"], "you asked: who is alice?");
 }
 
 // ---------- F6: /ml-audit ----------

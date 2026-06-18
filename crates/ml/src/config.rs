@@ -83,6 +83,19 @@ impl LlmPrivacy {
         }
     }
 
+    /// Whether translator-provided free text (e.g. an `explanation`) may
+    /// be echoed back to the caller.
+    ///
+    /// A third-party translator can put the raw question into such fields,
+    /// and the endpoint cannot inspect arbitrary text for PII. So free
+    /// text is only echoed when the policy permits retaining the literal
+    /// question (`log_questions && !redact_in_logs`). Under no-retention
+    /// or redaction it is suppressed — the structured fields
+    /// (`generated_sparql`, `confidence`, `cost`) are unaffected.
+    pub fn may_echo_free_text(&self) -> bool {
+        self.log_questions && !self.redact_in_logs
+    }
+
     /// Decide what text (if any) should be stored for `question`.
     ///
     /// Returns `None` when nothing should be retained, `Some(redacted)`
@@ -180,5 +193,17 @@ mod tests {
         let c = MlConfig::enabled().with_privacy(LlmPrivacy::retain_questions());
         assert!(c.enabled);
         assert!(c.llm_privacy.log_questions);
+    }
+
+    #[test]
+    fn may_echo_free_text_only_under_full_retention() {
+        assert!(!LlmPrivacy::no_retention().may_echo_free_text());
+        assert!(LlmPrivacy::retain_questions().may_echo_free_text());
+        // Redaction on => suppress free text even if logging is enabled.
+        assert!(!LlmPrivacy {
+            log_questions: true,
+            redact_in_logs: true,
+        }
+        .may_echo_free_text());
     }
 }

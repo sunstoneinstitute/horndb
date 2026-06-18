@@ -66,6 +66,14 @@ before writing any telemetry, so the policy cannot be bypassed by a
 forgetful call site. This addresses the SPEC-08 "Training-data leakage"
 and "Privacy / GDPR" risks.
 
+The privacy guarantee is enforced **at the boundary, not trusted to the
+translator**. A third-party `Translator` could echo the raw question in
+its free-text `explanation`; the endpoint therefore suppresses
+`explanation` (returns `None`) unless `LlmPrivacy::may_echo_free_text()`
+is true (full retention: `log_questions && !redact_in_logs`). Structured
+fields (`generated_sparql`, `confidence`, `cost`) are always returned —
+they are engine-controlled and cannot carry arbitrary question text.
+
 ### CI
 
 `cargo test --workspace` runs default features (server off), so the

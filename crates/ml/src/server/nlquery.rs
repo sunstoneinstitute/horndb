@@ -55,7 +55,13 @@ pub struct NlQueryResponse {
     /// failed (`execution_error` is set in the latter case).
     pub results: Option<String>,
     pub confidence: f64,
-    pub explanation: String,
+    /// Translator-provided free text. Suppressed (`None`) under a
+    /// no-retention / redaction privacy policy, because a third-party
+    /// translator may echo the raw question here and the endpoint cannot
+    /// inspect arbitrary text for PII. Only passed through when the policy
+    /// permits retaining the literal question.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     pub model: String,
     pub cost: CostJson,
     /// Whether the generated SPARQL was executed.
@@ -145,11 +151,20 @@ pub async fn handle_nl_query(
         }
     };
 
+    // Translator `explanation` is arbitrary free text that may echo the
+    // raw question; only echo it when the policy allows retaining the
+    // literal question. The structured fields are always returned.
+    let explanation = if privacy.may_echo_free_text() {
+        Some(translation.explanation)
+    } else {
+        None
+    };
+
     let body = NlQueryResponse {
         generated_sparql: translation.generated_sparql,
         results,
         confidence: translation.confidence.value(),
-        explanation: translation.explanation,
+        explanation,
         model: translation.model.as_str().to_string(),
         cost,
         executed,
