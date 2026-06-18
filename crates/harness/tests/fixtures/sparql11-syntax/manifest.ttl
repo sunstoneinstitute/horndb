@@ -1,0 +1,103 @@
+@prefix mf:  <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+
+# W3C SPARQL 1.1 *syntax* tests — a curated, checked-in subset of the
+# upstream `syntax-query` / `syntax-update-1` / `syntax-update-2`
+# sub-suites (https://www.w3.org/2009/sparql/docs/tests/).
+#
+# Each case asserts only that the SPARQL 1.1 grammar accepts (Positive*)
+# or rejects (Negative*) the referenced `.rq` (query) / `.ru` (update)
+# file. There is no data, no result set, and no reasoner involvement —
+# the harness grades them with `spargebra`, the same parser the SPEC-07
+# engine uses. This keeps the suite self-contained and CI-budget-friendly
+# (sub-millisecond per case, no network at CI time).
+#
+# The mf:action of a syntax test points directly at the query/update file
+# (unlike a QueryEvaluationTest, whose action is a qt:QueryTest blank node
+# carrying qt:query + qt:data).
+
+<#manifest> a mf:Manifest ;
+    mf:name "SPARQL 1.1 syntax subset (query + update)" ;
+    mf:entries (
+        <#syntax-select-01>
+        <#syntax-bind-01>
+        <#syntax-aggregate-01>
+        <#syntax-subquery-01>
+        <#syntax-propertypath-01>
+        <#syntax-values-01>
+        <#syntax-relative-iri-01>
+        <#syntax-bad-01>
+        <#syntax-bad-02>
+        <#syntax-bad-03>
+        <#syntax-update-insertdata-01>
+        <#syntax-update-deletewhere-01>
+        <#syntax-update-modify-01>
+        <#syntax-update-bad-01>
+        <#syntax-update-bad-02>
+    ) .
+
+# --- positive query syntax ---
+<#syntax-select-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "SELECT *" ;
+    mf:action <syntax-select-01.rq> .
+
+<#syntax-bind-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "BIND in WHERE" ;
+    mf:action <syntax-bind-01.rq> .
+
+<#syntax-aggregate-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "GROUP BY / HAVING with COUNT" ;
+    mf:action <syntax-aggregate-01.rq> .
+
+<#syntax-subquery-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "sub-SELECT" ;
+    mf:action <syntax-subquery-01.rq> .
+
+<#syntax-propertypath-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "property path +/*" ;
+    mf:action <syntax-propertypath-01.rq> .
+
+<#syntax-values-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "inline VALUES" ;
+    mf:action <syntax-values-01.rq> .
+
+# Relative IRIs with no explicit BASE: must resolve against the action file
+# IRI (regression guard for the runner's base-IRI handling).
+<#syntax-relative-iri-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "relative IRIs without BASE" ;
+    mf:action <syntax-relative-iri-01.rq> .
+
+# --- negative query syntax ---
+<#syntax-bad-01> a mf:NegativeSyntaxTest11 ;
+    mf:name "unclosed group graph pattern" ;
+    mf:action <syntax-bad-01.rq> .
+
+<#syntax-bad-02> a mf:NegativeSyntaxTest11 ;
+    mf:name "BIND without AS ?var" ;
+    mf:action <syntax-bad-02.rq> .
+
+<#syntax-bad-03> a mf:NegativeSyntaxTest11 ;
+    mf:name "dangling GROUP" ;
+    mf:action <syntax-bad-03.rq> .
+
+# --- positive update syntax ---
+<#syntax-update-insertdata-01> a mf:PositiveUpdateSyntaxTest11 ;
+    mf:name "INSERT DATA" ;
+    mf:action <syntax-update-insertdata-01.ru> .
+
+<#syntax-update-deletewhere-01> a mf:PositiveUpdateSyntaxTest11 ;
+    mf:name "DELETE WHERE" ;
+    mf:action <syntax-update-deletewhere-01.ru> .
+
+<#syntax-update-modify-01> a mf:PositiveUpdateSyntaxTest11 ;
+    mf:name "DELETE/INSERT/WHERE" ;
+    mf:action <syntax-update-modify-01.ru> .
+
+# --- negative update syntax ---
+<#syntax-update-bad-01> a mf:NegativeUpdateSyntaxTest11 ;
+    mf:name "INSERT DATA with a variable" ;
+    mf:action <syntax-update-bad-01.ru> .
+
+<#syntax-update-bad-02> a mf:NegativeUpdateSyntaxTest11 ;
+    mf:name "LOAD without source IRI" ;
+    mf:action <syntax-update-bad-02.ru> .

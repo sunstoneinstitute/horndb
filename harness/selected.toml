@@ -65,6 +65,38 @@ include = [
     "#ask-true",
 ]
 
+[suites.sparql11-syntax]
+# W3C SPARQL 1.1 *syntax* tests (query + update), graded by `spargebra`
+# accept/reject — no data, no result set, no reasoner. A curated checked-in
+# subset of the upstream `syntax-query` / `syntax-update-{1,2}` sub-suites
+# (https://www.w3.org/2009/sparql/docs/tests/); see
+# `crates/harness/tests/fixtures/sparql11-syntax/`. These run in
+# sub-milliseconds and need no network at CI time, so they fit the SPEC-01
+# NF1 per-PR budget comfortably. Grow this list as the SPARQL frontend widens.
+manifest = "crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl"
+include = [
+    # positive query syntax
+    "#syntax-select-01",
+    "#syntax-bind-01",
+    "#syntax-aggregate-01",
+    "#syntax-subquery-01",
+    "#syntax-propertypath-01",
+    "#syntax-values-01",
+    # relative IRIs with no BASE must resolve against the action file IRI
+    "#syntax-relative-iri-01",
+    # negative query syntax (grammar must reject)
+    "#syntax-bad-01",
+    "#syntax-bad-02",
+    "#syntax-bad-03",
+    # positive update syntax
+    "#syntax-update-insertdata-01",
+    "#syntax-update-deletewhere-01",
+    "#syntax-update-modify-01",
+    # negative update syntax (grammar must reject)
+    "#syntax-update-bad-01",
+    "#syntax-update-bad-02",
+]
+
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).

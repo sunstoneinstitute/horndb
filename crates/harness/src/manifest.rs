@@ -119,6 +119,10 @@ struct EntryProjector {
     qt_data_iri: String,
     syntax_pos_iri: String,
     syntax_neg_iri: String,
+    sparql_query_pos_iri: String,
+    sparql_query_neg_iri: String,
+    sparql_update_pos_iri: String,
+    sparql_update_neg_iri: String,
 }
 
 impl EntryProjector {
@@ -139,6 +143,13 @@ impl EntryProjector {
             // `mf:action`; no `mf:result`.
             syntax_pos_iri: format!("{RDFT}TestNTriplesPositiveSyntax"),
             syntax_neg_iri: format!("{RDFT}TestNTriplesNegativeSyntax"),
+            // W3C SPARQL 1.1 *syntax* tests. The mf:action points directly at
+            // the `.rq` (query) / `.ru` (update) file — no qt:QueryTest blank
+            // node, no data, no result. Graded by spargebra accept/reject.
+            sparql_query_pos_iri: format!("{MF}PositiveSyntaxTest11"),
+            sparql_query_neg_iri: format!("{MF}NegativeSyntaxTest11"),
+            sparql_update_pos_iri: format!("{MF}PositiveUpdateSyntaxTest11"),
+            sparql_update_neg_iri: format!("{MF}NegativeUpdateSyntaxTest11"),
         })
     }
 
@@ -257,6 +268,26 @@ fn project_entry(
     } else if kind_str == p.syntax_neg_iri {
         TestKind::SyntaxNegative {
             input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+        }
+    } else if kind_str == p.sparql_query_pos_iri {
+        TestKind::SparqlSyntaxPositive {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+            update: false,
+        }
+    } else if kind_str == p.sparql_query_neg_iri {
+        TestKind::SparqlSyntaxNegative {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+            update: false,
+        }
+    } else if kind_str == p.sparql_update_pos_iri {
+        TestKind::SparqlSyntaxPositive {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+            update: true,
+        }
+    } else if kind_str == p.sparql_update_neg_iri {
+        TestKind::SparqlSyntaxNegative {
+            input: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
+            update: true,
         }
     } else if kind_str == p.qet_iri || kind_str.starts_with(QT) {
         // SPARQL ASK: action is a qt:QueryTest with qt:query + qt:data,

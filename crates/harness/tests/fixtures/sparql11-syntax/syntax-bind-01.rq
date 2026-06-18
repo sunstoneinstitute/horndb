@@ -1,0 +1,2 @@
+PREFIX : <http://example.org/ns#>
+SELECT ?z WHERE { ?s :p ?o . BIND(?o + 1 AS ?z) }
