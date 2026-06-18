@@ -1,38 +1,36 @@
-//! SPEC-06 F6 — interaction of retraction recompute with closure-derived
-//! inputs (codex review findings).
+//! SPEC-06 F6 — closure-path retraction through the `Circuit`, and its
+//! interaction with the rule recompute.
 //!
-//! Finding 1: a rule consequence that depends on a closure-derived input
-//! must survive a retraction tick that removes the rule's *asserted* path
-//! to that consequence while the closure support stays intact. The
-//! retraction recompute seeds its rule closure from
-//! `asserted_base ∪ closure_support`, so a closure-inferred row (e.g.
-//! `(c,SC,e)`) is a stable base input the recompute can join against rather
-//! than something it omits and spuriously withdraws.
+//! On a retraction tick the closure plans run their retraction pass
+//! (`apply_retract_delta`) BEFORE the rule recompute, withdrawing exactly the
+//! `ClosureInferred` rows whose base support is gone and shrinking
+//! `closure_support`. The rule recompute then seeds from
+//! `asserted_base ∪ closure_support` — the already-shrunk support — so a rule
+//! consequence that depended on a now-withdrawn closure edge is withdrawn with
+//! it, and one that still has support survives.
 //!
-//! Finding 2: when the same triple is produced by both a rule and a
-//! closure plan, losing the rule support must NOT delete the row —
-//! closure-path retraction is deferred, so the closure support keeps it
-//! alive. The retraction diff retains any withdrawn rule row that is in
-//! `closure_support`.
+//! Closure withdrawal respects rule ownership (the dual of the original
+//! Finding-2 logic): a row that is ALSO rule-derived keeps its materialization
+//! from the rule; closure only loses its ownership. A row that loses BOTH rule
+//! and closure support is withdrawn.
 
 mod fixtures;
 
 use fixtures::synthetic_rules::{CaxScoRule, TransitiveOn, R1_SCM_SCO, R3_CAX_SCO, SC, TYPE};
 use horndb_incremental::{Circuit, NaryPlan, TransitiveClosureRule};
 
-/// Finding 1: assert the SC chain `(c,SC,d),(d,SC,e)` so the (non-SC-
-/// transitive) closure plan derives `(c,SC,e)`, plus `(a,TYPE,c)` so the
-/// cax-sco rule derives `(a,TYPE,d)` and (via the closure edge / the
-/// asserted `(d,SC,e)`) `(a,TYPE,e)`.
+/// Closure-path retraction cascades into the rule consequence. Assert the SC
+/// chain `(c,SC,d),(d,SC,e)` so the closure plan derives `(c,SC,e)`, plus
+/// `(a,TYPE,c)` so the cax-sco rule derives `(a,TYPE,d)` (off asserted
+/// `(c,SC,d)`) and `(a,TYPE,e)` (off the closure-derived `(c,SC,e)`).
 ///
-/// Then retract the asserted SC edge `(d,SC,e)`. The rule's *asserted*
-/// route to `(a,TYPE,e)` is gone, but the insertion-only closure plan
-/// still supports `(c,SC,e)`, so the rule must still derive `(a,TYPE,e)`
-/// off the closure-derived edge. Before the Finding-1 fix the recompute
-/// seeds only `asserted_base`, omits `(c,SC,e)`, and spuriously withdraws
-/// `(a,TYPE,e)`.
+/// Then retract the asserted SC edge `(d,SC,e)`. The remaining base SC edges
+/// are `{(c,SC,d)}`, whose transitive closure is `{(c,SC,d)}` — so the closure
+/// edge `(c,SC,e)` is no longer derivable and is **withdrawn**. The cax-sco
+/// rule consequence `(a,TYPE,e)`, which had no support other than `(c,SC,e)`,
+/// is therefore withdrawn with it. `(a,TYPE,d)` survives — `(c,SC,d)` remains.
 #[test]
-fn rule_consequence_on_closure_input_survives_unrelated_retraction() {
+fn closure_consequence_withdrawn_when_support_retracted() {
     // Concrete distinct ids.
     const A: u64 = 1;
     const C: u64 = 2;
@@ -41,7 +39,7 @@ fn rule_consequence_on_closure_input_survives_unrelated_retraction() {
 
     let mut circuit = Circuit::new();
     // SC closure plan — NOT a transitive *rule*, so the closure-derived
-    // (c,SC,e) is not reconstructible by the registered rules.
+    // (c,SC,e) is reconstructible only by the closure plan.
     circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
     let mut plan = NaryPlan::new();
     plan.push_join(Box::new(CaxScoRule { id: R3_CAX_SCO }));
@@ -60,34 +58,40 @@ fn rule_consequence_on_closure_input_survives_unrelated_retraction() {
     assert_eq!(
         circuit.derived_base().get(&(A, TYPE, E)),
         1,
-        "rule must derive (a,TYPE,e)"
+        "rule must derive (a,TYPE,e) off the closure edge"
     );
 
-    // Retract the asserted SC edge (d,SC,e). The rule's asserted route to
-    // (a,TYPE,e) disappears, but the closure plan (insertion-only) still
-    // supports (c,SC,e), so the rule can still derive (a,TYPE,e).
+    // Retract the asserted SC edge (d,SC,e). Base SC after = {(c,SC,d)}, whose
+    // closure = {(c,SC,d)}, so (c,SC,e) loses all support and is withdrawn; the
+    // rule consequence (a,TYPE,e) goes with it.
     circuit.retract_triple((D, SC, E));
     circuit.tick();
 
     assert_eq!(
         circuit.derived_base().get(&(C, SC, E)),
-        1,
-        "(c,SC,e) persists — closure-path retraction is deferred"
+        0,
+        "(c,SC,e) withdrawn — its base support (d,SC,e) is gone, no alternate path"
     );
     assert_eq!(
         circuit.derived_base().get(&(A, TYPE, E)),
+        0,
+        "(a,TYPE,e) withdrawn — its only support (closure edge (c,SC,e)) is gone"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(A, TYPE, D)),
         1,
-        "(a,TYPE,e) must NOT be spuriously withdrawn — it is still derivable \
-         from the closure-derived (c,SC,e)"
+        "(a,TYPE,d) survives — (c,SC,d) remains asserted"
     );
 }
 
-/// Finding 2: the same triple `(1,SC,3)` is produced by BOTH a transitive
-/// SC closure plan and a transitive SC rule. Retracting one of its rule
-/// supports loses the rule derivation, but the insertion-only closure plan
-/// still supports it, so the row must be retained.
+/// Overlap, both supports lost: the same triple `(1,SC,3)` is produced by BOTH
+/// a transitive SC closure plan and a transitive SC rule. Retracting `(2,SC,3)`
+/// removes the shared base edge: the rule no longer derives `(1,SC,3)` (base SC
+/// after = `{(1,SC,2)}`), AND the closure plan withdraws it (its closure is
+/// `{(1,SC,2)}`). With closure-path retraction live, the row loses BOTH supports
+/// and must be withdrawn — the previous behavior (closure kept it alive) is gone.
 #[test]
-fn overlap_triple_retains_closure_support_on_rule_retraction() {
+fn overlap_triple_withdrawn_when_shared_support_retracted() {
     let mut circuit = Circuit::new();
     circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
     let mut plan = NaryPlan::new();
@@ -106,14 +110,15 @@ fn overlap_triple_retains_closure_support_on_rule_retraction() {
         "both rule and closure derive (1,SC,3)"
     );
 
-    // Retract a rule support. The rule no longer derives (1,SC,3), but the
-    // insertion-only closure plan still supports it.
+    // Retract the shared base edge (2,SC,3). The closure withdraws (1,SC,3)
+    // [closure of {(1,SC,2)} = {(1,SC,2)}] and the rule no longer derives it,
+    // so the row loses all support.
     circuit.retract_triple((2, SC, 3));
     circuit.tick();
     assert_eq!(
         circuit.derived_base().get(&(1, SC, 3)),
-        1,
-        "(1,SC,3) retained via closure_support after rule support lost"
+        0,
+        "(1,SC,3) withdrawn — both rule and closure support lost"
     );
 }
 
