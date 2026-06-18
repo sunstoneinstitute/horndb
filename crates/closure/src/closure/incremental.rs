@@ -51,7 +51,7 @@ pub struct DeleteOutcome {
 /// ([`Self::new`] / [`Self::from_base_edges`] / [`Self::insert_edge`]). An
 /// instance seeded via [`Self::from_closed_edges`] has an empty `base` and so
 /// **cannot** be retracted correctly — see that constructor's docs.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct IncrementalTransitiveClosure {
     fwd: FxHashMap<u64, FxHashSet<u64>>,
     bwd: FxHashMap<u64, FxHashSet<u64>>,
@@ -59,6 +59,34 @@ pub struct IncrementalTransitiveClosure {
     /// via `from_closed_edges`.
     base: FxHashMap<u64, FxHashSet<u64>>,
     nnz: usize,
+    /// `true` iff `base` fully tracks the asserted support for the closed set,
+    /// so retraction can correctly diff the affected region against it. Set by
+    /// [`Self::new`] / [`Self::from_base_edges`] (which build the closure FROM
+    /// base). [`Self::from_closed_edges`] sets it `false`: that constructor is
+    /// given an already-closed extent with an UNKNOWN base, so retraction cannot
+    /// recompute reachability correctly and would corrupt the seeded closure
+    /// (BUG B). When `false`, [`Self::delete_edge`] / [`Self::delete_edges`]
+    /// no-op. Once a closure is closed-seeded it stays retraction-disabled for
+    /// its whole lifetime — a single closure cannot be partially base-tracked,
+    /// so even subsequently inserted edges (which DO get recorded into `base`)
+    /// cannot make retraction safe, because the SEEDED extent's support is still
+    /// missing. The conservative, consistent rule is: closed-seeded ⇒ no
+    /// retraction. A base-seed variant must be added if a caller needs both.
+    base_complete: bool,
+}
+
+impl Default for IncrementalTransitiveClosure {
+    fn default() -> Self {
+        Self {
+            fwd: FxHashMap::default(),
+            bwd: FxHashMap::default(),
+            base: FxHashMap::default(),
+            nnz: 0,
+            // An empty closure built via `new()`/`default()` fully tracks its
+            // (empty) base; inserts keep it base-complete.
+            base_complete: true,
+        }
+    }
 }
 
 impl IncrementalTransitiveClosure {
@@ -71,14 +99,24 @@ impl IncrementalTransitiveClosure {
     /// the output of [`crate::closure::transitive::transitive_closure`]). The
     /// caller guarantees closure; this constructor does not re-close.
     ///
-    /// **Retraction is unsupported on an instance built this way.** The base
-    /// (asserted) edges are unknown — only the closed set is provided — so
+    /// **Retraction is disabled on an instance built this way (BUG B).** The
+    /// base (asserted) edges are unknown — only the closed set is provided — so
     /// [`Self::delete_edge`] cannot tell which closed pairs lose support when a
-    /// base edge is withdrawn. The `base` map is left empty, which means every
-    /// `delete_edge` call is a no-op (the edge is never found in `base`). Use
+    /// base edge is withdrawn. Worse, recomputing reachability over the
+    /// (incomplete) post-seed base would actively *withdraw the seeded closure
+    /// edges themselves*. To stay safe, this constructor marks the instance
+    /// `base_complete = false`, and [`Self::delete_edge`] / [`Self::delete_edges`]
+    /// become NO-OPs for its whole lifetime (returning an empty outcome and
+    /// leaving the closed set intact) — even after subsequent inserts, since a
+    /// single closure cannot be partially base-tracked. Use
     /// [`Self::from_base_edges`] when the instance must support retraction.
     pub fn from_closed_edges<I: IntoIterator<Item = (u64, u64)>>(edges: I) -> Self {
-        let mut c = Self::default();
+        // The asserted base for the seeded closed extent is unknown, so this
+        // instance can never retract correctly. Disable retraction for its life.
+        let mut c = Self {
+            base_complete: false,
+            ..Self::default()
+        };
         for (s, o) in edges {
             if c.fwd.entry(s).or_default().insert(o) {
                 c.bwd.entry(o).or_default().insert(s);
@@ -278,6 +316,11 @@ impl IncrementalTransitiveClosure {
     /// Idempotent: if `(s, o)` was not a base edge, returns an empty outcome and
     /// leaves state unchanged. Maintains `closed == transitive_closure(base)`.
     ///
+    /// **No-op when closed-seeded:** if this instance was built via
+    /// [`Self::from_closed_edges`] (`base_complete == false`), retraction is
+    /// disabled entirely and returns an empty outcome, leaving the closed set
+    /// intact (BUG B) — see that constructor's docs.
+    ///
     /// Algorithm (correctness-first affected-region recompute):
     ///  1. Remove `(s, o)` from `base`. If it was absent, return empty.
     ///  2. Candidate region = closed pairs `(x, y)` that *could* lose support:
@@ -293,6 +336,13 @@ impl IncrementalTransitiveClosure {
     ///     `s` over another base path. Report it so the SPEC-06 layer can
     ///     promote it to a materialized derived row (BUG P1).
     pub fn delete_edge(&mut self, s: u64, o: u64) -> DeleteOutcome {
+        // 0. BUG B: if this closure was closed-seeded (base unknown), retraction
+        // cannot recompute reachability correctly and would corrupt the seeded
+        // closure. No-op: withdrawing nothing is safe and matches the documented
+        // "seeded-edge retraction deferred" limitation.
+        if !self.base_complete {
+            return DeleteOutcome::default();
+        }
         // 1. Remove from base; bail if it was not an asserted edge.
         let was_base = self
             .base
@@ -307,12 +357,16 @@ impl IncrementalTransitiveClosure {
         }
 
         // 2. Affected sources X = closed-bwd[s] ∪ {s}; targets Y = closed-fwd[o] ∪ {o}.
-        let mut sources: Vec<u64> = self
+        // Use a set so that when `s` lies on a cycle/self-loop (closed-bwd[s]
+        // already contains `s`), `s` is visited exactly once. Without the dedup
+        // the source `s` is processed twice and any pair it withdraws is pushed to
+        // `withdrawn` twice (BUG A), producing duplicate negative deltas.
+        let mut sources: FxHashSet<u64> = self
             .bwd
             .get(&s)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default();
-        sources.push(s);
+        sources.insert(s);
         let mut targets: FxHashSet<u64> = self
             .fwd
             .get(&o)
@@ -683,6 +737,75 @@ mod tests {
             edge_set(&c),
             [(1, 2), (1, 3), (2, 3)].into_iter().collect(),
             "after breaking the cycle the closure is just the chain"
+        );
+    }
+
+    #[test]
+    fn delete_edge_on_cycle_returns_no_duplicate_withdrawals() {
+        // BUG A: a 1<->2 cycle. Inserting (1,2) and (2,1) gives the closed set
+        // {(1,1),(1,2),(2,1),(2,2)}. When deleting (2,1), the affected source set
+        // is closed-bwd[2] ∪ {2}. Because 2 is on the cycle, bwd[2] ALREADY
+        // contains 2, so without dedup source 2 is visited twice and any pair it
+        // withdraws lands in `withdrawn` twice. Deleting (2,1) breaks the cycle,
+        // leaving only the chain 1->2, so {(1,1),(2,1),(2,2)} are withdrawn.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 1)]);
+        assert_eq!(
+            edge_set(&c),
+            [(1, 1), (1, 2), (2, 1), (2, 2)].into_iter().collect()
+        );
+        let out = c.delete_edge(2, 1);
+
+        // No duplicate pairs in the withdrawn Vec.
+        let dedup: std::collections::BTreeSet<(u64, u64)> = out.withdrawn.iter().copied().collect();
+        assert_eq!(
+            out.withdrawn.len(),
+            dedup.len(),
+            "withdrawn must contain no duplicate pairs; got {:?}",
+            out.withdrawn
+        );
+        // And the withdrawn set is exactly the correct one.
+        assert_eq!(
+            dedup,
+            [(1, 1), (2, 1), (2, 2)].into_iter().collect(),
+            "deleting (2,1) from the 1<->2 cycle withdraws (1,1),(2,1),(2,2)"
+        );
+        // Remaining closure is just the chain 1->2.
+        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
+    }
+
+    #[test]
+    fn closed_seeded_closure_noops_retraction() {
+        // BUG B: a closure built via `from_closed_edges` has an EMPTY base — the
+        // asserted edges that produced the closed set are unknown. If a caller
+        // then inserts an edge and retracts it, recomputing reachability over the
+        // (incomplete) post-seed base can withdraw the SEEDED closure edges. That
+        // corrupts the seeded closure. Retraction MUST be a no-op for the whole
+        // closure once it is closed-seeded.
+        let mut c = IncrementalTransitiveClosure::from_closed_edges([(1, 2)]);
+        // Insert (2,1): closes the 1<->2 cycle on top of the seeded (1,2).
+        c.insert_edge(2, 1);
+        let pre = edge_set(&c);
+        // Retract (2,1). Because the closure is closed-seeded, this must NO-OP:
+        // empty outcome, and the closed set is left intact (seeded (1,2) survives).
+        let out = c.delete_edge(2, 1);
+        assert!(
+            out.withdrawn.is_empty(),
+            "closed-seeded retraction must withdraw nothing; got {:?}",
+            out.withdrawn
+        );
+        assert!(
+            out.survived.is_empty(),
+            "closed-seeded retraction must report no survivor; got {:?}",
+            out.survived
+        );
+        assert_eq!(
+            edge_set(&c),
+            pre,
+            "closed-seeded retraction must leave the closure untouched"
+        );
+        assert!(
+            edge_set(&c).contains(&(1, 2)),
+            "the seeded (1,2) must survive a closed-seeded retraction"
         );
     }
 }
