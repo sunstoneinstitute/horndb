@@ -302,16 +302,165 @@ fn inverse_sequence() {
     assert_eq!(names(&rows, "o"), vec!["alice"]);
 }
 
+// ---- Recursive Kleene paths `+` / `*` (SPEC-07 #50) ------------------
+//
+// The base graph's `knows` relation is the acyclic chain
+//   alice -knows-> bob -knows-> dave.
+
 #[test]
-fn kleene_star_still_rejected() {
-    let msg = run_err("SELECT ?x WHERE { ?x <http://ex/knows>* <http://ex/dave> }");
-    assert!(msg.contains("property-path"), "got: {msg}");
+fn plus_forward_from_ground() {
+    // `alice knows+ ?x`: one-or-more knows-steps from alice → {bob, dave}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/alice> <http://ex/knows>+ ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["bob", "dave"]);
 }
 
 #[test]
-fn kleene_plus_still_rejected() {
-    let msg = run_err("SELECT ?x WHERE { <http://ex/alice> <http://ex/knows>+ ?x }");
-    assert!(msg.contains("property-path"), "got: {msg}");
+fn plus_backward_to_ground() {
+    // `?x knows+ dave`: nodes that reach dave via knows+ → {alice, bob}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { ?x <http://ex/knows>+ <http://ex/dave> }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob"]);
+}
+
+#[test]
+fn plus_both_variables_enumerates_all_reachable_pairs() {
+    // `?x knows+ ?y`: alice→bob, alice→dave, bob→dave.
+    let s = make_store();
+    let rows = run("SELECT ?x ?y WHERE { ?x <http://ex/knows>+ ?y }", &s);
+    let mut pairs: Vec<(String, String)> = rows
+        .iter()
+        .map(|b| {
+            let suf = |t: &Term| match t {
+                Term::Iri(s) => s.rsplit('/').next().unwrap().to_owned(),
+                other => panic!("expected IRI, got {other:?}"),
+            };
+            (suf(b.get("x").unwrap()), suf(b.get("y").unwrap()))
+        })
+        .collect();
+    pairs.sort();
+    assert_eq!(
+        pairs,
+        vec![
+            ("alice".to_owned(), "bob".to_owned()),
+            ("alice".to_owned(), "dave".to_owned()),
+            ("bob".to_owned(), "dave".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn plus_ground_both_endpoints_is_existence_test() {
+    // `alice knows+ dave` is reachable → exactly one (empty) solution.
+    let s = make_store();
+    let rows = run(
+        "SELECT * WHERE { <http://ex/alice> <http://ex/knows>+ <http://ex/dave> }",
+        &s,
+    );
+    assert_eq!(rows.len(), 1, "reachable existence test, got {rows:?}");
+    // Not reachable in the other direction.
+    let none = run(
+        "SELECT * WHERE { <http://ex/dave> <http://ex/knows>+ <http://ex/alice> }",
+        &s,
+    );
+    assert!(none.is_empty(), "dave does not reach alice, got {none:?}");
+}
+
+#[test]
+fn star_adds_reflexive_pairs() {
+    // `alice knows* ?x`: zero-or-more → {alice (reflexive), bob, dave}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/alice> <http://ex/knows>* ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob", "dave"]);
+}
+
+#[test]
+fn star_reflexive_at_leaf() {
+    // `dave knows* ?x`: dave has no outgoing knows → only the reflexive
+    // {dave}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/dave> <http://ex/knows>* ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["dave"]);
+}
+
+#[test]
+fn plus_terminates_on_a_cycle() {
+    // Add bob -knows-> alice, creating the cycle alice→bob→alice plus
+    // bob→dave. `alice knows+ ?x` must terminate and reach everyone,
+    // including alice herself (alice→bob→alice).
+    let mut s = make_store();
+    s.insert_triple(
+        iri("http://ex/bob"),
+        iri("http://ex/knows"),
+        iri("http://ex/alice"),
+    );
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/alice> <http://ex/knows>+ ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob", "dave"]);
+}
+
+#[test]
+fn plus_over_alternative_inner_path() {
+    // `(knows|admires)+` from alice. Base graph: alice-knows->bob,
+    // bob-knows->dave, bob-admires->alice. From alice the reachable set
+    // under either predicate is {bob, dave, alice}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/alice> (<http://ex/knows>|<http://ex/admires>)+ ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob", "dave"]);
+}
+
+#[test]
+fn plus_over_inverse_inner_path() {
+    // `^knows+` from dave: invert knows then close. dave <-knows- bob
+    // <-knows- alice, so dave reaches {bob, alice}.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?x WHERE { <http://ex/dave> ^<http://ex/knows>+ ?x }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob"]);
+}
+
+#[test]
+fn star_over_subclassof_chain_matches_acceptance_shape() {
+    // SPEC-07 acceptance #7 shape: `?x rdfs:subClassOf* :Person`.
+    // Cat ⊑ Mammal ⊑ Animal; Person ⊑ Animal. `?x subClassOf* Animal`
+    // returns Animal (reflexive), Mammal, Cat, Person.
+    let mut s = MemStore::default();
+    let sco = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    for (sub, sup) in [
+        ("Cat", "Mammal"),
+        ("Mammal", "Animal"),
+        ("Person", "Animal"),
+    ] {
+        s.insert_triple(
+            iri(&format!("http://ex/{sub}")),
+            iri(sco),
+            iri(&format!("http://ex/{sup}")),
+        );
+    }
+    let rows = run(
+        "SELECT ?x WHERE { ?x <http://www.w3.org/2000/01/rdf-schema#subClassOf>* <http://ex/Animal> }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["Animal", "Cat", "Mammal", "Person"]);
 }
 
 // ---- Nested non-recursive paths (reach the in-crate Sequence arm) ----

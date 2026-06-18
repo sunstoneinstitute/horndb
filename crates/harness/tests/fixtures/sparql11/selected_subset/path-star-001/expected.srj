@@ -1,0 +1,11 @@
+{
+  "head": { "vars": ["x"] },
+  "results": {
+    "bindings": [
+      { "x": { "type": "uri", "value": "http://example.org/Animal" } },
+      { "x": { "type": "uri", "value": "http://example.org/Mammal" } },
+      { "x": { "type": "uri", "value": "http://example.org/Cat" } },
+      { "x": { "type": "uri", "value": "http://example.org/Person" } }
+    ]
+  }
+}

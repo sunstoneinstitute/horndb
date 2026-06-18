@@ -135,12 +135,14 @@ pub enum Func {
 ///   * Group/Aggregate (no GROUP BY in Stage 1)
 ///   * Minus
 ///   * Service
-///   * Recursive property paths `*`/`+` (Kleene) — these route to
-///     closure and are still rejected in [`translate`]. The
-///     non-recursive operators are lowered there: `/` (Seq) and `^`
-///     (Inverse) collapse into expanded triple patterns; `|` (Alt) and
-///     `?` (ZeroOrOne) lower to `Union`; `!` (NegatedPropertySet) lowers
-///     to a wildcard-predicate BGP under a `NOT IN` filter.
+///
+/// Property paths lower in [`translate`]: the non-recursive operators
+/// `/` (Seq) and `^` (Inverse) collapse into expanded triple patterns;
+/// `|` (Alt) and `?` (ZeroOrOne) lower to `Union`; `!`
+/// (NegatedPropertySet) lowers to a wildcard-predicate BGP under a
+/// `NOT IN` filter. The recursive Kleene operators `*`/`+` lower to the
+/// [`Algebra::PathClosure`] node, which the runtime evaluates by a
+/// fixpoint over the one-step edge relation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Algebra {
     Bgp {
@@ -198,7 +200,35 @@ pub enum Algebra {
         keys: Vec<Var>,
         aggregates: Vec<Aggregate>,
     },
+    /// Recursive Kleene property path `p+` / `p*` between `subject` and
+    /// `object`.
+    ///
+    /// `edge` is the one-step relation the inner path `p` denotes,
+    /// already lowered to an [`Algebra`] over the two hidden endpoint
+    /// variables [`PATH_SRC_VAR`] (source) and [`PATH_DST_VAR`]
+    /// (destination). The runtime materialises `edge`, takes its
+    /// transitive closure (BFS to a fixpoint, so cycles terminate), and
+    /// — when `reflexive` is set (`*`) — adds the zero-length pairs over
+    /// the nodes the path touches. The closure rows are then matched
+    /// against `subject`/`object`, each of which may be ground or a
+    /// variable.
+    PathClosure {
+        subject: Term,
+        object: Term,
+        edge: Box<Algebra>,
+        /// `true` for `*` (reflexive-transitive), `false` for `+`
+        /// (transitive only).
+        reflexive: bool,
+    },
 }
+
+/// Hidden source-endpoint variable threaded through a
+/// [`Algebra::PathClosure`]'s `edge` sub-plan. User-unspellable (the
+/// `?` sigil cannot appear in a parsed variable name).
+pub const PATH_SRC_VAR: &str = "?pp_src";
+/// Hidden destination-endpoint variable for a [`Algebra::PathClosure`]
+/// `edge` sub-plan. User-unspellable, paired with [`PATH_SRC_VAR`].
+pub const PATH_DST_VAR: &str = "?pp_dst";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderDir {

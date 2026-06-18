@@ -217,4 +217,8 @@ tests = [
     "selected_subset/path-alt-001",
     "selected_subset/path-neg-001",
     "selected_subset/path-opt-001",
+    # Recursive Kleene property paths (SPEC-07 #50): `+` transitive,
+    # `*` reflexive-transitive (the acceptance #7 `subClassOf*` shape).
+    "selected_subset/path-plus-001",
+    "selected_subset/path-star-001",
 ]

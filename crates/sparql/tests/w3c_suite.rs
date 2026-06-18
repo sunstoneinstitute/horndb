@@ -157,6 +157,10 @@ w3c_case!(expr_002, "expr-002");
 w3c_case!(path_alt_001, "path-alt-001");
 w3c_case!(path_neg_001, "path-neg-001");
 w3c_case!(path_opt_001, "path-opt-001");
+// Recursive Kleene property paths (SPEC-07 #50): `+` transitive, `*`
+// reflexive-transitive (`subClassOf*`, acceptance #7 shape).
+w3c_case!(path_plus_001, "path-plus-001");
+w3c_case!(path_star_001, "path-star-001");
 
 // ── HornBackend leg ───────────────────────────────────────────────────────────
 
@@ -179,3 +183,5 @@ w3c_case_horn!(expr_002_hornbackend, "expr-002");
 w3c_case_horn!(path_alt_001_hornbackend, "path-alt-001");
 w3c_case_horn!(path_neg_001_hornbackend, "path-neg-001");
 w3c_case_horn!(path_opt_001_hornbackend, "path-opt-001");
+w3c_case_horn!(path_plus_001_hornbackend, "path-plus-001");
+w3c_case_horn!(path_star_001_hornbackend, "path-star-001");
