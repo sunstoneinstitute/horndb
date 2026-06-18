@@ -73,6 +73,22 @@ impl Translator for BlankSparqlTranslator {
     }
 }
 
+/// A translator that fails with the raw question embedded in the error —
+/// modelling a provider that echoes the prompt in its error message. The
+/// boundary must not leak it in the error body under no-retention.
+struct LeakyErrorTranslator;
+impl Translator for LeakyErrorTranslator {
+    fn model_id(&self) -> ModelId {
+        ModelId::new("leaky-err")
+    }
+    fn translate(&self, q: &NlQuestion) -> Result<Translation, TranslateError> {
+        Err(TranslateError::Upstream(format!(
+            "provider rejected prompt: {}",
+            q.question
+        )))
+    }
+}
+
 fn state_with(registry: MlRegistry, fail_exec: bool) -> MlAppState {
     MlAppState::new(
         Arc::new(registry),
@@ -189,6 +205,41 @@ async fn nl_query_empty_question_is_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn nl_query_error_body_does_not_leak_question_under_no_retention() {
+    let reg = MlRegistry::new(MlConfig::enabled()); // no retention default
+    reg.register_translator(Arc::new(LeakyErrorTranslator));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(
+            serde_json::json!({"question": "secret PII question"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let v = body_json(resp).await;
+    assert!(
+        !v.to_string().contains("secret PII question"),
+        "raw question leaked in error body: {v}"
+    );
+    assert_eq!(v["error"], "llm translation failed");
+}
+
+#[tokio::test]
+async fn nl_query_error_body_echoes_question_when_retention_allowed() {
+    let reg = MlRegistry::new(MlConfig::enabled().with_privacy(LlmPrivacy::retain_questions()));
+    reg.register_translator(Arc::new(LeakyErrorTranslator));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(serde_json::json!({"question": "who is alice?"})))
+        .await
+        .unwrap();
+    let v = body_json(resp).await;
+    assert!(v["error"].as_str().unwrap().contains("who is alice?"));
 }
 
 #[tokio::test]

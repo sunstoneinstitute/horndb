@@ -117,13 +117,22 @@ pub async fn handle_nl_query(
                 TranslateError::Upstream(_) => StatusCode::BAD_GATEWAY,
                 TranslateError::Empty => StatusCode::UNPROCESSABLE_ENTITY,
             };
-            return (
-                status,
-                Json(ErrorBody {
-                    error: e.to_string(),
-                }),
-            )
-                .into_response();
+            // A third-party translator's error string can include the raw
+            // question (e.g. a provider echoing the prompt). Gate it through
+            // the same privacy policy as the success-path explanation: only
+            // echo verbatim under full retention, else a generic message.
+            let error = if privacy.may_echo_free_text() {
+                e.to_string()
+            } else {
+                match &e {
+                    TranslateError::Upstream(m) if m.contains("ML disabled") => {
+                        "ML disabled: no translator configured".to_string()
+                    }
+                    TranslateError::Upstream(_) => "llm translation failed".to_string(),
+                    TranslateError::Empty => TranslateError::Empty.to_string(),
+                }
+            };
+            return (status, Json(ErrorBody { error })).into_response();
         }
     };
 
