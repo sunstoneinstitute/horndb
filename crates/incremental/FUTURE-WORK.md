@@ -22,14 +22,16 @@ with the SPEC-06 requirement ID and the trigger for promotion.
 - **Promotion test**: SPEC-06 acceptance #3 — insert 10K, retract 10K,
   store bit-identical (modulo timestamps) to pre-insertion — passes
   (`tests/retraction.rs::insert_10k_retract_10k_bit_identical`).
-- **Still Stage 2**: (a) a *fully delta-incremental* retraction path —
+- **Closure-path retraction — DELIVERED (2026-06-18, #5)**: see the F5
+  entry below. A `ClosureInferred` row whose base support is retracted is
+  now withdrawn.
+- **Still Stage 2**: a *fully delta-incremental* retraction path —
   the current path recomputes the whole rule closure on every
   retraction-containing tick rather than threading negative
   multiplicities through each bilinear (the DBSP correctness theorem,
-  McSherry/Ryzhyk/Tannen PVLDB 2023 §3); and (b) **closure-path
-  retraction** — F5's `ClosureRule` is stateful and insertion-only, so
-  closure-inferred rows are never withdrawn and the rule diff leaves
-  them untouched (see the F5 entry below).
+  McSherry/Ryzhyk/Tannen PVLDB 2023 §3); closure-path retraction likewise
+  recomputes base-reachability over the affected source region per
+  retracted edge rather than threading negative deltas end-to-end.
 
 ### F7 — In-flight reader visibility (MVCC)
 - **Done (#46)**: refcounted `Snapshot` handles (`Circuit::snapshot()`,
@@ -48,7 +50,7 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   post-write reader latency on a warm store is shown to matter — the lazy build
   keeps the write hot path delta-sized, which is the priority for SPEC-06.
 
-### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion-only)
+### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion + retraction)
 - **Done (2026-06-01, #44)**: `Circuit::add_closure_plan(Box<dyn ClosureRule>)`
   registers a closure operator. `TransitiveClosureRule`
   (`crates/incremental/src/closure_plan.rs`) wraps SPEC-05's
@@ -57,11 +59,20 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   inferred triples, published as `DerivationKind::ClosureInferred`. Differential
   test (`tests/closure_deltas_differential.rs`) pins it against the full
   `BackendImpl` recompute.
-- **Still Stage 2**: retraction / negative-multiplicity deltas through the
-  closure. F6 (above) delivered rule-path retraction, but the closure
-  operator stays insertion-only, so this is now its own follow-up rather
-  than F6-blocked — it needs the deletion half of SPEC-05's incremental
-  closure. Also outstanding: closure↔rule cross-feedback *within* a single
+- **Closure-path retraction — Done (2026-06-18, #5)**:
+  `ClosureRule::apply_retract_delta` (default no-op; overridden by
+  `TransitiveClosureRule`) consumes the negative-only asserted delta and calls
+  SPEC-05's `IncrementalClosureBackend::delete_transitive_edges`, returning the
+  closure edges to withdraw. `Circuit::tick` runs the closure-retraction pass
+  **before** the rule recompute on retraction-containing ticks: each withdrawn
+  edge is dropped from `closure_support` unconditionally, and zeroed in
+  `derived_base` with a negative `ClosureInferred` published **only** when the
+  row is not still rule-owned (`rule_attr`) or otherwise supported — the dual of
+  the Finding-2 overlap-retention logic. Tests: `tests/closure_retraction.rs`
+  (chain break, diamond second-path retention, re-assert round-trip) and the
+  rewritten `tests/retraction_closure.rs`.
+- **Still Stage 2**: a fully delta-incremental closure-retraction path (no
+  affected-region recompute); closure↔rule cross-feedback *within* a single
   tick (closure output feeding rule bodies and vice versa); non-transitive
   closure shapes.
 
