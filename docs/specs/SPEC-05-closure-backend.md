@@ -61,6 +61,63 @@ Out of scope:
 4. Differential test: closure-via-GraphBLAS produces the identical set of inferred triples as closure-via-SPEC-04-rule-firing (used as reference) on LUBM-100. No missing, no spurious.
 5. Memory ratio on LUBM-8000 closure of transitive properties: ≤2× the original transitive-property triples.
 
+## Valued-reasoning addendum — Fork A (scalar confidence)
+
+> **Status:** Fork A implemented (TASKS.md #12). Fork B (structured carrier /
+> custom semiring) and PreJIT are **deferred** with a measured justification —
+> see "Measured decision" below.
+
+The boolean `(∨, ∧)` closure above answers *reachability*. Sunstone annotated
+reasoning (rdf-registry #9 weighted edges, #10 crosswalk resolution) also needs
+*best-confidence* reachability: each edge carries a confidence in `(0, 1]` on its
+RDF 1.2 triple-term annotation (SPEC-02), and a query wants the strongest path
+between two concepts. The optimization ladder (issue #12), in cost order:
+
+**VA1. Fork A — scalar confidence on a built-in semiring (implemented).** Build a
+weighted adjacency `W_p` from triple-term-annotated edges (dictionary IDs →
+dense matrix indices, reusing the F7 renumbering) and close it under the
+**built-in** `(max, ×)` FP64 semiring (`GrB_MAX_TIMES_SEMIRING_FP64`): entry
+`(i, j)` of `W_p*` is `max` over all paths of the `product` of edge
+confidences — the best-confidence path. Convergence: with weights in `(0, 1]`
+the `(max, ×)` product is monotone non-increasing along a path, so the best
+weight of every pair is realised by a *simple* path and the closure converges in
+≤ `N` iterations (an `N`-iteration safety cap guards out-of-contract weights
+`> 1` over a cycle). Surface: `horndb_closure::crosswalk::CrosswalkGraph` (the
+crosswalk/propagation entry point) over `metrics::valued_transitive_closure`.
+The identity is **not** materialised (only genuinely reachable pairs), matching
+the boolean convention.
+
+**VA2. Fork B — structured carrier via custom semiring (deferred).** When a use
+case must propagate `(confidence, SKOS match-type lattice element, provenance
+set)` as one matrix cell, define a user type + user semiring (`⊕` = max /
+probabilistic-OR; `⊗` = confidence multiply + lattice meet + provenance union)
+on GraphBLAS's generic kernel. Deferred until such a use case is real.
+
+**VA3. PreJIT (deferred).** Bake specialized kernels into the vendored
+`libgraphblas` *only if* the metrics show the generic kernel hurts at scale.
+
+**Measured decision (from the #11 readiness metrics + #12 Fork-A bench, both on
+`hornbench`; see `BENCHMARKS.md`):** the **generic-kernel penalty for a scalar
+FP64 `(max, ×)` op is ≈1.0×** — a user-defined-op kernel is *not* meaningfully
+slower than the FactoryKernel on the vendored SuiteSparse v10.3.x build. Two
+consequences: (a) Fork A correctly stays on the built-in semiring — there is no
+kernel speed to reclaim for a scalar carrier; (b) **PreJIT buys ≈0 for scalar
+ops**, so it is deferred and should be revisited only for a *structured* (UDT)
+carrier where the generic kernel is the only option and the closure is on the
+latency-critical path. The valued-vs-boolean cost (carrying any confidence at
+all) is **shape- and core-count-dependent**: on the GTIO/SKOS crosswalk shape it
+is a modest ~2.3–2.6× the boolean closure, but on a thin n-chain at 16-core it
+reaches ~69× — because OpenMP parallelises boolean's iso/bitmap fast path across
+cores while the FP64 non-iso accumulation stays effectively serial. This is a
+property of the carrier, not the kernel (the generic-kernel penalty is still
+~1.0×), and Fork A accepts it as the price of best-confidence semantics. See
+`BENCHMARKS.md` for the per-shape numbers.
+
+**Open questions for the eventual Fork-B spec (unchanged from #12):** fixed-size
+encoding of the structured carrier; exact `⊕`/`⊗` definitions and the semiring
+laws they satisfy; threshold/pruning to keep the closure sparse; interaction
+with SPEC-06 incremental deltas; rollback of a *weighted* cascade.
+
 ## Risks and open questions
 
 - **Semiring overhead for small problems.** For very small closures (e.g. a 100-node hierarchy), the GraphBLAS call overhead dominates and direct rule firing would win. Heuristic: route to SPEC-04 if `nnz(M_p) < 10⁴`; route to SPEC-05 otherwise. Threshold needs benchmark tuning.
