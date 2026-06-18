@@ -55,6 +55,24 @@ impl Translator for LeakyTranslator {
     }
 }
 
+/// A misbehaving translator that returns `Ok` with blank SPARQL instead of
+/// `TranslateError::Empty`. The boundary must reject it (422), not execute.
+struct BlankSparqlTranslator;
+impl Translator for BlankSparqlTranslator {
+    fn model_id(&self) -> ModelId {
+        ModelId::new("blank")
+    }
+    fn translate(&self, _q: &NlQuestion) -> Result<Translation, TranslateError> {
+        Ok(Translation {
+            generated_sparql: "   \n  ".to_string(),
+            confidence: Confidence::new(0.1),
+            explanation: "blank".to_string(),
+            model: ModelId::new("blank"),
+            cost: CostReport::zero(),
+        })
+    }
+}
+
 fn state_with(registry: MlRegistry, fail_exec: bool) -> MlAppState {
     MlAppState::new(
         Arc::new(registry),
@@ -171,6 +189,21 @@ async fn nl_query_empty_question_is_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn nl_query_blank_generated_sparql_is_422() {
+    // Even if a plugin returns Ok with whitespace SPARQL, the boundary
+    // rejects it (422) rather than executing blank text.
+    let reg = MlRegistry::new(MlConfig::enabled());
+    reg.register_translator(Arc::new(BlankSparqlTranslator));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(serde_json::json!({"question": "x"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

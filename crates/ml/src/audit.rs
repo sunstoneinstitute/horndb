@@ -58,23 +58,36 @@ impl MlAuditLog {
     /// even as new entries arrive.
     pub fn query_since(&self, since: DateTime<Utc>, offset: usize, limit: usize) -> AuditPage {
         let guard = self.inner.lock().expect("audit-log mutex poisoned");
-        let filtered: Vec<MlAuditEntry> = guard
-            .iter()
-            .filter(|e| e.timestamp >= since)
-            .cloned()
-            .collect();
-        // `saturating_add`: `offset`/`limit` can be attacker-controlled HTTP
-        // query params, and a near-`usize::MAX` offset would otherwise panic
-        // (debug) or wrap (release) on the add. Saturating is safe here — the
-        // `min(filtered.len())` clamps it back into range immediately.
-        let end = offset.saturating_add(limit).min(filtered.len());
-        let entries = if offset >= filtered.len() {
-            Vec::new()
-        } else {
-            filtered[offset..end].to_vec()
-        };
-        let next_offset = if end < filtered.len() {
-            Some(end)
+        // Paginate *during* iteration so we only clone the requested page,
+        // not the whole filtered log. `offset`/`limit` are caller-controlled
+        // HTTP params, so this bounds the per-request work (and the time the
+        // mutex is held) to `limit` clones regardless of log size.
+        //
+        // We still iterate past the page by one matching entry to learn
+        // whether `next_offset` should be set, but we never *clone* beyond
+        // the page.
+        let mut matched = 0usize; // count of entries matching `since`
+        let mut entries: Vec<MlAuditEntry> = Vec::new();
+        let mut more = false;
+        for e in guard.iter().filter(|e| e.timestamp >= since) {
+            if matched < offset {
+                matched += 1;
+                continue;
+            }
+            if entries.len() < limit {
+                entries.push(e.clone());
+            } else {
+                // One matching entry beyond the page exists.
+                more = true;
+                break;
+            }
+            matched += 1;
+        }
+        // `next_offset` is the index (into the filtered stream) the caller
+        // should resume from. `saturating_add` guards a near-`usize::MAX`
+        // offset from overflowing.
+        let next_offset = if more {
+            Some(offset.saturating_add(entries.len()))
         } else {
             None
         };

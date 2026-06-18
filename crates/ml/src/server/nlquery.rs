@@ -127,6 +127,19 @@ pub async fn handle_nl_query(
         }
     };
 
+    // Translators are external plugins: don't trust them to have returned
+    // `TranslateError::Empty` for blank output. Enforce the empty-SPARQL
+    // contract (422) at the boundary so we never execute whitespace.
+    if translation.generated_sparql.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorBody {
+                error: TranslateError::Empty.to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     let cost = CostJson {
         prompt_tokens: translation.cost.prompt_tokens,
         completion_tokens: translation.cost.completion_tokens,
