@@ -200,6 +200,16 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   coverage, and broader RDFox A/B (publication gated on license review).
   LUBM materialization RDFox A/B is wired at N=1 (`compare-rdfox.sh --lubm`,
   exact closure-count parity); LUBM-100 and the wider corpora are outstanding.
+  **Epic closed (Stage-1 core surface delivered).** Increments delivered:
+  the W3C OWL 2 RL suite ingestion + 96-case `owl2-w3c-rl`, the RDF 1.2
+  N-Triples syntax suite, the LUBM RDFox A/B harness at N=1, and the W3C
+  SPARQL 1.1 *syntax* suite (`sparql11-syntax`, #110/PR #112). **Stage-2
+  deferred** (heavy external corpora needing large downloads / self-hosted
+  runners): the SPARQL 1.1 *evaluation*/result-set suites, the full ORE 2015
+  corpus (1,920 ontologies), LDBC SPB SF3/SF5 audited runs, LUBM-100/1000/8000
+  + UOBM at scale, and broader/published RDFox A/B (DeWitt license review).
+  Re-open a focused HIGH/MEDIUM task per corpus when the runner capacity and
+  licensing land.
 
 - [ ] **Closure valued-reasoning readiness metrics.** ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
   Instrument the closure path *before* building any custom-semiring work, so the
