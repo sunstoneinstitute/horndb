@@ -624,7 +624,9 @@ fn validate_derived_datatype_memberships(
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
 ) {
-    use crate::datatype_literals::{classify, parse_literal_key, ParsedLiteral};
+    use crate::datatype_literals::{literal_in_datatype, parse_literal_key};
+
+    const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
     // TermId → lexical key, for both literal subjects and datatype-IRI objects.
     let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
@@ -641,16 +643,16 @@ fn validate_derived_datatype_memberships(
         let Some(parsed) = parse_literal_key(lit_key) else {
             continue;
         };
-        if !dt_iri.starts_with("http://www.w3.org/2001/XMLSchema#") {
+        let Some(target_local) = dt_iri.strip_prefix(XSD) else {
             continue;
-        }
-        // Re-classify the literal's *lexical value* under the derived datatype.
-        let under_derived = ParsedLiteral {
-            value: parsed.value,
-            datatype: dt_iri,
-            language: None,
         };
-        if classify(&under_derived).is_err() {
+        // Check the literal's *intrinsic* value against the derived datatype's
+        // value space (preserving its own datatype/language — re-keying the
+        // lexical form under the target would wrongly accept e.g.
+        // `"5"^^xsd:string rdf:type xsd:integer`). `Some(false)` is a genuine
+        // value-space violation; `None` (undecidable in Stage-1) is left
+        // consistent to avoid false inconsistencies.
+        if literal_in_datatype(&parsed, target_local) == Some(false) {
             violations.push(t.s);
         }
     }

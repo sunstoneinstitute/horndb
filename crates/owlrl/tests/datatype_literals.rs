@@ -172,6 +172,29 @@ fn dt_not_type_via_derived_range_membership_is_inconsistent() {
     );
 }
 
+/// dt-not-type over a derived membership that crosses value spaces: a *string*
+/// literal `"5"^^xsd:string` typed `xsd:integer` via `prp-rng` denotes a string
+/// value, which is not in the integer value space → inconsistent (even though
+/// the lexical form "5" would re-parse as an integer).
+#[test]
+fn dt_not_type_string_typed_as_integer_is_inconsistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    premise.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/p").unwrap()),
+        NamedNode::new("http://www.w3.org/2000/01/rdf-schema#range").unwrap(),
+        NamedNode::new(XSD_INTEGER).unwrap(),
+        GraphName::DefaultGraph,
+    ));
+    let xsd_string = "http://www.w3.org/2001/XMLSchema#string";
+    premise.insert(&lit("http://ex/s", "http://ex/p", "5", xsd_string));
+    engine.load(&premise).unwrap();
+    assert!(
+        !engine.is_consistent().unwrap(),
+        "\"5\"^^xsd:string typed xsd:integer via prp-rng denotes a string value (dt-not-type) → inconsistent"
+    );
+}
+
 /// Companion consistency guard: a *well-typed* derived membership stays
 /// consistent. `:p rdfs:range xsd:byte` with `"5"^^xsd:integer` types "5" as
 /// xsd:byte, and 5 is in range.

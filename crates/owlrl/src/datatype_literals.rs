@@ -178,6 +178,69 @@ pub fn classify(lit: &ParsedLiteral<'_>) -> Result<Option<ValueClass>, ()> {
     }
 }
 
+/// Whether `lit` — keeping its **intrinsic** datatype/language — denotes a
+/// value in the value space of the XSD datatype `target_local` (the local name,
+/// e.g. `"byte"`). Used for `dt-not-type` over a *derived* membership
+/// `?lit rdf:type target` (e.g. from `prp-rng`): the literal's value must
+/// actually inhabit `target`'s value space, not merely re-parse under it.
+///
+/// The literal's value space is determined by its *own* datatype: a
+/// `"5"^^xsd:string` denotes a **string** value, which is never in an integer
+/// or boolean value space even though `"5"` re-parses as an integer. Returns:
+///
+/// `Some(true)`  — the value is in `target`'s value space (consistent).
+/// `Some(false)` — the value is *not* in `target`'s space (`dt-not-type` ⇒
+///   inconsistency).
+/// `None`        — undecidable in Stage-1 (the literal's intrinsic datatype or
+///   `target` is opaque / unhandled); the caller treats this as "no violation"
+///   to stay conservative (never a *false* inconsistency).
+pub fn literal_in_datatype(lit: &ParsedLiteral<'_>, target_local: &str) -> Option<bool> {
+    // What value does the literal denote? Classify under its intrinsic
+    // datatype. An intrinsically ill-typed literal is already flagged by the
+    // load-time pass; here treat it as undecidable.
+    let vc = match classify(lit) {
+        Ok(Some(vc)) => vc,
+        Ok(None) | Err(()) => return None,
+    };
+    match &vc {
+        // An integer value: in `target`'s space iff `target` is an integer
+        // datatype whose range admits it. Re-validate the canonical integer
+        // string against the *target* type.
+        ValueClass::Integer(canon) => {
+            if XSD_INTEGER_DATATYPES.contains(&target_local) {
+                Some(parse_xsd_integer(target_local, canon).is_some())
+            } else if target_local == "decimal" {
+                // Every integer is a decimal value.
+                Some(true)
+            } else if matches!(target_local, "string" | "boolean") {
+                // An integer value is not a string/boolean value.
+                Some(false)
+            } else {
+                // Opaque target (dateTime, double, user type): undecidable.
+                None
+            }
+        }
+        // A string/lang value: only in xsd:string's space (and rdf:langString,
+        // but a typed membership names xsd: datatypes). Never an integer or
+        // boolean *value*.
+        ValueClass::Plain(_) => match target_local {
+            "string" => Some(true),
+            t if XSD_INTEGER_DATATYPES.contains(&t) || t == "boolean" || t == "decimal" => {
+                Some(false)
+            }
+            _ => None,
+        },
+        // A boolean value: only in xsd:boolean's space.
+        ValueClass::Boolean(_) => match target_local {
+            "boolean" => Some(true),
+            t if XSD_INTEGER_DATATYPES.contains(&t) || t == "string" || t == "decimal" => {
+                Some(false)
+            }
+            _ => None,
+        },
+    }
+}
+
 /// Parse and validate an XSD integer-tower lexical form, returning the
 /// canonical decimal string (no leading `+`, no leading zeros, `-0` → `0`) on
 /// success, or `None` if the lexical form is not a valid value of `local`.
@@ -252,6 +315,96 @@ mod tests {
 
     fn typed(value: &str, dt_local: &str) -> String {
         format!("\"{value}\"^^<{XSD}{dt_local}>")
+    }
+
+    fn parse(value: &str, dt_local: &str) -> ParsedLiteral<'static> {
+        // Leak so the returned ParsedLiteral can borrow 'static in tests.
+        let key: &'static str = Box::leak(typed(value, dt_local).into_boxed_str());
+        parse_literal_key(key).unwrap()
+    }
+
+    #[test]
+    fn literal_in_datatype_string_value_not_in_integer_space() {
+        // "5"^^xsd:string denotes a STRING value, not in xsd:integer's space,
+        // even though "5" re-parses as an integer.
+        assert_eq!(
+            literal_in_datatype(&parse("5", "string"), "integer"),
+            Some(false)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("5", "string"), "byte"),
+            Some(false)
+        );
+        // A string IS in xsd:string's space.
+        assert_eq!(
+            literal_in_datatype(&parse("hello", "string"), "string"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn literal_in_datatype_integer_range() {
+        // An integer value is in a wider integer datatype, but not a narrower
+        // one that excludes it.
+        assert_eq!(
+            literal_in_datatype(&parse("5", "integer"), "byte"),
+            Some(true)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("999", "integer"), "byte"),
+            Some(false)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("5", "byte"), "integer"),
+            Some(true)
+        );
+        // Every integer is a decimal value.
+        assert_eq!(
+            literal_in_datatype(&parse("5", "integer"), "decimal"),
+            Some(true)
+        );
+        // An integer is not a string/boolean value.
+        assert_eq!(
+            literal_in_datatype(&parse("5", "integer"), "string"),
+            Some(false)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("1", "integer"), "boolean"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn literal_in_datatype_boolean_value() {
+        assert_eq!(
+            literal_in_datatype(&parse("true", "boolean"), "boolean"),
+            Some(true)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("true", "boolean"), "integer"),
+            Some(false)
+        );
+        assert_eq!(
+            literal_in_datatype(&parse("true", "boolean"), "string"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn literal_in_datatype_opaque_is_undecidable() {
+        // Opaque target datatype (dateTime) → None, never a false violation.
+        assert_eq!(
+            literal_in_datatype(&parse("5", "integer"), "dateTime"),
+            None
+        );
+        // Opaque source datatype (user type) → None.
+        let key: &'static str = Box::leak(
+            "\"x\"^^<http://example.org/myType>"
+                .to_string()
+                .into_boxed_str(),
+        );
+        let user = parse_literal_key(key).unwrap();
+        assert_eq!(literal_in_datatype(&user, "integer"), None);
     }
 
     #[test]
