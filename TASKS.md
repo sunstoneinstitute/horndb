@@ -40,7 +40,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [x] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
-- [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
+- [v] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-8-ml-http-boundary · 2026-06-18T07:46:58Z_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
@@ -154,7 +154,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Turtle CONSTRUCT/DESCRIBE output is the residual of ([#57](https://github.com/sunstoneinstitute/horndb/issues/57));
   `SERVICE` federation, RDF 1.2 SPARQL surface, GeoSPARQL.
 
-- [ ] **SPEC-08 ML.** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
+- [v] **SPEC-08 ML.** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
   F3 LLM → SPARQL HTTP endpoint, real FAISS-backed `CandidateGenerator`, HTTP
   audit endpoint + cost reporting, training-data leakage controls. (Stage-1
   ships the traits + in-process scaffolding only.)
