@@ -149,3 +149,63 @@ async fn get_query_returns_json_hornbackend() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/b");
 }
+
+#[tokio::test]
+async fn post_clear_default_empties_store() {
+    // `CLEAR DEFAULT` over /update removes the seeded triple; a follow-up
+    // SELECT returns no bindings (graph-management increment #52).
+    let app = router_with_data();
+    let clear = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from("CLEAR DEFAULT".to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(clear).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let select = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(select).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn post_load_file_inserts_triples() {
+    // LOAD a file: source over /update, then SELECT it back.
+    let mut path = std::env::temp_dir();
+    path.push(format!("horndb_server_load_{}.nt", std::process::id()));
+    std::fs::write(&path, "<http://ex/loaded> <http://ex/p> <http://ex/v> .\n").unwrap();
+
+    let app = router_with_data();
+    let load = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from(format!("LOAD <file://{}>", path.display())))
+        .unwrap();
+    let resp = app.clone().oneshot(load).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let select = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Chttp%3A%2F%2Fex%2Floaded%3E%20%3Chttp%3A%2F%2Fex%2Fp%3E%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(select).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/v");
+    std::fs::remove_file(&path).ok();
+}

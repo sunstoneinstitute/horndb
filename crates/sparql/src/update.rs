@@ -1,9 +1,35 @@
-//! SPARQL Update — `INSERT DATA` / `DELETE DATA` plus pattern-based
-//! `INSERT`/`DELETE … WHERE` (SPEC-07 F5).
+//! SPARQL Update — `INSERT DATA` / `DELETE DATA`, pattern-based
+//! `INSERT`/`DELETE … WHERE`, and the graph-management verbs
+//! `LOAD`/`CLEAR`/`DROP`/`CREATE` plus multi-operation updates (SPEC-07 F5,
+//! #52).
 //!
-//! Graph-management verbs (`LOAD`, `CLEAR`, `DROP`, `CREATE`, …) and
-//! multi-operation updates are still parsed but rejected at apply time
-//! (see `parser::ParsedUpdate::UnsupportedForm` and SPEC-07 Future Work).
+//! Under the Stage-1 default-graph-only model the graph-management verbs map
+//! onto the single merged default graph and honour the `SILENT` modifier:
+//! `CLEAR`/`DROP DEFAULT`/`ALL` empty the store; `LOAD` fetches a `file:`
+//! source and merges it into the default graph; and a `CLEAR`/`DROP`/`CREATE`/
+//! `LOAD` that would touch an unrepresentable named graph is an error unless
+//! `SILENT` (then a no-op).
+//!
+//! `ADD`/`MOVE`/`COPY` are not distinct spargebra variants: the parser rewrites
+//! them (per the W3C spec) into `Drop` + `DeleteInsert` sequences, with the
+//! same-graph identity case (`… <g> TO <g>`) collapsing to zero operations (a
+//! valid no-op). A named-graph operand surfaces as a named `GRAPH` pattern in
+//! the desugared `DeleteInsert` and is rejected by `apply_delete_insert`'s
+//! existing named-graph guards. **The `SILENT` flag is dropped by spargebra's
+//! desugaring**, so a named-operand `ADD`/`MOVE`/`COPY` errors even with
+//! `SILENT` — preserving it would require re-parsing the verb, which is out of
+//! scope while named graphs are unrepresentable (the no-op and the error are
+//! observationally identical to a default-graph-only store either way: no data
+//! moves). True named-graph scoping and remote (`http(s):`) `LOAD` stay
+//! deferred — see `INTEGRATION-NOTES.md`.
+//!
+//! A multi-operation update is applied **atomically**: `apply_update_with`
+//! preflights every operation (`validate_op`) for the failures it would hit at
+//! apply time — structural rejections, a non-silent `LOAD` whose fetch/parse
+//! fails, and a pattern update whose WHERE clause fails to translate/plan —
+//! before the first mutation, so e.g. `COPY <named> TO DEFAULT` (a desugared
+//! destructive `Drop{DEFAULT}` + a failing named read) can never clear the
+//! default graph on a failing update.
 
 use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
@@ -52,13 +78,31 @@ pub fn apply_update_with<B: FullBackend>(
     let ops = match u {
         ParsedUpdate::InsertData { inner }
         | ParsedUpdate::DeleteData { inner }
-        | ParsedUpdate::DeleteInsert { inner } => &inner.operations,
+        | ParsedUpdate::DeleteInsert { inner }
+        | ParsedUpdate::GraphManagement { inner } => &inner.operations,
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),
             ));
         }
     };
+
+    // SPARQL Update is atomic: a failed update must not partially apply
+    // (§3.1.3). spargebra desugars `COPY`/`MOVE <named> TO DEFAULT` into a
+    // destructive `Drop{DEFAULT}` *followed by* a `DeleteInsert` that reads the
+    // unrepresentable named graph — so applying op-by-op would clear the
+    // default graph and only then reject, losing data on a failing update.
+    // Preflight every operation for the failures it would hit at apply time —
+    // structural rejections, a non-silent `LOAD` whose fetch/parse fails, and a
+    // pattern update whose WHERE clause fails to translate/plan — without
+    // mutating, so the whole sequence is known-applyable before the first write.
+    for op in ops {
+        validate_op(op, cfg)?;
+    }
+
+    // `validate_op` above has already rejected every error case (named-graph
+    // quads/templates, triple terms, unrepresentable LOAD/CREATE targets,
+    // untranslatable WHERE clauses), so the apply loop can mutate freely.
     for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
@@ -85,13 +129,433 @@ pub fn apply_update_with<B: FullBackend>(
             } => {
                 apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
             }
-            other => {
-                return Err(SparqlError::UnsupportedAlgebra(format!(
-                    "update operation: {other:?}"
-                )));
+            GraphUpdateOperation::Clear { silent, graph } => {
+                apply_clear_drop(store, *silent, graph)?;
+            }
+            GraphUpdateOperation::Drop { silent, graph } => {
+                apply_clear_drop(store, *silent, graph)?;
+            }
+            GraphUpdateOperation::Create { silent, .. } => {
+                // No named-graph store exists (Stage-1 default-graph only),
+                // so a named graph cannot be created. SPARQL 1.1 §3.1.4:
+                // CREATE of an unrepresentable target is an error unless
+                // SILENT, in which case it is a no-op.
+                if !silent {
+                    return Err(create_named_graph_unsupported());
+                }
+            }
+            GraphUpdateOperation::Load {
+                silent,
+                source,
+                destination,
+            } => {
+                apply_load(store, *silent, source, destination)?;
             }
         }
     }
+    Ok(())
+}
+
+/// Error for a graph-management verb that targets a named graph, which the
+/// Stage-1 default-graph-only store cannot represent.
+fn create_named_graph_unsupported() -> SparqlError {
+    SparqlError::UnsupportedAlgebra("CREATE of a named graph (Stage-1 default graph only)".into())
+}
+
+/// Apply `CLEAR`/`DROP` against the single default graph. The two verbs are
+/// semantically identical here: there are no named graphs to remove, so a
+/// `DEFAULT`/`ALL` target clears the store and any named/`NAMED` target refers
+/// to a graph that does not exist (SPARQL 1.1 §3.2.{1,2}: an error unless
+/// `SILENT`, otherwise a no-op).
+fn apply_clear_drop<B: FullBackend>(
+    store: &mut B,
+    silent: bool,
+    graph: &spargebra::algebra::GraphTarget,
+) -> Result<()> {
+    use spargebra::algebra::GraphTarget;
+    match graph {
+        GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
+            store.clear_all();
+            Ok(())
+        }
+        // No named graphs exist in the Stage-1 store: a named target (or the
+        // `NAMED` keyword) addresses nothing.
+        GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
+            if silent {
+                Ok(())
+            } else {
+                Err(named_graph_unsupported())
+            }
+        }
+    }
+}
+
+/// Apply `LOAD <source> [INTO GRAPH <destination>]`. The document is fetched,
+/// parsed, and its triples inserted into the default graph. Stage-1 boundaries:
+/// only `file:` sources are fetched (no HTTP client dependency), and a named
+/// `destination` cannot be targeted. A boundary violation is an error unless
+/// `SILENT`, in which case the whole load is skipped (SPARQL 1.1 §3.1.5).
+fn apply_load<B: FullBackend>(
+    store: &mut B,
+    silent: bool,
+    source: &spargebra::term::NamedNode,
+    destination: &spargebra::term::GraphName,
+) -> Result<()> {
+    use spargebra::term::GraphName;
+    // A named destination graph cannot be represented (default-graph only).
+    if let GraphName::NamedNode(_) = destination {
+        return if silent {
+            Ok(())
+        } else {
+            Err(SparqlError::UnsupportedAlgebra(
+                "LOAD INTO a named graph (Stage-1 default graph only)".into(),
+            ))
+        };
+    }
+    match fetch_and_parse(source.as_str()) {
+        Ok(triples) => {
+            for (s, p, o) in triples {
+                store.insert_triple(s, p, o);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if silent {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Fetch and parse an RDF document named by `source`, returning its triples as
+/// algebra [`Term`]s. Stage-1 supports `file:` IRIs only; remote (`http(s):`)
+/// sources are rejected (the workspace carries no HTTP client). The
+/// serialization is chosen from the path extension, defaulting to Turtle. All
+/// graph names in a quad source are merged into the default graph (Stage-1 has
+/// no named-graph store), matching the N-Quads bulk loader.
+fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
+    use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
+
+    let raw = file_iri_to_path(source)?;
+    // A file IRI percent-encodes reserved characters (e.g. a space as `%20`);
+    // decode to the real filesystem path before reading.
+    let path = percent_decode(&raw);
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
+    let map_err =
+        |e: oxttl::TurtleSyntaxError| SparqlError::Executor(format!("LOAD parsing {path}: {e}"));
+
+    let mut out = Vec::new();
+    match path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        // N-Triples/N-Quads require absolute IRIs (no base).
+        Some("nt") => {
+            for t in NTriplesParser::new().for_slice(&bytes) {
+                let t = t.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+            }
+        }
+        Some("nq") => {
+            for q in NQuadsParser::new().for_slice(&bytes) {
+                let q = q.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+            }
+        }
+        // Turtle/TriG may carry relative IRIs resolved against the document IRI;
+        // use `source` as the base so `<s> <p> <o> .` loaded from
+        // `file:///tmp/data.ttl` resolves correctly (mirrors the storage loader).
+        Some("trig") => {
+            let parser = with_base(TriGParser::new(), source)?;
+            for q in parser.for_slice(&bytes) {
+                let q = q.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+            }
+        }
+        // `.ttl` and anything else default to Turtle.
+        _ => {
+            let parser = with_base(TurtleParser::new(), source)?;
+            for t in parser.for_slice(&bytes) {
+                let t = t.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Set the document IRI as the parser's base so relative IRIs in Turtle/TriG
+/// resolve against `source`. `source` is the `LOAD <iri>` operand, which
+/// spargebra already validated as an IRI, so `with_base_iri` succeeds in
+/// practice; a rejected base is surfaced as a clear LOAD error.
+trait WithBase: Sized {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self>;
+}
+impl WithBase for oxttl::TurtleParser {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self> {
+        self.with_base_iri(base)
+            .map_err(|e| SparqlError::Executor(format!("LOAD base IRI invalid ({base}): {e}")))
+    }
+}
+impl WithBase for oxttl::TriGParser {
+    fn with_base_iri_checked(self, base: &str) -> Result<Self> {
+        self.with_base_iri(base)
+            .map_err(|e| SparqlError::Executor(format!("LOAD base IRI invalid ({base}): {e}")))
+    }
+}
+fn with_base<P: WithBase>(parser: P, source: &str) -> Result<P> {
+    parser.with_base_iri_checked(source)
+}
+
+/// Extract the local filesystem path from a `file:` IRI (still percent-encoded).
+///
+/// Handles the authority component: `file:///abs` (empty authority) and
+/// `file://localhost/abs` are local and yield `/abs`; `file:/abs` (no `//`)
+/// yields `/abs`. A non-empty, non-`localhost` authority (e.g. a remote host)
+/// is rejected. A non-`file:` source is rejected (Stage-1 fetches `file:` only).
+fn file_iri_to_path(source: &str) -> Result<String> {
+    let non_file = || {
+        SparqlError::UnsupportedAlgebra(format!(
+            "LOAD of a non-file source (Stage-1 fetches file: IRIs only): {source}"
+        ))
+    };
+    if let Some(rest) = source.strip_prefix("file://") {
+        // `rest` is `<authority><path>`; the authority runs up to the first `/`.
+        let (authority, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            // No path slash at all (`file://host`): treat the whole thing as the
+            // authority with an empty path — not a usable local file.
+            None => (rest, ""),
+        };
+        if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+            Ok(path.to_owned())
+        } else {
+            Err(SparqlError::UnsupportedAlgebra(format!(
+                "LOAD of a non-local file authority (Stage-1 fetches local files only): {source}"
+            )))
+        }
+    } else if let Some(path) = source.strip_prefix("file:") {
+        // `file:/abs` or `file:relative` — no authority component.
+        Ok(path.to_owned())
+    } else {
+        Err(non_file())
+    }
+}
+
+/// Percent-decode a file-IRI path component (RFC 3986). A `%XX` escape becomes
+/// the decoded byte; a malformed escape is left verbatim. The decoded byte
+/// sequence is interpreted as UTF-8 (lossy), which covers ordinary filesystem
+/// paths; this is a minimal decoder sufficient for `file:` LOAD sources.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Lower a parsed `(subject, predicate, object)` from oxttl to algebra terms.
+fn oxrdf_triple_to_terms(
+    subject: &oxrdf::NamedOrBlankNode,
+    predicate: &oxrdf::NamedNode,
+    object: &oxrdf::Term,
+) -> (Term, Term, Term) {
+    (
+        oxrdf_subject_to_term(subject),
+        Term::Iri(predicate.as_str().to_owned()),
+        oxrdf_term_to_term(object),
+    )
+}
+
+/// Lower an `oxrdf` subject (named node or blank node) to an algebra [`Term`].
+///
+/// Blank-node labels are carried through verbatim (`b.as_str()`). This shares
+/// the Stage-1 store's known blank-node approximation with the N-Triples/Turtle
+/// bulk loaders and `construct_triples`: labels are not freshened per loaded
+/// document, so a `_:b` in one `LOAD` is identified with the same label in
+/// another `LOAD` (or already in the store), and re-loading an identical
+/// blank-node triple dedups. Per-document blank-node scoping belongs with the
+/// dictionary store (SPEC-02), which carries blank-node identity explicitly.
+fn oxrdf_subject_to_term(s: &oxrdf::NamedOrBlankNode) -> Term {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+    }
+}
+
+/// Lower an `oxrdf` object term to an algebra [`Term`]. Literals keep their
+/// N-Triples lexical form, matching the rest of the Stage-1 store.
+fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
+    match t {
+        oxrdf::Term::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
+        oxrdf::Term::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+        oxrdf::Term::Literal(l) => Term::Literal(l.to_string()),
+        // RDF 1.2 triple-term objects: the Stage-1 store has no triple-term
+        // slot, so they are surfaced as their N-Triples lexical form (the same
+        // best-effort lowering the loader applies). A LOAD of triple-term data
+        // into a SPARQL 1.1 store is an edge case; keeping the lexical form is
+        // better than dropping the triple silently.
+        oxrdf::Term::Triple(tr) => Term::Literal(tr.to_string()),
+    }
+}
+
+/// Preflight one operation: return the error it *would* produce at apply time,
+/// without touching the store. Mirrors every rejecting path in the apply loop so
+/// the whole update can be validated before the first mutation (SPARQL Update
+/// atomicity, §3.1.3). A `LOAD` is validated by fetching + parsing its source
+/// (a pure read); on success the parsed triples are discarded and re-fetched at
+/// apply time — acceptable because LOAD is not on a hot path and the alternative
+/// (threading the parsed triples through to apply) complicates the op loop.
+fn validate_op(op: &spargebra::GraphUpdateOperation, cfg: &SparqlConfig) -> Result<()> {
+    use spargebra::term::GraphName;
+    use spargebra::GraphUpdateOperation;
+    match op {
+        GraphUpdateOperation::InsertData { data } => {
+            for q in data {
+                require_default_graph_name(&q.graph_name)?;
+                object_to_term(&q.object)?;
+            }
+            Ok(())
+        }
+        GraphUpdateOperation::DeleteData { data } => {
+            for q in data {
+                require_default_graph_name(&q.graph_name)?;
+                ground_term_to_term(&q.object)?;
+            }
+            Ok(())
+        }
+        GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            using,
+            pattern,
+        } => validate_delete_insert(delete, insert, using.as_ref(), pattern, cfg),
+        GraphUpdateOperation::Clear { silent, graph }
+        | GraphUpdateOperation::Drop { silent, graph } => {
+            use spargebra::algebra::GraphTarget;
+            match graph {
+                GraphTarget::DefaultGraph | GraphTarget::AllGraphs => Ok(()),
+                GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
+                    if *silent {
+                        Ok(())
+                    } else {
+                        Err(named_graph_unsupported())
+                    }
+                }
+            }
+        }
+        GraphUpdateOperation::Create { silent, .. } => {
+            if *silent {
+                Ok(())
+            } else {
+                Err(create_named_graph_unsupported())
+            }
+        }
+        GraphUpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        } => {
+            if *silent {
+                // A silent LOAD swallows every failure, so it can never abort
+                // the update — nothing to preflight.
+                return Ok(());
+            }
+            if let GraphName::NamedNode(_) = destination {
+                return Err(SparqlError::UnsupportedAlgebra(
+                    "LOAD INTO a named graph (Stage-1 default graph only)".into(),
+                ));
+            }
+            // Fetch + parse now (pure read) to surface a non-silent fetch/parse
+            // failure before any prior op mutates.
+            fetch_and_parse(source.as_str()).map(|_| ())
+        }
+    }
+}
+
+/// Shared rejection scan for a pattern-based update. Returns the error a
+/// `DeleteInsert` would produce, without mutating — used both by the atomicity
+/// preflight and by `apply_delete_insert` itself.
+fn validate_delete_insert(
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+    cfg: &SparqlConfig,
+) -> Result<()> {
+    // Reject a USING/USING NAMED dataset that redefines the graphs the
+    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
+    // default graph only). A vacuous dataset (`None`, or one naming no
+    // graphs) stays a no-op.
+    if let Some(ds) = using {
+        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
+            return Err(using_named_graph_unsupported());
+        }
+    }
+
+    // Reject named-graph templates (Stage-1 default graph only).
+    for q in delete {
+        require_default_graph(&q.graph_name)?;
+    }
+    for q in insert {
+        require_default_graph(&q.graph_name)?;
+    }
+
+    // Reject a GRAPH pattern anywhere in the WHERE clause. `translate_where`
+    // lowers `GraphPattern::Graph { name, inner }` to its inner pattern over the
+    // single default graph — an accepted Stage-1 simplification for *read*
+    // queries, but for a mutating update it would make e.g.
+    // `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
+    // default-graph triples even though the named graph isn't represented
+    // (silent data corruption). Stage-1 is default-graph only.
+    if where_has_graph_pattern(pattern) {
+        return Err(SparqlError::UnsupportedAlgebra(
+            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
+        ));
+    }
+
+    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template. The
+    // Stage-1 store has no triple-term slot, so silently dropping such a
+    // template triple (the `resolve_*` `Triple(_) => None` arms) while
+    // reporting success is inconsistent with INSERT DATA / DELETE DATA, which
+    // return `triple_term_unsupported()`. The up-front scan makes those `None`
+    // arms unreachable for the triple-term reason.
+    for q in delete {
+        if ground_quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+    for q in insert {
+        if quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+
+    // Translate and plan the WHERE clause now (pure — no store access) so an
+    // unsupported algebra construct (`SERVICE`, `MINUS`, an unsupported path op,
+    // …) aborts the whole update *before* any earlier operation mutates. The
+    // throwaway plan is recomputed in `apply_delete_insert`; planning is cheap
+    // relative to the safety it buys, and updates are not on a hot path.
+    let alg = translate_where(pattern, cfg)?;
+    planner::plan(&alg)?;
     Ok(())
 }
 
@@ -108,55 +572,10 @@ fn apply_delete_insert<B: FullBackend>(
     using: Option<&spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
 ) -> Result<()> {
-    // Reject a USING/USING NAMED dataset that redefines the graphs the
-    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
-    // default graph only). A vacuous dataset (`None`, or one naming no
-    // graphs) stays a no-op. This must run before any mutation so an
-    // ignored USING can never silently target the wrong graph.
-    if let Some(ds) = using {
-        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
-            return Err(using_named_graph_unsupported());
-        }
-    }
-
-    // Reject named-graph templates up front (Stage-1 default graph only),
-    // so a partially-applied update can't leave the store inconsistent.
-    for q in delete {
-        require_default_graph(&q.graph_name)?;
-    }
-    for q in insert {
-        require_default_graph(&q.graph_name)?;
-    }
-
-    // Reject a GRAPH pattern anywhere in the WHERE clause before mutating.
-    // `translate_where` lowers `GraphPattern::Graph { name, inner }` to its
-    // inner pattern over the single default graph — an accepted Stage-1
-    // simplification for *read* queries, but for a mutating update it would
-    // make e.g. `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
-    // default-graph triples even though the named graph isn't represented
-    // (silent data corruption). Stage-1 is default-graph only.
-    if where_has_graph_pattern(pattern) {
-        return Err(SparqlError::UnsupportedAlgebra(
-            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
-        ));
-    }
-
-    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template before
-    // mutating. The Stage-1 store has no triple-term slot, so silently
-    // dropping such a template triple (the `resolve_*` `Triple(_) => None`
-    // arms) while reporting success is inconsistent with INSERT DATA /
-    // DELETE DATA, which return `triple_term_unsupported()`. The up-front
-    // scan makes those `None` arms unreachable for the triple-term reason.
-    for q in delete {
-        if ground_quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
-    for q in insert {
-        if quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
+    // All the rejections below must run before any mutation so a failing
+    // update can't partially apply (and so the atomicity preflight in
+    // `apply_update_with` can detect them without side effects).
+    validate_delete_insert(delete, insert, using, pattern, cfg)?;
 
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
@@ -250,6 +669,17 @@ fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
         GraphNamePattern::NamedNode(_) | GraphNamePattern::Variable(_) => {
             Err(named_graph_unsupported())
         }
+    }
+}
+
+/// Reject a named graph on an `INSERT DATA` / `DELETE DATA` quad. The apply
+/// loop ignores `q.graph_name` (Stage-1 default-graph only), so a
+/// `GRAPH <g> { … }` block would silently mutate the default graph; reject it
+/// instead of mis-routing data.
+fn require_default_graph_name(g: &spargebra::term::GraphName) -> Result<()> {
+    match g {
+        spargebra::term::GraphName::DefaultGraph => Ok(()),
+        spargebra::term::GraphName::NamedNode(_) => Err(named_graph_unsupported()),
     }
 }
 

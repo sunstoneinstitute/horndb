@@ -79,6 +79,10 @@ pub trait Executor {
 pub trait Store {
     fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term);
     fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term);
+    /// Remove every triple from the (single, default) graph. Backs the
+    /// graph-management `CLEAR`/`DROP` verbs and the destination-clearing
+    /// step of `COPY`/`MOVE` under the Stage-1 default-graph-only model.
+    fn clear_all(&mut self);
 }
 
 /// Convenience: a backend that is both an `Executor` and a `Store`.
