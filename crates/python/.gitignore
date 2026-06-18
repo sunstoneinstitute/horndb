@@ -1,0 +1,8 @@
+# maturin / Python build artifacts
+/dist/
+/target/
+*.so
+*.pyd
+__pycache__/
+.pytest_cache/
+.venv/

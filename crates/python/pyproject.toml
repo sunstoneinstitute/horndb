@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "horndb-rdflib"
+version = "0.1.0"
+description = "rdflib-compatible Python API for HornDB (SPEC-10)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [{ name = "Sunstone Institute" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[project.optional-dependencies]
+# `rdflib` is only needed to run the differential compatibility test suite,
+# never to use the package.
+test = ["rdflib>=7.0", "pytest>=7.0"]
+
+[tool.maturin]
+# Build the cdylib extension module named `horndb_rdflib`.
+features = ["extension-module"]
+module-name = "horndb_rdflib"
+# Keep maturin from trying to manage the surrounding cargo workspace; this
+# crate carries its own empty `[workspace]` table (see Cargo.toml).
+manifest-path = "Cargo.toml"

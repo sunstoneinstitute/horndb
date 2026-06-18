@@ -65,6 +65,15 @@ impl MemStore {
     pub fn is_empty(&self) -> bool {
         self.triples.is_empty()
     }
+    /// Iterate every stored triple in raw N-Triples lexical `(s, p, o)` form,
+    /// in insertion order. Unlike [`Executor::scan_bgp`], this returns the
+    /// *stored* strings verbatim (no kind reclassification), which lets a
+    /// caller that tracks term kinds out-of-band — e.g. the rdflib-compatible
+    /// Python binding (SPEC-10) — round-trip blank nodes and typed literals
+    /// faithfully. SPEC-02's dictionary store will supersede this.
+    pub fn iter_triples(&self) -> impl Iterator<Item = &(String, String, String)> {
+        self.triples.iter()
+    }
 }
 
 fn term_to_lex(t: &Term) -> String {
