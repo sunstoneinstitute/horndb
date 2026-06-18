@@ -70,6 +70,20 @@ pub trait Executor {
         &self,
         patterns: &[TriplePattern],
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>>;
+
+    /// Best-effort estimate of how many solution rows a BGP yields,
+    /// used by `EXPLAIN` (SPEC-07 F9) for per-node cardinality
+    /// annotations. The default returns `None` ("unknown"); backends
+    /// that can cheaply count (e.g. an in-memory triple set) should
+    /// override it. The number is an *estimate*, not a guarantee —
+    /// `EXPLAIN` labels it with `~`.
+    ///
+    /// This deliberately does not execute the BGP join: a leaf-pattern
+    /// row count is enough for the Stage-1 plan printer, which has no
+    /// cost model.
+    fn cardinality_estimate(&self, _patterns: &[TriplePattern]) -> Option<usize> {
+        None
+    }
 }
 
 /// A storage-side write seam used by [`crate::update`].

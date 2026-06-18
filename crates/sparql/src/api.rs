@@ -4,10 +4,11 @@
 //! Callers that need finer control should use the individual modules.
 
 use crate::algebra::translate::translate_query_with;
-use crate::error::Result;
+use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
 use crate::exec::{Bindings, Executor, FullBackend};
 use crate::parser::{parse_query, parse_update, ParsedQuery};
+use crate::plan::explain::{explain, ExecutionMode, ExplainFormat};
 use crate::plan::planner;
 use crate::update::apply_update_with;
 use crate::SparqlConfig;
@@ -24,6 +25,11 @@ pub enum QueryAnswer {
     Boolean(bool),
     /// CONSTRUCT result: ground triples in (s, p, o) lexical form.
     Triples(Vec<(String, String, String)>),
+    /// `EXPLAIN` result (SPEC-07 F9): the rendered physical plan with
+    /// execution mode and cardinality estimates. The query is **not**
+    /// executed. `json` records the rendering format so the HTTP layer
+    /// can pick the right content type.
+    Explanation { text: String, json: bool },
 }
 
 pub fn execute_query<E: Executor + ?Sized>(query: &str, exec: &E) -> Result<QueryAnswer> {
@@ -80,7 +86,40 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let triples = describe_triples(exec, &seeds, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
+        ParsedQuery::Explain { inner, json } => {
+            // EXPLAIN does not run the query: translate + plan only, then
+            // render. The execution mode is the entailment regime;
+            // backward-chaining (#55) is not yet selectable, so it is
+            // always `Materialized` today (the renderer labels that).
+            let plan = plan_of(&inner, cfg)?;
+            let format = if json {
+                ExplainFormat::Json
+            } else {
+                ExplainFormat::Text
+            };
+            let text = explain(&plan, exec, ExecutionMode::Materialized, format);
+            Ok(QueryAnswer::Explanation { text, json })
+        }
     }
+}
+
+/// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,
+/// without executing it. Shared by the `EXPLAIN` path. Nested `EXPLAIN`
+/// (`EXPLAIN EXPLAIN …`) is rejected — it is not meaningful.
+fn plan_of(parsed: &ParsedQuery, cfg: &SparqlConfig) -> Result<crate::plan::PhysicalPlan> {
+    let inner = match parsed {
+        ParsedQuery::Select { inner }
+        | ParsedQuery::Ask { inner }
+        | ParsedQuery::Construct { inner }
+        | ParsedQuery::Describe { inner } => inner,
+        ParsedQuery::Explain { .. } => {
+            return Err(SparqlError::UnsupportedAlgebra(
+                "nested EXPLAIN is not supported".into(),
+            ));
+        }
+    };
+    let alg = translate_query_with(inner, cfg)?;
+    planner::plan(&alg)
 }
 
 pub fn execute_update<B: FullBackend>(update: &str, store: &mut B) -> Result<()> {

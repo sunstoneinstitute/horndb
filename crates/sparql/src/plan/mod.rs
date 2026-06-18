@@ -1,6 +1,7 @@
 //! Physical plan tree. Each node is one work unit the runtime
 //! executes against an [`crate::exec::Executor`].
 
+pub mod explain;
 pub mod planner;
 
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};

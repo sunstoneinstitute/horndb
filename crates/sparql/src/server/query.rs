@@ -151,6 +151,18 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
             )
                 .into_response()
         }
+        QueryAnswer::Explanation { text, json } => {
+            // EXPLAIN (SPEC-07 F9): the plan rendering. The format is
+            // fixed by the pragma (`EXPLAIN` vs `EXPLAIN JSON`), not the
+            // Accept header, since EXPLAIN output is not a SPARQL results
+            // document.
+            let ctype = if json {
+                "application/json"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            (StatusCode::OK, [("content-type", ctype)], text).into_response()
+        }
     }
 }
 

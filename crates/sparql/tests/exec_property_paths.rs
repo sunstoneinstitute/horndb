@@ -43,6 +43,7 @@ fn run(q: &str, store: &MemStore) -> Vec<Bindings> {
         | ParsedQuery::Ask { inner }
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe"),
+        ParsedQuery::Explain { .. } => panic!("explain"),
     };
     let alg = translate_query(&inner).unwrap();
     let plan = planner::plan(&alg).unwrap();
@@ -55,6 +56,7 @@ fn run_err(q: &str) -> String {
         | ParsedQuery::Ask { inner }
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe"),
+        ParsedQuery::Explain { .. } => panic!("explain"),
     };
     translate_query(&inner).unwrap_err().to_string()
 }

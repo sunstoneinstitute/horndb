@@ -135,9 +135,27 @@ impl Executor for MemStore {
         }
         Ok(Box::new(current.into_iter()))
     }
+
+    fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {
+        Some(self.estimate_bgp(patterns))
+    }
 }
 
 impl MemStore {
+    /// Cardinality estimate for `EXPLAIN`: the number of candidate
+    /// triples for the *first* pattern, resolved through the same
+    /// indexes `scan_bgp` uses, against an empty binding row. This is the
+    /// leaf-pattern selectivity — an upper bound on the BGP output once
+    /// later patterns join — which is what the Stage-1 plan printer wants
+    /// (there is no cost model to chain selectivities through). An empty
+    /// pattern list is the join identity: one row.
+    fn estimate_bgp(&self, patterns: &[TriplePattern]) -> usize {
+        match patterns.first() {
+            None => 1,
+            Some(first) => self.candidates(first, &Bindings::new()).len(),
+        }
+    }
+
     /// Candidate triple positions for `pat` given prior `row`. Picks the
     /// most selective available index for the bound positions; returns a
     /// borrowed slice when an index covers it, otherwise a full-range

@@ -209,3 +209,63 @@ async fn post_load_file_inserts_triples() {
     assert_eq!(v["results"]["bindings"][0]["o"]["value"], "http://ex/v");
     std::fs::remove_file(&path).ok();
 }
+
+#[tokio::test]
+async fn explain_pragma_returns_text_plan() {
+    let app = router_with_data();
+    // EXPLAIN SELECT ?o WHERE { ?s ?p ?o }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from(
+            "EXPLAIN SELECT ?o WHERE { ?s ?p ?o }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    assert!(ctype.starts_with("text/plain"), "content-type: {ctype}");
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("mode: materialized"), "{text}");
+    assert!(text.contains("BgpScan"), "{text}");
+}
+
+#[tokio::test]
+async fn explain_json_pragma_returns_json_plan() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from(
+            "EXPLAIN JSON SELECT ?o WHERE { ?s ?p ?o }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    assert!(
+        ctype.starts_with("application/json"),
+        "content-type: {ctype}"
+    );
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["mode"], "materialized");
+    assert!(v["plan"]["op"].is_string());
+}
