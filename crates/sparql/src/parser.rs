@@ -33,6 +33,15 @@ pub enum ParsedQuery {
     Describe {
         inner: Query,
     },
+    /// Non-standard `EXPLAIN` pragma (SPEC-07 F9): describe the chosen
+    /// physical plan, its per-node cardinality estimates, and the
+    /// execution mode instead of running the query. `inner` is the
+    /// wrapped query (any form); `json` selects the rendering format
+    /// (`EXPLAIN JSON …`).
+    Explain {
+        inner: Box<ParsedQuery>,
+        json: bool,
+    },
 }
 
 /// A successfully parsed SPARQL update. Stage 1 only supports
@@ -75,6 +84,18 @@ pub enum ParsedUpdate {
 /// Defaults: no base IRI, no prefix mappings beyond those declared
 /// in the query itself.
 pub fn parse_query(input: &str) -> Result<ParsedQuery> {
+    // Non-standard leading `EXPLAIN` pragma (SPEC-07 F9). spargebra does
+    // not know this keyword, so we strip it before parsing and wrap the
+    // result. `EXPLAIN` must lead the request (it precedes any PREFIX/BASE
+    // prologue), matching the convention of other engines' EXPLAIN.
+    if let Some((rest, json)) = strip_explain_pragma(input) {
+        let inner = parse_query(rest)?;
+        return Ok(ParsedQuery::Explain {
+            inner: Box::new(inner),
+            json,
+        });
+    }
+
     let q = SparqlParser::new()
         .parse_query(input)
         .map_err(|e| SparqlError::Parse(e.to_string()))?;
@@ -84,6 +105,63 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery> {
         Query::Construct { .. } => ParsedQuery::Construct { inner: q },
         Query::Describe { .. } => ParsedQuery::Describe { inner: q },
     })
+}
+
+/// If `input` begins with the non-standard `EXPLAIN` pragma (optionally
+/// `EXPLAIN JSON`), return `(remaining_query, json_format)`; otherwise
+/// `None`.
+///
+/// Matching is case-insensitive and requires the `EXPLAIN` (and optional
+/// `JSON`) token to be followed by ASCII whitespace, so a query that
+/// merely *starts* a variable or IRI with those letters is not mistaken
+/// for the pragma (SPARQL keywords are not a concern here — `EXPLAIN` is
+/// not a SPARQL keyword and a bare `EXPLAIN` with no following query is a
+/// parse error from the recursive call). Leading whitespace is tolerated.
+fn strip_explain_pragma(input: &str) -> Option<(&str, bool)> {
+    let trimmed = input.trim_start();
+    let rest = strip_keyword_ci(trimmed, "EXPLAIN")?;
+    // `EXPLAIN` matched and was followed by whitespace; now look for an
+    // optional `JSON` sub-keyword, also whitespace-terminated.
+    if let Some(after_json) = strip_keyword_ci(rest.trim_start(), "JSON") {
+        Some((after_json, true))
+    } else {
+        Some((rest, false))
+    }
+}
+
+/// If `s` starts with `kw` (ASCII-case-insensitive) followed by ASCII
+/// whitespace, return the slice after the keyword (the whitespace itself
+/// is left for the caller to trim). Returns `None` if `kw` is not a
+/// whitespace-delimited prefix of `s`.
+///
+/// `kw` must be ASCII (the callers pass `"EXPLAIN"` / `"JSON"`). The
+/// comparison is done byte-wise rather than by string slicing so that a
+/// non-ASCII `s` whose `kw.len()`-th byte falls in the middle of a
+/// multibyte UTF-8 character does not panic (`&s[..kw.len()]` would
+/// require a char boundary). The trailing-whitespace check and the
+/// `kw.len()` slice index are both at the keyword's byte length, which is
+/// a char boundary exactly when the leading bytes are all ASCII — which
+/// the per-byte `eq_ignore_ascii_case` guarantees on the matching path.
+fn strip_keyword_ci<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    debug_assert!(kw.is_ascii(), "strip_keyword_ci expects an ASCII keyword");
+    let bytes = s.as_bytes();
+    let kw_bytes = kw.as_bytes();
+    if bytes.len() < kw_bytes.len() {
+        return None;
+    }
+    // Per-byte ASCII-case-insensitive compare — never slices `s`, so a
+    // multibyte char straddling the keyword length cannot panic.
+    if !bytes[..kw_bytes.len()].eq_ignore_ascii_case(kw_bytes) {
+        return None;
+    }
+    // The character immediately after the keyword must be ASCII
+    // whitespace, so `EXPLAINING` / `EXPLAIN(...)` are not matched.
+    // Because every keyword byte matched ASCII, `kw_bytes.len()` is a
+    // char boundary here and `&s[kw_bytes.len()..]` is safe.
+    match bytes.get(kw_bytes.len()) {
+        Some(c) if c.is_ascii_whitespace() => Some(&s[kw_bytes.len()..]),
+        _ => None,
+    }
 }
 
 /// Parse a SPARQL 1.1 update string.

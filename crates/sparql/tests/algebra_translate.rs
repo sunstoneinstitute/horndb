@@ -9,6 +9,7 @@ fn alg_of(query: &str) -> Algebra {
         | ParsedQuery::Ask { inner }
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe not supported here"),
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
     };
     translate::translate_query(&inner).expect("translate")
 }
@@ -130,6 +131,7 @@ fn parse_select(query: &str) -> spargebra::Query {
         | ParsedQuery::Ask { inner }
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe not supported here"),
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
     }
 }
 

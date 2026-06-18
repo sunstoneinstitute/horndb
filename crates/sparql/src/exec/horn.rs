@@ -632,6 +632,20 @@ impl Executor for HornBackend {
 
         Ok(Box::new(rows.into_iter()))
     }
+
+    fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {
+        // The empty BGP is the join identity: one row.
+        if patterns.is_empty() {
+            return Some(1);
+        }
+        // Stage-1 estimate: the live triple count is a sound upper bound
+        // on any single BGP's output. There is no per-pattern statistic
+        // exposed at this seam yet (SPEC-02's dictionary store will carry
+        // index histograms), so `EXPLAIN` reports this coarse bound rather
+        // than a precise per-pattern count. Saturating cast keeps it
+        // within `usize` on 32-bit targets.
+        Some(usize::try_from(self.len()).unwrap_or(usize::MAX))
+    }
 }
 
 #[cfg(test)]

@@ -293,3 +293,45 @@ remote `LOAD` waits on an HTTP client decision; and the W3C SPARQL 1.1 Update
 conformance suite is wired by the harness epic (#10). Coverage for this
 increment lives in `tests/update_graph_mgmt.rs` (both backends) and the
 `/update` server tests in `tests/server_http.rs`.
+
+## EXPLAIN pragma (F9, #53)
+
+The non-standard `EXPLAIN` pragma is recognised **before** spargebra sees the
+text, because spargebra has no `EXPLAIN` keyword. `parser::parse_query`
+strips a leading, whitespace-delimited, case-insensitive `EXPLAIN` (optionally
+`EXPLAIN JSON`) token and wraps the inner parse as
+`ParsedQuery::Explain { inner, json }`. The keyword must lead the request (it
+precedes any `PREFIX`/`BASE` prologue) and needs a trailing whitespace boundary,
+so a query starting with `?explainme` or an IRI is never mistaken for it; a bare
+`EXPLAIN` with no following query surfaces as the inner parse error.
+
+`api::execute_query_with` handles the `Explain` arm by translating + planning
+the wrapped query and **not running it** (`plan_of` shares the translate→plan
+path with the executing arms but stops before `Runtime::run`). Rendering lives
+in `plan::explain`: an indented operator tree (`ExplainFormat::Text`) or a JSON
+object tree (`ExplainFormat::Json`), returned as `QueryAnswer::Explanation`.
+
+**Execution mode.** The header `mode:` line reports the entailment-regime
+execution mode. Today the only mode is `Materialized` (the simple regime, or an
+OWL-RL closure pre-written by SPEC-04/05); backward-chained mode (#55) is not yet
+selectable, so the renderer prints `materialized` and labels backward-chaining
+as not-yet-available. When #55 lands, `ExecutionMode` gains the backward variant
+and the API picks it per query.
+
+**Cardinality.** `Executor` gained `cardinality_estimate(&[TriplePattern]) ->
+Option<usize>` (default `None`). `MemStore` returns the leading-pattern index
+size (exact for a single pattern, an upper bound for a multi-pattern BGP);
+`HornBackend` returns the live triple count as a sound upper bound (no
+per-pattern statistic is exposed at the seam yet — SPEC-02's dictionary store
+will carry index histograms). `plan::explain::estimate` combines child estimates
+with textbook per-operator rules (join = product, union = sum, slice caps at
+`length`, filter/distinct/project pass through). Numbers are estimates, surfaced
+with a `~` prefix — there is no cost model (`plan::planner` is a 1:1 lowering).
+
+**Deferred:** "chosen indexes" display (no index chooser exists; the plan is a
+1:1 lowering) and the real materialized-vs-backward mode selection (with #55).
+The `/query` handler serves the rendering as `text/plain` (text) or
+`application/json` (JSON) by pragma — not by `Accept`, since EXPLAIN output is
+not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
+`tests/parser_basic.rs`, the `plan::explain` unit tests, and the
+`/query` EXPLAIN server tests in `tests/server_http.rs`.

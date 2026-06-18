@@ -36,6 +36,7 @@ fn run(q: &str, store: &MemStore) -> Vec<horndb_sparql::exec::Bindings> {
         | ParsedQuery::Ask { inner }
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe"),
+        ParsedQuery::Explain { .. } => panic!("explain"),
     };
     let alg = translate_query(&inner).unwrap();
     let plan = planner::plan(&alg).unwrap();
