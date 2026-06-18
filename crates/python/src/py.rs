@@ -78,9 +78,12 @@ impl URIRef {
         !self.__eq__(other)
     }
 
-    /// rdflib exposes the n3 serialisation; handy for query-string building.
+    /// rdflib's `n3()` serialisation — an IRI wrapped in angle brackets, e.g.
+    /// `<http://ex/s>`. This is the SPARQL/Turtle syntax form, NOT the bare
+    /// store-lexical form (`to_store_lexical()`), so code that splices `n3()`
+    /// into query/Turtle strings stays valid.
     fn n3(&self) -> String {
-        RdfTerm::iri(self.iri.clone()).to_store_lexical()
+        format!("<{}>", self.iri)
     }
 }
 
@@ -498,19 +501,28 @@ impl Graph {
 
     /// `graph.parse(data=..., format=...)` (F4). Only the `data`/`format`
     /// keyword path is supported in this increment.
+    ///
+    /// Returns the graph itself, matching rdflib's `Graph.parse()` so the
+    /// common `g = Graph().parse(data=..., format="nt")` chaining idiom works.
     #[pyo3(signature = (data=None, format="turtle"))]
-    fn parse(&self, data: Option<&str>, format: &str) -> PyResult<()> {
+    fn parse<'py>(
+        slf: Bound<'py, Self>,
+        data: Option<&str>,
+        format: &str,
+    ) -> PyResult<Bound<'py, Self>> {
         let data = data.ok_or_else(|| {
             PyValueError::new_err(
                 "Graph.parse: only the data=... keyword is supported in this build",
             )
         })?;
         let fmt = SerFormat::from_name(format).map_err(to_py_err)?;
-        self.inner
+        slf.borrow()
+            .inner
             .lock()
             .unwrap()
             .parse_str(data, fmt)
-            .map_err(to_py_err)
+            .map_err(to_py_err)?;
+        Ok(slf)
     }
 
     /// `graph.serialize(format=...)` -> `str` (F4).

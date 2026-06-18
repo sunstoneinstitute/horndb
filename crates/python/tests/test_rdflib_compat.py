@@ -69,6 +69,20 @@ def test_variable_strips_sigil_like_rdflib():
     assert str(hb.Variable("?x")) == str(rdflib.Variable("x")) == "x"
 
 
+def test_uriref_n3_matches_rdflib_angle_brackets():
+    # rdflib wraps IRIs in <> for n3()/SPARQL/Turtle; the bare form is invalid.
+    assert hb.URIRef("http://ex/s").n3() == rdflib.URIRef("http://ex/s").n3() == "<http://ex/s>"
+
+
+def test_literal_n3_matches_rdflib():
+    assert hb.Literal("hi").n3() == rdflib.Literal("hi").n3() == '"hi"'
+    assert hb.Literal("chat", lang="en").n3() == rdflib.Literal("chat", lang="en").n3()
+
+
+def test_bnode_n3_is_underscore_colon():
+    assert hb.BNode("b0").n3() == "_:b0"
+
+
 # --------------------------------------------------------------------------- #
 # F2 — Graph mutation, len, contains, iteration
 # --------------------------------------------------------------------------- #
@@ -163,6 +177,13 @@ def test_parse_ntriples_matches_rdflib_triple_set():
     rh = sorted((str(s), str(p), str(o)) for s, p, o in rg)
     hh = sorted((str(s), str(p), str(o)) for s, p, o in hg)
     assert hh == rh
+
+
+def test_parse_returns_self_for_chaining():
+    # rdflib: Graph().parse(...) returns the graph, enabling the common idiom.
+    g = hb.Graph().parse(data=NT_DOC, format="nt")
+    assert g is not None
+    assert len(g) == 1
 
 
 def test_parse_turtle_with_prefix():
