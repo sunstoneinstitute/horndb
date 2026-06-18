@@ -271,7 +271,22 @@ impl IncrementalClosureBackend {
         // with no edges are harmless and reused correctly on retry, so the
         // DenseIdMap is intentionally NOT rolled back on sink error.
         let dense = state.map.intern_edges(new_edges);
-        let delta = state.closure.insert_edges(dense);
+        // Fold edges one at a time, tracking which BASE edges this call newly
+        // added (Finding 5). On a sink failure we must roll back not only the
+        // closure delta but also the base edges we just added — otherwise an
+        // aborted asserted edge lingers in `base` and wrongly supports later
+        // retractions/reachability. A re-inserted edge that already existed in
+        // `base` is NOT recorded here, so rollback never removes pre-existing
+        // support.
+        let mut delta = Vec::new();
+        let mut new_base_edges = Vec::new();
+        for (s, o) in dense {
+            let (edge_delta, base_was_new) = state.closure.insert_edge_tracked(s, o);
+            delta.extend(edge_delta);
+            if base_was_new {
+                new_base_edges.push((s, o));
+            }
+        }
         if delta.is_empty() {
             return Ok(0);
         }
@@ -289,9 +304,12 @@ impl IncrementalClosureBackend {
             Ok(n) => Ok(n),
             Err(e) => {
                 // Sink write failed: roll back the just-inserted closure edges
-                // so a retry re-emits them.  Map interns are left in place —
+                // AND the base edges this call newly added (Finding 5), so the
+                // aborted assertion leaves no trace in either the closed set or
+                // `base`. A retry re-emits them. Map interns are left in place —
                 // they are harmless and will be reused correctly on retry.
                 state.closure.rollback_inserted(&delta);
+                state.closure.rollback_base_edges(&new_base_edges);
                 Err(e)
             }
         }
@@ -343,6 +361,23 @@ impl IncrementalClosureBackend {
         })
     }
 
+    /// All asserted base edges retained for predicate `p`, in `DictId` space
+    /// (unordered; caller sorts). Returns an empty vec if `p` has no retained
+    /// state. Primarily for tests and debugging — lets callers verify that an
+    /// aborted insert left no base edge behind (Finding 5).
+    pub fn base_edges(&self, p: PredicateId) -> Vec<(DictId, DictId)> {
+        let Some(state) = self.predicates.get(&p) else {
+            return Vec::new();
+        };
+        let map = &state.map;
+        state
+            .closure
+            .base_edges()
+            .into_iter()
+            .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
+            .collect()
+    }
+
     /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
     pub fn add_sameas(&mut self, pairs: &[(DictId, DictId)]) {
         for &(a, b) in pairs {
@@ -353,5 +388,98 @@ impl IncrementalClosureBackend {
     /// Borrow the equivalence-class state.
     pub fn equiv_classes(&self) -> &EquivClasses {
         &self.sameas
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Triple;
+
+    /// A sink whose `bulk_insert_inferred` always fails — used to prove the
+    /// insert path rolls back cleanly on a downstream write failure.
+    struct ErroringSink;
+    impl TripleSink for ErroringSink {
+        fn bulk_insert_inferred(&self, _triples: &mut dyn Iterator<Item = Triple>) -> Result<u64> {
+            anyhow::bail!("sink write failed")
+        }
+    }
+
+    /// A sink that succeeds — to establish base state around a failing insert.
+    struct OkSink;
+    impl TripleSink for OkSink {
+        fn bulk_insert_inferred(&self, triples: &mut dyn Iterator<Item = Triple>) -> Result<u64> {
+            Ok(triples.count() as u64)
+        }
+    }
+
+    fn sorted(mut v: Vec<(DictId, DictId)>) -> Vec<(u64, u64)> {
+        let mut out: Vec<(u64, u64)> = v.drain(..).map(|(s, o)| (s.0, o.0)).collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Finding 5: a failed sink write must roll back the BASE edge too, not just
+    /// the closure delta. Before the fix the aborted asserted edge lingered in
+    /// `base` and could wrongly support later retractions/reachability.
+    #[test]
+    fn failed_sink_insert_rolls_back_base_edge() {
+        let p = PredicateId(100);
+        let mut backend = IncrementalClosureBackend::new();
+
+        // Establish a clean existing edge (1,2) via a succeeding sink.
+        backend
+            .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &OkSink)
+            .expect("ok insert");
+        assert_eq!(sorted(backend.base_edges(p)), vec![(1, 2)]);
+
+        // Now attempt to insert (3,4) through a FAILING sink: the call must Err
+        // and leave NO trace of (3,4) in base.
+        let err = backend.insert_transitive_edges(p, &[(DictId(3), DictId(4))], &ErroringSink);
+        assert!(err.is_err(), "failing sink must propagate the error");
+        assert_eq!(
+            sorted(backend.base_edges(p)),
+            vec![(1, 2)],
+            "aborted (3,4) must NOT linger in base; only the pre-existing (1,2) survives"
+        );
+
+        // A subsequent retraction of the unrelated (1,2) is unaffected: it is
+        // genuinely a base edge and withdraws (1,2).
+        let outcome = backend
+            .delete_transitive_edges(p, &[(DictId(1), DictId(2))])
+            .expect("delete");
+        assert_eq!(
+            outcome.withdrawn,
+            vec![(DictId(1), DictId(2))],
+            "retracting the unrelated (1,2) must withdraw it cleanly"
+        );
+        assert!(backend.base_edges(p).is_empty(), "base now empty");
+    }
+
+    /// A failed insert that RE-INSERTS an already-present base edge must NOT
+    /// remove that pre-existing edge on rollback (only genuinely-new base edges
+    /// are rolled back).
+    #[test]
+    fn failed_sink_insert_keeps_preexisting_base_edge() {
+        let p = PredicateId(100);
+        let mut backend = IncrementalClosureBackend::new();
+        backend
+            .insert_transitive_edges(p, &[(DictId(1), DictId(2))], &OkSink)
+            .expect("ok insert");
+
+        // Attempt to insert (1,2) AGAIN plus a new (2,3), through a failing sink.
+        // (1,2) is already a base edge, so even though the whole call aborts, the
+        // pre-existing (1,2) must survive; only the new (2,3) is rolled back.
+        let err = backend.insert_transitive_edges(
+            p,
+            &[(DictId(1), DictId(2)), (DictId(2), DictId(3))],
+            &ErroringSink,
+        );
+        assert!(err.is_err());
+        assert_eq!(
+            sorted(backend.base_edges(p)),
+            vec![(1, 2)],
+            "pre-existing (1,2) survives; new (2,3) rolled back"
+        );
     }
 }

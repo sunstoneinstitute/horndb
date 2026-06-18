@@ -189,3 +189,251 @@ fn stale_rule_consequence_on_retracted_asserted_edge_is_withdrawn() {
         "(a,TYPE,d) must be withdrawn — its only support (asserted (c,SC,d)) is gone"
     );
 }
+
+/// A rule whose body matches the SPECIFIC closure edge `(c,SC,e)` and emits a
+/// fresh-predicate head `(a,GOAL,e)` that cannot feed back into any rule. The
+/// consequence is therefore derivable ONLY when the closure edge `(c,SC,e)` is
+/// present in the recompute seed (via `closure_support`); the base SC edges
+/// `(c,SC,d),(c,SC,x),(x,SC,e)` do NOT let the rule reconstruct it, because
+/// there is no transitive SC rule registered — only the closure plan closes SC.
+struct GoalOnClosureEdge {
+    id: horndb_incremental::RuleId,
+    a: u64,
+    c: u64,
+    e: u64,
+}
+
+const GOAL: u64 = 250;
+
+impl horndb_incremental::BilinearRule for GoalOnClosureEdge {
+    fn id(&self) -> horndb_incremental::RuleId {
+        self.id
+    }
+    fn apply_full(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        let mut out = horndb_incremental::Zset::new();
+        // Fire (a,GOAL,e) iff BOTH (a,TYPE,c) and the exact (c,SC,e) are present.
+        let have_type = a.get(&(self.a, TYPE, self.c)) > 0;
+        let have_edge = a.get(&(self.c, SC, self.e)) > 0;
+        if have_type && have_edge {
+            out.add((self.a, GOAL, self.e), 1);
+        }
+        out
+    }
+    fn apply_delta(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        da: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _db: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        // Presence-driven rule: recompute the head from the POST-DELTA base
+        // (base ∪ delta). The circuit's set-semantics "newly present" filter
+        // dedups, so re-emitting an already-present head is harmless. This makes
+        // the head fire whenever BOTH facts are present, regardless of which tick
+        // each arrived in.
+        let mut post = a.clone();
+        post.add_assign(da);
+        self.apply_full(&post, &post)
+    }
+}
+
+/// Finding 2 — same-tick insert+retract: a rule consequence that depends on a
+/// closure edge must SURVIVE a tick that retracts one support edge AND inserts a
+/// replacement path keeping the closure edge entailed.
+///
+/// Setup (closure SC plan + a rule that fires ONLY off the closure edge
+/// `(c,SC,e)`; no transitive SC rule, so the closure plan alone produces
+/// `(c,SC,e)`):
+///   base SC: (c,SC,d),(d,SC,e)  →  closure (c,SC,e)
+///   (a,TYPE,c)  →  GoalOnClosureEdge derives (a,GOAL,e) off the closure edge.
+///
+/// Mixed tick: retract (d,SC,e) AND insert a replacement path (c,SC,x),(x,SC,e).
+/// Post-tick the base SC closure still entails (c,SC,e) [via c->x->e], so the
+/// rule consequence (a,GOAL,e) must SURVIVE.
+///
+/// The fix runs the positive closure-insertion pass BEFORE the rule recompute on
+/// mixed ticks, so the recompute's `closure_support` seed already contains the
+/// re-derived (c,SC,e). Without it, the retraction pass withdrew (c,SC,e), the
+/// recompute (seeing a closure_support without it) withdrew (a,GOAL,e), and the
+/// late insertion pass re-added (c,SC,e) only AFTER rules had run.
+#[test]
+fn mixed_tick_insert_replacement_path_keeps_rule_consequence() {
+    const A: u64 = 1;
+    const C: u64 = 2;
+    const D: u64 = 3;
+    const E: u64 = 4;
+    const X: u64 = 5;
+
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
+    let mut plan = NaryPlan::new();
+    plan.push_join(Box::new(GoalOnClosureEdge {
+        id: R3_CAX_SCO,
+        a: A,
+        c: C,
+        e: E,
+    }));
+    circuit.add_plan(plan, R3_CAX_SCO);
+
+    // Tick 1: the closure chain only — closure derives (c,SC,e). (We assert
+    // (a,TYPE,c) in a SEPARATE tick because the closure insertion pass runs
+    // after the rule forward pass within one tick, so a rule consequence off a
+    // closure edge is only derivable once the closure edge already exists — the
+    // documented within-tick closure→rule insertion limitation.)
+    circuit.assert_triple((C, SC, D));
+    circuit.assert_triple((D, SC, E));
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "closure derives (c,SC,e)"
+    );
+
+    // Tick 2: now assert (a,TYPE,c) — the rule fires off the existing (c,SC,e).
+    circuit.assert_triple((A, TYPE, C));
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(A, GOAL, E)),
+        1,
+        "rule derives (a,GOAL,e) off the closure edge (c,SC,e)"
+    );
+
+    // Mixed tick: retract (d,SC,e) AND insert the replacement path c->x->e.
+    circuit.retract_triple((D, SC, E));
+    circuit.assert_triple((C, SC, X));
+    circuit.assert_triple((X, SC, E));
+    circuit.tick();
+
+    // Post-tick the closure still entails (c,SC,e) via c->x->e.
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "(c,SC,e) still entailed via the replacement path c->x->e"
+    );
+    // The rule consequence off the closure edge must SURVIVE the mixed tick.
+    assert_eq!(
+        circuit.derived_base().get(&(A, GOAL, E)),
+        1,
+        "(a,GOAL,e) must survive — its support (c,SC,e) is still entailed post-tick"
+    );
+}
+
+/// A rule that derives the fixed head `(C,SC,E)` whenever an asserted marker
+/// `(C,MARK,E)` is present — an INDEPENDENT support for `(C,SC,E)` that does NOT
+/// rely on any SC edge. Used by the Finding-3 test to remove the rule support
+/// (retract the marker) while leaving the closure chain support intact.
+struct MarkerRule {
+    id: horndb_incremental::RuleId,
+    c: u64,
+    e: u64,
+}
+
+const MARK: u64 = 200;
+
+impl horndb_incremental::BilinearRule for MarkerRule {
+    fn id(&self) -> horndb_incremental::RuleId {
+        self.id
+    }
+    fn apply_full(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        let mut out = horndb_incremental::Zset::new();
+        // Unary trigger expressed as a bilinear self-join: emit (c,SC,e) once
+        // per present marker (c,MARK,e). We scan only `a` and ignore `b` so the
+        // head's multiplicity tracks marker presence (set-semantics filter in
+        // the recompute collapses it to 1).
+        for ((xs, xp, xo), m) in a.iter() {
+            if *xp == MARK && *xs == self.c && *xo == self.e && m > 0 {
+                out.add((self.c, SC, self.e), 1);
+            }
+        }
+        out
+    }
+    fn apply_delta(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        da: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _db: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        // Linear in `a`; delta is just the rule applied to the `a`-delta.
+        let _ = (a, b);
+        self.apply_full(da, da)
+    }
+}
+
+/// Finding 3 — record closure ownership for rule-owned promotions.
+///
+/// `(c,SC,e)` is simultaneously: asserted-direct, path-implied (via the chain
+/// `(c,SC,d),(d,SC,e)`), AND derived by an INDEPENDENT rule off a marker
+/// `(c,MARK,e)`. We retract the direct assertion (Step A) — this PROMOTES
+/// `(c,SC,e)` (still entailed by the closure chain) while the marker rule ALSO
+/// owns the derived row. Finding 3: the promote loop sees the row already in
+/// `derived_base` (rule-owned) and must STILL record `closure_support` — not
+/// treat it as a no-op. Then (Step B) we retract the MARKER, removing the rule
+/// support entirely; the closure chain `(c,SC,d),(d,SC,e)` still entails
+/// `(c,SC,e)`, so the row MUST PERSIST via `closure_support`.
+///
+/// This pins the end-to-end contract: a promoted survivor that is also
+/// rule-derived survives the loss of its rule support because the closure still
+/// entails it. The Finding-3 fix makes the promote loop record `closure_support`
+/// even when the row is already materialized in `derived_base` (rule-owned),
+/// rather than treating it as a no-op — closing a latent ownership gap.
+#[test]
+fn rule_owned_promotion_records_closure_support() {
+    const C: u64 = 1;
+    const D: u64 = 2;
+    const E: u64 = 3;
+
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
+    let mut plan = NaryPlan::new();
+    plan.push_join(Box::new(MarkerRule {
+        id: R3_CAX_SCO,
+        c: C,
+        e: E,
+    }));
+    circuit.add_plan(plan, R3_CAX_SCO);
+
+    // Closure chain + the marker (independent rule support) + the direct edge.
+    circuit.assert_triple((C, SC, D));
+    circuit.assert_triple((D, SC, E));
+    circuit.assert_triple((C, MARK, E)); // independent rule support
+    circuit.assert_triple((C, SC, E)); // direct (asserted) edge
+    circuit.tick();
+
+    // (c,SC,e) is asserted → lives in asserted_base, not derived_base.
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        0,
+        "(c,SC,e) is asserted, not materialized in derived_base"
+    );
+
+    // Step A: retract the direct (c,SC,e). Still entailed by the closure chain
+    // AND derived by the marker rule. It must become a materialized derived row,
+    // and Finding 3 requires closure_support to record ownership too.
+    circuit.retract_triple((C, SC, E));
+    circuit.tick();
+    assert!(
+        circuit.derived_base().get(&(C, SC, E)) > 0,
+        "(c,SC,e) must persist after retracting the direct edge; got {}",
+        circuit.derived_base().get(&(C, SC, E))
+    );
+
+    // Step B: retract the MARKER — removes the rule support entirely. The
+    // closure chain (c,SC,d),(d,SC,e) still entails (c,SC,e), so closure_support
+    // MUST keep the row alive. Before the Finding-3 fix it was wrongly zeroed.
+    circuit.retract_triple((C, MARK, E));
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "(c,SC,e) MUST persist via closure_support after the rule support is gone"
+    );
+}

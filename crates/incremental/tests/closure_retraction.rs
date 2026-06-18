@@ -161,6 +161,59 @@ fn retract_alternate_path_withdraws_purely_derived_edge() {
     );
 }
 
+/// Finding 4 — double-retract presence boundary.
+///
+/// An edge asserted ONCE (multiplicity 1) but retracted TWICE in a single tick
+/// has post-tick multiplicity -1. The circuit treats any non-positive
+/// multiplicity as absent, so the base edge is genuinely gone and the closure
+/// deletion MUST fire. Before the fix the gate was `asserted_base.get(t) == 0`,
+/// which a -1 multiplicity fails, suppressing the closure deletion and leaving
+/// stale `ClosureInferred` rows.
+#[test]
+fn retract_twice_in_one_tick_withdraws_closure() {
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(P)));
+
+    // Assert the chain 1 -> 2 -> 3 (each edge once).
+    circuit.assert_triple((1, P, 2));
+    circuit.assert_triple((2, P, 3));
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        1,
+        "(1,P,3) is closure-derived from the chain"
+    );
+
+    let rx = circuit.subscribe();
+
+    // Retract (1,P,2) TWICE in the same tick: post-tick asserted multiplicity
+    // is -1 (over-retracted), i.e. genuinely absent. The base edge is gone, so
+    // the transitive (1,P,3) must be withdrawn.
+    circuit.retract_triple((1, P, 2));
+    circuit.retract_triple((1, P, 2));
+    circuit.tick();
+
+    assert!(
+        circuit.asserted_base().get(&(1, P, 2)) <= 0,
+        "(1,P,2) over-retracted: non-positive multiplicity => absent"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        0,
+        "(1,P,3) must be withdrawn — the (1,P,2) base edge is gone"
+    );
+
+    // A negative ClosureInferred for (1,P,3) must appear on the feed.
+    let records = drain(&rx);
+    let withdrew = records
+        .iter()
+        .any(|r| r.triple == (1, P, 3) && r.kind == DerivationKind::ClosureInferred && r.mult < 0);
+    assert!(
+        withdrew,
+        "expected a negative ClosureInferred for (1,P,3); got {records:?}"
+    );
+}
+
 /// Drain every record currently queued on the receiver.
 fn drain(rx: &horndb_incremental::ChangeFeedRx) -> Vec<horndb_incremental::DeltaRecord> {
     let mut out = Vec::new();

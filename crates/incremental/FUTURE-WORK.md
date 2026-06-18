@@ -71,14 +71,25 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   the Finding-2 overlap-retention logic. Tests: `tests/closure_retraction.rs`
   (chain break, diamond second-path retention, re-assert round-trip) and the
   rewritten `tests/retraction_closure.rs`.
+- **Mixed-tick insert+retract closure→rule — Done (2026-06-18, #5)**: on a tick
+  that simultaneously retracts one support edge and inserts a replacement path,
+  the closure INSERTION pass now runs BEFORE the rule recompute (the closure
+  retraction pass still runs first), so the recompute sees the post-tick closure
+  and a rule consequence whose closure support is still entailed via the
+  replacement path survives. The end-of-tick insertion pass is skipped on
+  retraction ticks (shared helper `Circuit::run_closure_insertion_pass`) so it
+  never runs twice. Test:
+  `tests/retraction_closure.rs::mixed_tick_insert_replacement_path_keeps_rule_consequence`.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
   affected-region recompute); **warm-store seeded-edge retraction** — a rule
   seeded via `TransitiveClosureRule::seed_closed_edges` retains only the
   *closed* extent, not the asserted base, so `apply_retract_delta` cannot
   withdraw a closure pair supported only by seeded (pre-existing) edges; it is
   exact only for edges inserted via `apply_insert_delta` (needs a base-seed
-  variant); closure↔rule cross-feedback *within* a single tick (closure output
-  feeding rule bodies and vice versa); non-transitive closure shapes.
+  variant); closure→rule cross-feedback *within a PURE INSERTION tick* (a closure
+  edge feeding a rule body in the same tick it is first derived — the insertion
+  pass still runs after the rule forward pass on insertion-only ticks) and
+  rule→closure feedback within a tick; non-transitive closure shapes.
 
 ## Stage 3 (SPEC-09 / hardware)
 

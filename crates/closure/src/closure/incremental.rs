@@ -135,10 +135,20 @@ impl IncrementalTransitiveClosure {
     /// Insert one edge and return the **newly inferred** closure edges (the
     /// delta), i.e. pairs not already present. Maintains the closed invariant.
     pub fn insert_edge(&mut self, s: u64, o: u64) -> Vec<(u64, u64)> {
+        self.insert_edge_tracked(s, o).0
+    }
+
+    /// Like [`Self::insert_edge`] but also reports whether `(s, o)` was a
+    /// **newly added** base edge (`true`) or already present in `base`
+    /// (`false`). The flag drives transaction rollback: on a downstream
+    /// failure only the base edges this call genuinely added may be removed —
+    /// a re-inserted existing base edge must survive (see
+    /// [`Self::rollback_base_edges`]).
+    pub fn insert_edge_tracked(&mut self, s: u64, o: u64) -> (Vec<(u64, u64)>, bool) {
         // Record the asserted base edge first, independently of the closure
         // delta computation below (which is unchanged). The base set is what
         // makes correct retraction possible.
-        self.base.entry(s).or_default().insert(o);
+        let base_was_new = self.base.entry(s).or_default().insert(o);
 
         // B = {x : x reaches s} ∪ {s}; F = {y : o reaches y} ∪ {o}.
         let mut b: Vec<u64> = self
@@ -164,7 +174,25 @@ impl IncrementalTransitiveClosure {
                 }
             }
         }
-        delta
+        (delta, base_was_new)
+    }
+
+    /// Remove base edges that were just added by a failed transaction, restoring
+    /// the prior `base` set (Finding 5). Only pass edges that this same logical
+    /// operation reported as **newly added** (`insert_edge_tracked` returned
+    /// `true`) — removing a base edge that pre-existed the operation would
+    /// corrupt support for the surviving closure. Touches only `base`; the
+    /// closed adjacency is rolled back separately via
+    /// [`Self::rollback_inserted`].
+    pub fn rollback_base_edges(&mut self, edges: &[(u64, u64)]) {
+        for &(s, o) in edges {
+            if let Some(set) = self.base.get_mut(&s) {
+                set.remove(&o);
+                if set.is_empty() {
+                    self.base.remove(&s);
+                }
+            }
+        }
     }
 
     /// Undo a set of edges that were just inserted by this same logical
@@ -347,6 +375,16 @@ impl IncrementalTransitiveClosure {
             out.withdrawn.extend(one.withdrawn);
             out.survived.extend(one.survived);
         }
+        // Finding 1: a survivor reported by an EARLIER deletion can be WITHDRAWN
+        // by a LATER deletion in the same batch (e.g. delete (1,3) [survives via
+        // 1->2->3] then delete (2,3) [withdraws (1,3)]). Fold one-at-a-time, then
+        // reconcile against the FINAL state: a survivor is only genuine if it is
+        // STILL in the closed set (`fwd[s]` contains `o`) at the very end. Anything
+        // that appears in the combined `withdrawn` is no longer closed by
+        // definition, so the closed-set filter subsumes it; we drop the explicit
+        // withdrawn-membership check in favour of the authoritative closed-set test.
+        out.survived
+            .retain(|&(s, o)| self.fwd.get(&s).is_some_and(|set| set.contains(&o)));
         out
     }
 }
@@ -556,22 +594,31 @@ mod tests {
 
     #[test]
     fn delete_edges_folds_withdrawn_and_survived() {
-        // Two independent diamonds folded in one call.
-        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
-        // Delete the direct 1->3 (survivor) and the chain edge 2->3 (withdraws
-        // the now-broken pairs). Order matters: fold deletes 1->3 first (still
-        // entailed via 2->3, survivor), then 2->3 (which now withdraws (1,3) and
-        // (2,3) — but (1,3) was already a survivor of the first delete).
-        let mut out = c.delete_edges([(1, 3), (2, 3)]);
-        out.withdrawn.sort_unstable();
-        // After both deletes only (1,2) remains; (1,3),(2,3) are gone.
-        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
-        // (1,3) survived the first delete (folded into `survived`).
+        // A genuine batch survivor: two base paths support (1,3) — the direct
+        // 1->3 and the chain 1->2->3. Deleting the direct 1->3 AND the unrelated
+        // 3->4 in one call leaves (1,3) entailed via 1->2->3, so it is reported as
+        // a survivor that REMAINS closed at the end of the fold.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3), (3, 4)]);
+        let out = c.delete_edges([(1, 3), (3, 4)]);
+        // (1,3) is still entailed via 1->2->3 → genuine survivor.
         assert!(
             out.survived.contains(&(1, 3)),
-            "got survived={:?}",
+            "(1,3) still closed via 1->2->3; must remain a survivor; got {:?}",
             out.survived
         );
+        // (3,4) was removed and is no longer reachable → withdrawn, not survived.
+        assert!(
+            out.withdrawn.contains(&(3, 4)),
+            "(3,4) lost all support; must be withdrawn; got {:?}",
+            out.withdrawn
+        );
+        assert!(
+            !out.survived.contains(&(3, 4)),
+            "(3,4) is gone; must NOT be a survivor; got {:?}",
+            out.survived
+        );
+        // Closure after both deletes: 1->2->3 chain (with transitive 1->3); 4 gone.
+        assert_eq!(edge_set(&c), [(1, 2), (1, 3), (2, 3)].into_iter().collect());
     }
 
     #[test]
@@ -599,6 +646,31 @@ mod tests {
             after_base, before_base,
             "base restored after delete+reinsert"
         );
+    }
+
+    #[test]
+    fn delete_edges_drops_survivor_later_withdrawn() {
+        // Finding 1: a survivor reported by an EARLIER deletion in a batch can be
+        // WITHDRAWN by a LATER deletion in the same batch. base {(1,2),(2,3),(1,3)};
+        // delete_edges([(1,3),(2,3)]):
+        //  - delete (1,3) first: still reachable via 1->2->3, reported as survivor.
+        //  - delete (2,3) next: withdraws (1,3) (no path left).
+        // The combined outcome must NOT report (1,3) in `survived` (it is gone), and
+        // MUST report it in `withdrawn`.
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (2, 3), (1, 3)]);
+        let out = c.delete_edges([(1, 3), (2, 3)]);
+        assert!(
+            out.withdrawn.contains(&(1, 3)),
+            "(1,3) ultimately lost all support; must be withdrawn; got {:?}",
+            out.withdrawn
+        );
+        assert!(
+            !out.survived.contains(&(1, 3)),
+            "(1,3) was withdrawn by the later delete; must NOT remain a survivor; got {:?}",
+            out.survived
+        );
+        // Final closure: only (1,2) remains.
+        assert_eq!(edge_set(&c), [(1, 2)].into_iter().collect());
     }
 
     #[test]
