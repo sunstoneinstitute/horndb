@@ -17,8 +17,11 @@
 //!
 //! - Full ~80-rule OWL 2 RL set (remaining `cls-int*`/`cls-uni` list-walking
 //!   rules and all `dt-*` datatype rules) — Stage 2.
-//! - Production proof recording (compressed side-table, on-demand rederivation
-//!   via SPEC-03) — Stage 2; today's `Provenance` is in-memory only.
+//! - Proof recording (SPEC-04 F4) is implemented: per-triple `Provenance`
+//!   composes into a recursive proof tree via `MemStore::proof_tree` /
+//!   `Engine::proof` (see `tests/proof_tree.rs`). Still deferred to Stage 2 is
+//!   *persistence*: a compressed side-table with on-demand rederivation via
+//!   SPEC-03. Today's `Provenance` is in-memory only.
 //! - `rdf:type` skew optimization (partition-by-class-id parallelism) — Stage 2.
 //!   (`eq-rep-p`'s own class blow-up is mitigated — see `eq_rep_p_opt`.)
 //! - Incremental updates via Z-sets — SPEC-06 / Stage 2.
@@ -60,4 +63,5 @@ pub use engine::{
     materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts,
     PhaseTimings, Stats,
 };
-pub use integration::{BackendChoice, Engine};
+pub use integration::{BackendChoice, Engine, StringProofTree};
+pub use provenance::ProofTree;

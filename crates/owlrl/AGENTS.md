@@ -345,6 +345,13 @@ that fired the derivation. The provenance is consumed by SPEC-08
 `MlDerived`, symbolic ones are `Symbolic`. See
 `INTEGRATION-NOTES.md` and `provenance.rs`.
 
+Provenance composes into a **proof tree** (SPEC-04 F4): `MemStore::proof_tree`
+recursively expands each derived triple's premises down to asserted base
+triples (cutting derivation cycles), and `Engine::proof(s, p, o)` returns the
+same tree decoded to lexical IRIs as a `StringProofTree`. See §7 for the two
+intentional elisions (GraphBLAS-closure empty premises; restriction-rule
+schema side conditions).
+
 `integration.rs` exposes an `Engine` façade that owns a
 `MemStore`, a dictionary (`String → TermId`), and a vocabulary, and
 exposes `load(&Dataset)`, `entails(...)`, `is_consistent()`, etc.
@@ -571,6 +578,24 @@ library is using.
   identical closure. The remaining downstream cost — `cls-*`/`cax-*` rules
   scanning a large materialised `rdf:type` partition (SPEC-04 F5
   partition-by-class-id) — is separate and still Stage-2. See TASKS.md #2.
+- **Proof recording is implemented (SPEC-04 F4, acceptance #5, NF4).**
+  Every compiled rule and every `list_rules.rs` rule records its real body
+  triples as `Provenance.premises` on each derived triple.
+  `MemStore::proof_tree` walks those premises recursively into a full
+  `ProofTree` (leaves are asserted base triples; cycles are cut to keep the
+  tree finite), and `Engine::proof(s, p, o)` returns the same tree decoded
+  back to lexical IRIs (`StringProofTree`). A deep derivation (e.g. an
+  N-step `rdfs:subClassOf` chain) yields a correspondingly deep proof in
+  well under the NF4 100 ms budget — see `tests/proof_tree.rs`. Two
+  intentional elisions remain: (a) the GraphBLAS closure backend
+  (`graphblas_backend.rs`) records best-effort *empty* premises by design,
+  so a closure-derived node is a `Derived` leaf rather than expanding
+  further; (b) the restriction-rule schema declarations (`owl:maxCardinality`/
+  `owl:onProperty`/`owl:onClass` for `cls-maxc*`/`cls-maxqc*`) are an elided
+  side condition — the *instance-level* premises are still recorded, so the
+  instance proof tree bottoms out at asserted instance data. The deferred
+  part is production *persistence*: a compressed side-table with on-demand
+  rederivation (Stage 2); today's premises live in-memory only.
 - **No incremental deletion.** `reset_and_materialize` is the only
   re-derivation path (SPEC-04 F7); SPEC-06 / Stage 2 will add Z-set
   incremental updates.

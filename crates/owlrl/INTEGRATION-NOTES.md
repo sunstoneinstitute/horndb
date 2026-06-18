@@ -31,6 +31,33 @@ With `ml.enabled = false`, the registry's candidate generator
 returns `Confidence::zero()` for every pair, so no candidates ever
 enter staging — the rule engine sees the asserted base only.
 
+## Proof recording (SPEC-04 F4, acceptance #5, NF4)
+
+Proof recording is implemented. Every compiled rule and every
+`list_rules.rs` rule records its real body triples as
+`Provenance.premises` on each derived triple. `MemStore::proof_tree`
+walks those premises recursively into a `ProofTree` whose leaves are
+asserted base triples (derivation cycles are cut to keep the tree
+finite), and `Engine::proof(s, p, o)` returns the same tree decoded back
+to lexical IRIs (`StringProofTree`). A deep derivation (e.g. an N-step
+`rdfs:subClassOf` chain) yields a correspondingly deep proof in well
+under the NF4 100 ms budget — see `tests/proof_tree.rs`.
+
+Two intentional elisions remain:
+
+1. The GraphBLAS closure backend (`graphblas_backend.rs`) records
+   best-effort **empty** premises by design, so a closure-derived node is
+   a `Derived` leaf rather than expanding further.
+2. The restriction-rule schema declarations (`owl:maxCardinality` /
+   `owl:onProperty` / `owl:onClass` for `cls-maxc*` / `cls-maxqc*`) are an
+   elided side condition — the *instance-level* premises are still
+   recorded, so the instance proof tree bottoms out at asserted instance
+   data.
+
+The deferred part is production **persistence**: a compressed side-table
+with on-demand rederivation (Stage 2). Today's premises live in-memory
+only.
+
 ## List-axiom rules live in `list_rules.rs`, not `rules.toml`
 
 The W3C OWL 2 RL rules that walk an `rdf:List` from the ontology — namely

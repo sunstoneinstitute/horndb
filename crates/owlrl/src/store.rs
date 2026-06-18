@@ -3,7 +3,7 @@
 //! For Stage 1, the only impl shipped is `MemStore`. SPEC-02 will provide a
 //! production backend implementing the same trait.
 
-use crate::provenance::Provenance;
+use crate::provenance::{ProofTree, Provenance};
 use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
 use crate::vocab::Vocabulary;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -104,6 +104,36 @@ impl MemStore {
 
     pub fn proof(&self, t: &Triple) -> Option<&Provenance> {
         self.proofs.get(t)
+    }
+
+    /// Build the full proof tree for `t` (SPEC-04 F4, acceptance #5).
+    ///
+    /// Recurses through the single-level [`Provenance`] recorded for each
+    /// inferred triple. A triple with no proof entry is treated as asserted
+    /// (a leaf). Derivation cycles are cut with a [`ProofTree::Cycle`] leaf.
+    pub fn proof_tree(&self, t: &Triple) -> ProofTree {
+        let mut path = FxHashSet::default();
+        self.proof_tree_inner(t, &mut path)
+    }
+
+    fn proof_tree_inner(&self, t: &Triple, path: &mut FxHashSet<Triple>) -> ProofTree {
+        let Some(prov) = self.proofs.get(t) else {
+            return ProofTree::Asserted(*t);
+        };
+        if !path.insert(*t) {
+            return ProofTree::Cycle(*t);
+        }
+        let premises = prov
+            .premises
+            .iter()
+            .map(|p| self.proof_tree_inner(p, path))
+            .collect();
+        path.remove(t);
+        ProofTree::Derived {
+            triple: *t,
+            rule_id: prov.rule_id,
+            premises,
+        }
     }
 
     /// Set the resolved max-cardinality restrictions. Called once at load
@@ -211,6 +241,7 @@ impl TripleStore for MemStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::ProofTree;
     use smallvec::smallvec;
 
     fn store() -> MemStore {
@@ -296,5 +327,63 @@ mod tests {
         s.clear_inferred();
         assert!(s.contains(&t(1, 2, 3)));
         assert!(!s.contains(&t(4, 5, 6)));
+    }
+
+    #[test]
+    fn proof_tree_bottoms_out_at_asserted() {
+        let mut s = store();
+        let ab = t(1, 2, 3);
+        let c1 = t(1, 4, 5);
+        let c2 = t(1, 6, 7);
+        s.assert(ab);
+        s.insert_inferred(c1, Provenance::new("r1", [ab]));
+        s.insert_inferred(c2, Provenance::new("r2", [c1]));
+
+        let tree = s.proof_tree(&c2);
+        match tree {
+            ProofTree::Derived {
+                triple,
+                rule_id,
+                premises,
+            } => {
+                assert_eq!(triple, c2);
+                assert_eq!(rule_id, "r2");
+                assert_eq!(premises.len(), 1);
+                match &premises[0] {
+                    ProofTree::Derived {
+                        triple,
+                        rule_id,
+                        premises,
+                    } => {
+                        assert_eq!(*triple, c1);
+                        assert_eq!(*rule_id, "r1");
+                        assert_eq!(premises.len(), 1);
+                        assert_eq!(premises[0], ProofTree::Asserted(ab));
+                    }
+                    other => panic!("expected Derived c1, got {other:?}"),
+                }
+            }
+            other => panic!("expected Derived c2, got {other:?}"),
+        }
+        assert_eq!(s.proof_tree(&ab), ProofTree::Asserted(ab));
+    }
+
+    #[test]
+    fn proof_tree_cuts_cycles() {
+        let mut s = store();
+        let x = t(1, 2, 3);
+        let y = t(3, 2, 1);
+        s.insert_inferred(x, Provenance::new("eq-sym", [y]));
+        s.insert_inferred(y, Provenance::new("eq-sym", [x]));
+        let tree = s.proof_tree(&x);
+        match tree {
+            ProofTree::Derived { premises, .. } => match &premises[0] {
+                ProofTree::Derived { premises, .. } => {
+                    assert_eq!(premises[0], ProofTree::Cycle(x));
+                }
+                other => panic!("expected nested Derived, got {other:?}"),
+            },
+            other => panic!("expected Derived, got {other:?}"),
+        }
     }
 }
