@@ -237,19 +237,18 @@ impl IncrementalClosureBackend {
     /// incremental inserts for a predicate that already has a materialized closure.
     /// Replaces any existing state for `p`. Writes nothing to a sink.
     ///
-    /// **Retraction is a NO-OP for a closed-seeded predicate (BUG B).** The seed
-    /// is an already-*closed* edge set, not a base set, so the underlying
-    /// [`IncrementalTransitiveClosure`] is built via `from_closed_edges` with an
-    /// UNKNOWN base. Recomputing reachability over the incomplete post-seed base
-    /// during retraction would actively withdraw the seeded closure edges
-    /// themselves, corrupting the closure. To prevent that, the closure is marked
-    /// `base_complete = false` and [`Self::delete_transitive_edges`] becomes a
-    /// no-op for this predicate's whole lifetime — returning an empty outcome and
-    /// leaving the seeded closure intact, even after subsequent inserts (a single
-    /// closure cannot be partially base-tracked). Predicates that need retraction
-    /// must build their state purely through [`Self::insert_transitive_edges`]
-    /// (which records base edges); the SPEC-06 `Circuit` path does exactly that.
-    /// A base-seed variant is intentionally not added until a caller needs it.
+    /// **Retraction semantics for a closed-seeded predicate.** The seed is an
+    /// already-*closed* edge set whose asserted base is unknown, so the
+    /// underlying [`IncrementalTransitiveClosure`] seeds its `base` from the
+    /// closed extent itself (a conservative stand-in). Retraction then works
+    /// uniformly: edges inserted *after* seeding via
+    /// [`Self::insert_transitive_edges`] retract **exactly**; retracting a
+    /// *seeded* edge is **sound but may under-withdraw** — the seeded base's
+    /// redundant transitive edges can keep a pair reachable even when the true
+    /// (unknown) asserted base would have dropped it. Predicates whose true
+    /// asserted base is known and need exact seeded-edge retraction must build
+    /// their state purely through [`Self::insert_transitive_edges`] (which
+    /// records the genuine base edges); the SPEC-06 `Circuit` path does that.
     pub fn seed_transitive_closure(&mut self, p: PredicateId, closed_edges: &[(DictId, DictId)]) {
         let mut map = DenseIdMap::with_capacity(closed_edges.len() * 2);
         let dense = map.intern_edges(closed_edges);
@@ -329,11 +328,10 @@ impl IncrementalClosureBackend {
     /// in the SPEC-06 Z-set layer, which negates `withdrawn` and PROMOTES
     /// `survived` to materialized derived rows (BUG P1). If `p` has no retained
     /// state, returns an empty outcome. Edges that were never asserted withdraw
-    /// nothing. **For a predicate seeded via [`Self::seed_transitive_closure`]
-    /// (closed-seeded, base unknown) this method is a complete NO-OP** — it
-    /// returns an empty outcome and never touches the closure (BUG B), rather
-    /// than recomputing against an incomplete base and corrupting the seeded
-    /// closure. See that method's retraction note.
+    /// nothing. **For a predicate seeded via [`Self::seed_transitive_closure`]**
+    /// the closed extent is used as a conservative base, so post-seed inserted
+    /// edges retract exactly while retracting a seeded edge is sound but may
+    /// under-withdraw. See that method's retraction note.
     pub fn delete_transitive_edges(
         &mut self,
         p: PredicateId,
@@ -490,45 +488,51 @@ mod tests {
         );
     }
 
-    /// BUG B: a predicate seeded via `seed_transitive_closure` (which builds the
-    /// closure from an already-CLOSED edge set, leaving `base` empty) must NOT
-    /// corrupt the seeded closure when a later inserted edge is retracted.
-    /// Seed closed {(1,2)}; insert (2,1) [closing the 1<->2 cycle]; delete (2,1).
-    /// Before the fix, `delete_transitive_edges` recomputed reachability against
-    /// the incomplete base and wrongly dropped the seeded (1,2). After the fix,
-    /// retraction is a NO-OP for a closed-seeded predicate and (1,2) survives.
+    /// A predicate seeded via `seed_transitive_closure` now seeds its `base`
+    /// from the closed extent, so a *post-seed inserted* edge retracts exactly.
+    /// Replaces the former `delete_on_closed_seeded_predicate_is_noop`, which
+    /// pinned the OLD blanket no-op (now wrong: it leaked the inserted edge's
+    /// derived closure on retraction).
+    ///
+    /// Seed closed {(1,2)}; insert (2,1) [now the closure holds the 1<->2 cycle:
+    /// {(1,1),(1,2),(2,1),(2,2)}]; delete (2,1). The cycle-derived (1,1),(2,1),
+    /// (2,2) lose all support and are withdrawn; the originally-seeded (1,2)
+    /// survives (it is still in base and still reachable). This matches
+    /// `transitive_closure` of the remaining base {(1,2)} == {(1,2)}.
     #[test]
-    fn delete_on_closed_seeded_predicate_is_noop() {
+    fn delete_on_closed_seeded_predicate_post_seed_insert_retracts() {
         let p = PredicateId(7);
         let mut backend = IncrementalClosureBackend::new();
         backend.seed_transitive_closure(p, &[(DictId(1), DictId(2))]);
 
-        // Insert (2,1) — closes the cycle on top of the seeded (1,2).
+        // Insert (2,1) — closes the 1<->2 cycle on top of the seeded (1,2).
         backend
             .insert_transitive_edges(p, &[(DictId(2), DictId(1))], &OkSink)
             .expect("ok insert");
 
-        // Retract (2,1): must NO-OP (empty outcome), and (1,2) must survive.
+        // Retract (2,1): the inserted edge retracts exactly. The cycle-derived
+        // (1,1),(2,1),(2,2) are withdrawn; the seeded (1,2) survives.
         let out = backend
             .delete_transitive_edges(p, &[(DictId(2), DictId(1))])
             .expect("delete");
-        assert!(
-            out.withdrawn.is_empty(),
-            "closed-seeded predicate retraction must withdraw nothing; got {:?}",
-            out.withdrawn
+        assert_eq!(
+            sorted(out.withdrawn),
+            vec![(1, 1), (2, 1), (2, 2)],
+            "retracting the post-seed (2,1) withdraws the cycle-derived pairs"
         );
         assert!(
             out.survived.is_empty(),
-            "closed-seeded predicate retraction must report no survivor; got {:?}",
+            "(2,1) lost all support, so it is not a survivor; got {:?}",
             out.survived
         );
-        // The seeded (1,2) must still be present in the closure.
+        // The closure now equals transitive_closure({(1,2)}) == {(1,2)}.
         let state = backend.predicates.get(&p).expect("state");
         let s = state.map.to_dense(DictId(1)).expect("dense 1").0;
         let o = state.map.to_dense(DictId(2)).expect("dense 2").0;
-        assert!(
-            state.closure.edges().contains(&(s, o)),
-            "the seeded (1,2) must survive a closed-seeded retraction"
+        assert_eq!(
+            state.closure.edges(),
+            vec![(s, o)],
+            "only the seeded (1,2) remains after retracting the inserted (2,1)"
         );
     }
 }

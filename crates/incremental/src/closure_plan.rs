@@ -118,12 +118,13 @@ impl TransitiveClosureRule {
     /// state and would miss the transitive edges that bridge old and new
     /// edges (SPEC-06 acceptance #1, warm-store case).
     ///
-    /// Retraction caveat: seeded edges are a *closed* extent, not the asserted
-    /// base, so the backend cannot tell which of them are base edges. A later
-    /// `apply_retract_delta` therefore cannot withdraw a closure pair that is
-    /// only supported by seeded (pre-existing) edges — closure-path retraction
-    /// (#5) is exact only for edges inserted via `apply_insert_delta` on this
-    /// rule. Withdrawing seeded edges needs a base-seed variant and is deferred.
+    /// Retraction: the seeded *closed* extent is used as a conservative base, so
+    /// a later `apply_retract_delta` retracts **exactly** for edges inserted via
+    /// `apply_insert_delta` on this rule. Retracting against seeded support is
+    /// **sound but may under-withdraw** — because the seeded base carries
+    /// redundant transitive edges, a pair supported only by seeded edges may stay
+    /// reachable even when the true (unknown) asserted base would have dropped it
+    /// (it never withdraws a pair still entailed by the closed extent).
     pub fn seed_closed_edges(&mut self, closed_edges: &[(u64, u64)]) {
         let edges: Vec<(DictId, DictId)> = closed_edges
             .iter()

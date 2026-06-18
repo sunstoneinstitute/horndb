@@ -87,12 +87,12 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   FINAL post-tick base; pinned by
   `tests/closure_retraction.rs::mixed_tick_replacement_path_final_state_correct`.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
-  affected-region recompute); **warm-store seeded-edge retraction** — a rule
-  seeded via `TransitiveClosureRule::seed_closed_edges` retains only the
-  *closed* extent, not the asserted base, so `apply_retract_delta` cannot
-  withdraw a closure pair supported only by seeded (pre-existing) edges; it is
-  exact only for edges inserted via `apply_insert_delta` (needs a base-seed
-  variant); closure→rule cross-feedback *within a PURE INSERTION tick* (a closure
+  affected-region recompute); **exact warm-store seeded-edge retraction** — a
+  rule seeded via `TransitiveClosureRule::seed_closed_edges` uses the *closed*
+  extent as a conservative base, so `apply_retract_delta` is exact for edges
+  inserted via `apply_insert_delta` and **sound (but may under-withdraw)** when
+  retracting against seeded support; recovering the true asserted base needs a
+  base-seed variant; closure→rule cross-feedback *within a PURE INSERTION tick* (a closure
   edge feeding a rule body in the same tick it is first derived — the insertion
   pass still runs after the rule forward pass on insertion-only ticks) and
   rule→closure feedback within a tick; non-transitive closure shapes.
