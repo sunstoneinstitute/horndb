@@ -126,6 +126,39 @@ fn cax_adc_large_extent() {
     assert_strategies_agree(&base);
 }
 
+/// `prp-key` over a keyed class where many subject **pairs** share many values
+/// of the single key property. This is the duplicate-heavy case: each shared
+/// value re-derives the same `?x owl:sameAs ?y` head, so the parallel path must
+/// dedup per-subject (rather than allocate one candidate per shared value) and
+/// still land the identical closure as the serial path.
+#[test]
+fn prp_key_duplicate_heavy() {
+    let v = Vocabulary::synthetic(10_000);
+    let ty = v.rdf_type.0;
+    let (c, key_p) = (9300u64, 9301u64);
+    let n_subjects = 600u64; // > PAR_TYPE_THRESHOLD so the parallel branch runs
+    let shared_vals = 8u64; // each pair shares this many key values
+    let mut base = vec![t(c, v.owl_has_key.0, 8300)];
+    // owl:hasKey list: (key_p)
+    base.push(t(8300, v.rdf_first.0, key_p));
+    base.push(t(8300, v.rdf_rest.0, v.rdf_nil.0));
+    // Subjects are grouped in pairs; both members of a pair carry the SAME set
+    // of `shared_vals` values on key_p, so prp-key derives `s0 sameAs s1` once
+    // per shared value (the duplicate-heavy path).
+    for pair in 0..(n_subjects / 2) {
+        let s0 = 4_000_000 + pair * 2;
+        let s1 = s0 + 1;
+        base.push(t(s0, ty, c));
+        base.push(t(s1, ty, c));
+        for k in 0..shared_vals {
+            let val = 5_000_000 + pair * shared_vals + k;
+            base.push(t(s0, key_p, val));
+            base.push(t(s1, key_p, val));
+        }
+    }
+    assert_strategies_agree(&base);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
 

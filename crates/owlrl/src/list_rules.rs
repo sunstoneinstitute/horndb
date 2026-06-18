@@ -635,6 +635,13 @@ fn fire_prp_key(
     // deduped into the round delta by `extend_delta`.
     let emit_for_x = |x: TermId| -> Vec<(Triple, Provenance)> {
         let mut produced: Vec<(Triple, Provenance)> = Vec::new();
+        // A single `?x` can re-derive the same `?x owl:sameAs ?y` head across
+        // multiple shared `ps[0]` values and `cartesian_zs` rows. The serial
+        // path skipped these immediately via `!out.contains`; the parallel path
+        // can't read the shared delta, so dedup per-`x` here to keep `produced`
+        // from blowing up on duplicate-heavy keys (the only intra-subject head
+        // is `(x sameAs y)`, so a `?y` seen-set suffices).
+        let mut seen: FxHashSet<TermId> = FxHashSet::default();
         for first_t in store.probe(Some(x), ps[0], None) {
             let z0 = first_t.o;
             let candidates: Vec<TermId> = store
@@ -660,7 +667,7 @@ fn fire_prp_key(
                 }
                 for y in survivors {
                     let head = Triple::new(x, vocab.owl_same_as, y);
-                    if !store.contains(&head) {
+                    if seen.insert(y) && !store.contains(&head) {
                         // Body atoms: ?x : c, ?y : c, the shared ps[0] value,
                         // and the matched ?z_i on every remaining key property
                         // (the `x_choice` values, which survivors were filtered
