@@ -120,11 +120,13 @@ fn bench_crosswalk_closure(c: &mut Criterion) {
             boolean: bool_edges,
         } = dense_forms(&edges);
 
-        // CARRIER-COST COMPARISON — both legs do the same work: build the
-        // matrix, close to fixpoint, read `nvals()`. The *only* difference is
-        // the carrier (FP64 `(max,×)` vs Boolean `(∨,∧)`), so the ratio is an
-        // apples-to-apples scalar-confidence carrier cost. Neither leg extracts
-        // result tuples.
+        // CARRIER-COST COMPARISON — the matrix is built *outside* `b.iter`
+        // (matrix construction / dictionary renumbering is not the workload of
+        // interest and is not timed). Both legs then do the same timed work on
+        // the prebuilt matrix: close to fixpoint, read `nvals()`. The *only*
+        // difference is the carrier (FP64 `(max,×)` vs Boolean `(∨,∧)`), so the
+        // ratio is an apples-to-apples scalar-confidence carrier cost. Neither
+        // leg extracts result tuples.
         group.bench_with_input(
             BenchmarkId::new("valued_closure", &label),
             &valued_edges,
@@ -150,11 +152,13 @@ fn bench_crosswalk_closure(c: &mut Criterion) {
             },
         );
 
-        // END-TO-END Fork-A entry point — the full user-facing cost: closure
-        // *plus* extracting + mapping every best-confidence pair back to
-        // dictionary IDs (`CrosswalkGraph::best_confidence_closure`). Reported
-        // separately so it is not confused with the pure carrier-cost ratio
-        // above (the extraction is O(result nnz) and only this leg pays it).
+        // END-TO-END Fork-A entry point — the full *query* cost on a prebuilt
+        // graph: closure *plus* extracting + mapping every best-confidence pair
+        // back to dictionary IDs (`CrosswalkGraph::best_confidence_closure`).
+        // Graph construction (`from_edges`) is outside `b.iter`, same as the
+        // matrices above. Reported separately so it is not confused with the
+        // pure carrier-cost ratio above (the extraction is O(result nnz) and
+        // only this leg pays it).
         group.bench_with_input(
             BenchmarkId::new("valued_end_to_end", &label),
             &edges,
