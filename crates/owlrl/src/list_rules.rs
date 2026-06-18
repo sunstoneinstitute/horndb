@@ -507,13 +507,17 @@ fn is_dirty(dirty: Option<&FxHashSet<TermId>>, p: TermId) -> bool {
 // SPEC-04 F5 — `rdf:type` skew parallelism helpers.
 //
 // The `rdf:type`-driven list rules (`cls-int1`, `cls-uni`, `cax-adc`,
-// `prp-key`) gather a subject extent and run an independent per-subject test
-// that emits at most one derived triple per subject. `map_subjects` runs that
-// test in parallel across rayon's pool when the extent is large enough (and the
-// strategy permits), and sequentially otherwise; `extend_delta` folds the
-// produced candidates into the shared round delta (insert is idempotent, so the
-// triple set is identical to the serial `!out.contains` guard regardless of
-// the order rayon produces results in).
+// `prp-key`) gather a subject extent and run an independent per-subject test.
+// Each rule deduplicates its heads to O(distinct heads) *before* collecting
+// (one candidate per distinct subject, or a per-subject `seen` set for
+// `prp-key`), so the parallel path never allocates the per-membership /
+// per-pair duplicates the serial `!out.contains` guard used to skip. The store
+// reads in a materialise round are immutable, so the per-subject work is
+// data-parallel: `map_subjects` runs it across rayon's pool above
+// `PAR_TYPE_THRESHOLD` (and sequentially otherwise / under `Serial`), and
+// `extend_delta` folds the result into the round delta. `insert` is idempotent,
+// so the closure is identical to the serial path regardless of the order rayon
+// produces results in.
 // ---------------------------------------------------------------------------
 
 /// Apply `f` to every subject in `xs`, collecting the `Some` results. Uses
@@ -530,8 +534,10 @@ where
     }
 }
 
-/// Fold rule-produced `(triple, provenance)` candidates into `out`. `insert`
-/// dedups, so re-derivations and per-subject duplicates collapse to one entry.
+/// Fold rule-produced `(triple, provenance)` candidates into `out`. Each rule
+/// already dedups its heads upstream (a subject `seen` set, or one head per
+/// distinct subject), so `produced` is O(distinct heads); `insert` is the final
+/// dedup against the round delta / store and is idempotent.
 fn extend_delta(out: &mut Delta, produced: Vec<(Triple, Provenance)>) {
     for (t, prov) in produced {
         out.insert(t, prov);
@@ -830,25 +836,27 @@ fn fire_cls_uni(
     parallel: ParallelStrategy,
     out: &mut Delta,
 ) {
-    // Gather every `(subject, member-class)` membership across the union list
-    // into an owned vec, then map per-membership. The member class is carried
-    // alongside the subject so each derived triple records the exact body atom
-    // (`?x rdf:type ci`) that fired it — identical to the serial path.
-    let memberships: Vec<(TermId, TermId)> = cs
-        .iter()
-        .flat_map(|&c_i| {
-            store
-                .probe(None, vocab.rdf_type, Some(c_i))
-                .map(move |t| (t.s, c_i))
-        })
-        .collect();
+    // The head `?x rdf:type c` is the same regardless of which union member
+    // `c_i` matched, so collect each subject **once** (recording the first
+    // member it was found under for the single-atom provenance) rather than once
+    // per membership. This keeps the candidate vector O(distinct subjects)
+    // instead of O(memberships) on subjects typed as several union members.
+    let mut seen: FxHashSet<TermId> = FxHashSet::default();
+    let mut subjects: Vec<(TermId, TermId)> = Vec::new();
+    for &c_i in cs {
+        for ts in store.probe(None, vocab.rdf_type, Some(c_i)) {
+            if seen.insert(ts.s) {
+                subjects.push((ts.s, c_i));
+            }
+        }
+    }
 
     let emit = |(x, c_i): (TermId, TermId)| -> Option<(Triple, Provenance)> {
         let head = Triple::new(x, vocab.rdf_type, c);
         if store.contains(&head) {
             return None;
         }
-        // Body atom: the single matched membership ?x rdf:type ci.
+        // Body atom: one matched membership ?x rdf:type ci (any is a valid proof).
         Some((
             head,
             Provenance {
@@ -858,11 +866,10 @@ fn fire_cls_uni(
         ))
     };
 
-    let produced = if parallel == ParallelStrategy::Auto && memberships.len() >= PAR_TYPE_THRESHOLD
-    {
-        memberships.par_iter().filter_map(|&m| emit(m)).collect()
+    let produced = if parallel == ParallelStrategy::Auto && subjects.len() >= PAR_TYPE_THRESHOLD {
+        subjects.par_iter().filter_map(|&m| emit(m)).collect()
     } else {
-        memberships.iter().filter_map(|&m| emit(m)).collect()
+        subjects.iter().filter_map(|&m| emit(m)).collect()
     };
     extend_delta(out, produced);
 }
@@ -882,6 +889,12 @@ fn fire_cax_adc(
     parallel: ParallelStrategy,
     out: &mut Delta,
 ) {
+    // The head is always `?x rdf:type owl:Nothing`, so a subject that violates
+    // several disjoint pairs must emit it only once. Carry a subject `seen` set
+    // across the (schema-sized) pair loop and filter each pair's candidates
+    // through it, keeping total allocation O(distinct violating subjects)
+    // instead of O(subjects · pairs).
+    let mut seen: FxHashSet<TermId> = FxHashSet::default();
     for i in 0..cs.len() {
         let xs_i: Vec<TermId> = store
             .probe(None, vocab.rdf_type, Some(cs[i]))
@@ -895,7 +908,7 @@ fn fire_cax_adc(
             // For this disjoint pair (ci, cj), each subject of ci that is also a
             // cj is an inconsistency. The per-subject test is independent, so it
             // parallelises over the (skewed) ci extent.
-            let emit = |x: TermId| -> Option<(Triple, Provenance)> {
+            let emit = |x: TermId| -> Option<(TermId, Triple, Provenance)> {
                 if !store.contains(&Triple::new(x, vocab.rdf_type, cj)) {
                     return None;
                 }
@@ -905,6 +918,7 @@ fn fire_cax_adc(
                 }
                 // Body atoms: ?x rdf:type ci and ?x rdf:type cj.
                 Some((
+                    x,
                     head,
                     Provenance {
                         rule_id: "cax-adc",
@@ -915,7 +929,19 @@ fn fire_cax_adc(
                     },
                 ))
             };
-            extend_delta(out, map_subjects(&xs_i, parallel, emit));
+            // `map_subjects` over xs_i yields ≤ one head per distinct subject of
+            // this pair; the outer `seen` collapses the same subject across pairs.
+            let pair_hits: Vec<(TermId, Triple, Provenance)> =
+                if parallel == ParallelStrategy::Auto && xs_i.len() >= PAR_TYPE_THRESHOLD {
+                    xs_i.par_iter().filter_map(|&x| emit(x)).collect()
+                } else {
+                    xs_i.iter().filter_map(|&x| emit(x)).collect()
+                };
+            for (x, head, prov) in pair_hits {
+                if seen.insert(x) {
+                    out.insert(head, prov);
+                }
+            }
         }
     }
 }
