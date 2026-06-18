@@ -45,7 +45,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [x] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [x] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
-- [v] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-108-faster-integration-tests · 2026-06-18T16:56:44Z_
+- [x] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [x] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
@@ -235,7 +235,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   populated, and a measured decision on Fork B/PreJIT — then open the SPEC-05
   addendum. Cross-refs: SPEC-05, SPEC-02 (RDF 1.2), SPEC-06, rdf-registry #9/#10/#11.
 
-- [v] **Speed up integration test runs.** ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
+- [x] **Speed up integration test runs.** ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
   `cargo test --workspace` is slow, dominated by ~89 separate `crates/*/tests/*.rs`
   targets (sparql 25, incremental 18, …) — each a separately-linked binary that
   cargo runs **serially** by default. Volume has grown with Stage-1 features, not a
