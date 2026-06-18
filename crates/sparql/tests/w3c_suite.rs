@@ -152,6 +152,11 @@ w3c_case!(basic_004, "basic-004");
 w3c_case!(basic_005, "basic-005");
 w3c_case!(expr_001, "expr-001");
 w3c_case!(expr_002, "expr-002");
+// Non-recursive property paths (SPEC-07 #49): alternative `|`, negated
+// property set `!`, zero-or-one `?`.
+w3c_case!(path_alt_001, "path-alt-001");
+w3c_case!(path_neg_001, "path-neg-001");
+w3c_case!(path_opt_001, "path-opt-001");
 
 // ── HornBackend leg ───────────────────────────────────────────────────────────
 
@@ -171,3 +176,6 @@ w3c_case_horn!(basic_004_hornbackend, "basic-004");
 w3c_case_horn!(basic_005_hornbackend, "basic-005");
 w3c_case_horn!(expr_001_hornbackend, "expr-001");
 w3c_case_horn!(expr_002_hornbackend, "expr-002");
+w3c_case_horn!(path_alt_001_hornbackend, "path-alt-001");
+w3c_case_horn!(path_neg_001_hornbackend, "path-neg-001");
+w3c_case_horn!(path_opt_001_hornbackend, "path-opt-001");

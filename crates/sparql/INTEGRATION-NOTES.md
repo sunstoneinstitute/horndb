@@ -142,3 +142,38 @@ this path via the `--materialize` flag.
 
 Named-graph patterns remain unscoped (unchanged Stage-1 behaviour).
 See the GRAPH patterns section above.
+
+### Non-recursive property paths (#49)
+
+`translate.rs::translate_path` lowers the non-recursive path operators to
+algebra at translation time, so the planner/runtime never see path nodes:
+
+- `/` (Sequence) and `^` (Inverse) expand into triple patterns, as before.
+- `|` (Alternative) and `?` (ZeroOrOne) lower to `Union`.
+- `!` (NegatedPropertySet) lowers to a wildcard-predicate BGP wrapped in a
+  `Filter` of `NOT IN {p1,…,pn}`. spargebra carries only forward predicates
+  in `NegatedPropertySet`; an inverse member `!(^p)` parses as
+  `Reverse(NegatedPropertySet([p]))` and is handled by the `Reverse` arm.
+
+Two design points worth recording:
+
+1. **Blank nodes in WHERE patterns are join variables.** spargebra flattens
+   a path *sequence* `s p1/p2 o` into two patterns joined by a freshly minted
+   blank node. A blank node in a query pattern is a non-distinguished variable
+   (SPARQL 1.1 §4.1.4), so `match_term` now maps blank-node subject/object
+   positions to deterministically named join variables instead of constants.
+   This is what makes `Alternative`/`NegatedPropertySet` sub-paths compose
+   across an algebra `Join`, and it also fixes a *latent* bug: plain `/`
+   sequences were only ever joined correctly when both steps landed in a single
+   BGP — across a `Join` boundary they silently produced no rows.
+
+2. **Zero-length `?` is bounded.** `p?` is `Union(zero-length, single-step)`.
+   The zero-length branch is lowered without enumerating the graph: both
+   endpoints ground → equality test; one variable → bind it to the other
+   endpoint; same variable twice → the unit relation. Two *distinct* unbound
+   endpoints would have to range over every node in the graph, so that case is
+   rejected with `UnsupportedPathOp` — it belongs with the recursive `*`/`+`
+   increment (#50) that routes through closure.
+
+Kleene `*`/`+` remain rejected (`UnsupportedPathOp`); they are recursive and
+route to closure under increment #50.

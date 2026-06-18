@@ -2,8 +2,10 @@
 //!
 //! Stage 1 supports a deliberately small operator set; constructs we
 //! do not yet handle return `SparqlError::UnsupportedAlgebra` (or
-//! `UnsupportedPathOp` for the Kleene-star property paths) so the
-//! planner never has to defend against them.
+//! `UnsupportedPathOp` for the recursive `*`/`+` property paths) so the
+//! planner never has to defend against them. The non-recursive path
+//! operators (`/`, `^`, `|`, `?`, `!`) are lowered in
+//! [`translate_path`].
 
 use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
@@ -117,13 +119,15 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             path,
             object,
         } => {
-            // Stage 1 supports only Seq (`/`) and Inverse (`^`); both
-            // expand to additional triple patterns (fresh variables
-            // for the intermediate node in `Seq`, swapped subject/
-            // object for `Inverse`). Kleene-star, alternation, etc.
-            // are rejected.
-            let patterns = expand_path(subject, path, object, cfg)?;
-            Ok(Algebra::Bgp { patterns })
+            // Non-recursive property paths lower at translation time:
+            //   `/` (Seq) and `^` (Inverse) expand into triple patterns
+            //   (fresh intermediate var for Seq, swapped subject/object
+            //   for Inverse); `|` (Alternative) and `?` (ZeroOrOne) lower
+            //   to `Union`; `!` (NegatedPropertySet) lowers to a wildcard
+            //   predicate filtered by `NOT IN {…}`. Kleene `*`/`+`
+            //   (recursive, route to closure) are still rejected.
+            let mut fresh = 0usize;
+            translate_path(subject, path, object, &mut fresh, cfg)
         }
         GraphPattern::Join { left, right } => Ok(Algebra::Join {
             left: Box::new(translate_pattern(left, cfg)?),
@@ -234,10 +238,14 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
 }
 
 fn translate_triple(tp: &SpgTriplePattern, cfg: &SparqlConfig) -> Result<TriplePattern> {
+    // Blank nodes in a WHERE graph pattern are non-distinguished
+    // variables (SPARQL 1.1 §4.1.4), so the subject/object positions go
+    // through `match_term`, which maps them to join variables. The
+    // predicate position cannot be a blank node.
     Ok(TriplePattern {
-        subject: term_pattern_to_term(&tp.subject, cfg)?,
+        subject: match_term(&tp.subject, cfg)?,
         predicate: named_node_pattern_to_term(&tp.predicate)?,
-        object: term_pattern_to_term(&tp.object, cfg)?,
+        object: match_term(&tp.object, cfg)?,
     })
 }
 
@@ -514,55 +522,194 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
     seen
 }
 
-/// Expand a (Stage-1 supported) property-path expression into a flat
-/// list of triple patterns. Only `Seq` (`/`) and `Inverse` (`^`) and
-/// a bare `NamedNode` predicate are supported.
-fn expand_path(
+/// Lower a non-recursive property-path expression between `subject` and
+/// `object` to an [`Algebra`] subtree. Supported operators:
+///
+/// * bare `NamedNode` predicate, `^` (Inverse), `/` (Sequence) — expand
+///   to one or more triple patterns (a `Bgp`, joined for sub-paths that
+///   are not themselves BGPs);
+/// * `|` (Alternative) and `?` (ZeroOrOne) — `Union`;
+/// * `!` (NegatedPropertySet) — a wildcard-predicate `Bgp` wrapped in a
+///   `Filter` that excludes the listed predicates.
+///
+/// Kleene `*`/`+` are recursive (route to closure) and remain rejected
+/// with [`SparqlError::UnsupportedPathOp`].
+///
+/// `fresh` is a monotonically increasing counter used to mint the
+/// intermediate variables introduced by `Sequence`; threading it through
+/// the recursion keeps those names unique within a single path.
+fn translate_path(
     subject: &TermPattern,
     path: &PropertyPathExpression,
     object: &TermPattern,
-    cfg: &SparqlConfig,
-) -> Result<Vec<TriplePattern>> {
-    let mut out = Vec::new();
-    let mut fresh = 0usize;
-    expand_path_into(subject, path, object, &mut out, &mut fresh, cfg)?;
-    Ok(out)
-}
-
-fn expand_path_into(
-    subject: &TermPattern,
-    path: &PropertyPathExpression,
-    object: &TermPattern,
-    out: &mut Vec<TriplePattern>,
     fresh: &mut usize,
     cfg: &SparqlConfig,
-) -> Result<()> {
+) -> Result<Algebra> {
     use PropertyPathExpression as P;
     match path {
-        P::NamedNode(n) => {
-            out.push(TriplePattern {
-                subject: term_pattern_to_term(subject, cfg)?,
+        P::NamedNode(n) => Ok(Algebra::Bgp {
+            patterns: vec![TriplePattern {
+                subject: match_term(subject, cfg)?,
                 predicate: Term::Iri(n.as_str().to_owned()),
-                object: term_pattern_to_term(object, cfg)?,
-            });
-            Ok(())
-        }
+                object: match_term(object, cfg)?,
+            }],
+        }),
         P::Reverse(inner) => {
-            // ^p between s and o == p between o and s
-            expand_path_into(object, inner, subject, out, fresh, cfg)
+            // `^p` between s and o == `p` between o and s.
+            translate_path(object, inner, subject, fresh, cfg)
         }
         P::Sequence(a, b) => {
-            // (a / b) between s and o introduces a fresh var v with
-            // s -a-> v -b-> o
+            // `(a / b)` between s and o introduces a fresh var v with
+            // `s -a-> v -b-> o`. Each side lowers independently; if both
+            // are plain BGPs we merge their patterns, otherwise we `Join`.
             let mid_name = format!("__path_seq_{}", *fresh);
             *fresh += 1;
-            let mid_var = Variable::new(mid_name.clone())
+            let mid_var = Variable::new(mid_name)
                 .map_err(|e| SparqlError::UnsupportedAlgebra(format!("fresh var: {e}")))?;
             let mid_pattern = TermPattern::Variable(mid_var);
-            expand_path_into(subject, a, &mid_pattern, out, fresh, cfg)?;
-            expand_path_into(&mid_pattern, b, object, out, fresh, cfg)?;
-            Ok(())
+            let left = translate_path(subject, a, &mid_pattern, fresh, cfg)?;
+            let right = translate_path(&mid_pattern, b, object, fresh, cfg)?;
+            Ok(join_algebra(left, right))
+        }
+        P::Alternative(a, b) => {
+            // `(a | b)` between s and o is the union of the two paths.
+            let left = translate_path(subject, a, object, fresh, cfg)?;
+            let right = translate_path(subject, b, object, fresh, cfg)?;
+            Ok(Algebra::Union {
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        P::ZeroOrOne(inner) => {
+            // `p?` between s and o is the union of the zero-length path
+            // (s and o denote the same node) with the single `p` step.
+            let zero = zero_length_path(subject, object, cfg)?;
+            let one = translate_path(subject, inner, object, fresh, cfg)?;
+            Ok(Algebra::Union {
+                left: Box::new(zero),
+                right: Box::new(one),
+            })
+        }
+        P::NegatedPropertySet(preds) => {
+            // `!(p1|…|pn)` between s and o: match `s ?p o` with a fresh
+            // predicate variable, then filter out the excluded set. Note
+            // spargebra carries only forward predicates here; an inverse
+            // member `^p` is parsed as `Reverse(NegatedPropertySet([p]))`
+            // and handled by the `Reverse` arm above.
+            let pred_name = format!("__path_neg_{}", *fresh);
+            *fresh += 1;
+            let pred_var = Var::new(pred_name);
+            let bgp = Algebra::Bgp {
+                patterns: vec![TriplePattern {
+                    subject: match_term(subject, cfg)?,
+                    predicate: Term::Var(pred_var.clone()),
+                    object: match_term(object, cfg)?,
+                }],
+            };
+            if preds.is_empty() {
+                // `!()` excludes nothing — every predicate matches.
+                return Ok(bgp);
+            }
+            let lhs = Expr::Term(Term::Var(pred_var));
+            let list = preds
+                .iter()
+                .map(|n| Expr::Term(Term::Iri(n.as_str().to_owned())))
+                .collect();
+            Ok(Algebra::Filter {
+                expr: Expr::Not(Box::new(Expr::In(Box::new(lhs), list))),
+                inner: Box::new(bgp),
+            })
         }
         other => Err(SparqlError::UnsupportedPathOp(format!("{other:?}"))),
+    }
+}
+
+/// Combine two property-path sub-algebras. When both are plain BGPs we
+/// concatenate their patterns (the common case — keeps `/` and `^`
+/// chains in a single scan-friendly BGP); otherwise we `Join` them so
+/// `Union`/`Filter` sub-paths compose correctly.
+fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
+    match (left, right) {
+        (Algebra::Bgp { patterns: mut l }, Algebra::Bgp { patterns: r }) => {
+            l.extend(r);
+            Algebra::Bgp { patterns: l }
+        }
+        (l, r) => Algebra::Join {
+            left: Box::new(l),
+            right: Box::new(r),
+        },
+    }
+}
+
+/// The zero-length path between `subject` and `object` — they must denote
+/// the same node. Lowers without enumerating the graph:
+///
+/// * both ground & equal → a single empty solution; both ground & unequal
+///   → no solution;
+/// * one variable, one ground → bind the variable to the ground term;
+/// * both the *same* variable → a single empty solution (trivially equal).
+///
+/// The genuinely unbounded case — two *distinct* variables, which would
+/// have to range over every node in the graph — is rejected; it belongs
+/// with the recursive `*`/`+` increment that routes through closure.
+///
+/// Endpoints are lowered through [`match_term`], so a
+/// blank-node endpoint minted by spargebra's sequence flattening is
+/// treated as a (join) variable, just like in the single-step arms.
+fn zero_length_path(
+    subject: &TermPattern,
+    object: &TermPattern,
+    cfg: &SparqlConfig,
+) -> Result<Algebra> {
+    // A single empty solution (the identity / unit relation).
+    let unit = Algebra::Values {
+        vars: Vec::new(),
+        rows: vec![Vec::new()],
+    };
+    // No solution.
+    let empty = Algebra::Values {
+        vars: Vec::new(),
+        rows: Vec::new(),
+    };
+    let s = match_term(subject, cfg)?;
+    let o = match_term(object, cfg)?;
+    match (s, o) {
+        (Term::Var(sv), Term::Var(ov)) => {
+            if sv == ov {
+                Ok(unit)
+            } else {
+                Err(SparqlError::UnsupportedPathOp(
+                    "zero-or-one path `?` between two distinct unbound variables \
+                     (would enumerate every node) — out of Stage-1 scope"
+                        .into(),
+                ))
+            }
+        }
+        (Term::Var(v), other) | (other, Term::Var(v)) => Ok(Algebra::Values {
+            vars: vec![v],
+            rows: vec![vec![Some(other)]],
+        }),
+        // Both ground: equal iff their term forms match.
+        (st, ot) => Ok(if st == ot { unit } else { empty }),
+    }
+}
+
+/// Lower a term that appears in a *matching* position of a WHERE graph
+/// pattern (triple-pattern or property-path endpoint). Identical to
+/// [`term_pattern_to_term`] except that a **blank node** is mapped to a
+/// (deterministically named) variable rather than a constant.
+///
+/// A blank node in a query pattern is a non-distinguished variable
+/// (SPARQL 1.1 §4.1.4): two occurrences of the same label must co-refer
+/// and join, but it can never match a *specific* blank node in the data.
+/// spargebra also relies on this when it flattens a path sequence
+/// `s p1/p2 o` into two joined patterns connected by a freshly minted
+/// blank node — that node must act as a join key across the resulting
+/// algebra. Lowering it to a constant (as the generic term lowering does)
+/// would match nothing.
+fn match_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
+    match tp {
+        TermPattern::BlankNode(b) => Ok(Term::Var(Var::new(format!("__pp_bnode_{}", b.as_str())))),
+        other => term_pattern_to_term(other, cfg),
     }
 }

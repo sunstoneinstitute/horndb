@@ -213,4 +213,8 @@ tests = [
     "selected_subset/basic-005",
     "selected_subset/expr-001",
     "selected_subset/expr-002",
+    # Non-recursive property paths (SPEC-07 #49).
+    "selected_subset/path-alt-001",
+    "selected_subset/path-neg-001",
+    "selected_subset/path-opt-001",
 ]

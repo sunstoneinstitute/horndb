@@ -135,9 +135,12 @@ pub enum Func {
 ///   * Group/Aggregate (no GROUP BY in Stage 1)
 ///   * Minus
 ///   * Service
-///   * PathOpStar/Plus/Question/Alt/Inv/NegSet — only `Seq` (`/`)
-///     and `Inverse` (`^`) collapse into expanded triple patterns
-///     in [`translate`].
+///   * Recursive property paths `*`/`+` (Kleene) — these route to
+///     closure and are still rejected in [`translate`]. The
+///     non-recursive operators are lowered there: `/` (Seq) and `^`
+///     (Inverse) collapse into expanded triple patterns; `|` (Alt) and
+///     `?` (ZeroOrOne) lower to `Union`; `!` (NegatedPropertySet) lowers
+///     to a wildcard-predicate BGP under a `NOT IN` filter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Algebra {
     Bgp {

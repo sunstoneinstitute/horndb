@@ -1,0 +1,9 @@
+{
+  "head": { "vars": ["o"] },
+  "results": {
+    "bindings": [
+      { "o": { "type": "uri", "value": "http://example.org/alice" } },
+      { "o": { "type": "uri", "value": "http://example.org/bob" } }
+    ]
+  }
+}
