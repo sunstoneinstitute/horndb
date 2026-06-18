@@ -69,3 +69,35 @@ graph, SPEC-05's `EQREL` structure must:
 No `horndb-closure` API needs to change for Stage 0/1 — this
 integration is a SPEC-05 plan task that calls into `horndb-ml`'s
 existing types only.
+
+## Valued-reasoning readiness metrics (#11)
+
+Instrumentation added *before* any custom-semiring acceleration (#12), so the
+build/buy call for JIT/PreJIT is measured, not guessed.
+
+- `grb::ValuedMatrix` — an `f64`-valued GraphBLAS matrix (the Fork-A scalar
+  confidence carrier). Two `(max, ×)` multiply paths are exposed on purpose:
+  `mxm_max_times_builtin` (prepackaged `GrB_MAX_TIMES_SEMIRING_FP64`,
+  FactoryKernel) and `mxm_max_times_udf` (a `(max, ×)` semiring assembled from
+  user-defined ops via `grb::UserSemiring`, forcing SuiteSparse's generic
+  kernel). The throughput ratio between the two is exactly the multiplier a
+  JIT/PreJIT specialization would remove.
+- `grb::UserSemiring` owns its `GrB_BinaryOp`/`GrB_Monoid`/`GrB_Semiring`
+  handles (RAII free on drop) so they outlive any `GrB_mxm` referencing them.
+  The two `extern "C"` user ops (`udf_max`, `udf_times`) are plain scalar-FP64
+  functions matching `GxB_binary_function`.
+- `metrics::valued_transitive_closure` runs a best-confidence-path `(max, ×)`
+  closure and returns `metrics::ClosureMetrics`: `N`, input/closure `nnz`,
+  density, iterations-to-fixpoint, per-iteration frontier-`nnz` work profile,
+  `GrB_mxm` time vs total time (`mxm_share`), and the `CarrierShape`. Selecting
+  `ValuedKernel::{Builtin, Udf}` toggles the kernel under test.
+- `benches/valued_readiness.rs` produces the two decision-relevant numbers
+  (valued-vs-boolean kernel split; generic-kernel penalty). Results +
+  decision rule live in `BENCHMARKS.md`. `tests/valued_closure.rs` pins
+  correctness, including that the builtin and UDF kernels are bit-identical.
+
+**Why FP64 / `(max, ×)` and not the boolean wrapper:** boolean matrices can use
+SuiteSparse's iso/bitmap fast paths; a valued carrier cannot, which is the cost
+this metric quantifies. The measured generic-kernel penalty on this v10.3.0
+build for a *scalar* FP64 op is ~1.0×, so PreJIT is only worth revisiting for a
+*structured* (UDT) carrier — recorded as the #12 gate.
