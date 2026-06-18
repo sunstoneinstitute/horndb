@@ -146,7 +146,6 @@ pub fn valued_transitive_closure(
     let mut reach = ValuedMatrix::from_weighted_edges(n, &edges)?;
     let mut frontier = ValuedMatrix::from_weighted_edges(n, &edges)?;
     let mut iterations: u32 = 0;
-    let mut prev_sum = reach.reduce_sum()?;
 
     loop {
         // Frontier := Frontier ⊗ M (one more hop), timing just the MxM.
@@ -165,26 +164,29 @@ pub fn valued_transitive_closure(
             break;
         }
 
+        // Exact fixed-point test, done entirely GraphBLAS-side so it does not
+        // dominate (or distort) the kernel measurement:
+        //   - `nnz` growth detects *new* reachable pairs (new support);
+        //   - `count_strictly_greater` detects a *weight-only* improvement on an
+        //     already-present pair (a longer path with higher confidence),
+        //     which a pure `nnz` check would miss and an FP-sum check could miss
+        //     when the gain is below the ULP of a large total.
+        let prev_nnz = reach.nvals()?;
+        let improved = next_frontier.count_strictly_greater(&reach)?;
         reach.max_assign(&next_frontier)?;
         reach.wait()?;
-        // Fixed point on the accumulator's *value*, not just its support: under
-        // the monotone `(max, ×)` accumulation the total sum strictly increases
-        // whenever any edge weight improves, including longer paths that
-        // overwrite an already-present pair with a better confidence. A pure
-        // `nnz`-stable check would stop too early on such weight-only gains.
-        let new_sum = reach.reduce_sum()?;
-        if new_sum == prev_sum {
+        let grew = reach.nvals()? != prev_nnz;
+        if !grew && improved == 0 {
             break;
         }
-        prev_sum = new_sum;
         frontier = next_frontier;
 
         // Safety cap. With weights in `(0, 1]` the best-confidence weight of any
-        // pair is realised by a *simple* path (length ≤ N-1), so the value sum
-        // is monotone *bounded* and converges within N iterations. The cap only
-        // bites on out-of-contract inputs (weights > 1 over a cycle, where the
-        // `(max, ×)` product can grow without bound); it stops the readiness
-        // measurement from looping forever rather than silently diverging.
+        // pair is realised by a *simple* path (length ≤ N-1), so the closure
+        // converges within N iterations. The cap only bites on out-of-contract
+        // inputs (weights > 1 over a cycle, where the `(max, ×)` product can
+        // grow without bound); it stops the readiness measurement from looping
+        // forever rather than silently diverging.
         if iterations as u64 >= n {
             break;
         }

@@ -1,7 +1,7 @@
 //! Correctness tests for the valued `(max, ×)` closure and its metrics
 //! instrumentation (TASKS.md #11).
 
-use horndb_closure::grb::{init_once, ValuedMatrix};
+use horndb_closure::grb::{init_once, UserSemiring, ValuedMatrix};
 use horndb_closure::metrics::{valued_transitive_closure, CarrierShape, ValuedKernel};
 
 fn weight_of(edges: &[(u64, u64, f64)], r: u64, c: u64) -> Option<f64> {
@@ -102,6 +102,40 @@ fn builtin_and_udf_kernels_agree() {
     }
     assert_eq!(ma.closure_nnz, mb.closure_nnz);
     assert_eq!(ma.iterations_to_fixpoint, mb.iterations_to_fixpoint);
+}
+
+/// A UDF `(max, ×)` multiply must remain valid after the borrowed
+/// `UserSemiring` is dropped — `mxm_max_times_udf` materialises the result
+/// before returning, so the pending nonblocking op cannot reference freed
+/// op/monoid handles. Reading the result *after* the drop would be a
+/// use-after-free if the multiply were left pending.
+#[test]
+fn udf_mxm_survives_semiring_drop() {
+    init_once().unwrap();
+    let a = ValuedMatrix::from_weighted_edges(3, &[(0, 1, 0.9), (1, 2, 0.8)]).unwrap();
+    let b = ValuedMatrix::from_weighted_edges(3, &[(0, 1, 0.5), (1, 2, 0.5)]).unwrap();
+
+    let c = {
+        let semiring = UserSemiring::max_times_fp64().unwrap();
+        a.mxm_max_times_udf(&b, &semiring).unwrap()
+        // `semiring` drops here, freeing its ops/monoid.
+    };
+
+    // If the multiply were still pending, this read would touch freed handles.
+    let edges = c.extract_weighted_edges().unwrap();
+    // a*b over (max,×): (0,2) = a[0,1]*b[1,2] = 0.9*0.5 = 0.45.
+    assert_eq!(weight_of(&edges, 0, 2), Some(0.9 * 0.5));
+}
+
+/// `reduce_sum` totals the accumulated confidence mass.
+#[test]
+fn valued_reduce_sum() {
+    init_once().unwrap();
+    let m =
+        ValuedMatrix::from_weighted_edges(4, &[(0, 1, 0.5), (1, 2, 0.25), (2, 3, 0.125)]).unwrap();
+    let s = m.reduce_sum().unwrap();
+    assert!((s - 0.875).abs() < 1e-12, "expected 0.875, got {s}");
+    assert_eq!(ValuedMatrix::new(4).unwrap().reduce_sum().unwrap(), 0.0);
 }
 
 /// Empty input → empty closure, zero iterations, well-formed metrics.

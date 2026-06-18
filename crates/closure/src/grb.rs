@@ -286,6 +286,14 @@ impl ValuedMatrix {
     /// [`mxm_max_times_builtin`](Self::mxm_max_times_builtin) but routes
     /// SuiteSparse onto its generic kernel — the measurement target for the
     /// JIT/PreJIT penalty.
+    ///
+    /// The multiply is **materialised before returning** (`GrB_Matrix_wait`).
+    /// GraphBLAS runs in nonblocking mode, so the `GrB_mxm` could otherwise
+    /// stay pending and reference `semiring`'s ops after the borrowed
+    /// `&UserSemiring` is dropped — a use-after-free of the op/monoid handles.
+    /// Forcing completion here makes the returned matrix independent of the
+    /// semiring's lifetime. (This is also why this call is timed as the kernel
+    /// cost in the readiness bench: the work has actually happened.)
     pub fn mxm_max_times_udf(
         &self,
         other: &ValuedMatrix,
@@ -304,6 +312,8 @@ impl ValuedMatrix {
                 std::ptr::null_mut(),
             ))?;
         }
+        // Materialise while `semiring` is still borrowed/alive.
+        c.wait()?;
         Ok(c)
     }
 
@@ -337,12 +347,10 @@ impl ValuedMatrix {
 
     /// Sum of all stored entries (`PLUS` reduction over `f64`).
     ///
-    /// Used as a *value* fixed-point signal: because the `(max, ×)`
-    /// accumulation in [`max_assign`](Self::max_assign) is monotone
-    /// non-decreasing per entry, the total sum strictly increases on any
-    /// iteration that improves *any* edge weight — even when the support
-    /// (`nnz`) is unchanged. Stopping only on stable `nnz` would miss longer
-    /// paths that improve an already-present pair.
+    /// A cheap aggregate over the valued carrier — total accumulated
+    /// confidence mass. (Not used as the closure fixed-point signal: an exact
+    /// entrywise `>` count is used there, because a single edge can improve by
+    /// less than the ULP of a large sum.)
     pub fn reduce_sum(&self) -> Result<f64, GrbError> {
         let mut acc: f64 = 0.0;
         unsafe {
@@ -355,6 +363,41 @@ impl ValuedMatrix {
             ))?;
         }
         Ok(acc)
+    }
+
+    /// Count coordinates where `self > other` (strictly), over the pattern
+    /// **intersection** of the two matrices.
+    ///
+    /// Exact and entirely GraphBLAS-side (one `eWiseMult` with `GrB_GT_FP64`
+    /// plus an `nvals` read), so it can be used as a cheap per-iteration
+    /// fixed-point signal without the cost of extracting and comparing tuples
+    /// in Rust. Coordinates present in `self` but absent in `other` (new
+    /// support) are *not* counted here — the closure loop detects those
+    /// separately via `nvals` growth, so the two signals together are exact.
+    pub fn count_strictly_greater(&self, other: &ValuedMatrix) -> Result<u64, GrbError> {
+        assert_eq!(self.nrows, other.nrows);
+        assert_eq!(self.ncols, other.ncols);
+        let mask = ValuedMatrix::new(self.nrows)?;
+        unsafe {
+            // mask = (self .> other) over the intersection; GT yields 1.0 where
+            // self > other and stores nothing where self <= other? No — GT
+            // stores a result for every intersection coordinate. We then count
+            // the nonzeros: GxB stores explicit 0.0 too, so select afterwards.
+            GrbError::check(ffi::GrB_Matrix_eWiseMult_BinaryOp(
+                mask.inner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                ffi::GrB_GT_FP64,
+                self.inner,
+                other.inner,
+                std::ptr::null_mut(),
+            ))?;
+        }
+        mask.wait()?;
+        // `GT` writes an explicit entry (1.0 or 0.0) at every shared coord, so
+        // count only the truthy ones by reducing the boolean-as-f64 to a sum.
+        let truthy = mask.reduce_sum()?;
+        Ok(truthy as u64)
     }
 
     /// Extract all stored entries as `(row, col, weight)` triples, row-major.
