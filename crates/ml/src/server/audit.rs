@@ -75,6 +75,20 @@ pub async fn handle_ml_audit(
     State(state): State<MlAppState>,
     Query(p): Query<AuditParams>,
 ) -> impl IntoResponse {
+    // Fail closed when ML is disabled (matches `/nl-query` and the
+    // `server/mod.rs` contract). The audit log only ever contains
+    // ML-derived facts, so gating it on the master switch keeps the whole
+    // ML HTTP surface inert when the operator turns ML off.
+    if !state.registry.is_enabled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorBody {
+                error: "ML disabled: audit endpoint unavailable".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     let since: DateTime<Utc> = match &p.since {
         None => DateTime::<Utc>::UNIX_EPOCH,
         Some(s) => {

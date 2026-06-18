@@ -237,6 +237,18 @@ fn get_audit(uri: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn ml_audit_fails_closed_when_ml_disabled() {
+    // Even with seeded facts, a disabled registry must not serve the audit
+    // log — the whole ML HTTP surface is opt-in / fail-closed.
+    let reg = MlRegistry::new(MlConfig::enabled());
+    seed_audit(&reg, 3);
+    reg.reload_config(MlConfig::disabled());
+    let app = build_router(state_with(reg, false));
+    let resp = app.oneshot(get_audit("/ml-audit")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn ml_audit_returns_seeded_facts() {
     let reg = MlRegistry::new(MlConfig::enabled());
     seed_audit(&reg, 3);
