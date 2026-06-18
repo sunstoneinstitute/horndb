@@ -37,9 +37,26 @@
 
 use std::collections::HashMap;
 
+use thiserror::Error;
+
 use crate::error::GrbError;
-use crate::grb::ValuedMatrix;
+use crate::grb::{init_once, ValuedMatrix};
 use crate::metrics::{valued_transitive_closure, ClosureMetrics, ValuedKernel};
+
+/// Errors building or resolving a [`CrosswalkGraph`].
+#[derive(Debug, Error)]
+pub enum CrosswalkError {
+    /// An edge carried a confidence outside the `(0, 1]` contract the
+    /// best-confidence `(max, ×)` closure relies on. Weights `> 1` can make the
+    /// product diverge over a cycle (caught only by the `N`-iteration safety
+    /// cap, yielding cap-dependent — i.e. unsound — answers); weights `≤ 0` are
+    /// not confidences. Rejected at the boundary so the closure stays sound.
+    #[error("edge {src}->{dst} has confidence {confidence}, expected a finite value in (0, 1]")]
+    InvalidConfidence { src: u64, dst: u64, confidence: f64 },
+    /// A GraphBLAS operation failed.
+    #[error(transparent)]
+    Grb(#[from] GrbError),
+}
 
 /// A single annotated crosswalk/relation edge: `src --confidence--> dst`,
 /// keyed by dictionary IDs. `confidence` is the value carried on the RDF 1.2
@@ -85,9 +102,19 @@ impl CrosswalkGraph {
     /// Duplicate `(src, dst)` edges keep the **maximum** confidence (matching
     /// the `(max, ×)` carrier — the strongest direct assertion wins).
     ///
-    /// Returns an error only on a GraphBLAS failure; an empty edge list yields
-    /// an empty graph (closure is then empty).
-    pub fn from_edges(edges: &[CrosswalkEdge]) -> Result<Self, GrbError> {
+    /// **Self-initialising:** calls [`init_once`] internally (idempotent), so a
+    /// caller does not have to set GraphBLAS up first — this is the high-level
+    /// Fork-A entry point.
+    ///
+    /// **Validation:** every edge confidence must be a finite value in
+    /// `(0, 1]` (the contract the best-confidence closure relies on for
+    /// soundness and convergence); otherwise returns
+    /// [`CrosswalkError::InvalidConfidence`]. An empty edge list yields an
+    /// empty graph (closure is then empty).
+    pub fn from_edges(edges: &[CrosswalkEdge]) -> Result<Self, CrosswalkError> {
+        // Self-initialise so the documented entry point works standalone.
+        init_once()?;
+
         let mut id_to_dense: HashMap<u64, u64> = HashMap::new();
         let mut dense_to_id: Vec<u64> = Vec::new();
 
@@ -105,6 +132,13 @@ impl CrosswalkGraph {
 
         let mut dense_edges: Vec<(u64, u64, f64)> = Vec::with_capacity(edges.len());
         for e in edges {
+            if !(e.confidence.is_finite() && e.confidence > 0.0 && e.confidence <= 1.0) {
+                return Err(CrosswalkError::InvalidConfidence {
+                    src: e.src,
+                    dst: e.dst,
+                    confidence: e.confidence,
+                });
+            }
             let r = intern(e.src, &mut id_to_dense, &mut dense_to_id);
             let c = intern(e.dst, &mut id_to_dense, &mut dense_to_id);
             dense_edges.push((r, c, e.confidence));

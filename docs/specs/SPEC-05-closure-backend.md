@@ -105,8 +105,13 @@ kernel speed to reclaim for a scalar carrier; (b) **PreJIT buys ≈0 for scalar
 ops**, so it is deferred and should be revisited only for a *structured* (UDT)
 carrier where the generic kernel is the only option and the closure is on the
 latency-critical path. The valued-vs-boolean cost (carrying any confidence at
-all) is a modest constant (≤~4× the boolean closure on the measured shapes),
-which Fork A accepts as the price of best-confidence semantics.
+all) is **shape- and core-count-dependent**: on the GTIO/SKOS crosswalk shape it
+is a modest ~2.4–2.5× the boolean closure, but on a thin n-chain at 16-core it
+reaches ~69× — because OpenMP parallelises boolean's iso/bitmap fast path across
+cores while the FP64 non-iso accumulation stays effectively serial. This is a
+property of the carrier, not the kernel (the generic-kernel penalty is still
+~1.0×), and Fork A accepts it as the price of best-confidence semantics. See
+`BENCHMARKS.md` for the per-shape numbers.
 
 **Open questions for the eventual Fork-B spec (unchanged from #12):** fixed-size
 encoding of the structured carrier; exact `⊕`/`⊗` definitions and the semiring

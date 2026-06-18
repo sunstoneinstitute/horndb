@@ -1,6 +1,6 @@
 //! Fork-A crosswalk closure tests (TASKS.md #12).
 
-use horndb_closure::crosswalk::{CrosswalkEdge, CrosswalkGraph};
+use horndb_closure::crosswalk::{CrosswalkEdge, CrosswalkError, CrosswalkGraph};
 use horndb_closure::grb::init_once;
 use horndb_closure::metrics::CarrierShape;
 
@@ -122,4 +122,51 @@ fn empty_graph() {
     assert_eq!(metrics.n, 0);
     assert_eq!(metrics.input_nnz, 0);
     assert_eq!(metrics.iterations_to_fixpoint, 0);
+}
+
+/// `from_edges` self-initialises GraphBLAS — no explicit `init_once()` needed
+/// (the documented high-level entry point works standalone). `init_once` is
+/// idempotent and may already have run in this shared test binary, but this at
+/// least exercises the in-method call.
+#[test]
+fn from_edges_self_initialises() {
+    // Deliberately NO `init_once()` here.
+    let g = CrosswalkGraph::from_edges(&[edge(1, 2, 0.5)]).unwrap();
+    assert_eq!(g.n(), 2);
+    assert_conf(pair_conf(&g, 1, 2), 0.5);
+}
+
+/// Out-of-contract confidences are rejected at the boundary so the closure
+/// stays sound (a `> 1` weight could diverge over a cycle and return
+/// cap-dependent answers; `≤ 0` and non-finite are not confidences).
+#[test]
+fn invalid_confidence_is_rejected() {
+    init_once().unwrap();
+    for bad in [1.5_f64, 0.0, -0.1, f64::NAN, f64::INFINITY] {
+        match CrosswalkGraph::from_edges(&[edge(7, 8, bad)]) {
+            Ok(_) => panic!("expected InvalidConfidence for {bad}, got Ok"),
+            Err(CrosswalkError::InvalidConfidence {
+                src,
+                dst,
+                confidence,
+            }) => {
+                assert_eq!((src, dst), (7, 8));
+                assert!(
+                    confidence.is_nan() == bad.is_nan()
+                        && (confidence.is_nan() || confidence == bad),
+                    "reported confidence {confidence} != offending {bad}"
+                );
+            }
+            Err(other) => panic!("expected InvalidConfidence for {bad}, got {other:?}"),
+        }
+    }
+    // The boundary `1.0` (certain match) is valid.
+    assert_conf(
+        pair_conf(
+            &CrosswalkGraph::from_edges(&[edge(7, 8, 1.0)]).unwrap(),
+            7,
+            8,
+        ),
+        1.0,
+    );
 }
