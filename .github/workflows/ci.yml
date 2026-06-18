@@ -54,6 +54,12 @@ jobs:
       - name: sparql tests (server feature)
         run: cargo test -p horndb-sparql --features server
 
+      - name: ml tests (server feature)
+        run: cargo test -p horndb-ml --features server
+
+      - name: ml clippy (server feature)
+        run: cargo clippy -p horndb-ml --all-targets --features server -- -D warnings
+
       - name: build harness binary
         run: cargo build -p horndb-harness --bin harness --release
 
