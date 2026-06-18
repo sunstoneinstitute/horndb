@@ -40,7 +40,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [x] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
-- [v] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-8-ml-http-boundary · 2026-06-18T07:46:58Z_
+- [v] **MEDIUM** · _Completeness_ — SPEC-08 ML (HTTP boundary delivered; FAISS candidate generator deferred) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-8-ml-http-boundary · 2026-06-18T07:46:58Z_
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
@@ -155,9 +155,24 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   `SERVICE` federation, RDF 1.2 SPARQL surface, GeoSPARQL.
 
 - [v] **SPEC-08 ML.** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
-  F3 LLM → SPARQL HTTP endpoint, real FAISS-backed `CandidateGenerator`, HTTP
-  audit endpoint + cost reporting, training-data leakage controls. (Stage-1
-  ships the traits + in-process scaffolding only.)
+  Epic complete — the ML HTTP boundary is delivered; the remainder is a
+  Stage-2 increment (native-linkage heavy).
+  Delivered: the HTTP boundary behind an off-by-default `server` feature —
+  `POST /nl-query` (F3, LLM→SPARQL via the `Translator` trait, generated SPARQL
+  always returned for audit, LLM never bundled / mock-tested hermetic),
+  `GET /ml-audit` (F6, paginated + since-filtered, bounded per-request work),
+  cost reporting (`CostReport`), and training-data leakage controls
+  (`config::LlmPrivacy`, boundary-enforced on every channel: success
+  explanation, error body, question log) ([#105](https://github.com/sunstoneinstitute/horndb/issues/105), PR #106).
+  The traits + in-process scaffolding (`CandidateGenerator`, `PlanAdvisor`,
+  `HotSetAdvisor`, provenance, registry) shipped in Stage 1.
+  Deferred to Stage-2 (re-file as an increment under #8 when pulled in): the
+  real FAISS-backed `CandidateGenerator` + its synthetic entity-resolution
+  acceptance (≥10× speedup over brute force, ≥99% false-positive rejection by
+  symbolic re-verification). Native FAISS vendoring/linkage (akin to the
+  GraphBLAS build) is separable from the HTTP boundary and not on any
+  correctness path (SPEC-08 candidate generation is opt-in / human-review by
+  default).
 
 - [ ] **SPEC-10 rdflib-compatible Python API.** ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
   Build the PyO3/maturin binding layer per
