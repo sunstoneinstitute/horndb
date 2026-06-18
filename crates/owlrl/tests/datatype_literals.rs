@@ -148,6 +148,66 @@ fn dt_not_type_out_of_range_byte_is_inconsistent() {
     );
 }
 
+/// dt-not-type over a *derived* datatype membership: `:p rdfs:range xsd:byte`
+/// types the value `"999"^^xsd:integer` as `xsd:byte` via `prp-rng`, and 999 is
+/// outside `xsd:byte`'s [-128, 127] value space → inconsistent.
+#[test]
+fn dt_not_type_via_derived_range_membership_is_inconsistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    // p has range xsd:byte.
+    premise.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/p").unwrap()),
+        NamedNode::new("http://www.w3.org/2000/01/rdf-schema#range").unwrap(),
+        NamedNode::new(XSD_BYTE).unwrap(),
+        GraphName::DefaultGraph,
+    ));
+    // s p "999"^^xsd:integer — the literal is well-typed as xsd:integer, but
+    // prp-rng types it xsd:byte, where 999 is out of range.
+    premise.insert(&lit("http://ex/s", "http://ex/p", "999", XSD_INTEGER));
+    engine.load(&premise).unwrap();
+    assert!(
+        !engine.is_consistent().unwrap(),
+        "\"999\"^^xsd:integer typed xsd:byte via prp-rng is out of range (dt-not-type) → inconsistent"
+    );
+}
+
+/// Companion consistency guard: a *well-typed* derived membership stays
+/// consistent. `:p rdfs:range xsd:byte` with `"5"^^xsd:integer` types "5" as
+/// xsd:byte, and 5 is in range.
+#[test]
+fn well_typed_derived_range_membership_stays_consistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    premise.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/p").unwrap()),
+        NamedNode::new("http://www.w3.org/2000/01/rdf-schema#range").unwrap(),
+        NamedNode::new(XSD_BYTE).unwrap(),
+        GraphName::DefaultGraph,
+    ));
+    premise.insert(&lit("http://ex/s", "http://ex/p", "5", XSD_INTEGER));
+    engine.load(&premise).unwrap();
+    assert!(
+        engine.is_consistent().unwrap(),
+        "\"5\"^^xsd:integer typed xsd:byte via prp-rng is in range → consistent"
+    );
+}
+
+/// A large unbounded integer must not be flagged as ill-typed (regression for
+/// the i128-overflow false inconsistency).
+#[test]
+fn large_unbounded_integer_stays_consistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    let big = "123456789012345678901234567890123456789012345678901234567890";
+    premise.insert(&lit("http://ex/s", "http://ex/p", big, XSD_INTEGER));
+    engine.load(&premise).unwrap();
+    assert!(
+        engine.is_consistent().unwrap(),
+        "a 60-digit xsd:integer is a valid value, not an inconsistency"
+    );
+}
+
 /// The New-Feature-Keys-006 scenario: a functional property `hasName` with two
 /// distinct string values for the same subject collapses (prp-fp) to
 /// `"Peter" owl:sameAs "Kichwa-Tembo"`, while dt-diff derives they are

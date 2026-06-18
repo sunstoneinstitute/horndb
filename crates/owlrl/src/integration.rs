@@ -236,6 +236,16 @@ impl Engine {
                 reset_and_materialize(&mut state.store, &mut backend)
             }
         };
+        // dt-not-type over *derived* datatype memberships: materialization may
+        // have typed a literal as a narrower datatype via prp-rng / prp-dom
+        // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
+        // `"999" rdf:type xsd:byte`). The load-time pass above only validated
+        // each literal's *intrinsic* datatype, so re-check the materialized
+        // `?lit rdf:type ?D` edges now and flag any value-space violation as a
+        // global inconsistency. This is a post-fixpoint check — asserting
+        // `?lit rdf:type owl:Nothing` is enough for `is_consistent()`; nothing
+        // downstream needs to fire on it.
+        validate_derived_datatype_memberships(&mut state.store, &self.vocab, &state.dict);
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -597,6 +607,55 @@ fn inject_datatype_literal_axioms(
                 store.assert(Triple::new(*b_id, vocab.owl_different_from, *a_id));
             }
         }
+    }
+}
+
+/// Post-materialization `dt-not-type` over *derived* datatype memberships.
+///
+/// Scans the materialized `?lit rdf:type ?D` edges. When `?lit` is a literal
+/// and `?D` is an XSD datatype IRI, validate the literal's *lexical* value
+/// against `?D`'s value space (re-keying the literal under `?D` and classifying
+/// it). A violation — e.g. `"999"^^xsd:integer` typed `xsd:byte` via
+/// `prp-rng` — asserts `?lit rdf:type owl:Nothing`, which `is_consistent()`
+/// surfaces. Runs once after the fixpoint; the asserted inconsistency needs no
+/// further propagation.
+fn validate_derived_datatype_memberships(
+    store: &mut MemStore,
+    vocab: &Vocabulary,
+    dict: &FxHashMap<String, TermId>,
+) {
+    use crate::datatype_literals::{classify, parse_literal_key, ParsedLiteral};
+
+    // TermId → lexical key, for both literal subjects and datatype-IRI objects.
+    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
+    for (lex, &id) in dict {
+        rev.insert(id, lex.as_str());
+    }
+
+    let mut violations: Vec<TermId> = Vec::new();
+    for t in store.scan_predicate(vocab.rdf_type) {
+        let (Some(lit_key), Some(dt_iri)) = (rev.get(&t.s), rev.get(&t.o)) else {
+            continue;
+        };
+        // Subject must be a literal; object must be an XSD datatype IRI.
+        let Some(parsed) = parse_literal_key(lit_key) else {
+            continue;
+        };
+        if !dt_iri.starts_with("http://www.w3.org/2001/XMLSchema#") {
+            continue;
+        }
+        // Re-classify the literal's *lexical value* under the derived datatype.
+        let under_derived = ParsedLiteral {
+            value: parsed.value,
+            datatype: dt_iri,
+            language: None,
+        };
+        if classify(&under_derived).is_err() {
+            violations.push(t.s);
+        }
+    }
+    for lit in violations {
+        store.assert(Triple::new(lit, vocab.rdf_type, vocab.owl_nothing));
     }
 }
 

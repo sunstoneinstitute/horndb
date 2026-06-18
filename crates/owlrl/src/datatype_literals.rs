@@ -181,47 +181,76 @@ pub fn classify(lit: &ParsedLiteral<'_>) -> Result<Option<ValueClass>, ()> {
 /// Parse and validate an XSD integer-tower lexical form, returning the
 /// canonical decimal string (no leading `+`, no leading zeros, `-0` → `0`) on
 /// success, or `None` if the lexical form is not a valid value of `local`.
+///
+/// The **unbounded** integer types (`xsd:integer`, `xsd:nonNegativeInteger`,
+/// `xsd:positiveInteger`, `xsd:nonPositiveInteger`, `xsd:negativeInteger`) are
+/// validated by *string* canonicalisation + sign, never by fixed-width parsing
+/// — a 40-digit `xsd:integer` is a perfectly valid value and must not be
+/// rejected (which would inject a false `owl:Nothing`). The **bounded**
+/// sub-types (`long`/`int`/`short`/`byte` and the `unsigned*` family) do carry
+/// a finite value space, so they parse into the corresponding fixed-width type:
+/// a lexical value outside the range is genuinely ill-typed.
 fn parse_xsd_integer(local: &str, value: &str) -> Option<String> {
-    let n: i128 = value.parse().ok()?;
-    // Bounded sub-types: reject values outside the type's value space.
-    let in_range = match local {
-        "integer" | "long" | "int" | "short" | "byte" => match local {
-            "long" => i64::try_from(n).is_ok(),
-            "int" => i32::try_from(n).is_ok(),
-            "short" => i16::try_from(n).is_ok(),
-            "byte" => i8::try_from(n).is_ok(),
-            _ => true, // integer: unbounded
-        },
-        "nonNegativeInteger" | "unsignedLong" | "unsignedInt" | "unsignedShort"
-        | "unsignedByte" | "positiveInteger" => {
-            let lower_ok = match local {
-                "positiveInteger" => n >= 1,
-                _ => n >= 0,
-            };
-            let upper_ok = match local {
-                "unsignedLong" => u64::try_from(n).is_ok(),
-                "unsignedInt" => u32::try_from(n).is_ok(),
-                "unsignedShort" => u16::try_from(n).is_ok(),
-                "unsignedByte" => u8::try_from(n).is_ok(),
-                _ => true,
-            };
-            lower_ok && upper_ok
-        }
-        "nonPositiveInteger" => n <= 0,
-        "negativeInteger" => n <= -1,
-        _ => true,
+    // Canonicalise the lexical form (validates integer syntax, arbitrary
+    // precision). Returns the canonical string and whether it is negative.
+    let (canon, negative) = canonicalize_integer(value)?;
+    let is_zero = canon == "0";
+    match local {
+        // Unbounded: only the sign constraint matters.
+        "integer" => Some(canon),
+        "nonNegativeInteger" => (!negative).then_some(canon),
+        "positiveInteger" => (!negative && !is_zero).then_some(canon),
+        "nonPositiveInteger" => (negative || is_zero).then_some(canon),
+        "negativeInteger" => (negative && !is_zero).then_some(canon),
+        // Bounded signed tower: parse into the fixed-width type. Overflow ⇒
+        // out of value space ⇒ ill-typed.
+        "long" => value.parse::<i64>().ok().map(|n| n.to_string()),
+        "int" => value.parse::<i32>().ok().map(|n| n.to_string()),
+        "short" => value.parse::<i16>().ok().map(|n| n.to_string()),
+        "byte" => value.parse::<i8>().ok().map(|n| n.to_string()),
+        // Bounded unsigned tower.
+        "unsignedLong" => value.parse::<u64>().ok().map(|n| n.to_string()),
+        "unsignedInt" => value.parse::<u32>().ok().map(|n| n.to_string()),
+        "unsignedShort" => value.parse::<u16>().ok().map(|n| n.to_string()),
+        "unsignedByte" => value.parse::<u8>().ok().map(|n| n.to_string()),
+        _ => Some(canon),
+    }
+}
+
+/// Validate an XSD integer lexical form by string and return its canonical
+/// decimal form (no leading `+`, no insignificant leading zeros, `-0` → `0`),
+/// plus whether it is negative. Arbitrary precision — does not parse into a
+/// fixed-width integer, so values beyond `i128` are still accepted.
+///
+/// `None` if the lexical form is not a syntactically valid integer (empty,
+/// non-digit characters, a lone sign, etc.) — that is the `dt-not-type` case.
+fn canonicalize_integer(value: &str) -> Option<(String, bool)> {
+    let (negative, digits) = match value.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, value.strip_prefix('+').unwrap_or(value)),
     };
-    if !in_range {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    Some(n.to_string())
+    // Strip insignificant leading zeros; an all-zero string canonicalises to
+    // "0" (and loses its sign: -0 == 0).
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(("0".to_string(), false));
+    }
+    let canon = if negative {
+        format!("-{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+    Some((canon, negative))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn typed(value: &'static str, dt_local: &'static str) -> String {
+    fn typed(value: &str, dt_local: &str) -> String {
         format!("\"{value}\"^^<{XSD}{dt_local}>")
     }
 
@@ -290,6 +319,47 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn large_unbounded_integer_is_well_typed() {
+        // A value far beyond i128 must NOT be treated as ill-typed —
+        // xsd:integer is unbounded. (Regression for the i128-overflow
+        // false-inconsistency.)
+        let big = "123456789012345678901234567890123456789012345678901234567890";
+        assert!(
+            classify(&parse_literal_key(&typed(big, "integer")).unwrap()).is_ok(),
+            "a 60-digit xsd:integer is a valid value, not dt-not-type"
+        );
+        // And two equal big integers (one with leading zeros) are dt-eq.
+        let a = classify(&parse_literal_key(&typed(big, "integer")).unwrap())
+            .unwrap()
+            .unwrap();
+        let leading_zeros = format!("00{big}");
+        let b = classify(&parse_literal_key(&typed(&leading_zeros, "integer")).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(a, b, "leading zeros do not change the canonical value");
+        // Sign constraints still apply to the unbounded subtypes.
+        let neg_big = format!("-{big}");
+        assert!(
+            classify(&parse_literal_key(&typed(&neg_big, "nonNegativeInteger")).unwrap()).is_err(),
+            "a large negative value is still out of nonNegativeInteger's space"
+        );
+        assert!(
+            classify(&parse_literal_key(&typed(&neg_big, "nonPositiveInteger")).unwrap()).is_ok(),
+            "a large negative value is in nonPositiveInteger's space"
+        );
+    }
+
+    #[test]
+    fn malformed_integer_lexical_is_ill_typed() {
+        for bad in ["", "+", "-", " 1", "1 ", "1.0", "0x1", "1_000", "abc"] {
+            assert!(
+                classify(&parse_literal_key(&typed(bad, "integer")).unwrap()).is_err(),
+                "{bad:?} is not a valid xsd:integer lexical form"
+            );
+        }
     }
 
     #[test]

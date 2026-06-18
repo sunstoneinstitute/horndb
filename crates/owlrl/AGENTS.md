@@ -634,7 +634,14 @@ library is using.
   value-distinct comparable literals ⇒ `owl:differentFrom` (`dt-diff`); a
   lexical form outside its datatype's value space ⇒ `owl:Nothing`
   (`dt-not-type`). The conclusions are base axioms the compiled `eq-diff1` /
-  `eq-rep-*` rules then propagate. Stage-1 scope is the XSD integer tower,
+  `eq-rep-*` rules then propagate. `dt-not-type` also runs a **post-fixpoint**
+  pass (`validate_derived_datatype_memberships`) that re-checks literals typed
+  into a narrower datatype during materialisation (`prp-rng`/`prp-dom`), e.g.
+  `"999"^^xsd:integer` typed `xsd:byte` via a range axiom ⇒ inconsistency.
+  Unbounded integer types (`xsd:integer`, `(non)?(Positive|Negative)Integer`)
+  are validated by arbitrary-precision string canonicalisation, so a literal
+  larger than `i128` is **not** falsely flagged ill-typed. Stage-1 scope is the
+  XSD integer tower,
   `xsd:string`/`boolean`, and plain/lang literals; other datatypes
   (`xsd:dateTime`, `xsd:decimal`, user types) stay **opaque** — never
   cross-compared, so no false `sameAs`/`differentFrom`. Full value-space
