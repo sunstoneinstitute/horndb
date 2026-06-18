@@ -636,12 +636,19 @@ library is using.
   (`dt-not-type`). The conclusions are base axioms the compiled `eq-diff1` /
   `eq-rep-*` rules then propagate. `dt-not-type` also runs a **post-fixpoint**
   pass (`validate_derived_datatype_memberships`) that re-checks literals typed
-  into a narrower datatype during materialisation (`prp-rng`/`prp-dom`), e.g.
-  `"999"^^xsd:integer` typed `xsd:byte` via a range axiom ⇒ inconsistency.
-  Unbounded integer types (`xsd:integer`, `(non)?(Positive|Negative)Integer`)
-  are validated by arbitrary-precision string canonicalisation, so a literal
-  larger than `i128` is **not** falsely flagged ill-typed. Stage-1 scope is the
-  XSD integer tower,
+  into a *derived* datatype during materialisation (`prp-rng`/`prp-dom`): it
+  validates the literal's **intrinsic value** against the derived datatype's
+  value space via `literal_in_datatype` (so `"999"^^xsd:integer` typed
+  `xsd:byte`, `"5"^^xsd:string` typed `xsd:integer`, and `"x"@fr` typed
+  `xsd:string` are all violations, while in-range/same-space memberships pass).
+  If any violation is asserted, the engine re-runs the fixpoint once so the
+  `owl:Nothing` propagates through `eq-rep-*` (a resource `owl:sameAs` the
+  offending literal also becomes `owl:Nothing`). Unbounded integer types
+  (`xsd:integer`, `(non)?(Positive|Negative)Integer`) are validated by
+  arbitrary-precision string canonicalisation, so a literal larger than `i128`
+  is **not** falsely flagged ill-typed, and bounded types validate the
+  canonical form (so `"-0"^^xsd:unsignedByte` ≡ 0 is in range). Stage-1 scope is
+  the XSD integer tower,
   `xsd:string`/`boolean`, and plain/lang literals; other datatypes
   (`xsd:dateTime`, `xsd:decimal`, user types) stay **opaque** — never
   cross-compared, so no false `sameAs`/`differentFrom`. Full value-space

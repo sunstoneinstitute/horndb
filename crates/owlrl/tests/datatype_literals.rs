@@ -216,6 +216,59 @@ fn well_typed_derived_range_membership_stays_consistent() {
     );
 }
 
+/// A `"-0"^^xsd:unsignedByte` literal denotes 0 (in range) and must stay
+/// consistent — regression for the unsigned-parser rejecting "-0".
+#[test]
+fn negative_zero_unsigned_stays_consistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    premise.insert(&lit(
+        "http://ex/s",
+        "http://ex/p",
+        "-0",
+        "http://www.w3.org/2001/XMLSchema#unsignedByte",
+    ));
+    engine.load(&premise).unwrap();
+    assert!(
+        engine.is_consistent().unwrap(),
+        "\"-0\"^^xsd:unsignedByte denotes 0 (in range) → consistent"
+    );
+}
+
+/// A derived datatype violation propagates through `owl:sameAs`: a named
+/// resource that is `owl:sameAs` an ill-typed literal also becomes
+/// `owl:Nothing` after the post-fixpoint re-materialization (eq-rep-s).
+#[test]
+fn derived_violation_propagates_through_sameas() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    // p has range xsd:byte; s p "999"^^xsd:integer ⇒ "999" rdf:type xsd:byte
+    // (out of range ⇒ "999" rdf:type owl:Nothing).
+    premise.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/p").unwrap()),
+        NamedNode::new("http://www.w3.org/2000/01/rdf-schema#range").unwrap(),
+        NamedNode::new(XSD_BYTE).unwrap(),
+        GraphName::DefaultGraph,
+    ));
+    premise.insert(&lit("http://ex/s", "http://ex/p", "999", XSD_INTEGER));
+    // A named resource is owl:sameAs the offending literal.
+    premise.insert(&Quad::new(
+        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/n").unwrap()),
+        NamedNode::new(OWL_SAME_AS).unwrap(),
+        Literal::new_typed_literal("999", NamedNode::new(XSD_INTEGER).unwrap()),
+        GraphName::DefaultGraph,
+    ));
+    engine.load(&premise).unwrap();
+    assert!(!engine.is_consistent().unwrap(), "graph is inconsistent");
+    // After re-materialization, eq-rep-s substitutes the literal's owl:Nothing
+    // membership onto the sameAs-linked named resource.
+    let owl_nothing = "http://www.w3.org/2002/07/owl#Nothing";
+    assert!(
+        has_triple(&engine, "http://ex/n", RDF_TYPE, owl_nothing),
+        ":n owl:sameAs an ill-typed literal ⇒ :n rdf:type owl:Nothing (eq-rep-s after re-materialization)"
+    );
+}
+
 /// A large unbounded integer must not be flagged as ill-typed (regression for
 /// the i128-overflow false inconsistency).
 #[test]

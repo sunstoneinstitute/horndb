@@ -225,27 +225,32 @@ impl Engine {
         let qual_restrictions =
             resolve_qual_max_card_restrictions(&state.store, &self.vocab, &state.dict);
         state.store.set_qual_card_restrictions(qual_restrictions);
-        let stats = match self.backend {
+        let materialize_once = |store: &mut MemStore| match self.backend {
             BackendChoice::RuleFiring => {
                 let mut backend = RuleFiringBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend)
+                reset_and_materialize(store, &mut backend)
             }
             #[cfg(feature = "graphblas-backend")]
             BackendChoice::GraphBlas => {
                 let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
-                reset_and_materialize(&mut state.store, &mut backend)
+                reset_and_materialize(store, &mut backend)
             }
         };
+        let mut stats = materialize_once(&mut state.store);
         // dt-not-type over *derived* datatype memberships: materialization may
         // have typed a literal as a narrower datatype via prp-rng / prp-dom
         // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
         // `"999" rdf:type xsd:byte`). The load-time pass above only validated
         // each literal's *intrinsic* datatype, so re-check the materialized
-        // `?lit rdf:type ?D` edges now and flag any value-space violation as a
-        // global inconsistency. This is a post-fixpoint check — asserting
-        // `?lit rdf:type owl:Nothing` is enough for `is_consistent()`; nothing
-        // downstream needs to fire on it.
-        validate_derived_datatype_memberships(&mut state.store, &self.vocab, &state.dict);
+        // `?lit rdf:type ?D` edges now and assert `?lit rdf:type owl:Nothing`
+        // on any value-space violation. If that asserted anything, re-run the
+        // fixpoint once so the inconsistency propagates through eq-rep-* (e.g. a
+        // named resource `owl:sameAs` the offending literal also becomes
+        // `owl:Nothing`); the re-run is a no-op for the common case where the
+        // initial materialisation found no derived violations.
+        if validate_derived_datatype_memberships(&mut state.store, &self.vocab, &state.dict) {
+            stats = materialize_once(&mut state.store);
+        }
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -613,17 +618,19 @@ fn inject_datatype_literal_axioms(
 /// Post-materialization `dt-not-type` over *derived* datatype memberships.
 ///
 /// Scans the materialized `?lit rdf:type ?D` edges. When `?lit` is a literal
-/// and `?D` is an XSD datatype IRI, validate the literal's *lexical* value
-/// against `?D`'s value space (re-keying the literal under `?D` and classifying
-/// it). A violation — e.g. `"999"^^xsd:integer` typed `xsd:byte` via
-/// `prp-rng` — asserts `?lit rdf:type owl:Nothing`, which `is_consistent()`
-/// surfaces. Runs once after the fixpoint; the asserted inconsistency needs no
-/// further propagation.
+/// and `?D` is an XSD datatype IRI, validate the literal's *intrinsic value*
+/// against `?D`'s value space (via [`literal_in_datatype`], which preserves the
+/// literal's own datatype/language). A violation — e.g. `"999"^^xsd:integer`
+/// typed `xsd:byte` via `prp-rng`, or `"5"^^xsd:string` typed `xsd:integer` —
+/// asserts `?lit rdf:type owl:Nothing`.
+///
+/// Returns `true` iff at least one violation was asserted, so the caller can
+/// re-run the fixpoint to propagate the `owl:Nothing` through `eq-rep-*`.
 fn validate_derived_datatype_memberships(
     store: &mut MemStore,
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
-) {
+) -> bool {
     use crate::datatype_literals::{literal_in_datatype, parse_literal_key};
 
     const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -656,9 +663,11 @@ fn validate_derived_datatype_memberships(
             violations.push(t.s);
         }
     }
+    let any = !violations.is_empty();
     for lit in violations {
         store.assert(Triple::new(lit, vocab.rdf_type, vocab.owl_nothing));
     }
+    any
 }
 
 /// Two value classes are comparable (eligible for `dt-eq`/`dt-diff`) iff they

@@ -220,16 +220,21 @@ pub fn literal_in_datatype(lit: &ParsedLiteral<'_>, target_local: &str) -> Optio
                 None
             }
         }
-        // A string/lang value: only in xsd:string's space (and rdf:langString,
-        // but a typed membership names xsd: datatypes). Never an integer or
-        // boolean *value*.
-        ValueClass::Plain(_) => match target_local {
-            "string" => Some(true),
-            t if XSD_INTEGER_DATATYPES.contains(&t) || t == "boolean" || t == "decimal" => {
-                Some(false)
+        // A string/lang value. A *language-tagged* value lives in
+        // rdf:langString's value space, which is disjoint from xsd:string's —
+        // so a lang literal typed `xsd:string` is a dt-not-type violation. A
+        // plain (xsd:string) value is in xsd:string. Neither is an integer or
+        // boolean value.
+        ValueClass::Plain(_) => {
+            let is_lang = lit.language.is_some();
+            match target_local {
+                "string" => Some(!is_lang),
+                t if XSD_INTEGER_DATATYPES.contains(&t) || t == "boolean" || t == "decimal" => {
+                    Some(false)
+                }
+                _ => None,
             }
-            _ => None,
-        },
+        }
         // A boolean value: only in xsd:boolean's space.
         ValueClass::Boolean(_) => match target_local {
             "boolean" => Some(true),
@@ -265,17 +270,20 @@ fn parse_xsd_integer(local: &str, value: &str) -> Option<String> {
         "positiveInteger" => (!negative && !is_zero).then_some(canon),
         "nonPositiveInteger" => (negative || is_zero).then_some(canon),
         "negativeInteger" => (negative && !is_zero).then_some(canon),
-        // Bounded signed tower: parse into the fixed-width type. Overflow ⇒
+        // Bounded signed tower: parse the *canonical* form (so e.g.
+        // `"+05"` / `"-0"` are accepted) into the fixed-width type. Overflow ⇒
         // out of value space ⇒ ill-typed.
-        "long" => value.parse::<i64>().ok().map(|n| n.to_string()),
-        "int" => value.parse::<i32>().ok().map(|n| n.to_string()),
-        "short" => value.parse::<i16>().ok().map(|n| n.to_string()),
-        "byte" => value.parse::<i8>().ok().map(|n| n.to_string()),
-        // Bounded unsigned tower.
-        "unsignedLong" => value.parse::<u64>().ok().map(|n| n.to_string()),
-        "unsignedInt" => value.parse::<u32>().ok().map(|n| n.to_string()),
-        "unsignedShort" => value.parse::<u16>().ok().map(|n| n.to_string()),
-        "unsignedByte" => value.parse::<u8>().ok().map(|n| n.to_string()),
+        "long" => canon.parse::<i64>().ok().map(|n| n.to_string()),
+        "int" => canon.parse::<i32>().ok().map(|n| n.to_string()),
+        "short" => canon.parse::<i16>().ok().map(|n| n.to_string()),
+        "byte" => canon.parse::<i8>().ok().map(|n| n.to_string()),
+        // Bounded unsigned tower. Parse the canonical form so `"-0"` (which
+        // canonicalises to `"0"`) is accepted rather than rejected by the
+        // unsigned parser.
+        "unsignedLong" => canon.parse::<u64>().ok().map(|n| n.to_string()),
+        "unsignedInt" => canon.parse::<u32>().ok().map(|n| n.to_string()),
+        "unsignedShort" => canon.parse::<u16>().ok().map(|n| n.to_string()),
+        "unsignedByte" => canon.parse::<u8>().ok().map(|n| n.to_string()),
         _ => Some(canon),
     }
 }
@@ -387,6 +395,39 @@ mod tests {
         assert_eq!(
             literal_in_datatype(&parse("true", "boolean"), "string"),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn negative_zero_in_unsigned_is_well_typed() {
+        // "-0" denotes 0, which is in every unsigned type's range. The unsigned
+        // parser rejects the raw "-0", so this must validate the *canonical*
+        // form ("0").
+        for dt in [
+            "unsignedByte",
+            "unsignedShort",
+            "unsignedInt",
+            "unsignedLong",
+            "nonNegativeInteger",
+        ] {
+            assert!(
+                classify(&parse_literal_key(&typed("-0", dt)).unwrap()).is_ok(),
+                "\"-0\"^^xsd:{dt} denotes 0 and is in range"
+            );
+        }
+        // But -0 is NOT a positiveInteger (which excludes 0).
+        assert!(classify(&parse_literal_key(&typed("-0", "positiveInteger")).unwrap()).is_err());
+    }
+
+    #[test]
+    fn lang_literal_not_in_xsd_string_space() {
+        // A language-tagged value lives in rdf:langString, not xsd:string.
+        let lang = parse_literal_key("\"chat\"@fr").unwrap();
+        assert_eq!(literal_in_datatype(&lang, "string"), Some(false));
+        // A plain xsd:string value IS in xsd:string.
+        assert_eq!(
+            literal_in_datatype(&parse("chat", "string"), "string"),
+            Some(true)
         );
     }
 
