@@ -39,7 +39,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [x] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
 - [x] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
-- [v] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-7-explain-pragma · 2026-06-18T07:13:00Z_
+- [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-08 ML (LLM→SPARQL endpoint, FAISS, audit endpoint, …) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
@@ -130,7 +130,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Deferred (re-file as increments when shippable): closure-path retraction,
   SPEC-02-backed per-tuple storage MVCC, distributed timely-dataflow (SPEC-09).
 
-- [v] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
+- [x] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
   Epic complete — the SPARQL 1.1 query/update surface is delivered; the
   remainder is Stage-2 (storage-blocked, perf, or already-deferred).
   Delivered: SELECT/ASK/CONSTRUCT and `DESCRIBE` one-level CBD (#48);
