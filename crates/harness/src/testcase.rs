@@ -7,6 +7,12 @@ use std::path::PathBuf;
 pub enum Suite {
     Owl2,
     Sparql11,
+    /// W3C SPARQL 1.1 *syntax* tests (positive + negative, query + update).
+    /// These assert only that the SPARQL grammar accepts/rejects the input;
+    /// there is no data, no result set, and no reasoner involvement. Source:
+    /// <https://www.w3.org/2009/sparql/docs/tests/> (the `syntax-query` /
+    /// `syntax-update-1` / `syntax-update-2` sub-suites).
+    Sparql11Syntax,
     /// W3C RDF 1.2 N-Triples syntax tests (positive + negative).
     /// Source: <https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/>.
     Rdf12NTriples,
@@ -17,6 +23,7 @@ impl Suite {
         match self {
             Suite::Owl2 => "owl2",
             Suite::Sparql11 => "sparql11",
+            Suite::Sparql11Syntax => "sparql11-syntax",
             Suite::Rdf12NTriples => "rdf12-n-triples",
         }
     }
@@ -53,6 +60,14 @@ pub enum TestKind {
     /// `input` *must* fail to parse. Used by the bad-syntax cases of
     /// the same suite.
     SyntaxNegative { input: PathBuf },
+    /// `input` is a SPARQL query/update that the SPARQL 1.1 grammar must
+    /// *accept*. Graded by `spargebra` (the same parser the SPEC-07 engine
+    /// uses) — a positive syntax test passes iff parsing succeeds. No data,
+    /// no result set, no reasoner.
+    SparqlSyntaxPositive { input: PathBuf, update: bool },
+    /// `input` is a SPARQL query/update that the SPARQL 1.1 grammar must
+    /// *reject*. Passes iff `spargebra` fails to parse it.
+    SparqlSyntaxNegative { input: PathBuf, update: bool },
 }
 
 #[derive(Debug, Clone)]

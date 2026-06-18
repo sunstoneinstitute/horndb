@@ -86,4 +86,22 @@ cargo run -p horndb-harness --bin harness -- \
 cargo run -p horndb-harness --bin harness -- \
     convert-manifests --root "$SPARQL_DIR"
 
+# SPARQL 1.1 *syntax* suite (issue #110). The `[suites.sparql11-syntax]`
+# selection in harness/selected.toml runs a curated, checked-in subset of the
+# upstream syntax sub-suites — they are graded by `spargebra` accept/reject,
+# need no data/results, and run in sub-milliseconds, so they ride the per-PR
+# correctness tier without a network fetch. The upstream cases this subset is
+# drawn from land here after the tarball extract above:
+#   $SPARQL_DIR/syntax-query/         (PositiveSyntaxTest11 / NegativeSyntaxTest11)
+#   $SPARQL_DIR/syntax-update-1/      (PositiveUpdateSyntaxTest11 / Negative…)
+#   $SPARQL_DIR/syntax-update-2/
+# The checked-in fixtures under crates/harness/tests/fixtures/sparql11-syntax/
+# are intentionally hand-curated (stable IDs, no large corpus) rather than a
+# byte-copy of any single upstream file, so this script does NOT overwrite
+# them. To grow the selection, add cases to that directory + selected.toml;
+# the manifest reader (mf:*SyntaxTest11) and runner already understand them.
+if [[ -d "$SPARQL_DIR/syntax-query" ]]; then
+    echo "upstream SPARQL syntax sub-suites present under $SPARQL_DIR (see sparql11-syntax notes above)."
+fi
+
 echo "done."

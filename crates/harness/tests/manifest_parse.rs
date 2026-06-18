@@ -73,3 +73,38 @@ fn parses_rdf12_ntriples_syntax_manifest() {
     // No other kinds should appear in a syntax-only manifest.
     assert_eq!(pos + neg, cases.len(), "unexpected non-syntax cases");
 }
+
+#[test]
+fn parses_sparql11_syntax_manifest() {
+    // Curated subset of the W3C SPARQL 1.1 syntax sub-suites (issue #110).
+    // Asserts the manifest parses and yields only SparqlSyntax{Positive,
+    // Negative} entries, covering both the query and update forms.
+    let cases = manifest::parse(
+        &fixture("sparql11-syntax/manifest.ttl"),
+        Suite::Sparql11Syntax,
+    )
+    .unwrap();
+    let pos = cases
+        .iter()
+        .filter(|c| matches!(c.kind, TestKind::SparqlSyntaxPositive { .. }))
+        .count();
+    let neg = cases
+        .iter()
+        .filter(|c| matches!(c.kind, TestKind::SparqlSyntaxNegative { .. }))
+        .count();
+    let updates = cases
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.kind,
+                TestKind::SparqlSyntaxPositive { update: true, .. }
+                    | TestKind::SparqlSyntaxNegative { update: true, .. }
+            )
+        })
+        .count();
+    assert_eq!(pos, 9, "expected 9 positive syntax cases, got {pos}");
+    assert_eq!(neg, 5, "expected 5 negative syntax cases, got {neg}");
+    assert_eq!(updates, 5, "expected 5 update-form cases, got {updates}");
+    // Syntax-only manifest: nothing else should appear.
+    assert_eq!(pos + neg, cases.len(), "unexpected non-syntax cases");
+}

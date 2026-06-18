@@ -32,6 +32,11 @@ pub fn run_selected(
             // larger.
             "owl2-w3c-rl" => Suite::Owl2,
             "sparql11" => Suite::Sparql11,
+            // W3C SPARQL 1.1 syntax tests (query + update). The manifest uses
+            // the mf: vocabulary (`PositiveSyntaxTest11` /
+            // `NegativeSyntaxTest11` / `*UpdateSyntaxTest11`); each case is
+            // graded by `spargebra` accept/reject — no data, no reasoner.
+            "sparql11-syntax" => Suite::Sparql11Syntax,
             // W3C RDF 1.2 N-Triples syntax tests. The manifest uses the
             // rdft: vocabulary (`TestNTriplesPositiveSyntax` /
             // `TestNTriplesNegativeSyntax`), parsed by the same
@@ -172,6 +177,36 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 Err(_) => (Status::Passed, None),
             }
         }
+        TestKind::SparqlSyntaxPositive { input, update } => {
+            // W3C SPARQL 1.1 positive syntax test: the grammar must accept
+            // the query/update. We grade with `spargebra` directly — the
+            // same parser the SPEC-07 engine uses — so the harness and the
+            // engine agree on the accepted surface. I/O errors (missing
+            // fixture) propagate via `?` so they surface as a harness error
+            // rather than a silent test failure.
+            let text = read_sparql_input(input)?;
+            match parse_sparql(&text, *update) {
+                Ok(()) => (Status::Passed, None),
+                Err(e) => (
+                    Status::Failed,
+                    Some(format!("positive syntax test failed to parse: {e}")),
+                ),
+            }
+        }
+        TestKind::SparqlSyntaxNegative { input, update } => {
+            // W3C SPARQL 1.1 negative syntax test: the grammar must reject
+            // the input. Read the file outside the parse call so an I/O
+            // error is not silently turned into a passing rejection — only a
+            // parse failure on bytes we read counts as the expected outcome.
+            let text = read_sparql_input(input)?;
+            match parse_sparql(&text, *update) {
+                Ok(()) => (
+                    Status::Failed,
+                    Some("negative syntax test parsed successfully but should have failed".into()),
+                ),
+                Err(_) => (Status::Passed, None),
+            }
+        }
         TestKind::SparqlAsk {
             query,
             data,
@@ -208,6 +243,34 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
 /// caller and surface as a harness error rather than a silent pass.
 fn read_syntax_input(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("reading nt {}", path.display()))
+}
+
+/// Read a SPARQL syntax-suite input file (`.rq` / `.ru`). As with
+/// `read_syntax_input`, an I/O error here means a misconfigured fixture, not
+/// the expected outcome of a negative test, so it propagates to the caller.
+fn read_sparql_input(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("reading sparql {}", path.display()))
+}
+
+/// Parse a SPARQL query (`update = false`) or update (`update = true`) with
+/// `spargebra`, the same grammar the SPEC-07 engine uses. Returns `Ok(())`
+/// when the input is grammatically valid and an error otherwise — the caller
+/// turns that into Passed/Failed depending on whether the case is positive or
+/// negative. The base IRI matches spargebra's default so relative IRIs in the
+/// fixtures resolve the same way the W3C suite assumes.
+fn parse_sparql(text: &str, update: bool) -> Result<()> {
+    use spargebra::SparqlParser;
+    if update {
+        SparqlParser::new()
+            .parse_update(text)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    } else {
+        SparqlParser::new()
+            .parse_query(text)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// Parse already-read N-Triples bytes and return the number of triples
@@ -383,5 +446,134 @@ mod tests {
         let mut engine = StubReasoner::new();
         let outcome = run_one(&mut engine, &case).unwrap();
         assert_eq!(outcome.status, Status::Passed);
+    }
+
+    /// The whole SPARQL 1.1 syntax suite must grade correctly against the
+    /// curated checked-in fixtures: every positive case parses (Passed) and
+    /// every negative case is rejected (Passed). Because the suite is graded
+    /// by `spargebra` with no reasoner, the StubReasoner is irrelevant here —
+    /// the test doubles as the verification that our fixture assumptions match
+    /// spargebra's grammar.
+    #[test]
+    fn sparql11_syntax_suite_all_cases_grade_as_expected() {
+        let manifest =
+            fixtures().join("crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl");
+        let cases = crate::manifest::parse(&manifest, Suite::Sparql11Syntax).unwrap();
+        assert_eq!(cases.len(), 14, "manifest must list all 14 curated cases");
+
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            "sparql11-syntax".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl".to_string(),
+                include: cases.iter().map(|c| c.id.clone()).collect(),
+            },
+        );
+        let selected = Selected {
+            version: 1,
+            suites,
+            removed: vec![],
+            sparql_query: None,
+        };
+
+        let mut engine = StubReasoner::new();
+        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .unwrap();
+
+        assert_eq!(report.outcomes.len(), 14);
+        for o in &report.outcomes {
+            assert_eq!(
+                o.status,
+                Status::Passed,
+                "case {} should pass (reason: {:?})",
+                o.test_id,
+                o.reason,
+            );
+        }
+    }
+
+    /// Sanity-check the two graders directly: positive cases parse, negative
+    /// cases fail, for both the query and update forms.
+    #[test]
+    fn sparql_syntax_arms_classify_positive_and_negative() {
+        let fx = |name: &str| {
+            fixtures().join(format!(
+                "crates/harness/tests/fixtures/sparql11-syntax/{name}"
+            ))
+        };
+        let mut engine = StubReasoner::new();
+
+        // positive query
+        let pos_q = TestCase {
+            id: "#pq".into(),
+            suite: Suite::Sparql11Syntax,
+            name: "pq".into(),
+            kind: TestKind::SparqlSyntaxPositive {
+                input: fx("syntax-aggregate-01.rq"),
+                update: false,
+            },
+        };
+        assert_eq!(run_one(&mut engine, &pos_q).unwrap().status, Status::Passed);
+
+        // negative query
+        let neg_q = TestCase {
+            id: "#nq".into(),
+            suite: Suite::Sparql11Syntax,
+            name: "nq".into(),
+            kind: TestKind::SparqlSyntaxNegative {
+                input: fx("syntax-bad-01.rq"),
+                update: false,
+            },
+        };
+        assert_eq!(run_one(&mut engine, &neg_q).unwrap().status, Status::Passed);
+
+        // positive update
+        let pos_u = TestCase {
+            id: "#pu".into(),
+            suite: Suite::Sparql11Syntax,
+            name: "pu".into(),
+            kind: TestKind::SparqlSyntaxPositive {
+                input: fx("syntax-update-modify-01.ru"),
+                update: true,
+            },
+        };
+        assert_eq!(run_one(&mut engine, &pos_u).unwrap().status, Status::Passed);
+
+        // negative update
+        let neg_u = TestCase {
+            id: "#nu".into(),
+            suite: Suite::Sparql11Syntax,
+            name: "nu".into(),
+            kind: TestKind::SparqlSyntaxNegative {
+                input: fx("syntax-update-bad-01.ru"),
+                update: true,
+            },
+        };
+        assert_eq!(run_one(&mut engine, &neg_u).unwrap().status, Status::Passed);
+    }
+
+    /// A SPARQL syntax case whose fixture file is missing must surface as a
+    /// harness error, not a silent passing rejection (mirrors the N-Triples
+    /// negative-syntax I/O-error regression test).
+    #[test]
+    fn sparql_negative_syntax_with_missing_input_does_not_silently_pass() {
+        let case = TestCase {
+            id: "#missing".into(),
+            suite: Suite::Sparql11Syntax,
+            name: "missing".into(),
+            kind: TestKind::SparqlSyntaxNegative {
+                input: PathBuf::from("/nonexistent/query.rq"),
+                update: false,
+            },
+        };
+        let mut engine = StubReasoner::new();
+        let err = run_one(&mut engine, &case)
+            .expect_err("missing fixture must surface as a harness error");
+        assert!(
+            format!("{err:#}").contains("reading sparql"),
+            "expected I/O-error context",
+        );
     }
 }
