@@ -577,7 +577,15 @@ library is using.
   generated path; `tests/eq_rep_p_differential.rs` proves the two reach the
   identical closure. The remaining downstream cost — `cls-*`/`cax-*` rules
   scanning a large materialised `rdf:type` partition (SPEC-04 F5
-  partition-by-class-id) — is separate and still Stage-2. See TASKS.md #2.
+  partition-by-class-id) — is addressed for the **hand-written list rules**:
+  `cls-int1`/`cls-uni`/`cax-adc`/`prp-key` partition their per-subject filtering
+  by class id and parallelise it across rayon above `PAR_TYPE_THRESHOLD`,
+  selected by `MaterializeOpts::parallel` (`ParallelStrategy::Auto` default;
+  `Serial` is the differential-test oracle in
+  `tests/rdf_type_skew_differential.rs`, benched in `benches/rdf_type_skew.rs`).
+  The **compiled** `rules.toml` rules (`cax-sco`-style) are *not* yet
+  parallelised — that needs a `FireFn` signature change and is Stage-2.
+  See TASKS.md #2/#39.
 - **Proof recording is implemented (SPEC-04 F4, acceptance #5, NF4).**
   Every compiled rule and every `list_rules.rs` rule records its real body
   triples as `Provenance.premises` on each derived triple.

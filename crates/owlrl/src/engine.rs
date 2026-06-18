@@ -47,20 +47,45 @@ pub enum EqRepPStrategy {
     Naive,
 }
 
+/// How the engine evaluates the `rdf:type`-driven list rules (`cls-int1`,
+/// `cls-uni`, `cax-adc`, `prp-key`) — SPEC-04 F5.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub enum ParallelStrategy {
+    /// Partition `rdf:type` work by class id and parallelise the per-subject
+    /// filtering across rayon's pool above a tuned subject-count threshold
+    /// (default). Identical closure to `Serial` — see
+    /// `tests/rdf_type_skew_differential.rs`.
+    #[default]
+    Auto,
+    /// Force the original sequential per-subject scan. Retained as the
+    /// correctness oracle for the F5 differential test and for callers that
+    /// want deterministic single-threaded execution.
+    Serial,
+}
+
 /// Tunables for a `materialize` run.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct MaterializeOpts {
     pub eq_rep_p: EqRepPStrategy,
+    /// `rdf:type`-skew parallelism for the list rules (SPEC-04 F5).
+    pub parallel: ParallelStrategy,
 }
 
 /// Run forward chaining to fixed point. Does NOT clear existing inferred
 /// triples — see `reset_and_materialize` for that.
-pub fn materialize<S: TripleStore, B: ClosureBackend>(store: &mut S, backend: &mut B) -> Stats {
+pub fn materialize<S: TripleStore + Sync, B: ClosureBackend>(
+    store: &mut S,
+    backend: &mut B,
+) -> Stats {
     materialize_with(store, backend, MaterializeOpts::default())
 }
 
 /// As `materialize`, with explicit strategy selection.
-pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
+///
+/// `S: Sync` is required by the SPEC-04 F5 parallel list-rule path, which shares
+/// `&store` across rayon worker threads. The only `TripleStore` impl (`MemStore`)
+/// is `Sync`, so this bound is invisible to callers.
+pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
     store: &mut S,
     backend: &mut B,
     opts: MaterializeOpts,
@@ -109,7 +134,13 @@ pub fn materialize_with<S: TripleStore, B: ClosureBackend>(
         //    these live outside `rules.toml`.
         let t_list = std::time::Instant::now();
         if list_rules_relevant(&axioms, dirty.as_ref(), &vocab) {
-            let d = list_rules::fire_all(store_as_dyn(store), &axioms, &vocab, dirty.as_ref());
+            let d = list_rules::fire_all(
+                store_as_dyn_sync(store),
+                &axioms,
+                &vocab,
+                dirty.as_ref(),
+                opts.parallel,
+            );
             round_delta.merge(d);
         }
         stats.timings.list_rules += t_list.elapsed();
@@ -158,7 +189,7 @@ fn list_rules_relevant(
 
 /// Drop all inferred triples and re-run forward chaining from the asserted base.
 /// Implements SPEC-04 F7.
-pub fn reset_and_materialize<S: TripleStore, B: ClosureBackend>(
+pub fn reset_and_materialize<S: TripleStore + Sync, B: ClosureBackend>(
     store: &mut S,
     backend: &mut B,
 ) -> Stats {
@@ -189,6 +220,13 @@ fn rule_relevant(
 /// Coerce a generic `&S` to `&dyn TripleStore`. Needed because `RULES`
 /// entries take `&dyn TripleStore`.
 fn store_as_dyn<S: TripleStore>(s: &S) -> &dyn TripleStore {
+    s
+}
+
+/// Coerce a generic `&S` to `&(dyn TripleStore + Sync)`. The SPEC-04 F5
+/// list-rule path (`list_rules::fire_all`) shares this reference across rayon
+/// threads, so it needs the `Sync` bound the plain `store_as_dyn` drops.
+fn store_as_dyn_sync<S: TripleStore + Sync>(s: &S) -> &(dyn TripleStore + Sync) {
     s
 }
 

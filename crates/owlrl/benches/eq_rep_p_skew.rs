@@ -42,7 +42,10 @@ fn run(base: &[Triple], strat: EqRepPStrategy) {
     materialize_with(
         &mut store,
         &mut backend,
-        MaterializeOpts { eq_rep_p: strat },
+        MaterializeOpts {
+            eq_rep_p: strat,
+            ..Default::default()
+        },
     );
 }
 
