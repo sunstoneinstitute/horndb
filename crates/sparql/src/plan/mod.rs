@@ -65,4 +65,15 @@ pub enum PhysicalPlan {
         keys: Vec<Var>,
         aggregates: Vec<Aggregate>,
     },
+    /// Recursive Kleene property path `p+`/`p*`. `edge` produces the
+    /// one-step relation over the hidden endpoint variables
+    /// (`?pp_src`, `?pp_dst`); the runtime takes its transitive (and,
+    /// when `reflexive`, reflexive) closure and binds the result to
+    /// `subject`/`object`. See [`crate::algebra::Algebra::PathClosure`].
+    PathClosure {
+        subject: Term,
+        object: Term,
+        edge: Box<PhysicalPlan>,
+        reflexive: bool,
+    },
 }

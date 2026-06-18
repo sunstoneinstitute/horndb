@@ -1,13 +1,16 @@
 //! Algebra translation from `spargebra` AST to our internal [`Algebra`].
 //!
 //! Stage 1 supports a deliberately small operator set; constructs we
-//! do not yet handle return `SparqlError::UnsupportedAlgebra` (or
-//! `UnsupportedPathOp` for the recursive `*`/`+` property paths) so the
-//! planner never has to defend against them. The non-recursive path
-//! operators (`/`, `^`, `|`, `?`, `!`) are lowered in
-//! [`translate_path`].
+//! do not yet handle return `SparqlError::UnsupportedAlgebra` so the
+//! planner never has to defend against them. All SPARQL 1.1 property-path
+//! operators are lowered in [`translate_path`]: the non-recursive ones
+//! (`/`, `^`, `|`, `?`, `!`) expand into existing algebra nodes, and the
+//! recursive Kleene `*`/`+` lower to [`Algebra::PathClosure`].
 
-use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var};
+use crate::algebra::{
+    AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var, PATH_DST_VAR,
+    PATH_SRC_VAR,
+};
 use crate::error::{Result, SparqlError};
 use crate::SparqlConfig;
 use spargebra::algebra::{
@@ -568,8 +571,11 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
 /// * `!` (NegatedPropertySet) — a wildcard-predicate `Bgp` wrapped in a
 ///   `Filter` that excludes the listed predicates.
 ///
-/// Kleene `*`/`+` are recursive (route to closure) and remain rejected
-/// with [`SparqlError::UnsupportedPathOp`].
+/// Kleene `*` ([`P::ZeroOrMore`]) and `+` ([`P::OneOrMore`]) are
+/// recursive: they lower to an [`Algebra::PathClosure`] whose `edge`
+/// is the inner path expanded over the hidden endpoint variables
+/// [`PATH_SRC_VAR`]/[`PATH_DST_VAR`]. The runtime evaluates the
+/// fixpoint.
 ///
 /// Endpoints arrive as already-lowered [`Term`]s (the caller runs them
 /// through [`match_term`]). Carrying `Term` rather than `spargebra`'s
@@ -653,8 +659,40 @@ fn translate_path(subject: Term, path: &PropertyPathExpression, object: Term) ->
                 inner: Box::new(bgp),
             })
         }
-        other => Err(SparqlError::UnsupportedPathOp(format!("{other:?}"))),
+        P::OneOrMore(inner) => translate_closure_path(subject, inner, object, false),
+        P::ZeroOrMore(inner) => translate_closure_path(subject, inner, object, true),
     }
+}
+
+/// Lower a recursive Kleene path (`p+` when `reflexive` is false, `p*`
+/// when true) to an [`Algebra::PathClosure`].
+///
+/// The one-step relation `p` is expanded between the two hidden endpoint
+/// variables [`PATH_SRC_VAR`] and [`PATH_DST_VAR`] (reusing the same
+/// non-recursive lowering, so `(p|q)+`, `^p+`, `(p/q)+` all work), then
+/// captured as the `edge` sub-algebra. The query's real endpoints
+/// (`subject`/`object`, either ground or variable) ride on the
+/// `PathClosure` node and are matched against the closure at runtime.
+///
+/// The endpoint variables are user-unspellable, so they can never
+/// collide with a query variable; the outer [`GraphPattern::Path`]
+/// caller projects the closure's output back down to the visible
+/// endpoint variables and `Distinct`s it.
+fn translate_closure_path(
+    subject: Term,
+    inner: &PropertyPathExpression,
+    object: Term,
+    reflexive: bool,
+) -> Result<Algebra> {
+    let src = Term::Var(Var::new(PATH_SRC_VAR));
+    let dst = Term::Var(Var::new(PATH_DST_VAR));
+    let edge = translate_path(src, inner, dst)?;
+    Ok(Algebra::PathClosure {
+        subject,
+        object,
+        edge: Box::new(edge),
+        reflexive,
+    })
 }
 
 /// Combine two property-path sub-algebras. When both are plain BGPs we

@@ -69,6 +69,17 @@ pub fn plan(alg: &Algebra) -> Result<PhysicalPlan> {
             keys: keys.clone(),
             aggregates: aggregates.clone(),
         },
+        Algebra::PathClosure {
+            subject,
+            object,
+            edge,
+            reflexive,
+        } => PhysicalPlan::PathClosure {
+            subject: subject.clone(),
+            object: object.clone(),
+            edge: Box::new(plan(edge)?),
+            reflexive: *reflexive,
+        },
     })
 }
 

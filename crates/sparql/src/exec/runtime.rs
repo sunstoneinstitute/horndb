@@ -143,7 +143,142 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 let v = self.eval(inner)?;
                 eval_group(v, keys, aggregates)
             }
+            PhysicalPlan::PathClosure {
+                subject,
+                object,
+                edge,
+                reflexive,
+            } => {
+                let edge_rows = self.eval(edge)?;
+                eval_path_closure(subject, object, &edge_rows, *reflexive)
+            }
         }
+    }
+}
+
+/// Evaluate a recursive Kleene path `p+`/`p*`.
+///
+/// `edge_rows` are the one-step relation `p` denotes, each row binding
+/// the hidden endpoint variables [`PATH_SRC_VAR`]/[`PATH_DST_VAR`].
+/// We take the transitive closure of that relation by BFS to a fixpoint
+/// (a `seen` set per source guarantees termination on cyclic data), and
+/// — for `*` — add the reflexive pairs over every node the relation
+/// touches. The resulting `(src, dst)` pairs are matched against the
+/// query endpoints `subject`/`object`, each of which may be ground
+/// (filter) or a variable (bind).
+///
+/// Stage-1 reflexive note: `p*`'s zero-length match is seeded only over
+/// nodes that appear in the path relation (plus a ground endpoint, if
+/// pinned), not over every node in the active graph. This matches the
+/// documented approximation in [`crate::algebra::translate`]'s
+/// `zero_length_path`; full graph-node enumeration for `*` is deferred.
+fn eval_path_closure(
+    subject: &Term,
+    object: &Term,
+    edge_rows: &[Bindings],
+    reflexive: bool,
+) -> Result<Vec<Bindings>> {
+    use crate::algebra::{PATH_DST_VAR, PATH_SRC_VAR};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+    // The hidden endpoint variables are stored in `Bindings` under their
+    // full names (the `?pp_*` sigil is part of the stored variable name,
+    // since these are user-unspellable synthetic vars).
+    let src_key = PATH_SRC_VAR;
+    let dst_key = PATH_DST_VAR;
+
+    // Adjacency over the lexical forms of the endpoint terms. We key on
+    // the term's serialised form (`lex`) to dedupe, and keep a
+    // representative `Term` for each node so we can rebuild bindings.
+    let mut adj: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut node_term: BTreeMap<String, Term> = BTreeMap::new();
+    for row in edge_rows {
+        let (Some(s), Some(o)) = (row.get(src_key), row.get(dst_key)) else {
+            continue;
+        };
+        let (sk, ok) = (lex(s), lex(o));
+        node_term.entry(sk.clone()).or_insert_with(|| s.clone());
+        node_term.entry(ok.clone()).or_insert_with(|| o.clone());
+        adj.entry(sk).or_default().insert(ok);
+    }
+
+    // Transitive closure: for each source, BFS over `adj`. Pairs are
+    // keyed by lexical form; `closure` holds `(src_key, dst_key)`.
+    let mut closure: BTreeSet<(String, String)> = BTreeSet::new();
+    let sources: Vec<String> = adj.keys().cloned().collect();
+    for start in sources {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        if let Some(nbrs) = adj.get(&start) {
+            for n in nbrs {
+                if seen.insert(n.clone()) {
+                    queue.push_back(n.clone());
+                }
+            }
+        }
+        while let Some(cur) = queue.pop_front() {
+            closure.insert((start.clone(), cur.clone()));
+            if let Some(nbrs) = adj.get(&cur) {
+                for n in nbrs {
+                    if seen.insert(n.clone()) {
+                        queue.push_back(n.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // `*` adds the reflexive pairs over every node the relation touches.
+    if reflexive {
+        for k in node_term.keys() {
+            closure.insert((k.clone(), k.clone()));
+        }
+        // A ground endpoint pinned to a node absent from the relation
+        // still self-matches under the zero-length branch.
+        for ep in [subject, object] {
+            if !matches!(ep, Term::Var(_)) {
+                let k = lex(ep);
+                node_term.entry(k.clone()).or_insert_with(|| ep.clone());
+                closure.insert((k.clone(), k));
+            }
+        }
+    }
+
+    // Bind/filter each closure pair against the query endpoints.
+    let mut out = Vec::new();
+    for (sk, ok) in &closure {
+        let s_term = node_term.get(sk).cloned().unwrap();
+        let o_term = node_term.get(ok).cloned().unwrap();
+        let mut b = Bindings::new();
+        if !bind_endpoint(subject, &s_term, &mut b) {
+            continue;
+        }
+        if !bind_endpoint(object, &o_term, &mut b) {
+            continue;
+        }
+        out.push(b);
+    }
+    Ok(out)
+}
+
+/// Match a closure endpoint against a query endpoint term, recording any
+/// variable binding into `b`. Returns `false` if a ground query endpoint
+/// does not equal the closure node (the pair is filtered out).
+///
+/// A repeated variable across both endpoints (e.g. `?x p+ ?x`) is handled
+/// by `Bindings::set` overwriting with the same value only when the two
+/// nodes agree — we guard that explicitly so an inconsistent pair is
+/// dropped rather than silently keeping the second binding.
+fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
+    match endpoint {
+        Term::Var(v) => {
+            if let Some(existing) = b.get(v.name()) {
+                return existing == node;
+            }
+            b.set(v.name().to_owned(), node.clone());
+            true
+        }
+        ground => lex(ground) == lex(node),
     }
 }
 

@@ -1,0 +1,1 @@
+SELECT ?x WHERE { <http://example.org/Cat> <http://www.w3.org/2000/01/rdf-schema#subClassOf>+ ?x }

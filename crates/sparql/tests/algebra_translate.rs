@@ -66,14 +66,56 @@ fn rejects_minus() {
 }
 
 #[test]
-fn rejects_kleene_star_path() {
+fn lowers_kleene_star_path_to_closure() {
+    // `*` now lowers to an `Algebra::PathClosure` (SPEC-07 #50) rather
+    // than being rejected. The reflexive flag marks `*` vs `+`.
+    use horndb_sparql::algebra::Algebra;
     let q = parse_query("SELECT ?x WHERE { ?x <http://ex/p>* ?y }").expect("parse");
     let inner = match q {
         ParsedQuery::Select { inner } => inner,
         _ => unreachable!(),
     };
-    let err = translate::translate_query(&inner).unwrap_err();
-    assert!(format!("{err}").contains("property-path"), "got: {err}");
+    let alg = translate::translate_query(&inner).expect("translate");
+    // Unwrap the outer Project/Distinct the path lowering wraps around it.
+    fn find_closure(a: &Algebra) -> Option<bool> {
+        match a {
+            Algebra::PathClosure { reflexive, .. } => Some(*reflexive),
+            Algebra::Project { inner, .. }
+            | Algebra::Distinct { inner }
+            | Algebra::Slice { inner, .. } => find_closure(inner),
+            _ => None,
+        }
+    }
+    assert_eq!(
+        find_closure(&alg),
+        Some(true),
+        "expected a reflexive PathClosure, got: {alg:?}"
+    );
+}
+
+#[test]
+fn lowers_kleene_plus_path_to_closure() {
+    use horndb_sparql::algebra::Algebra;
+    let q = parse_query("SELECT ?x WHERE { ?x <http://ex/p>+ ?y }").expect("parse");
+    let inner = match q {
+        ParsedQuery::Select { inner } => inner,
+        _ => unreachable!(),
+    };
+    let alg = translate::translate_query(&inner).expect("translate");
+    fn find_reflexive(a: &Algebra) -> Option<bool> {
+        match a {
+            Algebra::PathClosure { reflexive, .. } => Some(*reflexive),
+            Algebra::Project { inner, .. }
+            | Algebra::Distinct { inner }
+            | Algebra::Slice { inner, .. } => find_reflexive(inner),
+            _ => None,
+        }
+    }
+    assert_eq!(
+        find_reflexive(&alg),
+        Some(false),
+        "expected a non-reflexive (`+`) PathClosure, got: {alg:?}"
+    );
 }
 
 // RDF 1.2: SPARQL 1.2 triple-term patterns (`<< s p o >>` / `<<( s p o )>>`)
