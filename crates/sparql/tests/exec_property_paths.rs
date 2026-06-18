@@ -56,7 +56,7 @@ fn run_err(q: &str) -> String {
         | ParsedQuery::Construct { inner } => inner,
         ParsedQuery::Describe { .. } => panic!("describe"),
     };
-    format!("{}", translate_query(&inner).unwrap_err())
+    translate_query(&inner).unwrap_err().to_string()
 }
 
 /// Collect the IRI suffix bound to `var` across all rows, sorted+deduped.
