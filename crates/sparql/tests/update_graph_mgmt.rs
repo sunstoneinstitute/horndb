@@ -309,6 +309,49 @@ fn add_named_operand_errors() {
     assert_eq!(count_all(&store), 1);
 }
 
+fn copy_named_to_default_errors_without_data_loss<B: FullBackend + Default>() {
+    // `COPY <named> TO DEFAULT` desugars to `Drop{DEFAULT}` + a `DeleteInsert`
+    // reading `GRAPH <named>`. Applying op-by-op would clear the default graph
+    // and only then reject the named read, losing data on a failing update.
+    // The atomicity preflight must reject the whole update before any mutation,
+    // leaving the seeded triple intact.
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run("COPY <http://g/1> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("graph"), "{err}");
+    assert_eq!(count_all(&store), 1, "failed update must not lose data");
+}
+
+#[test]
+fn copy_named_to_default_errors_without_data_loss_mem() {
+    copy_named_to_default_errors_without_data_loss::<MemStore>();
+}
+#[test]
+fn copy_named_to_default_errors_without_data_loss_horn() {
+    copy_named_to_default_errors_without_data_loss::<HornBackend>();
+}
+
+#[test]
+fn move_named_to_default_errors_without_data_loss() {
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run("MOVE <http://g/1> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("graph"), "{err}");
+    assert_eq!(count_all(&store), 1, "failed update must not lose data");
+}
+
+#[test]
+fn multi_op_failing_op_aborts_before_destructive_op() {
+    // A destructive op followed by a failing op: the whole update is rejected
+    // up front, so the destructive op never runs.
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run("CLEAR DEFAULT ; CREATE GRAPH <http://g/1>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("create"), "{err}");
+    assert_eq!(
+        count_all(&store),
+        1,
+        "CLEAR must not run when a later op fails"
+    );
+}
+
 #[test]
 fn add_named_operand_silent_still_errors() {
     // spargebra drops the SILENT flag when it desugars ADD/MOVE/COPY into a

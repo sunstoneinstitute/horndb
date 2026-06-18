@@ -78,6 +78,20 @@ pub fn apply_update_with<B: FullBackend>(
             ));
         }
     };
+
+    // SPARQL Update is atomic: a failed update must not partially apply
+    // (§3.1.3). spargebra desugars `COPY`/`MOVE <named> TO DEFAULT` into a
+    // destructive `Drop{DEFAULT}` *followed by* a `DeleteInsert` that reads the
+    // unrepresentable named graph — so applying op-by-op would clear the
+    // default graph and only then reject, losing data on a failing update.
+    // Preflight every operation for the rejections we can detect without
+    // mutating; only mutate once the whole sequence is known-applyable. (The
+    // remaining failure mode — a `LOAD` whose fetch/parse fails — is checked in
+    // its own pass below, before any op mutates.)
+    for op in ops {
+        validate_op(op)?;
+    }
+
     for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
@@ -339,6 +353,137 @@ fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
     }
 }
 
+/// Preflight one operation: return the error it *would* produce at apply time,
+/// without touching the store. Mirrors every rejecting path in the apply loop so
+/// the whole update can be validated before the first mutation (SPARQL Update
+/// atomicity, §3.1.3). A `LOAD` is validated by fetching + parsing its source
+/// (a pure read); on success the parsed triples are discarded and re-fetched at
+/// apply time — acceptable because LOAD is not on a hot path and the alternative
+/// (threading the parsed triples through to apply) complicates the op loop.
+fn validate_op(op: &spargebra::GraphUpdateOperation) -> Result<()> {
+    use spargebra::term::GraphName;
+    use spargebra::GraphUpdateOperation;
+    match op {
+        GraphUpdateOperation::InsertData { data } => {
+            for q in data {
+                object_to_term(&q.object)?;
+            }
+            Ok(())
+        }
+        GraphUpdateOperation::DeleteData { data } => {
+            for q in data {
+                ground_term_to_term(&q.object)?;
+            }
+            Ok(())
+        }
+        GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            using,
+            pattern,
+        } => validate_delete_insert(delete, insert, using.as_ref(), pattern),
+        GraphUpdateOperation::Clear { silent, graph }
+        | GraphUpdateOperation::Drop { silent, graph } => {
+            use spargebra::algebra::GraphTarget;
+            match graph {
+                GraphTarget::DefaultGraph | GraphTarget::AllGraphs => Ok(()),
+                GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
+                    if *silent {
+                        Ok(())
+                    } else {
+                        Err(named_graph_unsupported())
+                    }
+                }
+            }
+        }
+        GraphUpdateOperation::Create { silent, .. } => {
+            if *silent {
+                Ok(())
+            } else {
+                Err(create_named_graph_unsupported())
+            }
+        }
+        GraphUpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        } => {
+            if *silent {
+                // A silent LOAD swallows every failure, so it can never abort
+                // the update — nothing to preflight.
+                return Ok(());
+            }
+            if let GraphName::NamedNode(_) = destination {
+                return Err(SparqlError::UnsupportedAlgebra(
+                    "LOAD INTO a named graph (Stage-1 default graph only)".into(),
+                ));
+            }
+            // Fetch + parse now (pure read) to surface a non-silent fetch/parse
+            // failure before any prior op mutates.
+            fetch_and_parse(source.as_str()).map(|_| ())
+        }
+    }
+}
+
+/// Shared rejection scan for a pattern-based update. Returns the error a
+/// `DeleteInsert` would produce, without mutating — used both by the atomicity
+/// preflight and by `apply_delete_insert` itself.
+fn validate_delete_insert(
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+) -> Result<()> {
+    // Reject a USING/USING NAMED dataset that redefines the graphs the
+    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
+    // default graph only). A vacuous dataset (`None`, or one naming no
+    // graphs) stays a no-op.
+    if let Some(ds) = using {
+        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
+            return Err(using_named_graph_unsupported());
+        }
+    }
+
+    // Reject named-graph templates (Stage-1 default graph only).
+    for q in delete {
+        require_default_graph(&q.graph_name)?;
+    }
+    for q in insert {
+        require_default_graph(&q.graph_name)?;
+    }
+
+    // Reject a GRAPH pattern anywhere in the WHERE clause. `translate_where`
+    // lowers `GraphPattern::Graph { name, inner }` to its inner pattern over the
+    // single default graph — an accepted Stage-1 simplification for *read*
+    // queries, but for a mutating update it would make e.g.
+    // `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
+    // default-graph triples even though the named graph isn't represented
+    // (silent data corruption). Stage-1 is default-graph only.
+    if where_has_graph_pattern(pattern) {
+        return Err(SparqlError::UnsupportedAlgebra(
+            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
+        ));
+    }
+
+    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template. The
+    // Stage-1 store has no triple-term slot, so silently dropping such a
+    // template triple (the `resolve_*` `Triple(_) => None` arms) while
+    // reporting success is inconsistent with INSERT DATA / DELETE DATA, which
+    // return `triple_term_unsupported()`. The up-front scan makes those `None`
+    // arms unreachable for the triple-term reason.
+    for q in delete {
+        if ground_quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+    for q in insert {
+        if quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+    Ok(())
+}
+
 /// Evaluate the WHERE pattern, then instantiate the DELETE/INSERT
 /// templates per solution. Per SPARQL 1.1 §3.1.3 the deletions are
 /// computed and applied before the insertions; both are derived from the
@@ -352,55 +497,10 @@ fn apply_delete_insert<B: FullBackend>(
     using: Option<&spargebra::algebra::QueryDataset>,
     pattern: &spargebra::algebra::GraphPattern,
 ) -> Result<()> {
-    // Reject a USING/USING NAMED dataset that redefines the graphs the
-    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
-    // default graph only). A vacuous dataset (`None`, or one naming no
-    // graphs) stays a no-op. This must run before any mutation so an
-    // ignored USING can never silently target the wrong graph.
-    if let Some(ds) = using {
-        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
-            return Err(using_named_graph_unsupported());
-        }
-    }
-
-    // Reject named-graph templates up front (Stage-1 default graph only),
-    // so a partially-applied update can't leave the store inconsistent.
-    for q in delete {
-        require_default_graph(&q.graph_name)?;
-    }
-    for q in insert {
-        require_default_graph(&q.graph_name)?;
-    }
-
-    // Reject a GRAPH pattern anywhere in the WHERE clause before mutating.
-    // `translate_where` lowers `GraphPattern::Graph { name, inner }` to its
-    // inner pattern over the single default graph — an accepted Stage-1
-    // simplification for *read* queries, but for a mutating update it would
-    // make e.g. `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
-    // default-graph triples even though the named graph isn't represented
-    // (silent data corruption). Stage-1 is default-graph only.
-    if where_has_graph_pattern(pattern) {
-        return Err(SparqlError::UnsupportedAlgebra(
-            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
-        ));
-    }
-
-    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template before
-    // mutating. The Stage-1 store has no triple-term slot, so silently
-    // dropping such a template triple (the `resolve_*` `Triple(_) => None`
-    // arms) while reporting success is inconsistent with INSERT DATA /
-    // DELETE DATA, which return `triple_term_unsupported()`. The up-front
-    // scan makes those `None` arms unreachable for the triple-term reason.
-    for q in delete {
-        if ground_quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
-    for q in insert {
-        if quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
+    // All the rejections below must run before any mutation so a failing
+    // update can't partially apply (and so the atomicity preflight in
+    // `apply_update_with` can detect them without side effects).
+    validate_delete_insert(delete, insert, using, pattern)?;
 
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
