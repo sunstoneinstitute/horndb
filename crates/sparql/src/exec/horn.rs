@@ -461,6 +461,19 @@ impl Store for HornBackend {
             self.invalidate();
         }
     }
+    fn clear_all(&mut self) {
+        if self.live == 0 {
+            return;
+        }
+        // Insertion-only storage: tombstone every physically-written key.
+        // `stored_keys` never shrinks, so cloning it into `tombstones`
+        // hides all live rows from `wcoj_snapshot` without touching the
+        // columns. Re-inserting a triple later clears its tombstone via
+        // `insert_oxrdf`/`insert_oxrdf_batch`, resurrecting it as usual.
+        self.tombstones = self.stored_keys.clone();
+        self.live = 0;
+        self.invalidate();
+    }
 }
 
 impl Executor for HornBackend {

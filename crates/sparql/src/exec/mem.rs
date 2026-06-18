@@ -209,6 +209,14 @@ impl Store for MemStore {
             self.insert(t);
         }
     }
+    fn clear_all(&mut self) {
+        self.triples.clear();
+        self.seen.clear();
+        self.by_p.clear();
+        self.by_po.clear();
+        self.by_ps.clear();
+        self.by_s.clear();
+    }
 }
 
 #[cfg(test)]

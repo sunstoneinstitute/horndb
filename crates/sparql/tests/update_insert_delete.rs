@@ -28,9 +28,12 @@ fn delete_data_removes_triple() {
 }
 
 #[test]
-fn unsupported_update_form_errors() {
+fn clear_default_is_supported() {
+    // `CLEAR DEFAULT` was rejected as an unsupported form in early Stage 1;
+    // the graph-management increment (#52) makes it a supported no-op on an
+    // empty store. Graph-management coverage lives in `update_graph_mgmt.rs`.
     let mut s = MemStore::default();
     let u = parse_update("CLEAR DEFAULT").unwrap();
-    let err = apply_update(&u, &mut s).unwrap_err();
-    assert!(format!("{err}").to_lowercase().contains("unsupported"));
+    apply_update(&u, &mut s).unwrap();
+    assert_eq!(s.len(), 0);
 }

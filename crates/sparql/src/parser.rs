@@ -53,8 +53,18 @@ pub enum ParsedUpdate {
     DeleteInsert {
         inner: Update,
     },
-    /// Any other update form (LOAD/CLEAR/DROP/...) is
-    /// parsed but flagged as out-of-scope at runtime.
+    /// A graph-management and/or multi-operation update whose operations are
+    /// all in the executable set (`LOAD`, `CLEAR`, `DROP`, `CREATE`, plus the
+    /// data/pattern forms). `ADD`/`MOVE`/`COPY` desugar (in spargebra) into
+    /// `Drop` + `DeleteInsert` sequences and land here. The executor walks the
+    /// whole operation sequence in order.
+    GraphManagement {
+        inner: Update,
+    },
+    /// Any update form the executor cannot apply is parsed but flagged as
+    /// out-of-scope at runtime. With spargebra 0.3.5 every standard verb is
+    /// executable, so this arm is reserved for forward-compatibility (a future
+    /// spargebra variant) and is unreachable today.
     UnsupportedForm {
         inner: Update,
     },
@@ -78,34 +88,39 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery> {
 
 /// Parse a SPARQL 1.1 update string.
 ///
-/// In Stage 1 we recognise `INSERT DATA`, `DELETE DATA`, and the
-/// single-operation pattern-based forms (`INSERT { … } WHERE { … }`,
-/// `DELETE { … } WHERE { … }`, `DELETE WHERE { … }`, and the combined
-/// `WITH/DELETE/INSERT … WHERE` form, all lowered by spargebra to one
-/// `GraphUpdateOperation::DeleteInsert`). Other update forms parse
-/// successfully but are classified as `UnsupportedForm`; the executor
-/// returns an explicit error when asked to apply them.
+/// A single data or pattern operation gets its dedicated classification
+/// (`InsertData`, `DeleteData`, `DeleteInsert` — the last covers
+/// `INSERT { … } WHERE { … }`, `DELETE { … } WHERE { … }`, `DELETE WHERE { … }`,
+/// and the combined `WITH/DELETE/INSERT … WHERE` form, all lowered by spargebra
+/// to one `GraphUpdateOperation::DeleteInsert`). Everything else — a
+/// graph-management verb (`LOAD`/`CLEAR`/`DROP`/`CREATE`) or any multi-operation
+/// sequence (including spargebra's `ADD`/`MOVE`/`COPY` desugaring) — is a
+/// `GraphManagement` update the executor walks in order. An empty operation
+/// list (the W3C identity-case rewrite of `ADD`/`MOVE`/`COPY <g> TO <g>`) is a
+/// valid no-op. The `UnsupportedForm` arm is reserved for a future spargebra
+/// variant the executor cannot apply; with spargebra 0.3.5 nothing reaches it.
 pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
     let u = SparqlParser::new()
         .parse_update(input)
         .map_err(|e| SparqlError::Parse(e.to_string()))?;
 
-    // `spargebra::Update` is a sequence of `GraphUpdateOperation`s.
-    // We classify by the *first* operation in Stage 1; multi-op
-    // updates degrade to `UnsupportedForm` and the executor rejects
-    // them. This is fine for the W3C subset we're targeting.
+    // `spargebra::Update` is a sequence of `GraphUpdateOperation`s. A
+    // single data/pattern operation keeps its dedicated classification so
+    // existing call sites are unchanged. Anything else — a graph-management
+    // verb (`LOAD`/`CLEAR`/`DROP`/`CREATE`) or a multi-operation sequence
+    // (which is also how spargebra desugars `ADD`/`MOVE`/`COPY`) — is a
+    // `GraphManagement` update; the executor walks the whole sequence. With
+    // spargebra 0.3.5 every operation variant is executable, so no update
+    // degrades to `UnsupportedForm` here.
     use spargebra::GraphUpdateOperation;
-    match u.operations.first() {
-        Some(GraphUpdateOperation::InsertData { .. }) if u.operations.len() == 1 => {
-            Ok(ParsedUpdate::InsertData { inner: u })
-        }
-        Some(GraphUpdateOperation::DeleteData { .. }) if u.operations.len() == 1 => {
-            Ok(ParsedUpdate::DeleteData { inner: u })
-        }
-        Some(GraphUpdateOperation::DeleteInsert { .. }) if u.operations.len() == 1 => {
-            Ok(ParsedUpdate::DeleteInsert { inner: u })
-        }
-        Some(_) => Ok(ParsedUpdate::UnsupportedForm { inner: u }),
-        None => Err(SparqlError::Parse("update contains no operations".into())),
+    match u.operations.as_slice() {
+        [GraphUpdateOperation::InsertData { .. }] => Ok(ParsedUpdate::InsertData { inner: u }),
+        [GraphUpdateOperation::DeleteData { .. }] => Ok(ParsedUpdate::DeleteData { inner: u }),
+        [GraphUpdateOperation::DeleteInsert { .. }] => Ok(ParsedUpdate::DeleteInsert { inner: u }),
+        // An empty operation list is the W3C identity-case rewrite of
+        // `ADD`/`MOVE`/`COPY <g> TO <g>` (same source and destination):
+        // spargebra lowers it to no operations, and SPARQL 1.1 defines it as a
+        // valid no-op. The executor walks an empty list and does nothing.
+        _ => Ok(ParsedUpdate::GraphManagement { inner: u }),
     }
 }

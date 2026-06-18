@@ -1,9 +1,17 @@
-//! SPARQL Update — `INSERT DATA` / `DELETE DATA` plus pattern-based
-//! `INSERT`/`DELETE … WHERE` (SPEC-07 F5).
+//! SPARQL Update — `INSERT DATA` / `DELETE DATA`, pattern-based
+//! `INSERT`/`DELETE … WHERE`, and the graph-management verbs
+//! `LOAD`/`CLEAR`/`DROP`/`CREATE` plus multi-operation updates (SPEC-07 F5,
+//! #52).
 //!
-//! Graph-management verbs (`LOAD`, `CLEAR`, `DROP`, `CREATE`, …) and
-//! multi-operation updates are still parsed but rejected at apply time
-//! (see `parser::ParsedUpdate::UnsupportedForm` and SPEC-07 Future Work).
+//! Under the Stage-1 default-graph-only model the graph-management verbs map
+//! onto the single merged default graph and honour the `SILENT` modifier:
+//! `CLEAR`/`DROP DEFAULT`/`ALL` empty the store; `LOAD` fetches a `file:`
+//! source and merges it into the default graph; and any verb that would touch
+//! an unrepresentable named graph is an error unless `SILENT` (then a no-op).
+//! `ADD`/`MOVE`/`COPY` desugar (in spargebra) to `Drop` + `DeleteInsert`
+//! sequences and are handled through those arms; the same-graph identity case
+//! desugars to zero operations (a valid no-op). True named-graph scoping and
+//! remote (`http(s):`) `LOAD` stay deferred — see `INTEGRATION-NOTES.md`.
 
 use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
@@ -52,7 +60,8 @@ pub fn apply_update_with<B: FullBackend>(
     let ops = match u {
         ParsedUpdate::InsertData { inner }
         | ParsedUpdate::DeleteData { inner }
-        | ParsedUpdate::DeleteInsert { inner } => &inner.operations,
+        | ParsedUpdate::DeleteInsert { inner }
+        | ParsedUpdate::GraphManagement { inner } => &inner.operations,
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),
@@ -85,14 +94,204 @@ pub fn apply_update_with<B: FullBackend>(
             } => {
                 apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
             }
-            other => {
-                return Err(SparqlError::UnsupportedAlgebra(format!(
-                    "update operation: {other:?}"
-                )));
+            GraphUpdateOperation::Clear { silent, graph } => {
+                apply_clear_drop(store, *silent, graph)?;
+            }
+            GraphUpdateOperation::Drop { silent, graph } => {
+                apply_clear_drop(store, *silent, graph)?;
+            }
+            GraphUpdateOperation::Create { silent, .. } => {
+                // No named-graph store exists (Stage-1 default-graph only),
+                // so a named graph cannot be created. SPARQL 1.1 §3.1.4:
+                // CREATE of an unrepresentable target is an error unless
+                // SILENT, in which case it is a no-op.
+                if !silent {
+                    return Err(create_named_graph_unsupported());
+                }
+            }
+            GraphUpdateOperation::Load {
+                silent,
+                source,
+                destination,
+            } => {
+                apply_load(store, *silent, source, destination)?;
             }
         }
     }
     Ok(())
+}
+
+/// Error for a graph-management verb that targets a named graph, which the
+/// Stage-1 default-graph-only store cannot represent.
+fn create_named_graph_unsupported() -> SparqlError {
+    SparqlError::UnsupportedAlgebra("CREATE of a named graph (Stage-1 default graph only)".into())
+}
+
+/// Apply `CLEAR`/`DROP` against the single default graph. The two verbs are
+/// semantically identical here: there are no named graphs to remove, so a
+/// `DEFAULT`/`ALL` target clears the store and any named/`NAMED` target refers
+/// to a graph that does not exist (SPARQL 1.1 §3.2.{1,2}: an error unless
+/// `SILENT`, otherwise a no-op).
+fn apply_clear_drop<B: FullBackend>(
+    store: &mut B,
+    silent: bool,
+    graph: &spargebra::algebra::GraphTarget,
+) -> Result<()> {
+    use spargebra::algebra::GraphTarget;
+    match graph {
+        GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
+            store.clear_all();
+            Ok(())
+        }
+        // No named graphs exist in the Stage-1 store: a named target (or the
+        // `NAMED` keyword) addresses nothing.
+        GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
+            if silent {
+                Ok(())
+            } else {
+                Err(named_graph_unsupported())
+            }
+        }
+    }
+}
+
+/// Apply `LOAD <source> [INTO GRAPH <destination>]`. The document is fetched,
+/// parsed, and its triples inserted into the default graph. Stage-1 boundaries:
+/// only `file:` sources are fetched (no HTTP client dependency), and a named
+/// `destination` cannot be targeted. A boundary violation is an error unless
+/// `SILENT`, in which case the whole load is skipped (SPARQL 1.1 §3.1.5).
+fn apply_load<B: FullBackend>(
+    store: &mut B,
+    silent: bool,
+    source: &spargebra::term::NamedNode,
+    destination: &spargebra::term::GraphName,
+) -> Result<()> {
+    use spargebra::term::GraphName;
+    // A named destination graph cannot be represented (default-graph only).
+    if let GraphName::NamedNode(_) = destination {
+        return if silent {
+            Ok(())
+        } else {
+            Err(SparqlError::UnsupportedAlgebra(
+                "LOAD INTO a named graph (Stage-1 default graph only)".into(),
+            ))
+        };
+    }
+    match fetch_and_parse(source.as_str()) {
+        Ok(triples) => {
+            for (s, p, o) in triples {
+                store.insert_triple(s, p, o);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if silent {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Fetch and parse an RDF document named by `source`, returning its triples as
+/// algebra [`Term`]s. Stage-1 supports `file:` IRIs only; remote (`http(s):`)
+/// sources are rejected (the workspace carries no HTTP client). The
+/// serialization is chosen from the path extension, defaulting to Turtle. All
+/// graph names in a quad source are merged into the default graph (Stage-1 has
+/// no named-graph store), matching the N-Quads bulk loader.
+fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
+    use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
+
+    let path = match source
+        .strip_prefix("file://")
+        .or_else(|| source.strip_prefix("file:"))
+    {
+        // `file:///abs/path` → `/abs/path`; the common absolute form.
+        Some(p) => p.to_owned(),
+        None => {
+            return Err(SparqlError::UnsupportedAlgebra(format!(
+                "LOAD of a non-file source (Stage-1 fetches file: IRIs only): {source}"
+            )));
+        }
+    };
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
+    let map_err =
+        |e: oxttl::TurtleSyntaxError| SparqlError::Executor(format!("LOAD parsing {path}: {e}"));
+
+    let mut out = Vec::new();
+    match path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("nt") => {
+            for t in NTriplesParser::new().for_slice(&bytes) {
+                let t = t.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+            }
+        }
+        Some("nq") => {
+            for q in NQuadsParser::new().for_slice(&bytes) {
+                let q = q.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+            }
+        }
+        Some("trig") => {
+            for q in TriGParser::new().for_slice(&bytes) {
+                let q = q.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+            }
+        }
+        // `.ttl` and anything else default to Turtle.
+        _ => {
+            for t in TurtleParser::new().for_slice(&bytes) {
+                let t = t.map_err(map_err)?;
+                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Lower a parsed `(subject, predicate, object)` from oxttl to algebra terms.
+fn oxrdf_triple_to_terms(
+    subject: &oxrdf::NamedOrBlankNode,
+    predicate: &oxrdf::NamedNode,
+    object: &oxrdf::Term,
+) -> (Term, Term, Term) {
+    (
+        oxrdf_subject_to_term(subject),
+        Term::Iri(predicate.as_str().to_owned()),
+        oxrdf_term_to_term(object),
+    )
+}
+
+/// Lower an `oxrdf` subject (named node or blank node) to an algebra [`Term`].
+fn oxrdf_subject_to_term(s: &oxrdf::NamedOrBlankNode) -> Term {
+    match s {
+        oxrdf::NamedOrBlankNode::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+    }
+}
+
+/// Lower an `oxrdf` object term to an algebra [`Term`]. Literals keep their
+/// N-Triples lexical form, matching the rest of the Stage-1 store.
+fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
+    match t {
+        oxrdf::Term::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
+        oxrdf::Term::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+        oxrdf::Term::Literal(l) => Term::Literal(l.to_string()),
+        // RDF 1.2 triple-term objects: the Stage-1 store has no triple-term
+        // slot, so they are surfaced as their N-Triples lexical form (the same
+        // best-effort lowering the loader applies). A LOAD of triple-term data
+        // into a SPARQL 1.1 store is an edge case; keeping the lexical form is
+        // better than dropping the triple silently.
+        oxrdf::Term::Triple(tr) => Term::Literal(tr.to_string()),
+    }
 }
 
 /// Evaluate the WHERE pattern, then instantiate the DELETE/INSERT

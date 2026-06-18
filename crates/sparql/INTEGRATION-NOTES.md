@@ -215,3 +215,49 @@ rejected rather than enumerated. Both belong with the recursive `*`/`+`
 increment (#50), which routes through closure and is the natural home for proper
 node-set semantics. Kleene `*`/`+` themselves remain rejected
 (`UnsupportedPathOp`).
+
+## Graph-management Update verbs (#52)
+
+`update.rs` implements `LOAD`/`CLEAR`/`DROP`/`CREATE` and (via spargebra
+desugaring) `ADD`/`MOVE`/`COPY`, plus multi-operation update sequences. The
+parser classifies a single data/pattern operation as before; everything else —
+a graph-management verb or any `;`-joined sequence — becomes
+`ParsedUpdate::GraphManagement`, and the executor walks the whole operation
+list in order.
+
+The execution store is **default-graph only** (one merged graph; see "GRAPH
+patterns" above). The graph-management verbs therefore map onto that single
+graph, with a uniform `SILENT` convention: an operation that would touch a
+named graph the Stage-1 store cannot represent is an **error** when not silent
+and a **no-op** when `SILENT`. Concretely:
+
+- **`CLEAR`/`DROP DEFAULT`/`ALL`** clear the store via the new
+  `Store::clear_all` seam method. `MemStore::clear_all` resets its vector and
+  indexes; `HornBackend::clear_all` tombstones every physically-written key
+  (storage is insertion-only, so it mirrors the `delete_triple` tombstone path)
+  and zeroes the live count. Re-inserting a cleared triple resurrects it via
+  the existing tombstone-clearing insert path.
+- **`CLEAR`/`DROP GRAPH <iri>` / `NAMED`** address a graph that does not exist:
+  error unless `SILENT`.
+- **`CREATE GRAPH <iri>`** cannot create a named graph: error unless `SILENT`.
+- **`LOAD <source> [INTO GRAPH <g>]`** fetches and parses `source`, merging its
+  triples into the default graph. Only `file:` sources are fetched — the
+  workspace carries no HTTP client, so remote (`http(s):`) sources are an error
+  unless `SILENT`. The serialization is picked from the path extension
+  (`.nt`/`.nq`/`.trig`, else Turtle) and parsed with `oxttl` (the same parser
+  family `serve.rs` uses); all graph names in a quad source merge into the
+  default graph. A named `INTO GRAPH` destination is an error unless `SILENT`.
+- **`ADD`/`MOVE`/`COPY`** are not distinct spargebra variants; the parser
+  rewrites them per the W3C spec into `Drop` + a `DeleteInsert` whose insert
+  target / WHERE is a `GRAPH` pattern. Named-graph operands are therefore
+  rejected by the existing `apply_delete_insert` named-graph guards. The
+  same-graph identity case (`… <g> TO <g>`) is rewritten to **zero
+  operations**, a valid no-op (`parse_update` admits an empty op list for this
+  reason).
+
+**Deferred** (documented, out of scope here): true named-graph scoping and a
+quad-aware `Store` seam belong with the Graph Store Protocol increment (#54);
+remote `LOAD` waits on an HTTP client decision; and the W3C SPARQL 1.1 Update
+conformance suite is wired by the harness epic (#10). Coverage for this
+increment lives in `tests/update_graph_mgmt.rs` (both backends) and the
+`/update` server tests in `tests/server_http.rs`.
