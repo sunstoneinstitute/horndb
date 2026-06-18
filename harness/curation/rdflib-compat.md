@@ -54,3 +54,11 @@ exactly the specified way).
 N-Quads / RDF/XML / JSON-LD formats, the full namespace-manager surface, and
 the multi-version CPython build matrix on macOS + Linux (acceptance #7 beyond
 the single Linux job). Tracked under issue #9.
+
+**Streaming (F9).** `Graph.triples()` and the `subjects`/`predicates`/`objects`
+projections return a materialised Python `list` in this increment — iterable
+for the common `for t in g.triples(...)` idiom (tested), but not a lazy
+generator, so `next(g.triples(...))` raises `TypeError` and a full scan
+materialises every match. True lazy/streamed iteration over the lock-held store
+(SPEC-10 F9 / NF2 GIL-release) is a Stage-2 increment; it touches the
+GIL/lifetime model and is intentionally out of this first slice.

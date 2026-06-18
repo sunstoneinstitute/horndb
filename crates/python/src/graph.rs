@@ -280,7 +280,18 @@ fn check_predicate(t: &RdfTerm) -> Result<()> {
 fn alg_term_to_rdfterm(t: &horndb_sparql::algebra::Term) -> RdfTerm {
     use horndb_sparql::algebra::Term as T;
     match t {
-        T::Iri(s) => RdfTerm::iri(s.trim_start_matches('<').trim_end_matches('>')),
+        T::Iri(s) => {
+            // MemStore's `classify_lexical` cannot tell a blank node from an
+            // IRI (both are non-`"`-prefixed), so a blank node the binding
+            // stored as `_:b` comes back as `Term::Iri("_:b")`. Recover the
+            // blank-node kind here so SPARQL bindings stay kind-faithful (F1),
+            // matching graph-iteration semantics.
+            if let Some(label) = s.strip_prefix("_:") {
+                RdfTerm::blank(label)
+            } else {
+                RdfTerm::iri(s.trim_start_matches('<').trim_end_matches('>'))
+            }
+        }
         T::BlankNode(s) => RdfTerm::blank(s.strip_prefix("_:").unwrap_or(s)),
         T::Literal(s) => {
             if s.starts_with('"') {

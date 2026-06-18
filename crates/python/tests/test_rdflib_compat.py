@@ -156,6 +156,17 @@ def test_subjects_and_value():
     assert str(v) in {"http://ex/bob", "http://ex/carol"}
 
 
+def test_mutators_return_self_like_rdflib():
+    # rdflib: add/remove/set all return the graph (verified against rdflib).
+    g = hb.Graph()
+    r = g.add((hb.URIRef("http://ex/s"), hb.URIRef("http://ex/p"), hb.URIRef("http://ex/o")))
+    assert r is g
+    r2 = g.set((hb.URIRef("http://ex/s"), hb.URIRef("http://ex/p"), hb.URIRef("http://ex/o2")))
+    assert r2 is g
+    r3 = g.remove((hb.URIRef("http://ex/s"), hb.URIRef("http://ex/p"), None))
+    assert r3 is g
+
+
 def test_remove_with_none_wildcard_matches_rdflib():
     rg, hg = build_pair()
     # rdflib: remove((s, p, None)) deletes every matching object.
@@ -238,6 +249,17 @@ def test_select_matches_rdflib_bindings():
     r_objs = sorted(str(row[0]) for row in rg.query(q))
     h_objs = sorted(str(row[0]) for row in hg.query(q))
     assert h_objs == r_objs == ["http://ex/bob", "http://ex/carol"]
+
+
+def test_select_preserves_blank_node_kind():
+    # A blank node bound by a SELECT must come back as a BNode, not a URIRef.
+    hg = hb.Graph()
+    hg.add((hb.BNode("b0"), hb.URIRef("http://ex/p"), hb.URIRef("http://ex/o")))
+    rows = list(hg.query("SELECT ?s WHERE { ?s <http://ex/p> <http://ex/o> }"))
+    assert len(rows) == 1
+    s = rows[0][0]
+    assert isinstance(s, hb.BNode), f"expected BNode, got {type(s)}"
+    assert not isinstance(s, hb.URIRef)
 
 
 def test_ask_matches_rdflib():

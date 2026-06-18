@@ -348,35 +348,50 @@ impl Graph {
         self.inner.lock().unwrap().len()
     }
 
-    /// `graph.add((s, p, o))`.
-    fn add(&self, triple: &Bound<'_, PyTuple>) -> PyResult<()> {
+    /// `graph.add((s, p, o))`. Returns the graph (rdflib's mutators return the
+    /// graph, enabling chaining/assignment).
+    fn add<'py>(slf: Bound<'py, Self>, triple: &Bound<'_, PyTuple>) -> PyResult<Bound<'py, Self>> {
         let (s, p, o) = extract_triple(triple)?;
-        self.inner
+        slf.borrow()
+            .inner
             .lock()
             .unwrap()
             .add(&s, &p, &o)
-            .map_err(to_py_err)
+            .map_err(to_py_err)?;
+        Ok(slf)
     }
 
     /// `graph.remove((s, p, o))`. Like rdflib, any position may be `None` to
-    /// remove every matching triple (e.g. `remove((s, p, None))`).
-    fn remove(&self, triple: &Bound<'_, PyTuple>) -> PyResult<()> {
+    /// remove every matching triple (e.g. `remove((s, p, None))`); returns the
+    /// graph.
+    fn remove<'py>(
+        slf: Bound<'py, Self>,
+        triple: &Bound<'_, PyTuple>,
+    ) -> PyResult<Bound<'py, Self>> {
         let (s, p, o) = extract_triple_pattern(triple)?;
-        let mut g = self.inner.lock().unwrap();
-        for (ts, tp, to) in g.triples(s.as_ref(), p.as_ref(), o.as_ref()) {
-            g.remove(&ts, &tp, &to);
+        {
+            let this = slf.borrow();
+            let mut g = this.inner.lock().unwrap();
+            for (ts, tp, to) in g.triples(s.as_ref(), p.as_ref(), o.as_ref()) {
+                g.remove(&ts, &tp, &to);
+            }
         }
-        Ok(())
+        Ok(slf)
     }
 
-    /// `graph.set((s, p, o))` — replace all `(s, p, *)` with the one object.
-    fn set(&self, triple: &Bound<'_, PyTuple>) -> PyResult<()> {
+    /// `graph.set((s, p, o))` — replace all `(s, p, *)` with the one object;
+    /// returns the graph.
+    fn set<'py>(slf: Bound<'py, Self>, triple: &Bound<'_, PyTuple>) -> PyResult<Bound<'py, Self>> {
         let (s, p, o) = extract_triple(triple)?;
-        let mut g = self.inner.lock().unwrap();
-        for (ts, tp, to) in g.triples(Some(&s), Some(&p), None) {
-            g.remove(&ts, &tp, &to);
+        {
+            let this = slf.borrow();
+            let mut g = this.inner.lock().unwrap();
+            for (ts, tp, to) in g.triples(Some(&s), Some(&p), None) {
+                g.remove(&ts, &tp, &to);
+            }
+            g.add(&s, &p, &o).map_err(to_py_err)?;
         }
-        g.add(&s, &p, &o).map_err(to_py_err)
+        Ok(slf)
     }
 
     /// `(s, p, o) in graph`. Like rdflib, `None` positions act as wildcards, so
