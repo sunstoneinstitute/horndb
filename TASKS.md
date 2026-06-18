@@ -131,7 +131,6 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   SPEC-02-backed per-tuple storage MVCC, distributed timely-dataflow (SPEC-09).
 
 - [ ] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
-  Remaining: non-recursive property paths `|`/`!`/`?` ([#49](https://github.com/sunstoneinstitute/horndb/issues/49)),
   Kleene paths `*`/`+` via closure ([#50](https://github.com/sunstoneinstitute/horndb/issues/50)),
   graph-management Update `LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY` ([#52](https://github.com/sunstoneinstitute/horndb/issues/52)),
   `EXPLAIN` pragma ([#53](https://github.com/sunstoneinstitute/horndb/issues/53)),
@@ -140,7 +139,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   streaming result serialization ([#56](https://github.com/sunstoneinstitute/horndb/issues/56)),
   SPARQL XML results + Turtle CONSTRUCT/DESCRIBE ([#57](https://github.com/sunstoneinstitute/horndb/issues/57)).
   Promoted HIGH (trainmarks): #51, #66, #67 — see section above.
-  Delivered: `DESCRIBE` one-level CBD (#48).
+  Delivered: `DESCRIBE` one-level CBD (#48); non-recursive property paths `|`/`!`/`?` ([#49](https://github.com/sunstoneinstitute/horndb/issues/49), PR #101).
   Deferred: `SERVICE` federation, RDF 1.2 SPARQL surface, GeoSPARQL.
 
 - [ ] **SPEC-08 ML.** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
