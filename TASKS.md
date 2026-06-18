@@ -43,7 +43,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-08 ML (HTTP boundary delivered; FAISS candidate generator deferred) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [x] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
 - [x] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
-- [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
+- [v] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-11-closure-valued-readiness-metrics · 2026-06-18T12:10:15Z_
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
 - [ ] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
@@ -211,7 +211,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   Re-open a focused HIGH/MEDIUM task per corpus when the runner capacity and
   licensing land.
 
-- [ ] **Closure valued-reasoning readiness metrics.** ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
+- [v] **Closure valued-reasoning readiness metrics.** ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
   Instrument the closure path *before* building any custom-semiring work, so the
   call is measured not guessed. Per run (harness + a `BENCHMARKS.md` row): matrix
   dimension `N` / `nnz` / density; iterations-to-fixpoint and work/iteration;
