@@ -180,3 +180,281 @@ impl Drop for BoolMatrix {
         }
     }
 }
+
+/// Owned `f64`-valued GraphBLAS matrix used for *valued* (annotated) closure.
+///
+/// This is the carrier for "Fork A" scalar-confidence reasoning (SPEC-05
+/// addendum / TASKS.md #11–#12): weighted edges combined under a valued
+/// semiring such as `(max, ×)` (best-confidence path) or `(min, +)`
+/// (shortest / least-cost path). It exists primarily so the readiness-metrics
+/// instrumentation can measure the cost of a valued `GrB_mxm` against the
+/// Boolean reachability baseline on the *same* matrix shape.
+///
+/// Two multiply paths are exposed deliberately:
+/// - [`ValuedMatrix::mxm_max_times_builtin`] uses the prepackaged
+///   `GrB_MAX_TIMES_SEMIRING_FP64`, which SuiteSparse dispatches to a
+///   hand-tuned *FactoryKernel*.
+/// - [`ValuedMatrix::mxm_max_times_udf`] builds an equivalent semiring from a
+///   *user-defined* binary op, forcing SuiteSparse onto its *generic* kernel.
+///
+/// The throughput ratio between the two is exactly the multiplier that a
+/// JIT/PreJIT specialization would remove (issue #11, "generic-kernel
+/// penalty").
+pub struct ValuedMatrix {
+    inner: ffi::GrB_Matrix,
+    nrows: u64,
+    ncols: u64,
+}
+
+// Safety: same rationale as `BoolMatrix` — distinct handles, internally
+// serialised by SuiteSparse in non-blocking mode.
+unsafe impl Send for ValuedMatrix {}
+
+impl ValuedMatrix {
+    /// Construct an `n x n` `f64` matrix from `(row, col, weight)` triples.
+    /// Duplicate coordinates are combined with `GrB_MAX_FP64` (keep the best
+    /// confidence), matching the `(max, ×)` carrier.
+    pub fn from_weighted_edges(n: u64, edges: &[(u64, u64, f64)]) -> Result<Self, GrbError> {
+        let mut handle: ffi::GrB_Matrix = std::ptr::null_mut();
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_new(&mut handle, ffi::GrB_FP64, n, n))?;
+        }
+
+        if !edges.is_empty() {
+            let rows: Vec<u64> = edges.iter().map(|(s, _, _)| *s).collect();
+            let cols: Vec<u64> = edges.iter().map(|(_, o, _)| *o).collect();
+            let vals: Vec<f64> = edges.iter().map(|(_, _, w)| *w).collect();
+            unsafe {
+                GrbError::check(ffi::GrB_Matrix_build_FP64(
+                    handle,
+                    rows.as_ptr(),
+                    cols.as_ptr(),
+                    vals.as_ptr(),
+                    edges.len() as u64,
+                    ffi::GrB_MAX_FP64,
+                ))?;
+            }
+        }
+
+        Ok(Self {
+            inner: handle,
+            nrows: n,
+            ncols: n,
+        })
+    }
+
+    /// Fresh empty `n x n` `f64` matrix.
+    pub fn new(n: u64) -> Result<Self, GrbError> {
+        Self::from_weighted_edges(n, &[])
+    }
+
+    pub fn nrows(&self) -> u64 {
+        self.nrows
+    }
+    pub fn ncols(&self) -> u64 {
+        self.ncols
+    }
+
+    pub fn nvals(&self) -> Result<u64, GrbError> {
+        let mut n: u64 = 0;
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_nvals(&mut n, self.inner))?;
+        }
+        Ok(n)
+    }
+
+    /// `C = A ⊗ B` over the built-in `(max, ×)` FP64 semiring (FactoryKernel).
+    pub fn mxm_max_times_builtin(&self, other: &ValuedMatrix) -> Result<ValuedMatrix, GrbError> {
+        assert_eq!(self.ncols, other.nrows, "shape mismatch for MxM");
+        let c = ValuedMatrix::new(self.nrows)?;
+        unsafe {
+            GrbError::check(ffi::GrB_mxm(
+                c.inner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                ffi::GrB_MAX_TIMES_SEMIRING_FP64,
+                self.inner,
+                other.inner,
+                std::ptr::null_mut(),
+            ))?;
+        }
+        Ok(c)
+    }
+
+    /// `C = A ⊗ B` over a `(max, ×)` semiring assembled from a *user-defined*
+    /// multiply op. Functionally identical to
+    /// [`mxm_max_times_builtin`](Self::mxm_max_times_builtin) but routes
+    /// SuiteSparse onto its generic kernel — the measurement target for the
+    /// JIT/PreJIT penalty.
+    pub fn mxm_max_times_udf(
+        &self,
+        other: &ValuedMatrix,
+        semiring: &UserSemiring,
+    ) -> Result<ValuedMatrix, GrbError> {
+        assert_eq!(self.ncols, other.nrows, "shape mismatch for MxM");
+        let c = ValuedMatrix::new(self.nrows)?;
+        unsafe {
+            GrbError::check(ffi::GrB_mxm(
+                c.inner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                semiring.inner,
+                self.inner,
+                other.inner,
+                std::ptr::null_mut(),
+            ))?;
+        }
+        Ok(c)
+    }
+
+    /// `self = max(self, other)` element-wise (accumulate best confidence).
+    pub fn max_assign(&mut self, other: &ValuedMatrix) -> Result<(), GrbError> {
+        assert_eq!(self.nrows, other.nrows);
+        assert_eq!(self.ncols, other.ncols);
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_eWiseAdd_Monoid(
+                self.inner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                ffi::GrB_MAX_MONOID_FP64,
+                self.inner,
+                other.inner,
+                std::ptr::null_mut(),
+            ))?;
+        }
+        Ok(())
+    }
+
+    /// Force pending lazy computation to complete (see [`BoolMatrix::wait`]).
+    pub fn wait(&self) -> Result<(), GrbError> {
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_wait(
+                self.inner,
+                ffi::GrB_WaitMode_GrB_MATERIALIZE as i32,
+            ))
+        }
+    }
+
+    /// Extract all stored entries as `(row, col, weight)` triples, row-major.
+    pub fn extract_weighted_edges(&self) -> Result<Vec<(u64, u64, f64)>, GrbError> {
+        let nvals = self.nvals()?;
+        let mut rows = vec![0u64; nvals as usize];
+        let mut cols = vec![0u64; nvals as usize];
+        let mut vals = vec![0.0f64; nvals as usize];
+        let mut n_out: u64 = nvals;
+        unsafe {
+            GrbError::check(ffi::GrB_Matrix_extractTuples_FP64(
+                rows.as_mut_ptr(),
+                cols.as_mut_ptr(),
+                vals.as_mut_ptr(),
+                &mut n_out,
+                self.inner,
+            ))?;
+        }
+        rows.truncate(n_out as usize);
+        cols.truncate(n_out as usize);
+        vals.truncate(n_out as usize);
+        let mut out: Vec<(u64, u64, f64)> = rows
+            .into_iter()
+            .zip(cols)
+            .zip(vals)
+            .map(|((r, c), v)| (r, c, v))
+            .collect();
+        out.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        Ok(out)
+    }
+}
+
+impl Drop for ValuedMatrix {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::GrB_Matrix_free(&mut self.inner);
+        }
+    }
+}
+
+/// `z = max(x, y)` for `f64`, exposed to GraphBLAS as a user-defined binary op.
+///
+/// Marked `extern "C"` so SuiteSparse can call it through its generic kernel.
+unsafe extern "C" fn udf_max(
+    z: *mut std::os::raw::c_void,
+    x: *const std::os::raw::c_void,
+    y: *const std::os::raw::c_void,
+) {
+    let x = *(x as *const f64);
+    let y = *(y as *const f64);
+    *(z as *mut f64) = if x > y { x } else { y };
+}
+
+/// `z = x * y` for `f64`, exposed to GraphBLAS as a user-defined binary op.
+unsafe extern "C" fn udf_times(
+    z: *mut std::os::raw::c_void,
+    x: *const std::os::raw::c_void,
+    y: *const std::os::raw::c_void,
+) {
+    let x = *(x as *const f64);
+    let y = *(y as *const f64);
+    *(z as *mut f64) = x * y;
+}
+
+/// A `(max, ×)` FP64 semiring built from *user-defined* ops, forcing the
+/// SuiteSparse generic (non-Factory) kernel. Owns the underlying ops/monoid so
+/// they outlive any `GrB_mxm` that references them.
+pub struct UserSemiring {
+    inner: ffi::GrB_Semiring,
+    monoid: ffi::GrB_Monoid,
+    add_op: ffi::GrB_BinaryOp,
+    mul_op: ffi::GrB_BinaryOp,
+}
+
+unsafe impl Send for UserSemiring {}
+
+impl UserSemiring {
+    /// Build the user-defined `(max, ×)` FP64 semiring. Identity of the `max`
+    /// monoid is `f64::NEG_INFINITY`.
+    pub fn max_times_fp64() -> Result<Self, GrbError> {
+        let mut add_op: ffi::GrB_BinaryOp = std::ptr::null_mut();
+        let mut mul_op: ffi::GrB_BinaryOp = std::ptr::null_mut();
+        let mut monoid: ffi::GrB_Monoid = std::ptr::null_mut();
+        let mut semiring: ffi::GrB_Semiring = std::ptr::null_mut();
+        unsafe {
+            GrbError::check(ffi::GrB_BinaryOp_new(
+                &mut add_op,
+                Some(udf_max),
+                ffi::GrB_FP64,
+                ffi::GrB_FP64,
+                ffi::GrB_FP64,
+            ))?;
+            GrbError::check(ffi::GrB_BinaryOp_new(
+                &mut mul_op,
+                Some(udf_times),
+                ffi::GrB_FP64,
+                ffi::GrB_FP64,
+                ffi::GrB_FP64,
+            ))?;
+            GrbError::check(ffi::GrB_Monoid_new_FP64(
+                &mut monoid,
+                add_op,
+                f64::NEG_INFINITY,
+            ))?;
+            GrbError::check(ffi::GrB_Semiring_new(&mut semiring, monoid, mul_op))?;
+        }
+        Ok(Self {
+            inner: semiring,
+            monoid,
+            add_op,
+            mul_op,
+        })
+    }
+}
+
+impl Drop for UserSemiring {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ffi::GrB_Semiring_free(&mut self.inner);
+            let _ = ffi::GrB_Monoid_free(&mut self.monoid);
+            let _ = ffi::GrB_BinaryOp_free(&mut self.add_op);
+            let _ = ffi::GrB_BinaryOp_free(&mut self.mul_op);
+        }
+    }
+}

@@ -46,6 +46,7 @@ pub mod dense_id;
 pub mod error;
 pub mod ffi;
 pub mod grb;
+pub mod metrics;
 pub mod sameas;
 pub mod sink;
 pub mod types;
