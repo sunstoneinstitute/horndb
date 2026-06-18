@@ -358,10 +358,14 @@ impl Graph {
             .map_err(to_py_err)
     }
 
-    /// `graph.remove((s, p, o))`.
+    /// `graph.remove((s, p, o))`. Like rdflib, any position may be `None` to
+    /// remove every matching triple (e.g. `remove((s, p, None))`).
     fn remove(&self, triple: &Bound<'_, PyTuple>) -> PyResult<()> {
-        let (s, p, o) = extract_triple(triple)?;
-        self.inner.lock().unwrap().remove(&s, &p, &o);
+        let (s, p, o) = extract_triple_pattern(triple)?;
+        let mut g = self.inner.lock().unwrap();
+        for (ts, tp, to) in g.triples(s.as_ref(), p.as_ref(), o.as_ref()) {
+            g.remove(&ts, &tp, &to);
+        }
         Ok(())
     }
 
@@ -375,10 +379,20 @@ impl Graph {
         g.add(&s, &p, &o).map_err(to_py_err)
     }
 
-    /// `(s, p, o) in graph`.
+    /// `(s, p, o) in graph`. Like rdflib, `None` positions act as wildcards, so
+    /// `(s, p, None) in graph` is a pattern-membership test.
     fn __contains__(&self, triple: &Bound<'_, PyTuple>) -> PyResult<bool> {
-        let (s, p, o) = extract_triple(triple)?;
-        Ok(self.inner.lock().unwrap().contains(&s, &p, &o))
+        let (s, p, o) = extract_triple_pattern(triple)?;
+        // Exact triple (no wildcard) → cheap direct membership check.
+        if let (Some(s), Some(p), Some(o)) = (&s, &p, &o) {
+            return Ok(self.inner.lock().unwrap().contains(s, p, o));
+        }
+        Ok(!self
+            .inner
+            .lock()
+            .unwrap()
+            .triples(s.as_ref(), p.as_ref(), o.as_ref())
+            .is_empty())
     }
 
     /// `graph.triples((s, p, o))` with `None` wildcards; also backs
@@ -703,8 +717,11 @@ impl QueryResultPy {
         self.vars.clone()
     }
 
-    /// The query form: "SELECT", "ASK", "CONSTRUCT" or "EXPLAIN".
+    /// The query form: "SELECT", "ASK", "CONSTRUCT" or "EXPLAIN". Exposed under
+    /// rdflib's attribute name `result.type` (`type` is a Rust keyword, so the
+    /// method is `type_` but the Python getter is named `type`).
     #[getter]
+    #[pyo3(name = "type")]
     fn type_(&self) -> &str {
         self.kind
     }

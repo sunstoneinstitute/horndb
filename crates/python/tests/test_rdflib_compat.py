@@ -156,6 +156,24 @@ def test_subjects_and_value():
     assert str(v) in {"http://ex/bob", "http://ex/carol"}
 
 
+def test_remove_with_none_wildcard_matches_rdflib():
+    rg, hg = build_pair()
+    # rdflib: remove((s, p, None)) deletes every matching object.
+    rg.remove((rdflib.URIRef("http://ex/alice"), rdflib.URIRef("http://ex/knows"), None))
+    hg.remove((hb.URIRef("http://ex/alice"), hb.URIRef("http://ex/knows"), None))
+    assert len(hg) == len(rg) == 0
+
+
+def test_contains_with_none_wildcard_matches_rdflib():
+    rg, hg = build_pair()
+    pat_r = (rdflib.URIRef("http://ex/alice"), rdflib.URIRef("http://ex/knows"), None)
+    pat_h = (hb.URIRef("http://ex/alice"), hb.URIRef("http://ex/knows"), None)
+    assert (pat_h in hg) == (pat_r in rg) is True
+    miss_r = (rdflib.URIRef("http://ex/nobody"), None, None)
+    miss_h = (hb.URIRef("http://ex/nobody"), None, None)
+    assert (miss_h in hg) == (miss_r in rg) is False
+
+
 def test_literal_subject_rejected():
     hg = hb.Graph()
     with pytest.raises(ValueError):
@@ -238,6 +256,17 @@ def test_construct_matches_rdflib_triple_set():
     h_set = sorted((str(s), str(p), str(o)) for s, p, o in hg.query(q))
     assert h_set == r_set
     assert len(h_set) == 2
+
+
+def test_result_type_attribute_matches_rdflib():
+    rg, hg = build_pair()
+    q = "SELECT ?o WHERE { ?s <http://ex/knows> ?o }"
+    # rdflib exposes the query form as `result.type`.
+    assert hg.query(q).type == rg.query(q).type == "SELECT"
+    qa = "ASK { <http://ex/alice> <http://ex/knows> <http://ex/bob> }"
+    assert hg.query(qa).type == rg.query(qa).type == "ASK"
+    qc = "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"
+    assert hg.query(qc).type == rg.query(qc).type == "CONSTRUCT"
 
 
 def test_update_insert_then_query():
