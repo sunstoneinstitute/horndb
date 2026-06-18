@@ -109,10 +109,19 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   user-defined Datalog frontend (Stage-2).
 
 - [x] **SPEC-05 closure.** ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
-  Remaining: deletion/retraction half of F6 (blocked on SPEC-06 #6).
-  Delivered: incremental insertion-path transitive closure (#42).
-  Deferred: GPU GraphBLAS backend (SPEC-09), LAGraph adoption, perf tuning
-  (`GrB_Matrix_dup` clone, `(min,+)` semiring, nnz-threshold routing).
+  Epic complete — both halves of F6 delivered, remainder deferred to Stage-2/3.
+  Delivered: incremental insertion-path transitive closure (#42); closure-path
+  retraction / deletion half of F6 ([#99](https://github.com/sunstoneinstitute/horndb/issues/99))
+  — `delete_edge`/`delete_transitive_edges` withdraw only closure pairs no longer
+  derivable over the post-delete base, wired into the SPEC-06 `Circuit` so a
+  `ClosureInferred` row is withdrawn when its base support is retracted.
+  Deferred: fully delta-incremental closure retraction (current path recomputes
+  the affected source region per retracted edge); change-feed net-delta
+  reconciliation for same-tick withdraw+re-add (final state correct, feed shows a
+  transient -1/+1); warm-store seeded base-edge retraction is sound but may
+  under-withdraw (closed extent used as conservative base); GPU GraphBLAS backend
+  (SPEC-09), LAGraph adoption, perf tuning (`GrB_Matrix_dup` clone, `(min,+)`
+  semiring, nnz-threshold routing).
 
 - [x] **SPEC-06 incremental.** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
   Delivered: F5 closure-operator deltas (#44), F6 correct retraction across
