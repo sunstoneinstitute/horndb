@@ -230,6 +230,27 @@ fn two_negated_sets_do_not_share_hidden_predicate_var() {
     assert_eq!(names(&rows, "b"), vec!["alice"]);
 }
 
+#[test]
+fn blank_node_endpoint_joins_with_enclosing_pattern() {
+    // A query blank node shared between a path and an ordinary triple must
+    // keep co-referring: `_:b (knows|likes) ?o . _:b admires ?x`. Only bob
+    // both has an outgoing knows/likes AND an admires edge, so `_:b` = bob,
+    // ?o ∈ {dave} (bob knows dave), ?x = alice (bob admires alice). The
+    // path's set-valued projection must NOT drop the `_:b` join variable,
+    // or this collapses into a Cartesian product / false positives.
+    let s = make_store();
+    let rows = run(
+        "SELECT ?o ?x WHERE { \
+           _:b (<http://ex/knows>|<http://ex/likes>) ?o . \
+           _:b <http://ex/admires> ?x }",
+        &s,
+    );
+    // bob knows dave (likes: none from bob); bob admires alice.
+    assert_eq!(names(&rows, "o"), vec!["dave"]);
+    assert_eq!(names(&rows, "x"), vec!["alice"]);
+    assert_eq!(rows.len(), 1, "no Cartesian blow-up, got {rows:?}");
+}
+
 // ---- Composition -----------------------------------------------------
 
 #[test]

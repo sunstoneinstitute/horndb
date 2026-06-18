@@ -197,12 +197,21 @@ Two design points worth recording:
    predicates of `!`, or the `?` zero-length/one-step overlap — and the lowering
    emits one witness per route (the witnesses differ only in the *hidden*
    columns). To match SPARQL's set semantics, `GraphPattern::Path` projects the
-   result down to the user-visible endpoint variables (`visible_path_vars`,
-   dropping the hidden witness columns) and wraps it in `Distinct`. When both
+   result down to `visible_path_vars` and wraps it in `Distinct`. The
+   projection drops only the **path-internal witnesses** (`?pp_seq_*`,
+   `?pp_neg_*`); it deliberately **keeps blank-node-endpoint variables**
+   (`?pp_bnode_*`), because a query blank node may co-refer with the *enclosing*
+   graph pattern (`_:b :p ?o . _:b :q ?x`) and must survive to join outward —
+   dropping it would Cartesian-explode the surrounding pattern. When both
    endpoints are ground the path is a pure existence test, collapsed to at most
    one solution via `Slice(0, 1)` — `Project { vars: [] }` can't express this
    because the runtime reads an empty projection as `SELECT *` and would keep
    the hidden columns.
 
-Kleene `*`/`+` remain rejected (`UnsupportedPathOp`); they are recursive and
-route to closure under increment #50.
+Two Stage-1 approximations are documented in code: a zero-length `?` does not
+node-membership-check a ground endpoint (so `?s p? <urn:absent>` self-matches an
+absent term — see `zero_length_path`), and both-variable `?` endpoints are
+rejected rather than enumerated. Both belong with the recursive `*`/`+`
+increment (#50), which routes through closure and is the natural home for proper
+node-set semantics. Kleene `*`/`+` themselves remain rejected
+(`UnsupportedPathOp`).

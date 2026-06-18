@@ -681,6 +681,15 @@ fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
 ///   → no solution;
 /// * one variable, one ground → bind the variable to the ground term.
 ///
+/// **Stage-1 approximation:** a strict reading of SPARQL restricts the
+/// zero-length match to terms that actually occur in the active graph, so
+/// `?s p? <urn:absent>` should bind nothing. We do not run that
+/// node-membership check here (it would need a graph scan / subquery), so
+/// a ground endpoint absent from the graph still yields its self-match.
+/// This only affects queries that pin an endpoint to a term not in the
+/// data; the recursive `*`/`+` increment (#50) that routes through closure
+/// is the natural place to add proper node-set semantics.
+///
 /// The genuinely unbounded cases — two *distinct* variables, **or the same
 /// variable on both ends** (`?x p? ?x`) — are rejected. Both would have to
 /// range the variable over every node in the graph (a zero-length path
@@ -756,24 +765,29 @@ fn match_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
 /// `SELECT` list nor matched against a user binding.
 const HIDDEN_VAR_PREFIX: &str = "?pp";
 
-/// Whether `v` is an internal path/blank-node variable (see
-/// [`HIDDEN_VAR_PREFIX`]) rather than a user-visible one.
-fn is_hidden_var(v: &Var) -> bool {
-    v.name().starts_with(HIDDEN_VAR_PREFIX)
+/// Whether `v` is a *path-internal witness* variable — a `Sequence` join
+/// node or a `NegatedPropertySet` predicate slot — as opposed to a
+/// blank-node-endpoint variable. Only witnesses may be dropped from a
+/// path's projection: they are pure existentials with no meaning outside
+/// the path. A blank-node-endpoint variable, by contrast, is a query
+/// blank node ([SPARQL 1.1] §4.1.4) that may co-refer with the *enclosing*
+/// graph pattern (`_:b :p ?o . _:b :q ?x`), so it must survive the path's
+/// `Distinct` projection to keep that join intact.
+fn is_path_witness_var(v: &Var) -> bool {
+    v.name().starts_with("?pp_seq_") || v.name().starts_with("?pp_neg_")
 }
 
-/// The user-visible variables among a path's two (already-lowered)
-/// endpoints — i.e. real query variables, excluding the hidden
-/// existentials minted for blank-node endpoints. Order-preserving and
-/// de-duplicated (a path like `?x p ?x` exposes `?x` once). These are the
-/// only columns a single property-path expression may bind, so projecting
-/// to them before `Distinct` drops the internal witness columns that
-/// would otherwise defeat set-valued de-duplication.
+/// The variables a path's two (already-lowered) endpoints expose to the
+/// surrounding pattern: real query variables **plus** blank-node-endpoint
+/// existentials (which may join outward), but **not** the path-internal
+/// witnesses (`Sequence`/`NegatedPropertySet` slots), which are dropped so
+/// they cannot defeat the set-valued `Distinct`. Order-preserving and
+/// de-duplicated (a path like `?x p ?x` exposes `?x` once).
 fn visible_path_vars(s: &Term, o: &Term) -> Vec<Var> {
     let mut out = Vec::new();
     for t in [s, o] {
         if let Term::Var(v) = t {
-            if !is_hidden_var(v) && !out.contains(v) {
+            if !is_path_witness_var(v) && !out.contains(v) {
                 out.push(v.clone());
             }
         }
