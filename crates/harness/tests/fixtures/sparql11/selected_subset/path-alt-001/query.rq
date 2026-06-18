@@ -1,0 +1,1 @@
+SELECT ?o WHERE { <http://example.org/alice> (<http://example.org/knows>|<http://example.org/likes>) ?o }

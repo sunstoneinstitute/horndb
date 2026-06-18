@@ -142,3 +142,76 @@ this path via the `--materialize` flag.
 
 Named-graph patterns remain unscoped (unchanged Stage-1 behaviour).
 See the GRAPH patterns section above.
+
+### Non-recursive property paths (#49)
+
+`translate.rs::translate_path` lowers the non-recursive path operators to
+algebra at translation time, so the planner/runtime never see path nodes:
+
+- `/` (Sequence) and `^` (Inverse) expand into triple patterns, as before.
+- `|` (Alternative) and `?` (ZeroOrOne) lower to `Union`.
+- `!` (NegatedPropertySet) lowers to a wildcard-predicate BGP wrapped in a
+  `Filter` of `NOT IN {p1,…,pn}`. spargebra carries only forward predicates
+  in `NegatedPropertySet`; an inverse member `!(^p)` parses as
+  `Reverse(NegatedPropertySet([p]))` and is handled by the `Reverse` arm.
+
+Two design points worth recording:
+
+1. **Blank nodes in WHERE patterns are join variables.** spargebra flattens
+   a path *sequence* `s p1/p2 o` into two patterns joined by a freshly minted
+   blank node. A blank node in a query pattern is a non-distinguished variable
+   (SPARQL 1.1 §4.1.4), so `match_term` now maps blank-node subject/object
+   positions to deterministically named join variables instead of constants.
+   This is what makes `Alternative`/`NegatedPropertySet` sub-paths compose
+   across an algebra `Join`, and it also fixes a *latent* bug: plain `/`
+   sequences were only ever joined correctly when both steps landed in a single
+   BGP — across a `Join` boundary they silently produced no rows.
+
+2. **Zero-length `?` is bounded.** `p?` is `Union(zero-length, single-step)`.
+   The zero-length branch is lowered without enumerating the graph: both
+   endpoints ground → equality test; one variable + one ground → bind the
+   variable to the ground endpoint. Both endpoints being variables — whether
+   two *distinct* ones (`?s p? ?o`) or the *same* one (`?x p? ?x`) — would have
+   to range the variable over every node in the graph, so those cases are
+   rejected with `UnsupportedPathOp` (returning the unit relation for `?x p? ?x`
+   would wrongly emit an unbound `?x` row). They belong with the recursive
+   `*`/`+` increment (#50) that routes through closure.
+
+3. **Hidden path variables are query-globally unique and user-unspellable.**
+   The intermediate variables minted during path/blank-node lowering (the
+   `Sequence` join node, the `NegatedPropertySet` predicate slot, the
+   blank-node existential) come from `hidden_var_name`. Two properties matter:
+   uniqueness — the path-minted ones draw a process-global counter so two
+   distinct path patterns in one query never reuse a hidden name and get
+   spuriously joined (a per-pattern counter would, e.g. with two `!` sets) —
+   and **un-spellability**: every hidden name carries the `?pp` prefix, and `?`
+   cannot appear in a SPARQL `VARNAME`, so a user variable can never collide
+   with (and thus never read or constrain) a hidden one. Because `?pp…` is not
+   a valid `spargebra::Variable`, `translate_path` carries its endpoints as
+   already-lowered `Term`s (not `TermPattern`s) and mints the `Sequence` join
+   node as a `Term::Var` directly — routing it through `spargebra::Variable::new`
+   would reject the name and fail otherwise-valid nested paths like `(p/q)?`.
+
+4. **A single path expression is set-valued.** Several routes can connect the
+   same `(start, end)` pair — distinct `|` branches, several unexcluded
+   predicates of `!`, or the `?` zero-length/one-step overlap — and the lowering
+   emits one witness per route (the witnesses differ only in the *hidden*
+   columns). To match SPARQL's set semantics, `GraphPattern::Path` projects the
+   result down to `visible_path_vars` and wraps it in `Distinct`. The
+   projection drops only the **path-internal witnesses** (`?pp_seq_*`,
+   `?pp_neg_*`); it deliberately **keeps blank-node-endpoint variables**
+   (`?pp_bnode_*`), because a query blank node may co-refer with the *enclosing*
+   graph pattern (`_:b :p ?o . _:b :q ?x`) and must survive to join outward —
+   dropping it would Cartesian-explode the surrounding pattern. When both
+   endpoints are ground the path is a pure existence test, collapsed to at most
+   one solution via `Slice(0, 1)` — `Project { vars: [] }` can't express this
+   because the runtime reads an empty projection as `SELECT *` and would keep
+   the hidden columns.
+
+Two Stage-1 approximations are documented in code: a zero-length `?` does not
+node-membership-check a ground endpoint (so `?s p? <urn:absent>` self-matches an
+absent term — see `zero_length_path`), and both-variable `?` endpoints are
+rejected rather than enumerated. Both belong with the recursive `*`/`+`
+increment (#50), which routes through closure and is the natural home for proper
+node-set semantics. Kleene `*`/`+` themselves remain rejected
+(`UnsupportedPathOp`).

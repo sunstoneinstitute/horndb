@@ -2,8 +2,10 @@
 //!
 //! Stage 1 supports a deliberately small operator set; constructs we
 //! do not yet handle return `SparqlError::UnsupportedAlgebra` (or
-//! `UnsupportedPathOp` for the Kleene-star property paths) so the
-//! planner never has to defend against them.
+//! `UnsupportedPathOp` for the recursive `*`/`+` property paths) so the
+//! planner never has to defend against them. The non-recursive path
+//! operators (`/`, `^`, `|`, `?`, `!`) are lowered in
+//! [`translate_path`].
 
 use crate::algebra::{AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
@@ -117,13 +119,51 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             path,
             object,
         } => {
-            // Stage 1 supports only Seq (`/`) and Inverse (`^`); both
-            // expand to additional triple patterns (fresh variables
-            // for the intermediate node in `Seq`, swapped subject/
-            // object for `Inverse`). Kleene-star, alternation, etc.
-            // are rejected.
-            let patterns = expand_path(subject, path, object, cfg)?;
-            Ok(Algebra::Bgp { patterns })
+            // Non-recursive property paths lower at translation time:
+            //   `/` (Seq) and `^` (Inverse) expand into triple patterns
+            //   (fresh intermediate var for Seq, swapped subject/object
+            //   for Inverse); `|` (Alternative) and `?` (ZeroOrOne) lower
+            //   to `Union`; `!` (NegatedPropertySet) lowers to a wildcard
+            //   predicate filtered by `NOT IN {…}`. Kleene `*`/`+`
+            //   (recursive, route to closure) are still rejected.
+            //
+            // A single property-path expression is *set*-valued: it
+            // matches each (start, end) pair at most once, regardless of
+            // how many distinct routes connect them (alternative branches,
+            // unexcluded predicates of `!`, the `?` zero/one overlap). The
+            // lowering can emit a route per witness, and those witnesses
+            // differ only in the *hidden* variables it mints (the `!`
+            // predicate slot, sequence join nodes). So we first `Project`
+            // the result down to the user-visible endpoint variables —
+            // dropping the hidden ones — then `Distinct` to collapse the
+            // duplicate routes before the rows escape the path.
+            let s = match_term(subject, cfg)?;
+            let o = match_term(object, cfg)?;
+            let visible = visible_path_vars(&s, &o);
+            let inner = translate_path(s, path, o)?;
+            if visible.is_empty() {
+                // Both endpoints are ground (or hidden): the path is a pure
+                // existence test. Collapse any number of matching routes to
+                // at most one empty solution. (`Project { vars: [] }` can't
+                // express this — the runtime reads empty projection as
+                // `SELECT *` and would preserve the hidden witness columns,
+                // defeating the de-duplication.)
+                Ok(Algebra::Slice {
+                    inner: Box::new(inner),
+                    start: 0,
+                    length: Some(1),
+                })
+            } else {
+                // Project to the visible endpoint variables (dropping the
+                // hidden witness columns), then `Distinct` so each
+                // (start, end) pair survives at most once.
+                Ok(Algebra::Distinct {
+                    inner: Box::new(Algebra::Project {
+                        vars: visible,
+                        inner: Box::new(inner),
+                    }),
+                })
+            }
         }
         GraphPattern::Join { left, right } => Ok(Algebra::Join {
             left: Box::new(translate_pattern(left, cfg)?),
@@ -234,10 +274,14 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
 }
 
 fn translate_triple(tp: &SpgTriplePattern, cfg: &SparqlConfig) -> Result<TriplePattern> {
+    // Blank nodes in a WHERE graph pattern are non-distinguished
+    // variables (SPARQL 1.1 §4.1.4), so the subject/object positions go
+    // through `match_term`, which maps them to join variables. The
+    // predicate position cannot be a blank node.
     Ok(TriplePattern {
-        subject: term_pattern_to_term(&tp.subject, cfg)?,
+        subject: match_term(&tp.subject, cfg)?,
         predicate: named_node_pattern_to_term(&tp.predicate)?,
-        object: term_pattern_to_term(&tp.object, cfg)?,
+        object: match_term(&tp.object, cfg)?,
     })
 }
 
@@ -514,55 +558,266 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
     seen
 }
 
-/// Expand a (Stage-1 supported) property-path expression into a flat
-/// list of triple patterns. Only `Seq` (`/`) and `Inverse` (`^`) and
-/// a bare `NamedNode` predicate are supported.
-fn expand_path(
-    subject: &TermPattern,
-    path: &PropertyPathExpression,
-    object: &TermPattern,
-    cfg: &SparqlConfig,
-) -> Result<Vec<TriplePattern>> {
-    let mut out = Vec::new();
-    let mut fresh = 0usize;
-    expand_path_into(subject, path, object, &mut out, &mut fresh, cfg)?;
-    Ok(out)
-}
-
-fn expand_path_into(
-    subject: &TermPattern,
-    path: &PropertyPathExpression,
-    object: &TermPattern,
-    out: &mut Vec<TriplePattern>,
-    fresh: &mut usize,
-    cfg: &SparqlConfig,
-) -> Result<()> {
+/// Lower a non-recursive property-path expression between `subject` and
+/// `object` to an [`Algebra`] subtree. Supported operators:
+///
+/// * bare `NamedNode` predicate, `^` (Inverse), `/` (Sequence) — expand
+///   to one or more triple patterns (a `Bgp`, joined for sub-paths that
+///   are not themselves BGPs);
+/// * `|` (Alternative) and `?` (ZeroOrOne) — `Union`;
+/// * `!` (NegatedPropertySet) — a wildcard-predicate `Bgp` wrapped in a
+///   `Filter` that excludes the listed predicates.
+///
+/// Kleene `*`/`+` are recursive (route to closure) and remain rejected
+/// with [`SparqlError::UnsupportedPathOp`].
+///
+/// Endpoints arrive as already-lowered [`Term`]s (the caller runs them
+/// through [`match_term`]). Carrying `Term` rather than `spargebra`'s
+/// `TermPattern` lets the `Sequence` arm mint its intermediate join node
+/// as a `Term::Var` with a user-unspellable name directly — `spargebra`'s
+/// `Variable::new` would reject that name. Intermediate names come from
+/// [`fresh_path_var`] (a process-global counter), so two distinct path
+/// patterns never accidentally join on a reused hidden variable.
+///
+/// Multiplicity is *not* the concern of this function: a single path may
+/// legitimately emit several witnesses for one (start, end) pair; the
+/// caller wraps the whole result in `Distinct` to make the path
+/// set-valued.
+fn translate_path(subject: Term, path: &PropertyPathExpression, object: Term) -> Result<Algebra> {
     use PropertyPathExpression as P;
     match path {
-        P::NamedNode(n) => {
-            out.push(TriplePattern {
-                subject: term_pattern_to_term(subject, cfg)?,
+        P::NamedNode(n) => Ok(Algebra::Bgp {
+            patterns: vec![TriplePattern {
+                subject,
                 predicate: Term::Iri(n.as_str().to_owned()),
-                object: term_pattern_to_term(object, cfg)?,
-            });
-            Ok(())
-        }
+                object,
+            }],
+        }),
         P::Reverse(inner) => {
-            // ^p between s and o == p between o and s
-            expand_path_into(object, inner, subject, out, fresh, cfg)
+            // `^p` between s and o == `p` between o and s.
+            translate_path(object, inner, subject)
         }
         P::Sequence(a, b) => {
-            // (a / b) between s and o introduces a fresh var v with
-            // s -a-> v -b-> o
-            let mid_name = format!("__path_seq_{}", *fresh);
-            *fresh += 1;
-            let mid_var = Variable::new(mid_name.clone())
-                .map_err(|e| SparqlError::UnsupportedAlgebra(format!("fresh var: {e}")))?;
-            let mid_pattern = TermPattern::Variable(mid_var);
-            expand_path_into(subject, a, &mid_pattern, out, fresh, cfg)?;
-            expand_path_into(&mid_pattern, b, object, out, fresh, cfg)?;
-            Ok(())
+            // `(a / b)` between s and o introduces a fresh var v with
+            // `s -a-> v -b-> o`. Each side lowers independently; if both
+            // are plain BGPs we merge their patterns, otherwise we `Join`.
+            let mid = Term::Var(Var::new(fresh_path_var("seq")));
+            let left = translate_path(subject, a, mid.clone())?;
+            let right = translate_path(mid, b, object)?;
+            Ok(join_algebra(left, right))
+        }
+        P::Alternative(a, b) => {
+            // `(a | b)` between s and o is the union of the two paths.
+            let left = translate_path(subject.clone(), a, object.clone())?;
+            let right = translate_path(subject, b, object)?;
+            Ok(Algebra::Union {
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+        }
+        P::ZeroOrOne(inner) => {
+            // `p?` between s and o is the union of the zero-length path
+            // (s and o denote the same node) with the single `p` step.
+            let zero = zero_length_path(subject.clone(), object.clone())?;
+            let one = translate_path(subject, inner, object)?;
+            Ok(Algebra::Union {
+                left: Box::new(zero),
+                right: Box::new(one),
+            })
+        }
+        P::NegatedPropertySet(preds) => {
+            // `!(p1|…|pn)` between s and o: match `s ?p o` with a fresh
+            // predicate variable, then filter out the excluded set. Note
+            // spargebra carries only forward predicates here; an inverse
+            // member `^p` is parsed as `Reverse(NegatedPropertySet([p]))`
+            // and handled by the `Reverse` arm above.
+            let pred_var = Var::new(fresh_path_var("neg"));
+            let bgp = Algebra::Bgp {
+                patterns: vec![TriplePattern {
+                    subject,
+                    predicate: Term::Var(pred_var.clone()),
+                    object,
+                }],
+            };
+            if preds.is_empty() {
+                // `!()` excludes nothing — every predicate matches.
+                return Ok(bgp);
+            }
+            let lhs = Expr::Term(Term::Var(pred_var));
+            let list = preds
+                .iter()
+                .map(|n| Expr::Term(Term::Iri(n.as_str().to_owned())))
+                .collect();
+            Ok(Algebra::Filter {
+                expr: Expr::Not(Box::new(Expr::In(Box::new(lhs), list))),
+                inner: Box::new(bgp),
+            })
         }
         other => Err(SparqlError::UnsupportedPathOp(format!("{other:?}"))),
     }
+}
+
+/// Combine two property-path sub-algebras. When both are plain BGPs we
+/// concatenate their patterns (the common case — keeps `/` and `^`
+/// chains in a single scan-friendly BGP); otherwise we `Join` them so
+/// `Union`/`Filter` sub-paths compose correctly.
+fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
+    match (left, right) {
+        (Algebra::Bgp { patterns: mut l }, Algebra::Bgp { patterns: r }) => {
+            l.extend(r);
+            Algebra::Bgp { patterns: l }
+        }
+        (l, r) => Algebra::Join {
+            left: Box::new(l),
+            right: Box::new(r),
+        },
+    }
+}
+
+/// The zero-length path between `subject` and `object` — they must denote
+/// the same node. Lowers without enumerating the graph:
+///
+/// * both ground & equal → a single empty solution; both ground & unequal
+///   → no solution;
+/// * one variable, one ground → bind the variable to the ground term.
+///
+/// **Stage-1 approximation:** a strict reading of SPARQL restricts the
+/// zero-length match to terms that actually occur in the active graph, so
+/// `?s p? <urn:absent>` should bind nothing. We do not run that
+/// node-membership check here (it would need a graph scan / subquery), so
+/// a ground endpoint absent from the graph still yields its self-match.
+/// This only affects queries that pin an endpoint to a term not in the
+/// data; the recursive `*`/`+` increment (#50) that routes through closure
+/// is the natural place to add proper node-set semantics.
+///
+/// The genuinely unbounded cases — two *distinct* variables, **or the same
+/// variable on both ends** (`?x p? ?x`) — are rejected. Both would have to
+/// range the variable over every node in the graph (a zero-length path
+/// binds `?x` to each node, not to an unbound row), which is out of
+/// Stage-1 scope; they belong with the recursive `*`/`+` increment that
+/// routes through closure.
+///
+/// Endpoints arrive already lowered (the caller runs them through
+/// [`match_term`]), so a blank-node endpoint minted by spargebra's
+/// sequence flattening is treated as a (join) variable, just like in the
+/// single-step arms.
+fn zero_length_path(subject: Term, object: Term) -> Result<Algebra> {
+    // A single empty solution (the identity / unit relation).
+    let unit = Algebra::Values {
+        vars: Vec::new(),
+        rows: vec![Vec::new()],
+    };
+    // No solution.
+    let empty = Algebra::Values {
+        vars: Vec::new(),
+        rows: Vec::new(),
+    };
+    match (subject, object) {
+        (Term::Var(_), Term::Var(_)) => {
+            // Two variable endpoints (whether the same variable, `?x p? ?x`,
+            // or two distinct ones) require binding a variable to every node
+            // in the graph for the zero-length branch — out of Stage-1 scope.
+            // Returning the unit relation here would emit an *unbound* row
+            // instead of the per-node bindings, which is wrong, so reject.
+            Err(SparqlError::UnsupportedPathOp(
+                "zero-or-one path `?` with an unbound variable on both ends \
+                 (would enumerate every node) — out of Stage-1 scope"
+                    .into(),
+            ))
+        }
+        (Term::Var(v), other) | (other, Term::Var(v)) => Ok(Algebra::Values {
+            vars: vec![v],
+            rows: vec![vec![Some(other)]],
+        }),
+        // Both ground: equal iff their term forms match.
+        (st, ot) => Ok(if st == ot { unit } else { empty }),
+    }
+}
+
+/// Lower a term that appears in a *matching* position of a WHERE graph
+/// pattern (triple-pattern or property-path endpoint). Identical to
+/// [`term_pattern_to_term`] except that a **blank node** is mapped to a
+/// (deterministically named) variable rather than a constant.
+///
+/// A blank node in a query pattern is a non-distinguished variable
+/// (SPARQL 1.1 §4.1.4): two occurrences of the same label must co-refer
+/// and join, but it can never match a *specific* blank node in the data.
+/// spargebra also relies on this when it flattens a path sequence
+/// `s p1/p2 o` into two joined patterns connected by a freshly minted
+/// blank node — that node must act as a join key across the resulting
+/// algebra. Lowering it to a constant (as the generic term lowering does)
+/// would match nothing.
+fn match_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
+    match tp {
+        TermPattern::BlankNode(b) => Ok(Term::Var(Var::new(hidden_var_name(
+            "bnode",
+            Some(b.as_str()),
+        )))),
+        other => term_pattern_to_term(other, cfg),
+    }
+}
+
+/// Prefix for the internal variables minted during path/blank-node
+/// lowering. It begins with `?`, which the SPARQL `VARNAME` grammar can
+/// never produce (a parsed variable's stored name carries no sigil and
+/// cannot contain `?`), so these synthetic names are **impossible to
+/// collide with any user variable** — they can be neither written in a
+/// `SELECT` list nor matched against a user binding.
+const HIDDEN_VAR_PREFIX: &str = "?pp";
+
+/// Whether `v` is a *path-internal witness* variable — a `Sequence` join
+/// node or a `NegatedPropertySet` predicate slot — as opposed to a
+/// blank-node-endpoint variable. Only witnesses may be dropped from a
+/// path's projection: they are pure existentials with no meaning outside
+/// the path. A blank-node-endpoint variable, by contrast, is a query
+/// blank node ([SPARQL 1.1] §4.1.4) that may co-refer with the *enclosing*
+/// graph pattern (`_:b :p ?o . _:b :q ?x`), so it must survive the path's
+/// `Distinct` projection to keep that join intact.
+fn is_path_witness_var(v: &Var) -> bool {
+    v.name().starts_with("?pp_seq_") || v.name().starts_with("?pp_neg_")
+}
+
+/// The variables a path's two (already-lowered) endpoints expose to the
+/// surrounding pattern: real query variables **plus** blank-node-endpoint
+/// existentials (which may join outward), but **not** the path-internal
+/// witnesses (`Sequence`/`NegatedPropertySet` slots), which are dropped so
+/// they cannot defeat the set-valued `Distinct`. Order-preserving and
+/// de-duplicated (a path like `?x p ?x` exposes `?x` once).
+fn visible_path_vars(s: &Term, o: &Term) -> Vec<Var> {
+    let mut out = Vec::new();
+    for t in [s, o] {
+        if let Term::Var(v) = t {
+            if !is_path_witness_var(v) && !out.contains(v) {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Build an internal (user-unspellable) variable name. `kind` tags the
+/// role (`bnode`, `seq`, `neg`); `tag` is an optional stable suffix (the
+/// blank-node label) used when the name must be *deterministic* so two
+/// occurrences co-refer; pass `None` to draw a globally fresh counter
+/// value instead.
+fn hidden_var_name(kind: &str, tag: Option<&str>) -> String {
+    match tag {
+        Some(t) => format!("{HIDDEN_VAR_PREFIX}_{kind}_{t}"),
+        None => {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("{HIDDEN_VAR_PREFIX}_{kind}_{n}")
+        }
+    }
+}
+
+/// Mint a hidden variable name unique across the whole translated query
+/// (process-global counter). Two distinct path patterns in one query
+/// (e.g. two `!` sets, or two `/` sequences) must not collide on a hidden
+/// name, or the join would force their unrelated hidden bindings to be
+/// equal and silently drop rows. The names are user-unspellable
+/// ([`HIDDEN_VAR_PREFIX`]) and are projected away before results return.
+fn fresh_path_var(kind: &str) -> String {
+    hidden_var_name(kind, None)
 }
