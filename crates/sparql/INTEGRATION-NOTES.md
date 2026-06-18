@@ -177,12 +177,16 @@ Two design points worth recording:
    would wrongly emit an unbound `?x` row). They belong with the recursive
    `*`/`+` increment (#50) that routes through closure.
 
-3. **Hidden path variables are query-globally unique.** The intermediate
-   variables minted during path lowering (the `Sequence` join node, the
-   `NegatedPropertySet` predicate slot) come from `fresh_path_var`, backed by a
-   process-global counter. A per-pattern counter would let two distinct path
-   patterns in one query reuse the same hidden name (e.g. two `!` sets) and get
-   spuriously joined on it, dropping valid rows.
+3. **Hidden path variables are query-globally unique and user-unspellable.**
+   The intermediate variables minted during path/blank-node lowering (the
+   `Sequence` join node, the `NegatedPropertySet` predicate slot, the
+   blank-node existential) come from `hidden_var_name`. Two properties matter:
+   uniqueness — the path-minted ones draw a process-global counter so two
+   distinct path patterns in one query never reuse a hidden name and get
+   spuriously joined (a per-pattern counter would, e.g. with two `!` sets) —
+   and **un-spellability**: every hidden name carries the `?pp` prefix, and `?`
+   cannot appear in a SPARQL `VARNAME`, so a user variable can never collide
+   with (and thus never read or constrain) a hidden one.
 
 Kleene `*`/`+` remain rejected (`UnsupportedPathOp`); they are recursive and
 route to closure under increment #50.

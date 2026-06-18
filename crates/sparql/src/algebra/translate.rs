@@ -708,21 +708,45 @@ fn zero_length_path(
 /// would match nothing.
 fn match_term(tp: &TermPattern, cfg: &SparqlConfig) -> Result<Term> {
     match tp {
-        TermPattern::BlankNode(b) => Ok(Term::Var(Var::new(format!("__pp_bnode_{}", b.as_str())))),
+        TermPattern::BlankNode(b) => Ok(Term::Var(Var::new(hidden_var_name(
+            "bnode",
+            Some(b.as_str()),
+        )))),
         other => term_pattern_to_term(other, cfg),
     }
 }
 
-/// Mint a hidden variable name for property-path lowering that is unique
-/// across the whole translated query. A process-global monotonic counter
-/// backs it: two distinct path patterns in one query (e.g. two `!` sets,
-/// or two `/` sequences) must not collide on a hidden name, or the join
-/// would force their unrelated hidden bindings to be equal and silently
-/// drop rows. The names start with `__path_` so they never clash with a
-/// user variable, and they are projected away before results are returned.
+/// Prefix for the internal variables minted during path/blank-node
+/// lowering. It begins with `?`, which the SPARQL `VARNAME` grammar can
+/// never produce (a parsed variable's stored name carries no sigil and
+/// cannot contain `?`), so these synthetic names are **impossible to
+/// collide with any user variable** — they can be neither written in a
+/// `SELECT` list nor matched against a user binding.
+const HIDDEN_VAR_PREFIX: &str = "?pp";
+
+/// Build an internal (user-unspellable) variable name. `kind` tags the
+/// role (`bnode`, `seq`, `neg`); `tag` is an optional stable suffix (the
+/// blank-node label) used when the name must be *deterministic* so two
+/// occurrences co-refer; pass `None` to draw a globally fresh counter
+/// value instead.
+fn hidden_var_name(kind: &str, tag: Option<&str>) -> String {
+    match tag {
+        Some(t) => format!("{HIDDEN_VAR_PREFIX}_{kind}_{t}"),
+        None => {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("{HIDDEN_VAR_PREFIX}_{kind}_{n}")
+        }
+    }
+}
+
+/// Mint a hidden variable name unique across the whole translated query
+/// (process-global counter). Two distinct path patterns in one query
+/// (e.g. two `!` sets, or two `/` sequences) must not collide on a hidden
+/// name, or the join would force their unrelated hidden bindings to be
+/// equal and silently drop rows. The names are user-unspellable
+/// ([`HIDDEN_VAR_PREFIX`]) and are projected away before results return.
 fn fresh_path_var(kind: &str) -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("__path_{kind}_{n}")
+    hidden_var_name(kind, None)
 }

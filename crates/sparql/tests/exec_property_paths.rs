@@ -292,3 +292,23 @@ fn kleene_plus_still_rejected() {
     let msg = run_err("SELECT ?x WHERE { <http://ex/alice> <http://ex/knows>+ ?x }");
     assert!(msg.contains("property-path"), "got: {msg}");
 }
+
+#[test]
+fn user_var_named_like_old_hidden_var_does_not_collide() {
+    // Hidden path/blank-node variables are user-unspellable now. A user
+    // variable spelled exactly like a former hidden name (`__path_seq_0`)
+    // alongside a sequence path must keep its own, independent binding —
+    // the sequence join must not force it equal to the hidden mid node.
+    // alice -knows-> bob -knows-> dave, and ?__path_seq_0 binds the open
+    // `?z` triple independently (alice's two outgoing objects).
+    let s = make_store();
+    let rows = run(
+        "SELECT ?o ?__path_seq_0 WHERE { \
+           <http://ex/alice> <http://ex/knows>/<http://ex/knows> ?o . \
+           <http://ex/alice> <http://ex/likes> ?__path_seq_0 }",
+        &s,
+    );
+    // The sequence yields dave; the user var binds carol (alice likes carol).
+    assert_eq!(names(&rows, "o"), vec!["dave"]);
+    assert_eq!(names(&rows, "__path_seq_0"), vec!["carol"]);
+}
