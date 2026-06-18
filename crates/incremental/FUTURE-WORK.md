@@ -72,9 +72,13 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   (chain break, diamond second-path retention, re-assert round-trip) and the
   rewritten `tests/retraction_closure.rs`.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
-  affected-region recompute); closure↔rule cross-feedback *within* a single
-  tick (closure output feeding rule bodies and vice versa); non-transitive
-  closure shapes.
+  affected-region recompute); **warm-store seeded-edge retraction** — a rule
+  seeded via `TransitiveClosureRule::seed_closed_edges` retains only the
+  *closed* extent, not the asserted base, so `apply_retract_delta` cannot
+  withdraw a closure pair supported only by seeded (pre-existing) edges; it is
+  exact only for edges inserted via `apply_insert_delta` (needs a base-seed
+  variant); closure↔rule cross-feedback *within* a single tick (closure output
+  feeding rule bodies and vice versa); non-transitive closure shapes.
 
 ## Stage 3 (SPEC-09 / hardware)
 
