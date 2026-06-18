@@ -187,12 +187,16 @@ struct PredicateState {
     closure: IncrementalTransitiveClosure,
 }
 
-/// Insertion-only incremental closure backend. Unlike [`BackendImpl`], which
-/// recomputes the whole closure from the full edge set on every call, this
-/// retains per-predicate closure state and folds in only the newly inserted
-/// edges, writing **only the delta** triples to the sink (SPEC-05 F6).
+/// Incremental closure backend. Unlike [`BackendImpl`], which recomputes the
+/// whole closure from the full edge set on every call, this retains
+/// per-predicate closure state and folds in only the newly inserted edges,
+/// writing **only the delta** triples to the sink (SPEC-05 F6).
 ///
-/// Insertion only — deletion needs SPEC-06 DBSP deltas and is out of scope.
+/// Deletion is supported at the closure level via
+/// [`Self::delete_transitive_edges`], which withdraws exactly the inferred
+/// pairs that lose support when a base edge is retracted. That method *returns*
+/// the withdrawn edges rather than writing to a sink: the `+/-` sign lives in
+/// the SPEC-06 Z-set layer, and [`TripleSink`] stays a pure insertion boundary.
 pub struct IncrementalClosureBackend {
     predicates: FxHashMap<PredicateId, PredicateState>,
     sameas: EquivClasses,
@@ -222,6 +226,16 @@ impl IncrementalClosureBackend {
     /// edges are closed; this does not re-close them. Call once before feeding
     /// incremental inserts for a predicate that already has a materialized closure.
     /// Replaces any existing state for `p`. Writes nothing to a sink.
+    ///
+    /// **Retraction limitation:** the seed is an already-*closed* edge set, not a
+    /// base set, so the underlying [`IncrementalTransitiveClosure`] is built via
+    /// `from_closed_edges` and has no record of which edges are asserted. A
+    /// predicate seeded this way therefore *cannot* retract correctly —
+    /// [`Self::delete_transitive_edges`] will find no matching base edge and
+    /// withdraw nothing. Predicates that need retraction must build their state
+    /// purely through [`Self::insert_transitive_edges`] (which records base
+    /// edges); the SPEC-06 `Circuit` path does exactly that. A base-seed variant
+    /// is intentionally not added until a caller needs it.
     pub fn seed_transitive_closure(&mut self, p: PredicateId, closed_edges: &[(DictId, DictId)]) {
         let mut map = DenseIdMap::with_capacity(closed_edges.len() * 2);
         let dense = map.intern_edges(closed_edges);
@@ -271,6 +285,42 @@ impl IncrementalClosureBackend {
                 Err(e)
             }
         }
+    }
+
+    /// Retract `edges` (asserted base edges) from predicate `p`'s transitive
+    /// closure and **return** the withdrawn closure edges (mapped back to
+    /// `DictId`), i.e. the inferred pairs that lose all support. Mirrors
+    /// [`Self::insert_transitive_edges`] but for the negative direction.
+    ///
+    /// No sink parameter and nothing is written to a sink: the `+/-` sign lives
+    /// in the SPEC-06 Z-set layer, which negates these returned edges. If `p`
+    /// has no retained state, returns empty. Edges that were never asserted (or
+    /// were seeded via [`Self::seed_transitive_closure`], whose base is unknown)
+    /// withdraw nothing — see that method's retraction limitation.
+    pub fn delete_transitive_edges(
+        &mut self,
+        p: PredicateId,
+        edges: &[(DictId, DictId)],
+    ) -> Result<Vec<(DictId, DictId)>> {
+        if edges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(state) = self.predicates.get_mut(&p) else {
+            return Ok(Vec::new());
+        };
+        // Map DictId endpoints to dense ids. An endpoint we have never interned
+        // cannot be part of any base edge, so it contributes no deletion; skip it.
+        let dense: Vec<(u64, u64)> = edges
+            .iter()
+            .filter_map(|&(s, o)| Some((state.map.to_dense(s)?.0, state.map.to_dense(o)?.0)))
+            .collect();
+        let withdrawn = state.closure.delete_edges(dense);
+        let map = &state.map;
+        let out = withdrawn
+            .into_iter()
+            .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
+            .collect();
+        Ok(out)
     }
 
     /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
