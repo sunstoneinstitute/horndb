@@ -167,6 +167,12 @@ async fn nl_query_respects_privacy_no_retention_by_default() {
     let v = body_json(resp).await;
     // Default privacy retains nothing — question_log omitted entirely.
     assert!(v.get("question_log").is_none());
+    // And the raw question must not leak through any other field
+    // (e.g. the translator's explanation).
+    assert!(
+        !v.to_string().contains("secret PII question"),
+        "raw question leaked in response: {v}"
+    );
 }
 
 #[tokio::test]

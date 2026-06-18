@@ -63,7 +63,11 @@ impl MlAuditLog {
             .filter(|e| e.timestamp >= since)
             .cloned()
             .collect();
-        let end = (offset + limit).min(filtered.len());
+        // `saturating_add`: `offset`/`limit` can be attacker-controlled HTTP
+        // query params, and a near-`usize::MAX` offset would otherwise panic
+        // (debug) or wrap (release) on the add. Saturating is safe here — the
+        // `min(filtered.len())` clamps it back into range immediately.
+        let end = offset.saturating_add(limit).min(filtered.len());
         let entries = if offset >= filtered.len() {
             Vec::new()
         } else {
@@ -126,6 +130,22 @@ mod tests {
         let p = log.query_since(Utc::now() - chrono::Duration::hours(1), 0, 10);
         assert_eq!(p.entries.len(), 1);
         assert_eq!(p.entries[0].model.as_str(), "new");
+    }
+
+    #[test]
+    fn huge_offset_does_not_overflow() {
+        // Regression: `offset + limit` near usize::MAX must not panic
+        // (debug) or wrap (release). Saturating add + min keeps it safe.
+        let log = MlAuditLog::new();
+        log.record(make_entry(Utc::now(), "m"));
+        let p = log.query_since(Utc::now() - chrono::Duration::hours(1), usize::MAX - 1, 10);
+        assert!(p.entries.is_empty());
+        assert!(p.next_offset.is_none());
+
+        // Also a large-but-in-range-ish offset with max limit.
+        let p2 = log.query_since(Utc::now() - chrono::Duration::hours(1), 0, usize::MAX);
+        assert_eq!(p2.entries.len(), 1);
+        assert!(p2.next_offset.is_none());
     }
 
     #[test]

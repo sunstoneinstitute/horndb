@@ -203,7 +203,11 @@ impl Translator for MockTranslator {
         Ok(Translation {
             generated_sparql: sparql,
             confidence: self.confidence,
-            explanation: format!("mock translation of {:?}", q.question),
+            // Deliberately question-free: the `explanation` field is returned
+            // in the /nl-query response regardless of the privacy policy, so
+            // echoing the raw question here would leak PII that the
+            // no-retention default is meant to suppress. Report length only.
+            explanation: format!("mock translation ({} chars)", q.question.chars().count()),
             model: self.model.clone(),
             cost: self.cost(),
         })
@@ -267,6 +271,16 @@ mod tests {
             t.translate(&q("other")).unwrap().generated_sparql,
             "DEFAULT"
         );
+    }
+
+    #[test]
+    fn mock_explanation_does_not_echo_question() {
+        // The explanation is returned regardless of privacy policy, so it
+        // must not contain the raw question text.
+        let t = MockTranslator::new("mock-v1", "SELECT * {}");
+        let out = t.translate(&q("secret PII question")).unwrap();
+        assert!(!out.explanation.contains("secret PII question"));
+        assert!(out.explanation.contains("19 chars"));
     }
 
     #[test]
