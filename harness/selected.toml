@@ -82,6 +82,8 @@ include = [
     "#syntax-subquery-01",
     "#syntax-propertypath-01",
     "#syntax-values-01",
+    # relative IRIs with no BASE must resolve against the action file IRI
+    "#syntax-relative-iri-01",
     # negative query syntax (grammar must reject)
     "#syntax-bad-01",
     "#syntax-bad-02",

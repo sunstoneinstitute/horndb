@@ -27,6 +27,7 @@ Positive (grammar must accept):
 | syntax-update-insertdata-01   | update | `INSERT DATA`                   |
 | syntax-update-deletewhere-01  | update | `DELETE WHERE`                  |
 | syntax-update-modify-01       | update | `DELETE/INSERT … WHERE`         |
+| syntax-relative-iri-01        | query  | relative IRIs resolved vs BASE  |
 
 Negative (grammar must reject):
 

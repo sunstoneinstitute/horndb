@@ -102,7 +102,7 @@ fn parses_sparql11_syntax_manifest() {
             )
         })
         .count();
-    assert_eq!(pos, 9, "expected 9 positive syntax cases, got {pos}");
+    assert_eq!(pos, 10, "expected 10 positive syntax cases, got {pos}");
     assert_eq!(neg, 5, "expected 5 negative syntax cases, got {neg}");
     assert_eq!(updates, 5, "expected 5 update-form cases, got {updates}");
     // Syntax-only manifest: nothing else should appear.

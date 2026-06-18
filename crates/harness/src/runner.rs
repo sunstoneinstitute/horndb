@@ -185,7 +185,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             // fixture) propagate via `?` so they surface as a harness error
             // rather than a silent test failure.
             let text = read_sparql_input(input)?;
-            match parse_sparql(&text, *update) {
+            match parse_sparql(&text, *update, input) {
                 Ok(()) => (Status::Passed, None),
                 Err(e) => (
                     Status::Failed,
@@ -199,7 +199,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             // error is not silently turned into a passing rejection — only a
             // parse failure on bytes we read counts as the expected outcome.
             let text = read_sparql_input(input)?;
-            match parse_sparql(&text, *update) {
+            match parse_sparql(&text, *update, input) {
                 Ok(()) => (
                     Status::Failed,
                     Some("negative syntax test parsed successfully but should have failed".into()),
@@ -256,17 +256,28 @@ fn read_sparql_input(path: &Path) -> Result<String> {
 /// `spargebra`, the same grammar the SPEC-07 engine uses. Returns `Ok(())`
 /// when the input is grammatically valid and an error otherwise — the caller
 /// turns that into Passed/Failed depending on whether the case is positive or
-/// negative. The base IRI matches spargebra's default so relative IRIs in the
-/// fixtures resolve the same way the W3C suite assumes.
-fn parse_sparql(text: &str, update: bool) -> Result<()> {
+/// negative.
+///
+/// `action` is the path of the query/update file; the W3C SPARQL syntax tests
+/// expect relative IRIs (e.g. `<s> <p> <o>` with no explicit `BASE`) to
+/// resolve against the *action file IRI*, so we seed spargebra's base IRI from
+/// it (mirroring `load_dataset`'s `file://{path}` convention). Without a base
+/// IRI spargebra would reject any relative-IRI query as malformed, which would
+/// spuriously fail otherwise-valid upstream positive cases as the curated
+/// subset grows.
+fn parse_sparql(text: &str, update: bool, action: &Path) -> Result<()> {
     use spargebra::SparqlParser;
+    let base_iri = format!("file://{}", action.display());
+    let parser = SparqlParser::new()
+        .with_base_iri(&base_iri)
+        .with_context(|| format!("invalid base IRI {base_iri}"))?;
     if update {
-        SparqlParser::new()
+        parser
             .parse_update(text)
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("{e}"))
     } else {
-        SparqlParser::new()
+        parser
             .parse_query(text)
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("{e}"))
@@ -459,7 +470,7 @@ mod tests {
         let manifest =
             fixtures().join("crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl");
         let cases = crate::manifest::parse(&manifest, Suite::Sparql11Syntax).unwrap();
-        assert_eq!(cases.len(), 14, "manifest must list all 14 curated cases");
+        assert_eq!(cases.len(), 15, "manifest must list all 15 curated cases");
 
         let mut suites = BTreeMap::new();
         suites.insert(
@@ -482,7 +493,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(report.outcomes.len(), 14);
+        assert_eq!(report.outcomes.len(), 15);
         for o in &report.outcomes {
             assert_eq!(
                 o.status,
@@ -552,6 +563,30 @@ mod tests {
             },
         };
         assert_eq!(run_one(&mut engine, &neg_u).unwrap().status, Status::Passed);
+    }
+
+    /// Regression for the codex review finding: a positive syntax case using
+    /// relative IRIs with no explicit `BASE` must resolve against the action
+    /// file IRI and pass. `parse_sparql` seeds the base IRI from the fixture
+    /// path; without it spargebra would reject the relative IRIs as malformed.
+    #[test]
+    fn relative_iri_query_resolves_against_action_file() {
+        let input = fixtures()
+            .join("crates/harness/tests/fixtures/sparql11-syntax/syntax-relative-iri-01.rq");
+        let text = std::fs::read_to_string(&input).unwrap();
+        // With a base IRI (production path) the relative IRIs resolve and the
+        // query parses.
+        assert!(
+            parse_sparql(&text, false, &input).is_ok(),
+            "relative-IRI query must parse with the action-file base IRI",
+        );
+        // Sanity: spargebra really does reject the same text with no base IRI,
+        // which is exactly the failure mode the base-IRI handling avoids.
+        assert!(
+            spargebra::SparqlParser::new().parse_query(&text).is_err(),
+            "guard: relative IRIs without a base IRI should be rejected — \
+             if this starts passing, the base-IRI handling is no longer load-bearing",
+        );
     }
 
     /// A SPARQL syntax case whose fixture file is missing must surface as a

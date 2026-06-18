@@ -25,6 +25,7 @@
         <#syntax-subquery-01>
         <#syntax-propertypath-01>
         <#syntax-values-01>
+        <#syntax-relative-iri-01>
         <#syntax-bad-01>
         <#syntax-bad-02>
         <#syntax-bad-03>
@@ -59,6 +60,12 @@
 <#syntax-values-01> a mf:PositiveSyntaxTest11 ;
     mf:name "inline VALUES" ;
     mf:action <syntax-values-01.rq> .
+
+# Relative IRIs with no explicit BASE: must resolve against the action file
+# IRI (regression guard for the runner's base-IRI handling).
+<#syntax-relative-iri-01> a mf:PositiveSyntaxTest11 ;
+    mf:name "relative IRIs without BASE" ;
+    mf:action <syntax-relative-iri-01.rq> .
 
 # --- negative query syntax ---
 <#syntax-bad-01> a mf:NegativeSyntaxTest11 ;
