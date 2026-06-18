@@ -1136,7 +1136,7 @@ dependencies = [
  "oxrdfio",
  "oxttl",
  "predicates",
- "quick-xml",
+ "quick-xml 0.40.1",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1857,7 +1857,7 @@ dependencies = [
  "oxilangtag",
  "oxiri",
  "oxrdf",
- "quick-xml",
+ "quick-xml 0.37.5",
  "thiserror",
 ]
 
@@ -2103,6 +2103,15 @@ name = "quick-xml"
 version = "0.37.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
 dependencies = [
  "memchr",
  "serde",
@@ -2504,7 +2513,7 @@ dependencies = [
  "json-event-parser",
  "memchr",
  "oxrdf",
- "quick-xml",
+ "quick-xml 0.37.5",
  "thiserror",
 ]
 
