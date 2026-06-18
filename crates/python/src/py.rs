@@ -539,14 +539,17 @@ impl Graph {
         Ok(slf)
     }
 
-    /// `graph.serialize(format=...)` -> `str` (F4).
+    /// `graph.serialize(format=...)` -> `str` (F4). Bound namespaces (F6) are
+    /// emitted as Turtle `@prefix` declarations so the output uses the caller's
+    /// QNames, matching rdflib.
     #[pyo3(signature = (format="turtle"))]
     fn serialize(&self, format: &str) -> PyResult<String> {
         let fmt = SerFormat::from_name(format).map_err(to_py_err)?;
+        let prefixes = self.namespaces.lock().unwrap().clone();
         self.inner
             .lock()
             .unwrap()
-            .serialize_str(fmt)
+            .serialize_str(fmt, &prefixes)
             .map_err(to_py_err)
     }
 

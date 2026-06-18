@@ -170,16 +170,35 @@ impl RdfGraph {
         Ok(())
     }
 
-    /// Serialise the whole default graph (rdflib `serialize`).
-    pub fn serialize_str(&self, format: SerFormat) -> Result<String> {
+    /// Serialise the whole default graph (rdflib `serialize`). `prefixes` are
+    /// `(prefix, namespace-IRI)` pairs bound via `Graph.bind(...)`; for Turtle
+    /// they are emitted as `@prefix` declarations so the output uses the
+    /// caller's QNames, matching rdflib. N-Triples has no prefix concept, so
+    /// they are ignored there.
+    pub fn serialize_str(
+        &self,
+        format: SerFormat,
+        prefixes: &[(String, String)],
+    ) -> Result<String> {
+        let mut ser = RdfSerializer::from_format(format.rdf_format());
+        if format == SerFormat::Turtle {
+            for (prefix, iri) in prefixes {
+                // Skip namespaces oxrdf rejects rather than failing the whole
+                // serialisation over one bad binding.
+                if let Ok(s) = ser.clone().with_prefix(prefix, iri) {
+                    ser = s;
+                }
+            }
+        }
         let mut buf = Vec::new();
-        let mut ser = RdfSerializer::from_format(format.rdf_format()).for_writer(&mut buf);
+        let mut writer = ser.for_writer(&mut buf);
         for t in self.store.iter_triples() {
             let quad = lexical_to_quad(t)?;
-            ser.serialize_quad(quad.as_ref())
+            writer
+                .serialize_quad(quad.as_ref())
                 .map_err(|e| GraphError::Io(e.to_string()))?;
         }
-        ser.finish().map_err(|e| GraphError::Io(e.to_string()))?;
+        writer.finish().map_err(|e| GraphError::Io(e.to_string()))?;
         String::from_utf8(buf).map_err(|e| GraphError::Io(e.to_string()))
     }
 
@@ -193,10 +212,7 @@ impl RdfGraph {
                     .into_iter()
                     .map(|b| {
                         vars.iter()
-                            .map(|v| {
-                                b.get(v)
-                                    .map(|t| RdfTerm::from_store_lexical(&alg_term_lex(t)))
-                            })
+                            .map(|v| b.get(v).map(alg_term_to_rdfterm))
                             .collect()
                     })
                     .collect();
@@ -253,13 +269,31 @@ fn check_predicate(t: &RdfTerm) -> Result<()> {
     }
 }
 
-/// Lexical form of a value bound into a SPARQL `Bindings` row.
-fn alg_term_lex(t: &horndb_sparql::algebra::Term) -> String {
+/// Convert a value bound into a SPARQL `Bindings` row to a kind-preserving
+/// [`RdfTerm`], mapping from the algebra `Term` *variant* rather than
+/// re-classifying a lexical string. This matters for SPARQL expression results
+/// (e.g. `isIRI(...) AS ?b`) whose `Term::Literal` payload may be a bare
+/// `true`/`false` that lexical reclassification would wrongly surface as an
+/// IRI. A `Term::Literal` whose payload is already N-Triples-quoted is parsed
+/// to recover its datatype/language; an unquoted payload becomes a plain
+/// literal, preserving the literal kind either way.
+fn alg_term_to_rdfterm(t: &horndb_sparql::algebra::Term) -> RdfTerm {
     use horndb_sparql::algebra::Term as T;
     match t {
-        T::Iri(s) | T::Literal(s) | T::BlankNode(s) => s.clone(),
-        T::Var(v) => v.name().to_string(),
-        T::Triple(_) => String::new(),
+        T::Iri(s) => RdfTerm::iri(s.trim_start_matches('<').trim_end_matches('>')),
+        T::BlankNode(s) => RdfTerm::blank(s.strip_prefix("_:").unwrap_or(s)),
+        T::Literal(s) => {
+            if s.starts_with('"') {
+                // Quoted N-Triples literal: recover datatype/lang faithfully.
+                RdfTerm::from_store_lexical(s)
+            } else {
+                // Bare payload (e.g. an effective-boolean expression result):
+                // a plain literal, NOT an IRI.
+                RdfTerm::plain_literal(s.clone())
+            }
+        }
+        T::Var(v) => RdfTerm::plain_literal(v.name()),
+        T::Triple(_) => RdfTerm::plain_literal(String::new()),
     }
 }
 
@@ -465,9 +499,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.len(), 1);
-        let out = g.serialize_str(SerFormat::NTriples).unwrap();
+        let out = g.serialize_str(SerFormat::NTriples, &[]).unwrap();
         assert!(out.contains("<http://ex/s>"));
         assert!(out.contains("\"hi\""));
+    }
+
+    #[test]
+    fn serialize_turtle_emits_bound_prefix() {
+        let mut g = RdfGraph::new();
+        g.add(
+            &iri("http://ex/s"),
+            &iri("http://ex/p"),
+            &iri("http://ex/o"),
+        )
+        .unwrap();
+        let prefixes = vec![("ex".to_string(), "http://ex/".to_string())];
+        let out = g.serialize_str(SerFormat::Turtle, &prefixes).unwrap();
+        assert!(out.contains("@prefix ex:"), "turtle output: {out}");
+        // The QName form should appear, not the full IRI.
+        assert!(out.contains("ex:s"), "turtle output: {out}");
     }
 
     #[test]

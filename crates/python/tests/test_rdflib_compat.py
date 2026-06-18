@@ -288,6 +288,27 @@ def test_update_delete():
 # F6 — namespaces
 # --------------------------------------------------------------------------- #
 
+def test_select_expression_result_is_literal_not_uriref():
+    # A SPARQL effective-boolean expression result must surface as a Literal,
+    # not a URIRef — matching rdflib's term typing for expression bindings.
+    hg = hb.Graph()
+    hg.add((hb.URIRef("http://ex/s"), hb.URIRef("http://ex/p"), hb.URIRef("http://ex/o")))
+    rows = list(hg.query("SELECT (isIRI(<http://ex/s>) AS ?b) WHERE { ?s ?p ?o }"))
+    assert len(rows) == 1
+    val = rows[0][0]
+    assert isinstance(val, hb.Literal), f"expected Literal, got {type(val)}"
+    assert not isinstance(val, hb.URIRef)
+
+
+def test_serialize_turtle_uses_bound_prefix():
+    hg = hb.Graph()
+    hg.bind("ex", hb.Namespace("http://ex/"))
+    hg.add((hb.URIRef("http://ex/s"), hb.URIRef("http://ex/p"), hb.URIRef("http://ex/o")))
+    out = hg.serialize(format="turtle")
+    assert "@prefix ex:" in out, out
+    assert "ex:s" in out, out
+
+
 def test_namespace_term_access_matches_rdflib():
     H = hb.Namespace("http://ex/")
     R = rdflib.Namespace("http://ex/")
