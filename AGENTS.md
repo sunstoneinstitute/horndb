@@ -79,11 +79,29 @@ Day-to-day commands:
 ```bash
 cargo fmt --all                                          # auto-format
 cargo clippy --workspace --all-targets -- -D warnings    # what CI runs
-cargo test --workspace                                   # all unit/integration tests
-cargo test -p horndb-sparql --features server            # SPARQL HTTP server tests (required for full SPARQL pass)
-cargo test -p <crate> <test_name>                        # single test
+cargo nextest run --workspace                            # all unit/integration tests (parallel across binaries)
+cargo nextest run -p horndb-sparql --features server     # SPARQL HTTP server tests (required for full SPARQL pass)
+cargo nextest run -p <crate> <test_name>                 # single test
 cargo bench -p <crate> --bench <name>                    # criterion benches (e.g. four_cycle, per_tuple, load_lubm, transitive, sameas, insert_throughput)
 ```
+
+**Test runner — use `cargo nextest`.** The workspace builds ~90 separate
+integration-test binaries; cargo's built-in runner executes them one binary at a
+time, which dominates `cargo test --workspace` wall-clock. `cargo nextest`
+schedules every test across all binaries in one concurrent pool — same tests,
+no source changes, materially faster (locally ~40% on a quiet machine; more
+under contention / in CI). Config lives in `.config/nextest.toml`. Install a
+rustc-1.90-compatible version (the workspace is pinned to 1.90.0; nextest
+>= 0.9.79 needs a newer rustc to *build* — a prebuilt binary has no such limit):
+
+```bash
+cargo install cargo-nextest --version '0.9.78' --locked   # build-from-source path
+# or fetch a prebuilt binary (no rustc constraint), e.g. cargo-binstall cargo-nextest
+```
+
+`cargo test --workspace` still works and is the only way to run **doctests**
+(nextest does not run them; the workspace currently has zero runnable doctests).
+CI runs `cargo nextest run --profile ci` plus a separate `cargo test --doc`.
 
 **Run benchmarks on the `hornbench` server, never the laptop.** Any `cargo bench`
 run that produces numbers for `BENCHMARKS.md` must execute on the dedicated
@@ -94,7 +112,7 @@ not-yet-committed files), then run the bench there and record the numbers (note
 the env) back in `BENCHMARKS.md`. Local `cargo bench` is fine only for a quick
 smoke-check you are *not* going to record.
 
-**macOS dev tip:** the workspace builds ~90 separate test binaries, and each freshly-linked one triggers a Gatekeeper (`syspolicyd`) + XProtect scan on first run — which can pin those daemons near 100% CPU during `cargo test`/`build`. Add your terminal to System Settings → Privacy & Security → **Developer Tools** (or run `sudo spctl developer-mode enable-terminal` once) to exempt its child processes from Gatekeeper assessment.
+**macOS dev tip:** the workspace builds ~90 separate test binaries, and each freshly-linked one triggers a Gatekeeper (`syspolicyd`) + XProtect scan on first run — which can pin those daemons near 100% CPU during `cargo test`/`build`. Add your terminal to System Settings → Privacy & Security → **Developer Tools** (or run `sudo spctl developer-mode enable-terminal` once) to exempt its child processes from Gatekeeper assessment. This and `cargo nextest` (above) are complementary: the exemption removes the per-binary scan, nextest removes the serial-per-binary run.
 
 CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with the real engine; nightly runs LDBC SPB-256 on a self-hosted runner. **Pin every GitHub Action to a full 40-char commit SHA, never a floating tag** — full hygiene rules and the dependabot flow are in `.github/CLAUDE.md`.
 

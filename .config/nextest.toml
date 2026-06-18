@@ -1,0 +1,41 @@
+# cargo-nextest configuration for HornDB.
+#
+# nextest runs every test binary in a shared, concurrently-scheduled pool
+# instead of cargo's serial-per-binary default. That is the primary lever for
+# task #108 (speed up integration test runs): the workspace builds ~90 separate
+# `crates/*/tests/*.rs` binaries, and the default `cargo test` runs them one
+# binary at a time. nextest interleaves them, cutting wall-clock substantially
+# with no source changes and no loss of coverage.
+#
+# Install a rustc-1.90-compatible version (the workspace is pinned to 1.90.0 via
+# rust-toolchain.toml; nextest >= 0.9.79 requires a newer rustc):
+#
+#     cargo install cargo-nextest --version '0.9.78' --locked
+#
+# Run the whole workspace:
+#
+#     cargo nextest run --workspace
+#     cargo nextest run -p horndb-sparql --features server   # server tests
+#
+# nextest does NOT run doctests. The workspace currently has zero runnable
+# doctests, but CI still runs `cargo test --workspace --doc` separately so that
+# coverage can never silently regress if doctests are added later.
+
+[profile.default]
+# Fail the whole run only after all tests have had a chance to run, so a single
+# flaky/failing target does not mask the rest. Keep output terse on success.
+failure-output = "immediate-final"
+status-level = "fail"
+final-status-level = "slow"
+
+# Surface pathologically slow tests (the retraction bit-identical test runs
+# ~15s) without failing them.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.ci]
+# CI inherits default behaviour but prints retries and a full final summary, and
+# retries once to absorb rare CI-only flakes without hiding real failures.
+inherits = "default"
+failure-output = "immediate-final"
+fail-fast = false
+retries = 1
