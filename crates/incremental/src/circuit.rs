@@ -244,20 +244,32 @@ impl Circuit {
         let logical_time = asserted_records.last().map(|r| r.time).unwrap_or(0);
 
         // The closure pass (F5) is insertion-only and must only ever see
-        // the positive part of the asserted delta — closure-path
-        // retraction stays deferred under parent #6. We materialise the
-        // positive-only delta only when there are closure plans to feed
-        // (a no-closure circuit must not pay an O(|Δ|) clone per tick; the
-        // empty placeholder is never read because the closure loop has no
-        // iterations when `closure_plans` is empty).
+        // base edges that are PRESENT post-tick — closure-path retraction
+        // stays deferred under parent #6. We materialise this positive
+        // insertion delta only when there are closure plans to feed (a
+        // no-closure circuit must not pay an O(|Δ|) clone per tick; the empty
+        // placeholder is never read because the closure loop has no iterations
+        // when `closure_plans` is empty).
+        //
+        // Finding 1: filter by POST-TICK presence (`asserted_base.get(t) > 0`),
+        // not raw `m > 0` from this tick's delta. The asserted records were
+        // already merged into `asserted_base` in the drain loop above, so `get`
+        // is post-tick here. An edge over-retracted to a NEGATIVE multiplicity
+        // and then partially re-asserted so its NET post-tick multiplicity is
+        // `<= 0` is ABSENT; a raw `m > 0` filter would still feed it to the
+        // closure backend, deriving closure edges off an absent base edge. This
+        // is the same present/absent boundary `materialize_presence`,
+        // `recompute_rule_closure`, and the retraction gate all use. Normal
+        // inserts (an edge whose multiplicity becomes +1) still flow through:
+        // their post-tick presence holds.
         let asserted_delta_for_closure = if self.closure_plans.is_empty() {
             Zset::new()
         } else {
             Zset::from_iter(
                 asserted_delta
                     .iter()
-                    .filter(|(_, m)| *m > 0)
-                    .map(|(t, m)| (*t, m)),
+                    .filter(|(t, m)| *m > 0 && self.asserted_base.get(t) > 0)
+                    .map(|(t, _)| (*t, 1)),
             )
         };
 
@@ -477,6 +489,19 @@ impl Circuit {
             // diff); rebuild it here first so the closure dedup is correct.
             combined_base = self.asserted_base.clone();
             combined_base.add_assign(&self.derived_base);
+            // Finding 2 (change-feed precision, NOT a final-state bug): in a
+            // single mixed tick that retracts one support path AND inserts a
+            // replacement path for the SAME closure edge, the deletion pass
+            // above already published a `ClosureInferred -1` and zeroed the
+            // edge; this insertion pass then re-adds it and publishes
+            // `ClosureInferred +1`. The FINAL `derived_base` state is correct
+            // (the edge is present, supported by the replacement path), but the
+            // change feed shows a transient -1 then +1 and `derived_merged`
+            // counts both. Reconciling the intra-tick withdraw/re-add to a
+            // net-zero feed delta means computing the closure delta against the
+            // FINAL post-tick base — a larger change that risks regressing this
+            // now-correct mixed-tick state handling. It is a documented Stage-2
+            // follow-up (see `FUTURE-WORK.md`, F5 "Still Stage 2").
             derived_merged +=
                 self.run_closure_insertion_pass(&asserted_delta_for_closure, &mut combined_base);
 

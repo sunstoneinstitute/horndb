@@ -214,6 +214,151 @@ fn retract_twice_in_one_tick_withdraws_closure() {
     );
 }
 
+/// Finding 1 — the POSITIVE closure-insertion delta must respect POST-TICK
+/// presence, not raw `m > 0` from the tick's asserted delta.
+///
+/// An edge over-retracted to a negative multiplicity and then partially
+/// re-asserted so its NET post-tick multiplicity is `<= 0` is ABSENT. Feeding
+/// the raw `m > 0` part of the tick's delta to the closure backend would derive
+/// closure edges off a base edge that is not present.
+///
+/// Repro: assert `(1,P,2)` and `(2,P,3)`, tick → `(1,P,3)` derived. Retract
+/// `(1,P,2)` TWICE in one tick → net asserted multiplicity -1, `(1,P,3)`
+/// withdrawn. Then assert `(1,P,2)` ONCE → `asserted_base.get((1,P,2))` is now 0
+/// (-1 + 1), still ABSENT — so the closure must NOT re-derive `(1,P,3)`.
+#[test]
+fn over_retract_then_reassert_to_zero_does_not_rederive_closure() {
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(P)));
+
+    // Assert the chain 1 -> 2 -> 3 (each edge once).
+    circuit.assert_triple((1, P, 2));
+    circuit.assert_triple((2, P, 3));
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        1,
+        "(1,P,3) is closure-derived from the chain"
+    );
+
+    // Over-retract (1,P,2): two retractions in one tick → net multiplicity -1.
+    circuit.retract_triple((1, P, 2));
+    circuit.retract_triple((1, P, 2));
+    circuit.tick();
+    assert_eq!(
+        circuit.asserted_base().get(&(1, P, 2)),
+        -1,
+        "(1,P,2) over-retracted to multiplicity -1"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        0,
+        "(1,P,3) withdrawn after the base edge is gone"
+    );
+
+    let rx = circuit.subscribe();
+
+    // Re-assert (1,P,2) ONCE: post-tick multiplicity is -1 + 1 = 0 → still
+    // ABSENT. The closure must NOT re-derive (1,P,3) off an absent base edge.
+    circuit.assert_triple((1, P, 2));
+    circuit.tick();
+    assert_eq!(
+        circuit.asserted_base().get(&(1, P, 2)),
+        0,
+        "(1,P,2) re-asserted to net multiplicity 0 — still absent"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        0,
+        "(1,P,3) must NOT be re-derived — the base edge (1,P,2) is absent (mult 0)"
+    );
+
+    // No POSITIVE ClosureInferred for (1,P,3) should have been published.
+    let records = drain(&rx);
+    let rederived = records
+        .iter()
+        .any(|r| r.triple == (1, P, 3) && r.kind == DerivationKind::ClosureInferred && r.mult > 0);
+    assert!(
+        !rederived,
+        "(1,P,3) must not be re-derived off an absent base edge; got {records:?}"
+    );
+}
+
+/// Finding 2 — DOCUMENT-AND-PIN (cosmetic change-feed precision, final state
+/// already correct). A single MIXED tick that retracts one support path AND
+/// inserts a replacement path for the SAME closure edge produces a transient
+/// `ClosureInferred -1` then `+1` on the change feed (the deletion pass zeroes
+/// the edge, then the insertion pass — running before the rule recompute, from
+/// the round-2 fix — re-adds it), and `derived_merged` counts both. This is NOT
+/// a final-state bug: `derived_base` is correct.
+///
+/// This test PINS the correct FINAL state. It deliberately does NOT assert on
+/// the transient feed records (that net-delta reconciliation is a documented
+/// Stage-2 follow-up — see `FUTURE-WORK.md`). A fresh subscriber that reads only
+/// final state sees the right answer.
+///
+/// Setup: `c=1, d=2, e=3, x=4`, all over predicate `P`. The closure edge under
+/// test is `(c,P,e)`. Path 1 is `c->d->e` (edges `(1,2),(2,3)`); the replacement
+/// is `c->x->e` (edges `(1,4),(4,3)`). In one tick we retract `(d,P,e)` (breaking
+/// path 1) and insert the two replacement edges. `(c,P,e)` must stay present.
+#[test]
+fn mixed_tick_replacement_path_final_state_correct() {
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(P)));
+
+    // Path 1: c -> d -> e closes the transitive (c,P,e).
+    circuit.assert_triple((1, P, 2)); // c -> d
+    circuit.assert_triple((2, P, 3)); // d -> e
+    circuit.tick();
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        1,
+        "(c,P,e) closure-derived via c->d->e"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 4)),
+        0,
+        "no replacement path yet"
+    );
+
+    // MIXED tick: retract the d->e edge (breaking path 1) AND insert the
+    // replacement path c->x->e in the same tick.
+    circuit.retract_triple((2, P, 3)); // remove d -> e
+    circuit.assert_triple((1, P, 4)); // c -> x
+    circuit.assert_triple((4, P, 3)); // x -> e
+    circuit.tick();
+
+    // FINAL state must be correct:
+    // (c,P,e) still present — now supported by c->x->e.
+    assert_eq!(
+        circuit.derived_base().get(&(1, P, 3)),
+        1,
+        "(c,P,e) must remain present — replacement path c->x->e supports it"
+    );
+    // The old path's derived/asserted contributions are gone:
+    // d->e was asserted and is now retracted (absent from both bases).
+    assert_eq!(
+        circuit.asserted_base().get(&(2, P, 3)),
+        0,
+        "d->e retracted — gone from asserted_base"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(2, P, 3)),
+        0,
+        "d->e has no materialized derived row"
+    );
+    // The replacement path's edges are present; (x,P,e) and (c,P,x) are asserted.
+    assert_eq!(circuit.asserted_base().get(&(1, P, 4)), 1, "c->x asserted");
+    assert_eq!(circuit.asserted_base().get(&(4, P, 3)), 1, "x->e asserted");
+
+    // A fresh subscriber reading only final state via a snapshot sees (c,P,e).
+    let snap = circuit.snapshot();
+    assert!(
+        snap.contains(&(1, P, 3)),
+        "(c,P,e) must be visible in a fresh post-tick snapshot"
+    );
+}
+
 /// Drain every record currently queued on the receiver.
 fn drain(rx: &horndb_incremental::ChangeFeedRx) -> Vec<horndb_incremental::DeltaRecord> {
     let mut out = Vec::new();

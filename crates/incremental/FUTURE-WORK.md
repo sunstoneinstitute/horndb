@@ -80,6 +80,12 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   retraction ticks (shared helper `Circuit::run_closure_insertion_pass`) so it
   never runs twice. Test:
   `tests/retraction_closure.rs::mixed_tick_insert_replacement_path_keeps_rule_consequence`.
+- **Still Stage 2**: change-feed net-delta reconciliation for same-tick closure
+  withdraw+re-add (replacement paths): final `derived_base` state is correct, but
+  the feed shows a transient `ClosureInferred -1` then `+1` and `derived_merged`
+  counts both. A net-zero feed delta needs the closure delta computed against the
+  FINAL post-tick base; pinned by
+  `tests/closure_retraction.rs::mixed_tick_replacement_path_final_state_correct`.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
   affected-region recompute); **warm-store seeded-edge retraction** — a rule
   seeded via `TransitiveClosureRule::seed_closed_edges` retains only the
