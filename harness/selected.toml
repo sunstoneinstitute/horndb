@@ -99,6 +99,7 @@ include = [
     "#New-Feature-Keys-003-pe",
     "#New-Feature-Keys-004-cons",
     "#New-Feature-Keys-005-cons",
+    "#New-Feature-Keys-006-incons",
     "#New-Feature-NegativeDataPropertyAssertion-001-incons",
     "#New-Feature-NegativeObjectPropertyAssertion-001-incons",
     "#New-Feature-ObjectPropertyChain-001-cons",

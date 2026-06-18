@@ -625,6 +625,22 @@ library is using.
   rules, the datatype base, and the `owl:Thing`-from-`NamedIndividual` pass —
   live outside `rules.toml`, which is why the RDFox A/B harness needs
   `scripts/bench/gen_schema_closure.py` to compare like-for-like; see #59.)
+- **Literal-value datatype rules (`dt-eq`, `dt-diff`, `dt-not-type`) are
+  implemented** in `src/datatype_literals.rs` (pure value-space parsing +
+  classification) and wired by the load-time `inject_datatype_literal_axioms`
+  pass in `integration.rs`. They reason over the *values* literals denote
+  (unlike `datatypes.rs`, which reasons over datatype IRIs): value-equal
+  literals across lexical forms / the integer tower ⇒ `owl:sameAs` (`dt-eq`);
+  value-distinct comparable literals ⇒ `owl:differentFrom` (`dt-diff`); a
+  lexical form outside its datatype's value space ⇒ `owl:Nothing`
+  (`dt-not-type`). The conclusions are base axioms the compiled `eq-diff1` /
+  `eq-rep-*` rules then propagate. Stage-1 scope is the XSD integer tower,
+  `xsd:string`/`boolean`, and plain/lang literals; other datatypes
+  (`xsd:dateTime`, `xsd:decimal`, user types) stay **opaque** — never
+  cross-compared, so no false `sameAs`/`differentFrom`. Full value-space
+  *intersection* narrowing (`I5.8-008/009-pe`) remains deferred (#4). See #40.
+  The pairwise comparison is O(k²) in distinct object literals `k`; a
+  value-space-bucketed pass is a Stage-2 optimisation if `k` grows large.
 - **Generated function bodies are O(|body|) nested loops.** This is
   fine for ~50 rules with bodies of length ≤ 4. SPEC-03 will replace
   the plan with leapfrog triejoin for arbitrary body sizes.

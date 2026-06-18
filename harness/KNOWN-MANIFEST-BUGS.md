@@ -36,12 +36,19 @@ Stage-1 engine intentionally defers:
 | `differentFrom`/`AllDifferent` entailment from disjoint properties (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) — not an OWL 2 RL rule; `prp-pdw`/`prp-adp` only derive `owl:Nothing` on a *shared* `(u, w)` pair | 3 |
 | Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
 | `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
-| `prp-key` + functional-property literal disequality (`Keys-006-incons`, needs `dt-not-type`) | 1 |
 | Self-chain → `owl:TransitiveProperty` meta-rule (`chain2trans1-pe`) — not in W3C OWL 2 RL | 1 |
 | `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
 | `owl:imports` external resolution (`imports-011-pe`) | 1 |
 
-Total: **19 cases**.
+Total: **18 cases**.
+
+> **2026-06-18 — literal-value datatype rules implemented (`dt-eq`/`dt-diff`/`dt-not-type`, issue #40).**
+> `New-Feature-Keys-006-incons` flips green and moves into `selected.toml`'s
+> `[suites.owl2-w3c-rl]` block: a functional property with two distinct string
+> values now collapses via `prp-fp` to `owl:sameAs`, `dt-diff` derives the two
+> literals are `owl:differentFrom`, and the compiled `eq-diff1` closes it to
+> `owl:Nothing` (inconsistency). See `crates/owlrl/src/datatype_literals.rs` and
+> the load-time `inject_datatype_literal_axioms` pass in `integration.rs`.
 
 > **2026-06-16 — unqualified max-cardinality implemented (`cls-maxc1`/`cls-maxc2`, issue #35).**
 > No W3C case in the synthesised `owl2-w3c-rl` suite is gated on *unqualified*
@@ -202,14 +209,15 @@ needs additional rules beyond the Stage-1 scope.
 - `#owl2-rl-rules-fp-differentFrom-pe`
 - `#owl2-rl-rules-ifp-differentFrom-pe`
 
-### `prp-key` + literal disequality (`dt-not-type`)
+### ~~`prp-key` + literal disequality~~ — RESOLVED (2026-06-18, `dt-diff`)
 
-`prp-key` is implemented in `list_rules.rs` (2026-05-25). The one
-remaining `-incons` case requires the engine to know that the
-literals `"Peter"` and `"Kichwa-Tembo"` cannot be `owl:sameAs`
-(i.e. `dt-not-type` literal-tower disequality) — Stage-2 work.
-
-- `#New-Feature-Keys-006-incons`
+`#New-Feature-Keys-006-incons` is now **green** and listed in
+`selected.toml`. `hasName` is a functional property, so `prp-fp`
+collapses its two values to `"Peter" owl:sameAs "Kichwa-Tembo"`; the
+new `dt-diff` rule (distinct string values ⇒ `owl:differentFrom`)
+then lets the compiled `eq-diff1` derive `owl:Nothing`. Implemented in
+`crates/owlrl/src/datatype_literals.rs` + `inject_datatype_literal_axioms`
+(issue #40).
 
 ### Self-chain → `owl:TransitiveProperty` meta-rule
 
