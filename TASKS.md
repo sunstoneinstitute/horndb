@@ -114,10 +114,11 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   (`GrB_Matrix_dup` clone, `(min,+)` semiring, nnz-threshold routing).
 
 - [x] **SPEC-06 incremental.** ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
-  Remaining: F6 correct retraction across joins ([#45](https://github.com/sunstoneinstitute/horndb/issues/45)),
-  F7 in-flight reader visibility / MVCC snapshots ([#46](https://github.com/sunstoneinstitute/horndb/issues/46)).
-  Delivered: F5 closure-operator deltas (#44).
-  Deferred: distributed timely-dataflow (SPEC-09).
+  Delivered: F5 closure-operator deltas (#44), F6 correct retraction across
+  joins ([#45](https://github.com/sunstoneinstitute/horndb/issues/45)), F7 in-flight
+  reader visibility / MVCC snapshots ([#46](https://github.com/sunstoneinstitute/horndb/issues/46)).
+  Deferred (re-file as increments when shippable): closure-path retraction,
+  SPEC-02-backed per-tuple storage MVCC, distributed timely-dataflow (SPEC-09).
 
 - [ ] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
   Remaining: non-recursive property paths `|`/`!`/`?` ([#49](https://github.com/sunstoneinstitute/horndb/issues/49)),
