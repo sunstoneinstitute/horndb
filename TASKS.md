@@ -131,14 +131,28 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   SPEC-02-backed per-tuple storage MVCC, distributed timely-dataflow (SPEC-09).
 
 - [v] **SPEC-07 SPARQL.** ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
-  Remaining: `EXPLAIN` pragma ([#53](https://github.com/sunstoneinstitute/horndb/issues/53)),
-  Graph Store Protocol ([#54](https://github.com/sunstoneinstitute/horndb/issues/54)),
-  backward-chained entailment mode + per-query pragma ([#55](https://github.com/sunstoneinstitute/horndb/issues/55)),
-  streaming result serialization ([#56](https://github.com/sunstoneinstitute/horndb/issues/56)),
-  SPARQL XML results + Turtle CONSTRUCT/DESCRIBE ([#57](https://github.com/sunstoneinstitute/horndb/issues/57)).
-  Promoted HIGH (trainmarks): #51, #66, #67 — see section above.
-  Delivered: `DESCRIBE` one-level CBD (#48); non-recursive property paths `|`/`!`/`?` ([#49](https://github.com/sunstoneinstitute/horndb/issues/49), PR #101); recursive Kleene paths `*`/`+` via runtime closure ([#50](https://github.com/sunstoneinstitute/horndb/issues/50), PR #102). graph-management Update `LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY` + multi-op (default-graph-only; atomic; spargebra desugars ADD/MOVE/COPY) ([#52](https://github.com/sunstoneinstitute/horndb/issues/52), PR #103).
-  Deferred: `SERVICE` federation, RDF 1.2 SPARQL surface, GeoSPARQL.
+  Epic complete — the SPARQL 1.1 query/update surface is delivered; the
+  remainder is Stage-2 (storage-blocked, perf, or already-deferred).
+  Delivered: SELECT/ASK/CONSTRUCT and `DESCRIBE` one-level CBD (#48);
+  the full expression + aggregation surface (`GROUP BY`/`COUNT`/`SUM`,
+  arithmetic/`IF`/`COALESCE`/builtins) + `GRAPH` lowering ([#66](https://github.com/sunstoneinstitute/horndb/issues/66));
+  the frontend wired onto real storage + WCOJ + materialized closure ([#67](https://github.com/sunstoneinstitute/horndb/issues/67));
+  pattern-based Update `INSERT`/`DELETE … WHERE` ([#51](https://github.com/sunstoneinstitute/horndb/issues/51));
+  non-recursive property paths `|`/`!`/`?` ([#49](https://github.com/sunstoneinstitute/horndb/issues/49), PR #101);
+  recursive Kleene paths `*`/`+` via runtime closure ([#50](https://github.com/sunstoneinstitute/horndb/issues/50), PR #102);
+  graph-management Update `LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY` + multi-op
+  (default-graph-only; atomic) ([#52](https://github.com/sunstoneinstitute/horndb/issues/52), PR #103);
+  the non-standard `EXPLAIN`/`EXPLAIN JSON` pragma (F9: chosen plan + execution
+  mode + per-node cardinality estimates, no execution) ([#53](https://github.com/sunstoneinstitute/horndb/issues/53), PR #104).
+  Deferred to Stage-2 (sub-issues closed with rationale; re-file under #7 when
+  shippable): Graph Store Protocol ([#54](https://github.com/sunstoneinstitute/horndb/issues/54)) —
+  blocked on a named-graph/quad store seam (SPEC-02, default-graph-only today);
+  backward-chained entailment mode + per-query pragma ([#55](https://github.com/sunstoneinstitute/horndb/issues/55)) —
+  depends on deferred SPEC-03 magic-sets/tabling (the EXPLAIN mode line is ready
+  to surface it); streaming result serialization ([#56](https://github.com/sunstoneinstitute/horndb/issues/56)) —
+  perf (F6); the buffered path is correct; SPARQL XML SELECT/ASK results ship,
+  Turtle CONSTRUCT/DESCRIBE output is the residual of ([#57](https://github.com/sunstoneinstitute/horndb/issues/57));
+  `SERVICE` federation, RDF 1.2 SPARQL surface, GeoSPARQL.
 
 - [ ] **SPEC-08 ML.** ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
   F3 LLM → SPARQL HTTP endpoint, real FAISS-backed `CandidateGenerator`, HTTP
