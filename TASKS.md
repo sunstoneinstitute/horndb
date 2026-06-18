@@ -41,7 +41,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-06 incremental (retraction, MVCC) ([#6](https://github.com/sunstoneinstitute/horndb/issues/6))
 - [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [x] **MEDIUM** · _Completeness_ — SPEC-08 ML (HTTP boundary delivered; FAISS candidate generator deferred) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
-- [ ] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
+- [v] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9)) — _wip: 122d0f80@Stigs-MacBook-Pro.local · task-9-python-rdflib-binding · 2026-06-18T09:12:34Z_
 - [ ] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [ ] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [ ] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
@@ -174,7 +174,7 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   correctness path (SPEC-08 candidate generation is opt-in / human-review by
   default).
 
-- [ ] **SPEC-10 rdflib-compatible Python API.** ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
+- [v] **SPEC-10 rdflib-compatible Python API.** ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
   Build the PyO3/maturin binding layer per
   `docs/specs/SPEC-10-rdflib-compatible-python-api.md`: rdflib-shaped terms,
   `Graph`/`Dataset` facades, core `add`/`remove`/`triples`/`query`/`update`,
