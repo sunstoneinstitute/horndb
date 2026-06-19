@@ -78,11 +78,17 @@ Day-to-day commands:
 
 ```bash
 cargo fmt --all                                          # auto-format
-cargo clippy --workspace --all-targets -- -D warnings    # what CI runs
-cargo nextest run --workspace                            # all unit/integration tests (parallel across binaries)
+cargo nextest run                                        # local: production crates only (no harness/bench-rdfox, no oxrocksdb-sys)
 cargo nextest run -p horndb-sparql --features server     # SPARQL HTTP server tests (required for full SPARQL pass)
 cargo nextest run -p <crate> <test_name>                 # single test
 cargo bench -p <crate> --bench <name>                    # criterion benches (e.g. four_cycle, per_tuple, load_lubm, transitive, sameas, insert_throughput)
+```
+
+CI / full-workspace commands (include harness + bench-rdfox, pulls in oxrocksdb-sys):
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings    # what CI runs
+cargo nextest run --workspace                            # all crates including harness
 ```
 
 **Test runner — use `cargo nextest`.** The workspace builds ~90 separate
