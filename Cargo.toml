@@ -49,7 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # uses the still-unstable `cfg_select!` macro and fails to build on any stable
 # Rust (verified 1.88 / 1.90 / 1.93). Revert this pin once a fixed
 # libsqlite3-sys (>0.38.0) ships. See the dependabot bump in git history.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 oxrdfio = { version = "0.2", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
