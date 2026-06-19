@@ -219,6 +219,15 @@ mkdir -p ".worktrees/<branch>/.claude"
 ln -sfn ../../../.claude/CLAUDE.local.md ".worktrees/<branch>/.claude/CLAUDE.local.md"
 ```
 
+Then symlink the gitignored worktree-local instructions into it so every
+worktree shares the one canonical `.claude/CLAUDE.local.md` (per
+`.claude/CLAUDE.local.md` → "Worktree symlinks for this file"):
+
+```bash
+mkdir -p ".worktrees/<branch>/.claude"
+ln -sfn ../../../.claude/CLAUDE.local.md ".worktrees/<branch>/.claude/CLAUDE.local.md"
+```
+
 Work from `.worktrees/<branch>`. To avoid recompiling the ~700 MB rocksdb
 artifact in a fresh tree, point Cargo at a shared target dir for this run (per
 `CLAUDE.md`) — also export it before any `git push` so the pre-push hook reuses
