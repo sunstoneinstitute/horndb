@@ -342,7 +342,26 @@ fn parse_test_cases(xml: &str) -> Result<Vec<TestCaseDraft>> {
             }
             Ok(Event::Text(t)) => {
                 if text_target.is_some() {
-                    text_buf.push_str(&t.unescape()?);
+                    // quick-xml 0.40 no longer unescapes entities inside Text
+                    // events: entity references now arrive as separate
+                    // `GeneralRef` events (handled below), so a Text run is just
+                    // decoded verbatim.
+                    text_buf.push_str(&t.decode()?);
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if text_target.is_some() {
+                    if let Some(ch) = r.resolve_char_ref()? {
+                        // Numeric character reference (e.g. `&#x30;`).
+                        text_buf.push(ch);
+                    } else {
+                        // Named entity (e.g. `&lt;`); resolve the XML predefined set.
+                        let name = r.decode()?;
+                        match quick_xml::escape::resolve_predefined_entity(&name) {
+                            Some(replacement) => text_buf.push_str(replacement),
+                            None => return Err(anyhow!("unknown entity reference: &{name};")),
+                        }
+                    }
                 }
             }
             Ok(Event::CData(t)) => {
@@ -384,7 +403,9 @@ fn attr_value(e: &BytesStart<'_>, want: &str) -> Result<Option<String>> {
         let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
         let local = key.rsplit(':').next().unwrap_or(key);
         if local == want {
-            let v = attr.unescape_value().map_err(|err| anyhow!("{err}"))?;
+            let v = attr
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(|err| anyhow!("{err}"))?;
             return Ok(Some(v.into_owned()));
         }
     }
