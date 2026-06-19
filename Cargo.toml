@@ -65,7 +65,7 @@ assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
-arrow = { version = "53", default-features = false }
+arrow = { version = "59", default-features = false }
 roaring = "0.11"
 dashmap = "6"
 parking_lot = "0.12"
