@@ -45,3 +45,11 @@ harness = false
 [[bench]]
 name = "incremental"
 harness = false
+
+[[bench]]
+name = "valued_readiness"
+harness = false
+
+[[bench]]
+name = "crosswalk"
+harness = false

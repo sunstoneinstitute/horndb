@@ -12,6 +12,19 @@ members = [
     "crates/hardware-ext",
     "crates/bench-rdfox",
 ]
+# harness and bench-rdfox are excluded from default builds to avoid pulling in
+# oxigraph → oxrocksdb-sys (~700 MB) during local development. Use --workspace
+# in CI or pass -p horndb-harness explicitly to include them.
+default-members = [
+    "crates/storage",
+    "crates/wcoj",
+    "crates/owlrl",
+    "crates/closure",
+    "crates/incremental",
+    "crates/sparql",
+    "crates/ml",
+    "crates/hardware-ext",
+]
 
 [workspace.package]
 edition = "2021"
@@ -52,7 +65,7 @@ assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
-arrow = { version = "53", default-features = false }
+arrow = { version = "59", default-features = false }
 roaring = "0.11"
 dashmap = "6"
 parking_lot = "0.12"
