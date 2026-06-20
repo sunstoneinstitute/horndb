@@ -1041,6 +1041,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "horndb-bench-trainmarks"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "horndb-sparql",
+ "oxrdf",
+ "oxttl",
+ "serde_json",
+]
+
+[[package]]
 name = "horndb-closure"
 version = "0.2.0"
 dependencies = [

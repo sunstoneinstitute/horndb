@@ -227,6 +227,55 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)) | **HornDB 36.16 qps** (Zen4 hornbench, 2026-07-01, all-scalar SIMD table) vs **GraphDB Free ~153 qps** → **~4.2× gap**; Intel SPR hel01: 34.4 (don't compare qps across hosts — measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2; the step was bisected to the native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → 36.16 (SIMD known-CPU table replacing the net-harmful calibrated kernels). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)** — remaining levers: probe-side join streaming, filter-aware/multi-aggregate pushdown, HTTP result streaming |
 
+### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
+
+The [DataTreehouse **trainmarks**](https://github.com/DataTreehouse/trainmarks)
+benchmark — a synthetic e-commerce graph (customers / orders / products) at
+three scales with six SPARQL queries and Turtle/N-Triples I/O timing, **no OWL
+reasoning** — runs end-to-end against the storage/WCOJ `HornBackend`. Unlike
+the RDFox comparison, trainmarks is a public, permissively-licensed benchmark
+with **no DeWitt clause**, so these numbers may be recorded and published.
+
+Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
+`scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
+below: **`hornbench`, release, 2026-06-20**, best-of-3 warm per upstream
+protocol (q4 column is single-run / timeout — see note).
+
+| operation | medium (~100K) | large (~1M) | xlarge (~10M) |
+|---|---|---|---|
+| read_turtle | 0.185s | 2.075s | 22.58s |
+| write_turtle | 0.030s | 0.389s | 3.86s |
+| write_ntriples | 0.027s | 0.351s | 3.66s |
+| read_ntriples | 0.138s | 1.723s | 20.04s |
+| q1 `COUNT(*)` | 0.091s | 1.120s | 7.92s |
+| q2 group/sum/limit | 0.018s | 0.334s | 5.33s |
+| q3 3-join + filter + limit | 0.009s | 0.135s | 2.37s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 1.447s | **~231s** ¹ | **TIMEOUT** ¹ |
+| q5 `CONSTRUCT` | 0.002s | 0.037s | 1.05s |
+| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.667s | 10.99s |
+
+**Status — all six queries execute correctly at every scale; the suite is
+runnable. The table is a pre-fix baseline: re-run pending on `hornbench`.**
+
+¹ **Stale — the q4 cliff has since been fixed.** At measurement time (2026-06-20)
+the `OPTIONAL` left-join was a nested loop and scaled ~quadratically (1.45s@100K
+→ ~231s cold@1M → did not complete@10M within the 600s upstream cap). That was
+filed and fixed as [#116](https://github.com/sunstoneinstitute/horndb/issues/116)
+(closed 2026-06-25): `exec/runtime.rs` now runs `LeftJoin` as a slot hash-probe
+keyed on the shared variables ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)
+Slice 2), ~linear in the common case. The [#128](https://github.com/sunstoneinstitute/horndb/issues/128)
+aggregation-runtime rework also post-dates this table, so the q1/q2 numbers are
+likely stale too. The driver's per-query watchdog records `TIMEOUT` and
+continues to the next query, so one slow query never blocks the rest of the
+suite (matching upstream's rdflib behaviour).
+
+Two smaller follow-ups surfaced at measurement time: (a) `SUM` over `xsd:double`
+yields `xsd:decimal` (value correct, datatype deviates from SPARQL type
+promotion); (b) no `LIMIT` pushdown. See the `HornBackend` scale notes
+(`crates/sparql/tests/horn_load_hammer.rs`) for the companion ~10M load-path
+memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
+duplication).
+
 ### Scaffolded but not yet evaluated against targets
 
 These benches compile and run on synthetic fixtures so future regressions are

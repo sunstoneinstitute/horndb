@@ -13,6 +13,7 @@ members = [
     "crates/hardware-ext",
     "crates/bench-rdfox",
     "crates/metrics",
+    "crates/bench-trainmarks",
 ]
 # harness and bench-rdfox are excluded from default builds to avoid pulling in
 # oxigraph → oxrocksdb-sys (~700 MB) during local development. Use --workspace

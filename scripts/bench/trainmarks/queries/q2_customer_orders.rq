@@ -1,0 +1,12 @@
+PREFIX : <http://benchmark.example/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?customer_name (COUNT(?order) AS ?order_count) (SUM(?amount) AS ?total_spend)
+WHERE {
+    ?order :placedBy ?customer ;
+           :totalAmount ?amount .
+    ?customer rdfs:label ?customer_name .
+}
+GROUP BY ?customer_name
+ORDER BY DESC(?total_spend)
+LIMIT 20

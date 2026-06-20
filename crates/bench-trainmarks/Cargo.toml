@@ -1,0 +1,26 @@
+[package]
+name = "horndb-bench-trainmarks"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Internal benchmark driver: runs the DataTreehouse "trainmarks" RDF benchmark
+# (https://github.com/DataTreehouse/trainmarks) against HornDB's storage/WCOJ
+# SPARQL backend (`HornBackend`). Driven by `scripts/bench/trainmarks.sh`.
+# Mirrors the upstream measurement protocol (read/write Turtle + N-Triples,
+# six SPARQL queries cold + best-of-3, per-operation timeout) and emits a
+# results JSON in the upstream schema so it can drop into their report.
+# Not part of the engine; not shipped.
+
+[[bin]]
+name = "bench-trainmarks"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+oxrdf = { workspace = true }
+oxttl = { workspace = true }
+horndb-sparql = { path = "../sparql", default-features = false }

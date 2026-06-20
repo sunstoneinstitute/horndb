@@ -1,0 +1,18 @@
+PREFIX : <http://benchmark.example/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+
+DELETE { ?product :unitPrice ?oldPrice }
+INSERT { ?product :unitPrice ?newPrice }
+WHERE {
+    ?product a :Product ;
+             :unitPrice ?oldPrice ;
+             :category ?cat .
+    BIND(
+        IF(?cat = "Software", ?oldPrice * 1.10,
+        IF(?cat = "Hardware", ?oldPrice * 0.95,
+        IF(?cat = "Services", ?oldPrice * 1.15,
+        IF(?cat = "Accessories", ?oldPrice * 0.90,
+        ?oldPrice * 1.05))))
+        AS ?newPrice
+    )
+}

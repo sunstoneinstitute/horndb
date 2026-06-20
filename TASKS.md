@@ -39,6 +39,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
+- [ ] **MEDIUM** · _Performance_ — Re-run trainmarks on hornbench post-#116 hash `LeftJoin` fix; refresh `docs/benchmarks.md` baseline ([#177](https://github.com/sunstoneinstitute/horndb/issues/177))
 - [ ] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
@@ -281,6 +282,18 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `datasetSize` (currently 18,644,617) with what is actually loaded; move the
   trend metric to `editorial-qps`. See `docs/benchmarks.md` and the SPB nightly row
   in `docs/architecture.md`.
+
+- [ ] **Re-run trainmarks on hornbench and refresh the recorded baseline.**
+  ([#177](https://github.com/sunstoneinstitute/horndb/issues/177))
+  The trainmarks (DataTreehouse) suite (driver `crates/bench-trainmarks`,
+  runner `scripts/bench/trainmarks.sh`) is runnable end-to-end, but the
+  baseline in `docs/benchmarks.md` (hornbench, 2026-06-20) predates the hash
+  `LeftJoin` fix ([#116](https://github.com/sunstoneinstitute/horndb/issues/116),
+  [#128](https://github.com/sunstoneinstitute/horndb/issues/128) Slice 2) that
+  removed the q4 `OPTIONAL` nested-loop cliff (~231s@1M / TIMEOUT@10M), and the
+  #128 aggregation rework that likely moves q1/q2. Re-run all three scales on
+  `hornbench`, refresh the table (target: q4 completes at xlarge), and update
+  the SPEC-07 trainmarks row in `docs/architecture.md`.
 
 ## MEDIUM — Conformance
 
