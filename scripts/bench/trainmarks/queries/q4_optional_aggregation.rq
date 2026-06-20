@@ -1,0 +1,19 @@
+PREFIX : <http://benchmark.example/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?country ?segment
+       (COUNT(DISTINCT ?customer) AS ?customers)
+       (COUNT(DISTINCT ?order) AS ?orders)
+       (SUM(?amount) AS ?revenue)
+WHERE {
+    ?customer rdf:type :Customer ;
+              :country ?country ;
+              :segment ?segment .
+    OPTIONAL {
+        ?order :placedBy ?customer ;
+               :totalAmount ?amount .
+    }
+}
+GROUP BY ?country ?segment
+ORDER BY DESC(?revenue)

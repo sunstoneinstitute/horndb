@@ -1,0 +1,15 @@
+PREFIX : <http://benchmark.example/>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+SELECT ?customer_name ?product_name ?amount ?status
+WHERE {
+    ?order :placedBy ?customer ;
+           :contains ?product ;
+           :totalAmount ?amount ;
+           :orderStatus ?status .
+    ?customer rdfs:label ?customer_name ;
+              :country :Norway .
+    ?product rdfs:label ?product_name .
+}
+ORDER BY DESC(?amount)
+LIMIT 50

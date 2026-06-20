@@ -200,6 +200,51 @@ Honest accounting. Updated when a bench moves.
 | `valued_readiness` — valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) | `horndb-closure` | Instrument valued `(max,×)` closure to decide *when* custom-semiring/JIT work ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) pays off — measure, don't guess | **`hornbench` (16-core Linux, OpenMP, criterion median; 2026-06-18, single-predicate `(0,0.99)`-weighted n-chain).** Re-baselined from the earlier provisional laptop run under [#12](https://github.com/sunstoneinstitute/horndb/issues/12). **(1) Valued-vs-boolean kernel split** (same shape, closure to fixpoint, incl. the exact GraphBLAS-side fixed-point check): N=500 (nnz=499→124,750 pairs) boolean `(∨,∧)` **6.76 ms** vs valued `(max,×)` builtin **37.2 ms** → valued **~5.5×** boolean; N=2,500 (nnz=2,499→3,123,750 pairs) boolean **156.8 ms** vs valued **10.86 s** → **~69×**. The valued penalty grows steeply with result `nnz` **and** with core count: hornbench's 16-core OpenMP parallelises boolean's iso/bitmap closure across cores, while the FP64 non-iso accumulation stays effectively serial — so the split is much wider here than on the single-thread-bound laptop (~3.8× at N=2,500). This is the price of carrying a scalar confidence at all; it is **not** a kernel-speed problem JIT could fix (see (2)). **(2) Generic-kernel penalty** (built-in FactoryKernel vs user-defined-op generic kernel, *same* `(max,×)` semantics): N=500 builtin **36.8 ms** vs UDF **37.8 ms** → **~1.03×**; N=2,500 builtin **10.80 s** vs UDF **10.81 s** → **~1.0×** (inside the run-to-run spread). The scalar-FP64 user op is **not** meaningfully slower than the FactoryKernel on the vendored SuiteSparse v10.3.x build, even at 16-core scale. | **GREEN — instrumentation delivered, numbers measured on `hornbench`.** **Decision rule (recorded):** _stay on built-in semirings while the carrier is scalar_ — a scalar **Fork A** confidence needs no custom op, and the valued-vs-boolean cost is a property of the carrier, not the kernel. _Custom semiring only for a **structured** carrier_ (Fork B). _PreJIT only when the generic-kernel share × generic→inlined speedup crosses the SLO_ — **measured ~1.0× generic-kernel penalty for a scalar FP64 op (even at 16-core scale), so PreJIT buys ≈0 here**; revisit only for a structured/UDT carrier where the generic kernel is the only option. Correctness pinned by `tests/valued_closure.rs` (builtin≡UDF bit-identical; weight-only-improvement + UDF-survives-semiring-drop regressions). **Fork A delivered ([#12](https://github.com/sunstoneinstitute/horndb/issues/12), `crosswalk` row below); Fork B / PreJIT deferred.** |
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | Fork A: resolve best-confidence crosswalk/propagation mappings in one built-in `(max,×)` closure instead of a SPARQL property-path crawl; bench it on a GTIO/SKOS-shaped graph and quantify the scalar-confidence carrier cost vs boolean reachability | **`hornbench` (16-core Linux, OpenMP, criterion median; 2026-06-18).** GTIO/SKOS-shaped layered crosswalk DAG: `vocabs` source vocabularies, each a `depth`-deep `skos:broader` ladder, cross-linked into the next vocab by competing `exactMatch`(0.90)/`closeMatch`(0.60) edges the closure must arbitrate. **Carrier-cost comparison** (matrix is *prebuilt* outside the timed loop — construction/renumbering is not the workload of interest; both legs then time the same thing on the prebuilt matrix: close to fixpoint → read `nvals`, *no* tuple extraction — so only the carrier differs and the ratio is apples-to-apples): **v8_d32** (256 concepts) valued `(max,×)` **2.55 ms** vs boolean `(∨,∧)` **1.10 ms** → **~2.3×**; **v16_d64** (1,024 concepts) valued **50.9 ms** vs boolean **19.6 ms** → **~2.6×**. **End-to-end Fork-A entry point** (`CrosswalkGraph::best_confidence_closure` on a prebuilt graph — the query cost, incl. extracting + mapping every best-confidence pair back to dictionary IDs): v8_d32 **2.58 ms**, v16_d64 **49.8 ms** — i.e. the result extraction + ID remap adds ≈0 over the raw closure at these shapes. The scalar-confidence carrier is a steady ~2.3–2.6× over boolean reachability on this denser, well-parallelisable shape (a far smaller penalty than the n-chain's 16-core split, where boolean's iso/bitmap fast path runs away — here both legs do comparable real work). Both finish in single/double-digit ms, i.e. one matrix closure replaces an unbounded property-path walk. | **GREEN — Fork A delivered.** Best-confidence semantics correctness-pinned by `tests/crosswalk.rs` (2-hop chain beats weak direct edge; GTIO/SKOS resolution; sparse dictionary IDs; duplicate-edge max; unknown/identity → `None`; out-of-`(0,1]` confidence rejected). The ~2.3–2.6× carrier cost confirms the #11 decision rule: a scalar confidence stays on the built-in semiring (no kernel speed to reclaim), and **Fork B (structured carrier) / PreJIT are deferred** (SPEC-05 valued-reasoning addendum). |
 
+### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
+
+The [DataTreehouse **trainmarks**](https://github.com/DataTreehouse/trainmarks)
+benchmark — a synthetic e-commerce graph (customers / orders / products) at
+three scales with six SPARQL queries and Turtle/N-Triples I/O timing, **no OWL
+reasoning** — now runs end-to-end against the storage/WCOJ `HornBackend`. Unlike
+the RDFox comparison, trainmarks is a public, permissively-licensed benchmark
+with **no DeWitt clause**, so these numbers may be recorded and published.
+
+Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
+`scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
+below: **`hornbench`, release, 2026-06-20**, best-of-3 warm per upstream
+protocol (q4 column is single-run / timeout — see note).
+
+| operation | medium (~100K) | large (~1M) | xlarge (~10M) |
+|---|---|---|---|
+| read_turtle | 0.185s | 2.075s | 22.58s |
+| write_turtle | 0.030s | 0.389s | 3.86s |
+| write_ntriples | 0.027s | 0.351s | 3.66s |
+| read_ntriples | 0.138s | 1.723s | 20.04s |
+| q1 `COUNT(*)` | 0.091s | 1.120s | 7.92s |
+| q2 group/sum/limit | 0.018s | 0.334s | 5.33s |
+| q3 3-join + filter + limit | 0.009s | 0.135s | 2.37s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 1.447s | **~231s** ¹ | **TIMEOUT** ¹ |
+| q5 `CONSTRUCT` | 0.002s | 0.037s | 1.05s |
+| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.667s | 10.99s |
+
+**Status — all six queries execute correctly at every scale; the suite is
+runnable. q4 is the one cliff.**
+
+¹ **q4 `OPTIONAL` left-join scales ~quadratically** (1.45s@100K → ~231s cold@1M
+→ does not complete@10M within the 600s upstream cap). The `OPTIONAL` is
+evaluated as a nested loop over orders per customer; it needs a hash/merge
+left-join. This is the headline trainmarks follow-up. The driver's per-query
+watchdog records `TIMEOUT` and continues to the next query, so one slow query
+never blocks the rest of the suite (matching upstream's rdflib behaviour).
+
+Two smaller follow-ups surfaced: (a) `SUM` over `xsd:double` yields
+`xsd:decimal` (value correct, datatype deviates from SPARQL type promotion);
+(b) read queries materialise the full result `Vec` before `LIMIT`/aggregation —
+no lazy eval / `LIMIT` pushdown — which inflates q1/q2 at scale. See the
+`HornBackend` scale notes (`crates/sparql/tests/horn_load_hammer.rs`) for the
+companion ~10M load-path memory findings (transient load-copy + 6-ordering
+snapshot + `stored_keys` duplication).
+
 ### Scaffolded but not yet evaluated against targets
 
 These benches compile and run on synthetic fixtures so future regressions are visible. They do not yet exercise the workload the SPEC measures, and the numbers they produce should not be compared to the target column above.
