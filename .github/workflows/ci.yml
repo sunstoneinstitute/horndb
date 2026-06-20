@@ -104,8 +104,10 @@ jobs:
   # hermetic lint-test-conformance job above never needs a Python interpreter:
   # the `horndb-python` binding crate is excluded from the Cargo workspace, so
   # `cargo build/clippy/test --workspace` stay Python-free. This job builds the
-  # wheel with maturin and runs the pytest suite against upstream rdflib
-  # (SPEC-10 acceptance #1, #2, #6, #7 — Linux target).
+  # wheel with maturin and runs the pytest suite for the Python API: the native
+  # pyoxigraph-shaped `horndb` surface and the `horndb.rdflib` compat facade
+  # (differential vs upstream rdflib / pyoxigraph; SPEC-10 acceptance #1, #2,
+  # #6, #7 — Linux target).
   python-rdflib-compat:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -127,12 +129,12 @@ jobs:
           python-version: "3.12"
 
       - name: install maturin + test deps
-        run: pip install "maturin>=1.7,<2.0" "rdflib>=7.0" pytest
+        run: pip install "maturin>=1.7,<2.0" "rdflib>=7.0" "pyoxigraph>=0.4" pytest
 
       - name: build + install the extension module
         working-directory: crates/python
         run: maturin build --features extension-module --out dist && pip install dist/*.whl
 
-      - name: rdflib-compat differential tests
+      - name: python API tests (native + rdflib-compat differential)
         working-directory: crates/python
         run: python -m pytest tests/ -q

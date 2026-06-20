@@ -1,9 +1,12 @@
 """Differential compatibility tests: HornDB's binding vs upstream rdflib.
 
-SPEC-10 acceptance #2 and #6. Each test asserts that `horndb_rdflib` behaves
+SPEC-10 acceptance #2 and #6. Each test asserts that `horndb.rdflib` behaves
 the same as `rdflib` on a representative, graph-centric example. Where HornDB
 intentionally diverges, the divergence is asserted explicitly and documented in
 SPEC-10 / the crate README rather than silently approximated (NF4).
+
+The rdflib-compatible facade lives under the `horndb.rdflib` submodule; the
+top-level `horndb` package is the native, pyoxigraph-shaped API.
 
 Run with:  maturin develop --features extension-module && pytest tests/
 """
@@ -11,7 +14,7 @@ Run with:  maturin develop --features extension-module && pytest tests/
 import pytest
 
 import rdflib
-import horndb_rdflib as hb
+import horndb.rdflib as hb
 
 
 # --------------------------------------------------------------------------- #

@@ -33,7 +33,7 @@ fn to_py_err(e: GraphError) -> PyErr {
 /// `rdflib.URIRef` — an IRI. Subclasses `str` in rdflib; here it wraps the IRI
 /// string and reproduces the equality/hash/str behaviour the compat suite
 /// relies on (F1).
-#[pyclass(module = "horndb_rdflib", frozen)]
+#[pyclass(module = "horndb.rdflib", frozen)]
 #[derive(Clone)]
 pub struct URIRef {
     pub(crate) iri: String,
@@ -88,7 +88,7 @@ impl URIRef {
 }
 
 /// `rdflib.BNode` — a blank node identified by a label.
-#[pyclass(module = "horndb_rdflib", frozen)]
+#[pyclass(module = "horndb.rdflib", frozen)]
 #[derive(Clone)]
 pub struct BNode {
     pub(crate) label: String,
@@ -135,7 +135,7 @@ impl BNode {
 }
 
 /// `rdflib.Literal` — a literal with an optional datatype and language tag.
-#[pyclass(module = "horndb_rdflib", frozen)]
+#[pyclass(module = "horndb.rdflib", frozen)]
 #[derive(Clone)]
 pub struct Literal {
     pub(crate) inner: RdfTerm,
@@ -221,7 +221,7 @@ impl Literal {
 }
 
 /// `rdflib.Variable` — a SPARQL variable name.
-#[pyclass(module = "horndb_rdflib", frozen)]
+#[pyclass(module = "horndb.rdflib", frozen)]
 #[derive(Clone)]
 pub struct Variable {
     pub(crate) name: String,
@@ -266,7 +266,7 @@ impl Variable {
 
 /// `rdflib.Namespace` — a base IRI from which terms are built by attribute or
 /// item access (`EX.foo`, `EX['foo']`) (F6).
-#[pyclass(module = "horndb_rdflib", frozen)]
+#[pyclass(module = "horndb.rdflib", frozen)]
 #[derive(Clone)]
 pub struct Namespace {
     pub(crate) base: String,
@@ -327,7 +327,7 @@ impl Namespace {
 /// `rdflib.Graph` — the core facade (F2/F4/F5/F6). Cheaply clonable handle
 /// sharing one in-memory store, so the Python object can be passed around like
 /// rdflib's mutable graph.
-#[pyclass(module = "horndb_rdflib")]
+#[pyclass(module = "horndb.rdflib")]
 pub struct Graph {
     inner: Arc<Mutex<RdfGraph>>,
     /// prefix -> namespace IRI, for serialisation and QName helpers (F6).
@@ -655,7 +655,7 @@ fn distinct_position(
 /// `graph.query(...)` return value. Iterating a SELECT yields one tuple of
 /// bound terms per solution; `bool(result)` gives an ASK answer; iterating a
 /// CONSTRUCT yields `(s, p, o)` tuples (F5).
-#[pyclass(module = "horndb_rdflib", name = "Result")]
+#[pyclass(module = "horndb.rdflib", name = "Result")]
 pub struct QueryResultPy {
     vars: Vec<String>,
     /// Each row is the Python objects for one solution (SELECT/CONSTRUCT) — a
@@ -895,9 +895,32 @@ fn fresh_bnode_label() -> String {
 // Module init
 // ---------------------------------------------------------------------------
 
-/// The `horndb_rdflib` extension module.
+/// The `horndb` extension module.
+///
+/// The **primary** surface is the native, pyoxigraph-shaped API
+/// (`Store`, `NamedNode`, `Quad`, …) registered by [`crate::store_py`]. The
+/// rdflib-compatible facade (`URIRef`/`BNode`/`Graph`/…) lives in the
+/// `horndb.rdflib` submodule so the two `Literal`/`Variable` namings can
+/// coexist without colliding.
 #[pymodule]
-fn horndb_rdflib(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn horndb(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Native pyoxigraph-shaped API at the top level (the spine).
+    crate::store_py::register(m)?;
+
+    // rdflib-compatible facade under `horndb.rdflib`.
+    let rdflib = PyModule::new(py, "horndb.rdflib")?;
+    register_rdflib(&rdflib)?;
+    m.add("rdflib", &rdflib)?;
+    // Make `import horndb.rdflib` / `from horndb.rdflib import Graph` resolve.
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("horndb.rdflib", &rdflib)?;
+    Ok(())
+}
+
+/// Populate the `horndb.rdflib` submodule with the rdflib-shaped classes and the
+/// well-known vocabulary namespaces.
+fn register_rdflib(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<URIRef>()?;
     m.add_class::<BNode>()?;
     m.add_class::<Literal>()?;

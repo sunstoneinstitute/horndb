@@ -151,25 +151,39 @@ If your `rdflib` mental model is "RDF graph as a bag of triples," adjust it here
 
 ## Python API status
 
-The **first SPEC-10 increment now ships a Python API**: the `horndb-python`
-binding crate (`crates/python/`, importable as `horndb_rdflib`) provides
-rdflib-shaped terms (`URIRef`/`BNode`/`Literal`/`Variable`/`Namespace`), a
-`Graph` facade (`add`/`remove`/`set`/`triples`/`subjects`/`objects`/`value`/
-`__len__`/`__contains__`/iteration), `parse`/`serialize` for Turtle and
-N-Triples, SPARQL `query`/`update` passthrough, and `bind`/`namespaces`. It is
-differential-tested against upstream rdflib. Build it with maturin
-(`maturin develop --features extension-module`); see the crate README.
+The `horndb-python` binding crate (`crates/python/`, importable as **`horndb`**)
+ships **two surfaces**:
 
-## What is missing compared with rdflib
+- **Native `horndb`** (pyoxigraph-shaped, the spine): a quad `Store` with named
+  graphs, `quads_for_pattern`, `load`/`serialize` for Turtle/N-Triples/N-Quads/
+  TriG/RDF-XML, SPARQL `query`/`update` (with `use_default_graph_as_union`), and
+  an explicit OWL 2 RL `Store.materialize()`. If you come from `pyoxigraph`, this
+  is a near-drop-in (`from horndb import Store, NamedNode, Quad, RdfFormat`). See
+  `docs/specs/2026-06-20-pyoxigraph-style-python-store.md`.
+- **`horndb.rdflib`** (rdflib-compatible facade): rdflib-shaped terms
+  (`URIRef`/`BNode`/`Literal`/`Variable`/`Namespace`), a `Graph` facade
+  (`add`/`remove`/`set`/`triples`/`subjects`/`objects`/`value`/`__len__`/
+  `__contains__`/iteration), `parse`/`serialize` for Turtle/N-Triples, SPARQL
+  `query`/`update`, and `bind`/`namespaces`. Differential-tested against upstream
+  rdflib.
+
+Build with maturin (`maturin develop --features extension-module`); see the
+crate README.
+
+## What is missing compared with rdflib / pyoxigraph
 
 This is the short list of things you should not assume exist yet:
 
-- `Dataset` / `ConjunctiveGraph` named-graph facades (Stage-1 store is
-  default-graph only).
-- Serializer/parser formats beyond Turtle and N-Triples (TriG, N-Quads,
-  RDF/XML, JSON-LD).
-- A wide plugin ecosystem for parsers, serializers, and stores.
-- A complete SPARQL Update vocabulary.
+- **Graph-scoped SPARQL** (`GRAPH ?g { … }`, `FROM` / `FROM NAMED`): the engine
+  is triple-only, so `query` offers only the `use_default_graph_as_union` knob.
+  (`quads_for_pattern` *is* fully graph-aware.)
+- rdflib `Dataset` / `ConjunctiveGraph` facades — the native `Store` now covers
+  named graphs instead.
+- DataFrame results (`.to_polars()`) and maplib-style DataFrame→RDF mapping
+  (deferred for the sunstone-py integration).
+- JSON-LD parse/serialize; a wide plugin ecosystem for parsers/serializers/
+  stores.
+- Named-graph SPARQL Update (updates are default-graph scope today).
 - `DESCRIBE` query support in the Stage-1 in-crate API.
 
 ## What to read next

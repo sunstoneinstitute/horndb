@@ -345,15 +345,18 @@ on it; Stage 3 begins only after Stage 2 acceptance passes.
 
 ## 12. SPEC-10 — rdflib-compatible Python API
 
-**Crate:** `crates/python` (`horndb-python`) · **Spec:** `SPEC-10` ·
+**Crate:** `crates/python` (`horndb-python`, importable as `horndb`) ·
+**Spec:** `SPEC-10` + design spec
+`docs/specs/2026-06-20-pyoxigraph-style-python-store.md` ·
 **Overall status: partially implemented**
 
-A Python compatibility layer (PyO3/maturin) exposing rdflib-shaped term
-classes, a `Graph` facade, core operations, parse/serialize, and SPARQL
-passthrough to the Rust engine. The first increment ships the core
-graph-centric surface; `docs/rdflib.md` compares common rdflib workflows with
-the HornDB surface. Tracked as a MEDIUM *Completeness* epic in `TASKS.md`
-(#9), split into shippable increments.
+A Python API (PyO3/maturin) with two surfaces. The **native** spine is
+pyoxigraph-shaped: a quad `Store` with named graphs, `quads_for_pattern`,
+multi-format `load`/`serialize`, SPARQL passthrough, and an explicit OWL 2 RL
+`materialize()` step — the top-level `horndb.*` names. The **rdflib-compatible
+facade** (`URIRef`/`BNode`/`Graph`/…) is served from the `horndb.rdflib`
+submodule. `docs/rdflib.md` compares common workflows. Tracked in `TASKS.md`
+(epic #9 + the native-Store follow-up).
 
 The binding crate is **excluded from the Cargo workspace** so the hermetic
 `cargo build/clippy/test --workspace` never needs a Python interpreter; it is
@@ -361,17 +364,21 @@ built with maturin and exercised by a dedicated `python-rdflib-compat` CI job.
 
 | Component | Status | Notes |
 |---|---|---|
-| rdflib-shaped terms (`URIRef`, `BNode`, `Literal`, `Variable`, `Namespace`) | **implemented** | SPEC-10 F1; differential-tested vs upstream rdflib. |
-| `Graph` facade (add/remove/set/triples/subjects/objects/value/len/contains/iter) | **implemented** | F2. |
-| `Dataset` / `ConjunctiveGraph` named-graph facades | **planned** | F3; Stage-1 store is default-graph only. |
-| `parse` / `serialize` (Turtle, N-Triples) | **implemented** | F4; TriG/N-Quads/RDF-XML/JSON-LD deferred. |
-| `query` / `update` passthrough to SPEC-07 | **implemented** | F5; SELECT/ASK/CONSTRUCT + INSERT/DELETE DATA. |
-| Namespace binding (`bind`, `namespaces`, `Namespace`) | **implemented** | F6. |
-| `rdflib-compat` differential subset | **implemented** | Acceptance #1/#2/#6; `crates/python/tests/`, `harness/curation/rdflib-compat.md`. |
+| Native pyoxigraph-shaped terms (`NamedNode`/`BlankNode`/`Literal`/`Triple`/`Quad`/`DefaultGraph`/`Variable`) | **implemented** | `src/store_py.rs`; `.value` + pyoxigraph `str()`/eq/hash. |
+| Native `Store` (add/remove/contains/len/iter, `quads_for_pattern`, `named_graphs`) with named graphs | **implemented** | `src/quadstore.rs`; the pyoxigraph spine. |
+| `load`/`serialize` — Turtle, N-Triples, **N-Quads, TriG**, RDF/XML | **implemented** | Quad formats round-trip named graphs; `to_graph=`/`from_graph=`. |
+| Native `query`/`update`; `use_default_graph_as_union` | **implemented** | SELECT→`QuerySolutions`, ASK→`bool`, CONSTRUCT→`Triple`s. |
+| `Store.materialize()` — OWL 2 RL closure (SPEC-04, pure-Rust RuleFiring; **no GraphBLAS** in the wheel) | **implemented** | `clear_inferred()` re-derivation path. |
+| Graph-scoped SPARQL (`GRAPH`/`FROM`/`FROM NAMED`) | **planned** | Engine is triple-only; only the union/default knob today. |
+| rdflib-shaped terms + `Graph` facade (`horndb.rdflib`) | **implemented** | SPEC-10 F1/F2; differential-tested vs upstream rdflib. |
+| `Dataset` / `ConjunctiveGraph` rdflib facades | **planned** | F3; the native `Store` now covers named graphs. |
+| Namespace binding (`bind`, `namespaces`, `Namespace`) | **implemented** | F6 (rdflib facade). |
+| DataFrame results (`.to_polars()`) / maplib mapping | **planned** | Deferred for the sunstone-py integration. |
 | Multi-version CPython wheel matrix (macOS + Linux) | **planned** | Acceptance #7; one Linux CI job today. |
 
 > The tracking epic (#9) is split into per-increment sub-issues as
-> implementation lands; the first increment delivered the core surface above.
+> implementation lands; the native pyoxigraph-shaped `Store` + reasoning is the
+> latest increment.
 
 ---
 

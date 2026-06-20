@@ -1,17 +1,50 @@
-# horndb-rdflib
+# horndb (Python API)
 
-An [`rdflib`](https://rdflib.readthedocs.io/)-compatible Python API for
+An ergonomic Python API for
 [HornDB](https://github.com/sunstoneinstitute/horndb), implemented as a
-PyO3/maturin binding over the Rust engine. See
-[`SPEC-10`](../../docs/specs/SPEC-10-rdflib-compatible-python-api.md) for the
-contract.
+PyO3/maturin binding over the Rust engine. Two surfaces:
 
-This is the **first SPEC-10 increment**: the core graph-centric surface.
+- **`horndb`** — the native, [`pyoxigraph`](https://pyoxigraph.readthedocs.io/)-shaped
+  spine: a quad `Store` with named graphs, `quads_for_pattern`, multi-format
+  `load`/`serialize`, SPARQL passthrough, and an explicit OWL 2 RL
+  `materialize()` step.
+- **`horndb.rdflib`** — an [`rdflib`](https://rdflib.readthedocs.io/)-compatible
+  facade (`URIRef`/`BNode`/`Graph`/…).
 
-## What works today
+See [`SPEC-10`](../../docs/specs/SPEC-10-rdflib-compatible-python-api.md) and the
+design spec
+[`2026-06-20-pyoxigraph-style-python-store.md`](../../docs/specs/2026-06-20-pyoxigraph-style-python-store.md).
+
+## Native `Store` (the pyoxigraph-shaped spine)
 
 ```python
-from horndb_rdflib import Graph, URIRef, Literal, Namespace
+from horndb import Store, NamedNode, Literal, Quad, DefaultGraph, RdfFormat
+
+store = Store()
+# One named graph per source file, then query their union — the rdf-registry idiom.
+store.load(turtle_bytes, RdfFormat.TURTLE, to_graph=NamedNode("file:core.ttl"))
+store.add(Quad(NamedNode("http://ex/s"), NamedNode("http://ex/p"), Literal("v")))
+
+len(store)                                              # quad count, all graphs
+store.named_graphs()                                    # [NamedNode('file:core.ttl')]
+list(store.quads_for_pattern(None, None, None, DefaultGraph()))
+
+for sol in store.query(DISCOVER_RQ, use_default_graph_as_union=True):
+    uri, kind = sol["uri"].value, sol["type"].value     # index by name or position
+
+# OWL 2 RL reasoning — HornDB's differentiator. Entailed triples become queryable.
+asserted, inferred = store.materialize()
+store.query("ASK { <http://ex/pingu> a <http://ex/Bird> }")   # True after closure
+```
+
+Supported `RdfFormat`s: `TURTLE`, `N_TRIPLES`, `N_QUADS`, `TRIG`, `RDF_XML`
+(the quad formats round-trip named graphs). `query` returns `QuerySolutions`
+(SELECT), `bool` (ASK), or a list of `Triple` (CONSTRUCT).
+
+## rdflib-compatible facade (`horndb.rdflib`)
+
+```python
+from horndb.rdflib import Graph, URIRef, Literal, Namespace
 
 EX = Namespace("http://ex/")
 g = Graph()
@@ -47,10 +80,13 @@ Implemented (SPEC-10 functional requirements):
 
 ## Not yet (later increments / Stage-2)
 
-`Dataset` / `ConjunctiveGraph` named graphs (F3), formats beyond Turtle/NT
-(TriG, N-Quads, RDF/XML, JSON-LD), the full namespace-manager surface,
-streaming generators (F9), GIL-release hot path (NF2), and the drop-in `rdflib`
-import name (F8 packaging decision). See `SPEC-10` and issue #9.
+Graph-scoped SPARQL (`GRAPH` / `FROM` / `FROM NAMED` — the engine is triple-only
+today, so `query` exposes only the `use_default_graph_as_union` knob), DataFrame
+results (`.to_polars()`) + maplib-style DataFrame→RDF mapping (deferred for the
+sunstone-py integration), rdflib `Dataset` / `ConjunctiveGraph` facades (the
+native `Store` now covers named graphs), JSON-LD, streaming generators (F9),
+GIL-release hot path (NF2), and the multi-version wheel matrix (F7/#9). See
+`SPEC-10`, the design spec, and `TASKS.md`.
 
 ## Building the wheel
 

@@ -1,8 +1,15 @@
 # `horndb-python` (SPEC-10) — agent notes
 
-PyO3/maturin binding exposing an `rdflib`-compatible Python API over the Rust
-engine. First SPEC-10 increment: core terms, `Graph`, parse/serialize (Turtle +
-N-Triples), SPARQL query/update passthrough, namespaces.
+PyO3/maturin binding exposing an ergonomic Python API over the Rust engine,
+importable as **`horndb`**. Two surfaces:
+
+- **`horndb.*`** — the native, pyoxigraph-shaped spine: a quad `Store` with
+  named graphs, `quads_for_pattern`, `load`/`serialize` (incl. N-Quads/TriG),
+  SPARQL `query`/`update` (with `use_default_graph_as_union`), and an explicit
+  OWL 2 RL `materialize()`. See
+  `docs/specs/2026-06-20-pyoxigraph-style-python-store.md`.
+- **`horndb.rdflib`** — the original `rdflib`-compatible facade (terms, `Graph`,
+  parse/serialize Turtle+N-Triples, SPARQL passthrough, namespaces).
 
 ## The one hard rule: keep the workspace Python-free
 
@@ -26,10 +33,29 @@ crate dir do not attach it to the root workspace. Consequence:
   N-Triples quoted form to match the SPARQL write path
   (`sparql::update::subject_to_term`); blank nodes get a `_:` prefix so they
   re-read as blank rather than IRI. No PyO3 — unit-tested with plain `cargo test`.
-- `src/graph.rs` — pure-Rust `RdfGraph` engine over `MemStore`: add/remove/
-  triples/query/update, parse/serialize via `oxrdfio`. Also PyO3-free.
-- `src/py.rs` — the thin PyO3 adapter: `URIRef`/`BNode`/`Literal`/`Variable`/
-  `Namespace`/`Graph`/`Result`. The only part that needs Python to run.
+- `src/graph.rs` — pure-Rust `RdfGraph` engine over `MemStore` (the rdflib
+  `Graph` facade): add/remove/triples/query/update, parse/serialize via
+  `oxrdfio`. A few converters are `pub(crate)` so `quadstore.rs` reuses them.
+  PyO3-free.
+- `src/quadstore.rs` — pure-Rust `QuadStore`: the native `Store` engine. Named
+  graphs (`GraphName`), `quads_for_pattern`, multi-format `load`/`serialize`
+  (`IoFormat`), `query(union)`/`update` bridged to `MemStore`, and
+  `materialize()` via `horndb_owlrl::integration::Engine`. PyO3-free —
+  12 unit tests under `cargo test`.
+- `src/py.rs` — PyO3 adapter for the **rdflib** facade (`URIRef`/`BNode`/
+  `Literal`/`Variable`/`Namespace`/`Graph`/`Result`). Also owns
+  `#[pymodule] fn horndb`, which registers the native classes and builds the
+  `horndb.rdflib` submodule (via a `sys.modules` insert).
+- `src/store_py.rs` — PyO3 adapter for the **native** surface
+  (`NamedNode`/`BlankNode`/`Literal`/`Triple`/`Quad`/`DefaultGraph`/`Variable`/
+  `RdfFormat`/`QuerySolutions`/`QuerySolution`/`Store`). `register(m)` adds them
+  to the top-level `horndb` module.
+
+The native `Literal`/`Variable` (pyoxigraph semantics) and the rdflib
+`Literal`/`Variable` share a name; they coexist because the rdflib ones live in
+the `horndb.rdflib` submodule. `Store.materialize()` pulls in `horndb-owlrl`
+(pure Rust, RuleFiring backend) — **do not** enable owlrl's `graphblas-backend`
+feature here or the wheel would need SuiteSparse:GraphBLAS.
 
 ## Build & test
 

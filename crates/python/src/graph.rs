@@ -277,7 +277,7 @@ fn check_predicate(t: &RdfTerm) -> Result<()> {
 /// IRI. A `Term::Literal` whose payload is already N-Triples-quoted is parsed
 /// to recover its datatype/language; an unquoted payload becomes a plain
 /// literal, preserving the literal kind either way.
-fn alg_term_to_rdfterm(t: &horndb_sparql::algebra::Term) -> RdfTerm {
+pub(crate) fn alg_term_to_rdfterm(t: &horndb_sparql::algebra::Term) -> RdfTerm {
     use horndb_sparql::algebra::Term as T;
     match t {
         T::Iri(s) => {
@@ -309,7 +309,7 @@ fn alg_term_to_rdfterm(t: &horndb_sparql::algebra::Term) -> RdfTerm {
 }
 
 /// Convert a parsed subject node to a kind-preserving [`RdfTerm`].
-fn subject_to_rdfterm(s: &NamedOrBlankNode) -> RdfTerm {
+pub(crate) fn subject_to_rdfterm(s: &NamedOrBlankNode) -> RdfTerm {
     match s {
         NamedOrBlankNode::NamedNode(n) => RdfTerm::iri(n.as_str()),
         NamedOrBlankNode::BlankNode(b) => RdfTerm::blank(b.as_str()),
@@ -321,7 +321,7 @@ fn subject_to_rdfterm(s: &NamedOrBlankNode) -> RdfTerm {
 /// N-Triples lexical string and stored as an IRI-ish token; full triple-term
 /// support is a later increment (Stage-2), so we don't lose the data but also
 /// don't model it structurally.
-fn object_to_rdfterm(o: &OxTerm) -> RdfTerm {
+pub(crate) fn object_to_rdfterm(o: &OxTerm) -> RdfTerm {
     match o {
         OxTerm::NamedNode(n) => RdfTerm::iri(n.as_str()),
         OxTerm::BlankNode(b) => RdfTerm::blank(b.as_str()),
@@ -360,7 +360,7 @@ fn lexical_to_quad(t: &(String, String, String)) -> Result<Quad> {
     ))
 }
 
-fn rdfterm_to_oxterm(t: &RdfTerm) -> Result<OxTerm> {
+pub(crate) fn rdfterm_to_oxterm(t: &RdfTerm) -> Result<OxTerm> {
     Ok(match t {
         RdfTerm::Iri(i) => {
             OxTerm::NamedNode(NamedNode::new(i).map_err(|e| GraphError::Io(e.to_string()))?)

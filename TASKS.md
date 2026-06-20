@@ -42,6 +42,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Completeness_ — SPEC-07 SPARQL (property paths, full `Update`, GSP, `EXPLAIN`, …) ([#7](https://github.com/sunstoneinstitute/horndb/issues/7))
 - [x] **MEDIUM** · _Completeness_ — SPEC-08 ML (HTTP boundary delivered; FAISS candidate generator deferred) ([#8](https://github.com/sunstoneinstitute/horndb/issues/8))
 - [x] **MEDIUM** · _Completeness_ — SPEC-10 rdflib-compatible Python API (PyO3 bindings) ([#9](https://github.com/sunstoneinstitute/horndb/issues/9))
+- [x] **MEDIUM** · _Completeness_ — SPEC-10 native pyoxigraph-shaped Python `Store` (named graphs, `quads_for_pattern`, multi-format I/O, OWL 2 RL `materialize`) ([#118](https://github.com/sunstoneinstitute/horndb/issues/118))
 - [x] **MEDIUM** · _Conformance_ — SPEC-01 harness (full W3C/ORE/LDBC/UOBM suites; LUBM RDFox A/B wired at N=1) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 - [x] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [x] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
@@ -49,6 +50,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [x] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
+- [ ] **LOW** · _Completeness_ — Python native-`Store` follow-ups (graph-scoped SPARQL, DataFrame results for sunstone-py, per-graph indexing) ([#119](https://github.com/sunstoneinstitute/horndb/issues/119))
 
 Closed tasks are listed in [Done](#done-for-traceability).
 
@@ -272,10 +274,25 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   portable or probe with a clear error, and rewrite `parse_claims`/age
   computation portably so orphan detection works on macOS.
 
+## LOW — Python API
+
+- [ ] **Python native-`Store` follow-ups.** ([#119](https://github.com/sunstoneinstitute/horndb/issues/119))
+  Deferred from the native pyoxigraph-shaped `horndb.Store` increment (#118;
+  design spec `docs/specs/2026-06-20-pyoxigraph-style-python-store.md`):
+  (a) **graph-scoped SPARQL** (`GRAPH`/`FROM`/`FROM NAMED`) once the SPEC-07
+  executor grows named-graph evaluation (#7) — today `query` exposes only the
+  binary `use_default_graph_as_union` knob, though `quads_for_pattern` is fully
+  graph-aware; (b) **DataFrame results** (`QuerySolutions.to_polars()`) and
+  maplib-style DataFrame→RDF mapping for the **sunstone-py** integration;
+  (c) **per-graph indexing** in `QuadStore` (today's `quads_for_pattern` is a
+  linear scan — fine for registry scale, not for large stores);
+  (d) **named-graph SPARQL Update** + preserving inferred triples across updates.
+
 ## Done (for traceability)
 
 Completed tasks; issues closed, links kept.
 
+- [x] **MEDIUM** · _Completeness_ — SPEC-10 native pyoxigraph-shaped Python `Store` (named graphs, `quads_for_pattern`, Turtle/N-Triples/N-Quads/TriG/RDF-XML I/O, `use_default_graph_as_union` query, OWL 2 RL `Store.materialize()` via the pure-Rust RuleFiring backend — no GraphBLAS in the wheel) ([#118](https://github.com/sunstoneinstitute/horndb/issues/118)). Module renamed `horndb_rdflib` → `horndb`; rdflib facade now under `horndb.rdflib`.
 - [x] **CRITICAL** · _Correctness_ — SPEC-03 WCOJ over-produced on BGPs with repeated patterns (leapfrog prime-time iter sort).
 - [x] **HIGH** · _Correctness_ — OWL 2 RL closure "over-derivation" vs reference on LUBM(1) ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)) — was a harness-completeness gap; parity now exact (delta 0).
 - [x] **HIGH** · _Maintainability_ — Workspace-wide `cargo clippy -- -D warnings` green; harness exclusion dropped from pre-push.

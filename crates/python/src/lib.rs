@@ -10,6 +10,8 @@
 //! interpreter. Build the wheel with maturin (see this crate's CLAUDE.md).
 
 pub mod graph;
+pub mod quadstore;
 pub mod term;
 
 mod py;
+mod store_py;

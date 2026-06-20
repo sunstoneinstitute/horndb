@@ -27,7 +27,7 @@ authors = ["Sunstone Institute"]
 publish = false
 
 [lib]
-name = "horndb_rdflib"
+name = "horndb"
 # cdylib for the Python extension module; rlib so the pure-Rust logic can be
 # unit-tested with `cargo test` (the test target does not need `extension-module`).
 crate-type = ["cdylib", "rlib"]
@@ -43,5 +43,9 @@ extension-module = ["pyo3/extension-module"]
 # abi3-py310: one wheel works on CPython 3.10+ (NF1 target 3.10–3.13).
 pyo3 = { version = "0.23", features = ["abi3-py310"] }
 horndb-sparql = { path = "../sparql", default-features = false, features = ["reasoner"] }
+# OWL 2 RL forward-chaining for `Store.materialize()`. Pure Rust (the default
+# RuleFiring backend) — does NOT pull in horndb-closure / SuiteSparse:GraphBLAS,
+# so the wheel stays free of native system dependencies.
+horndb-owlrl = { path = "../owlrl" }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 oxrdfio = { version = "0.2", features = ["rdf-12"] }

@@ -3,9 +3,9 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "horndb-rdflib"
+name = "horndb"
 version = "0.1.0"
-description = "rdflib-compatible Python API for HornDB (SPEC-10)"
+description = "Ergonomic Python API for HornDB: a pyoxigraph-shaped quad Store with OWL 2 RL reasoning, plus an rdflib-compatible facade (SPEC-10)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -22,9 +22,9 @@ classifiers = [
 test = ["rdflib>=7.0", "pytest>=7.0"]
 
 [tool.maturin]
-# Build the cdylib extension module named `horndb_rdflib`.
+# Build the cdylib extension module named `horndb`.
 features = ["extension-module"]
-module-name = "horndb_rdflib"
+module-name = "horndb"
 # Keep maturin from trying to manage the surrounding cargo workspace; this
 # crate carries its own empty `[workspace]` table (see Cargo.toml).
 manifest-path = "Cargo.toml"
