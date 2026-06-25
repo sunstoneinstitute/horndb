@@ -274,7 +274,7 @@ HTTP server (`server` feature, on by default).
 | Component | Status | Notes |
 |---|---|---|
 | Parser (spargebra) → AST | **implemented** | `parser.rs`. |
-| Algebra translation (BGP, Join, LeftJoin, Filter, Project, Distinct, Slice, OrderBy, Union, Extend, Values) | **implemented** | `algebra/translate.rs`. |
+| Algebra translation (BGP, Join, LeftJoin, Filter, Project, Distinct, Slice, OrderBy, Union, Extend, Values) | **implemented** | `algebra/translate.rs`. `OPTIONAL`/`LeftJoin` executes as a hash join keyed on the shared (join) variables — `exec/runtime.rs::hash_left_join`, ~linear in the common case (was a quadratic nested loop; trainmarks q4 cliff, #116). |
 | Aggregation / `GROUP BY` (`COUNT`/`SUM`/`MIN`/`MAX`/`AVG`/`SAMPLE`/`GROUP_CONCAT`, `DISTINCT` modifiers) | **implemented** | `algebra/translate.rs` + `exec/runtime.rs::eval_group`. Unblocks the LDBC SPB aggregation mix (incl. the driver's `COUNT` warm-up query). #66. |
 | `FILTER`/`BIND` expression coverage | **implemented (Stage-1 surface)** | Comparisons (incl. `<=`/`>=`), `IN`/`NOT IN`, boolean connectives, arithmetic, `IF`, `COALESCE`, and 30 builtins (string/regex/numeric/type-check/datetime accessors) over the best-effort f64 lexical model — `algebra/mod.rs::Func`, `exec/runtime.rs::eval_func`. `EXISTS`, non-deterministic builtins (`RAND`/`NOW`/`UUID`/…), hashing, `STRLANG`/`STRDT`, and custom functions still return `UnsupportedAlgebra`. #66. |
 | `GRAPH` named-graph patterns | **implemented (Stage-1 merged-graph)** | Lower transparently to the inner pattern; a graph-name variable stays unbound. True named-graph scoping (zero solutions for absent graphs, per-graph `?g` bindings) is deferred to the named-graph epic (#7) — see `crates/sparql/INTEGRATION-NOTES.md`. #66. |
