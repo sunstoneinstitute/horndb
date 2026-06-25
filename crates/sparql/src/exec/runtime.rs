@@ -6,7 +6,7 @@ use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Bindings, Executor};
 use crate::plan::PhysicalPlan;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub struct Runtime<'a, E: Executor + ?Sized> {
     exec: &'a E,
@@ -42,26 +42,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             PhysicalPlan::LeftJoin { left, right, expr } => {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-                let mut out = Vec::new();
-                for a in &l {
-                    let mut matched = false;
-                    for b in &r {
-                        if let Some(m) = a.extend_compat(b) {
-                            let keep = match expr {
-                                Some(e) => eval_expr(e, &m)?,
-                                None => true,
-                            };
-                            if keep {
-                                matched = true;
-                                out.push(m);
-                            }
-                        }
-                    }
-                    if !matched {
-                        out.push(a.clone());
-                    }
-                }
-                Ok(out)
+                hash_left_join(l, r, expr.as_ref())
             }
             PhysicalPlan::Filter { expr, inner } => {
                 let v = self.eval(inner)?;
@@ -154,6 +135,118 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             }
         }
     }
+}
+
+/// Hash left-join (`OPTIONAL`): pair each left row with the compatible
+/// right rows, preserving every left row that finds no match.
+///
+/// Replaces the original nested loop (O(|l|·|r|), which made trainmarks
+/// q4 quadratic and time out at scale — #116). Two rows are compatible
+/// iff they agree on every *shared* variable ([`Bindings::extend_compat`]);
+/// any variable a left and right row could share is necessarily in the
+/// **join-variable set** (the intersection of the two relations' bound
+/// variables). So we index the right relation by the lexical values of
+/// the join variables and probe only the matching bucket per left row,
+/// turning the common (homogeneous, fully-bound) case into O(|l|+|r|).
+///
+/// Correctness is independent of the index: `extend_compat` still does
+/// the final compatibility check and merge on every candidate pair, so
+/// the index only ever *prunes* candidates that cannot match.
+///
+/// Rows that leave some join variable unbound can still be compatible on
+/// the remaining shared variables, so they are handled conservatively: a
+/// right row missing a join var goes to `unkeyed` and is a candidate for
+/// *every* left row, and a left row missing a join var probes the whole
+/// right relation. When there are no shared variables the single (empty)
+/// key collapses to the cartesian product, matching `OPTIONAL` there.
+fn hash_left_join(
+    l: Vec<Bindings>,
+    r: Vec<Bindings>,
+    expr: Option<&Expr>,
+) -> Result<Vec<Bindings>> {
+    let jvars = join_vars(&l, &r);
+
+    // Index the right relation by join-variable key; rows that don't bind
+    // every join var can't be keyed and fall back to `unkeyed`.
+    let mut index: HashMap<Vec<String>, Vec<&Bindings>> = HashMap::new();
+    let mut unkeyed: Vec<&Bindings> = Vec::new();
+    for b in &r {
+        match join_key(b, &jvars) {
+            Some(k) => index.entry(k).or_default().push(b),
+            None => unkeyed.push(b),
+        }
+    }
+
+    let mut out = Vec::new();
+    for a in &l {
+        let mut matched = false;
+        match join_key(a, &jvars) {
+            Some(k) => {
+                if let Some(bucket) = index.get(&k) {
+                    matched |= probe_into(a, bucket, expr, &mut out)?;
+                }
+                if !unkeyed.is_empty() {
+                    matched |= probe_into(a, &unkeyed, expr, &mut out)?;
+                }
+            }
+            // Left row missing a join var: it may still be compatible with
+            // any right row on the remaining shared vars, so probe all.
+            None => {
+                let all: Vec<&Bindings> = r.iter().collect();
+                matched |= probe_into(a, &all, expr, &mut out)?;
+            }
+        }
+        if !matched {
+            out.push(a.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Probe one left row against a set of candidate right rows, pushing each
+/// kept merged solution into `out`. Returns whether any candidate matched
+/// (so the caller can decide to emit the unmatched left row). `expr` is
+/// the `OPTIONAL`'s inner `FILTER`, evaluated over the merged row.
+fn probe_into(
+    a: &Bindings,
+    candidates: &[&Bindings],
+    expr: Option<&Expr>,
+    out: &mut Vec<Bindings>,
+) -> Result<bool> {
+    let mut matched = false;
+    for b in candidates {
+        if let Some(m) = a.extend_compat(b) {
+            let keep = match expr {
+                Some(e) => eval_expr(e, &m)?,
+                None => true,
+            };
+            if keep {
+                matched = true;
+                out.push(m);
+            }
+        }
+    }
+    Ok(matched)
+}
+
+/// The join-variable set: variables bound somewhere in *both* relations.
+/// Sorted (via `BTreeSet`) so the key column order is deterministic.
+fn join_vars(left: &[Bindings], right: &[Bindings]) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let lvars: BTreeSet<&str> = left.iter().flat_map(|b| b.keys()).collect();
+    let rvars: BTreeSet<&str> = right.iter().flat_map(|b| b.keys()).collect();
+    lvars.intersection(&rvars).map(|s| s.to_string()).collect()
+}
+
+/// The probe/build key for a row: the lexical value of each join variable,
+/// in `jvars` order. `None` if the row leaves any join variable unbound
+/// (such rows can't be hash-keyed and take the conservative path).
+fn join_key(b: &Bindings, jvars: &[String]) -> Option<Vec<String>> {
+    let mut key = Vec::with_capacity(jvars.len());
+    for v in jvars {
+        key.push(lex(b.get(v)?));
+    }
+    Some(key)
 }
 
 /// Evaluate a recursive Kleene path `p+`/`p*`.
