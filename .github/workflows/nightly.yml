@@ -5,11 +5,22 @@ on:
     - cron: "0 3 * * *"  # 03:00 UTC daily
   workflow_dispatch:
 
+# Stable, persisted SPB asset tree on the hornbench runner, OUTSIDE the
+# ephemeral Actions checkout. Prepared once (see TASKS.md). Holds:
+#   - the built LDBC SPB driver JAR,
+#   - $SPB_DATASET: the flat materialized closure both engines serve,
+#   - the queries + substitution params the scenario's relative paths
+#     resolve against (the Ant `dist/` tree).
+# The runner executes as user `bench`, so the job can read these paths.
+env:
+  SPB_ASSETS: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist
+  SPB_DATASET: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist/spb-256.nt
+  HORNDB_BIND: 127.0.0.1:3840
+
 jobs:
   spb-256:
-    # Runs on the dedicated benchmark machine (self-hosted runner with
-    # the SPB driver, Java, and the engine binaries pre-installed). The
-    # runner labels match what the ops team has configured.
+    # Dedicated benchmark machine (self-hosted). Labels match what ops
+    # configured on hornbench (gh_runner_labels in hetzner-infra).
     runs-on: [self-hosted, bench, zen4]
     timeout-minutes: 120
     steps:
@@ -23,20 +34,65 @@ jobs:
       - name: build harness
         run: cargo build -p horndb-harness --bin harness --release --features real-engine
 
+      - name: stage nightly scenario into asset tree
+        # The driver resolves the scenario's relative path keys against the
+        # scenario file's own directory, so the checked-in template must
+        # live alongside the prepared assets.
+        run: cp crates/harness/scenarios/spb-nightly.properties "$SPB_ASSETS/spb-nightly.properties"
+
       - name: start HornDB engine
-        run: ./scripts/dev/start-engine.sh &
-        # The engine startup script lives in SPEC-04 territory; this
-        # workflow assumes it exists. If absent the next step fails.
+        # Per-run bring-up: serve the prepared flat closure (no reasoning),
+        # wait until the query endpoint answers, then run the driver.
+        run: |
+          set -euo pipefail
+          test -f "$SPB_DATASET" || { echo "::error::SPB dataset missing at $SPB_DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
+          DATA_FILES="$SPB_DATASET" RELEASE=1 BIND="$HORNDB_BIND" \
+            ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
+          echo $! > /tmp/horndb-engine.pid
+          for i in $(seq 1 180); do
+            if curl -fsS -G --data-urlencode 'query=ASK{}' "http://$HORNDB_BIND/query" >/dev/null 2>&1; then
+              echo "HornDB engine ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::HornDB engine did not become ready in 180s"; cat /tmp/horndb-engine.log; exit 1
 
       - name: SPB-256 against HornDB
+        env:
+          SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
+          SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
+          HORNDB_ENDPOINT: http://127.0.0.1:3840/query
+          HORNDB_UPDATE_ENDPOINT: http://127.0.0.1:3840/update
         run: ./crates/harness/scripts/run-spb-256.sh
 
+      - name: stop HornDB engine
+        if: always()
+        run: |
+          if [ -f /tmp/horndb-engine.pid ]; then
+            kill "$(cat /tmp/horndb-engine.pid)" 2>/dev/null || true
+          fi
+          pkill -f 'target/release/serve' 2>/dev/null || true
+
       - name: SPB-256 against GraphDB Free
-        run: ./crates/harness/scripts/run-graphdb-free-spb-256.sh
+        # GraphDB Free is a standing service on hornbench holding the same
+        # closure in a read-only `spb` repo. If it is unreachable, skip the
+        # A/B leg rather than failing the HornDB nightly.
+        env:
+          SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
+          SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
+        run: |
+          set -euo pipefail
+          endpoint="${GRAPHDB_FREE_ENDPOINT:-http://127.0.0.1:7200/repositories/spb}"
+          if ! curl -fsS -H 'Accept: application/sparql-results+json' \
+               -G --data-urlencode 'query=ASK{}' "$endpoint" >/dev/null 2>&1; then
+            echo "::warning::GraphDB Free not reachable at $endpoint — skipping A/B leg"
+            exit 0
+          fi
+          ./crates/harness/scripts/run-graphdb-free-spb-256.sh
 
       - name: trend report
         run: |
-          ./target/release/harness report --suite ldbc-spb-256 --metric editorial-qps
+          ./target/release/harness report --suite ldbc-spb-256 --metric aggregation-qps
 
       - name: upload sqlite
         if: always()
