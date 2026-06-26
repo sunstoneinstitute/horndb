@@ -218,10 +218,13 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 
 ### Not yet running
 
-- **LDBC SPB-256 nightly.** Workflow exists (`.github/workflows/nightly.yml`) and points at a self-hosted runner with the SPB driver pre-installed. Requires `scripts/dev/start-engine.sh` to exist, which it does not yet (SPEC-04 territory).
 - **LUBM-8000 materialization** (SPEC-04 acceptance #2, SPEC-02 acceptance #2/#3). Gated on the storage + rule engine being usable on real corpora.
 - **ORE 2015 OWL 2 RL fragment full pass.** Ten-ontology subset is wired up (`harness/ore2015-selected.toml`); the full corpus expansion is Stage-2 work (TASKS.md MEDIUM).
-- **A/B vs GraphDB Free.** SPEC-01 F10 — harness flow + per-engine SPB driver scripts exist (`scripts/run-graphdb-free-spb-256.sh`, `scripts/run-rdfox-spb-256.sh`); needs the GraphDB Free binary on the benchmark runner. No licence restriction on publishing.
+
+### Running — LDBC SPB nightly (published)
+
+- **LDBC SPB nightly — running end-to-end.** `.github/workflows/nightly.yml` brings HornDB up per-run via `crates/harness/scripts/start-engine.sh` (serving the prepared flat closure, no reasoning) and drives the SPB aggregation query mix against `/query` + `/update`, recording `aggregation-qps` into the trend DB (`harness report --suite ldbc-spb-256 --metric aggregation-qps`). Validated on `hornbench` 2026-06-25 at **feasible scale** — the 512 k-triple materialized SPB closure (BBC ontologies + reference datasets + 200 k generated Creative Works), aggregation-only. **Follow-up (TASKS.md):** the true SF=0.256 (256 M-triple) dataset and editorial (CW insert/update/delete) agents; until then `editorialAgents=0` and the headline metric is `aggregation-qps`, not `editorial-qps`.
+- **A/B vs GraphDB Free — wired.** SPEC-01 F10. GraphDB **10.8.14** runs as a standing, licence-free service on `hornbench` (GraphDB 11.x hard-requires a licence even for the free tier — "No license was set"; 10.x keeps the genuine free tier), provisioned by `crates/harness/scripts/bootstrap-graphdb-free-spb.sh` and holding the same closure in a no-inference `spb` repo for an apples-to-apples query A/B. The nightly's A/B leg skips gracefully (warning, not failure) if GraphDB is unreachable. _First-light feasible-scale smoke (2026-06-25, 30 s window): HornDB **0.23** vs GraphDB Free **145.9** aggregation-qps on the 512 k-triple closure — a large gap the nightly now tracks._ No licence restriction on publishing GraphDB Free numbers. **Durability follow-up (TASKS.md):** make GraphDB a systemd unit so it survives a hornbench reboot.
 
 ### Running, internal only (no published numbers)
 
