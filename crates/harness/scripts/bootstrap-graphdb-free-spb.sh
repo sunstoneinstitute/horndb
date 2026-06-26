@@ -10,9 +10,16 @@
 # The dist zip is pulled from Ontotext's public Maven repo, which serves
 # it without the registration form the website download requires.
 #
-# This script is idempotent: re-running re-creates the `spb` repo and
-# reloads the dataset. It leaves GraphDB running detached on :7200; for a
-# reboot-durable setup, wrap `graphdb -d` in a systemd unit (ops TODO).
+# This is the one-time (heavy) provisioning step: it downloads the pinned
+# GraphDB version, (re)creates the `spb` repo, and loads the dataset. It is
+# idempotent — re-running re-creates the repo and reloads the dataset.
+#
+# The nightly does NOT depend on GraphDB staying up afterwards:
+# start-graphdb-free.sh brings the same pinned version up per run (downloading
+# it if the runner lacks it) and the workflow stops it after the A/B leg, so
+# the engine never competes with HornDB for RAM / page cache. No standing
+# service / systemd unit is required. Keep GRAPHDB_VERSION in step with the
+# nightly workflow's pin so bootstrap and the per-run start agree.
 #
 # Usage:
 #   DATASET=/path/to/spb-256.nt ./bootstrap-graphdb-free-spb.sh

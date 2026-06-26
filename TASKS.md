@@ -49,7 +49,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
-- [ ] **LOW** · _Operational_ — GraphDB Free A/B reference reboot-durable (systemd unit) on hornbench ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
+- [x] **LOW** · _Operational_ — GraphDB Free A/B reference: per-run bring-up (supersedes systemd unit) ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
 - [x] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
 
 Closed tasks are listed in [Done](#done-for-traceability).
@@ -281,14 +281,19 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   keep the app foregrounded during long sessions, or pre-cache an unencrypted
   signing key for CI. (Bypassing signing is not acceptable — global rule.)
 
-- [ ] **GraphDB Free A/B reference reboot-durable (systemd unit).**
+- [x] **GraphDB Free A/B reference: per-run bring-up (supersedes systemd unit).**
   ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
-  `crates/harness/scripts/bootstrap-graphdb-free-spb.sh` launches the A/B
-  reference engine detached via `nohup graphdb -d`; it does not survive a
-  `hornbench` reboot, so after a restart the nightly A/B leg silently skips
-  (warning, not failure) until someone re-runs the bootstrap. Wrap GraphDB in a
-  systemd unit (or equivalent) so the service and the read-only `spb` repo come
-  back automatically.
+  Originally scoped as "wrap GraphDB in a systemd unit so it survives a
+  `hornbench` reboot." Resolved differently — and better for benchmark hygiene —
+  by giving GraphDB the **same per-run lifecycle HornDB already has**:
+  `crates/harness/scripts/start-graphdb-free.sh` brings the branch-pinned
+  GraphDB version up for its own A/B leg (downloading the dist if the runner
+  lacks it, so the version tracks the git branch rather than whatever is
+  installed) and the nightly stops it afterwards (`pkill -f graphdb`). A reboot
+  between runs is now harmless: the next run re-provisions and starts it. This
+  also removes the standing-service noise — an idle GraphDB no longer competes
+  with HornDB for RAM / OS page cache during the HornDB measurement leg, which
+  matters at the SF=0.256 scale-up (#125). No systemctl involved.
 
 - [x] **tasks.sh portability on macOS.** ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
   `.claude/scripts/tasks.sh` needs `flock(1)` (absent on Darwin — installed

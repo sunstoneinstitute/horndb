@@ -16,6 +16,10 @@ env:
   SPB_ASSETS: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist
   SPB_DATASET: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist/spb-256.nt
   HORNDB_BIND: 127.0.0.1:3840
+  # Pin the GraphDB A/B reference version to the branch, not whatever is
+  # installed on the runner. start-graphdb-free.sh downloads this version if
+  # the runner does not already have it unpacked.
+  GRAPHDB_VERSION: "10.8.14"
 
 jobs:
   spb-256:
@@ -73,22 +77,28 @@ jobs:
           fi
           pkill -f 'target/release/serve' 2>/dev/null || true
 
+      - name: start GraphDB engine
+        id: start_graphdb
+        # Per-run bring-up, mirroring the HornDB leg above: bring the
+        # branch-pinned GraphDB version up, holding the same closure in a
+        # read-only `spb` repo (loaded once by bootstrap-graphdb-free-spb.sh),
+        # then run the driver. Running GraphDB only for its own leg keeps it
+        # from competing with HornDB for RAM / OS page cache during the HornDB
+        # measurement. continue-on-error preserves the prior contract: a
+        # GraphDB problem skips the A/B leg rather than failing the nightly.
+        continue-on-error: true
+        run: ./crates/harness/scripts/start-graphdb-free.sh
+
       - name: SPB-256 against GraphDB Free
-        # GraphDB Free is a standing service on hornbench holding the same
-        # closure in a read-only `spb` repo. If it is unreachable, skip the
-        # A/B leg rather than failing the HornDB nightly.
+        if: steps.start_graphdb.outcome == 'success'
         env:
           SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
           SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
-        run: |
-          set -euo pipefail
-          endpoint="${GRAPHDB_FREE_ENDPOINT:-http://127.0.0.1:7200/repositories/spb}"
-          if ! curl -fsS -H 'Accept: application/sparql-results+json' \
-               -G --data-urlencode 'query=ASK{}' "$endpoint" >/dev/null 2>&1; then
-            echo "::warning::GraphDB Free not reachable at $endpoint — skipping A/B leg"
-            exit 0
-          fi
-          ./crates/harness/scripts/run-graphdb-free-spb-256.sh
+        run: ./crates/harness/scripts/run-graphdb-free-spb-256.sh
+
+      - name: stop GraphDB engine
+        if: always()
+        run: pkill -f 'graphdb' 2>/dev/null || true
 
       - name: trend report
         run: |
