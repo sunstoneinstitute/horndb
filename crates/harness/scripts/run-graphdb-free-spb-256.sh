@@ -14,7 +14,11 @@ JAR="${SPB_DRIVER_JAR:-$ROOT/crates/harness/data/ldbc-spb/spb-driver.jar}"
 SCENARIO="${SPB_SCENARIO:-$ROOT/crates/harness/data/ldbc-spb/sf-0.256.properties}"
 DURATION="${SPB_DURATION_SECONDS:-600}"
 
-cargo run -p horndb-harness --bin harness --release -- \
+# `spb-run` only talks HTTP to the standing GraphDB, so the real engine
+# isn't needed here — but building with `--features real-engine` keeps
+# the harness Cargo fingerprint identical to the HornDB leg's, so the
+# A/B reuses one cached build instead of recompiling the harness twice.
+cargo run -p horndb-harness --bin harness --release --features real-engine -- \
     spb-run \
     --driver-jar "$JAR" \
     --scenario "$SCENARIO" \

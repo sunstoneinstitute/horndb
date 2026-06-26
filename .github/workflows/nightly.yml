@@ -8,13 +8,12 @@ on:
 # Stable, persisted SPB asset tree on the hornbench runner, OUTSIDE the
 # ephemeral Actions checkout. Prepared once (see TASKS.md). Holds:
 #   - the built LDBC SPB driver JAR,
-#   - $SPB_DATASET: the flat materialized closure both engines serve,
+#   - spb-256.nt: the flat materialized closure both engines serve,
 #   - the queries + substitution params the scenario's relative paths
 #     resolve against (the Ant `dist/` tree).
 # The runner executes as user `bench`, so the job can read these paths.
 env:
   SPB_ASSETS: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist
-  SPB_DATASET: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist/spb-256.nt
   HORNDB_BIND: 127.0.0.1:3840
   # Pin the GraphDB A/B reference version to the branch, not whatever is
   # installed on the runner. start-graphdb-free.sh downloads this version if
@@ -49,33 +48,32 @@ jobs:
         # wait until the query endpoint answers, then run the driver.
         run: |
           set -euo pipefail
-          test -f "$SPB_DATASET" || { echo "::error::SPB dataset missing at $SPB_DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
-          DATA_FILES="$SPB_DATASET" RELEASE=1 BIND="$HORNDB_BIND" \
+          DATASET="$SPB_ASSETS/spb-256.nt"
+          test -f "$DATASET" || { echo "::error::SPB dataset missing at $DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
+          DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" \
             ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
           echo $! > /tmp/horndb-engine.pid
-          for i in $(seq 1 180); do
-            if curl -fsS -G --data-urlencode 'query=ASK{}' "http://$HORNDB_BIND/query" >/dev/null 2>&1; then
-              echo "HornDB engine ready after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::HornDB engine did not become ready in 180s"; cat /tmp/horndb-engine.log; exit 1
+          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 180; then
+            echo "::error::HornDB engine did not become ready in 180s"; cat /tmp/horndb-engine.log; exit 1
+          fi
 
       - name: SPB-256 against HornDB
         env:
           SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
           SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
-          HORNDB_ENDPOINT: http://127.0.0.1:3840/query
-          HORNDB_UPDATE_ENDPOINT: http://127.0.0.1:3840/update
+          HORNDB_ENDPOINT: http://${{ env.HORNDB_BIND }}/query
+          HORNDB_UPDATE_ENDPOINT: http://${{ env.HORNDB_BIND }}/update
         run: ./crates/harness/scripts/run-spb-256.sh
 
       - name: stop HornDB engine
         if: always()
+        # start-engine.sh `exec`s the serve binary, so the recorded PID is
+        # the server itself — a precise kill is enough, and is safer than a
+        # broad `pkill -f serve` on the shared bench runner.
         run: |
           if [ -f /tmp/horndb-engine.pid ]; then
             kill "$(cat /tmp/horndb-engine.pid)" 2>/dev/null || true
           fi
-          pkill -f 'target/release/serve' 2>/dev/null || true
 
       - name: start GraphDB engine
         id: start_graphdb
@@ -94,7 +92,18 @@ jobs:
         env:
           SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
           SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
-        run: ./crates/harness/scripts/run-graphdb-free-spb-256.sh
+        run: |
+          set -euo pipefail
+          # The process is up (start_graphdb succeeded) but its HTTP endpoint
+          # may still be warming up — wait for it to answer, mirroring the
+          # HornDB leg. If it never becomes ready, skip the A/B leg rather
+          # than failing the nightly.
+          endpoint="${GRAPHDB_FREE_ENDPOINT:-http://127.0.0.1:7200/repositories/spb}"
+          if ! ./crates/harness/scripts/wait-for-sparql.sh "$endpoint" 180; then
+            echo "::warning::GraphDB Free not reachable at $endpoint — skipping A/B leg"
+            exit 0
+          fi
+          ./crates/harness/scripts/run-graphdb-free-spb-256.sh
 
       - name: stop GraphDB engine
         if: always()
