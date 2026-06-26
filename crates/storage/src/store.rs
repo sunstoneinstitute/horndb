@@ -82,9 +82,7 @@ impl Store {
     pub fn insert_triples(&self, triples: &[(Term, Term, Term)]) -> Result<()> {
         let mut quads = Vec::with_capacity(triples.len());
         for (s, p, o) in triples {
-            let s_id = self.dictionary.intern(s)?;
-            let p_id = self.dictionary.intern(p)?;
-            let o_id = self.dictionary.intern(o)?;
+            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
             quads.push((DEFAULT_GRAPH, s_id, p_id, o_id));
         }
         self.tier.insert_quad_batch(&quads)
@@ -95,9 +93,7 @@ impl Store {
     pub fn insert_quads(&self, quads: &[(GraphId, Term, Term, Term)]) -> Result<()> {
         let mut encoded = Vec::with_capacity(quads.len());
         for (g, s, p, o) in quads {
-            let s_id = self.dictionary.intern(s)?;
-            let p_id = self.dictionary.intern(p)?;
-            let o_id = self.dictionary.intern(o)?;
+            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
             encoded.push((*g, s_id, p_id, o_id));
         }
         self.tier.insert_quad_batch(&encoded)

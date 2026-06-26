@@ -13,7 +13,7 @@
 //! [`load_turtle_reader_with_base`] lets a caller supply one explicitly.
 
 use crate::error::{Result, StorageError};
-use crate::loader::{subject_to_term, LoadStats, BATCH_SIZE};
+use crate::loader::{load_quads, subject_to_term, LoadStats};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::Term;
@@ -21,7 +21,6 @@ use oxttl::TurtleParser;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::time::Instant;
 
 pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
@@ -48,44 +47,24 @@ pub fn load_turtle_reader_with_base<R: Read>(
     reader: R,
     base_iri: Option<&str>,
 ) -> Result<LoadStats> {
-    let start = Instant::now();
     let mut parser = TurtleParser::new();
     if let Some(base) = base_iri {
         parser = parser
             .with_base_iri(base)
             .map_err(|e| StorageError::TurtleParse(format!("invalid base IRI {base:?}: {e}")))?;
     }
-    let iter = parser.for_reader(reader);
-
-    let mut batch: Vec<(crate::term::GraphId, _, _, _)> = Vec::with_capacity(BATCH_SIZE);
-    let mut total: u64 = 0;
-
-    for t in iter {
-        let triple = t.map_err(|e| StorageError::TurtleParse(format!("{e}")))?;
-        let s_term = subject_to_term(triple.subject);
-        let p_term = Term::NamedNode(triple.predicate);
-        let o_term = triple.object;
-
-        let s_id = store.dictionary().intern(&s_term)?;
-        let p_id = store.dictionary().intern(&p_term)?;
-        let o_id = store.dictionary().intern(&o_term)?;
-        batch.push((DEFAULT_GRAPH, s_id, p_id, o_id));
-        total += 1;
-        if batch.len() >= BATCH_SIZE {
-            store.tier().insert_quad_batch(&batch)?;
-            batch.clear();
-        }
-    }
-    if !batch.is_empty() {
-        store.tier().insert_quad_batch(&batch)?;
-    }
-
-    Ok(LoadStats {
-        triples: total,
-        bytes_read: 0, // file caller will overwrite
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        dictionary_size: store.dictionary().len() as u64,
-    })
+    load_quads(
+        store,
+        parser.for_reader(reader).map(|t| {
+            let triple = t.map_err(|e| StorageError::TurtleParse(format!("{e}")))?;
+            Ok((
+                DEFAULT_GRAPH,
+                subject_to_term(triple.subject),
+                Term::NamedNode(triple.predicate),
+                triple.object,
+            ))
+        }),
+    )
 }
 
 /// Best-effort `file://` base IRI for a Turtle document. Returns `None` when the

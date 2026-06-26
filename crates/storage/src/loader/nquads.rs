@@ -8,7 +8,7 @@
 //! so triples with the same graph label co-locate.
 
 use crate::error::{Result, StorageError};
-use crate::loader::{subject_to_term, LoadStats, BATCH_SIZE};
+use crate::loader::{load_quads, subject_to_term, LoadStats};
 use crate::store::Store;
 use crate::term::{GraphId, DEFAULT_GRAPH};
 use oxrdf::{GraphName, Term};
@@ -16,7 +16,6 @@ use oxttl::NQuadsParser;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::time::Instant;
 
 pub fn load_nquads_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
@@ -28,40 +27,20 @@ pub fn load_nquads_file(store: &Store, path: &Path) -> Result<LoadStats> {
 }
 
 pub fn load_nquads_reader<R: Read>(store: &Store, reader: R) -> Result<LoadStats> {
-    let start = Instant::now();
     let parser = NQuadsParser::new();
-    let iter = parser.for_reader(reader);
-
-    let mut batch: Vec<(GraphId, _, _, _)> = Vec::with_capacity(BATCH_SIZE);
-    let mut total: u64 = 0;
-
-    for q in iter {
-        let quad = q.map_err(|e| StorageError::NquadsParse(format!("{e}")))?;
-        let g_id = graph_id(store, quad.graph_name)?;
-        let s_term = subject_to_term(quad.subject);
-        let p_term = Term::NamedNode(quad.predicate);
-        let o_term = quad.object;
-
-        let s_id = store.dictionary().intern(&s_term)?;
-        let p_id = store.dictionary().intern(&p_term)?;
-        let o_id = store.dictionary().intern(&o_term)?;
-        batch.push((g_id, s_id, p_id, o_id));
-        total += 1;
-        if batch.len() >= BATCH_SIZE {
-            store.tier().insert_quad_batch(&batch)?;
-            batch.clear();
-        }
-    }
-    if !batch.is_empty() {
-        store.tier().insert_quad_batch(&batch)?;
-    }
-
-    Ok(LoadStats {
-        triples: total,
-        bytes_read: 0, // file caller will overwrite
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        dictionary_size: store.dictionary().len() as u64,
-    })
+    load_quads(
+        store,
+        parser.for_reader(reader).map(|q| {
+            let quad = q.map_err(|e| StorageError::NquadsParse(format!("{e}")))?;
+            let g_id = graph_id(store, quad.graph_name)?;
+            Ok((
+                g_id,
+                subject_to_term(quad.subject),
+                Term::NamedNode(quad.predicate),
+                quad.object,
+            ))
+        }),
+    )
 }
 
 /// Map an N-Quads graph term to a [`GraphId`]. The default graph keeps the

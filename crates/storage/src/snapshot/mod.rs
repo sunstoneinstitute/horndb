@@ -123,18 +123,20 @@ pub fn import_snapshot_into<R: Read>(store: &Store, r: &mut R) -> Result<()> {
     for bytes in &term_bytes {
         terms.push(term_codec::decode_term(bytes)?);
     }
+    // Resolve a 1-based local id to its decoded term (cloned into the batch).
+    let resolve = |local: u64, position: &str| {
+        terms
+            .get((local - 1) as usize)
+            .cloned()
+            .ok_or_else(|| StorageError::Snapshot(format!("{position} local id out of range")))
+    };
     let mut batch = Vec::with_capacity(triples.len());
     for t in &triples {
-        let s = terms
-            .get((t.s - 1) as usize)
-            .ok_or_else(|| StorageError::Snapshot("subject local id out of range".into()))?;
-        let p = terms
-            .get((t.p - 1) as usize)
-            .ok_or_else(|| StorageError::Snapshot("predicate local id out of range".into()))?;
-        let o = terms
-            .get((t.o - 1) as usize)
-            .ok_or_else(|| StorageError::Snapshot("object local id out of range".into()))?;
-        batch.push((s.clone(), p.clone(), o.clone()));
+        batch.push((
+            resolve(t.s, "subject")?,
+            resolve(t.p, "predicate")?,
+            resolve(t.o, "object")?,
+        ));
     }
     store.insert_triples(&batch)?;
     Ok(())

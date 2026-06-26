@@ -56,6 +56,13 @@ impl Dictionary {
         Ok(id)
     }
 
+    /// Intern a subject/predicate/object triple in one call, returning their
+    /// `TermId`s. Convenience over three [`Dictionary::intern`] calls, shared by
+    /// the bulk loaders and [`crate::Store`]'s insert paths.
+    pub fn intern_triple(&self, s: &Term, p: &Term, o: &Term) -> Result<(TermId, TermId, TermId)> {
+        Ok((self.intern(s)?, self.intern(p)?, self.intern(o)?))
+    }
+
     /// Resolve a term to its `TermId` **without** interning it. Returns
     /// `None` if the term has never been interned (inline-int literals
     /// always resolve — they are value-encoded, not dictionary-allocated).

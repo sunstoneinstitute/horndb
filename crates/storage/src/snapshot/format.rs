@@ -34,33 +34,29 @@ pub fn write_snapshot<W: Write>(
     triples: &mut [LocalTriple],
 ) -> Result<(u64, u64)> {
     // Header.
-    w.write_all(&MAGIC).map_err(StorageError::from)?;
-    w.write_all(&FORMAT_VERSION.to_le_bytes())
-        .map_err(StorageError::from)?;
-    w.write_all(&0u32.to_le_bytes())
-        .map_err(StorageError::from)?; // flags
-    w.write_all(&(terms.len() as u64).to_le_bytes())
-        .map_err(StorageError::from)?;
-    w.write_all(&(triples.len() as u64).to_le_bytes())
-        .map_err(StorageError::from)?;
+    w.write_all(&MAGIC)?;
+    w.write_all(&FORMAT_VERSION.to_le_bytes())?;
+    w.write_all(&0u32.to_le_bytes())?; // flags
+    w.write_all(&(terms.len() as u64).to_le_bytes())?;
+    w.write_all(&(triples.len() as u64).to_le_bytes())?;
 
     // Dictionary (front-coded).
     let mut dict_buf = Vec::new();
     let mut prev: &[u8] = &[];
     for cur in terms {
         let shared = common_prefix_len(prev, cur);
-        write_uvarint(&mut dict_buf, shared as u64).map_err(StorageError::from)?;
-        write_uvarint(&mut dict_buf, (cur.len() - shared) as u64).map_err(StorageError::from)?;
+        write_uvarint(&mut dict_buf, shared as u64)?;
+        write_uvarint(&mut dict_buf, (cur.len() - shared) as u64)?;
         dict_buf.extend_from_slice(&cur[shared..]);
         prev = cur;
     }
-    w.write_all(&dict_buf).map_err(StorageError::from)?;
+    w.write_all(&dict_buf)?;
 
     // Triples (SPO adjacency, gap-coded).
     triples.sort_unstable_by(|a, b| (a.s, a.p, a.o).cmp(&(b.s, b.p, b.o)));
     let mut tri_buf = Vec::new();
     write_adjacency(&mut tri_buf, triples)?;
-    w.write_all(&tri_buf).map_err(StorageError::from)?;
+    w.write_all(&tri_buf)?;
 
     Ok((dict_buf.len() as u64, tri_buf.len() as u64))
 }
@@ -69,7 +65,7 @@ pub fn write_snapshot<W: Write>(
 /// local-id order) and the triples in local-id space.
 pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTriple>)> {
     let mut magic = [0u8; 8];
-    r.read_exact(&mut magic).map_err(StorageError::from)?;
+    r.read_exact(&mut magic)?;
     if magic != MAGIC {
         return Err(snap_err("bad magic / not a horndb snapshot"));
     }
@@ -87,12 +83,13 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
     let num_terms = read_u64(r)?;
     let num_triples = read_u64(r)?;
 
-    // Dictionary.
+    // Dictionary. Each term is front-coded against the previous one, which is
+    // the last entry already pushed onto `terms` — no separate `prev` copy.
     let mut terms: Vec<Vec<u8>> = Vec::with_capacity((num_terms as usize).min(MAX_PREALLOC));
-    let mut prev: Vec<u8> = Vec::new();
     for _ in 0..num_terms {
-        let shared = read_uvarint(r).map_err(StorageError::from)? as usize;
-        let suffix_len = read_uvarint(r).map_err(StorageError::from)? as usize;
+        let shared = read_uvarint(r)? as usize;
+        let suffix_len = read_uvarint(r)? as usize;
+        let prev: &[u8] = terms.last().map_or(&[], Vec::as_slice);
         if shared > prev.len() {
             return Err(snap_err("front-coding shared prefix exceeds previous term"));
         }
@@ -101,21 +98,14 @@ pub fn read_snapshot<R: Read>(r: &mut R) -> Result<(Vec<Vec<u8>>, Vec<LocalTripl
         // allocation before any suffix bytes are read.
         let mut cur = Vec::with_capacity(shared + suffix_len.min(MAX_PREALLOC));
         cur.extend_from_slice(&prev[..shared]);
-        // Read at most `suffix_len` bytes via a bounded, geometrically-growing
-        // read. A crafted stream declaring a huge `suffix_len` only allocates the
-        // bytes that actually arrive (then we error), instead of pre-allocating
-        // `suffix_len` eagerly and risking an OOM/abort.
-        let mut suffix = Vec::new();
-        let got = r
-            .by_ref()
-            .take(suffix_len as u64)
-            .read_to_end(&mut suffix)
-            .map_err(StorageError::from)?;
+        // Append at most `suffix_len` bytes via a bounded read. A crafted stream
+        // declaring a huge `suffix_len` only allocates the bytes that actually
+        // arrive (then we error), instead of pre-allocating `suffix_len` eagerly
+        // and risking an OOM/abort.
+        let got = r.by_ref().take(suffix_len as u64).read_to_end(&mut cur)?;
         if got != suffix_len {
             return Err(snap_err("dictionary suffix truncated"));
         }
-        cur.extend_from_slice(&suffix);
-        prev = cur.clone();
         terms.push(cur);
     }
 
@@ -141,12 +131,12 @@ fn write_adjacency<W: Write>(w: &mut W, sorted: &[LocalTriple]) -> Result<()> {
         v.dedup();
         v
     };
-    write_uvarint(w, subjects.len() as u64).map_err(StorageError::from)?;
+    write_uvarint(w, subjects.len() as u64)?;
     let mut i = 0usize;
     let mut prev_s = 0u64;
     while i < sorted.len() {
         let s = sorted[i].s;
-        write_uvarint(w, s - prev_s).map_err(StorageError::from)?;
+        write_uvarint(w, s - prev_s)?;
         // gather the slice for this subject
         let s_start = i;
         while i < sorted.len() && sorted[i].s == s {
@@ -156,21 +146,21 @@ fn write_adjacency<W: Write>(w: &mut W, sorted: &[LocalTriple]) -> Result<()> {
         // distinct predicates
         let mut preds: Vec<u64> = s_slice.iter().map(|t| t.p).collect();
         preds.dedup();
-        write_uvarint(w, preds.len() as u64).map_err(StorageError::from)?;
+        write_uvarint(w, preds.len() as u64)?;
         let mut j = 0usize;
         let mut prev_p = 0u64;
         while j < s_slice.len() {
             let p = s_slice[j].p;
-            write_uvarint(w, p - prev_p).map_err(StorageError::from)?;
+            write_uvarint(w, p - prev_p)?;
             let p_start = j;
             while j < s_slice.len() && s_slice[j].p == p {
                 j += 1;
             }
             let objs = &s_slice[p_start..j];
-            write_uvarint(w, objs.len() as u64).map_err(StorageError::from)?;
+            write_uvarint(w, objs.len() as u64)?;
             let mut prev_o = 0u64;
             for t in objs {
-                write_uvarint(w, t.o - prev_o).map_err(StorageError::from)?;
+                write_uvarint(w, t.o - prev_o)?;
                 prev_o = t.o;
             }
             prev_p = p;
@@ -186,23 +176,23 @@ fn read_adjacency<R: Read>(
     num_triples: u64,
 ) -> Result<Vec<LocalTriple>> {
     let mut out = Vec::with_capacity((num_triples as usize).min(MAX_PREALLOC));
-    let num_subjects = read_uvarint(r).map_err(StorageError::from)?;
+    let num_subjects = read_uvarint(r)?;
     let mut prev_s = 0u64;
     for _ in 0..num_subjects {
         let s = prev_s
-            .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+            .checked_add(read_uvarint(r)?)
             .ok_or_else(|| snap_err("local-id gap overflow"))?;
-        let num_preds = read_uvarint(r).map_err(StorageError::from)?;
+        let num_preds = read_uvarint(r)?;
         let mut prev_p = 0u64;
         for _ in 0..num_preds {
             let p = prev_p
-                .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+                .checked_add(read_uvarint(r)?)
                 .ok_or_else(|| snap_err("local-id gap overflow"))?;
-            let num_objs = read_uvarint(r).map_err(StorageError::from)?;
+            let num_objs = read_uvarint(r)?;
             let mut prev_o = 0u64;
             for _ in 0..num_objs {
                 let o = prev_o
-                    .checked_add(read_uvarint(r).map_err(StorageError::from)?)
+                    .checked_add(read_uvarint(r)?)
                     .ok_or_else(|| snap_err("local-id gap overflow"))?;
                 if s == 0 || p == 0 || o == 0 || s > num_terms || p > num_terms || o > num_terms {
                     return Err(snap_err("triple references out-of-range local id"));
@@ -229,13 +219,13 @@ fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
 
 fn read_u32<R: Read>(r: &mut R) -> Result<u32> {
     let mut b = [0u8; 4];
-    r.read_exact(&mut b).map_err(StorageError::from)?;
+    r.read_exact(&mut b)?;
     Ok(u32::from_le_bytes(b))
 }
 
 fn read_u64<R: Read>(r: &mut R) -> Result<u64> {
     let mut b = [0u8; 8];
-    r.read_exact(&mut b).map_err(StorageError::from)?;
+    r.read_exact(&mut b)?;
     Ok(u64::from_le_bytes(b))
 }
 
