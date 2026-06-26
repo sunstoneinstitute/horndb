@@ -2,6 +2,7 @@
 //! <https://www.w3.org/TR/sparql11-results-json/>
 
 use crate::algebra::Term;
+use crate::exec::runtime::literal_parts;
 use crate::exec::Bindings;
 use serde_json::{json, Map, Value};
 
@@ -47,44 +48,14 @@ fn term_to_json(t: &Term) -> Value {
     }
 }
 
-/// Parse an N-Triples-form literal into a SPARQL-JSON binding.
-/// Recognises `"foo"`, `"foo"@lang`, `"foo"^^<datatype>`.
+/// Parse an N-Triples-form literal (`"foo"`, `"foo"@lang`,
+/// `"foo"^^<datatype>`) into a SPARQL-JSON binding, reusing the crate's
+/// shared lexical splitter so the JSON/XML/runtime paths stay in lockstep.
 fn parse_literal_to_json(raw: &str) -> Value {
-    // Best-effort lexical parsing; sufficient for the W3C subset.
-    let raw = raw.trim();
-    if !raw.starts_with('"') {
-        return json!({ "type": "literal", "value": raw });
+    let (value, lang, datatype) = literal_parts(raw);
+    match (lang, datatype) {
+        (Some(lang), _) => json!({ "type": "literal", "value": value, "xml:lang": lang }),
+        (_, Some(dt)) => json!({ "type": "literal", "value": value, "datatype": dt }),
+        _ => json!({ "type": "literal", "value": value }),
     }
-    let mut end_quote = None;
-    let bytes = raw.as_bytes();
-    let mut i = 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            end_quote = Some(i);
-            break;
-        }
-        i += 1;
-    }
-    let Some(eq) = end_quote else {
-        return json!({ "type": "literal", "value": raw });
-    };
-    let value = &raw[1..eq];
-    let tail = &raw[eq + 1..];
-
-    if let Some(rest) = tail.strip_prefix("@") {
-        return json!({ "type": "literal", "value": value, "xml:lang": rest });
-    }
-    if let Some(rest) = tail.strip_prefix("^^") {
-        let dt = rest.trim_start_matches('<').trim_end_matches('>');
-        return json!({
-            "type": "literal",
-            "value": value,
-            "datatype": dt
-        });
-    }
-    json!({ "type": "literal", "value": value })
 }

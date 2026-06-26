@@ -17,7 +17,7 @@ pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let update = if ctype.contains("application/x-www-form-urlencoded") {
-        match super::query::url_form_update(&body) {
+        match super::query::url_form_field(&body, "update") {
             Some(u) => u,
             None => {
                 return (StatusCode::BAD_REQUEST, "form missing `update`".to_string())

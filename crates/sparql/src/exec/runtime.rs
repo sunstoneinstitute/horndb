@@ -987,6 +987,11 @@ fn datetime_key(s: &str) -> Option<String> {
 }
 
 fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
+    // Evaluate an operand to its numeric value; an expression error
+    // (non-numeric / unbound) surfaces as `Ok(None)`.
+    let numof = |sub: &Expr| -> Result<Option<f64>> {
+        Ok(eval_expr_to_term(sub, b)?.as_ref().and_then(numeric_value))
+    };
     Ok(match e {
         Expr::Term(t) => match t {
             Term::Var(v) => b.get(v.name()).cloned(),
@@ -1007,36 +1012,14 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::Bound(_) => Some(Term::Literal(
             if eval_expr(e, b)? { "true" } else { "false" }.into(),
         )),
-        Expr::Add(x, y) => arith(
-            |a, b| a + b,
-            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
-            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
-        ),
-        Expr::Sub(x, y) => arith(
-            |a, b| a - b,
-            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
-            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
-        ),
-        Expr::Mul(x, y) => arith(
-            |a, b| a * b,
-            eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
-            eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value),
-        ),
-        Expr::Div(x, y) => {
-            let d = eval_expr_to_term(y, b)?.as_ref().and_then(numeric_value);
-            match d {
-                Some(d) if d != 0.0 => arith(
-                    |a, b| a / b,
-                    eval_expr_to_term(x, b)?.as_ref().and_then(numeric_value),
-                    Some(d),
-                ),
-                _ => None, // division by zero / non-numeric divisor
-            }
-        }
-        Expr::Neg(x) => eval_expr_to_term(x, b)?
-            .as_ref()
-            .and_then(numeric_value)
-            .map(|n| numeric_term(-n)),
+        Expr::Add(x, y) => arith(|a, b| a + b, numof(x)?, numof(y)?),
+        Expr::Sub(x, y) => arith(|a, b| a - b, numof(x)?, numof(y)?),
+        Expr::Mul(x, y) => arith(|a, b| a * b, numof(x)?, numof(y)?),
+        Expr::Div(x, y) => match numof(y)? {
+            Some(d) if d != 0.0 => arith(|a, b| a / b, numof(x)?, Some(d)),
+            _ => None, // division by zero / non-numeric divisor
+        },
+        Expr::Neg(x) => numof(x)?.map(|n| numeric_term(-n)),
         // Stage-1 note: an erroring condition evaluates as false (the
         // crate-wide error→false EBV convention) and takes the else
         // branch, rather than propagating the error as SPARQL §17.4.1.2

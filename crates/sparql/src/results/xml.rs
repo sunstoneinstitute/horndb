@@ -9,6 +9,7 @@
 //! literal-parsing logic the JSON writer uses.
 
 use crate::algebra::Term;
+use crate::exec::runtime::literal_parts;
 use crate::exec::Bindings;
 
 /// Serialise a SELECT result set as SPARQL Results XML.
@@ -70,49 +71,26 @@ fn term_to_xml(t: &Term) -> String {
     }
 }
 
-/// Parse an N-Triples-form literal into a SPARQL-XML `<literal>` element.
-/// Recognises `"foo"`, `"foo"@lang`, `"foo"^^<datatype>`.
+/// Parse an N-Triples-form literal (`"foo"`, `"foo"@lang`,
+/// `"foo"^^<datatype>`) into a SPARQL-XML `<literal>` element, reusing the
+/// crate's shared lexical splitter (the JSON writer uses the same one).
 fn parse_literal_to_xml(raw: &str) -> String {
-    let raw = raw.trim();
-    if !raw.starts_with('"') {
-        return format!("<literal>{}</literal>", xml_text_escape(raw));
-    }
-    let bytes = raw.as_bytes();
-    let mut end_quote = None;
-    let mut i = 1;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            i += 2;
-            continue;
-        }
-        if bytes[i] == b'"' {
-            end_quote = Some(i);
-            break;
-        }
-        i += 1;
-    }
-    let Some(eq) = end_quote else {
-        return format!("<literal>{}</literal>", xml_text_escape(raw));
-    };
-    let value = &raw[1..eq];
-    let tail = &raw[eq + 1..];
-
-    if let Some(lang) = tail.strip_prefix('@') {
-        return format!(
+    let (value, lang, datatype) = literal_parts(raw);
+    if let Some(lang) = lang {
+        format!(
             "<literal xml:lang=\"{}\">{}</literal>",
-            xml_attr_escape(lang),
-            xml_text_escape(value)
-        );
-    }
-    if let Some(rest) = tail.strip_prefix("^^") {
-        let dt = rest.trim_start_matches('<').trim_end_matches('>');
-        return format!(
+            xml_attr_escape(&lang),
+            xml_text_escape(&value)
+        )
+    } else if let Some(dt) = datatype {
+        format!(
             "<literal datatype=\"{}\">{}</literal>",
-            xml_attr_escape(dt),
-            xml_text_escape(value)
-        );
+            xml_attr_escape(&dt),
+            xml_text_escape(&value)
+        )
+    } else {
+        format!("<literal>{}</literal>", xml_text_escape(&value))
     }
-    format!("<literal>{}</literal>", xml_text_escape(value))
 }
 
 fn xml_text_escape(s: &str) -> String {

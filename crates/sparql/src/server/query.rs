@@ -47,7 +47,7 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let query = if ctype.contains("application/x-www-form-urlencoded") {
-        match url_form_query(&body) {
+        match url_form_field(&body, "query") {
             Some(q) => q,
             None => {
                 return (StatusCode::BAD_REQUEST, "form missing `query`".to_string())
@@ -60,11 +60,13 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
     run(state, &query, &headers).await
 }
 
-fn url_form_query(body: &str) -> Option<String> {
+/// Extract a single urlencoded form field by key (`query=…` / `update=…`)
+/// from a request body, percent-decoding its value.
+pub(crate) fn url_form_field(body: &str, key: &str) -> Option<String> {
     for pair in body.split('&') {
         let mut it = pair.splitn(2, '=');
         if let (Some(k), Some(v)) = (it.next(), it.next()) {
-            if k == "query" {
+            if k == key {
                 return Some(percent_decode(v));
             }
         }
@@ -164,17 +166,4 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
             (StatusCode::OK, [("content-type", ctype)], text).into_response()
         }
     }
-}
-
-/// Pulled out for re-use by `/update`'s form-encoded body path.
-pub(crate) fn url_form_update(body: &str) -> Option<String> {
-    for pair in body.split('&') {
-        let mut it = pair.splitn(2, '=');
-        if let (Some(k), Some(v)) = (it.next(), it.next()) {
-            if k == "update" {
-                return Some(percent_decode(v));
-            }
-        }
-    }
-    None
 }
