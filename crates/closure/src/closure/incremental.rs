@@ -20,6 +20,14 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+/// Neighbours of `node` in adjacency map `adj`, as an owned `Vec` (empty when
+/// `node` has no entry).
+fn neighbors(adj: &FxHashMap<u64, FxHashSet<u64>>, node: u64) -> Vec<u64> {
+    adj.get(&node)
+        .map(|set| set.iter().copied().collect())
+        .unwrap_or_default()
+}
+
 /// Outcome of retracting one or more base edges from the closure.
 ///
 /// `withdrawn` are closure pairs that lost ALL support and were dropped from
@@ -181,17 +189,9 @@ impl IncrementalTransitiveClosure {
         let base_was_new = self.base.entry(s).or_default().insert(o);
 
         // B = {x : x reaches s} ∪ {s}; F = {y : o reaches y} ∪ {o}.
-        let mut b: Vec<u64> = self
-            .bwd
-            .get(&s)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default();
+        let mut b = neighbors(&self.bwd, s);
         b.push(s);
-        let mut f: Vec<u64> = self
-            .fwd
-            .get(&o)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default();
+        let mut f = neighbors(&self.fwd, o);
         f.push(o);
 
         let mut delta = Vec::new();
@@ -232,17 +232,7 @@ impl IncrementalTransitiveClosure {
     /// state exactly.
     pub fn rollback_inserted(&mut self, edges: &[(u64, u64)]) {
         for &(x, y) in edges {
-            let removed = self
-                .fwd
-                .get_mut(&x)
-                .map(|set| set.remove(&y))
-                .unwrap_or(false);
-            if removed {
-                if let Some(set) = self.bwd.get_mut(&y) {
-                    set.remove(&x);
-                }
-                self.nnz -= 1;
-            }
+            self.drop_closed(x, y);
         }
     }
 
@@ -266,11 +256,7 @@ impl IncrementalTransitiveClosure {
     /// `start -> ... -> y`.
     fn base_reach(&self, start: u64) -> FxHashSet<u64> {
         let mut reached: FxHashSet<u64> = FxHashSet::default();
-        let mut stack: Vec<u64> = self
-            .base
-            .get(&start)
-            .map(|os| os.iter().copied().collect())
-            .unwrap_or_default();
+        let mut stack = neighbors(&self.base, start);
         while let Some(n) = stack.pop() {
             if reached.insert(n) {
                 if let Some(os) = self.base.get(&n) {
@@ -347,17 +333,9 @@ impl IncrementalTransitiveClosure {
         // already contains `s`), `s` is visited exactly once. Without the dedup
         // the source `s` is processed twice and any pair it withdraws is pushed to
         // `withdrawn` twice (BUG A), producing duplicate negative deltas.
-        let mut sources: FxHashSet<u64> = self
-            .bwd
-            .get(&s)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default();
+        let mut sources: FxHashSet<u64> = self.bwd.get(&s).cloned().unwrap_or_default();
         sources.insert(s);
-        let mut targets: FxHashSet<u64> = self
-            .fwd
-            .get(&o)
-            .map(|set| set.iter().copied().collect())
-            .unwrap_or_default();
+        let mut targets: FxHashSet<u64> = self.fwd.get(&o).cloned().unwrap_or_default();
         targets.insert(o);
 
         // 3 + 4. For each affected source, recompute reachability over the

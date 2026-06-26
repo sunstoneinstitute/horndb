@@ -113,13 +113,8 @@ impl EquivClasses {
 
     /// Returns `true` if `a` and `b` are in the same class.
     pub fn same(&mut self, a: DictId, b: DictId) -> bool {
-        let sa = match self.index.get(&a) {
-            Some(&s) => s,
-            None => return false,
-        };
-        let sb = match self.index.get(&b) {
-            Some(&s) => s,
-            None => return false,
+        let (Some(&sa), Some(&sb)) = (self.index.get(&a), self.index.get(&b)) else {
+            return false;
         };
         self.find(sa) == self.find(sb)
     }

@@ -379,10 +379,8 @@ impl ValuedMatrix {
         assert_eq!(self.ncols, other.ncols);
         let mask = ValuedMatrix::new(self.nrows)?;
         unsafe {
-            // mask = (self .> other) over the intersection; GT yields 1.0 where
-            // self > other and stores nothing where self <= other? No — GT
-            // stores a result for every intersection coordinate. We then count
-            // the nonzeros: GxB stores explicit 0.0 too, so select afterwards.
+            // mask[i,j] = (self[i,j] > other[i,j]) ? 1.0 : 0.0, over the pattern
+            // intersection of the two matrices.
             GrbError::check(ffi::GrB_Matrix_eWiseMult_BinaryOp(
                 mask.inner,
                 std::ptr::null_mut(),

@@ -164,15 +164,25 @@ fn write_closure(
     sink: &dyn TripleSink,
 ) -> Result<u64> {
     let mut iter = dense_edges.iter().filter_map(|&(s, o)| {
-        let s_dict = map.to_dict(DenseIdx(s))?;
-        let o_dict = map.to_dict(DenseIdx(o))?;
         Some(Triple {
-            s: s_dict,
+            s: map.to_dict(DenseIdx(s))?,
             p,
-            o: o_dict,
+            o: map.to_dict(DenseIdx(o))?,
         })
     });
     sink.bulk_insert_inferred(&mut iter)
+}
+
+/// Map dense `(u64, u64)` index pairs back to `DictId` pairs, dropping any
+/// endpoint absent from `map` (which never happens for interned edges).
+fn pairs_to_dict(
+    map: &DenseIdMap,
+    pairs: impl IntoIterator<Item = (u64, u64)>,
+) -> Vec<(DictId, DictId)> {
+    pairs
+        .into_iter()
+        .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
+        .collect()
 }
 
 /// Convenience constructor for callers (SPEC-04 will use this until it has
@@ -293,17 +303,7 @@ impl IncrementalClosureBackend {
         if delta.is_empty() {
             return Ok(0);
         }
-        let map = &state.map;
-        let mut iter = delta.iter().filter_map(|&(s, o)| {
-            let s_dict = map.to_dict(DenseIdx(s))?;
-            let o_dict = map.to_dict(DenseIdx(o))?;
-            Some(Triple {
-                s: s_dict,
-                p,
-                o: o_dict,
-            })
-        });
-        match sink.bulk_insert_inferred(&mut iter) {
+        match write_closure(p, &delta, &state.map, sink) {
             Ok(n) => Ok(n),
             Err(e) => {
                 // Sink write failed: roll back the just-inserted closure edges
@@ -353,16 +353,9 @@ impl IncrementalClosureBackend {
             withdrawn,
             survived,
         } = state.closure.delete_edges(dense);
-        let map = &state.map;
-        let to_dict = |pairs: Vec<(u64, u64)>| -> Vec<(DictId, DictId)> {
-            pairs
-                .into_iter()
-                .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
-                .collect()
-        };
         Ok(DictDeleteOutcome {
-            withdrawn: to_dict(withdrawn),
-            survived: to_dict(survived),
+            withdrawn: pairs_to_dict(&state.map, withdrawn),
+            survived: pairs_to_dict(&state.map, survived),
         })
     }
 
@@ -374,13 +367,7 @@ impl IncrementalClosureBackend {
         let Some(state) = self.predicates.get(&p) else {
             return Vec::new();
         };
-        let map = &state.map;
-        state
-            .closure
-            .base_edges()
-            .into_iter()
-            .filter_map(|(s, o)| Some((map.to_dict(DenseIdx(s))?, map.to_dict(DenseIdx(o))?)))
-            .collect()
+        pairs_to_dict(&state.map, state.closure.base_edges())
     }
 
     /// Union `owl:sameAs` pairs (shared with the bulk backend's semantics).
