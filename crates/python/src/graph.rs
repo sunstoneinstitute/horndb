@@ -122,9 +122,7 @@ impl RdfGraph {
             p.to_store_lexical(),
             o.to_store_lexical(),
         );
-        self.store
-            .iter_triples()
-            .any(|t| t.0 == target.0 && t.1 == target.1 && t.2 == target.2)
+        self.store.iter_triples().any(|t| *t == target)
     }
 
     /// Iterate the triples matching an optional pattern. `None` in a position
@@ -142,9 +140,9 @@ impl RdfGraph {
         self.store
             .iter_triples()
             .filter(|t| {
-                sl.as_ref().map(|v| v == &t.0).unwrap_or(true)
-                    && pl.as_ref().map(|v| v == &t.1).unwrap_or(true)
-                    && ol.as_ref().map(|v| v == &t.2).unwrap_or(true)
+                sl.as_ref().is_none_or(|v| v == &t.0)
+                    && pl.as_ref().is_none_or(|v| v == &t.1)
+                    && ol.as_ref().is_none_or(|v| v == &t.2)
             })
             .map(|t| {
                 (

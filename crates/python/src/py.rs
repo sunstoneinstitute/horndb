@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
 
 use crate::graph::{GraphError, QueryResult, RdfGraph, SerFormat};
-use crate::term::{RdfTerm, XSD_STRING};
+use crate::term::RdfTerm;
 
 /// Map a [`GraphError`] to a Python exception. SPEC-10 F7 asks for rdflib-like
 /// errors; rdflib raises `ValueError`/`KeyError`/`Exception` subclasses, so we
@@ -492,13 +492,9 @@ impl Graph {
         let s = opt_term(subject)?;
         let p = opt_term(predicate)?;
         let g = self.inner.lock().unwrap();
-        let mut rows = g.triples(s.as_ref(), p.as_ref(), None);
-        match rows.len() {
-            0 => Ok(None),
-            _ => {
-                let o = rows.remove(0).2;
-                Ok(Some(term_to_py(py, &o)?))
-            }
+        match g.triples(s.as_ref(), p.as_ref(), None).into_iter().next() {
+            Some((_, _, o)) => Ok(Some(term_to_py(py, &o)?)),
+            None => Ok(None),
         }
     }
 
@@ -876,7 +872,10 @@ fn default_namespaces() -> Vec<(String, String)> {
             "rdfs".to_string(),
             "http://www.w3.org/2000/01/rdf-schema#".to_string(),
         ),
-        ("xsd".to_string(), XSD_STRING.replace("string", "")),
+        (
+            "xsd".to_string(),
+            "http://www.w3.org/2001/XMLSchema#".to_string(),
+        ),
         (
             "owl".to_string(),
             "http://www.w3.org/2002/07/owl#".to_string(),

@@ -158,14 +158,14 @@ impl RdfTerm {
 /// Parse a literal in N-Triples lexical form (`"v"`, `"v"@en`, `"v"^^<dt>`).
 fn parse_literal_lexical(lex: &str) -> RdfTerm {
     // Reuse oxrdf's N-Triples literal parser for correctness (escapes etc.).
-    match Literal::from_str_ntriples(lex) {
-        Ok(lit) => {
+    match literal_from_ntriples(lex) {
+        Some(lit) => {
             let value = lit.value().to_string();
             let language = lit.language().map(|l| l.to_string());
             let datatype = lit.datatype().as_str().to_string();
             RdfTerm::literal(value, Some(datatype), language)
         }
-        Err(_) => {
+        None => {
             // Best-effort fallback: strip the outer quotes if present.
             let inner = lex
                 .strip_prefix('"')
@@ -176,22 +176,14 @@ fn parse_literal_lexical(lex: &str) -> RdfTerm {
     }
 }
 
-// oxrdf 0.3's `Literal` does not expose a public N-Triples parse helper, so we
-// parse via the term parser. This thin trait keeps the call site readable and
-// localises any future swap to a dedicated literal parser.
-trait LiteralNtParse: Sized {
-    fn from_str_ntriples(s: &str) -> Result<Literal, ()>;
-}
-
-impl LiteralNtParse for Literal {
-    fn from_str_ntriples(s: &str) -> Result<Literal, ()> {
-        // `oxrdf::Term`'s `FromStr` parses N-Triples terms; pull the literal
-        // back out. We avoid a full N-Triples line parse for a single term.
-        use std::str::FromStr;
-        match oxrdf::Term::from_str(s) {
-            Ok(oxrdf::Term::Literal(l)) => Ok(l),
-            _ => Err(()),
-        }
+/// Parse a single `Literal` from its N-Triples form. oxrdf 0.3 exposes no
+/// public literal parser, so we go through the term parser and pull the literal
+/// back out — avoiding a full N-Triples line parse for one term.
+fn literal_from_ntriples(s: &str) -> Option<Literal> {
+    use std::str::FromStr;
+    match oxrdf::Term::from_str(s) {
+        Ok(oxrdf::Term::Literal(l)) => Some(l),
+        _ => None,
     }
 }
 
