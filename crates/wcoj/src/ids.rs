@@ -19,14 +19,8 @@ impl Triple {
     /// `(level0, level1, level2)`. Used by the trie iterator to read components
     /// in trie-depth order regardless of physical ordering.
     pub fn by_ordering(&self, ord: Ordering) -> (TermId, TermId, TermId) {
-        match ord {
-            Ordering::Spo => (self.s, self.p, self.o),
-            Ordering::Sop => (self.s, self.o, self.p),
-            Ordering::Pso => (self.p, self.s, self.o),
-            Ordering::Pos => (self.p, self.o, self.s),
-            Ordering::Osp => (self.o, self.s, self.p),
-            Ordering::Ops => (self.o, self.p, self.s),
-        }
+        let [a, b, c] = ord.permute(self.s, self.p, self.o);
+        (a, b, c)
     }
 }
 
@@ -50,4 +44,19 @@ impl Ordering {
         Ordering::Osp,
         Ordering::Ops,
     ];
+
+    /// Permute three components `(s, p, o)` into this ordering's
+    /// `(level0, level1, level2)` layout. The single source of truth for the
+    /// six SPO permutations used across the crate.
+    #[inline]
+    pub fn permute<T>(self, s: T, p: T, o: T) -> [T; 3] {
+        match self {
+            Ordering::Spo => [s, p, o],
+            Ordering::Sop => [s, o, p],
+            Ordering::Pso => [p, s, o],
+            Ordering::Pos => [p, o, s],
+            Ordering::Osp => [o, s, p],
+            Ordering::Ops => [o, p, s],
+        }
+    }
 }

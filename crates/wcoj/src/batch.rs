@@ -13,7 +13,6 @@ use crate::pattern::Var;
 pub const STANDARD_VECTOR_SIZE: usize = 2048;
 
 pub struct BindingBatchBuilder {
-    #[allow(dead_code)]
     vars: Vec<Var>,
     schema: SchemaRef,
     /// One growable column per variable.
@@ -64,14 +63,11 @@ impl BindingBatchBuilder {
             .cols
             .iter_mut()
             .map(|c| {
-                let take = std::mem::take(c);
+                // Swap in a fresh buffer so the builder is ready for reuse.
+                let take = std::mem::replace(c, Vec::with_capacity(STANDARD_VECTOR_SIZE));
                 Arc::new(UInt64Array::from(take)) as ArrayRef
             })
             .collect();
-        // Re-allocate empty buffers for continued use.
-        for c in &mut self.cols {
-            *c = Vec::with_capacity(STANDARD_VECTOR_SIZE);
-        }
         RecordBatch::try_new(self.schema.clone(), arrays).ok()
     }
 }

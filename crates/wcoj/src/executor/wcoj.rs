@@ -315,14 +315,21 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             }
             descend_at.push(v);
         }
+        // Top-contribution depth of each iter: the shallowest var_order index
+        // it mentions. A non-ground pattern always mentions ≥1 variable.
+        let top_depth: Vec<usize> = nonground_patterns
+            .iter()
+            .map(|pat| {
+                exec.plan
+                    .var_order
+                    .iter()
+                    .position(|var| pat.position_of(*var).is_some())
+                    .expect("non-ground pattern mentions no ordered variable")
+            })
+            .collect();
         let mut top_at: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
-        for (i, pat) in nonground_patterns.iter().enumerate() {
-            for (g, var) in exec.plan.var_order.iter().enumerate() {
-                if pat.position_of(*var).is_some() {
-                    top_at[g].push(i);
-                    break;
-                }
-            }
+        for (i, &d) in top_depth.iter().enumerate() {
+            top_at[d].push(i);
         }
         // carry_at[d] = iters in contributing[d] whose top contribution is
         // < d. These need their depth-d state explicitly reset (un-open,
@@ -330,14 +337,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         let mut carry_at: Vec<Vec<usize>> = vec![Vec::new(); n_vars];
         for (d, conts) in contributing.iter().enumerate() {
             for &i in conts {
-                let pat = nonground_patterns[i];
-                let top_d = exec
-                    .plan
-                    .var_order
-                    .iter()
-                    .position(|var| pat.position_of(*var).is_some())
-                    .unwrap();
-                if top_d < d {
+                if top_depth[i] < d {
                     carry_at[d].push(i);
                 }
             }
@@ -416,9 +416,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             self.prime_scratch.sort_by_key(|&(_, v)| v);
             let sorted = &mut self.sorted_idxs[d];
             sorted.clear();
-            for &(i, _) in &self.prime_scratch {
-                sorted.push(i);
-            }
+            sorted.extend(self.prime_scratch.iter().map(|&(i, _)| i));
             let st = self.state[d].as_mut().unwrap();
             st.primed = true;
             st.p = 0;
@@ -515,16 +513,12 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
 
             // If the prior iteration descended past this depth and we're
             // back, advance the leapfrog past the prior match before
-            // re-leapfrogging.
-            let must_advance_after_descent = {
-                let st = self.state[self.depth as usize].as_ref().unwrap();
-                st.has_descended && !st.done
-            };
-            if must_advance_after_descent {
-                self.state[self.depth as usize]
-                    .as_mut()
-                    .unwrap()
-                    .has_descended = false;
+            // re-leapfrogging (the advance itself happens in `leapfrog_next`).
+            {
+                let st = self.state[self.depth as usize].as_mut().unwrap();
+                if st.has_descended && !st.done {
+                    st.has_descended = false;
+                }
             }
 
             let next = self.leapfrog_next(self.depth);

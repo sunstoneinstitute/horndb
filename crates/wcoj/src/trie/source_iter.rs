@@ -47,14 +47,7 @@ impl<I: OrderedTripleIter> PatternTrieIter<I> {
         }
 
         // Compute the three physical-level Terms in trie order.
-        let phys_terms = match ordering {
-            Ordering::Spo => [pattern.s, pattern.p, pattern.o],
-            Ordering::Sop => [pattern.s, pattern.o, pattern.p],
-            Ordering::Pso => [pattern.p, pattern.s, pattern.o],
-            Ordering::Pos => [pattern.p, pattern.o, pattern.s],
-            Ordering::Osp => [pattern.o, pattern.s, pattern.p],
-            Ordering::Ops => [pattern.o, pattern.p, pattern.s],
-        };
+        let phys_terms = ordering.permute(pattern.s, pattern.p, pattern.o);
 
         // Mark bound levels first.
         let mut actions = [LevelAction::Bound(0); 3];
