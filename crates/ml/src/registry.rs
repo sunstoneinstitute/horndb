@@ -15,7 +15,17 @@ use crate::config::{LlmPrivacy, MlConfig};
 use crate::hotset::{DisabledHotSetAdvisor, HotSetAdvisor};
 use crate::nlquery::{DisabledTranslator, Translator};
 use crate::planner::{DisabledPlanAdvisor, PlanAdvisor};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// Pick the registered plugin when ML is on, else the cached no-op.
+/// `Disabled*` fallbacks are also used when ML is on but nothing is
+/// registered, so the hot path never allocates.
+fn resolve<T: ?Sized>(enabled: bool, registered: &Option<Arc<T>>, disabled: &Arc<T>) -> Arc<T> {
+    match registered {
+        Some(plugin) if enabled => plugin.clone(),
+        _ => disabled.clone(),
+    }
+}
 
 pub struct MlRegistry {
     inner: RwLock<RegistryInner>,
@@ -55,12 +65,16 @@ impl MlRegistry {
         }
     }
 
+    fn read(&self) -> RwLockReadGuard<'_, RegistryInner> {
+        self.inner.read().expect("registry rwlock poisoned")
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, RegistryInner> {
+        self.inner.write().expect("registry rwlock poisoned")
+    }
+
     pub fn is_enabled(&self) -> bool {
-        self.inner
-            .read()
-            .expect("registry rwlock poisoned")
-            .config
-            .enabled
+        self.read().config.enabled
     }
 
     /// Hot-reload the config (acceptance #5 — no restart).
@@ -69,67 +83,38 @@ impl MlRegistry {
     /// in place but accessor methods return the `Disabled*` no-ops
     /// until re-enabled.
     pub fn reload_config(&self, config: MlConfig) {
-        let mut guard = self.inner.write().expect("registry rwlock poisoned");
-        guard.config = config;
+        self.write().config = config;
     }
 
     pub fn register_candidate(&self, g: Arc<dyn CandidateGenerator>) {
-        let mut guard = self.inner.write().expect("registry rwlock poisoned");
-        guard.candidate = Some(g);
+        self.write().candidate = Some(g);
     }
 
     pub fn register_planner(&self, p: Arc<dyn PlanAdvisor>) {
-        let mut guard = self.inner.write().expect("registry rwlock poisoned");
-        guard.planner = Some(p);
+        self.write().planner = Some(p);
     }
 
     pub fn register_hotset(&self, h: Arc<dyn HotSetAdvisor>) {
-        let mut guard = self.inner.write().expect("registry rwlock poisoned");
-        guard.hotset = Some(h);
+        self.write().hotset = Some(h);
     }
 
     pub fn register_translator(&self, t: Arc<dyn Translator>) {
-        let mut guard = self.inner.write().expect("registry rwlock poisoned");
-        guard.translator = Some(t);
+        self.write().translator = Some(t);
     }
 
     pub fn candidate_generator(&self) -> Arc<dyn CandidateGenerator> {
-        let guard = self.inner.read().expect("registry rwlock poisoned");
-        if guard.config.enabled {
-            guard
-                .candidate
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| guard.disabled_candidate.clone())
-        } else {
-            guard.disabled_candidate.clone()
-        }
+        let g = self.read();
+        resolve(g.config.enabled, &g.candidate, &g.disabled_candidate)
     }
 
     pub fn plan_advisor(&self) -> Arc<dyn PlanAdvisor> {
-        let guard = self.inner.read().expect("registry rwlock poisoned");
-        if guard.config.enabled {
-            guard
-                .planner
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| guard.disabled_planner.clone())
-        } else {
-            guard.disabled_planner.clone()
-        }
+        let g = self.read();
+        resolve(g.config.enabled, &g.planner, &g.disabled_planner)
     }
 
     pub fn hotset_advisor(&self) -> Arc<dyn HotSetAdvisor> {
-        let guard = self.inner.read().expect("registry rwlock poisoned");
-        if guard.config.enabled {
-            guard
-                .hotset
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| guard.disabled_hotset.clone())
-        } else {
-            guard.disabled_hotset.clone()
-        }
+        let g = self.read();
+        resolve(g.config.enabled, &g.hotset, &g.disabled_hotset)
     }
 
     /// The active NL→SPARQL translator (SPEC-08 F3). Like the other
@@ -137,26 +122,13 @@ impl MlRegistry {
     /// nothing is registered — so `/nl-query` fails closed rather than
     /// silently guessing.
     pub fn translator(&self) -> Arc<dyn Translator> {
-        let guard = self.inner.read().expect("registry rwlock poisoned");
-        if guard.config.enabled {
-            guard
-                .translator
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| guard.disabled_translator.clone())
-        } else {
-            guard.disabled_translator.clone()
-        }
+        let g = self.read();
+        resolve(g.config.enabled, &g.translator, &g.disabled_translator)
     }
 
     /// The current LLM privacy / training-data-leakage policy (F3).
     pub fn llm_privacy(&self) -> LlmPrivacy {
-        self.inner
-            .read()
-            .expect("registry rwlock poisoned")
-            .config
-            .llm_privacy
-            .clone()
+        self.read().config.llm_privacy.clone()
     }
 
     pub fn audit_log(&self) -> Arc<MlAuditLog> {
