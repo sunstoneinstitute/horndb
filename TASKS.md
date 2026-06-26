@@ -35,6 +35,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — SPEC-07 SPARQL aggregation (`GROUP BY`/`COUNT`/`SUM`) + expanded `FILTER`/`BIND`/`IF` expressions (trainmarks-blocking) ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
+- [ ] **HIGH** · _Performance_ — SPEC-07 `OPTIONAL` left-join is quadratic; trainmarks q4 times out at scale ([#7](https://github.com/sunstoneinstitute/horndb/issues/7) — dedicated issue TODO)
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [x] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
 - [x] **MEDIUM** · _Completeness_ — SPEC-05 closure (retraction path, GPU backend, LAGraph) ([#5](https://github.com/sunstoneinstitute/horndb/issues/5))
@@ -84,6 +85,26 @@ They stay listed as increments of the SPEC-07 epic ([#7](https://github.com/suns
   Only `INSERT DATA` / `DELETE DATA` ship today; trainmarks includes a
   conditional `DELETE`/`INSERT … WHERE` update (the `BIND`/`IF` expression half
   is #66).
+
+The query *surface* above is delivered and all six trainmarks queries now
+execute (driver: `crates/bench-trainmarks`, runner: `scripts/bench/trainmarks.sh`).
+Running the suite at scale surfaced one performance cliff:
+
+- [ ] **`OPTIONAL` left-join is quadratic — trainmarks q4 times out at scale.**
+  ([#7](https://github.com/sunstoneinstitute/horndb/issues/7) — **dedicated
+  GitHub issue still to be filed**; mirror it here once created.)
+  trainmarks **q4** (revenue by country/segment via `OPTIONAL { ?order
+  :placedBy ?customer ; :totalAmount ?amount }` + `COUNT(DISTINCT …)` +
+  `GROUP BY`) is evaluated as a nested loop over the right-hand pattern per
+  left-hand row in `crates/sparql/src/exec/runtime.rs`, so it scales
+  ~quadratically: **1.45s @100K → ~231s @1M → does not complete @10M** within
+  the 600s upstream cap. Every other trainmarks query (q1/q2/q3/q5/q6 + I/O)
+  scales acceptably — q4 is the sole cliff. **Fix:** a hash/merge `LeftJoin`
+  (build a hash table on the `OPTIONAL` join key, probe per left row) instead of
+  the nested loop. Re-measure q4 across all three scales (target: completes at
+  xlarge). Exercised by `scripts/bench/trainmarks/queries/q4_optional_aggregation.rq`;
+  numbers recorded in `BENCHMARKS.md` → trainmarks section; correctness pinned by
+  `crates/sparql/tests/trainmarks_smoke.rs`.
 
 ## MEDIUM — Stage-2 scope (deferred per plans)
 
