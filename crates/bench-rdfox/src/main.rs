@@ -125,16 +125,22 @@ fn ms(t: std::time::Duration) -> String {
     format!("{:.3}", t.as_secs_f64() * 1e3)
 }
 
+/// Throughput = `count / secs`, guarding against a zero-duration phase
+/// (which would otherwise yield NaN/inf and break the JSON consumer).
+fn per_sec(count: f64, secs: f64) -> f64 {
+    if secs > 0.0 {
+        count / secs
+    } else {
+        0.0
+    }
+}
+
 fn run_import(data: &Path) -> Result<()> {
     let store = horndb_storage::Store::in_memory();
     let stats = horndb_storage::loader::ntriples::load_ntriples_file(&store, data)
         .with_context(|| format!("loading {}", data.display()))?;
     let secs = stats.elapsed_ms as f64 / 1e3;
-    let tps = if secs > 0.0 {
-        stats.triples as f64 / secs
-    } else {
-        0.0
-    };
+    let tps = per_sec(stats.triples as f64, secs);
     emit(&[
         ("kind", "\"import\"".into()),
         ("input_triples", stats.triples.to_string()),
@@ -157,10 +163,12 @@ fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
         if t.predicate.as_str() != predicate {
             continue;
         }
-        let next = ids.len() as u64;
-        let s = *ids.entry(t.subject.to_string()).or_insert(next);
-        let next = ids.len() as u64;
-        let o = *ids.entry(t.object.to_string()).or_insert(next);
+        let mut intern = |key: String| {
+            let next = ids.len() as u64;
+            *ids.entry(key).or_insert(next)
+        };
+        let s = intern(t.subject.to_string());
+        let o = intern(t.object.to_string());
         edges.push((s, o));
     }
     let parse = parse_start.elapsed();
@@ -177,11 +185,7 @@ fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
     let closure_edges = star.nvals().context("nvals")?;
 
     let secs = reason.as_secs_f64();
-    let tps = if secs > 0.0 {
-        closure_edges as f64 / secs
-    } else {
-        0.0
-    };
+    let tps = per_sec(closure_edges as f64, secs);
     emit(&[
         ("kind", "\"transitive\"".into()),
         ("nodes", n.to_string()),
@@ -202,25 +206,23 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendAr
     for f in files {
         let reader =
             BufReader::new(File::open(f).with_context(|| format!("opening {}", f.display()))?);
+        let mut insert = |t: oxrdf::Triple| {
+            dataset.insert(
+                Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
+            );
+            input += 1;
+        };
         // Format by extension: `.ttl` → Turtle, everything else → N-Triples.
         // SPB ontologies and reference datasets ship as Turtle; the
         // generated Creative Works are N-Triples.
         let is_turtle = f.extension().and_then(|e| e.to_str()) == Some("ttl");
         if is_turtle {
             for triple in TurtleParser::new().for_reader(reader) {
-                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
-                dataset.insert(
-                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
-                );
-                input += 1;
+                insert(triple.with_context(|| format!("parsing {}", f.display()))?);
             }
         } else {
             for triple in NTriplesParser::new().for_reader(reader) {
-                let t = triple.with_context(|| format!("parsing {}", f.display()))?;
-                dataset.insert(
-                    Quad::new(t.subject, t.predicate, t.object, GraphName::DefaultGraph).as_ref(),
-                );
-                input += 1;
+                insert(triple.with_context(|| format!("parsing {}", f.display()))?);
             }
         }
     }
@@ -231,11 +233,9 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendAr
     engine.load(&dataset).context("materializing")?;
     let reason = reason_start.elapsed();
     // Per-phase wall-clock attribution (summed across semi-naïve rounds).
-    let timings = engine
-        .last_stats()
-        .map(|s| s.timings.clone())
-        .unwrap_or_default();
-    let rounds = engine.last_stats().map(|s| s.rounds).unwrap_or(0);
+    let stats = engine.last_stats();
+    let timings = stats.map(|s| s.timings.clone()).unwrap_or_default();
+    let rounds = stats.map(|s| s.rounds).unwrap_or(0);
 
     let asserted = engine.asserted_len().unwrap_or(0);
     let total = engine.materialized_len().unwrap_or(0);
@@ -253,12 +253,8 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendAr
     let secs = reason.as_secs_f64();
     // Throughput on *input* facts (comparable to RDFox "facts/sec" on the
     // asserted base) and on *output* facts (total closure size / time).
-    let tps_in = if secs > 0.0 {
-        asserted as f64 / secs
-    } else {
-        0.0
-    };
-    let tps_out = if secs > 0.0 { total as f64 / secs } else { 0.0 };
+    let tps_in = per_sec(asserted as f64, secs);
+    let tps_out = per_sec(total as f64, secs);
     emit(&[
         ("kind", "\"materialize\"".into()),
         ("backend", format!("\"{}\"", backend.label())),
