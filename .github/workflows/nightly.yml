@@ -109,9 +109,21 @@ jobs:
         if: always()
         run: pkill -f 'graphdb' 2>/dev/null || true
 
-      - name: trend report
+      - name: publish benchmark summary
+        if: always()
+        # Render the A/B snapshot table + a Mermaid `xychart-beta` trend
+        # line into the job's step summary. Mermaid is the only one of
+        # {raw SVG, data-URI <img>, mermaid} that survives GitHub's
+        # markdown sanitiser, so it is how we embed the graph without an
+        # uploaded asset. `always()` so the summary still publishes when
+        # the A/B leg was skipped (GraphDB unreachable). The plain-text
+        # dump still goes to the build log for quick eyeballing.
         run: |
           ./target/release/harness report --suite ldbc-spb-256 --metric aggregation-qps
+          {
+            ./target/release/harness report \
+              --suite ldbc-spb-256 --metric aggregation-qps --format markdown
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: upload sqlite
         if: always()

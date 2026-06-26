@@ -173,6 +173,36 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+
+    /// Returns `(dataset, commit_sha, timestamp_rfc3339, metric_value)` rows
+    /// for the given suite/metric, joined to `runs` for the commit and
+    /// ordered oldest-first (chronological — convenient for charting). The
+    /// `dataset` column is the engine label (e.g. "horndb", "graphdb-free"),
+    /// so callers can group an A/B series. `dataset` is nullable in the
+    /// schema; rows with a NULL dataset are reported under the empty string.
+    pub fn metric_series_by_dataset(
+        &self,
+        suite: &str,
+        metric_name: &str,
+    ) -> Result<Vec<(String, String, String, f64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(m.dataset, ''), r.commit_sha, m.timestamp, m.metric_value
+             FROM metrics m JOIN runs r ON r.run_id = m.run_id
+             WHERE m.suite = ?1 AND m.metric_name = ?2
+             ORDER BY m.timestamp ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![suite, metric_name], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
 }
 
 fn new_run_id(commit_sha: &str, reasoner_name: &str) -> String {

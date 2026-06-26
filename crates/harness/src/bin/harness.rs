@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::info;
 
 use horndb_harness::{
@@ -33,6 +33,12 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum ReportFormat {
+    Text,
+    Markdown,
+}
+
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Run the currently-selected subset against the chosen engine.
@@ -54,6 +60,11 @@ enum Cmd {
         suite: String,
         #[arg(long)]
         metric: String,
+        /// Output format. `text` is the plain trend dump; `markdown`
+        /// emits a GitHub-flavoured table + Mermaid chart suitable for
+        /// appending to `$GITHUB_STEP_SUMMARY`.
+        #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+        format: ReportFormat,
     },
     /// Walk `--root` and convert every `manifest.rdf` (RDF/XML) into
     /// a sibling `manifest.ttl`. Skips files that already have a .ttl
@@ -188,17 +199,29 @@ fn real_main() -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Report { suite, metric } => {
-            let t = report_mod::trend(&db, &suite, &metric)?;
-            println!(
-                "trend suite={} metric={} points={} regression={}",
-                t.suite,
-                t.metric,
-                t.points.len(),
-                t.regression_flag,
-            );
-            for p in &t.points {
-                println!("  {} {} {}", p.timestamp, p.run_id, p.value);
+        Cmd::Report {
+            suite,
+            metric,
+            format,
+        } => {
+            match format {
+                ReportFormat::Text => {
+                    let t = report_mod::trend(&db, &suite, &metric)?;
+                    println!(
+                        "trend suite={} metric={} points={} regression={}",
+                        t.suite,
+                        t.metric,
+                        t.points.len(),
+                        t.regression_flag,
+                    );
+                    for p in &t.points {
+                        println!("  {} {} {}", p.timestamp, p.run_id, p.value);
+                    }
+                }
+                ReportFormat::Markdown => {
+                    let groups = report_mod::series_by_dataset(&db, &suite, &metric)?;
+                    print!("{}", report_mod::render_markdown(&suite, &metric, &groups));
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
