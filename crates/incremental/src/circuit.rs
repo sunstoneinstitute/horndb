@@ -51,7 +51,7 @@ use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
 use crate::operator::NaryPlan;
 use crate::snapshot::Snapshot;
-use crate::types::{DerivationKind, LogicalTime, RuleId, TripleId};
+use crate::types::{DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
 use crate::zset::Zset;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -209,6 +209,36 @@ impl Circuit {
         materialized
     }
 
+    /// Build the per-tick dedup oracle `asserted_base ∪ derived_base` as a fresh
+    /// Z-set. Rebuilt rather than cached because `tick()` mutates `derived_base`
+    /// across its passes; callers re-acquire it after each mutation phase.
+    fn combined_base(&self) -> Zset<TripleId> {
+        let mut combined = self.asserted_base.clone();
+        combined.add_assign(&self.derived_base);
+        combined
+    }
+
+    /// Publish one derived delta and advance the derived logical clock.
+    ///
+    /// Every derived row — rule- or closure-inferred, added or withdrawn —
+    /// flows through here so the clock-advance/overflow contract and the feed
+    /// publish stay in a single place. Returns 1 so callers can fold it into
+    /// their merged-row count.
+    fn emit_derived(
+        &mut self,
+        triple: TripleId,
+        mult: Multiplicity,
+        kind: DerivationKind,
+    ) -> usize {
+        let t = self.derived_clock;
+        self.derived_clock = self
+            .derived_clock
+            .checked_add(1)
+            .expect("derived-clock overflow");
+        self.feed.publish(triple, mult, t, kind);
+        1
+    }
+
     /// Append an insertion to the pending log. Kind = Asserted.
     pub fn assert_triple(&mut self, triple: TripleId) {
         self.log.append(triple, 1, DerivationKind::Asserted);
@@ -311,8 +341,7 @@ impl Circuit {
             )
         };
 
-        let mut combined_base: Zset<TripleId> = self.asserted_base.clone();
-        combined_base.add_assign(&self.derived_base);
+        let mut combined_base = self.combined_base();
         let mut derived_merged = 0;
 
         if !has_retraction {
@@ -328,9 +357,14 @@ impl Circuit {
             const MAX_ROUNDS: usize = 64;
             let mut round_delta = asserted_delta;
 
+            // Take the plans out of `self` so the per-row `emit_derived` call
+            // (which needs `&mut self`) does not conflict with iterating
+            // `&self.plans` — the same borrow-checker dance the closure passes
+            // use. Restored after the fixed-point loop.
+            let plans = std::mem::take(&mut self.plans);
             for _ in 0..MAX_ROUNDS {
                 let mut next_delta: Zset<TripleId> = Zset::new();
-                for (plan, rid) in &self.plans {
+                for (plan, rid) in &plans {
                     let dd = plan.apply_delta(&combined_base, &round_delta);
                     // Set-semantics filter: emit only the rows that cross
                     // the "present / absent" boundary in combined_base.
@@ -349,14 +383,8 @@ impl Circuit {
                         self.derived_base.add(*triple, mult);
                         combined_base.add(*triple, mult);
                         self.rule_attr.insert(*triple, *rid);
-                        let t = self.derived_clock;
-                        self.derived_clock = self
-                            .derived_clock
-                            .checked_add(1)
-                            .expect("derived-clock overflow");
-                        self.feed
-                            .publish(*triple, mult, t, DerivationKind::RuleInferred(*rid));
-                        derived_merged += 1;
+                        derived_merged +=
+                            self.emit_derived(*triple, mult, DerivationKind::RuleInferred(*rid));
                         next_delta.add(*triple, mult);
                     }
                 }
@@ -365,6 +393,7 @@ impl Circuit {
                 }
                 round_delta = next_delta;
             }
+            self.plans = plans;
         } else {
             // ---- Retraction-containing regime (DBSP distinct-in-loop) ----
             //
@@ -415,14 +444,8 @@ impl Circuit {
                     if cur != 0 {
                         self.derived_base.add(triple, -cur);
                     }
-                    let t = self.derived_clock;
-                    self.derived_clock = self
-                        .derived_clock
-                        .checked_add(1)
-                        .expect("derived-clock overflow");
-                    self.feed
-                        .publish(triple, -1, t, DerivationKind::ClosureInferred);
-                    derived_merged += 1;
+                    derived_merged +=
+                        self.emit_derived(triple, -1, DerivationKind::ClosureInferred);
                 }
 
                 // P1 — promote deleted-but-still-entailed asserted edges. The
@@ -461,14 +484,7 @@ impl Circuit {
                     }
                     self.derived_base.add(triple, 1);
                     self.closure_support.insert(triple);
-                    let t = self.derived_clock;
-                    self.derived_clock = self
-                        .derived_clock
-                        .checked_add(1)
-                        .expect("derived-clock overflow");
-                    self.feed
-                        .publish(triple, 1, t, DerivationKind::ClosureInferred);
-                    derived_merged += 1;
+                    derived_merged += self.emit_derived(triple, 1, DerivationKind::ClosureInferred);
                 }
             }
             self.closure_plans = closure_plans;
@@ -487,8 +503,7 @@ impl Circuit {
             // on retraction ticks so this does not run twice. `combined_base`
             // currently reflects asserted ∪ derived (rebuilt below in the rule
             // diff); rebuild it here first so the closure dedup is correct.
-            combined_base = self.asserted_base.clone();
-            combined_base.add_assign(&self.derived_base);
+            combined_base = self.combined_base();
             // Finding 2 (change-feed precision, NOT a final-state bug): in a
             // single mixed tick that retracts one support path AND inserts a
             // replacement path for the SAME closure edge, the deletion pass
@@ -517,14 +532,8 @@ impl Circuit {
             for (triple, rid) in &new_rule {
                 if !old_rule.contains_key(triple) {
                     self.derived_base.add(*triple, 1);
-                    let t = self.derived_clock;
-                    self.derived_clock = self
-                        .derived_clock
-                        .checked_add(1)
-                        .expect("derived-clock overflow");
-                    self.feed
-                        .publish(*triple, 1, t, DerivationKind::RuleInferred(*rid));
-                    derived_merged += 1;
+                    derived_merged +=
+                        self.emit_derived(*triple, 1, DerivationKind::RuleInferred(*rid));
                 }
             }
             // No-longer-derivable rows → withdraw to zero + publish a
@@ -546,14 +555,8 @@ impl Circuit {
                     if cur != 0 {
                         self.derived_base.add(*triple, -cur);
                     }
-                    let t = self.derived_clock;
-                    self.derived_clock = self
-                        .derived_clock
-                        .checked_add(1)
-                        .expect("derived-clock overflow");
-                    self.feed
-                        .publish(*triple, -1, t, DerivationKind::RuleInferred(*old_rid));
-                    derived_merged += 1;
+                    derived_merged +=
+                        self.emit_derived(*triple, -1, DerivationKind::RuleInferred(*old_rid));
                 }
             }
             self.rule_attr = new_rule;
@@ -561,8 +564,7 @@ impl Circuit {
             // Keep `combined_base` consistent for the closure pass below
             // (closure plans dedup against it). Rebuild from the now-current
             // asserted + derived bases.
-            combined_base = self.asserted_base.clone();
-            combined_base.add_assign(&self.derived_base);
+            combined_base = self.combined_base();
         }
 
         // Closure INSERTION pass (SPEC-06 F5). On insertion-only ticks this runs
@@ -650,14 +652,7 @@ impl Circuit {
                 self.derived_base.add(triple, 1);
                 combined_base.add(triple, 1);
                 self.closure_support.insert(triple);
-                let t = self.derived_clock;
-                self.derived_clock = self
-                    .derived_clock
-                    .checked_add(1)
-                    .expect("derived-clock overflow");
-                self.feed
-                    .publish(triple, 1, t, DerivationKind::ClosureInferred);
-                merged += 1;
+                merged += self.emit_derived(triple, 1, DerivationKind::ClosureInferred);
             }
         }
         self.closure_plans = closure_plans;

@@ -43,14 +43,12 @@ impl ChangeFeed {
         time: LogicalTime,
         kind: DerivationKind,
     ) {
-        let rec = DeltaRecord {
+        self.publish_record(DeltaRecord {
             triple,
             mult,
             time,
             kind,
-        };
-        let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
-        subs.retain(|tx| tx.send(rec).is_ok());
+        });
     }
 
     pub fn publish_record(&self, rec: DeltaRecord) {
