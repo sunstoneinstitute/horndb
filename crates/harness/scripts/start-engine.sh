@@ -22,7 +22,7 @@
 #   DATA_FILES="closure.nt" ./start-engine.sh
 #
 # Environment knobs:
-#   BIND           bind address (default 127.0.0.1:7878)
+#   BIND           bind address (default 127.0.0.1:3840)
 #   MATERIALIZE    1 to run the OWL 2 RL materialize step (default 0)
 #   CORPUS_DIRS    space-separated dirs scanned for *.ttl / *.nt to feed
 #                  the materialize step (when MATERIALIZE=1)
@@ -39,7 +39,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 
-BIND="${BIND:-127.0.0.1:7878}"
+BIND="${BIND:-127.0.0.1:3840}"
 MATERIALIZE="${MATERIALIZE:-0}"
 DUMP_NT="${DUMP_NT:-$ROOT/target/horndb-materialized.nt}"
 RELEASE="${RELEASE:-0}"
