@@ -80,25 +80,7 @@ fn run_one(
     start: Instant,
 ) -> Result<Outcome> {
     let path: PathBuf = root.join(&ont.path);
-    let bytes = std::fs::read(&path)?;
-    let base_iri = format!("file://{}", path.display());
-    let mut graph = oxrdf::Graph::new();
-    let parser = oxttl::TurtleParser::new()
-        .with_base_iri(&base_iri)?
-        .for_slice(&bytes);
-    for triple in parser {
-        let t = triple?;
-        graph.insert(&t);
-    }
-    let mut dataset = oxrdf::Dataset::new();
-    for triple in graph.iter() {
-        dataset.insert(&oxrdf::Quad::new(
-            triple.subject.into_owned(),
-            triple.predicate.into_owned(),
-            triple.object.into_owned(),
-            oxrdf::GraphName::DefaultGraph,
-        ));
-    }
+    let dataset = crate::rdf::load_turtle_dataset(&path)?;
 
     engine.load(&dataset)?;
     if start.elapsed() > PER_ONTOLOGY_BUDGET {

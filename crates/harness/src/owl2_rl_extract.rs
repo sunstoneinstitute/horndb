@@ -222,33 +222,31 @@ pub fn extract(source: &Path, out_dir: &Path) -> Result<ExtractStats> {
 /// Sanitise `id` for use as both a filename stem and a Turtle relative
 /// IRI fragment. Drops anything outside `[A-Za-z0-9._-]`.
 fn sanitise_id(id: &str) -> String {
+    // Map anything outside `[A-Za-z0-9._-]` to `_`, collapsing runs of
+    // underscores in the same pass so e.g. `FS2RDF--ar` stays readable.
     let mut out = String::with_capacity(id.len());
-    for ch in id.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    // Collapse runs of underscores so e.g. `FS2RDF--ar` stays readable.
-    let mut squashed = String::with_capacity(out.len());
     let mut prev_us = false;
-    for ch in out.chars() {
-        if ch == '_' {
+    for ch in id.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            ch
+        } else {
+            '_'
+        };
+        if mapped == '_' {
             if !prev_us {
-                squashed.push('_');
+                out.push('_');
             }
             prev_us = true;
         } else {
-            squashed.push(ch);
+            out.push(mapped);
             prev_us = false;
         }
     }
-    let trimmed = squashed.trim_matches('_').to_string();
+    let trimmed = out.trim_matches('_');
     if trimmed.is_empty() {
         "case".to_string()
     } else {
-        trimmed
+        trimmed.to_string()
     }
 }
 
@@ -256,24 +254,20 @@ fn sanitise_id(id: &str) -> String {
 /// `test:*Test` rdf:type values it carries. `ProfileIdentificationTest`
 /// is metadata and is ignored.
 fn pick_kinds(types: &[String]) -> Vec<ManifestKind> {
-    let pe_iri = format!("{TEST_NS}PositiveEntailmentTest");
-    let ne_iri = format!("{TEST_NS}NegativeEntailmentTest");
-    let cons_iri = format!("{TEST_NS}ConsistencyTest");
-    let incons_iri = format!("{TEST_NS}InconsistencyTest");
-    let mut out = Vec::new();
-    if types.iter().any(|t| t == &pe_iri) {
-        out.push(ManifestKind::PositiveEntailment);
-    }
-    if types.iter().any(|t| t == &ne_iri) {
-        out.push(ManifestKind::NegativeEntailment);
-    }
-    if types.iter().any(|t| t == &cons_iri) {
-        out.push(ManifestKind::Consistency);
-    }
-    if types.iter().any(|t| t == &incons_iri) {
-        out.push(ManifestKind::Inconsistency);
-    }
-    out
+    const TABLE: [(&str, ManifestKind); 4] = [
+        ("PositiveEntailmentTest", ManifestKind::PositiveEntailment),
+        ("NegativeEntailmentTest", ManifestKind::NegativeEntailment),
+        ("ConsistencyTest", ManifestKind::Consistency),
+        ("InconsistencyTest", ManifestKind::Inconsistency),
+    ];
+    TABLE
+        .into_iter()
+        .filter(|(local, _)| {
+            let iri = format!("{TEST_NS}{local}");
+            types.contains(&iri)
+        })
+        .map(|(_, kind)| kind)
+        .collect()
 }
 
 /// Parse the (entity-expanded) profile-RL.rdf body into one draft per
@@ -433,6 +427,7 @@ fn write_turtle(body: &str, dest: &Path) -> Result<()> {
 
 /// Render the synthesised mf:Manifest as Turtle.
 fn render_manifest(entries: &[ManifestEntry]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
     out.push_str("@prefix mf:  <http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#> .\n");
     out.push_str("@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n");
@@ -448,19 +443,20 @@ fn render_manifest(entries: &[ManifestEntry]) -> String {
     out.push_str("<#manifest> a mf:Manifest ;\n");
     out.push_str("    mf:entries (\n");
     for entry in entries {
-        out.push_str(&format!("        <#{}>\n", entry.id));
+        let _ = writeln!(out, "        <#{}>", entry.id);
     }
     out.push_str("    ) .\n\n");
     for entry in entries {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "<#{id}> a {ty} ;\n    mf:name {name} ;\n    mf:action <{premise}>",
             id = entry.id,
             ty = entry.kind.mf_type(),
             name = turtle_literal(&entry.name),
             premise = entry.premise.display(),
-        ));
+        );
         if let Some(c) = &entry.conclusion {
-            out.push_str(&format!(" ;\n    mf:result <{}>", c.display()));
+            let _ = write!(out, " ;\n    mf:result <{}>", c.display());
         }
         out.push_str(" .\n\n");
     }

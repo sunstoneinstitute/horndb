@@ -15,6 +15,7 @@ pub mod outcome;
 pub mod owl2_rl_extract;
 #[cfg(feature = "real-engine")]
 pub mod owlrl_engine;
+pub mod rdf;
 pub mod reasoner;
 pub mod report;
 pub mod runner;

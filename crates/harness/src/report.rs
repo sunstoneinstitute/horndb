@@ -51,7 +51,7 @@ fn detect_regression(points: &[TrendPoint]) -> bool {
         return false;
     }
     let mut window: Vec<f64> = points[1..8].iter().map(|p| p.value).collect();
-    window.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    window.sort_by(f64::total_cmp);
     let median = window[3];
     let latest = points[0].value;
     // Latency metric semantics: higher is worse. A regression is

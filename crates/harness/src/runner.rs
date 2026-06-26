@@ -6,10 +6,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use oxrdf::{Dataset, Graph, GraphName, Quad};
-use oxttl::{NTriplesParser, TurtleParser};
+use oxttl::NTriplesParser;
 
 use crate::outcome::{Outcome, Report, Status};
+use crate::rdf::load_turtle_dataset;
 use crate::reasoner::Reasoner;
 use crate::selected::Selected;
 use crate::testcase::{Suite, TestCase, TestKind};
@@ -91,8 +91,8 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             premise,
             conclusion,
         } => {
-            let p = load_dataset(premise)?;
-            let c = load_dataset(conclusion)?;
+            let p = load_turtle_dataset(premise)?;
+            let c = load_turtle_dataset(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
                 (Status::Passed, None)
@@ -107,8 +107,8 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             premise,
             conclusion,
         } => {
-            let p = load_dataset(premise)?;
-            let c = load_dataset(conclusion)?;
+            let p = load_turtle_dataset(premise)?;
+            let c = load_turtle_dataset(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
                 (
@@ -120,7 +120,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             }
         }
         TestKind::Consistency { premise } => {
-            let p = load_dataset(premise)?;
+            let p = load_turtle_dataset(premise)?;
             engine.load(&p)?;
             if engine.is_consistent()? {
                 (Status::Passed, None)
@@ -132,7 +132,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             }
         }
         TestKind::Inconsistency { premise } => {
-            let p = load_dataset(premise)?;
+            let p = load_turtle_dataset(premise)?;
             engine.load(&p)?;
             if !engine.is_consistent()? {
                 (Status::Passed, None)
@@ -212,7 +212,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             data,
             expected,
         } => {
-            let d = load_dataset(data)?;
+            let d = load_turtle_dataset(data)?;
             engine.load(&d)?;
             let q = fs::read_to_string(query)
                 .with_context(|| format!("reading query {}", query.display()))?;
@@ -296,29 +296,6 @@ fn parse_ntriples_bytes(bytes: &[u8]) -> Result<usize> {
         count += 1;
     }
     Ok(count)
-}
-
-fn load_dataset(path: &Path) -> Result<Dataset> {
-    let bytes = fs::read(path).with_context(|| format!("reading rdf {}", path.display()))?;
-    let base_iri = format!("file://{}", path.display());
-    let mut graph = Graph::new();
-    let parser = TurtleParser::new()
-        .with_base_iri(&base_iri)?
-        .for_slice(&bytes);
-    for triple in parser {
-        let t = triple?;
-        graph.insert(&t);
-    }
-    let mut dataset = Dataset::new();
-    for triple in graph.iter() {
-        dataset.insert(&Quad::new(
-            triple.subject.into_owned(),
-            triple.predicate.into_owned(),
-            triple.object.into_owned(),
-            GraphName::DefaultGraph,
-        ));
-    }
-    Ok(dataset)
 }
 
 #[cfg(test)]
