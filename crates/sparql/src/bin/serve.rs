@@ -35,8 +35,8 @@ struct Cli {
     #[arg(long = "data", required = true, num_args = 1..)]
     data: Vec<PathBuf>,
 
-    /// Address to bind, e.g. `127.0.0.1:7878`.
-    #[arg(long = "bind", default_value = "127.0.0.1:7878")]
+    /// Address to bind, e.g. `127.0.0.1:3840` (3840 is HornDB's standard port).
+    #[arg(long = "bind", default_value = "127.0.0.1:3840")]
     bind: String,
 
     /// Run OWL 2 RL materialization over the loaded data and serve the

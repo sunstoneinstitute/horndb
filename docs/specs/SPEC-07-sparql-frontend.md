@@ -39,7 +39,7 @@ The mode is selected per-query via a non-standard pragma or globally by configur
 
 **F6. Result serialization.** Stream results — never buffer the entire result set in memory. Backpressure via the underlying HTTP/2 stream where the protocol supports it.
 
-**F7. SPARQL Protocol.** Embedded HTTP server (axum or hyper-based) exposing the standard `/query` and `/update` endpoints. Authentication is out-of-scope at the spec level; a reverse-proxy or sidecar pattern is assumed.
+**F7. SPARQL Protocol.** Embedded HTTP server (axum or hyper-based) exposing the standard `/query` and `/update` endpoints. The standard HornDB listen port is **3840** (IANA-registered to an unrelated, defunct service, so collisions are practically nil); the default bind is `127.0.0.1:3840`, overridable via the `serve` binary's `--bind` flag. Authentication is out-of-scope at the spec level; a reverse-proxy or sidecar pattern is assumed.
 
 **F8. Property paths.** Implement all SPARQL 1.1 path operators (`/`, `^`, `|`, `?`, `+`, `*`, `!`). For `*` and `+` with reasoning enabled, the planner is allowed to invoke SPEC-05 closure (and materialize the result of the path query) rather than evaluate the path natively, when selectivity favours it.
 
