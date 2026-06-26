@@ -1,0 +1,63 @@
+name: Tag Version
+
+# Mirrors sunstoneinstitute/claude-plugins' tag-plugin-versions.yml. When a
+# workspace version change lands on main via a human-authored push (e.g. a PR
+# that edits Cargo.toml's version directly), tag the commit `vX.Y.Z` if that
+# tag does not already exist. Idempotent: Cargo.toml edits that do not change
+# the version (e.g. dependency bumps) re-run this but create no tag.
+#
+# Note: the bot bumps from bump-version-on-merge.yml are tagged inline by that
+# workflow, because a push made with GITHUB_TOKEN does not trigger this one.
+# This workflow is the safety net for the human-merge path.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Fetch existing tags
+        run: git fetch --tags --force
+
+      - name: Tag the workspace version
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 - <<'PY'
+          import re
+          section = None
+          for line in open("Cargo.toml"):
+              s = line.strip()
+              if s.startswith("[") and s.endswith("]"):
+                  section = s
+                  continue
+              if section == "[workspace.package]":
+                  m = re.match(r'version\s*=\s*"([^"]+)"\s*$', s)
+                  if m:
+                      print(m.group(1))
+                      break
+          PY
+          )
+          if [ -z "$VERSION" ]; then
+            echo "::error::No [workspace.package] version found in Cargo.toml"
+            exit 1
+          fi
+          TAG="v$VERSION"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists. Nothing to do."
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "::notice::Created tag $TAG"

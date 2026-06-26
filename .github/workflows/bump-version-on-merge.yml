@@ -1,0 +1,119 @@
+name: Bump Version on Merge
+
+# Adapted from sunstoneinstitute/claude-plugins
+# (.github/workflows/bump-versions-on-merge.yml), reshaped for HornDB's single
+# workspace version. After a PR merges into main, read its bump-* label and
+# push a "Bump version:" commit to main. tag-version.yml then tags vX.Y.Z.
+# No bump-* label → no bump (a comment explains the skip).
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: bump-version-main
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine bump type from PR labels
+        id: bump_type
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          BUMP_TYPE=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --json labels -q '.labels[].name' | grep -oE 'bump-(major|minor|patch)' | head -1 || true)
+          if [ -z "$BUMP_TYPE" ]; then
+            echo "::notice::No bump-major/minor/patch label on PR #$PR_NUMBER. Skipping version bump."
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+              --body "Version bump skipped: no \`bump-major\`/\`bump-minor\`/\`bump-patch\` label on this PR." || true
+            echo "type=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Detected bump type: ${BUMP_TYPE#bump-}"
+          echo "type=${BUMP_TYPE#bump-}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if the PR already bumped the version
+        id: already
+        if: steps.bump_type.outputs.type != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --json commits -q '.commits[].messageHeadline' | grep -q '^Bump version:'; then
+            echo "::notice::PR #$PR_NUMBER already contains a version-bump commit. Skipping."
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump workspace version and push to main
+        if: steps.bump_type.outputs.type != '' && steps.already.outputs.already == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUMP_TYPE: ${{ steps.bump_type.outputs.type }}
+        run: |
+          set -e
+          NEW=$(python3 scripts/bump-version.py --bump-type "$BUMP_TYPE")
+          if git diff --quiet -- Cargo.toml; then
+            echo "::notice::Cargo.toml unchanged by the bump. Nothing to commit."
+            exit 0
+          fi
+          # Keep Cargo.lock's member entries in lockstep with the bumped
+          # manifest (members are local, so --offline needs no registry).
+          cargo update --workspace --offline || true
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump version: $BUMP_TYPE -> $NEW (PR #$PR_NUMBER)"
+
+          # Push with retry — if a concurrent merge landed first, rebase + retry.
+          pushed=false
+          for attempt in 1 2 3; do
+            if git push origin main; then
+              echo "Bump to $NEW pushed on attempt $attempt."
+              pushed=true
+              break
+            fi
+            echo "Push attempt $attempt failed. Rebasing and retrying..."
+            git pull --rebase origin main || true
+            sleep $((attempt * 5))
+          done
+          if [ "$pushed" != true ]; then
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+              --body "Version bump to \`$NEW\` failed to push to main after 3 attempts. Manual bump required." || true
+            exit 1
+          fi
+
+          # Tag the bump here. The push above used GITHUB_TOKEN, and pushes made
+          # with that token do NOT trigger other workflows — so tag-version.yml
+          # would not fire for this commit. Create the tag inline instead.
+          # (tag-version.yml still covers version changes that land on main via
+          # a human-authored merge, which does emit a triggering push event.)
+          TAG="v$NEW"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists."
+          else
+            git tag "$TAG"
+            git push origin "$TAG" || echo "::warning::Failed to push tag $TAG"
+          fi

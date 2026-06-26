@@ -1023,7 +1023,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "horndb-bench-rdfox"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-closure"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -1052,11 +1052,11 @@ dependencies = [
 
 [[package]]
 name = "horndb-hardware-ext"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "horndb-harness"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1087,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-incremental"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-ml"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-owlrl"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-sparql"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1161,7 +1161,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-storage"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "horndb-wcoj"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",

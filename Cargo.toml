@@ -27,6 +27,12 @@ default-members = [
 ]
 
 [workspace.package]
+# Single source of truth for every member crate's version (each crate sets
+# `version.workspace = true`). Bumped on merge by the `bump-*` PR label via
+# scripts/bump-version.py + .github/workflows/bump-version-on-merge.yml, then
+# tagged `vX.Y.Z` by tag-version.yml. `crates/python` is deliberately outside
+# this workspace, so it keeps its own version.
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.87"
 license = "Apache-2.0"

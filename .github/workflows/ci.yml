@@ -2,11 +2,72 @@ name: ci
 
 on:
   pull_request:
+    # `labeled` is included so that applying `can-be-tested` to a PR from a
+    # non-owner re-triggers CI (the gate job below re-evaluates and lets it
+    # through). opened/synchronize/reopened are the normal build triggers.
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
 jobs:
+  # Decide whether this event may consume CI. Pushes to main are always trusted
+  # (already-merged code). A pull request builds only when its author is a code
+  # owner or a trusted collaborator has applied the `can-be-tested` label —
+  # otherwise the build jobs are skipped. This keeps fork / drive-by PRs from
+  # auto-running the workspace build until a maintainer opts them in. Note:
+  # applying labels needs Triage+ on the repo, so a PR author cannot
+  # self-authorise by labelling their own PR.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - name: Decide whether to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # Non-PR events (push to main) are trusted — always build.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Event ${{ github.event_name }} is trusted — building."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A trusted collaborator applied the opt-in label.
+          if ${{ contains(github.event.pull_request.labels.*.name, 'can-be-tested') }}; then
+            echo "PR carries the 'can-be-tested' label — building."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # PR author is a code owner. Read CODEOWNERS from the BASE commit
+          # (trusted) via the API — never the PR's own copy, which the author
+          # could edit to add themselves. Only simple `@user` owners are
+          # recognised (HornDB uses `* @stigsb`); `@org/team` owners would need
+          # a membership lookup and are intentionally not resolved here.
+          OWNERS=$(gh api \
+            "repos/${{ github.repository }}/contents/.github/CODEOWNERS?ref=$BASE_SHA" \
+            --jq '.content' 2>/dev/null | base64 -d 2>/dev/null \
+            | sed 's/#.*//' | grep -oE '@[A-Za-z0-9-]+' | tr -d '@' | sort -u || true)
+          echo "Code owners: $(echo "$OWNERS" | tr '\n' ' ')"
+          if [ -n "$OWNERS" ] && echo "$OWNERS" | grep -qx "$AUTHOR"; then
+            echo "Author $AUTHOR is a code owner — building."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice::Author '$AUTHOR' is not a code owner and the PR lacks the 'can-be-tested' label — skipping the build. A maintainer can add that label to authorise CI."
+          echo "build=false" >> "$GITHUB_OUTPUT"
+
   lint-test-conformance:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -107,6 +168,8 @@ jobs:
   # wheel with maturin and runs the pytest suite against upstream rdflib
   # (SPEC-10 acceptance #1, #2, #6, #7 — Linux target).
   python-rdflib-compat:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

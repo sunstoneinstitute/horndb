@@ -1,0 +1,9 @@
+# Code owners for HornDB.
+#
+# The default owner reviews every path unless a more specific rule below
+# overrides it. The CI gate (.github/workflows/ci.yml) also reads the owner
+# logins here to decide whether a pull request may run the build automatically;
+# see that workflow for the trust model.
+
+# Default owner for everything in the repo.
+* @stigsb
