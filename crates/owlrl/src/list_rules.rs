@@ -523,14 +523,16 @@ fn is_dirty(dirty: Option<&FxHashSet<TermId>>, p: TermId) -> bool {
 /// Apply `f` to every subject in `xs`, collecting the `Some` results. Uses
 /// rayon when `parallel == Auto` and `xs` is above `PAR_TYPE_THRESHOLD`;
 /// sequential otherwise. `f` must be a pure read over the (immutable) store.
-fn map_subjects<F>(xs: &[TermId], parallel: ParallelStrategy, f: F) -> Vec<(Triple, Provenance)>
+fn map_subjects<T, R, F>(xs: &[T], parallel: ParallelStrategy, f: F) -> Vec<R>
 where
-    F: Fn(TermId) -> Option<(Triple, Provenance)> + Sync + Send,
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> Option<R> + Sync + Send,
 {
     if parallel == ParallelStrategy::Auto && xs.len() >= PAR_TYPE_THRESHOLD {
-        xs.par_iter().filter_map(|&x| f(x)).collect()
+        xs.par_iter().filter_map(&f).collect()
     } else {
-        xs.iter().filter_map(|&x| f(x)).collect()
+        xs.iter().filter_map(f).collect()
     }
 }
 
@@ -763,7 +765,7 @@ fn fire_cls_int1(
         .map(|t| t.s)
         .collect();
 
-    let emit = |x: TermId| -> Option<(Triple, Provenance)> {
+    let emit = |&x: &TermId| -> Option<(Triple, Provenance)> {
         if !cs[1..]
             .iter()
             .all(|&c_i| store.contains(&Triple::new(x, vocab.rdf_type, c_i)))
@@ -851,7 +853,7 @@ fn fire_cls_uni(
         }
     }
 
-    let emit = |(x, c_i): (TermId, TermId)| -> Option<(Triple, Provenance)> {
+    let emit = |&(x, c_i): &(TermId, TermId)| -> Option<(Triple, Provenance)> {
         let head = Triple::new(x, vocab.rdf_type, c);
         if store.contains(&head) {
             return None;
@@ -866,12 +868,7 @@ fn fire_cls_uni(
         ))
     };
 
-    let produced = if parallel == ParallelStrategy::Auto && subjects.len() >= PAR_TYPE_THRESHOLD {
-        subjects.par_iter().filter_map(|&m| emit(m)).collect()
-    } else {
-        subjects.iter().filter_map(|&m| emit(m)).collect()
-    };
-    extend_delta(out, produced);
+    extend_delta(out, map_subjects(&subjects, parallel, emit));
 }
 
 // ---------------------------------------------------------------------------
@@ -908,7 +905,7 @@ fn fire_cax_adc(
             // For this disjoint pair (ci, cj), each subject of ci that is also a
             // cj is an inconsistency. The per-subject test is independent, so it
             // parallelises over the (skewed) ci extent.
-            let emit = |x: TermId| -> Option<(TermId, Triple, Provenance)> {
+            let emit = |&x: &TermId| -> Option<(TermId, Triple, Provenance)> {
                 if !store.contains(&Triple::new(x, vocab.rdf_type, cj)) {
                     return None;
                 }
@@ -931,12 +928,7 @@ fn fire_cax_adc(
             };
             // `map_subjects` over xs_i yields ≤ one head per distinct subject of
             // this pair; the outer `seen` collapses the same subject across pairs.
-            let pair_hits: Vec<(TermId, Triple, Provenance)> =
-                if parallel == ParallelStrategy::Auto && xs_i.len() >= PAR_TYPE_THRESHOLD {
-                    xs_i.par_iter().filter_map(|&x| emit(x)).collect()
-                } else {
-                    xs_i.iter().filter_map(|&x| emit(x)).collect()
-                };
+            let pair_hits = map_subjects(&xs_i, parallel, emit);
             for (x, head, prov) in pair_hits {
                 if seen.insert(x) {
                     out.insert(head, prov);

@@ -66,8 +66,10 @@ impl Delta {
     /// Drop any triples already present in `existing`.
     pub fn subtract(&mut self, existing: &FxHashSet<Triple>) {
         self.triples.retain(|t| !existing.contains(t));
-        let live = self.triples.clone();
-        self.proofs.retain(|t, _| live.contains(t));
+        // `proofs` keys are a subset of `triples`, so the same predicate drops
+        // exactly the proofs whose triples were just removed — no need to
+        // snapshot the retained set.
+        self.proofs.retain(|t, _| !existing.contains(t));
     }
 }
 

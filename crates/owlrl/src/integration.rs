@@ -323,14 +323,7 @@ impl Engine {
     /// dumping / benchmarking, not a hot path.
     pub fn materialized_triples(&self) -> Option<Vec<(String, String, String)>> {
         let state = self.state.as_ref()?;
-        // Invert the dictionary: TermId → lexical key. The dict maps the
-        // canonical lexical key to its id, so just flip it. Vocabulary
-        // IRIs live in here too (seeded from `base_dict`), so OWL/RDF/RDFS
-        // terms decode correctly.
-        let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-        for (lex, &id) in &state.dict {
-            rev.insert(id, lex.as_str());
-        }
+        let rev = invert_dict(&state.dict);
         let mut out = Vec::new();
         for t in state.store.all_triples() {
             let (Some(&s), Some(&p), Some(&o)) = (rev.get(&t.s), rev.get(&t.p), rev.get(&t.o))
@@ -364,12 +357,7 @@ impl Engine {
         if !state.store.contains(&triple) {
             return None;
         }
-        // Invert the dictionary once: TermId → lexical key (see
-        // `materialized_triples`).
-        let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-        for (lex, &id) in &state.dict {
-            rev.insert(id, lex.as_str());
-        }
+        let rev = invert_dict(&state.dict);
         Some(decode_proof(&state.store.proof_tree(&triple), &rev))
     }
 
@@ -392,6 +380,15 @@ impl Default for Engine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Invert the dictionary into a `TermId → lexical key` map. The forward dict
+/// maps each canonical lexical key to its id; the read paths below (proof
+/// decoding, triple/literal/cardinality resolution) need the reverse. Vocabulary
+/// IRIs live in the dict too (seeded from `base_dict`), so OWL/RDF/RDFS terms
+/// decode correctly.
+fn invert_dict(dict: &FxHashMap<String, TermId>) -> FxHashMap<TermId, &str> {
+    dict.iter().map(|(lex, &id)| (id, lex.as_str())).collect()
 }
 
 /// Decode a [`ProofTree`] into a [`StringProofTree`], mapping each node's
@@ -456,11 +453,7 @@ fn resolve_max_card_restrictions(
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
 ) -> Vec<MaxCardRestriction> {
-    // Invert the dictionary once: TermId → lexical key.
-    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-    for (lex, &id) in dict {
-        rev.insert(id, lex.as_str());
-    }
+    let rev = invert_dict(dict);
     let mut out = Vec::new();
     for card in store.scan_predicate(vocab.owl_max_cardinality) {
         let class = card.s;
@@ -493,11 +486,7 @@ fn resolve_qual_max_card_restrictions(
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
 ) -> Vec<QualMaxCardRestriction> {
-    // Invert the dictionary once: TermId → lexical key.
-    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-    for (lex, &id) in dict {
-        rev.insert(id, lex.as_str());
-    }
+    let rev = invert_dict(dict);
     let mut out = Vec::new();
     for card in store.scan_predicate(vocab.owl_max_qualified_cardinality) {
         let class = card.s;
@@ -555,11 +544,7 @@ fn inject_datatype_literal_axioms(
 ) {
     use crate::datatype_literals::{classify, parse_literal_key, ValueClass};
 
-    // Invert the dictionary once: TermId → lexical key.
-    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-    for (lex, &id) in dict {
-        rev.insert(id, lex.as_str());
-    }
+    let rev = invert_dict(dict);
 
     // Collect the distinct literal object terms actually present in the data.
     // A term is a literal iff its lexical key parses as one (`"…"^^<…>` or
@@ -636,10 +621,7 @@ fn validate_derived_datatype_memberships(
     const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
     // TermId → lexical key, for both literal subjects and datatype-IRI objects.
-    let mut rev: FxHashMap<TermId, &str> = FxHashMap::default();
-    for (lex, &id) in dict {
-        rev.insert(id, lex.as_str());
-    }
+    let rev = invert_dict(dict);
 
     let mut violations: Vec<TermId> = Vec::new();
     for t in store.scan_predicate(vocab.rdf_type) {
@@ -725,61 +707,61 @@ fn parse_card_literal(lex: &str) -> Option<u8> {
 fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
     let mut id: u64 = 1;
     let mut dict: FxHashMap<String, TermId> = FxHashMap::default();
-    let alloc = |iri: &str, id: &mut u64, dict: &mut FxHashMap<String, TermId>| -> TermId {
-        let t = TermId(*id);
-        *id += 1;
+    let mut alloc = |iri: &str| -> TermId {
+        let t = TermId(id);
+        id += 1;
         dict.insert(iri.to_string(), t);
         t
     };
     let vocab = Vocabulary {
-        rdf_type: alloc(RDF_TYPE, &mut id, &mut dict),
-        rdf_first: alloc(RDF_FIRST, &mut id, &mut dict),
-        rdf_rest: alloc(RDF_REST, &mut id, &mut dict),
-        rdf_nil: alloc(RDF_NIL, &mut id, &mut dict),
-        rdfs_sub_class_of: alloc(RDFS_SUB_CLASS_OF, &mut id, &mut dict),
-        rdfs_sub_property_of: alloc(RDFS_SUB_PROPERTY_OF, &mut id, &mut dict),
-        rdfs_domain: alloc(RDFS_DOMAIN, &mut id, &mut dict),
-        rdfs_range: alloc(RDFS_RANGE, &mut id, &mut dict),
-        owl_class: alloc(OWL_CLASS, &mut id, &mut dict),
-        owl_thing: alloc(OWL_THING, &mut id, &mut dict),
-        owl_nothing: alloc(OWL_NOTHING, &mut id, &mut dict),
-        owl_same_as: alloc(OWL_SAME_AS, &mut id, &mut dict),
-        owl_different_from: alloc(OWL_DIFFERENT_FROM, &mut id, &mut dict),
-        owl_equivalent_class: alloc(OWL_EQUIVALENT_CLASS, &mut id, &mut dict),
-        owl_equivalent_property: alloc(OWL_EQUIVALENT_PROPERTY, &mut id, &mut dict),
-        owl_inverse_of: alloc(OWL_INVERSE_OF, &mut id, &mut dict),
-        owl_functional_property: alloc(OWL_FUNCTIONAL_PROPERTY, &mut id, &mut dict),
-        owl_inverse_functional_property: alloc(OWL_INVERSE_FUNCTIONAL_PROPERTY, &mut id, &mut dict),
-        owl_symmetric_property: alloc(OWL_SYMMETRIC_PROPERTY, &mut id, &mut dict),
-        owl_transitive_property: alloc(OWL_TRANSITIVE_PROPERTY, &mut id, &mut dict),
-        owl_irreflexive_property: alloc(OWL_IRREFLEXIVE_PROPERTY, &mut id, &mut dict),
-        owl_reflexive_property: alloc(OWL_REFLEXIVE_PROPERTY, &mut id, &mut dict),
-        owl_asymmetric_property: alloc(OWL_ASYMMETRIC_PROPERTY, &mut id, &mut dict),
-        owl_property_disjoint_with: alloc(OWL_PROPERTY_DISJOINT_WITH, &mut id, &mut dict),
-        owl_disjoint_with: alloc(OWL_DISJOINT_WITH, &mut id, &mut dict),
-        owl_complement_of: alloc(OWL_COMPLEMENT_OF, &mut id, &mut dict),
-        owl_intersection_of: alloc(OWL_INTERSECTION_OF, &mut id, &mut dict),
-        owl_union_of: alloc(OWL_UNION_OF, &mut id, &mut dict),
-        owl_some_values_from: alloc(OWL_SOME_VALUES_FROM, &mut id, &mut dict),
-        owl_all_values_from: alloc(OWL_ALL_VALUES_FROM, &mut id, &mut dict),
-        owl_has_value: alloc(OWL_HAS_VALUE, &mut id, &mut dict),
-        owl_on_property: alloc(OWL_ON_PROPERTY, &mut id, &mut dict),
-        owl_max_cardinality: alloc(OWL_MAX_CARDINALITY, &mut id, &mut dict),
-        owl_max_qualified_cardinality: alloc(OWL_MAX_QUALIFIED_CARDINALITY, &mut id, &mut dict),
-        owl_on_class: alloc(OWL_ON_CLASS, &mut id, &mut dict),
-        owl_source_individual: alloc(OWL_SOURCE_INDIVIDUAL, &mut id, &mut dict),
-        owl_assertion_property: alloc(OWL_ASSERTION_PROPERTY, &mut id, &mut dict),
-        owl_target_individual: alloc(OWL_TARGET_INDIVIDUAL, &mut id, &mut dict),
-        owl_target_value: alloc(OWL_TARGET_VALUE, &mut id, &mut dict),
-        owl_object_property: alloc(OWL_OBJECT_PROPERTY, &mut id, &mut dict),
-        owl_property_chain_axiom: alloc(OWL_PROPERTY_CHAIN_AXIOM, &mut id, &mut dict),
-        owl_has_key: alloc(OWL_HAS_KEY, &mut id, &mut dict),
-        owl_all_disjoint_classes: alloc(OWL_ALL_DISJOINT_CLASSES, &mut id, &mut dict),
-        owl_all_disjoint_properties: alloc(OWL_ALL_DISJOINT_PROPERTIES, &mut id, &mut dict),
-        owl_all_different: alloc(OWL_ALL_DIFFERENT, &mut id, &mut dict),
-        owl_members: alloc(OWL_MEMBERS, &mut id, &mut dict),
-        owl_distinct_members: alloc(OWL_DISTINCT_MEMBERS, &mut id, &mut dict),
-        owl_named_individual: alloc(OWL_NAMED_INDIVIDUAL, &mut id, &mut dict),
+        rdf_type: alloc(RDF_TYPE),
+        rdf_first: alloc(RDF_FIRST),
+        rdf_rest: alloc(RDF_REST),
+        rdf_nil: alloc(RDF_NIL),
+        rdfs_sub_class_of: alloc(RDFS_SUB_CLASS_OF),
+        rdfs_sub_property_of: alloc(RDFS_SUB_PROPERTY_OF),
+        rdfs_domain: alloc(RDFS_DOMAIN),
+        rdfs_range: alloc(RDFS_RANGE),
+        owl_class: alloc(OWL_CLASS),
+        owl_thing: alloc(OWL_THING),
+        owl_nothing: alloc(OWL_NOTHING),
+        owl_same_as: alloc(OWL_SAME_AS),
+        owl_different_from: alloc(OWL_DIFFERENT_FROM),
+        owl_equivalent_class: alloc(OWL_EQUIVALENT_CLASS),
+        owl_equivalent_property: alloc(OWL_EQUIVALENT_PROPERTY),
+        owl_inverse_of: alloc(OWL_INVERSE_OF),
+        owl_functional_property: alloc(OWL_FUNCTIONAL_PROPERTY),
+        owl_inverse_functional_property: alloc(OWL_INVERSE_FUNCTIONAL_PROPERTY),
+        owl_symmetric_property: alloc(OWL_SYMMETRIC_PROPERTY),
+        owl_transitive_property: alloc(OWL_TRANSITIVE_PROPERTY),
+        owl_irreflexive_property: alloc(OWL_IRREFLEXIVE_PROPERTY),
+        owl_reflexive_property: alloc(OWL_REFLEXIVE_PROPERTY),
+        owl_asymmetric_property: alloc(OWL_ASYMMETRIC_PROPERTY),
+        owl_property_disjoint_with: alloc(OWL_PROPERTY_DISJOINT_WITH),
+        owl_disjoint_with: alloc(OWL_DISJOINT_WITH),
+        owl_complement_of: alloc(OWL_COMPLEMENT_OF),
+        owl_intersection_of: alloc(OWL_INTERSECTION_OF),
+        owl_union_of: alloc(OWL_UNION_OF),
+        owl_some_values_from: alloc(OWL_SOME_VALUES_FROM),
+        owl_all_values_from: alloc(OWL_ALL_VALUES_FROM),
+        owl_has_value: alloc(OWL_HAS_VALUE),
+        owl_on_property: alloc(OWL_ON_PROPERTY),
+        owl_max_cardinality: alloc(OWL_MAX_CARDINALITY),
+        owl_max_qualified_cardinality: alloc(OWL_MAX_QUALIFIED_CARDINALITY),
+        owl_on_class: alloc(OWL_ON_CLASS),
+        owl_source_individual: alloc(OWL_SOURCE_INDIVIDUAL),
+        owl_assertion_property: alloc(OWL_ASSERTION_PROPERTY),
+        owl_target_individual: alloc(OWL_TARGET_INDIVIDUAL),
+        owl_target_value: alloc(OWL_TARGET_VALUE),
+        owl_object_property: alloc(OWL_OBJECT_PROPERTY),
+        owl_property_chain_axiom: alloc(OWL_PROPERTY_CHAIN_AXIOM),
+        owl_has_key: alloc(OWL_HAS_KEY),
+        owl_all_disjoint_classes: alloc(OWL_ALL_DISJOINT_CLASSES),
+        owl_all_disjoint_properties: alloc(OWL_ALL_DISJOINT_PROPERTIES),
+        owl_all_different: alloc(OWL_ALL_DIFFERENT),
+        owl_members: alloc(OWL_MEMBERS),
+        owl_distinct_members: alloc(OWL_DISTINCT_MEMBERS),
+        owl_named_individual: alloc(OWL_NAMED_INDIVIDUAL),
     };
     debug_assert_eq!(id, USER_TERMS_BASE);
     (vocab, dict)
@@ -825,25 +807,25 @@ fn intern_term(state: &mut LoadState, t: TermRef<'_>) -> Result<TermId> {
     }
 }
 
-fn intern_named(state: &mut LoadState, iri: &str) -> TermId {
-    if let Some(&t) = state.dict.get(iri) {
+/// Look up `key` in the dictionary, allocating a fresh consecutive `TermId` on
+/// first sight. Building the canonical key (IRI / `_:bnode` / literal form) is
+/// the caller's responsibility.
+fn intern_key(state: &mut LoadState, key: &str) -> TermId {
+    if let Some(&t) = state.dict.get(key) {
         return t;
     }
     let t = TermId(state.next_id);
     state.next_id += 1;
-    state.dict.insert(iri.to_string(), t);
+    state.dict.insert(key.to_string(), t);
     t
 }
 
+fn intern_named(state: &mut LoadState, iri: &str) -> TermId {
+    intern_key(state, iri)
+}
+
 fn intern_blank(state: &mut LoadState, id: &str) -> TermId {
-    let key = format!("_:{id}");
-    if let Some(&t) = state.dict.get(&key) {
-        return t;
-    }
-    let t = TermId(state.next_id);
-    state.next_id += 1;
-    state.dict.insert(key, t);
-    t
+    intern_key(state, &format!("_:{id}"))
 }
 
 fn intern_literal(
@@ -856,13 +838,7 @@ fn intern_literal(
         Some(lang) => format!("\"{value}\"@{lang}"),
         None => format!("\"{value}\"^^<{datatype}>"),
     };
-    if let Some(&t) = state.dict.get(&key) {
-        return t;
-    }
-    let t = TermId(state.next_id);
-    state.next_id += 1;
-    state.dict.insert(key, t);
-    t
+    intern_key(state, &key)
 }
 
 /// Check whether the materialized store entails `q` (treating bnodes in
