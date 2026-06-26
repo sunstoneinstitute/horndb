@@ -46,8 +46,10 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [x] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
 - [x] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
+- [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
+- [ ] **LOW** · _Operational_ — GraphDB Free A/B reference reboot-durable (systemd unit) on hornbench ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
 - [x] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
 
 Closed tasks are listed in [Done](#done-for-traceability).
@@ -248,6 +250,20 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   full-workspace wall-clock, a recorded decision on which lever(s) to keep, and CI
   updated if the runner command changes.
 
+- [ ] **LDBC SPB nightly: scale to true SF=0.256 + editorial agents.**
+  ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
+  The nightly SPB job (`.github/workflows/nightly.yml`) runs end-to-end on
+  `hornbench` but only at **feasible scale** — a ~512k-triple materialized
+  closure, aggregation-only, `editorialAgents=0`, so the headline metric is
+  `aggregation-qps`, not the LDBC `editorial-qps`. Scale to the true SF=0.256
+  (256M-triple) dataset and enable editorial (CW insert/update/delete) agents:
+  materialize the 256M closure on `hornbench` and confirm both engines (HornDB
+  `serve`, GraphDB Free `spb` repo) can hold it; flip `editorialAgents` on in
+  `crates/harness/scenarios/spb-nightly.properties` and reconcile the nominal
+  `datasetSize` (currently 18,644,617) with what is actually loaded; move the
+  trend metric to `editorial-qps`. See `BENCHMARKS.md` and the SPB nightly row
+  in `docs/architecture.md`.
+
 ## LOW — Operational
 
 - [ ] **Disk pressure during multi-agent runs.** ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
@@ -264,6 +280,15 @@ the open work. Pull from this list when the corresponding Stage-1 slice settles.
   failed" during long agent sessions even when the desktop app is unlocked. Fix:
   keep the app foregrounded during long sessions, or pre-cache an unencrypted
   signing key for CI. (Bypassing signing is not acceptable — global rule.)
+
+- [ ] **GraphDB Free A/B reference reboot-durable (systemd unit).**
+  ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
+  `crates/harness/scripts/bootstrap-graphdb-free-spb.sh` launches the A/B
+  reference engine detached via `nohup graphdb -d`; it does not survive a
+  `hornbench` reboot, so after a restart the nightly A/B leg silently skips
+  (warning, not failure) until someone re-runs the bootstrap. Wrap GraphDB in a
+  systemd unit (or equivalent) so the service and the read-only `spb` repo come
+  back automatically.
 
 - [x] **tasks.sh portability on macOS.** ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
   `.claude/scripts/tasks.sh` needs `flock(1)` (absent on Darwin — installed
