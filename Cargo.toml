@@ -42,6 +42,9 @@ repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]
 
 [workspace.dependencies]
+# Internal leaf crate (SPEC-12). Consumers reference it with
+# `horndb-simd = { workspace = true }`.
+horndb-simd = { path = "crates/simd" }
 anyhow = "1"
 thiserror = "2"
 crossbeam-channel = "0.5"
