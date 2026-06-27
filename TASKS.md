@@ -33,6 +33,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 ## Index
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
+- [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
@@ -57,6 +58,29 @@ Closed tasks are listed in [Done](#done-for-traceability).
   is a 1:1 lowering with no cost model). Scope: hash group-by, id-based `Bindings`
   (decode to strings only at serialization), then streaming + pushdown. Revisit PGO
   only after this lands. See `docs/architecture.md` §9 and `BENCHMARKS.md`.
+
+## HIGH — Completeness
+
+- [ ] **SPEC-11 SSSOM mappings + compact crosswalk index.**
+  ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
+  First-class support for [SSSOM](https://mapping-commons.github.io/sssom/) ontology
+  crosswalks (`docs/specs/SPEC-11-mappings.md`). HornDB is the reasoning view — the
+  external SoR owns SSSOM storage/ingestion (ADR-0016, data-platform ADR-0002), so
+  this is the *reasoning + serving* half: (F1) SKOS/OWL/semapv mapping predicates in
+  `crates/owlrl/src/vocab.rs`; (F2) n-ary `sssom:Mapping` node + positive base triple,
+  negated = n-ary-only; (F3) the SSSOM chaining rules T1/RCE1-2/RI1-5/RG1-2 compiled
+  into `rules.toml` with the transitive subset delegated to GraphBLAS closure (the
+  RCE-N OWL rules are already entailed by `cax-*`/`scm-*`); (F4) monotone
+  negative-mapping chaining (`Not` as a distinct predicate — preserves SPEC-04's
+  negation-free stratification); (F5) the compact crosswalk index — rung-2 (Elias-Fano
+  subjects + Frame-of-Reference bit-packed objects, ~10 B/pair bidirectional) baseline,
+  rung-4 PGM target; (F6) crosswalk spine; (F7) confidence propagation (product default,
+  SeMRA); (F8) chain provenance (`derived_from` = proof premises); (F9) harness-only
+  SSSOM/TSV loader. **ADR-0017**: `skos:exactMatch` is a crosswalk edge, *not* OWL
+  identity. Gated by a curated SSSOM conformance subset in `harness/selected.toml`;
+  benched on hornbench (index ≤ ~10 B/pair; full-closure time vs the OxO2 1.16M-mapping
+  / 17-min baseline). Splits into shippable increments (vocab + representation → chain
+  rules → index → spine/serving). See `docs/architecture.md` §13.
 
 ## MEDIUM — Performance
 

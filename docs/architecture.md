@@ -376,7 +376,37 @@ built with maturin and exercised by a dedicated `python-rdflib-compat` CI job.
 
 ---
 
-## 13. Cross-cutting concerns
+## 13. SPEC-11 — SSSOM mappings & crosswalk index
+
+**Crate:** `crates/owlrl` (chain rules) + `crates/storage` (crosswalk index) ·
+**Spec:** `SPEC-11` · **Overall status: specified / planned**
+
+First-class support for [SSSOM](https://mapping-commons.github.io/sssom/)
+ontology crosswalks: mappings arrive as RDF from the external SoR (ADR-0016,
+data-platform ADR-0002 — HornDB does **not** parse SSSOM/TSV in production),
+their chain-rule closure is materialized by the compiled rule engine, and
+query-time crosswalking is served from a compact, SIMD-friendly index over
+sequential `TermId`s. `skos:exactMatch` is a crosswalk edge, **not** OWL
+identity (ADR-0017). Tracked as a HIGH *Completeness* task in `TASKS.md`.
+
+| Component | Status | Notes |
+|---|---|---|
+| Mapping-predicate vocabulary in `vocab.rs` (SKOS/OWL/semapv) | **planned** | SPEC-11 F1. |
+| Mapping representation (n-ary `sssom:Mapping` node + positive base triple; negated = n-ary only) | **planned** | F2; RDF 1.2 deferred (ADR-0014, ADR-0002 D10). |
+| SSSOM chaining rules in `rules.toml` (T1 / RCE1-2 / RI1-5 / RG1-2; transitive → closure) | **planned** | F3; rides SPEC-04 codegen + SPEC-05 closure. RCE-N OWL rules already entailed by `cax-*`/`scm-*`. |
+| Negative-mapping chaining (monotone, `Not` as distinct predicate) | **planned** | F4; preserves SPEC-04 negation-free stratification. |
+| Compact crosswalk index (rung-2 EF+FOR baseline → rung-4 PGM) | **planned** | F5; ~10 B/pair bidi target (NF2). |
+| Crosswalk spine (designated sets always-resident; identity rides ADR-0007 spine) | **planned** | F6. |
+| Confidence propagation along chains (product default; SeMRA) | **planned** | F7. |
+| Chain provenance (`derived_from` = proof premises) | **planned** | F8; reuses SPEC-04 F4. |
+| Harness SSSOM/TSV loader (bench/standalone only) | **planned** | F9; not a production surface. |
+
+> `skos:exactMatch` is deliberately kept out of OWL identity (ADR-0017) — the
+> chain rules give crosswalk recall without `eq-rep-*` entailment pollution.
+
+---
+
+## 14. Cross-cutting concerns
 
 ### Provenance / correctability
 **Status: partially implemented.** Stage-1 ships per-triple `Provenance`
@@ -422,7 +452,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 
 ---
 
-## 14. Roadmap stages
+## 15. Roadmap stages
 
 | Stage | Scope | Status |
 |---|---|---|

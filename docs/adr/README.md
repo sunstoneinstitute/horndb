@@ -41,6 +41,7 @@ mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
 | [0014](0014-track-rdf12-not-rdf-star.md) | Track W3C RDF 1.2 (not RDF-star), gated behind config | SPEC-00, SPEC-07 |
 | [0015](0015-vendor-graphblas-static-submodule.md) | Vendor SuiteSparse:GraphBLAS as a static git submodule | SPEC-05 |
 | [0016](0016-embeddable-reasoning-view-for-external-sor.md) | Consumed as an embeddable reasoning view over an external system-of-record | SPEC-02, SPEC-06, SPEC-10 |
+| [0017](0017-exactmatch-is-crosswalk-not-identity.md) | `skos:exactMatch` is a crosswalk edge, not OWL identity | SPEC-11 (forthcoming) |
 
 ## Adding a new ADR
 

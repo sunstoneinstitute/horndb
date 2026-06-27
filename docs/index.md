@@ -14,7 +14,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 ## Docs in this directory
 
 - [`architecture.md`](architecture.md) — single-page architecture map across all SPECs, with a **Status** field (implemented / specified / planned / deferred) per subsystem and feature. Read this to see what exists today; kept in sync with `../TASKS.md`.
-- [`adr/`](adr/README.md) — Architecture Decision Records (15 so far), one decision per file in Nygard format. Read these for the rationale behind a choice; read `architecture.md` for its current status.
+- [`adr/`](adr/README.md) — Architecture Decision Records (17 so far), one decision per file in Nygard format. Read these for the rationale behind a choice; read `architecture.md` for its current status.
 - [`rdflib.md`](rdflib.md) — compare common rdflib workflows with the current HornDB surface area; read SPEC-10 for the compatibility contract.
 - [`maplib.md`](maplib.md) — related-systems comparison with DataTreehouse's maplib: shared DNA, divergence, and a source-grounded look at its SPARQL-on-Polars execution model vs. HornDB's WCOJ executor (SPEC-03) and GraphBLAS closure (SPEC-05). Read before query-execution or closure work where the other Polars-native RDF engine is a useful reference.
 - [`ideas/silicondb-horndb-claim-layer.md`](ideas/silicondb-horndb-claim-layer.md) — design sketch for a probabilistic claim layer with HornDB certification.
