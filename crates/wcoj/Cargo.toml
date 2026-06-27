@@ -9,6 +9,7 @@ publish = false
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 arrow = { workspace = true }
+horndb-simd = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
