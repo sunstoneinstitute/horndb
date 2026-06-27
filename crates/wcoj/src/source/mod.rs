@@ -7,6 +7,7 @@
 
 pub mod compressed;
 pub mod packed_column;
+pub(crate) mod soa;
 pub mod synthetic;
 pub mod vec_source;
 
