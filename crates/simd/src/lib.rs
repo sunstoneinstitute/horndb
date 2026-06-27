@@ -6,4 +6,9 @@
 //! This crate is the *only* place in the workspace allowed to carry
 //! hand-written SIMD intrinsics.
 
-// Scaffolding placeholder: `dispatch` and `scalar` modules land in Tasks 2-3.
+mod dispatch;
+
+pub use dispatch::{forced_isa, Isa};
+
+#[cfg(test)]
+pub use dispatch::with_forced_isa;
