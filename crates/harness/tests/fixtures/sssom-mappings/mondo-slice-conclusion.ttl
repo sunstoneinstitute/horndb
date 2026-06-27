@@ -1,0 +1,5 @@
+@prefix skos:   <http://www.w3.org/2004/02/skos/core#> .
+@prefix MONDO:  <http://purl.obolibrary.org/obo/MONDO_> .
+@prefix UBERON: <http://purl.obolibrary.org/obo/UBERON_> .
+
+MONDO:0000001 skos:broadMatch UBERON:0000001 .
