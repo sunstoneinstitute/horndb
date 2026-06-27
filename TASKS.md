@@ -32,11 +32,31 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 ## Index
 
+- [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 
 Closed tasks are listed in [Done](#done-for-traceability).
+
+## HIGH — Performance
+
+- [ ] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
+  ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
+  The SPB nightly serves ~12 aggregation-qps where GraphDB Free serves ~150 (~12×).
+  Diagnosis (in-process against the real `HornBackend`; harness at
+  `crates/sparql/examples/agg_profile.rs`) shows the gap is structural in the SPARQL
+  runtime, not codegen — **PGO is the wrong lever** here. Three causes, by impact:
+  (1) the dictionary is defeated at the SPARQL boundary — `HornBackend::scan_bgp`
+  (`exec/horn.rs:597-606`) decodes every `TermId` back to a heap `Term::Iri(String)`
+  and `Bindings` is `BTreeMap<String, Term>` (`exec/mod.rs:19-22`), so `COUNT(*)` spends
+  269 ms allocating 400k×3 strings to count what `len()` knows instantly; (2) `DISTINCT`
+  dedup is a linear scan (`runtime.rs::dedup_terms`, O(n·d)→O(n²)) — **fixed separately**
+  by the HashSet PR; (3) no streaming / no projection or aggregate pushdown
+  (`runtime.rs:26-28` materializes a full `Vec<Bindings>` per node; `plan/planner.rs`
+  is a 1:1 lowering with no cost model). Scope: hash group-by, id-based `Bindings`
+  (decode to strings only at serialization), then streaming + pushdown. Revisit PGO
+  only after this lands. See `docs/architecture.md` §9 and `BENCHMARKS.md`.
 
 ## MEDIUM — Performance
 
