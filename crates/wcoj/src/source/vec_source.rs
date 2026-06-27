@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::error::{Result, WcojError};
 use crate::ids::{Ordering, TermId, Triple};
+use crate::source::soa::LevelColumn;
 use crate::source::{OrderedTripleIter, TripleSource};
 
 pub struct VecTripleSource {
@@ -51,6 +52,15 @@ impl TripleSource for VecTripleSource {
     }
 }
 
+/// Minimum active-run length for which we materialise a contiguous SoA
+/// `LevelColumn` and seek through the SIMD `lower_bound`. Below this, the
+/// strided AoS `partition_point` (itself auto-vectorised) is cheaper than the
+/// column copy — and crucially, deep trie levels with tiny runs (e.g. an
+/// out-degree of a handful) are opened-and-torn-down millions of times, so
+/// building a column for each would dominate. Tuned so only the wide levels
+/// (where SIMD `lower_bound` pays off) build a column.
+const SIMD_SEEK_MIN_RUN: usize = 64;
+
 /// Cursor state: at each depth we hold a `(lo, hi)` range into `data` of rows
 /// whose prefix matches the chosen path so far. `cursor[depth]` is the index
 /// of the next row to return at `depth`.
@@ -60,6 +70,11 @@ pub struct VecIter<'a> {
     range: [(usize, usize); 3],
     /// Cursor index per depth.
     cursor: [usize; 3],
+    /// SoA column for the active range at each depth, rebuilt on
+    /// `open_level`/`up`. Built only for runs of at least [`SIMD_SEEK_MIN_RUN`]
+    /// rows (where the SIMD `lower_bound` outweighs the column copy); shorter
+    /// runs leave this `None` and `seek` falls back to the scalar AoS search.
+    col_view: [Option<LevelColumn>; 3],
 }
 
 impl<'a> VecIter<'a> {
@@ -69,6 +84,10 @@ impl<'a> VecIter<'a> {
             data,
             range: [full, (0, 0), (0, 0)],
             cursor: [0, 0, 0],
+            // Columns are built lazily on the first seek of a wide-enough
+            // level, so iters whose leading physical level is a bound term
+            // (seeked once) never pay for a full-data column copy.
+            col_view: [None, None, None],
         }
     }
 
@@ -80,6 +99,23 @@ impl<'a> VecIter<'a> {
             2 => t.2,
             _ => unreachable!("depth {depth} > 2"),
         }
+    }
+
+    /// Scalar AoS lower-bound fallback for short runs (no SoA column). Finds the
+    /// first row in `data[start..hi]` whose `depth` column is `>= value`.
+    #[inline]
+    fn seek_scalar(&self, depth: u8, start: usize, hi: usize, value: TermId) -> usize {
+        let slice = &self.data[start..hi];
+        let off = slice.partition_point(|row| {
+            let v = match depth {
+                0 => row.0,
+                1 => row.1,
+                2 => row.2,
+                _ => unreachable!(),
+            };
+            v < value
+        });
+        start + off
     }
 }
 
@@ -99,24 +135,16 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         let d = depth as usize;
         let (lo, hi) = self.range[d];
         let start = self.cursor[d].max(lo);
-        // Binary search the suffix `data[start..hi]` for the first row
-        // whose `depth` column is ≥ `value`. Because rows share a common
-        // prefix at depths < `depth`, the `depth` column is monotone
-        // non-decreasing within `[lo, hi)`. `partition_point` is faster
-        // than the obvious gallop+bisect hybrid here because the closure
-        // is auto-vectorised into a branchless SIMD comparison on the
-        // contiguous `Vec<(u64, u64, u64)>` storage.
-        let slice = &self.data[start..hi];
-        let off = slice.partition_point(|row| {
-            let v = match depth {
-                0 => row.0,
-                1 => row.1,
-                2 => row.2,
-                _ => unreachable!(),
-            };
-            v < value
-        });
-        self.cursor[d] = start + off;
+        // Build the SoA column lazily the first time a wide level is seeked;
+        // short runs stay `None` and use the scalar AoS partition_point.
+        if self.col_view[d].is_none() && hi - lo >= SIMD_SEEK_MIN_RUN {
+            self.col_view[d] = Some(LevelColumn::from_aos(self.data, lo, hi, depth));
+        }
+        // Wide levels seek through the SIMD `lower_bound`; short runs fall back.
+        self.cursor[d] = match self.col_view[d].as_ref() {
+            Some(col) => col.lower_bound_from(start, value),
+            None => self.seek_scalar(depth, start, hi, value),
+        };
     }
 
     #[inline]
@@ -144,18 +172,23 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         let new_hi = row + end_off;
         self.range[depth as usize] = (new_lo, new_hi);
         self.cursor[depth as usize] = new_lo;
+        // Invalidate any stale column from a previous sibling subtree at this
+        // depth; a fresh one is built lazily on the first seek if wide enough.
+        self.col_view[depth as usize] = None;
     }
 
     #[inline]
     fn up(&mut self, depth: u8) {
         let d = depth as usize;
         if d == 0 {
-            // Root: reset to full data range and rewind cursor to start.
+            // Root: reset to full data range and rewind cursor to start. The
+            // depth-0 column covers all rows and never changes — keep it.
             self.range[0] = (0, self.data.len());
             self.cursor[0] = 0;
         } else {
             self.range[d] = (0, 0);
             self.cursor[d] = 0;
+            self.col_view[d] = None;
         }
     }
 
