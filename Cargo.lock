@@ -1193,6 +1193,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "criterion",
+ "horndb-simd",
  "proptest",
  "thiserror",
 ]

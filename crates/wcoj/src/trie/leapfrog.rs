@@ -25,6 +25,12 @@ pub struct LeapfrogJoin<'a> {
     /// True before the first call to `next` — we don't seek on the very
     /// first call, just check the current heads.
     primed: bool,
+    /// Precomputed pairwise intersection (the `k == 2` SIMD fast path) and the
+    /// read cursor into it. `simd_active` is set once both iters expose a
+    /// contiguous `active_run`; thereafter `find_match` drains `simd_buf`.
+    simd_buf: Vec<TermId>,
+    simd_pos: usize,
+    simd_active: bool,
 }
 
 impl<'a> LeapfrogJoin<'a> {
@@ -36,6 +42,9 @@ impl<'a> LeapfrogJoin<'a> {
             order: Vec::new(),
             done: false,
             primed: false,
+            simd_buf: Vec::new(),
+            simd_pos: 0,
+            simd_active: false,
         }
     }
 
@@ -79,8 +88,14 @@ impl<'a> LeapfrogJoin<'a> {
             return self.find_match();
         }
 
-        // Subsequent call: advance the iterator that just produced the
-        // matching value past it, then leapfrog again.
+        // Subsequent call. When the SIMD fast path is armed, the next value is
+        // simply the next entry of the precomputed intersection — no scalar
+        // rotate/seek.
+        if self.simd_active {
+            return self.find_match();
+        }
+        // Advance the iterator that just produced the matching value past it,
+        // then leapfrog again.
         let k = self.iters.len();
         let cur_iter = self.order[self.p];
         let cur = self.iters[cur_iter].peek(self.depth).unwrap();
@@ -98,7 +113,47 @@ impl<'a> LeapfrogJoin<'a> {
     /// `iters[order[(p + k - 1) % k]]` always holds the maximum of all
     /// current heads (the invariant is established by sorting on prime
     /// and preserved by each seek making the seeked iter the new max).
+    /// Try to arm the `k == 2` SIMD intersect fast path. When both iterators
+    /// expose a contiguous `active_run` for the current level, precompute their
+    /// intersection once with `horndb_simd::intersect`; `find_match` then drains
+    /// it. A pairwise accelerator inside the leapfrog: it emits exactly the same
+    /// values, in the same (sorted) order, as the scalar round-robin.
+    fn try_arm_simd(&mut self) {
+        if self.simd_active || self.iters.len() != 2 {
+            return;
+        }
+        let depth = self.depth;
+        let (left, right) = self.iters.split_at_mut(1);
+        let a = left[0].active_run(depth);
+        let b = right[0].active_run(depth);
+        if let (Some(a), Some(b)) = (a, b) {
+            self.simd_buf.clear();
+            horndb_simd::intersect(a, b, &mut self.simd_buf);
+            self.simd_pos = 0;
+            self.simd_active = true;
+        }
+    }
+
     fn find_match(&mut self) -> Option<TermId> {
+        if !self.simd_active {
+            self.try_arm_simd();
+        }
+        if self.simd_active {
+            if self.simd_pos < self.simd_buf.len() {
+                let v = self.simd_buf[self.simd_pos];
+                self.simd_pos += 1;
+                // Leave both cursors positioned at the emitted value so the
+                // executor's descent (`open_level` on the children) binds the
+                // right sub-range. One seek per *emitted* match, not per
+                // candidate — the candidate skipping was done in bulk by
+                // `intersect`.
+                self.iters[0].seek(self.depth, v);
+                self.iters[1].seek(self.depth, v);
+                return Some(v);
+            }
+            self.done = true;
+            return None;
+        }
         let k = self.iters.len();
         loop {
             let prev = (self.p + k - 1) % k;
@@ -138,6 +193,9 @@ impl<'a> LeapfrogJoin<'a> {
             order: Vec::new(),
             done: true,
             primed: true,
+            simd_buf: Vec::new(),
+            simd_pos: 0,
+            simd_active: false,
         }
     }
 }

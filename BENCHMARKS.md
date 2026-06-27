@@ -233,7 +233,7 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 
 | Bench | Crate | Notes |
 |---|---|---|
-| `benches/per_tuple.rs` | `horndb-wcoj` | SPEC-03 NF1 sanity check, **now owned by SPEC-12 NF1** (target ≤2.5 ns/tuple). Stub today; the real microbench + SIMD seek/intersect land with SPEC-12 (no SIMD yet, binary-search-based seek). |
+| `benches/per_tuple.rs` | `horndb-wcoj` | SPEC-03 NF1 sanity check, **now owned by SPEC-12 NF1** (target ≤2.5 ns/tuple). Real microbench wired (two-star `?x p1 ?y . ?x p2 ?y` join, throughput = output tuples so per-element time *is* ns/tuple). SIMD seek (`VecIter` SoA column + `PackedColumn` block-finish) landed (SPEC-12 F1). **Measured: _(pending hornbench measurement)_** — record on `hornbench` only, never the laptop. |
 | `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic 10K-triple fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. |
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
