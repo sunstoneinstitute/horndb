@@ -379,7 +379,7 @@ built with maturin and exercised by a dedicated `python-rdflib-compat` CI job.
 ## 13. SPEC-11 — SSSOM mappings & crosswalk index
 
 **Crate:** `crates/owlrl` (chain rules) + `crates/storage` (crosswalk index) ·
-**Spec:** `SPEC-11` · **Overall status: specified / planned**
+**Spec:** `SPEC-11` · **Overall status: partial / in progress**
 
 First-class support for [SSSOM](https://mapping-commons.github.io/sssom/)
 ontology crosswalks: mappings arrive as RDF from the external SoR (ADR-0016,
@@ -391,15 +391,15 @@ identity (ADR-0017). Tracked as a HIGH *Completeness* task in `TASKS.md`.
 
 | Component | Status | Notes |
 |---|---|---|
-| Mapping-predicate vocabulary in `vocab.rs` (SKOS/OWL/semapv) | **planned** | SPEC-11 F1. |
-| Mapping representation (n-ary `sssom:Mapping` node + positive base triple; negated = n-ary only) | **planned** | F2; RDF 1.2 deferred (ADR-0014, ADR-0002 D10). |
-| SSSOM chaining rules in `rules.toml` (T1 / RCE1-2 / RI1-5 / RG1-2; transitive → closure) | **planned** | F3; rides SPEC-04 codegen + SPEC-05 closure. RCE-N OWL rules already entailed by `cax-*`/`scm-*`. |
-| Negative-mapping chaining (monotone, `Not` as distinct predicate) | **planned** | F4; preserves SPEC-04 negation-free stratification. |
+| Mapping-predicate vocabulary in `vocab.rs` (SKOS/OWL/semapv) | **implemented** | SPEC-11 F1. |
+| Mapping representation (n-ary `sssom:Mapping` node + positive base triple; negated = n-ary only) | **partial** | F2; n-ary node builder exists, full materialization-on-inference is follow-up. RDF 1.2 deferred (ADR-0014, ADR-0002 D10). |
+| SSSOM chaining rules in `rules.toml` (T1 / RCE1-2 / RI1-5 / RG1-2; transitive → closure) | **implemented** | F3; rides SPEC-04 codegen + SPEC-05 closure. RCE-N OWL rules already entailed by `cax-*`/`scm-*`. |
+| Negative-mapping chaining (monotone, `Not` as distinct predicate) | **implemented** | F4; preserves SPEC-04 negation-free stratification. |
 | Compact crosswalk index (rung-2 EF+FOR baseline → rung-4 PGM) | **planned** | F5; ~10 B/pair bidi target (NF2). |
 | Crosswalk spine (designated sets always-resident; identity rides ADR-0007 spine) | **planned** | F6. |
-| Confidence propagation along chains (product default; SeMRA) | **planned** | F7. |
-| Chain provenance (`derived_from` = proof premises) | **planned** | F8; reuses SPEC-04 F4. |
-| Harness SSSOM/TSV loader (bench/standalone only) | **planned** | F9; not a production surface. |
+| Confidence propagation along chains (product default; SeMRA) | **implemented** | F7. |
+| Chain provenance (`derived_from` = proof premises) | **implemented** | F8; reuses SPEC-04 F4. |
+| Harness SSSOM/TSV loader (bench/standalone only) | **implemented** | F9; not a production surface. |
 
 > `skos:exactMatch` is deliberately kept out of OWL identity (ADR-0017) — the
 > chain rules give crosswalk recall without `eq-rep-*` entailment pollution.
