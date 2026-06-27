@@ -7,6 +7,7 @@
 //! hand-written SIMD intrinsics.
 
 mod dispatch;
+mod scalar;
 
 pub use dispatch::{forced_isa, Isa};
 
