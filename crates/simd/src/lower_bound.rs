@@ -4,7 +4,6 @@
 
 use crate::dispatch::{forced_isa, Isa};
 use crate::scalar;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 
 /// First index `i` in `haystack` with `haystack[i] >= value`, assuming
@@ -17,15 +16,14 @@ pub fn lower_bound(haystack: &[u64], value: u64) -> usize {
 type Fn_ = fn(&[u64], u64) -> usize;
 
 fn dispatch() -> Fn_ {
-    #[cfg(test)]
-    {
-        resolve()
+    // A forced ISA (tests/benches) must take effect on every call, so bypass
+    // the cache while a force is active. Production never forces: one
+    // thread-local read, then the cached fn pointer.
+    if forced_isa().is_some() {
+        return resolve();
     }
-    #[cfg(not(test))]
-    {
-        static CACHE: OnceLock<Fn_> = OnceLock::new();
-        *CACHE.get_or_init(resolve)
-    }
+    static CACHE: OnceLock<Fn_> = OnceLock::new();
+    *CACHE.get_or_init(resolve)
 }
 
 fn resolve() -> Fn_ {

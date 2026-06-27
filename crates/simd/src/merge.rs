@@ -3,7 +3,6 @@
 
 use crate::dispatch::{forced_isa, Isa};
 use crate::scalar;
-#[cfg(not(test))]
 use std::sync::OnceLock;
 
 /// Append the full sorted merge of `a` and `b` (both ascending, duplicates
@@ -15,15 +14,14 @@ pub fn merge(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
 type Fn_ = fn(&[u64], &[u64], &mut Vec<u64>);
 
 fn dispatch() -> Fn_ {
-    #[cfg(test)]
-    {
-        resolve()
+    // A forced ISA (tests/benches) must take effect on every call, so bypass
+    // the cache while a force is active. Production never forces: one
+    // thread-local read, then the cached fn pointer.
+    if forced_isa().is_some() {
+        return resolve();
     }
-    #[cfg(not(test))]
-    {
-        static CACHE: OnceLock<Fn_> = OnceLock::new();
-        *CACHE.get_or_init(resolve)
-    }
+    static CACHE: OnceLock<Fn_> = OnceLock::new();
+    *CACHE.get_or_init(resolve)
 }
 
 fn resolve() -> Fn_ {
@@ -79,6 +77,7 @@ mod tests {
     }
 
     fn forced_paths() -> Vec<Isa> {
+        #[allow(unused_mut)]
         let mut v = vec![Isa::Scalar];
         #[cfg(target_arch = "x86_64")]
         {

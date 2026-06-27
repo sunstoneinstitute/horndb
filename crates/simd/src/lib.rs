@@ -24,5 +24,8 @@ pub use merge::merge;
 
 pub use dispatch::{forced_isa, Isa};
 
-#[cfg(test)]
+/// Test-support API (see [`dispatch::with_forced_isa`]): pins a specific ISA
+/// dispatch path for the differential proptests and the intersect bench, which
+/// compile this crate as an ordinary dependency. Production callers never use
+/// it.
 pub use dispatch::with_forced_isa;
