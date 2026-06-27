@@ -126,7 +126,7 @@ discipline to the owlrl path (issue acceptance #3).
   otherwise fall back to a synthetic closure-heavy dataset and **say so** in the
   report (no silent substitution). Run A/B, record numbers in `BENCHMARKS.md`
   and a short attribution note; report how much of the 3× gap the swap closes
-  and what remains (cross-ref #2's `rdf:type`-scan component).
+  and what remains (cross-ref the `rdf:type`-scan work, #133/#134).
 
 ### 6. Docs sync (closing commit)
 
