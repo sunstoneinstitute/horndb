@@ -638,3 +638,16 @@ body = [
   { s = "?b", p = "skos:narrowMatch", o = "?c" },
 ]
 head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+# --- SPEC-11 F4: monotone negative-mapping chaining (no negation-as-failure) ---
+# A negated exactMatch is a positive fact over horndb:notExactMatch. Composing a
+# positive exactMatch with a negated one yields a negated one. The negated
+# predicate is excluded from the positive crosswalk index (F5, follow-up plan).
+[[rule]]
+id = "sssom-neg-exact"
+comment = "SSSOM F4: exactMatch o notExactMatch => notExactMatch (monotone)."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "horndb:notExactMatch", o = "?c" },
+]
+head = { s = "?a", p = "horndb:notExactMatch", o = "?c" }
