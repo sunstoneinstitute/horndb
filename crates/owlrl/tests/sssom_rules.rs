@@ -36,3 +36,43 @@ fn rg2_subclass_generalises_to_broad_match() {
     });
     assert!(s.contains(&t(a, v.skos_broad_match, b)));
 }
+
+#[test]
+fn ri_narrow_inverts_to_broad() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_narrow_match, b));
+    });
+    assert!(s.contains(&t(b, v.skos_broad_match, a)));
+}
+
+#[test]
+fn ri_broad_inverts_to_narrow() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_broad_match, b));
+    });
+    assert!(s.contains(&t(b, v.skos_narrow_match, a)));
+}
+
+#[test]
+fn ri_cross_species_exact_is_symmetric() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.semapv_cross_species_exact_match, b));
+    });
+    assert!(s.contains(&t(b, v.semapv_cross_species_exact_match, a)));
+}
+
+#[test]
+fn ri_cross_species_narrow_inverts_to_broad() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.semapv_cross_species_narrow_match, b));
+    });
+    assert!(s.contains(&t(b, v.semapv_cross_species_broad_match, a)));
+}

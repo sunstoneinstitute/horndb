@@ -512,3 +512,44 @@ body = [
   { s = "?a", p = "rdfs:subClassOf", o = "?b" },
 ]
 head = { s = "?a", p = "skos:broadMatch", o = "?b" }
+
+# --- SPEC-11 F3: SSSOM inversion rules (RI1-5) — tagged semapv:MappingInversion ---
+[[rule]]
+id = "sssom-ri1"
+comment = "SSSOM RI1: skos:narrowMatch inverts to skos:broadMatch."
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:broadMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri2"
+comment = "SSSOM RI2: skos:broadMatch inverts to skos:narrowMatch."
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:narrowMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri3"
+comment = "SSSOM RI3: semapv:crossSpeciesExactMatch is symmetric (self-inverse)."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesExactMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesExactMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri4"
+comment = "SSSOM RI4: semapv:crossSpeciesNarrowMatch inverts to crossSpeciesBroadMatch."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesNarrowMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesBroadMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri5"
+comment = "SSSOM RI5: semapv:crossSpeciesBroadMatch inverts to crossSpeciesNarrowMatch."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesBroadMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesNarrowMatch", o = "?a" }
