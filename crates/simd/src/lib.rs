@@ -9,6 +9,7 @@
 mod dedup;
 mod dispatch;
 mod filter;
+mod filter_indices;
 mod gather;
 mod intersect;
 mod lower_bound;
@@ -17,6 +18,7 @@ mod scalar;
 
 pub use dedup::dedup;
 pub use filter::{filter, filter_range};
+pub use filter_indices::filter_indices_eq;
 pub use gather::gather;
 pub use intersect::intersect;
 pub use lower_bound::lower_bound;

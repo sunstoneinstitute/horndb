@@ -3,7 +3,8 @@
 //! Mirrors the WCOJ binary-join fuzzer and the owlrl closure differential.
 
 use horndb_simd::{
-    dedup, filter_range, gather, intersect, lower_bound, merge, with_forced_isa, Isa,
+    dedup, filter_indices_eq, filter_range, gather, intersect, lower_bound, merge, with_forced_isa,
+    Isa,
 };
 use proptest::prelude::*;
 
@@ -91,6 +92,31 @@ proptest! {
             let mut got = Vec::new();
             with_forced_isa(isa, || filter_range(&v, lo, hi, &mut got));
             prop_assert_eq!(&got, &want, "filter_range {:?}", isa);
+        }
+    }
+
+    #[test]
+    fn filter_indices_eq_matches_oracle(values: Vec<u64>, needle: u64) {
+        let mut want = Vec::new();
+        with_forced_isa(Isa::Scalar, || filter_indices_eq(&values, needle, &mut want));
+        for isa in host_paths() {
+            let mut got = Vec::new();
+            with_forced_isa(isa, || filter_indices_eq(&values, needle, &mut got));
+            prop_assert_eq!(&got, &want, "filter_indices_eq {:?}", isa);
+        }
+    }
+
+    #[test]
+    fn filter_indices_eq_dense_matches_oracle(len in 0usize..512, needle in 0u64..8) {
+        // Skew values into a small domain so `needle` lands frequently,
+        // exercising the movemask set-bit extraction across full blocks.
+        let values: Vec<u64> = (0..len).map(|i| (i as u64) % 8).collect();
+        let mut want = Vec::new();
+        with_forced_isa(Isa::Scalar, || filter_indices_eq(&values, needle, &mut want));
+        for isa in host_paths() {
+            let mut got = Vec::new();
+            with_forced_isa(isa, || filter_indices_eq(&values, needle, &mut got));
+            prop_assert_eq!(&got, &want, "filter_indices_eq dense {:?}", isa);
         }
     }
 
