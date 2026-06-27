@@ -9,10 +9,12 @@
 mod dispatch;
 mod intersect;
 mod lower_bound;
+mod merge;
 mod scalar;
 
 pub use intersect::intersect;
 pub use lower_bound::lower_bound;
+pub use merge::merge;
 
 pub use dispatch::{forced_isa, Isa};
 
