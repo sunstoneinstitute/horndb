@@ -493,3 +493,22 @@ body = [
   { s = "?s",  p = "?p",         o = "?o" },
 ]
 head = { s = "?s", p = "?p", o = "?o2" }
+
+# --- SPEC-11 F3: SSSOM generalisation rules (RG1, RG2) ---
+# Deliberate weakening: OWL-strength axioms generalise to SKOS-strength
+# crosswalk edges so OWL- and SKOS-sourced mappings compose in one layer.
+[[rule]]
+id = "sssom-rg1"
+comment = "SSSOM RG1: owl:equivalentClass generalises to skos:exactMatch."
+body = [
+  { s = "?a", p = "owl:equivalentClass", o = "?b" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?b" }
+
+[[rule]]
+id = "sssom-rg2"
+comment = "SSSOM RG2: rdfs:subClassOf generalises to skos:broadMatch."
+body = [
+  { s = "?a", p = "rdfs:subClassOf", o = "?b" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?b" }
