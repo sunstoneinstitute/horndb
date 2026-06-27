@@ -6,12 +6,14 @@
 //! This crate is the *only* place in the workspace allowed to carry
 //! hand-written SIMD intrinsics.
 
+mod dedup;
 mod dispatch;
 mod intersect;
 mod lower_bound;
 mod merge;
 mod scalar;
 
+pub use dedup::dedup;
 pub use intersect::intersect;
 pub use lower_bound::lower_bound;
 pub use merge::merge;
