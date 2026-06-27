@@ -21,6 +21,8 @@ The **Plan** column links to each spec's Stage-1 implementation plan under `../p
 | [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/2026-05-24-SPEC-08-ml-integration.md) |
 | [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/2026-05-24-SPEC-09-hardware-specialization.md) (roadmap-only) |
 | [SPEC-10](SPEC-10-rdflib-compatible-python-api.md) | rdflib-compatible Python API | Draft | — |
+| [SPEC-11](SPEC-11-mappings.md) | SSSOM mappings & crosswalk index | Draft | — |
+| [SPEC-12](SPEC-12-simd.md) | SIMD acceleration layer | Draft | — |
 
 ## Dated design specs
 
@@ -29,6 +31,7 @@ Numbered `SPEC-NN` files are the standing subsystem contracts above. Point desig
 | Design spec | Refines | Status |
 |------|---------|--------|
 | [Shared, lock-guarded GraphBLAS build across worktrees](2026-05-31-shared-graphblas-build-design.md) | SPEC-05 (closure backend) | Approved |
+| [`owlrl` `rdf:type` object index + genuine semi-naïve firing](2026-06-27-owlrl-type-index-seminaive.md) | SPEC-04 (rule engine, F5-adjacent; [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) | Draft |
 
 ## Reading order
 

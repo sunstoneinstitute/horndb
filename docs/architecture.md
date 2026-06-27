@@ -119,7 +119,7 @@ two engines: `--engine stub` (plumbing) and `--engine owlrl` (real, needs
 | Versioned selection manifest (`harness/selected.toml`) | **implemented** | Single canonical file at workspace root (manifest `[suites.*]` + `[sparql_query]`). |
 | Result DB (SQLite) + trend reports (`harness report`) | **implemented** | `db.rs`, `report.rs`; state in `target/harness.sqlite`, JUnit at `target/junit.xml`. |
 | Stub-engine smoke target | **implemented** | `stub.rs` (F12). |
-| LUBM materialization RDFox A/B (`scripts/bench/compare-rdfox.sh --lubm N`) | **implemented (N=1)** | Identical TBox+ABox through both engines; RDFox fires the `rules.toml` rules (`gen_ruleset.py`) **plus** the TBox-resolved list-axiom rules + XSD datatype base (`gen_schema_closure.py`); closure-count parity gate + HornDB wall-clock cap. The N=1 "over-derivation" ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)) was diagnosed as a harness-completeness gap (HornDB's `scm-int`/`cls-int1` + datatype base were absent from the reference ruleset, not a soundness bug) and **resolved** — parity is now exact (delta 0). The 3× *timing* gate at N=1 is still open, but [#61](https://github.com/sunstoneinstitute/horndb/issues/61) **resolved its scoping**: the SPEC-05 GraphBLAS closure backend is now wired + injectable into the owlrl `Engine` and per-phase profiling (`horndb-bench materialize --backend …`; `BENCHMARKS.md`) shows the LUBM-shaped materialize cost is dominated by the compiled `cax-sco` type-expansion + delta-apply, **not** the closure (~0.3% of reason time). So the timing gap is the SPEC-04 F5 `rdf:type`-partition scan tracked in [#2](https://github.com/sunstoneinstitute/horndb/issues/2), not the closure backend. LUBM-100 not yet run (Jena `riot` unavailable in the implementation sandbox; attribution from synthetic stand-ins). RDFox numbers internal-only (DeWitt). |
+| LUBM materialization RDFox A/B (`scripts/bench/compare-rdfox.sh --lubm N`) | **implemented (N=1)** | Identical TBox+ABox through both engines; RDFox fires the `rules.toml` rules (`gen_ruleset.py`) **plus** the TBox-resolved list-axiom rules + XSD datatype base (`gen_schema_closure.py`); closure-count parity gate + HornDB wall-clock cap. The N=1 "over-derivation" ([#59](https://github.com/sunstoneinstitute/horndb/issues/59)) was diagnosed as a harness-completeness gap (HornDB's `scm-int`/`cls-int1` + datatype base were absent from the reference ruleset, not a soundness bug) and **resolved** — parity is now exact (delta 0). The 3× *timing* gate at N=1 is still open, but [#61](https://github.com/sunstoneinstitute/horndb/issues/61) **resolved its scoping**: the SPEC-05 GraphBLAS closure backend is now wired + injectable into the owlrl `Engine` and per-phase profiling (`horndb-bench materialize --backend …`; `BENCHMARKS.md`) shows the LUBM-shaped materialize cost is dominated by the compiled `cax-sco` type-expansion + delta-apply, **not** the closure (~0.3% of reason time). So the timing gap is the SPEC-04 F5 `rdf:type`-partition scan tracked in [#133](https://github.com/sunstoneinstitute/horndb/issues/133), not the closure backend. LUBM-100 not yet run (Jena `riot` unavailable in the implementation sandbox; attribution from synthetic stand-ins). RDFox numbers internal-only (DeWitt). |
 | LDBC SPB nightly throughput A/B (`.github/workflows/nightly.yml`) | **implemented (feasible scale)** | Per-run HornDB bring-up via `crates/harness/scripts/start-engine.sh` (serving the prepared flat closure, no reasoning); `harness spb-run` drives the SPB aggregation mix against `/query`+`/update` and records `aggregation-qps` to the trend DB. A/B reference is **GraphDB Free 10.8.14** (licence-free; 11.x hard-requires a licence), version pinned by the workflow and brought up **per run** by `scripts/start-graphdb-free.sh` (downloads the pinned dist if the runner lacks it) and stopped after the A/B leg — mirroring the HornDB bring-up so neither engine competes for RAM / OS page cache during the other's measurement; the dataset is loaded once by `scripts/bootstrap-graphdb-free-spb.sh`. The leg skips gracefully if GraphDB fails to start. Validated 2026-06-25 at *feasible scale* (512 k-triple SPB closure, aggregation-only). **Follow-up:** true SF=0.256 (256 M triples) + editorial agents (TASKS.md). See `BENCHMARKS.md`. |
 | Full W3C OWL 2 + SPARQL 1.1 *evaluation* suites, ORE 2015, LDBC SPB SF3/SF5, LUBM-100/UOBM, broader RDFox A/B | **deferred** | SPEC-01 harness epic ([#10](https://github.com/sunstoneinstitute/horndb/issues/10)) **closed** after the Stage-1 core surface landed (OWL 2 RL ingestion + `owl2-w3c-rl`, RDF 1.2 N-Triples syntax, LUBM RDFox A/B at N=1, and the SPARQL 1.1 *syntax* suite `sparql11-syntax`, [#110](https://github.com/sunstoneinstitute/horndb/issues/110)). **Stage-2 deferred** (heavy external corpora needing large downloads / self-hosted runners): the SPARQL 1.1 *evaluation*/result-set suites, the full ORE 2015 corpus, LDBC SPB SF3/SF5 audited runs, LUBM-100/1000/8000 + UOBM at scale, and broader/published RDFox A/B (DeWitt license review). Scaffolding exists (`ore.rs`, `ldbc_spb.rs`). |
 
@@ -206,7 +206,7 @@ Rust at build time from `rules.toml` (Soufflé-style) — no interpreter.
 | Disjoint properties (`prp-pdw` pairwise, `prp-adp` list `owl:AllDisjointProperties`) | **implemented** | `prp-pdw` compiled from `rules.toml`; `prp-adp` ([#37](https://github.com/sunstoneinstitute/horndb/issues/37)) hand-written in `list_rules.rs` (list-walking analogue), both head `?u rdf:type owl:Nothing` on a shared `(u, w)` pair. Covered by unit + engine tests; the W3C `DisjointObjectProperties-*-cons` / `DisjointDataProperties-*-cons` cases in the selection exercise the no-false-fire path. The `*-pe` variants stay red on a DL `differentFrom`/`AllDifferent` entailment with no OWL 2 RL rule (`harness/KNOWN-MANIFEST-BUGS.md`). |
 | Literal-value datatype rules (`dt-eq`/`dt-diff`/`dt-not-type`) | **implemented** | Load-time `inject_datatype_literal_axioms` (`integration.rs`) classifies each instance literal's value via `crates/owlrl/src/datatype_literals.rs` over the Stage-1 datatype set (XSD integer tower, `xsd:string`/`boolean`, plain/lang literals): value-equal ⇒ `owl:sameAs` (`dt-eq`, cross-lexical `1`≡`+1`≡`01` and cross-datatype `1`^^byte≡`1`^^integer), value-distinct (comparable) ⇒ `owl:differentFrom` (`dt-diff`), out-of-value-space lexical form ⇒ `owl:Nothing` (`dt-not-type`). Flips `#New-Feature-Keys-006-incons` green (issue #40). Disjoint value spaces (string vs integer) are never cross-compared; non-XSD/unhandled datatypes stay opaque (Stage-1 soundness). |
 | Datatype value-space intersection (`I5.8-008/009-pe`) | **deferred** | Genuine interval/value-space narrowing; tracked under issue #4. |
-| `rdf:type` skew parallelism (F5) | **implemented (list-rule path)** | The `rdf:type`-driven hand-written list rules (`cls-int1`, `cls-uni`, `cax-adc`, `prp-key`) partition their per-subject filtering by class id and parallelise it across rayon above `PAR_TYPE_THRESHOLD` (`crates/owlrl/src/list_rules.rs`), selected by `MaterializeOpts::parallel` (`ParallelStrategy::Auto` default; `Serial` is the oracle). Identical closure proven by `tests/rdf_type_skew_differential.rs` (3 large-extent fixtures + proptest); `benches/rdf_type_skew.rs` + `BENCHMARKS.md` record the win ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)). Parallelising the **compiled** (`cax-sco`-style) rules — which would change the generated `FireFn` signature — is a separate Stage-2 follow-up. |
+| `rdf:type` skew parallelism (F5) | **partially implemented (list-rule path; compiled-rule hotspot planned)** | The `rdf:type`-driven hand-written list rules (`cls-int1`, `cls-uni`, `cax-adc`, `prp-key`) partition their per-subject filtering by class id and parallelise it across rayon above `PAR_TYPE_THRESHOLD` (`crates/owlrl/src/list_rules.rs`), selected by `MaterializeOpts::parallel` (`ParallelStrategy::Auto` default; `Serial` is the oracle). Identical closure proven by `tests/rdf_type_skew_differential.rs` (3 large-extent fixtures + proptest); `benches/rdf_type_skew.rs` + `BENCHMARKS.md` record the win ([#39](https://github.com/sunstoneinstitute/horndb/issues/39)). The **compiled** (`cax-sco`-style) rules are the open hotspot, but profiling ([#133](https://github.com/sunstoneinstitute/horndb/issues/133)) shows the cost is an un-indexed full `rdf:type`-partition scan + naïve (non-delta) re-firing, **not** a parallelism gap. The two ranked fixes — a within-partition object index on `MemStore` (no `FireFn`/trait change) and genuine delta-driven semi-naïve firing (which does change the `FireFn` signature) — are specified in `docs/specs/2026-06-27-owlrl-type-index-seminaive.md`. |
 | `eq-rep-p` predicate-position skew fix + always-relevant rule marking | **implemented** | Always-relevant marking via `wildcard_predicate`; semantics-preserving class-canonical path in `crates/owlrl/src/eq_rep_p_opt.rs` (union-find over `owl:sameAs`), default `EqRepPStrategy::Optimized`. Differential proptest `tests/eq_rep_p_differential.rs` proves identical closure to the naïve oracle. `TASKS.md` #2. Downstream F5 partition-by-class-id (row above) now implemented for the list-rule path. |
 | User-defined rules (runtime Datalog frontend) | **deferred** | Stage 2 extension. |
 
@@ -228,7 +228,7 @@ SuiteSparse:GraphBLAS. SPEC-04 routes those axioms here.
 | `owl:sameAs` equivalence classes (union-find / EQREL) | **implemented** | `sameas.rs`. |
 | Dense renumbering cache (`dictionary_id ↔ dense_index`) | **implemented** | `dense_id.rs`. |
 | Materialization writeback to storage (no rule re-fire) | **implemented** | `sink.rs`. |
-| Wiring the GraphBLAS closure into the owlrl `Engine` (production replacement for `RuleFiringBackend`) | **implemented** | `crates/owlrl/src/graphblas_backend.rs` (`GraphBlasBackend`, `graphblas-backend` feature) computes `scm-sco`/`scm-spo`/`eq-sym`/`eq-trans`/`prp-trp` via strict `transitive_closure` over a dense `BoolMatrix`; injected via `Engine::with_backend(BackendChoice::GraphBlas)`. Differential parity with `RuleFiringBackend` in `crates/owlrl/tests/closure_backend_differential.rs`. Profiling ([#61](https://github.com/sunstoneinstitute/horndb/issues/61), `BENCHMARKS.md`) shows the swap is a decisive win only when closure dominates; the LUBM-shaped materialize cost is compiled-rule/`rdf:type`-scan bound ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)), not closure-bound. |
+| Wiring the GraphBLAS closure into the owlrl `Engine` (production replacement for `RuleFiringBackend`) | **implemented** | `crates/owlrl/src/graphblas_backend.rs` (`GraphBlasBackend`, `graphblas-backend` feature) computes `scm-sco`/`scm-spo`/`eq-sym`/`eq-trans`/`prp-trp` via strict `transitive_closure` over a dense `BoolMatrix`; injected via `Engine::with_backend(BackendChoice::GraphBlas)`. Differential parity with `RuleFiringBackend` in `crates/owlrl/tests/closure_backend_differential.rs`. Profiling ([#61](https://github.com/sunstoneinstitute/horndb/issues/61), `BENCHMARKS.md`) shows the swap is a decisive win only when closure dominates; the LUBM-shaped materialize cost is compiled-rule/`rdf:type`-scan bound ([#133](https://github.com/sunstoneinstitute/horndb/issues/133)), not closure-bound. |
 | Vendored GraphBLAS as a git submodule (static, OpenMP, checked-in bindings) | **implemented** | `crates/closure/vendor/GraphBLAS` submodule `v10.3.0`; `vendored`+`openmp` default Cargo features (`regen-bindings` optional), statically linked (verified via `otool -L`), checked-in `src/bindings.rs`. CI checks out submodules and drops the from-source build. Supersedes the `[x]` "CI: install GraphBLAS on runners". |
 | Shared, flock-guarded GraphBLAS build across worktrees | **implemented** | `build.rs` compiles the vendored GraphBLAS once per `(target, version)` into `crates/closure/vendor/.shared-build/<target>/<version>/` (anchored at the main worktree, gitignored), reused across git worktrees; concurrent builders serialise on an `fs4` advisory flock with the builder pid written in for diagnostics; CI caches the dir keyed on the submodule SHA. Details in `crates/closure/INTEGRATION-NOTES.md`. Narrows the disk-pressure concern (`TASKS.md` #13) to rocksdb. |
 | Incremental closure updates (F6) — insertion + retraction | **implemented** | `closure/incremental.rs` (`IncrementalTransitiveClosure`) + `sink.rs` (`IncrementalClosureBackend`): a single-edge insert updates only the affected slice (backward-reach(s) × forward-reach(o)) and writes only the delta to the sink. **Deletion/retraction** (`delete_edge`/`delete_edges`/`delete_transitive_edges`) retains the asserted base edges alongside the closed set; retracting a base edge recomputes base-reachability over the affected source region and withdraws only the closure pairs no longer derivable over the post-delete base (invariant `closed == transitive_closure(base)`). Differential proptests vs GraphBLAS full closure (`tests/incremental.rs` insertion, `tests/incremental_retraction.rs` random insert/delete sequences). SPEC-06 owns the +/- sign; the SPEC-05 layer is sink-insertion-only and returns the withdrawn edges. Closure-path retraction delivered under [#5](https://github.com/sunstoneinstitute/horndb/issues/5) (insertion path [#42](https://github.com/sunstoneinstitute/horndb/issues/42)). |
@@ -406,7 +406,35 @@ identity (ADR-0017). Tracked as a HIGH *Completeness* task in `TASKS.md`.
 
 ---
 
-## 14. Cross-cutting concerns
+## 14. SPEC-12 — SIMD acceleration layer
+
+**Crate:** new `horndb-simd` (zero-dep leaf) + consumers `crates/wcoj`,
+`crates/storage`, `crates/owlrl` · **Spec:** `SPEC-12` · **Overall status: specified**
+
+A single, shared, runtime-dispatched SIMD layer for the data-parallel hot loops:
+`std::arch` intrinsics on stable Rust with cached-function-pointer dispatch
+(AVX-512/AVX2 on the EPYC Zen4 reference host, NEON on Apple-Silicon dev Macs,
+**scalar fallback always present as the correctness oracle**). Closes SPEC-03 NF1
+(`per_tuple`) and the SIMD-friendly half of SPEC-02 NF2 (STREAM `rdf:type` scan).
+Every kernel is differential-proven bit-identical to its scalar oracle. Tracked as a
+HIGH *Performance* task in `TASKS.md`.
+
+| Component | Status | Notes |
+|---|---|---|
+| `horndb-simd` primitives crate + scalar oracle + per-kernel differential proptests | **specified** | F4; new zero-dep leaf *below* `storage` (`simd → storage → wcoj → …`). Sole home for hand-written intrinsics. |
+| WCOJ seek + leapfrog intersect SIMD | **specified** | F1; highest payoff. AoS→SoA active-level trie view is a prerequisite (open SPEC-03 design question). |
+| Dictionary decode + `rdf:type` partition scan SIMD | **specified** | F2; jointly satisfies SPEC-02 acceptance #4. |
+| Delta-apply merge/dedup/sort SIMD | **specified (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133))** | F3; needs hash-delta → sorted-run change first. The `cax-sco` partition-filter scan is **out of scope** — superseded by #133's object index + semi-naïve firing. |
+| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **specified** | NF5; F5 makes dispatch test-forceable so CI exercises every path. |
+
+> SIMD accelerates loops that are already *algorithmically right*. It is **not** a
+> substitute for the missing indexes/semi-naïve firing that dominate the SPEC-04
+> materialize path — that is [#133](https://github.com/sunstoneinstitute/horndb/issues/133)
+> (see §6), explicitly out of SPEC-12's scope.
+
+---
+
+## 15. Cross-cutting concerns
 
 ### Provenance / correctability
 **Status: partially implemented.** Stage-1 ships per-triple `Provenance`
@@ -430,7 +458,9 @@ Stage-1 engine and W3C-manifest paths explicitly bail on triple-term inputs.
 **Status: partially implemented.** Per-subsystem targets and measured numbers
 live in `BENCHMARKS.md`. SPEC-03's 4-cycle ≥10× gate is now **met** (~34× on
 the canonical skewed win case, [#1](https://github.com/sunstoneinstitute/horndb/issues/1)).
-Keep `BENCHMARKS.md` rows in sync with the `TASKS.md` performance entries.
+SPEC-03 NF1 (`per_tuple` ≤2.5 ns/tuple) and the SPEC-02 NF2 STREAM `rdf:type` scan
+are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows in
+sync with the `TASKS.md` performance entries.
 
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
@@ -452,7 +482,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 
 ---
 
-## 15. Roadmap stages
+## 16. Roadmap stages
 
 | Stage | Scope | Status |
 |---|---|---|
