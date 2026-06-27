@@ -55,10 +55,7 @@ impl TripleSource for VecTripleSource {
 /// Minimum active-run length for which we materialise a contiguous SoA
 /// `LevelColumn` and seek through the SIMD `lower_bound`. Below this, the
 /// strided AoS `partition_point` (itself auto-vectorised) is cheaper than the
-/// column copy — and crucially, deep trie levels with tiny runs (e.g. an
-/// out-degree of a handful) are opened-and-torn-down millions of times, so
-/// building a column for each would dominate. Tuned so only the wide levels
-/// (where SIMD `lower_bound` pays off) build a column.
+/// column copy.
 const SIMD_SEEK_MIN_RUN: usize = 64;
 
 /// Cursor state: at each depth we hold a `(lo, hi)` range into `data` of rows
@@ -70,10 +67,15 @@ pub struct VecIter<'a> {
     range: [(usize, usize); 3],
     /// Cursor index per depth.
     cursor: [usize; 3],
-    /// SoA column for the active range at each depth, rebuilt on
-    /// `open_level`/`up`. Built only for runs of at least [`SIMD_SEEK_MIN_RUN`]
-    /// rows (where the SIMD `lower_bound` outweighs the column copy); shorter
-    /// runs leave this `None` and `seek` falls back to the scalar AoS search.
+    /// SoA column for the active range at each depth. The hot `seek` path only
+    /// auto-builds **depth 0** — the full-data root level, which is built once
+    /// (lazily) and reused for the whole scan (it survives `up(0)`). Depths 1–2
+    /// have per-`open_level` ranges that, when wide (e.g. under a single bound
+    /// predicate), would otherwise be rebuilt on every descent — an O(range)
+    /// cost in the inner loop that dwarfs the scalar AoS `partition_point` — so
+    /// they stay scalar on the hot path. `active_run` (the leapfrog SIMD
+    /// intersect, off the executor's inlined hot path) may still build a deeper
+    /// column on demand.
     col_view: [Option<LevelColumn>; 3],
 }
 
@@ -135,12 +137,15 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         let d = depth as usize;
         let (lo, hi) = self.range[d];
         let start = self.cursor[d].max(lo);
-        // Build the SoA column lazily the first time a wide level is seeked;
-        // short runs stay `None` and use the scalar AoS partition_point.
-        if self.col_view[d].is_none() && hi - lo >= SIMD_SEEK_MIN_RUN {
-            self.col_view[d] = Some(LevelColumn::from_aos(self.data, lo, hi, depth));
+        // Build the depth-0 (root) SoA column lazily on first seek; it covers
+        // the full data, is built once, and is reused for the whole scan. Deeper
+        // levels stay scalar here to avoid a per-`open_level` rebuild in the
+        // inner loop (see `col_view` docs).
+        if d == 0 && self.col_view[0].is_none() && hi - lo >= SIMD_SEEK_MIN_RUN {
+            self.col_view[0] = Some(LevelColumn::from_aos(self.data, lo, hi, 0));
         }
-        // Wide levels seek through the SIMD `lower_bound`; short runs fall back.
+        // Levels with a column seek through the SIMD `lower_bound`; the rest
+        // fall back to the scalar AoS partition_point.
         self.cursor[d] = match self.col_view[d].as_ref() {
             Some(col) => col.lower_bound_from(start, value),
             None => self.seek_scalar(depth, start, hi, value),
