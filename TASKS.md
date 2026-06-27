@@ -34,6 +34,8 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives + WCOJ seek/intersect (`per_tuple` ≤2.5 ns/tuple) (`#TODO` open issue)
+- [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
+- [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
@@ -72,6 +74,30 @@ Closed tasks are listed in [Done](#done-for-traceability).
   [#2](https://github.com/sunstoneinstitute/horndb/issues/2) (object index + semi-naïve)
   and may be descoped; the `cax-sco` partition-filter scan is out of scope (superseded
   by #2). See `docs/specs/SPEC-12-simd.md`, `docs/architecture.md` §14, `BENCHMARKS.md`.
+
+- [ ] **SPEC-04: within-partition object index on `MemStore`.**
+  ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
+  Add `obj_index` (predicate → object → subjects) alongside `by_pred`, maintained in
+  `assert`/`insert_inferred`/`clear_inferred`, so `probe(None, p, Some(o))` returns
+  O(|extent|) instead of scanning the whole partition. **`TripleStore` trait unchanged**
+  — no codegen/`FireFn`/engine change, just `MemStore` internals — so this is the
+  low-risk, independently-shippable half. Turns the compiled `cax-sco` inner loop (and
+  the F5 list-rule probes) from O(N) to O(|extent(c1)|). Ship **first**.
+  Spec: `docs/specs/2026-06-27-owlrl-type-index-seminaive.md` (fix #1). Gate:
+  `compiled_rules_ms` drop on the owlrl materialize A/B LUBM-shaped row + resident-set
+  delta recorded in `BENCHMARKS.md`; all differential gates stay green.
+
+- [ ] **SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules.**
+  ([#2](https://github.com/sunstoneinstitute/horndb/issues/2))
+  The compiled rules ignore their `_delta` arg (`engine.rs:127` passes `&Delta::new()`)
+  and re-join the whole store every round (~12× redundant re-derivation for a depth-12
+  taxonomy). Fire the n-variant delta decomposition instead: `FireFn` signature change
+  (AGENTS.md §7) + `Delta` probe surface + `emit.rs` codegen + engine plumbing of the
+  already-computed `applied` delta. Compounds with the object index; do **second**,
+  measure between. Must stay differential-equal (closure-backend + rdf_type_skew +
+  owl2-w3c-rl + acceptance #4 green). Spec:
+  `docs/specs/2026-06-27-owlrl-type-index-seminaive.md` (fix #2). Gate: round/inner-loop
+  work counters drop, reason-time falls.
 
 ## HIGH — Completeness
 
@@ -151,7 +177,7 @@ Completed tasks; issues closed, links kept.
 - [x] **HIGH** · _Completeness_ — SPEC-07 SPARQL aggregation (`GROUP BY`/`COUNT`/`SUM`) + expanded `FILTER`/`BIND`/`IF` expressions (trainmarks-blocking) ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
-- [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — class-canonical union-find pass (`eq_rep_p_opt.rs`), default `Optimized`; downstream `rdf:type` partition-by-class-id (F5) remains under #39.
+- [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — class-canonical union-find pass (`eq_rep_p_opt.rs`), default `Optimized`; downstream `rdf:type` partition-by-class-id (F5) remains under #39. The compiled-rule `rdf:type`-scan hotspot under #2 is split out below (object index + semi-naïve) per `docs/specs/2026-06-27-owlrl-type-index-seminaive.md`.
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline (`harness extract-owl2-rl`; 91 cases → 78 green in `[suites.owl2-w3c-rl]`, reds in `KNOWN-MANIFEST-BUGS.md`).
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [x] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))
