@@ -40,8 +40,8 @@ impl TermKind {
     }
 }
 
-const KIND_SHIFT: u32 = 60;
-const PAYLOAD_MASK: u64 = (1u64 << KIND_SHIFT) - 1;
+pub(crate) const KIND_SHIFT: u32 = 60;
+pub(crate) const PAYLOAD_MASK: u64 = (1u64 << KIND_SHIFT) - 1;
 /// Maximum dictionary index that fits in the 60-bit payload (exclusive upper bound).
 pub const MAX_DICT_INDEX: u64 = 1u64 << KIND_SHIFT;
 
@@ -58,6 +58,12 @@ impl TermId {
 
     pub fn payload(self) -> u64 {
         self.0 & PAYLOAD_MASK
+    }
+
+    /// Raw 64-bit pattern (the SIMD batch decode reads these directly).
+    #[inline]
+    pub fn bits(self) -> u64 {
+        self.0
     }
 
     pub fn inline_int(value: i32) -> Self {
