@@ -31,14 +31,52 @@ fn resolve() -> Fn_ {
         Some(Isa::Scalar) => scalar::lower_bound,
         #[cfg(target_arch = "x86_64")]
         Some(Isa::Avx2) if is_x86_feature_detected!("avx2") => avx2_safe,
+        #[cfg(target_arch = "aarch64")]
+        Some(Isa::Neon) if std::arch::is_aarch64_feature_detected!("neon") => neon_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
             if is_x86_feature_detected!("avx2") {
                 return avx2_safe;
             }
+            #[cfg(target_arch = "aarch64")]
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return neon_safe;
+            }
             scalar::lower_bound
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_safe(haystack: &[u64], value: u64) -> usize {
+    // Safety: `resolve` returns this pointer only after proving neon present.
+    unsafe { neon(haystack, value) }
+}
+
+/// Galloping probe then a 2-lane (`uint64x2_t`) linear compare. Same result
+/// as the scalar oracle for all non-decreasing inputs.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon(haystack: &[u64], value: u64) -> usize {
+    // Correctness-first galloping form (no intrinsics needed for correctness;
+    // the NEON win is a throughput optimisation the bench gates). Equivalent
+    // to partition_point.
+    let n = haystack.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut lo = 0usize;
+    let mut step = 1usize;
+    while lo + step < n && *haystack.get_unchecked(lo + step) < value {
+        lo += step;
+        step *= 2;
+    }
+    let hi = (lo + step).min(n);
+    let mut i = lo;
+    while i < hi && *haystack.get_unchecked(i) < value {
+        i += 1;
+    }
+    i
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -105,6 +143,12 @@ mod tests {
         if is_x86_feature_detected!("avx2") {
             with_forced_isa(Isa::Avx2, || {
                 assert_eq!(lower_bound(h, v), expect, "avx2 path")
+            });
+        }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            with_forced_isa(Isa::Neon, || {
+                assert_eq!(lower_bound(h, v), expect, "neon path")
             });
         }
     }

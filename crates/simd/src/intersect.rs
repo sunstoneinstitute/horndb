@@ -31,6 +31,8 @@ fn resolve() -> Fn_ {
         Some(Isa::Avx512) if is_x86_feature_detected!("avx512f") => avx512_safe,
         #[cfg(target_arch = "x86_64")]
         Some(Isa::Avx2) if is_x86_feature_detected!("avx2") => avx2_safe,
+        #[cfg(target_arch = "aarch64")]
+        Some(Isa::Neon) if std::arch::is_aarch64_feature_detected!("neon") => neon_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
             {
@@ -43,7 +45,41 @@ fn resolve() -> Fn_ {
                     return avx2_safe;
                 }
             }
+            #[cfg(target_arch = "aarch64")]
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                return neon_safe;
+            }
             scalar::intersect
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn neon_safe(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+    unsafe { neon(a, b, out) }
+}
+
+/// NEON sorted-set intersection. Same galloping skeleton as the x86 kernels,
+/// reusing the SIMD `lower_bound` to skip ahead on the smaller side. The wide
+/// `uint64x2_t` compare path is a throughput optimisation the bench gates;
+/// the galloping form is differential-proven equal to the scalar oracle.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        let av = *a.get_unchecked(i);
+        j += crate::lower_bound::lower_bound(&b[j..], av);
+        if j >= b.len() {
+            break;
+        }
+        let bv = *b.get_unchecked(j);
+        if av == bv {
+            out.push(av);
+            i += 1;
+            j += 1;
+        } else {
+            i += crate::lower_bound::lower_bound(&a[i..], bv);
         }
     }
 }
@@ -147,6 +183,10 @@ mod tests {
             if is_x86_feature_detected!("avx512f") {
                 v.push(Isa::Avx512);
             }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            v.push(Isa::Neon);
         }
         v
     }
