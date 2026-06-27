@@ -409,7 +409,7 @@ identity (ADR-0017). Tracked as a HIGH *Completeness* task in `TASKS.md`.
 ## 14. SPEC-12 — SIMD acceleration layer
 
 **Crate:** new `horndb-simd` (zero-dep leaf) + consumers `crates/wcoj`,
-`crates/storage`, `crates/owlrl` · **Spec:** `SPEC-12` · **Overall status: specified**
+`crates/storage`, `crates/owlrl` · **Spec:** `SPEC-12` · **Overall status: partially implemented** (primitives crate landed; WCOJ/storage consumers still specified)
 
 A single, shared, runtime-dispatched SIMD layer for the data-parallel hot loops:
 `std::arch` intrinsics on stable Rust with cached-function-pointer dispatch
@@ -421,11 +421,11 @@ HIGH *Performance* task in `TASKS.md`.
 
 | Component | Status | Notes |
 |---|---|---|
-| `horndb-simd` primitives crate + scalar oracle + per-kernel differential proptests | **specified** | F4; new zero-dep leaf *below* `storage` (`simd → storage → wcoj → …`). Sole home for hand-written intrinsics. |
+| `horndb-simd` primitives crate + scalar oracle + per-kernel differential proptests | **implemented** | F4+F5; new zero-dep leaf *below* `storage` (`simd → storage → wcoj → …`). Sole home for hand-written intrinsics. Ships six runtime-dispatched primitives (`lower_bound`, `intersect`, `merge`, `dedup`, `filter`/`filter_range`, `gather`) over `&[u64]`/`&[u32]`, each differential-proven bit-identical to the scalar oracle on every ISA path the host runs (`crates/simd/tests/differential.rs`), plus the `with_forced_isa` F5 override and the `intersect` SIMD-vs-scalar bench. AVX2/AVX-512 kernels for x86_64, NEON for aarch64; kernels that don't yet clear the NF2 floor ship the scalar-equivalent galloping form. |
 | WCOJ seek + leapfrog intersect SIMD | **specified** | F1; highest payoff. AoS→SoA active-level trie view is a prerequisite (open SPEC-03 design question). |
 | Dictionary decode + `rdf:type` partition scan SIMD | **specified** | F2; jointly satisfies SPEC-02 acceptance #4. |
 | Delta-apply merge/dedup/sort SIMD | **specified (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133))** | F3; needs hash-delta → sorted-run change first. The `cax-sco` partition-filter scan is **out of scope** — superseded by #133's object index + semi-naïve firing. |
-| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **specified** | NF5; F5 makes dispatch test-forceable so CI exercises every path. |
+| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **implemented** | NF5; cached `OnceLock` fn-ptr per primitive, scalar-forced build green on stable 1.90. F5 `with_forced_isa` makes dispatch test-forceable so the differential suite exercises every host ISA path. |
 
 > SIMD accelerates loops that are already *algorithmically right*. It is **not** a
 > substitute for the missing indexes/semi-naïve firing that dominate the SPEC-04

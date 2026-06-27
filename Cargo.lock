@@ -1133,6 +1133,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "horndb-simd"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "proptest",
+]
+
+[[package]]
 name = "horndb-sparql"
 version = "0.1.0"
 dependencies = [
