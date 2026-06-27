@@ -75,7 +75,16 @@ Closed tasks are listed in [Done](#done-for-traceability).
   compress/compare kernel is hand-written. **Stage 1b — OPEN:** the WCOJ seek/intersect
   consumer to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle`
   no-regress).
-  **Stage 2:** dictionary decode + `rdf:type` partition scan (SPEC-02 NF2 ≥80% STREAM).
+  **Stage 2 — DONE (kernels + benches; hornbench numbers pending):** `horndb-storage`
+  consumes `horndb-simd` for bulk inline-int dictionary decode
+  (`Dictionary::decode_inline_ints`/`lookup_inline_int_batch`/`lookup_batch`) and the
+  vectorised `rdf:type` partition scan (`PredicatePartition::subjects_with_object`, built
+  on the new `horndb_simd::filter_indices_eq` scan+index-compact primitive +
+  `gather`; the primitive is differential-proptested bit-identical vs scalar on every
+  host ISA path). The `dict_decode` (≥4×) and `partition_scan` (≥80% STREAM-Triad)
+  microbenches are wired and smoke-run; the ≥4× ratio and the NUMA-pinned STREAM-Triad
+  fraction are the deferred hornbench-host measurement (`BENCHMARKS.md` rows marked
+  pending hornbench). The F2 "encode" stretch (vectorised `intern`) is out of scope.
   **Gated:** the delta-apply merge/dedup SIMD blocks on
   [#133](https://github.com/sunstoneinstitute/horndb/issues/133) (object index) +
   [#134](https://github.com/sunstoneinstitute/horndb/issues/134) (semi-naïve)
