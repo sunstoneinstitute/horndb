@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name = "dict_decode"
 harness = false
+
+[[bench]]
+name = "partition_scan"
+harness = false
