@@ -603,3 +603,38 @@ body = [
   { s = "?b", p = "skos:exactMatch", o = "?c" },
 ]
 head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+# --- SPEC-11 F3: SSSOM transitivity (T1) — delegated to the closure backend ---
+# Only the SKOS mapping predicates are added here. subClassOf/subPropertyOf/
+# sameAs/equivalentClass/equivalentProperty are ALREADY closed by the existing
+# OWL machinery (scm-sco, scm-spo, eq-trans, scm-eqc*/scm-eqp*) and are not
+# re-added (ADR-0017: do not re-close identity-strength predicates here).
+[[rule]]
+id = "sssom-t1-exact"
+comment = "SSSOM T1: skos:exactMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-t1-broad"
+comment = "SSSOM T1: skos:broadMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+  { s = "?b", p = "skos:broadMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-t1-narrow"
+comment = "SSSOM T1: skos:narrowMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+  { s = "?b", p = "skos:narrowMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }

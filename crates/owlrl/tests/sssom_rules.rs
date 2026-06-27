@@ -91,6 +91,31 @@ fn rce1_exact_then_broad_propagates_broad() {
 }
 
 #[test]
+fn t1_broad_match_is_transitive() {
+    // A broadMatch B broadMatch C  =>  A broadMatch C
+    let a = TermId(1);
+    let b = TermId(2);
+    let c = TermId(3);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_broad_match, b));
+        s.assert(t(b, v.skos_broad_match, c));
+    });
+    assert!(s.contains(&t(a, v.skos_broad_match, c)));
+}
+
+#[test]
+fn t1_narrow_match_is_transitive() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let c = TermId(3);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_narrow_match, b));
+        s.assert(t(b, v.skos_narrow_match, c));
+    });
+    assert!(s.contains(&t(a, v.skos_narrow_match, c)));
+}
+
+#[test]
 fn rce2_broad_then_exact_propagates_broad() {
     // A broadMatch B, B exactMatch C  =>  A broadMatch C
     let a = TermId(1);
