@@ -117,3 +117,78 @@ fn group_by_subject_count() {
         ]
     );
 }
+
+/// Store with deliberate duplicates, for the DISTINCT dedup paths (#128).
+/// Six inserts over three subjects; MemStore dedups the two identical
+/// triples, leaving four distinct rows with ?v multiset {10,20,30,30}.
+fn dup_store() -> MemStore {
+    let mut s = MemStore::default();
+    let lit = |n: &str| {
+        Term::Literal(format!(
+            "\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+        ))
+    };
+    for (subj, v) in [
+        ("s1", "10"),
+        ("s1", "10"),
+        ("s2", "20"),
+        ("s2", "30"),
+        ("s3", "30"),
+        ("s3", "30"),
+    ] {
+        s.insert_triple(
+            iri(&format!("http://ex/{subj}")),
+            iri("http://ex/v"),
+            lit(v),
+        );
+    }
+    s
+}
+
+#[test]
+fn select_distinct_dedups_rows() {
+    // Whole-row dedup path (PhysicalPlan::Distinct). MemStore's HashSet scan
+    // order is non-deterministic, so assert the distinct SET, not an order.
+    let s = dup_store();
+    let rows = solutions("SELECT DISTINCT ?v WHERE { ?s <http://ex/v> ?v }", &s);
+    let mut got: Vec<String> = rows.iter().map(|r| val(r.get("v").unwrap())).collect();
+    got.sort();
+    assert_eq!(got, vec!["10", "20", "30"], "three distinct ?v values");
+}
+
+#[test]
+fn sum_distinct_dedups_before_summing() {
+    // MemStore dedups identical triples, so the stored ?v multiset over the
+    // four distinct rows is {10,20,30,30}; DISTINCT collapses it to {10,20,30}.
+    let s = dup_store();
+    let rows = solutions(
+        "SELECT (SUM(DISTINCT ?v) AS ?t) WHERE { ?s <http://ex/v> ?v }",
+        &s,
+    );
+    assert_eq!(
+        val(rows[0].get("t").unwrap()),
+        "60",
+        "SUM(DISTINCT) = 10+20+30"
+    );
+    // Plain SUM sees the full stored multiset: 10+20+30+30 = 90.
+    let rows = solutions("SELECT (SUM(?v) AS ?t) WHERE { ?s <http://ex/v> ?v }", &s);
+    assert_eq!(val(rows[0].get("t").unwrap()), "90", "SUM = 10+20+30+30");
+}
+
+#[test]
+fn count_distinct_term_and_star() {
+    let s = dup_store();
+    // COUNT(DISTINCT ?v) — dedup_terms path: distinct values {10,20,30} = 3.
+    let rows = solutions(
+        "SELECT (COUNT(DISTINCT ?v) AS ?c) WHERE { ?s <http://ex/v> ?v }",
+        &s,
+    );
+    assert_eq!(val(rows[0].get("c").unwrap()), "3");
+    // COUNT(DISTINCT *) — whole-row dedup path: the four (?s,?v) solutions are
+    // all distinct (?s distinguishes them), so the count is 4 = COUNT(*).
+    let rows = solutions(
+        "SELECT (COUNT(DISTINCT *) AS ?c) WHERE { ?s <http://ex/v> ?v }",
+        &s,
+    );
+    assert_eq!(val(rows[0].get("c").unwrap()), "4");
+}

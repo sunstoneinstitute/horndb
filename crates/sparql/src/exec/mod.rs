@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 ///
 /// We use `BTreeMap` so the order of variables in serialised results
 /// is deterministic for snapshot tests.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Bindings {
     inner: BTreeMap<String, Term>,
 }

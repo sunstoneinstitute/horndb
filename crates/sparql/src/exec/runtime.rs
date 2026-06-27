@@ -6,7 +6,7 @@ use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Bindings, Executor};
 use crate::plan::PhysicalPlan;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct Runtime<'a, E: Executor + ?Sized> {
     exec: &'a E,
@@ -69,13 +69,17 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             }
             PhysicalPlan::Distinct { inner } => {
                 let v = self.eval(inner)?;
-                let mut seen: Vec<Bindings> = Vec::new();
+                // Order-preserving dedup: O(n) membership via a hash set,
+                // keeping first-seen order (was an O(n^2) linear scan — the
+                // SPB aggregation gap, #128).
+                let mut seen: HashSet<Bindings> = HashSet::with_capacity(v.len());
+                let mut out: Vec<Bindings> = Vec::with_capacity(v.len());
                 for b in v {
-                    if !seen.contains(&b) {
-                        seen.push(b);
+                    if seen.insert(b.clone()) {
+                        out.push(b);
                     }
                 }
-                Ok(seen)
+                Ok(out)
             }
             PhysicalPlan::Slice {
                 inner,
@@ -721,14 +725,10 @@ fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>>
     Ok(match &agg.func {
         AggFunc::CountStar => {
             let n = if agg.distinct {
-                // COUNT(DISTINCT *) — distinct whole solution rows.
-                let mut seen: Vec<&Bindings> = Vec::new();
-                for m in members {
-                    if !seen.contains(&m) {
-                        seen.push(m);
-                    }
-                }
-                seen.len()
+                // COUNT(DISTINCT *) — distinct whole solution rows. O(n) via a
+                // hash set (was an O(n^2) linear scan, #128); only the count is
+                // needed, so order is irrelevant here.
+                members.iter().collect::<HashSet<&Bindings>>().len()
             } else {
                 members.len()
             };
@@ -824,16 +824,11 @@ fn numeric_term(x: f64) -> Term {
 }
 
 /// Deduplicate a term multiset by value, preserving first-seen order.
+/// O(n) via a hash set (was an O(n^2) linear scan — the SPB aggregation
+/// gap, #128).
 fn dedup_terms(vals: &mut Vec<Term>) {
-    let mut seen: Vec<Term> = Vec::new();
-    vals.retain(|t| {
-        if seen.contains(t) {
-            false
-        } else {
-            seen.push(t.clone());
-            true
-        }
-    });
+    let mut seen: HashSet<Term> = HashSet::with_capacity(vals.len());
+    vals.retain(|t| seen.insert(t.clone()));
 }
 
 fn project(b: &Bindings, vars: &[Var]) -> Bindings {
