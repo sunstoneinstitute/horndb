@@ -1,7 +1,9 @@
 # 2026-06-27 — `owlrl` `rdf:type` object index + genuine semi-naïve firing
 
 > Dated design spec (SPEC-04 F5-adjacent). Targets the LUBM-shaped
-> materialize hotspot tracked in [#2](https://github.com/sunstoneinstitute/horndb/issues/2).
+> materialize hotspot split across [#133](https://github.com/sunstoneinstitute/horndb/issues/133)
+> (fix #1, object index) and [#134](https://github.com/sunstoneinstitute/horndb/issues/134)
+> (fix #2, semi-naïve firing).
 > Gates on existing benches per the harness-first rule (SPEC-00).
 
 ## Purpose

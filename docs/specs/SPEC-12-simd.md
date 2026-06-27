@@ -32,7 +32,7 @@ paths, ranked by payoff (highest first):
    including the ≥80% STREAM-Triad `rdf:type` partition scan (SPEC-02 NF2,
    acceptance #4).
 3. **Delta-apply merge / dedup / sort** of derived triples (SPEC-04, F3) —
-   **gated behind issue [#2](https://github.com/sunstoneinstitute/horndb/issues/2)**;
+   **gated behind issue [#133](https://github.com/sunstoneinstitute/horndb/issues/133)**;
    see the caveat below.
 4. **The shared SIMD primitives layer itself** (F4) — `intersect`, `merge`,
    `dedup`, `filter`, `gather`, `lower_bound` over `&[u32]`/`&[u64]` slices,
@@ -68,7 +68,7 @@ Out of scope (non-goals):
   effectively naïve and the scan repeats per subclass-pair and per round). The
   fix is an **object index** on the `rdf:type` partition and **genuine
   delta-driven semi-naïve firing** — issue
-  [#2](https://github.com/sunstoneinstitute/horndb/issues/2), SPEC-04 F5 — **not**
+  [#133](https://github.com/sunstoneinstitute/horndb/issues/133), SPEC-04 F5 — **not**
   SIMD. Vectorizing that scan would optimize a loop that indexing *deletes*. This
   SPEC explicitly does **not** scope SIMD onto the cax-sco partition filter.
 - GPU / SVE / wider-than-512 ISAs — SPEC-09, Stage 3.
@@ -115,9 +115,9 @@ Out of scope (non-goals):
 
 **F3. Delta-apply merge / dedup / sort (SPEC-04 hot path) — GATED.**
 - This requirement is **blocked on and lower priority than** issue
-  [#2](https://github.com/sunstoneinstitute/horndb/issues/2). SIMD here targets the
+  [#133](https://github.com/sunstoneinstitute/horndb/issues/133). SIMD here targets the
   parts that remain after indexing lands, **not** the cax-sco scan.
-- After #2, the SIMD-friendly residue is: (a) the **delta-apply merge/dedup/sort**
+- After #133, the SIMD-friendly residue is: (a) the **delta-apply merge/dedup/sort**
   of derived triples — today `Delta` is unordered `FxHashSet`/`FxHashMap`
   (`crates/owlrl/src/delta.rs:9-10`, with `merge`/`insert`/`subtract` at `:18-73`
   doing hash-based dedup), so this F **requires** first representing the delta as
@@ -127,8 +127,8 @@ Out of scope (non-goals):
   (`crates/owlrl/src/list_rules.rs:769-773`, `:896-899`) become a vectorized
   semijoin against a sorted extent once the extent is materialized contiguously.
 - The representational change (hash-delta → sorted-run delta) is the bulk of this
-  work; the SIMD kernels are reused from F4. If #2's indexing makes the hash delta
-  cheap enough, this F may be descoped — decide after #2 measures.
+  work; the SIMD kernels are reused from F4. If #133's indexing makes the hash delta
+  cheap enough, this F may be descoped — decide after #133 measures.
 
 **F4. Shared SIMD primitives layer.**
 - A single module — recommended as a new **leaf crate `horndb-simd`** with zero
@@ -196,7 +196,7 @@ overhead to the scalar baseline.
   consumer and the lowest layer that depends on `horndb-simd`.
 - **SPEC-03 (wcoj)** — the F1 consumer; the highest-payoff path.
 - **SPEC-04 (owlrl)** — the F3 consumer, **gated on issue
-  [#2](https://github.com/sunstoneinstitute/horndb/issues/2)**.
+  [#133](https://github.com/sunstoneinstitute/horndb/issues/133)**.
 - **SPEC-01 (harness / BENCHMARKS.md)** — the per_tuple / intersect / decode /
   partition-scan benches that gate this SPEC.
 - No new external crates: `std::arch` intrinsics only.
@@ -238,10 +238,10 @@ criterion/harness bench, every recorded number measured on hornbench and written
    1.90 on x86-64 and aarch64; a scalar-forced run (F5) passes with every SIMD path
    disabled. (NF5)
 7. **Delta-apply SIMD (gated).** *Only after issue
-   [#2](https://github.com/sunstoneinstitute/horndb/issues/2) lands:* a delta-apply
+   [#133](https://github.com/sunstoneinstitute/horndb/issues/133) lands:* a delta-apply
    merge/dedup microbench over sorted-run deltas shows a measured win over the
    hash-delta baseline, differential-proven equal to the current `Delta` semantics.
-   This criterion is **deferred** until #2 and may be descoped if #2 makes it
+   This criterion is **deferred** until #133 and may be descoped if #133 makes it
    irrelevant.
 
 ## Roadmap / staging
@@ -253,10 +253,10 @@ criterion/harness bench, every recorded number measured on hornbench and written
 2. **Second: dictionary decode + partition scan (F2).** Reuses the same primitives;
    pairs naturally with the SPEC-02 NUMA-pinned STREAM bench. Acceptance #4.
 3. **Last, gated: delta-apply SIMD (F3).** Blocked on issue
-   [#2](https://github.com/sunstoneinstitute/horndb/issues/2) (object index +
+   [#133](https://github.com/sunstoneinstitute/horndb/issues/133) (object index +
    semi-naïve). Requires the hash-delta → sorted-run representational change before
    any kernel helps. Acceptance #7. The cax-sco partition-filter scan is **out of
-   scope** — superseded by #2's indexing.
+   scope** — superseded by #133's indexing.
 
 ## Risks and open questions
 
@@ -282,9 +282,9 @@ criterion/harness bench, every recorded number measured on hornbench and written
   is fast but not bit-identical to the scalar oracle is a correctness regression in
   a *reasoner* — every materialized triple must be sound (SPEC-00 bet 6). No kernel
   ships without its proptest green.
-- **F3 may evaporate.** If issue #2's indexing + semi-naïve makes the delta cheap
+- **F3 may evaporate.** If issue #133's indexing + semi-naïve makes the delta cheap
   enough, the SIMD delta-apply may not be worth the representational change. This is
-  an explicit "measure after #2" decision, not a commitment.
+  an explicit "measure after #133" decision, not a commitment.
 - **Open: AoS → SoA for the WCOJ trie.** F1's intersect wants column-major active
   levels; the current dense store is AoS tuples. Whether to keep a transient SoA
   view per level or change the trie storage layout is a SPEC-03 design decision this

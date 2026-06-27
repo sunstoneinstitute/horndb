@@ -31,7 +31,7 @@ Numbered `SPEC-NN` files are the standing subsystem contracts above. Point desig
 | Design spec | Refines | Status |
 |------|---------|--------|
 | [Shared, lock-guarded GraphBLAS build across worktrees](2026-05-31-shared-graphblas-build-design.md) | SPEC-05 (closure backend) | Approved |
-| [`owlrl` `rdf:type` object index + genuine semi-naïve firing](2026-06-27-owlrl-type-index-seminaive.md) | SPEC-04 (rule engine, F5-adjacent; [#2](https://github.com/sunstoneinstitute/horndb/issues/2)) | Draft |
+| [`owlrl` `rdf:type` object index + genuine semi-naïve firing](2026-06-27-owlrl-type-index-seminaive.md) | SPEC-04 (rule engine, F5-adjacent; [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) | Draft |
 
 ## Reading order
 
