@@ -1176,6 +1176,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "dashmap",
+ "horndb-simd",
  "oxrdf",
  "oxttl",
  "parking_lot",
