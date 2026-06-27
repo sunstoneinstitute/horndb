@@ -23,7 +23,11 @@ struct Cli {
     /// Path to workspace root (default: cwd).
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
-    /// SQLite result DB (default: target/harness.sqlite).
+    /// SQLite result DB. Precedence: `--db` > `$HARNESS_DB` >
+    /// `target/harness.sqlite`. The DB is append-only across runs, so point
+    /// `$HARNESS_DB` at a path that persists between invocations (e.g. the
+    /// nightly bench runner uses a path outside the ephemeral checkout) to
+    /// accumulate a trend series rather than starting fresh each run.
     #[arg(long)]
     db: Option<PathBuf>,
     /// Engine to dispatch against. Stage 0 only supports `stub`.
@@ -143,6 +147,7 @@ fn real_main() -> Result<ExitCode> {
         .unwrap_or(cli.workspace.clone());
     let db_path = cli
         .db
+        .or_else(|| std::env::var_os("HARNESS_DB").map(PathBuf::from))
         .unwrap_or_else(|| workspace.join("target/harness.sqlite"));
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).ok();

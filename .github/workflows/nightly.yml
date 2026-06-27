@@ -14,6 +14,14 @@ on:
 # The runner executes as user `bench`, so the job can read these paths.
 env:
   SPB_ASSETS: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist
+  # Append-only trend DB on the runner's persistent disk, OUTSIDE the
+  # ephemeral Actions checkout (which `git clean -ffdx` + rust-cache wipe
+  # each run). All harness invocations below — both engine legs and the
+  # report — read $HARNESS_DB by default, so each nightly appends its rows
+  # to the accumulated series instead of starting from an empty DB. The
+  # uploaded artifact is therefore the full cumulative history, not a
+  # single run's two points.
+  HARNESS_DB: /home/bench/horndb-bench/harness.sqlite
   HORNDB_BIND: 127.0.0.1:3840
   # Pin the GraphDB A/B reference version to the branch, not whatever is
   # installed on the runner. start-graphdb-free.sh downloads this version if
@@ -130,4 +138,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: harness-${{ github.run_id }}
-          path: target/harness.sqlite
+          # The cumulative trend DB lives outside the checkout; upload that
+          # (not target/harness.sqlite, which never gets written now that
+          # $HARNESS_DB redirects every harness invocation).
+          path: ${{ env.HARNESS_DB }}
