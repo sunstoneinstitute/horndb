@@ -81,6 +81,14 @@ Closed tasks are listed in [Done](#done-for-traceability).
   benched on hornbench (index ≤ ~10 B/pair; full-closure time vs the OxO2 1.16M-mapping
   / 17-min baseline). Splits into shippable increments (vocab + representation → chain
   rules → index → spine/serving). See `docs/architecture.md` §13.
+  **Progress (2026-06-27, branch `spec-11-mappings-reasoning`):** the *reasoning slice*
+  is implemented and green — F1 (vocab), F3 (chaining rules), F4 (negative chaining),
+  F7 (confidence), F8 (provenance), F9 (harness SSSOM/TSV loader), plus the curated
+  SSSOM conformance subset in `harness/selected.toml`. F2 (mapping representation) is
+  **partial** — the n-ary `sssom:Mapping` node builder exists; full
+  materialization-on-inference is follow-up. Still outstanding (keeps this box
+  unchecked): the *serving slice* — F5 (compact crosswalk index) and F6 (crosswalk
+  spine), plus GraphBLAS-backend T1 parity. Tracked as a separate serving-slice plan.
 
 ## MEDIUM — Performance
 

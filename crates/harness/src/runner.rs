@@ -42,6 +42,10 @@ pub fn run_selected(
             // `TestNTriplesNegativeSyntax`), parsed by the same
             // `manifest::parse` entry point as the mf:* suites.
             "rdf12-n-triples" => Suite::Rdf12NTriples,
+            // SPEC-11 SSSOM chaining conformance. Same `mf:PositiveEntailmentTest`
+            // shape as `owl2`; the `#sssom-mondo-slice` premise is a `.sssom.tsv`
+            // file loaded via `load_dataset_for` (extension-branched below).
+            "sssom-mappings" => Suite::SssomMappings,
             other => {
                 report.push(Outcome {
                     test_id: format!("<suite:{other}>"),
@@ -91,8 +95,8 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             premise,
             conclusion,
         } => {
-            let p = load_turtle_dataset(premise)?;
-            let c = load_turtle_dataset(conclusion)?;
+            let p = load_dataset_for(premise)?;
+            let c = load_dataset_for(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
                 (Status::Passed, None)
@@ -235,6 +239,22 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
         reason,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// Load an entailment premise/conclusion dataset, branching on file
+/// extension. SPEC-11 SSSOM fixtures whose action file ends in `.sssom.tsv`
+/// are parsed by the harness-only SSSOM/TSV reader (`sssom_loader`); every
+/// other fixture is Turtle and goes through `load_turtle_dataset`. Routing
+/// both premise and conclusion through here is harmless (conclusions are
+/// always `.ttl`) and keeps a single load path.
+fn load_dataset_for(path: &Path) -> Result<oxrdf::Dataset> {
+    if path.to_string_lossy().ends_with(".sssom.tsv") {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("reading sssom tsv {}", path.display()))?;
+        crate::sssom_loader::parse_sssom_tsv(&text)
+    } else {
+        load_turtle_dataset(path)
+    }
 }
 
 /// Read a syntax-suite input file. I/O errors here mean a misconfigured

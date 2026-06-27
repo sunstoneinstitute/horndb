@@ -1,0 +1,4 @@
+@prefix h:  <https://w3id.org/horndb/internal#> .
+@prefix ex: <http://example.org/> .
+
+ex:A h:notExactMatch ex:C .

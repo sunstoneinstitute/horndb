@@ -1,0 +1,134 @@
+#mapping_set_id: https://w3id.org/biopragmatics/biomappings/sssom/biomappings.sssom.tsv
+#mapping_set_title: Biomappings (curated slice for HornDB SPEC-11 conformance)
+#mapping_set_description: A ~120-row excerpt of the public Biomappings SSSOM export, trimmed to skos:* mapping predicates for the SPEC-11 F9 loader + chaining conformance fixture. Anchored on a real transitive exactMatch chain (APOLLO_SV:00000142 -> IDOMAL:0001040 -> VO:0000002).
+#license: https://creativecommons.org/publicdomain/zero/1.0/
+#curie_map:
+#  AGRO: http://purl.obolibrary.org/obo/AGRO_
+#  APOLLO_SV: http://purl.obolibrary.org/obo/APOLLO_SV_
+#  GSSO: http://purl.obolibrary.org/obo/GSSO_
+#  IDOMAL: http://purl.obolibrary.org/obo/IDOMAL_
+#  VO: http://purl.obolibrary.org/obo/VO_
+#  adcad: https://purl.dataone.org/odo/ADCAD_
+#  agrovoc: http://aims.fao.org/aos/agrovoc/
+#  skos: http://www.w3.org/2004/02/skos/core#
+subject_id	predicate_id	predicate_modifier	object_id	mapping_justification	confidence
+APOLLO_SV:00000142	skos:exactMatch		IDOMAL:0001040	semapv:ManualMappingCuration
+IDOMAL:0001040	skos:exactMatch		VO:0000002	semapv:ManualMappingCuration
+adcad:00003	skos:exactMatch		GSSO:007360	semapv:ManualMappingCuration
+adcad:00004	skos:exactMatch		GSSO:003852	semapv:ManualMappingCuration
+adcad:00006	skos:exactMatch		GSSO:006201	semapv:ManualMappingCuration
+adcad:00009	skos:exactMatch		GSSO:006210	semapv:ManualMappingCuration
+adcad:00013	skos:exactMatch		GSSO:008403	semapv:ManualMappingCuration
+adcad:00015	skos:exactMatch		GSSO:008398	semapv:ManualMappingCuration
+adcad:00019	skos:exactMatch		GSSO:011177	semapv:ManualMappingCuration
+adcad:00020	skos:exactMatch		GSSO:008387	semapv:ManualMappingCuration
+adcad:00022	skos:exactMatch		GSSO:008384	semapv:ManualMappingCuration
+adcad:00025	skos:exactMatch		GSSO:008371	semapv:ManualMappingCuration
+adcad:00027	skos:exactMatch		GSSO:008366	semapv:ManualMappingCuration
+adcad:00028	skos:exactMatch		GSSO:008376	semapv:ManualMappingCuration
+adcad:00034	skos:exactMatch		GSSO:006207	semapv:ManualMappingCuration
+adcad:00037	skos:exactMatch		GSSO:009387	semapv:ManualMappingCuration
+adcad:00057	skos:exactMatch		GSSO:011170	semapv:ManualMappingCuration
+adcad:00063	skos:exactMatch		GSSO:011173	semapv:ManualMappingCuration
+adcad:00064	skos:exactMatch		GSSO:009389	semapv:ManualMappingCuration
+adcad:00065	skos:exactMatch		GSSO:006208	semapv:ManualMappingCuration
+adcad:00067	skos:exactMatch		GSSO:003851	semapv:ManualMappingCuration
+adcad:00068	skos:exactMatch		GSSO:009049	semapv:ManualMappingCuration
+adcad:00071	skos:exactMatch		GSSO:010235	semapv:ManualMappingCuration
+adcad:00077	skos:exactMatch		GSSO:006202	semapv:ManualMappingCuration
+agrovoc:0619dd9e	skos:exactMatch		AGRO:00000137	semapv:ManualMappingCuration
+agrovoc:0a9fbc47	skos:exactMatch		AGRO:00000456	semapv:ManualMappingCuration
+agrovoc:1012	skos:exactMatch		AGRO:00000066	semapv:ManualMappingCuration
+agrovoc:10457	skos:exactMatch		AGRO:00000116	semapv:ManualMappingCuration
+agrovoc:1101	skos:exactMatch		AGRO:00000040	semapv:ManualMappingCuration
+agrovoc:12679	skos:exactMatch		AGRO:00000220	semapv:ManualMappingCuration
+agrovoc:13452	skos:exactMatch		AGRO:00000093	semapv:ManualMappingCuration
+agrovoc:13811	skos:exactMatch		AGRO:00000229	semapv:ManualMappingCuration
+agrovoc:1410249722990	skos:exactMatch		AGRO:00000329	semapv:ManualMappingCuration
+agrovoc:155	skos:exactMatch		AGRO:00000037	semapv:ManualMappingCuration
+agrovoc:15970	skos:exactMatch		AGRO:00000047	semapv:ManualMappingCuration
+agrovoc:16097	skos:exactMatch		AGRO:00000580	semapv:ManualMappingCuration
+agrovoc:16118	skos:exactMatch		AGRO:00000154	semapv:ManualMappingCuration
+agrovoc:16650	skos:exactMatch		AGRO:00002009	semapv:ManualMappingCuration
+agrovoc:1775	skos:exactMatch		AGRO:00000473	semapv:ManualMappingCuration
+agrovoc:17857	skos:exactMatch		AGRO:00000321	semapv:ManualMappingCuration
+agrovoc:1882e93f	skos:exactMatch		AGRO:00000365	semapv:ManualMappingCuration
+agrovoc:1972	skos:exactMatch		AGRO:00000325	semapv:ManualMappingCuration
+agrovoc:200	skos:exactMatch		AGRO:00000197	semapv:ManualMappingCuration
+agrovoc:2019	skos:exactMatch		AGRO:00000393	semapv:ManualMappingCuration
+agrovoc:207	skos:exactMatch		AGRO:00000584	semapv:ManualMappingCuration
+agrovoc:2151	skos:exactMatch		AGRO:00000046	semapv:ManualMappingCuration
+agrovoc:2386	skos:exactMatch		AGRO:00000396	semapv:ManualMappingCuration
+agrovoc:24001	skos:exactMatch		AGRO:00000540	semapv:ManualMappingCuration
+agrovoc:24065	skos:exactMatch		AGRO:00010132	semapv:ManualMappingCuration
+agrovoc:24262	skos:exactMatch		AGRO:00002042	semapv:ManualMappingCuration
+agrovoc:24947	skos:exactMatch		AGRO:00000204	semapv:ManualMappingCuration
+agrovoc:24975	skos:exactMatch		AGRO:00020001	semapv:ManualMappingCuration
+agrovoc:25021	skos:exactMatch		AGRO:00000272	semapv:ManualMappingCuration
+agrovoc:2502372e	skos:exactMatch		AGRO:00000331	semapv:ManualMappingCuration
+agrovoc:25206	skos:exactMatch		AGRO:00000112	semapv:ManualMappingCuration
+agrovoc:25243	skos:exactMatch		AGRO:00000426	semapv:ManualMappingCuration
+agrovoc:25265	skos:exactMatch		AGRO:00000520	semapv:ManualMappingCuration
+agrovoc:25305	skos:exactMatch		AGRO:00000589	semapv:ManualMappingCuration
+agrovoc:25354	skos:exactMatch		AGRO:00000588	semapv:ManualMappingCuration
+agrovoc:25356	skos:exactMatch		AGRO:00000055	semapv:ManualMappingCuration
+agrovoc:25674	skos:exactMatch		AGRO:00000463	semapv:ManualMappingCuration
+agrovoc:25695	skos:exactMatch		AGRO:00000129	semapv:ManualMappingCuration
+agrovoc:25720	skos:exactMatch		AGRO:00000412	semapv:ManualMappingCuration
+agrovoc:25763	skos:exactMatch		AGRO:00000540	semapv:ManualMappingCuration
+agrovoc:25779	skos:exactMatch		AGRO:00000125	semapv:ManualMappingCuration
+agrovoc:25791	skos:exactMatch		AGRO:00000004	semapv:ManualMappingCuration
+agrovoc:25794	skos:exactMatch		AGRO:00000128	semapv:ManualMappingCuration
+agrovoc:25808	skos:exactMatch		AGRO:00000130	semapv:ManualMappingCuration
+agrovoc:25812	skos:exactMatch		AGRO:00000590	semapv:ManualMappingCuration
+agrovoc:25818	skos:exactMatch		AGRO:00000030	semapv:ManualMappingCuration
+agrovoc:25990	skos:exactMatch		AGRO:00000139	semapv:ManualMappingCuration
+agrovoc:26820	skos:exactMatch		AGRO:00000051	semapv:ManualMappingCuration
+agrovoc:26af733b	skos:exactMatch		AGRO:00000482	semapv:ManualMappingCuration
+agrovoc:26f679e5	skos:exactMatch		AGRO:00000586	semapv:ManualMappingCuration
+agrovoc:27870	skos:exactMatch		AGRO:00002040	semapv:ManualMappingCuration
+agrovoc:27896	skos:exactMatch		AGRO:00000081	semapv:ManualMappingCuration
+agrovoc:27921	skos:exactMatch		AGRO:00010133	semapv:ManualMappingCuration
+agrovoc:2794	skos:exactMatch		AGRO:00000299	semapv:ManualMappingCuration
+agrovoc:2805	skos:exactMatch		AGRO:00000372	semapv:ManualMappingCuration
+agrovoc:2810	skos:exactMatch		AGRO:00000076	semapv:ManualMappingCuration
+agrovoc:29464	skos:exactMatch		AGRO:00010128	semapv:ManualMappingCuration
+agrovoc:3008	skos:exactMatch		AGRO:00000048	semapv:ManualMappingCuration
+agrovoc:3154	skos:exactMatch		AGRO:00000067	semapv:ManualMappingCuration
+agrovoc:32823ce3	skos:exactMatch		AGRO:00000477	semapv:ManualMappingCuration
+agrovoc:330635	skos:exactMatch		AGRO:00000022	semapv:ManualMappingCuration
+agrovoc:330677	skos:exactMatch		AGRO:00000024	semapv:ManualMappingCuration
+agrovoc:330772	skos:exactMatch		AGRO:00000453	semapv:ManualMappingCuration
+agrovoc:330794	skos:exactMatch		AGRO:00000009	semapv:ManualMappingCuration
+agrovoc:33445	skos:exactMatch		AGRO:00000017	semapv:ManualMappingCuration
+agrovoc:33452	skos:exactMatch		AGRO:00000579	semapv:ManualMappingCuration
+agrovoc:3375	skos:exactMatch		AGRO:00000075	semapv:ManualMappingCuration
+agrovoc:34250	skos:exactMatch		AGRO:00000015	semapv:ManualMappingCuration
+agrovoc:3500	skos:exactMatch		AGRO:00000025	semapv:ManualMappingCuration
+agrovoc:35282	skos:exactMatch		AGRO:00000028	semapv:ManualMappingCuration
+agrovoc:35678	skos:exactMatch		AGRO:00000089	semapv:ManualMappingCuration
+agrovoc:36542	skos:exactMatch		AGRO:00000431	semapv:ManualMappingCuration
+agrovoc:36704	skos:exactMatch		AGRO:00020004	semapv:ManualMappingCuration
+agrovoc:37405	skos:exactMatch		AGRO:00000309	semapv:ManualMappingCuration
+agrovoc:37743	skos:exactMatch		AGRO:00002010	semapv:ManualMappingCuration
+agrovoc:3910	skos:exactMatch		AGRO:00000516	semapv:ManualMappingCuration
+agrovoc:3954	skos:exactMatch		AGRO:00000006	semapv:ManualMappingCuration
+agrovoc:3955	skos:exactMatch		AGRO:00000241	semapv:ManualMappingCuration
+agrovoc:3957	skos:exactMatch		AGRO:00000054	semapv:ManualMappingCuration
+agrovoc:397044c5	skos:exactMatch		AGRO:00000455	semapv:ManualMappingCuration
+agrovoc:4373	skos:exactMatch		AGRO:00000078	semapv:ManualMappingCuration
+agrovoc:4592	skos:exactMatch		AGRO:00002039	semapv:ManualMappingCuration
+agrovoc:4915	skos:exactMatch		AGRO:00000481	semapv:ManualMappingCuration
+agrovoc:4963	skos:exactMatch		AGRO:00002008	semapv:ManualMappingCuration
+agrovoc:4977	skos:exactMatch		AGRO:00000092	semapv:ManualMappingCuration
+agrovoc:4978	skos:exactMatch		AGRO:00000111	semapv:ManualMappingCuration
+agrovoc:4f8733aa	skos:exactMatch		AGRO:00000476	semapv:ManualMappingCuration
+agrovoc:5195	skos:exactMatch		AGRO:00020007	semapv:ManualMappingCuration
+agrovoc:5250	skos:exactMatch		AGRO:00002046	semapv:ManualMappingCuration
+agrovoc:542	skos:exactMatch		AGRO:00000036	semapv:ManualMappingCuration
+agrovoc:5497	skos:exactMatch		AGRO:00000434	semapv:ManualMappingCuration
+agrovoc:5726	skos:exactMatch		AGRO:00000023	semapv:ManualMappingCuration
+agrovoc:60a629e9	skos:exactMatch		AGRO:00000091	semapv:ManualMappingCuration
+agrovoc:6274	skos:exactMatch		AGRO:00000566	semapv:ManualMappingCuration
+agrovoc:6463	skos:exactMatch		AGRO:00000115	semapv:ManualMappingCuration
+agrovoc:6636	skos:exactMatch		AGRO:00002030	semapv:ManualMappingCuration

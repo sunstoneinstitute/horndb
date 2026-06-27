@@ -185,6 +185,14 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | **Stage 3 win condition** — LDBC SPB SF5 on single MI300A/GH200 | ≥**1.5×** RDFox materialization **and** ≥**2×** GraphDB Enterprise queries | NF5 / acceptance #5 |
 | LUBM-8000 with 50% in CXL tier | within **1.3×** all-DDR5 baseline | acceptance #3 |
 
+### SPEC-11 — SSSOM mappings & crosswalk index (`horndb-owlrl` + `horndb-storage`)
+
+| Metric | Target | Baseline |
+|---|---|---|
+| Chain-rule closure throughput (SSSOM mappings) | **TBD** (NF1) | RDFox/Inferray closure leaders; Measured: pending hornbench (F5/F6 follow-up) |
+| Compact crosswalk-index footprint | ≤**10 bytes/pair** bidi (NF2, F5) | EF+FOR baseline → rung-4 PGM; Measured: pending hornbench (F5/F6 follow-up) |
+| Full-closure materialization vs OxO2 | beat **1.16 M mappings / 17 min** (NF3) | OxO2 (EBI Ontology Xref Service) reference run; Measured: pending hornbench (F5/F6 follow-up) |
+
 ## Where we actually are right now
 
 Honest accounting. Updated when a bench moves.

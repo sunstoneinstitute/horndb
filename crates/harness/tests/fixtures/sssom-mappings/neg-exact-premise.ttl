@@ -1,0 +1,6 @@
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix h:    <https://w3id.org/horndb/internal#> .
+@prefix ex:   <http://example.org/> .
+
+ex:A skos:exactMatch ex:B .
+ex:B h:notExactMatch ex:C .

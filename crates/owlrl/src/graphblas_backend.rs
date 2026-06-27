@@ -75,6 +75,9 @@ impl ClosureBackend for GraphBlasBackend {
         close_sameas(store, v.owl_same_as, &mut out);
         // prp-trp: strict transitive closure of each declared transitive property.
         close_transitive_properties(store, &v, &mut out);
+        // TODO(TASKS.md #130): SPEC-11 T1 — this backend does not yet close the
+        // SSSOM mapping predicates (skos:exactMatch/broadMatch/narrowMatch) that
+        // RuleFiringBackend closes. Bring to parity (SPEC-11/SPEC-05 follow-up).
 
         out
     }
