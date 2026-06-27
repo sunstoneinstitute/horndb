@@ -13,25 +13,36 @@ from a real SSSOM/TSV slice via the §F9 harness loader.
 | `#sssom-rce1-broad` | exactMatch ∘ broadMatch ⟹ broadMatch | F3 RCE1 |
 | `#sssom-t1-broad` | broadMatch transitivity | F3 T1 |
 | `#sssom-neg-exact` | exactMatch ∘ Not ⟹ Not | F4 |
-| `#sssom-mondo-slice` | real slice loads + chains | F9, acceptance #1 |
+| `#sssom-biomappings-slice` | real slice loads + chains | F9, acceptance #1 |
 
 ## SSSOM/TSV slice provenance
 
-Source of the real slice: **SYNTHETIC STAND-IN** — `mondo-slice.sssom.tsv`
-is a hand-authored ~20-row TSV representative of the Biomappings/Mondo
-SSSOM format. It is NOT derived from a real Biomappings or Mondo release.
+`biomappings-slice.sssom.tsv` is a **real**, curated excerpt of the public
+Biomappings SSSOM export — a genuine community mapping set, not a synthetic
+stand-in.
 
-This stand-in was created because network access was unavailable during
-fixture authoring. The file uses realistic CURIE prefixes (MONDO, HP,
-UBERON, skos) and includes a chainable pair (MONDO→HP exactMatch,
-HP→UBERON broadMatch) that exercises the §F9 loader + RCE1-broad rule.
+- **Source:** Biomappings — <https://github.com/biopragmatics/biomappings>
+- **File:** `biomappings.sssom.tsv`, fetched via the canonical PURL
+  <https://w3id.org/biopragmatics/biomappings/sssom/biomappings.sssom.tsv>
+- **Licence:** CC0 1.0 (public domain) — carried in the slice's own header.
+- **Curation:** the first ~120 data rows of the export that use only `skos:*`
+  mapping predicates, with prefix-resolvable subjects/objects, plus the slice's
+  original commented-YAML `curie_map` (trimmed to the 8 prefixes the slice
+  actually references). Non-`skos:` predicate rows (e.g. `RO:*`, `debio:*`) were
+  dropped so every emitted triple is a clean mapping edge.
 
-**TASKS.md follow-up required:** Replace `mondo-slice.sssom.tsv` with a
-genuine vendored slice from Biomappings (https://github.com/cthoyt/biomappings)
-or Mondo (https://github.com/monarch-initiative/mondo). Record the source URL,
-git commit SHA, licence (CC0 for Biomappings; CC BY 4.0 for Mondo), and
-trim to ≤ a few hundred rows that include at least one chainable pair. Update
-this section with the provenance once the real slice is vendored.
+The slice is anchored on a **real transitive `skos:exactMatch` chain** present
+in the export:
 
-Keep the slice tiny (≤ a few hundred rows) — it is a correctness fixture, not
-a benchmark corpus (benches run on hornbench per the project rule).
+```
+APOLLO_SV:00000142  →  IDOMAL:0001040  →  VO:0000002
+```
+
+The §F9 loader ingests it and the T1-exact closure derives
+`APOLLO_SV:00000142 skos:exactMatch VO:0000002`, asserted in
+`biomappings-slice-conclusion.ttl`.
+
+To refresh the slice, re-fetch the PURL above and re-run the same curation
+(first ~120 `skos:*` rows + the chain rows + a trimmed `curie_map`). Keep it
+tiny (≤ a few hundred rows) — it is a correctness fixture, not a benchmark
+corpus (benches run on hornbench per the project rule).

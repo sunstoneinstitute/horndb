@@ -9,7 +9,7 @@
         <#sssom-rce1-broad>
         <#sssom-t1-broad>
         <#sssom-neg-exact>
-        <#sssom-mondo-slice>
+        <#sssom-biomappings-slice>
     ) .
 
 <#sssom-rg1-exact> a mf:PositiveEntailmentTest ;
@@ -42,7 +42,7 @@
     mf:action <neg-exact-premise.ttl> ;
     mf:result <neg-exact-conclusion.ttl> .
 
-<#sssom-mondo-slice> a mf:PositiveEntailmentTest ;
-    mf:name "SSSOM F9: synthetic Mondo/HP/UBERON slice loads and chains via RCE1-broad" ;
-    mf:action <mondo-slice.sssom.tsv> ;
-    mf:result <mondo-slice-conclusion.ttl> .
+<#sssom-biomappings-slice> a mf:PositiveEntailmentTest ;
+    mf:name "SSSOM F9: real Biomappings slice loads and chains via T1-exact transitivity" ;
+    mf:action <biomappings-slice.sssom.tsv> ;
+    mf:result <biomappings-slice-conclusion.ttl> .

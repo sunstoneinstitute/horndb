@@ -240,7 +240,7 @@ include = [
 
 [suites.sssom-mappings]
 # SPEC-11 SSSOM chaining conformance. Premise/conclusion fixtures isolate each
-# rule family (F3 RG/RI/RCE/T1, F4 negative); #sssom-mondo-slice loads a real
+# rule family (F3 RG/RI/RCE/T1, F4 negative); #sssom-biomappings-slice loads a real
 # slice via the §F9 harness SSSOM/TSV loader. Curation: harness/curation/sssom-mappings.md
 manifest = "crates/harness/tests/fixtures/sssom-mappings/manifest.ttl"
 include = [
@@ -250,7 +250,7 @@ include = [
     "#sssom-rce1-broad",
     "#sssom-t1-broad",
     "#sssom-neg-exact",
-    "#sssom-mondo-slice",
+    "#sssom-biomappings-slice",
 ]
 
 # SPEC-07 Stage-1 SPARQL query subset.

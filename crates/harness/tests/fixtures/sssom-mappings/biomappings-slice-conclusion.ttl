@@ -1,0 +1,7 @@
+@prefix skos:      <http://www.w3.org/2004/02/skos/core#> .
+@prefix APOLLO_SV: <http://purl.obolibrary.org/obo/APOLLO_SV_> .
+@prefix VO:        <http://purl.obolibrary.org/obo/VO_> .
+
+# Derived by T1-exact (skos:exactMatch transitivity) over the real Biomappings
+# slice: APOLLO_SV:00000142 -> IDOMAL:0001040 -> VO:0000002.
+APOLLO_SV:00000142 skos:exactMatch VO:0000002 .
