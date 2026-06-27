@@ -7,9 +7,11 @@
 //! hand-written SIMD intrinsics.
 
 mod dispatch;
+mod intersect;
 mod lower_bound;
 mod scalar;
 
+pub use intersect::intersect;
 pub use lower_bound::lower_bound;
 
 pub use dispatch::{forced_isa, Isa};
