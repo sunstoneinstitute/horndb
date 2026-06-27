@@ -33,6 +33,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 ## Index
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
+- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives + WCOJ seek/intersect (`per_tuple` ≤2.5 ns/tuple) (`#TODO` open issue)
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
@@ -58,6 +59,19 @@ Closed tasks are listed in [Done](#done-for-traceability).
   is a 1:1 lowering with no cost model). Scope: hash group-by, id-based `Bindings`
   (decode to strings only at serialization), then streaming + pushdown. Revisit PGO
   only after this lands. See `docs/architecture.md` §9 and `BENCHMARKS.md`.
+
+- [ ] **SPEC-12 SIMD acceleration layer.** (`#TODO` — open issue with `priority: high` + `category: performance`, then replace this marker on both the index line and this heading)
+  A new stable-Rust `std::arch` SIMD layer with runtime AVX-512/AVX2/NEON dispatch +
+  a scalar oracle, behind a new zero-dep leaf crate `horndb-simd`
+  (`simd → storage → wcoj → …`). **Stage 1:** the primitives crate
+  (`lower_bound`/`intersect`/`merge`/`dedup`/`filter`/`gather`, each
+  differential-proptested bit-identical vs scalar) + the WCOJ seek/intersect consumer
+  to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle` no-regress).
+  **Stage 2:** dictionary decode + `rdf:type` partition scan (SPEC-02 NF2 ≥80% STREAM).
+  **Gated:** the delta-apply merge/dedup SIMD blocks on
+  [#2](https://github.com/sunstoneinstitute/horndb/issues/2) (object index + semi-naïve)
+  and may be descoped; the `cax-sco` partition-filter scan is out of scope (superseded
+  by #2). See `docs/specs/SPEC-12-simd.md`, `docs/architecture.md` §14, `BENCHMARKS.md`.
 
 ## HIGH — Completeness
 

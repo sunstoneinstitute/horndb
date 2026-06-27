@@ -406,7 +406,35 @@ identity (ADR-0017). Tracked as a HIGH *Completeness* task in `TASKS.md`.
 
 ---
 
-## 14. Cross-cutting concerns
+## 14. SPEC-12 — SIMD acceleration layer
+
+**Crate:** new `horndb-simd` (zero-dep leaf) + consumers `crates/wcoj`,
+`crates/storage`, `crates/owlrl` · **Spec:** `SPEC-12` · **Overall status: specified**
+
+A single, shared, runtime-dispatched SIMD layer for the data-parallel hot loops:
+`std::arch` intrinsics on stable Rust with cached-function-pointer dispatch
+(AVX-512/AVX2 on the EPYC Zen4 reference host, NEON on Apple-Silicon dev Macs,
+**scalar fallback always present as the correctness oracle**). Closes SPEC-03 NF1
+(`per_tuple`) and the SIMD-friendly half of SPEC-02 NF2 (STREAM `rdf:type` scan).
+Every kernel is differential-proven bit-identical to its scalar oracle. Tracked as a
+HIGH *Performance* task in `TASKS.md`.
+
+| Component | Status | Notes |
+|---|---|---|
+| `horndb-simd` primitives crate + scalar oracle + per-kernel differential proptests | **specified** | F4; new zero-dep leaf *below* `storage` (`simd → storage → wcoj → …`). Sole home for hand-written intrinsics. |
+| WCOJ seek + leapfrog intersect SIMD | **specified** | F1; highest payoff. AoS→SoA active-level trie view is a prerequisite (open SPEC-03 design question). |
+| Dictionary decode + `rdf:type` partition scan SIMD | **specified** | F2; jointly satisfies SPEC-02 acceptance #4. |
+| Delta-apply merge/dedup/sort SIMD | **specified (gated on [#2](https://github.com/sunstoneinstitute/horndb/issues/2))** | F3; needs hash-delta → sorted-run change first. The `cax-sco` partition-filter scan is **out of scope** — superseded by #2's object index + semi-naïve firing. |
+| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **specified** | NF5; F5 makes dispatch test-forceable so CI exercises every path. |
+
+> SIMD accelerates loops that are already *algorithmically right*. It is **not** a
+> substitute for the missing indexes/semi-naïve firing that dominate the SPEC-04
+> materialize path — that is [#2](https://github.com/sunstoneinstitute/horndb/issues/2)
+> (see §6), explicitly out of SPEC-12's scope.
+
+---
+
+## 15. Cross-cutting concerns
 
 ### Provenance / correctability
 **Status: partially implemented.** Stage-1 ships per-triple `Provenance`
@@ -430,7 +458,9 @@ Stage-1 engine and W3C-manifest paths explicitly bail on triple-term inputs.
 **Status: partially implemented.** Per-subsystem targets and measured numbers
 live in `BENCHMARKS.md`. SPEC-03's 4-cycle ≥10× gate is now **met** (~34× on
 the canonical skewed win case, [#1](https://github.com/sunstoneinstitute/horndb/issues/1)).
-Keep `BENCHMARKS.md` rows in sync with the `TASKS.md` performance entries.
+SPEC-03 NF1 (`per_tuple` ≤2.5 ns/tuple) and the SPEC-02 NF2 STREAM `rdf:type` scan
+are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows in
+sync with the `TASKS.md` performance entries.
 
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
@@ -452,7 +482,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 
 ---
 
-## 15. Roadmap stages
+## 16. Roadmap stages
 
 | Stage | Scope | Status |
 |---|---|---|

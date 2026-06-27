@@ -193,6 +193,22 @@ Numbers below are pulled directly from each SPEC's NF section and acceptance cri
 | Compact crosswalk-index footprint | ≤**10 bytes/pair** bidi (NF2, F5) | EF+FOR baseline → rung-4 PGM; Measured: pending hornbench (F5/F6 follow-up) |
 | Full-closure materialization vs OxO2 | beat **1.16 M mappings / 17 min** (NF3) | OxO2 (EBI Ontology Xref Service) reference run; Measured: pending hornbench (F5/F6 follow-up) |
 
+### SPEC-12 — SIMD acceleration layer (`horndb-simd`)
+
+| Metric | Target | Baseline |
+|---|---|---|
+| WCOJ per-tuple overhead (`per_tuple`) | ≤**2.5 ns/tuple** | DuckDB ~2 ns; closes the SPEC-03 NF1 5 ns envelope (NF1) |
+| Sorted-set intersection SIMD speedup (`intersect`) | ≥**4×** AVX-512 / ≥**2×** NEON vs scalar | NF2 |
+| Bulk dictionary decode SIMD speedup | ≥**4×** scalar | NF4 |
+| `rdf:type` partition scan | ≥**80% STREAM Triad** bandwidth | SPEC-02 NF2 / acceptance #4 (jointly owned) |
+| Per-kernel differential vs scalar oracle | **zero** mismatches, every ISA path | NF3 |
+
+> SIMD is scoped to the loops that are already *algorithmically right* — WCOJ
+> seek/intersect, dictionary decode, columnar scans. It is **not** the lever for the
+> `cax-sco` / `rdf:type` materialization hotspot, which is an un-indexed full-partition
+> scan fixed by an object index + semi-naïve firing
+> ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — see SPEC-12 §F3.
+
 ## Where we actually are right now
 
 Honest accounting. Updated when a bench moves.
@@ -214,7 +230,7 @@ These benches compile and run on synthetic fixtures so future regressions are vi
 
 | Bench | Crate | Notes |
 |---|---|---|
-| `benches/per_tuple.rs` | `horndb-wcoj` | SPEC-03 NF1 sanity check (5 ns/tuple). Stage 1 *allowed* to miss the target (no SIMD yet, binary-search-based seek). |
+| `benches/per_tuple.rs` | `horndb-wcoj` | SPEC-03 NF1 sanity check, **now owned by SPEC-12 NF1** (target ≤2.5 ns/tuple). Stub today; the real microbench + SIMD seek/intersect land with SPEC-12 (no SIMD yet, binary-search-based seek). |
 | `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic 10K-triple fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. |
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
