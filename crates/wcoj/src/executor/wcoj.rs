@@ -107,6 +107,11 @@ impl<I: OrderedTripleIter> TrieIterator for AdaptiveIter<I> {
         self.inner.seek(local, value);
     }
     #[inline]
+    fn active_run(&mut self, depth: u8) -> Option<&[TermId]> {
+        let local = self.local_for(depth);
+        self.inner.active_run(local)
+    }
+    #[inline]
     fn open_level(&mut self, depth: u8) {
         let local = self.local_for(depth);
         self.inner.open_level(local);

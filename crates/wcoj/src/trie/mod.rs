@@ -39,4 +39,14 @@ pub trait TrieIterator {
     fn at_end(&self, depth: u8) -> bool {
         self.peek(depth).is_none()
     }
+
+    /// If this iterator can expose its active level's remaining values as a
+    /// contiguous sorted `&[TermId]`, return it (for the leapfrog SIMD
+    /// intersect fast path). Default `None` — the leapfrog falls back to
+    /// seek/peek. The slice runs from the current cursor to the level end, in
+    /// trie order, with no duplicates (matching the source's dedup). Takes
+    /// `&mut self` so a source can materialise the view on demand.
+    fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
+        None
+    }
 }

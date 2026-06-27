@@ -91,4 +91,14 @@ pub trait OrderedTripleIter: Send {
     fn at_end(&self, depth: u8) -> bool {
         self.peek(depth).is_none()
     }
+
+    /// If this cursor can cheaply expose its active level's remaining values
+    /// (from the current cursor to the level end) as a contiguous sorted
+    /// `&[TermId]`, return it — for the leapfrog SIMD-intersect fast path.
+    /// Default `None`. Takes `&mut self` because a source may need to
+    /// materialise the contiguous view on demand (e.g. the dense AoS `VecIter`
+    /// builds its SoA column lazily).
+    fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
+        None
+    }
 }

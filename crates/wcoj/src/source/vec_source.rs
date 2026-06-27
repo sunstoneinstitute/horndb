@@ -197,6 +197,26 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         let d = depth as usize;
         self.cursor[d] = self.range[d].0;
     }
+
+    fn active_run(&mut self, depth: u8) -> Option<&[TermId]> {
+        let d = depth as usize;
+        let (lo, hi) = self.range[d];
+        let start = self.cursor[d].max(lo);
+        if start >= hi {
+            return None;
+        }
+        // Materialise the column on demand (same threshold as `seek`); short
+        // runs stay scalar and opt out of the SIMD intersect fast path.
+        if self.col_view[d].is_none() {
+            if hi - lo < SIMD_SEEK_MIN_RUN {
+                return None;
+            }
+            self.col_view[d] = Some(LevelColumn::from_aos(self.data, lo, hi, depth));
+        }
+        let col = self.col_view[d].as_ref()?;
+        // The column covers [lo, hi); slice from the cursor to the level end.
+        Some(&col.values()[start - lo..hi - lo])
+    }
 }
 
 #[cfg(test)]
