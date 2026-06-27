@@ -16,6 +16,11 @@ pub enum Suite {
     /// W3C RDF 1.2 N-Triples syntax tests (positive + negative).
     /// Source: <https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/>.
     Rdf12NTriples,
+    /// SPEC-11 SSSOM mappings chaining conformance. Positive-entailment
+    /// fixtures isolate each rule family (F3 RG/RI/RCE/T1, F4 negative);
+    /// the `#sssom-mondo-slice` case loads a real SSSOM/TSV slice via the
+    /// §F9 harness loader. Curation: `harness/curation/sssom-mappings.md`.
+    SssomMappings,
 }
 
 impl Suite {
@@ -25,6 +30,7 @@ impl Suite {
             Suite::Sparql11 => "sparql11",
             Suite::Sparql11Syntax => "sparql11-syntax",
             Suite::Rdf12NTriples => "rdf12-n-triples",
+            Suite::SssomMappings => "sssom-mappings",
         }
     }
 }
