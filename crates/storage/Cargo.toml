@@ -15,6 +15,7 @@ parking_lot.workspace = true
 bytemuck.workspace = true
 oxttl.workspace = true
 oxrdf.workspace = true
+horndb-simd = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
