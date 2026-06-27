@@ -55,6 +55,10 @@ impl ClosureBackend for RuleFiringBackend {
             close_transitive(store, v.owl_same_as, "eq-trans", &mut out);
             // prp-trp: explicit transitive properties.
             close_transitive_property(store, &v, &mut out);
+            // SPEC-11 T1: SSSOM mapping-predicate transitivity.
+            close_transitive(store, v.skos_exact_match, "sssom-t1-exact", &mut out);
+            close_transitive(store, v.skos_broad_match, "sssom-t1-broad", &mut out);
+            close_transitive(store, v.skos_narrow_match, "sssom-t1-narrow", &mut out);
             if out.len() == before {
                 break;
             }

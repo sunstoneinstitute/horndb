@@ -493,3 +493,161 @@ body = [
   { s = "?s",  p = "?p",         o = "?o" },
 ]
 head = { s = "?s", p = "?p", o = "?o2" }
+
+# --- SPEC-11 F3: SSSOM generalisation rules (RG1, RG2) ---
+# Deliberate weakening: OWL-strength axioms generalise to SKOS-strength
+# crosswalk edges so OWL- and SKOS-sourced mappings compose in one layer.
+[[rule]]
+id = "sssom-rg1"
+comment = "SSSOM RG1: owl:equivalentClass generalises to skos:exactMatch."
+body = [
+  { s = "?a", p = "owl:equivalentClass", o = "?b" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?b" }
+
+[[rule]]
+id = "sssom-rg2"
+comment = "SSSOM RG2: rdfs:subClassOf generalises to skos:broadMatch."
+body = [
+  { s = "?a", p = "rdfs:subClassOf", o = "?b" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?b" }
+
+# --- SPEC-11 F3: SSSOM inversion rules (RI1-5) — tagged semapv:MappingInversion ---
+[[rule]]
+id = "sssom-ri1"
+comment = "SSSOM RI1: skos:narrowMatch inverts to skos:broadMatch."
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:broadMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri2"
+comment = "SSSOM RI2: skos:broadMatch inverts to skos:narrowMatch."
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:narrowMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri3"
+comment = "SSSOM RI3: semapv:crossSpeciesExactMatch is symmetric (self-inverse)."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesExactMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesExactMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri4"
+comment = "SSSOM RI4: semapv:crossSpeciesNarrowMatch inverts to crossSpeciesBroadMatch."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesNarrowMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesBroadMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri5"
+comment = "SSSOM RI5: semapv:crossSpeciesBroadMatch inverts to crossSpeciesNarrowMatch."
+body = [
+  { s = "?a", p = "semapv:crossSpeciesBroadMatch", o = "?b" },
+]
+head = { s = "?b", p = "semapv:crossSpeciesNarrowMatch", o = "?a" }
+
+# --- SPEC-11 F3: SSSOM role-chain rules (RCE1/RCE2) ---
+# RCE1: exactMatch o p  => p   (leading exactMatch, p in {broad,narrow,exact}).
+# RCE2: p o exactMatch  => p   (trailing exactMatch mirror).
+# p is restricted to mapping predicates (ADR-0017): exactMatch is a crosswalk
+# edge, never an identity that substitutes across arbitrary triples.
+[[rule]]
+id = "sssom-rce1-broad"
+comment = "SSSOM RCE1: exactMatch o broadMatch => broadMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:broadMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-narrow"
+comment = "SSSOM RCE1: exactMatch o narrowMatch => narrowMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:narrowMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-exact"
+comment = "SSSOM RCE1: exactMatch o exactMatch => exactMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-broad"
+comment = "SSSOM RCE2: broadMatch o exactMatch => broadMatch."
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-narrow"
+comment = "SSSOM RCE2: narrowMatch o exactMatch => narrowMatch."
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+# --- SPEC-11 F3: SSSOM transitivity (T1) — delegated to the closure backend ---
+# Only the SKOS mapping predicates are added here. subClassOf/subPropertyOf/
+# sameAs/equivalentClass/equivalentProperty are ALREADY closed by the existing
+# OWL machinery (scm-sco, scm-spo, eq-trans, scm-eqc*/scm-eqp*) and are not
+# re-added (ADR-0017: do not re-close identity-strength predicates here).
+[[rule]]
+id = "sssom-t1-exact"
+comment = "SSSOM T1: skos:exactMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-t1-broad"
+comment = "SSSOM T1: skos:broadMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+  { s = "?b", p = "skos:broadMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-t1-narrow"
+comment = "SSSOM T1: skos:narrowMatch transitivity (closure-delegated)."
+delegate = "closure"
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+  { s = "?b", p = "skos:narrowMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+# --- SPEC-11 F4: monotone negative-mapping chaining (no negation-as-failure) ---
+# A negated exactMatch is a positive fact over horndb:notExactMatch. Composing a
+# positive exactMatch with a negated one yields a negated one. The negated
+# predicate is excluded from the positive crosswalk index (F5, follow-up plan).
+[[rule]]
+id = "sssom-neg-exact"
+comment = "SSSOM F4: exactMatch o notExactMatch => notExactMatch (monotone)."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "horndb:notExactMatch", o = "?c" },
+]
+head = { s = "?a", p = "horndb:notExactMatch", o = "?c" }

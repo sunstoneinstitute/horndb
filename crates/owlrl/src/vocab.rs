@@ -124,6 +124,48 @@ pub struct Vocabulary {
     pub owl_distinct_members: TermId,
     /// `owl:NamedIndividual`
     pub owl_named_individual: TermId,
+
+    // --- SPEC-11 SSSOM mapping predicates (F1) ---
+    /// `skos:exactMatch`
+    pub skos_exact_match: TermId,
+    /// `skos:closeMatch`
+    pub skos_close_match: TermId,
+    /// `skos:broadMatch`
+    pub skos_broad_match: TermId,
+    /// `skos:narrowMatch`
+    pub skos_narrow_match: TermId,
+    /// `skos:relatedMatch`
+    pub skos_related_match: TermId,
+    /// `semapv:crossSpeciesExactMatch`
+    pub semapv_cross_species_exact_match: TermId,
+    /// `semapv:crossSpeciesNarrowMatch`
+    pub semapv_cross_species_narrow_match: TermId,
+    /// `semapv:crossSpeciesBroadMatch`
+    pub semapv_cross_species_broad_match: TermId,
+    /// `semapv:MappingChaining`
+    pub semapv_mapping_chaining: TermId,
+    /// `semapv:MappingInversion`
+    pub semapv_mapping_inversion: TermId,
+    // SSSOM n-ary mapping node (F2)
+    /// `sssom:Mapping`
+    pub sssom_mapping: TermId,
+    /// `sssom:subject_id`
+    pub sssom_subject_id: TermId,
+    /// `sssom:predicate_id`
+    pub sssom_predicate_id: TermId,
+    /// `sssom:object_id`
+    pub sssom_object_id: TermId,
+    /// `sssom:mapping_justification`
+    pub sssom_mapping_justification: TermId,
+    /// `sssom:confidence`
+    pub sssom_confidence: TermId,
+    /// `sssom:predicate_modifier`
+    pub sssom_predicate_modifier: TermId,
+    /// `sssom:derived_from`
+    pub sssom_derived_from: TermId,
+    // Internal negated mapping predicate (F4) — NOT a public IRI for chaining.
+    /// `horndb:notExactMatch`
+    pub horndb_not_exact_match: TermId,
 }
 
 impl Vocabulary {
@@ -186,6 +228,25 @@ impl Vocabulary {
             owl_members: next(),
             owl_distinct_members: next(),
             owl_named_individual: next(),
+            skos_exact_match: next(),
+            skos_close_match: next(),
+            skos_broad_match: next(),
+            skos_narrow_match: next(),
+            skos_related_match: next(),
+            semapv_cross_species_exact_match: next(),
+            semapv_cross_species_narrow_match: next(),
+            semapv_cross_species_broad_match: next(),
+            semapv_mapping_chaining: next(),
+            semapv_mapping_inversion: next(),
+            sssom_mapping: next(),
+            sssom_subject_id: next(),
+            sssom_predicate_id: next(),
+            sssom_object_id: next(),
+            sssom_mapping_justification: next(),
+            sssom_confidence: next(),
+            sssom_predicate_modifier: next(),
+            sssom_derived_from: next(),
+            horndb_not_exact_match: next(),
         }
     }
 }
@@ -200,5 +261,32 @@ mod tests {
         assert_eq!(v.rdf_type, TermId(100));
         assert_ne!(v.rdf_type, v.rdfs_sub_class_of);
         assert_ne!(v.owl_thing, v.owl_nothing);
+    }
+
+    #[test]
+    fn sssom_terms_present_and_distinct() {
+        let v = Vocabulary::synthetic(100);
+        // mapping predicates
+        assert_ne!(v.skos_exact_match, v.skos_broad_match);
+        assert_ne!(v.skos_narrow_match, v.skos_close_match);
+        assert_ne!(v.skos_related_match, v.skos_exact_match);
+        // cross-species
+        assert_ne!(
+            v.semapv_cross_species_exact_match,
+            v.semapv_cross_species_narrow_match
+        );
+        assert_ne!(
+            v.semapv_cross_species_broad_match,
+            v.semapv_cross_species_exact_match
+        );
+        // justifications
+        assert_ne!(v.semapv_mapping_chaining, v.semapv_mapping_inversion);
+        // n-ary node slots
+        assert_ne!(v.sssom_mapping, v.sssom_subject_id);
+        assert_ne!(v.sssom_predicate_id, v.sssom_object_id);
+        assert_ne!(v.sssom_mapping_justification, v.sssom_confidence);
+        assert_ne!(v.sssom_predicate_modifier, v.sssom_derived_from);
+        // internal negated
+        assert_ne!(v.horndb_not_exact_match, v.skos_exact_match);
     }
 }

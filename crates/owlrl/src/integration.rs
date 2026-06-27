@@ -70,9 +70,32 @@ const OWL_ALL_DIFFERENT: &str = "http://www.w3.org/2002/07/owl#AllDifferent";
 const OWL_MEMBERS: &str = "http://www.w3.org/2002/07/owl#members";
 const OWL_DISTINCT_MEMBERS: &str = "http://www.w3.org/2002/07/owl#distinctMembers";
 const OWL_NAMED_INDIVIDUAL: &str = "http://www.w3.org/2002/07/owl#NamedIndividual";
+// SPEC-11 SSSOM mapping vocabulary (F1).
+const SKOS_EXACT_MATCH: &str = "http://www.w3.org/2004/02/skos/core#exactMatch";
+const SKOS_CLOSE_MATCH: &str = "http://www.w3.org/2004/02/skos/core#closeMatch";
+const SKOS_BROAD_MATCH: &str = "http://www.w3.org/2004/02/skos/core#broadMatch";
+const SKOS_NARROW_MATCH: &str = "http://www.w3.org/2004/02/skos/core#narrowMatch";
+const SKOS_RELATED_MATCH: &str = "http://www.w3.org/2004/02/skos/core#relatedMatch";
+const SEMAPV_CROSS_SPECIES_EXACT_MATCH: &str =
+    "https://w3id.org/semapv/vocab/crossSpeciesExactMatch";
+const SEMAPV_CROSS_SPECIES_NARROW_MATCH: &str =
+    "https://w3id.org/semapv/vocab/crossSpeciesNarrowMatch";
+const SEMAPV_CROSS_SPECIES_BROAD_MATCH: &str =
+    "https://w3id.org/semapv/vocab/crossSpeciesBroadMatch";
+const SEMAPV_MAPPING_CHAINING: &str = "https://w3id.org/semapv/vocab/MappingChaining";
+const SEMAPV_MAPPING_INVERSION: &str = "https://w3id.org/semapv/vocab/MappingInversion";
+const SSSOM_MAPPING: &str = "https://w3id.org/sssom/Mapping";
+const SSSOM_SUBJECT_ID: &str = "https://w3id.org/sssom/subject_id";
+const SSSOM_PREDICATE_ID: &str = "https://w3id.org/sssom/predicate_id";
+const SSSOM_OBJECT_ID: &str = "https://w3id.org/sssom/object_id";
+const SSSOM_MAPPING_JUSTIFICATION: &str = "https://w3id.org/sssom/mapping_justification";
+const SSSOM_CONFIDENCE: &str = "https://w3id.org/sssom/confidence";
+const SSSOM_PREDICATE_MODIFIER: &str = "https://w3id.org/sssom/predicate_modifier";
+const SSSOM_DERIVED_FROM: &str = "https://w3id.org/sssom/derived_from";
+const HORNDB_NOT_EXACT_MATCH: &str = "https://w3id.org/horndb/internal#notExactMatch";
 
-/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=48`.
-const USER_TERMS_BASE: u64 = 49;
+/// First non-reserved `TermId` value. Vocabulary terms occupy `1..=67`.
+const USER_TERMS_BASE: u64 = 68;
 
 /// Stateful OWL 2 RL reasoning façade.
 ///
@@ -762,6 +785,25 @@ fn build_vocab() -> (Vocabulary, FxHashMap<String, TermId>) {
         owl_members: alloc(OWL_MEMBERS),
         owl_distinct_members: alloc(OWL_DISTINCT_MEMBERS),
         owl_named_individual: alloc(OWL_NAMED_INDIVIDUAL),
+        skos_exact_match: alloc(SKOS_EXACT_MATCH),
+        skos_close_match: alloc(SKOS_CLOSE_MATCH),
+        skos_broad_match: alloc(SKOS_BROAD_MATCH),
+        skos_narrow_match: alloc(SKOS_NARROW_MATCH),
+        skos_related_match: alloc(SKOS_RELATED_MATCH),
+        semapv_cross_species_exact_match: alloc(SEMAPV_CROSS_SPECIES_EXACT_MATCH),
+        semapv_cross_species_narrow_match: alloc(SEMAPV_CROSS_SPECIES_NARROW_MATCH),
+        semapv_cross_species_broad_match: alloc(SEMAPV_CROSS_SPECIES_BROAD_MATCH),
+        semapv_mapping_chaining: alloc(SEMAPV_MAPPING_CHAINING),
+        semapv_mapping_inversion: alloc(SEMAPV_MAPPING_INVERSION),
+        sssom_mapping: alloc(SSSOM_MAPPING),
+        sssom_subject_id: alloc(SSSOM_SUBJECT_ID),
+        sssom_predicate_id: alloc(SSSOM_PREDICATE_ID),
+        sssom_object_id: alloc(SSSOM_OBJECT_ID),
+        sssom_mapping_justification: alloc(SSSOM_MAPPING_JUSTIFICATION),
+        sssom_confidence: alloc(SSSOM_CONFIDENCE),
+        sssom_predicate_modifier: alloc(SSSOM_PREDICATE_MODIFIER),
+        sssom_derived_from: alloc(SSSOM_DERIVED_FROM),
+        horndb_not_exact_match: alloc(HORNDB_NOT_EXACT_MATCH),
     };
     debug_assert_eq!(id, USER_TERMS_BASE);
     (vocab, dict)
