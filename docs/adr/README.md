@@ -40,6 +40,7 @@ mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
 | [0013](0013-provenance-correctability-hard-requirement.md) | Provenance / correctability as a hard requirement | SPEC-00, SPEC-04, SPEC-07 |
 | [0014](0014-track-rdf12-not-rdf-star.md) | Track W3C RDF 1.2 (not RDF-star), gated behind config | SPEC-00, SPEC-07 |
 | [0015](0015-vendor-graphblas-static-submodule.md) | Vendor SuiteSparse:GraphBLAS as a static git submodule | SPEC-05 |
+| [0016](0016-embeddable-reasoning-view-for-external-sor.md) | Consumed as an embeddable reasoning view over an external system-of-record | SPEC-02, SPEC-06, SPEC-10 |
 
 ## Adding a new ADR
 
