@@ -76,3 +76,29 @@ fn ri_cross_species_narrow_inverts_to_broad() {
     });
     assert!(s.contains(&t(b, v.semapv_cross_species_broad_match, a)));
 }
+
+#[test]
+fn rce1_exact_then_broad_propagates_broad() {
+    // A exactMatch B, B broadMatch C  =>  A broadMatch C
+    let a = TermId(1);
+    let b = TermId(2);
+    let c = TermId(3);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_exact_match, b));
+        s.assert(t(b, v.skos_broad_match, c));
+    });
+    assert!(s.contains(&t(a, v.skos_broad_match, c)));
+}
+
+#[test]
+fn rce2_broad_then_exact_propagates_broad() {
+    // A broadMatch B, B exactMatch C  =>  A broadMatch C
+    let a = TermId(1);
+    let b = TermId(2);
+    let c = TermId(3);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_broad_match, b));
+        s.assert(t(b, v.skos_exact_match, c));
+    });
+    assert!(s.contains(&t(a, v.skos_broad_match, c)));
+}

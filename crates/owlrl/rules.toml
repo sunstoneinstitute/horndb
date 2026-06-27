@@ -553,3 +553,53 @@ body = [
   { s = "?a", p = "semapv:crossSpeciesBroadMatch", o = "?b" },
 ]
 head = { s = "?b", p = "semapv:crossSpeciesNarrowMatch", o = "?a" }
+
+# --- SPEC-11 F3: SSSOM role-chain rules (RCE1/RCE2) ---
+# RCE1: exactMatch o p  => p   (leading exactMatch, p in {broad,narrow,exact}).
+# RCE2: p o exactMatch  => p   (trailing exactMatch mirror).
+# p is restricted to mapping predicates (ADR-0017): exactMatch is a crosswalk
+# edge, never an identity that substitutes across arbitrary triples.
+[[rule]]
+id = "sssom-rce1-broad"
+comment = "SSSOM RCE1: exactMatch o broadMatch => broadMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:broadMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-narrow"
+comment = "SSSOM RCE1: exactMatch o narrowMatch => narrowMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:narrowMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-exact"
+comment = "SSSOM RCE1: exactMatch o exactMatch => exactMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-broad"
+comment = "SSSOM RCE2: broadMatch o exactMatch => broadMatch."
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-narrow"
+comment = "SSSOM RCE2: narrowMatch o exactMatch => narrowMatch."
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
