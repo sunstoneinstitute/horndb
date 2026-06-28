@@ -8,7 +8,7 @@
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
-use crate::exec::{Batch, Bindings, Executor};
+use crate::exec::{Batch, Bindings, Executor, KeyPart, Row};
 use crate::plan::PhysicalPlan;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -80,24 +80,47 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(Batch::from_bindings(a))
             }
             PhysicalPlan::Project { vars, inner } => {
-                let v = self.eval_rows(inner)?;
-                Ok(Batch::from_bindings(
-                    v.into_iter().map(|b| project(&b, vars)).collect(),
-                ))
+                let b = self.eval(inner)?;
+                if vars.is_empty() {
+                    // SELECT * / ASK: keep everything (parity with project()).
+                    return Ok(b);
+                }
+                // New schema = projected vars that exist in the input, in
+                // projection order; remap each row's slots by index.
+                let idx: Vec<Option<usize>> = vars.iter().map(|v| b.col(v.name())).collect();
+                let schema: Vec<Var> = vars
+                    .iter()
+                    .zip(&idx)
+                    .filter(|(_, i)| i.is_some())
+                    .map(|(v, _)| v.clone())
+                    .collect();
+                let rows = b
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        Row(idx
+                            .iter()
+                            .filter_map(|i| i.map(|i| r.0[i].clone()))
+                            .collect())
+                    })
+                    .collect();
+                Ok(Batch { schema, rows })
             }
             PhysicalPlan::Distinct { inner } => {
-                let v = self.eval_rows(inner)?;
-                // Order-preserving dedup: O(n) membership via a hash set,
-                // keeping first-seen order (was an O(n^2) linear scan — the
-                // SPB aggregation gap, #128).
-                let mut seen: HashSet<Bindings> = HashSet::with_capacity(v.len());
-                let mut out: Vec<Bindings> = Vec::with_capacity(v.len());
-                for b in v {
-                    if seen.insert(b.clone()) {
-                        out.push(b);
+                let b = self.eval(inner)?;
+                let mut seen: std::collections::HashSet<Vec<KeyPart>> =
+                    std::collections::HashSet::with_capacity(b.rows.len());
+                let mut rows = Vec::with_capacity(b.rows.len());
+                for r in b.rows {
+                    let key: Vec<KeyPart> = r.0.iter().map(|s| s.key_part()).collect();
+                    if seen.insert(key) {
+                        rows.push(r);
                     }
                 }
-                Ok(Batch::from_bindings(out))
+                Ok(Batch {
+                    schema: b.schema,
+                    rows,
+                })
             }
             PhysicalPlan::Slice {
                 inner,
@@ -852,6 +875,7 @@ fn dedup_terms(vals: &mut Vec<Term>) {
     vals.retain(|t| seen.insert(t.clone()));
 }
 
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)])
 fn project(b: &Bindings, vars: &[Var]) -> Bindings {
     if vars.is_empty() {
         // SELECT * with no projected vars (e.g. ASK): preserve.
