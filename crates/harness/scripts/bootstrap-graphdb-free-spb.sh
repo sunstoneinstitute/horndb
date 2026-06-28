@@ -46,7 +46,12 @@ if [[ ! -d "graphdb-${VER}" ]]; then
 fi
 
 echo "starting GraphDB ${VER} (detached) on :${PORT}…"
-pkill -f 'graphdb' 2>/dev/null || true
+# Match the versioned dist path, NOT a bare `graphdb`: this script's own path
+# contains "graphdb", so on Linux (procps) `pkill -f graphdb` SIGTERMs the
+# running script itself (exit 143). The server JVM carries
+# `-Dgraphdb.dist=.../graphdb-<version>`, so the digit after `graphdb-` matches
+# the server but never `bootstrap-graphdb-free-spb.sh`. See start-graphdb-free.sh.
+pkill -f 'graphdb-[0-9]' 2>/dev/null || true
 sleep 2
 export GDB_JAVA_OPTS="${GDB_JAVA_OPTS:--Xmx8g} -Dgraphdb.home=${GDB_BASE}/home${VER%%.*}"
 mkdir -p "${GDB_BASE}/home${VER%%.*}"
