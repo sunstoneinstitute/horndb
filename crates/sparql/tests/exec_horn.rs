@@ -213,6 +213,55 @@ fn six_figure_store_multi_pattern_smoke() {
     );
 }
 
+#[test]
+fn scan_bgp_ids_decodes_to_same_rows_as_scan_bgp() {
+    let mut be = HornBackend::new();
+    be.insert_triple(iri("a"), iri("p"), iri("b"));
+    be.insert_triple(iri("c"), iri("p"), iri("d"));
+
+    let patterns = vec![pat(var("s"), iri("p"), var("o"))];
+
+    let mut legacy: Vec<_> = be.scan_bgp(&patterns).unwrap().collect();
+    let batch = be.scan_bgp_ids(&patterns).unwrap();
+    let mut ids: Vec<_> = batch.to_bindings(|id| be.decode_term(id)).unwrap();
+
+    let key = |b: &horndb_sparql::exec::Bindings| {
+        let mut v: Vec<String> = b.vars().map(|(k, t)| format!("{k}={t:?}")).collect();
+        v.sort();
+        v.join(",")
+    };
+    legacy.sort_by_key(key);
+    ids.sort_by_key(key);
+    assert_eq!(ids, legacy);
+}
+
+#[test]
+fn scan_bgp_ids_diagonal_self_join_matches_scan_bgp() {
+    let mut be = HornBackend::new();
+    be.insert_triple(iri("a"), iri("p"), iri("a"));
+    be.insert_triple(iri("a"), iri("p"), iri("b"));
+
+    // BGP with ?x in both subject and object — only (a, p, a) should survive.
+    let patterns = vec![pat(var("x"), iri("p"), var("x"))];
+
+    let mut legacy: Vec<_> = be.scan_bgp(&patterns).unwrap().collect();
+    let batch = be.scan_bgp_ids(&patterns).unwrap();
+    let mut ids: Vec<_> = batch.to_bindings(|id| be.decode_term(id)).unwrap();
+
+    let key = |b: &horndb_sparql::exec::Bindings| {
+        let mut v: Vec<String> = b.vars().map(|(k, t)| format!("{k}={t:?}")).collect();
+        v.sort();
+        v.join(",")
+    };
+    legacy.sort_by_key(key);
+    ids.sort_by_key(key);
+    assert_eq!(ids, legacy, "scan_bgp_ids diagonal must match scan_bgp");
+
+    // Pin the expected semantics: only ?x = http://ex/a survives the diagonal.
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].get("x"), Some(&iri("a")));
+}
+
 #[cfg(feature = "reasoner")]
 #[test]
 fn materialized_closure_is_queryable() {
