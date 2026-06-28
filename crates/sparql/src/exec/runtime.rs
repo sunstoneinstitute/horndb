@@ -43,10 +43,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// `Batch::from_bindings`.
     fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
-            // Native scan lands in Task 4; here, adapt the string scan.
-            PhysicalPlan::BgpScan { patterns } => Ok(Batch::from_bindings(
-                self.exec.scan_bgp(patterns)?.collect(),
-            )),
+            PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
             PhysicalPlan::Join { left, right } => {
                 let l = self.eval_rows(left)?;
                 let r = self.eval_rows(right)?;
@@ -107,12 +104,11 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 start,
                 length,
             } => {
-                let v = self.eval_rows(inner)?;
-                let s = *start;
-                let take = length.unwrap_or(v.len().saturating_sub(s));
-                Ok(Batch::from_bindings(
-                    v.into_iter().skip(s).take(take).collect(),
-                ))
+                let mut b = self.eval(inner)?;
+                let s = (*start).min(b.rows.len());
+                let take = length.unwrap_or(b.rows.len() - s);
+                b.rows = b.rows.into_iter().skip(s).take(take).collect();
+                Ok(b)
             }
             PhysicalPlan::OrderBy { inner, keys } => {
                 let mut v = self.eval_rows(inner)?;
