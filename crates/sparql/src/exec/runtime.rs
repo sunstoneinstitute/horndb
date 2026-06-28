@@ -8,7 +8,7 @@
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
-use crate::exec::{Batch, Bindings, Executor, KeyPart, Row};
+use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, Slot};
 use crate::plan::PhysicalPlan;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -167,8 +167,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 keys,
                 aggregates,
             } => {
-                let v = self.eval_rows(inner)?;
-                Ok(Batch::from_bindings(eval_group(v, keys, aggregates)?))
+                let b = self.eval(inner)?;
+                self.eval_group_native(b, keys, aggregates)
             }
             PhysicalPlan::PathClosure {
                 subject,
@@ -182,6 +182,136 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 )?))
             }
         }
+    }
+
+    /// Decode just the named columns of a slot row into a `Bindings`, for
+    /// reusing the string expression/aggregate evaluator verbatim.
+    fn decode_subset(&self, row: &Row, schema: &[Var], want: &HashSet<String>) -> Result<Bindings> {
+        let mut b = Bindings::new();
+        for (i, v) in schema.iter().enumerate() {
+            if !want.contains(v.name()) {
+                continue;
+            }
+            match &row.0[i] {
+                Slot::Id(id) => b.set(v.name().to_owned(), self.exec.decode_term(*id)?),
+                Slot::Term(t) => b.set(v.name().to_owned(), t.clone()),
+                Slot::Unbound => {}
+            }
+        }
+        Ok(b)
+    }
+
+    fn eval_group_native(&self, b: Batch, keys: &[Var], aggregates: &[Aggregate]) -> Result<Batch> {
+        let key_idx: Vec<Option<usize>> = keys.iter().map(|k| b.col(k.name())).collect();
+
+        struct Grp {
+            key_slots: Vec<Slot>,
+            members: Vec<Row>,
+        }
+        let mut groups: HashMap<Vec<KeyPart>, Grp> = HashMap::new();
+        for r in b.rows {
+            let gkey: Vec<KeyPart> = key_idx
+                .iter()
+                .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
+                .collect();
+            let entry = groups.entry(gkey).or_insert_with(|| Grp {
+                key_slots: key_idx
+                    .iter()
+                    .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
+                    .collect(),
+                members: Vec::new(),
+            });
+            entry.members.push(r);
+        }
+
+        // Implicit grouping with no input rows still yields one empty group
+        // (SPARQL §11.2: COUNT(*) of nothing is one row with 0).
+        if keys.is_empty() && groups.is_empty() {
+            groups.insert(
+                Vec::new(),
+                Grp {
+                    key_slots: Vec::new(),
+                    members: Vec::new(),
+                },
+            );
+        }
+
+        // Output schema = keys ++ aggregate output vars.
+        let mut schema: Vec<Var> = keys.to_vec();
+        for agg in aggregates {
+            schema.push(agg.out.clone());
+        }
+
+        // Which input columns each aggregate's inner expression references.
+        let agg_vars: Vec<HashSet<String>> = aggregates
+            .iter()
+            .map(|agg| {
+                let mut s = HashSet::new();
+                for e in agg_inner_exprs(agg) {
+                    referenced_vars(e, &mut s);
+                }
+                s
+            })
+            .collect();
+
+        let mut out: Vec<(Vec<Option<String>>, Row)> = Vec::with_capacity(groups.len());
+        for grp in groups.into_values() {
+            let mut slots: Vec<Slot> = grp.key_slots.clone();
+
+            for (agg, want) in aggregates.iter().zip(&agg_vars) {
+                let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
+                    // COUNT(*) fast path: member count needs no decode at all.
+                    Some(integer_literal(grp.members.len() as i64))
+                } else if matches!(agg.func, AggFunc::CountStar) {
+                    // COUNT(DISTINCT *): distinct whole-solution rows.
+                    // agg_inner_exprs returns empty for CountStar, so `want`
+                    // is empty and decode_subset would yield empty Bindings
+                    // for every row — all deduped to 1, wrong count.
+                    // Instead, key on Vec<KeyPart> directly: within-column
+                    // homogeneity ensures same-value cells hash identically,
+                    // giving the same deduplication as the old
+                    // `HashSet<&Bindings>` path without any decode.
+                    let distinct: HashSet<Vec<KeyPart>> = grp
+                        .members
+                        .iter()
+                        .map(|r| r.0.iter().map(|s| s.key_part()).collect())
+                        .collect();
+                    Some(integer_literal(distinct.len() as i64))
+                } else {
+                    let members_decoded: Vec<Bindings> = grp
+                        .members
+                        .iter()
+                        .map(|r| self.decode_subset(r, &b.schema, want))
+                        .collect::<Result<Vec<_>>>()?;
+                    eval_aggregate(agg, &members_decoded)?
+                };
+                match value {
+                    Some(t) => slots.push(Slot::Term(t)),
+                    None => slots.push(Slot::Unbound),
+                }
+            }
+
+            // Sort key: decoded lexical of each group key slot. Reproduces
+            // the pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering
+            // exactly (None < Some(...) in BTreeMap order is the same as
+            // Option<String> Ord ordering used in sort_by).
+            let sort_key: Vec<Option<String>> = grp
+                .key_slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Unbound => Ok(None),
+                    Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
+                    Slot::Term(t) => Ok(Some(lex(t))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            out.push((sort_key, Row(slots)));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+
+        Ok(Batch {
+            schema,
+            rows: out.into_iter().map(|(_, r)| r).collect(),
+        })
     }
 }
 
@@ -423,6 +553,66 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
     }
 }
 
+/// Collect the variable names an expression reads, so a slot operator can
+/// decode only those columns into a transient `Bindings`.
+fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Term(Term::Var(v)) => {
+            out.insert(v.name().to_owned());
+        }
+        Expr::Term(_) => {}
+        Expr::Bound(v) => {
+            out.insert(v.name().to_owned());
+        }
+        Expr::Eq(a, b)
+        | Expr::Ne(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Le(a, b)
+        | Expr::Ge(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b) => {
+            referenced_vars(a, out);
+            referenced_vars(b, out);
+        }
+        Expr::Not(a) | Expr::Neg(a) => referenced_vars(a, out),
+        Expr::If(a, b, c) => {
+            referenced_vars(a, out);
+            referenced_vars(b, out);
+            referenced_vars(c, out);
+        }
+        Expr::In(a, list) => {
+            referenced_vars(a, out);
+            for x in list {
+                referenced_vars(x, out);
+            }
+        }
+        Expr::Coalesce(args) | Expr::Func(_, args) => {
+            for x in args {
+                referenced_vars(x, out);
+            }
+        }
+    }
+}
+
+/// The inner expression(s) an aggregate evaluates over its members.
+fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
+    match &agg.func {
+        AggFunc::CountStar => Vec::new(),
+        AggFunc::Count(e)
+        | AggFunc::Sum(e)
+        | AggFunc::Avg(e)
+        | AggFunc::Min(e)
+        | AggFunc::Max(e)
+        | AggFunc::Sample(e) => vec![&**e],
+        AggFunc::GroupConcat { expr, .. } => vec![&**expr],
+    }
+}
+
 /// Evaluate `GROUP BY` + aggregates over a materialised input.
 ///
 /// Rows are partitioned by the lexical form of the key-variable
@@ -431,6 +621,7 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
 /// (`keys` empty) yields exactly one group — even over zero input rows,
 /// per SPARQL 1.1 §11.2: `SELECT (COUNT(*) AS ?c) WHERE { … }` returns
 /// a single row with `?c = 0` when nothing matches.
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)])
 fn eval_group(
     rows: Vec<Bindings>,
     keys: &[Var],
