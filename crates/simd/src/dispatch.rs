@@ -49,6 +49,83 @@ pub fn with_forced_isa<R>(isa: Isa, f: impl FnOnce() -> R) -> R {
     f()
 }
 
+// --- Operational ISA cap (HORNDB_SIMD_MAX_ISA) -----------------------------
+//
+// A process-wide ceiling on the ISA the *production* detection path may pick,
+// read once from the environment. Unlike `forced_isa` (a thread-local *force*
+// used only by tests/benches), this is a global *cap* meant as an ops knob:
+// e.g. `HORNDB_SIMD_MAX_ISA=avx2` disables AVX-512 fleet-wide without a
+// rebuild (the AVX-512 downclocking question is a per-deployment property),
+// and `HORNDB_SIMD_MAX_ISA=scalar` turns SIMD off entirely — a clean escape
+// hatch for isolating a suspected kernel regression in production.
+//
+// The cap is a width *tier*, not an exact ISA: scalar < {avx2, neon} < avx512.
+// It does NOT affect `forced_isa`, so the differential proptests still exercise
+// every kernel the host can run even when the variable is set in the shell.
+
+/// Width tier used to compare ISAs for the cap. Cross-arch values never meet on
+/// one host (an x86 box has no NEON kernels and vice-versa); the tier just lets
+/// a single `HORNDB_SIMD_MAX_ISA` value behave sensibly on either arch.
+fn tier(isa: Isa) -> u8 {
+    match isa {
+        Isa::Scalar => 0,
+        Isa::Avx2 | Isa::Neon => 1,
+        Isa::Avx512 => 2,
+    }
+}
+
+/// Parse a `HORNDB_SIMD_MAX_ISA` value (case-insensitive). Unrecognised values
+/// yield `None` (treated as "no cap"). Accepts `scalar`, `avx2`, `avx512`
+/// (and the `avx512f`/`avx-512` spellings), and `neon`.
+fn parse_isa(s: &str) -> Option<Isa> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "scalar" | "none" | "off" => Some(Isa::Scalar),
+        "avx2" => Some(Isa::Avx2),
+        "avx512" | "avx512f" | "avx-512" => Some(Isa::Avx512),
+        "neon" => Some(Isa::Neon),
+        _ => None,
+    }
+}
+
+/// The configured cap, read once from `HORNDB_SIMD_MAX_ISA`, or `None`.
+fn isa_cap() -> Option<Isa> {
+    use std::sync::OnceLock;
+    static CAP: OnceLock<Option<Isa>> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("HORNDB_SIMD_MAX_ISA")
+            .ok()
+            .and_then(|v| parse_isa(&v))
+    })
+}
+
+/// Pure cap check (testable without touching the environment): is `isa`
+/// permitted under `cap`? Scalar is always permitted.
+fn cap_allows(isa: Isa, cap: Option<Isa>) -> bool {
+    match cap {
+        Some(c) => tier(isa) <= tier(c),
+        None => true,
+    }
+}
+
+/// Whether the production detection path may select `isa`, honouring the
+/// `HORNDB_SIMD_MAX_ISA` cap. Each primitive's `resolve` guards its
+/// feature-detection arms with this; the test/bench `forced_isa` override
+/// deliberately bypasses it.
+pub(crate) fn allows(isa: Isa) -> bool {
+    cap_allows(isa, isa_cap())
+}
+
+/// The operational ISA cap configured via `HORNDB_SIMD_MAX_ISA`, or `None` if
+/// the variable is unset or unrecognised. Read once from the environment.
+///
+/// Exposed so a host can log the effective SIMD policy at startup, e.g.
+/// `tracing::info!(cap = ?horndb_simd::configured_max_isa(), "SIMD dispatch")`.
+/// It is a width *tier* (scalar < avx2 ≈ neon < avx512): a cap of `Avx2` lets
+/// AVX2/NEON kernels run but suppresses AVX-512; `Scalar` disables all SIMD.
+pub fn configured_max_isa() -> Option<Isa> {
+    isa_cap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +141,41 @@ mod tests {
             None,
             "override must not leak past the closure"
         );
+    }
+
+    #[test]
+    fn no_cap_allows_everything() {
+        for isa in [Isa::Scalar, Isa::Avx2, Isa::Avx512, Isa::Neon] {
+            assert!(cap_allows(isa, None), "{isa:?}");
+        }
+    }
+
+    #[test]
+    fn avx2_cap_disables_avx512_keeps_the_rest() {
+        let cap = Some(Isa::Avx2);
+        assert!(cap_allows(Isa::Scalar, cap));
+        assert!(cap_allows(Isa::Avx2, cap));
+        assert!(cap_allows(Isa::Neon, cap)); // same tier as avx2
+        assert!(!cap_allows(Isa::Avx512, cap), "avx512 must be capped out");
+    }
+
+    #[test]
+    fn scalar_cap_disables_all_simd() {
+        let cap = Some(Isa::Scalar);
+        assert!(cap_allows(Isa::Scalar, cap));
+        for isa in [Isa::Avx2, Isa::Avx512, Isa::Neon] {
+            assert!(!cap_allows(isa, cap), "{isa:?} must be capped out");
+        }
+    }
+
+    #[test]
+    fn parse_isa_accepts_known_spellings() {
+        assert_eq!(parse_isa("scalar"), Some(Isa::Scalar));
+        assert_eq!(parse_isa("AVX2"), Some(Isa::Avx2));
+        assert_eq!(parse_isa(" avx512 "), Some(Isa::Avx512));
+        assert_eq!(parse_isa("avx512f"), Some(Isa::Avx512));
+        assert_eq!(parse_isa("neon"), Some(Isa::Neon));
+        assert_eq!(parse_isa("garbage"), None);
+        assert_eq!(parse_isa(""), None);
     }
 }

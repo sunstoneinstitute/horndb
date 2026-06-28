@@ -35,11 +35,12 @@ fn resolve() -> Fn_ {
         Some(Isa::Neon) if std::arch::is_aarch64_feature_detected!("neon") => neon_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx2") {
+            if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
             }
             #[cfg(target_arch = "aarch64")]
-            if std::arch::is_aarch64_feature_detected!("neon") {
+            if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon")
+            {
                 return neon_safe;
             }
             scalar::lower_bound

@@ -37,7 +37,7 @@ fn resolve() -> Fn_ {
         Some(Isa::Avx2) if is_x86_feature_detected!("avx2") => avx2_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
-            if is_x86_feature_detected!("avx2") {
+            if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
             }
             range_scalar
