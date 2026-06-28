@@ -866,7 +866,7 @@ fn compare_by_keys(a: &Bindings, b: &Bindings, keys: &[(Expr, OrderDir)]) -> std
     std::cmp::Ordering::Equal
 }
 
-fn lex(t: &Term) -> String {
+pub(crate) fn lex(t: &Term) -> String {
     match t {
         Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => s.clone(),
         Term::Var(v) => v.name().to_owned(),
