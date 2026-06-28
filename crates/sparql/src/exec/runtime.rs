@@ -62,6 +62,16 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                         }
                     }
                 }
+                // Restore within-column homogeneity: an adapter-backed child
+                // (LeftJoin/Union → all Slot::Term) may leave a shared var as
+                // Slot::Unbound on some rows; the native BGP child has Slot::Id
+                // for that var. merge_rows takes the non-Unbound side, so the
+                // output column holds both Term and Id for the same logical
+                // value. Distinct/Group key on KeyPart where Id(x) ≠ Lex(x)
+                // → equal solutions hash differently → wrong results.
+                // Only genuinely mixed (Id ∧ Term) columns are decoded; the
+                // pure-Id BGP-only aggregation hot path pays zero decode.
+                self.normalize_join_columns(&mut rows, out_schema.len())?;
                 Ok(Batch {
                     schema: out_schema,
                     rows,
@@ -326,6 +336,37 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             schema,
             rows: out.into_iter().map(|(_, r)| r).collect(),
         })
+    }
+
+    /// Decode Id cells in columns that mix Slot::Id and Slot::Term, restoring
+    /// the within-column homogeneity invariant after a native Join.
+    ///
+    /// See the comment in the Join arm for the full explanation of why mixing
+    /// occurs (adapter-backed child leaves Slot::Unbound on some rows while
+    /// the native BGP child has Slot::Id → merge_rows takes Id on those rows).
+    fn normalize_join_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
+        for c in 0..width {
+            let mut has_id = false;
+            let mut has_term = false;
+            for row in rows.iter() {
+                match &row.0[c] {
+                    Slot::Id(_) => has_id = true,
+                    Slot::Term(_) => has_term = true,
+                    Slot::Unbound => {}
+                }
+                if has_id && has_term {
+                    break;
+                }
+            }
+            if has_id && has_term {
+                for row in rows.iter_mut() {
+                    if let Slot::Id(id) = row.0[c] {
+                        row.0[c] = Slot::Term(self.exec.decode_term(id)?);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Merge two slot rows if compatible (shared vars equal by the slot
@@ -1931,6 +1972,104 @@ mod slot_differential {
                 sort_rows(&mut want_h);
                 prop_assert_eq!(got_h, want_h,
                     "HornBackend query `{}` diverged", q);
+            }
+        }
+    }
+
+    /// Regression: Join(LeftJoin(A,B), BGP(C)) where the OPTIONAL makes ?v
+    /// Slot::Term-or-Unbound on the left and Slot::Id on the right →
+    /// column mixing → DISTINCT deduplication failure (bug fixed in #128).
+    #[test]
+    fn distinct_join_over_optional_no_column_mixing() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s1"), iri("p"), iri("a0"));
+        horn.insert_triple(iri("s1"), iri("opt"), iri("X"));
+        horn.insert_triple(iri("s2"), iri("p"), iri("a0"));
+        horn.insert_triple(iri("X"), iri("r"), iri("o1"));
+
+        let q = "SELECT DISTINCT ?v WHERE { \
+            ?a <http://ex/p> ?a0 . \
+            OPTIONAL { ?a <http://ex/opt> ?v } \
+            ?v <http://ex/r> ?o }";
+        let plan = plan_select(q);
+
+        let got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            got.len(),
+            1,
+            "DISTINCT must deduplicate: got {} rows, want 1\nrows: {got:?}",
+            got.len()
+        );
+        let v = got[0].get("v").expect("?v must be bound");
+        assert_eq!(
+            v,
+            &Term::Iri("http://ex/X".into()),
+            "?v must be <http://ex/X>"
+        );
+
+        // Differential check vs legacy oracle.
+        let mut got_sorted = got;
+        let mut want = Runtime::new(&horn).eval_legacy(&plan).unwrap();
+        sort_rows(&mut got_sorted);
+        sort_rows(&mut want);
+        assert_eq!(got_sorted, want, "slot path diverged from legacy oracle");
+    }
+
+    // Differential proptest covering Join-over-adapter compositions (OPTIONAL
+    // and asymmetric UNION) that the single-pattern proptest cannot reach.
+    // Uses a shared node namespace (http://ex/n{n}) so a node can appear as
+    // both subject and object, enabling chain-join patterns where the
+    // OPTIONAL-only variable is also a subject in a subsequent BGP.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn slot_runtime_matches_legacy_joins(
+            triples in proptest::collection::vec((0u32..6, 0u32..3, 0u32..6), 0..40)
+        ) {
+            let mut horn = HornBackend::new();
+            for (s, p, o) in &triples {
+                // Shared namespace so `?mid`/`?v` bound as objects can also
+                // appear as subjects in the chained BGP — needed to exercise
+                // the Join(LeftJoin, BGP) column-mixing bug.
+                let st = Term::Iri(format!("http://ex/n{s}"));
+                let pt = Term::Iri(format!("http://ex/p{p}"));
+                let ot = Term::Iri(format!("http://ex/n{o}"));
+                horn.insert_triple(st, pt, ot);
+            }
+
+            // OPTIONAL+DISTINCT: ?v is Slot::Term on matched left rows and
+            // Slot::Unbound on unmatched; the right BGP produces Slot::Id for
+            // ?v → mixing without the normalize_join_columns fix.
+            let optional_q =
+                "SELECT DISTINCT ?v WHERE { \
+                    ?s <http://ex/p0> ?mid . \
+                    OPTIONAL { ?s <http://ex/p1> ?v } \
+                    ?v <http://ex/p2> ?o }";
+            // Asymmetric UNION: one branch has ?o, the other doesn't, then
+            // Join with a native BGP → same Unbound-vs-Id mixing for ?o.
+            let union_q =
+                "SELECT DISTINCT ?o WHERE { \
+                    { ?s <http://ex/p0> ?o } UNION { ?s <http://ex/p1> ?y } . \
+                    ?o <http://ex/p2> ?x }";
+            // GROUP BY over the mixed column: wrong groups without the fix.
+            let group_q =
+                "SELECT ?v (COUNT(*) AS ?c) WHERE { \
+                    ?s <http://ex/p0> ?mid . \
+                    OPTIONAL { ?s <http://ex/p1> ?v } \
+                    ?v <http://ex/p2> ?o } GROUP BY ?v";
+
+            for q in [optional_q, union_q, group_q] {
+                let plan = plan_select(q);
+                let mut got: Vec<Bindings> =
+                    Runtime::new(&horn).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("run: {e}")))?
+                        .collect();
+                let mut want = Runtime::new(&horn).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("legacy: {e}")))?;
+                sort_rows(&mut got);
+                sort_rows(&mut want);
+                prop_assert_eq!(got, want, "HornBackend join query `{}` diverged", q);
             }
         }
     }
