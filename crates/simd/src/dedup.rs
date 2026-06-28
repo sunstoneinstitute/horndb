@@ -58,8 +58,17 @@ unsafe fn avx2(sorted: &[u64], out: &mut Vec<u64>) {
     while i < sorted.len() {
         let v = *sorted.get_unchecked(i);
         out.push(v);
-        // Skip the rest of this run: first index with value > v.
-        let run = crate::lower_bound::lower_bound(&sorted[i..], v.wrapping_add(1));
+        // Skip the rest of this run: the count of elements equal to `v` from
+        // `i`, i.e. the first index strictly greater than `v`. For `v < MAX`
+        // that is `lower_bound(.., v + 1)`. `v == u64::MAX` has no greater
+        // value, and the slice is non-decreasing, so every remaining element
+        // equals MAX — the run extends to the end. (Computing `v + 1` here
+        // would wrap to 0 and return run = 0, re-emitting the duplicate.)
+        let run = if v == u64::MAX {
+            sorted.len() - i
+        } else {
+            crate::lower_bound::lower_bound(&sorted[i..], v + 1)
+        };
         i += run.max(1);
     }
 }
