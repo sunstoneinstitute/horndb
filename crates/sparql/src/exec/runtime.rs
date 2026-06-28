@@ -1,10 +1,14 @@
-//! Iterator-style runtime over [`PhysicalPlan`]. Each plan node
-//! yields a `Vec<Bindings>` because Stage 1 materialises per-node;
-//! true streaming is a Future Work item.
+//! Iterator-style runtime over [`PhysicalPlan`]. `eval` returns [`Batch`]
+//! (id-carrying slot rows); `run` decodes once at the boundary via
+//! `decode_term`. Each operator arm still materialises per-node (true
+//! streaming is Future Work). During Tasks 4–8 the per-arm `eval_rows`
+//! decode-adapter is replaced with native slot operations arm by arm;
+//! `eval_legacy` (test-only) is the string-based differential oracle until
+//! Slice 2 lands.
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
-use crate::exec::{Bindings, Executor};
+use crate::exec::{Batch, Bindings, Executor};
 use crate::plan::PhysicalPlan;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -19,16 +23,33 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Execute the plan and return all solution mappings.
     pub fn run(&self, plan: &PhysicalPlan) -> Result<std::vec::IntoIter<Bindings>> {
-        let v = self.eval(plan)?;
-        Ok(v.into_iter())
+        let batch = self.eval(plan)?;
+        let rows = batch.to_bindings(|id| self.exec.decode_term(id))?;
+        Ok(rows.into_iter())
     }
 
-    fn eval(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+    /// Decode a child plan's [`Batch`] back to `Vec<Bindings>` so an arm can
+    /// reuse today's string free-fns (the decode-adapter's input half).
+    /// Temporary scaffolding: each arm migrated to native slot ops in
+    /// Tasks 4–7 calls `self.eval(child)` directly instead; remove once the
+    /// last `eval_rows` caller is gone.
+    fn eval_rows(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+        self.eval(plan)?.to_bindings(|id| self.exec.decode_term(id))
+    }
+
+    /// Evaluate a plan node to a [`Batch`]. Until native slot ops land
+    /// (Tasks 4–8), every arm decodes its children via `eval_rows`, runs the
+    /// existing string free-fn, and re-wraps the result with
+    /// `Batch::from_bindings`.
+    fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
-            PhysicalPlan::BgpScan { patterns } => Ok(self.exec.scan_bgp(patterns)?.collect()),
+            // Native scan lands in Task 4; here, adapt the string scan.
+            PhysicalPlan::BgpScan { patterns } => Ok(Batch::from_bindings(
+                self.exec.scan_bgp(patterns)?.collect(),
+            )),
             PhysicalPlan::Join { left, right } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
+                let l = self.eval_rows(left)?;
+                let r = self.eval_rows(right)?;
                 let mut out = Vec::new();
                 for a in &l {
                     for b in &r {
@@ -37,38 +58,38 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                         }
                     }
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                hash_left_join(l, r, expr.as_ref())
+                let l = self.eval_rows(left)?;
+                let r = self.eval_rows(right)?;
+                Ok(Batch::from_bindings(hash_left_join(l, r, expr.as_ref())?))
             }
             PhysicalPlan::Filter { expr, inner } => {
-                let v = self.eval(inner)?;
-                v.into_iter()
+                let v = self.eval_rows(inner)?;
+                let kept = v
+                    .into_iter()
                     .map(|b| eval_expr(expr, &b).map(|keep| (b, keep)))
-                    .collect::<Result<Vec<_>>>()
-                    .map(|pairs| {
-                        pairs
-                            .into_iter()
-                            .filter(|(_, k)| *k)
-                            .map(|(b, _)| b)
-                            .collect()
-                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|(_, k)| *k)
+                    .map(|(b, _)| b)
+                    .collect();
+                Ok(Batch::from_bindings(kept))
             }
             PhysicalPlan::Union { left, right } => {
-                let mut a = self.eval(left)?;
-                let b = self.eval(right)?;
-                a.extend(b);
-                Ok(a)
+                let mut a = self.eval_rows(left)?;
+                a.extend(self.eval_rows(right)?);
+                Ok(Batch::from_bindings(a))
             }
             PhysicalPlan::Project { vars, inner } => {
-                let v = self.eval(inner)?;
-                Ok(v.into_iter().map(|b| project(&b, vars)).collect())
+                let v = self.eval_rows(inner)?;
+                Ok(Batch::from_bindings(
+                    v.into_iter().map(|b| project(&b, vars)).collect(),
+                ))
             }
             PhysicalPlan::Distinct { inner } => {
-                let v = self.eval(inner)?;
+                let v = self.eval_rows(inner)?;
                 // Order-preserving dedup: O(n) membership via a hash set,
                 // keeping first-seen order (was an O(n^2) linear scan — the
                 // SPB aggregation gap, #128).
@@ -79,25 +100,27 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                         out.push(b);
                     }
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Slice {
                 inner,
                 start,
                 length,
             } => {
-                let v = self.eval(inner)?;
+                let v = self.eval_rows(inner)?;
                 let s = *start;
                 let take = length.unwrap_or(v.len().saturating_sub(s));
-                Ok(v.into_iter().skip(s).take(take).collect())
+                Ok(Batch::from_bindings(
+                    v.into_iter().skip(s).take(take).collect(),
+                ))
             }
             PhysicalPlan::OrderBy { inner, keys } => {
-                let mut v = self.eval(inner)?;
+                let mut v = self.eval_rows(inner)?;
                 v.sort_by(|a, b| compare_by_keys(a, b, keys));
-                Ok(v)
+                Ok(Batch::from_bindings(v))
             }
             PhysicalPlan::Extend { inner, var, expr } => {
-                let v = self.eval(inner)?;
+                let v = self.eval_rows(inner)?;
                 let mut out = Vec::with_capacity(v.len());
                 for mut b in v {
                     if let Some(t) = eval_expr_to_term(expr, &b)? {
@@ -105,7 +128,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     }
                     out.push(b);
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Values { vars, rows } => {
                 let mut out = Vec::with_capacity(rows.len());
@@ -118,15 +141,15 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     }
                     out.push(b);
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Group {
                 inner,
                 keys,
                 aggregates,
             } => {
-                let v = self.eval(inner)?;
-                eval_group(v, keys, aggregates)
+                let v = self.eval_rows(inner)?;
+                Ok(Batch::from_bindings(eval_group(v, keys, aggregates)?))
             }
             PhysicalPlan::PathClosure {
                 subject,
@@ -134,8 +157,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
-                let edge_rows = self.eval(edge)?;
-                eval_path_closure(subject, object, &edge_rows, *reflexive)
+                let edge_rows = self.eval_rows(edge)?;
+                Ok(Batch::from_bindings(eval_path_closure(
+                    subject, object, &edge_rows, *reflexive,
+                )?))
             }
         }
     }
@@ -1257,6 +1282,130 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
 #[allow(dead_code)]
 fn _witness() -> Result<()> {
     Err(SparqlError::Executor("unreachable".into()))
+}
+
+#[cfg(test)]
+impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
+    /// The pre-#128 string runtime, retained as a differential oracle for
+    /// the slot port (consumed by the Task 8 differential proptest). Deleted
+    /// when Slice 2 lands. Mirrors the `eval` that returned `Vec<Bindings>`.
+    #[allow(dead_code)]
+    pub(crate) fn eval_legacy(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+        match plan {
+            PhysicalPlan::BgpScan { patterns } => Ok(self.exec.scan_bgp(patterns)?.collect()),
+            PhysicalPlan::Join { left, right } => {
+                let l = self.eval_legacy(left)?;
+                let r = self.eval_legacy(right)?;
+                let mut out = Vec::new();
+                for a in &l {
+                    for b in &r {
+                        if let Some(m) = a.extend_compat(b) {
+                            out.push(m);
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            PhysicalPlan::LeftJoin { left, right, expr } => {
+                let l = self.eval_legacy(left)?;
+                let r = self.eval_legacy(right)?;
+                hash_left_join(l, r, expr.as_ref())
+            }
+            PhysicalPlan::Filter { expr, inner } => {
+                let v = self.eval_legacy(inner)?;
+                v.into_iter()
+                    .map(|b| eval_expr(expr, &b).map(|keep| (b, keep)))
+                    .collect::<Result<Vec<_>>>()
+                    .map(|pairs| {
+                        pairs
+                            .into_iter()
+                            .filter(|(_, k)| *k)
+                            .map(|(b, _)| b)
+                            .collect()
+                    })
+            }
+            PhysicalPlan::Union { left, right } => {
+                let mut a = self.eval_legacy(left)?;
+                let b = self.eval_legacy(right)?;
+                a.extend(b);
+                Ok(a)
+            }
+            PhysicalPlan::Project { vars, inner } => {
+                let v = self.eval_legacy(inner)?;
+                Ok(v.into_iter().map(|b| project(&b, vars)).collect())
+            }
+            PhysicalPlan::Distinct { inner } => {
+                let v = self.eval_legacy(inner)?;
+                // Order-preserving dedup: O(n) membership via a hash set,
+                // keeping first-seen order (was an O(n^2) linear scan — the
+                // SPB aggregation gap, #128).
+                let mut seen: HashSet<Bindings> = HashSet::with_capacity(v.len());
+                let mut out: Vec<Bindings> = Vec::with_capacity(v.len());
+                for b in v {
+                    if seen.insert(b.clone()) {
+                        out.push(b);
+                    }
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Slice {
+                inner,
+                start,
+                length,
+            } => {
+                let v = self.eval_legacy(inner)?;
+                let s = *start;
+                let take = length.unwrap_or(v.len().saturating_sub(s));
+                Ok(v.into_iter().skip(s).take(take).collect())
+            }
+            PhysicalPlan::OrderBy { inner, keys } => {
+                let mut v = self.eval_legacy(inner)?;
+                v.sort_by(|a, b| compare_by_keys(a, b, keys));
+                Ok(v)
+            }
+            PhysicalPlan::Extend { inner, var, expr } => {
+                let v = self.eval_legacy(inner)?;
+                let mut out = Vec::with_capacity(v.len());
+                for mut b in v {
+                    if let Some(t) = eval_expr_to_term(expr, &b)? {
+                        b.set(var.name().to_owned(), t);
+                    }
+                    out.push(b);
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Values { vars, rows } => {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let mut b = Bindings::new();
+                    for (var, cell) in vars.iter().zip(row.iter()) {
+                        if let Some(term) = cell {
+                            b.set(var.name().to_owned(), term.clone());
+                        }
+                    }
+                    out.push(b);
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Group {
+                inner,
+                keys,
+                aggregates,
+            } => {
+                let v = self.eval_legacy(inner)?;
+                eval_group(v, keys, aggregates)
+            }
+            PhysicalPlan::PathClosure {
+                subject,
+                object,
+                edge,
+                reflexive,
+            } => {
+                let edge_rows = self.eval_legacy(edge)?;
+                eval_path_closure(subject, object, &edge_rows, *reflexive)
+            }
+        }
+    }
 }
 
 /// Render a CONSTRUCT template against a stream of solution mappings.
