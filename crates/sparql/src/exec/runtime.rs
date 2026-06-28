@@ -45,17 +45,27 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
             PhysicalPlan::Join { left, right } => {
-                let l = self.eval_rows(left)?;
-                let r = self.eval_rows(right)?;
-                let mut out = Vec::new();
-                for a in &l {
-                    for b in &r {
-                        if let Some(m) = a.extend_compat(b) {
-                            out.push(m);
+                let l = self.eval(left)?;
+                let r = self.eval(right)?;
+                // Output schema = left schema ++ right-only vars.
+                let mut out_schema = l.schema.clone();
+                for v in &r.schema {
+                    if !out_schema.iter().any(|x| x.name() == v.name()) {
+                        out_schema.push(v.clone());
+                    }
+                }
+                let mut rows = Vec::new();
+                for a in &l.rows {
+                    for b in &r.rows {
+                        if let Some(m) = self.merge_rows(&l.schema, a, &r.schema, b, &out_schema)? {
+                            rows.push(m);
                         }
                     }
                 }
-                Ok(Batch::from_bindings(out))
+                Ok(Batch {
+                    schema: out_schema,
+                    rows,
+                })
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
                 let l = self.eval_rows(left)?;
@@ -63,16 +73,20 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(Batch::from_bindings(hash_left_join(l, r, expr.as_ref())?))
             }
             PhysicalPlan::Filter { expr, inner } => {
-                let v = self.eval_rows(inner)?;
-                let kept = v
-                    .into_iter()
-                    .map(|b| eval_expr(expr, &b).map(|keep| (b, keep)))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(|(_, k)| *k)
-                    .map(|(b, _)| b)
-                    .collect();
-                Ok(Batch::from_bindings(kept))
+                let b = self.eval(inner)?;
+                let mut want = std::collections::HashSet::new();
+                referenced_vars(expr, &mut want);
+                let mut rows = Vec::with_capacity(b.rows.len());
+                for r in b.rows {
+                    let env = self.decode_subset(&r, &b.schema, &want)?;
+                    if eval_expr(expr, &env)? {
+                        rows.push(r);
+                    }
+                }
+                Ok(Batch {
+                    schema: b.schema,
+                    rows,
+                })
             }
             PhysicalPlan::Union { left, right } => {
                 let mut a = self.eval_rows(left)?;
@@ -312,6 +326,44 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             schema,
             rows: out.into_iter().map(|(_, r)| r).collect(),
         })
+    }
+
+    /// Merge two slot rows if compatible (shared vars equal by the slot
+    /// rule), producing the union row over `out_schema`. Returns None if any
+    /// shared bound var disagrees. Mirrors `Bindings::extend_compat` on slots:
+    /// an `Unbound` slot is treated as an absent var (a wildcard that never
+    /// conflicts), matching how `Bindings` simply lacks an unbound key.
+    fn merge_rows(
+        &self,
+        ls: &[Var],
+        l: &Row,
+        rs: &[Var],
+        r: &Row,
+        out_schema: &[Var],
+    ) -> Result<Option<Row>> {
+        let decode = |id| self.exec.decode_term(id);
+        let lget = |name: &str| ls.iter().position(|v| v.name() == name).map(|i| &l.0[i]);
+        let rget = |name: &str| rs.iter().position(|v| v.name() == name).map(|i| &r.0[i]);
+        let mut slots = Vec::with_capacity(out_schema.len());
+        for v in out_schema {
+            let chosen = match (lget(v.name()), rget(v.name())) {
+                (Some(a), Some(b)) => match (a, b) {
+                    (Slot::Unbound, x) | (x, Slot::Unbound) => x.clone(),
+                    _ => {
+                        if Slot::eq(a, b, decode)? {
+                            a.clone()
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                },
+                (Some(a), None) => a.clone(),
+                (None, Some(b)) => b.clone(),
+                (None, None) => Slot::Unbound,
+            };
+            slots.push(chosen);
+        }
+        Ok(Some(Row(slots)))
     }
 }
 
