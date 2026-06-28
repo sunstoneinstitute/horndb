@@ -54,8 +54,16 @@ if [[ ! -x "${GDB_BASE}/graphdb-${VER}/bin/graphdb" ]]; then
     unzip -q -o "${GDB_BASE}/graphdb-${VER}-dist.zip" -d "$GDB_BASE"
 fi
 
-# Clear any GraphDB from a different version/run before starting the pinned one.
-pkill -f 'graphdb' 2>/dev/null || true
+# Clear any GraphDB server from a different version/run before starting the
+# pinned one. Match the versioned dist path (`graphdb-<N>...`), NOT a bare
+# `graphdb`: this script's own path contains the substring "graphdb", so on
+# Linux (procps) `pkill -f graphdb` matches the running script's command line
+# and SIGTERMs itself — the bash exits 143 ("Terminated") before GraphDB ever
+# starts, silently skipping the A/B leg. (BSD pkill on macOS spares the caller,
+# which is why this never reproduced locally.) The server's JVM always carries
+# `-Dgraphdb.dist=.../graphdb-<version>` on its command line, so the digit after
+# `graphdb-` matches the server but never `start-graphdb-free.sh`.
+pkill -f 'graphdb-[0-9]' 2>/dev/null || true
 sleep 2
 
 export GDB_JAVA_OPTS="${GDB_JAVA_OPTS:--Xmx${HEAP}} -Dgraphdb.home=${GDB_BASE}/home${VER%%.*}"
