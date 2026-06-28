@@ -33,7 +33,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 ## Index
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
-- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives + WCOJ seek/intersect (`per_tuple` ≤2.5 ns/tuple) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
+- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; wire the SIMD intersect into `BatchIter`'s inlined leapfrog (the production executor hot path — `LeapfrogJoin` is only used by `trie/leapfrog.rs` today); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
@@ -65,11 +65,26 @@ Closed tasks are listed in [Done](#done-for-traceability).
 - [ ] **SPEC-12 SIMD acceleration layer.** ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
   A new stable-Rust `std::arch` SIMD layer with runtime AVX-512/AVX2/NEON dispatch +
   a scalar oracle, behind a new zero-dep leaf crate `horndb-simd`
-  (`simd → storage → wcoj → …`). **Stage 1:** the primitives crate
-  (`lower_bound`/`intersect`/`merge`/`dedup`/`filter`/`gather`, each
-  differential-proptested bit-identical vs scalar) + the WCOJ seek/intersect consumer
-  to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle` no-regress).
-  **Stage 2:** dictionary decode + `rdf:type` partition scan (SPEC-02 NF2 ≥80% STREAM).
+  (`simd → storage → wcoj → …`). **Stage 1a — DONE:** the primitives crate
+  (`lower_bound`/`intersect`/`merge`/`dedup`/`filter`+`filter_range`/`gather`, each
+  differential-proptested bit-identical vs scalar on every host ISA path, plus the F5
+  `with_forced_isa` override and the `intersect` SIMD-vs-scalar bench) landed in
+  `crates/simd` (AVX2/AVX-512 on x86_64, NEON on aarch64; scalar-forced build green on
+  stable 1.90). Kernels that don't yet clear the NF2 floor ship the scalar-equivalent
+  galloping form; the bench is wired but **awaits hornbench measurement** before any wide
+  compress/compare kernel is hand-written. **Stage 1b — OPEN:** the WCOJ seek/intersect
+  consumer to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle`
+  no-regress).
+  **Stage 2 — DONE (kernels + benches; hornbench numbers pending):** `horndb-storage`
+  consumes `horndb-simd` for bulk inline-int dictionary decode
+  (`Dictionary::decode_inline_ints`/`lookup_inline_int_batch`/`lookup_batch`) and the
+  vectorised `rdf:type` partition scan (`PredicatePartition::subjects_with_object`, built
+  on the new `horndb_simd::filter_indices_eq` scan+index-compact primitive +
+  `gather`; the primitive is differential-proptested bit-identical vs scalar on every
+  host ISA path). The `dict_decode` (≥4×) and `partition_scan` (≥80% STREAM-Triad)
+  microbenches are wired and smoke-run; the ≥4× ratio and the NUMA-pinned STREAM-Triad
+  fraction are the deferred hornbench-host measurement (`BENCHMARKS.md` rows marked
+  pending hornbench). The F2 "encode" stretch (vectorised `intern`) is out of scope.
   **Gated:** the delta-apply merge/dedup SIMD blocks on
   [#133](https://github.com/sunstoneinstitute/horndb/issues/133) (object index) +
   [#134](https://github.com/sunstoneinstitute/horndb/issues/134) (semi-naïve)

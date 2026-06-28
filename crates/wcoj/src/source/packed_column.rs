@@ -126,10 +126,73 @@ impl PackedColumn {
         meta.base + (v & mask)
     }
 
+    /// Last value of block `b`, i.e. the value at the highest index the block
+    /// holds. Used to bisect over blocks: for a non-decreasing column the
+    /// per-block last values are themselves non-decreasing.
+    #[inline]
+    fn block_last(&self, b: usize) -> u64 {
+        let end = ((b + 1) * BLOCK).min(self.len);
+        self.get(end - 1)
+    }
+
+    /// Decode block `b` into `scratch` (cleared then filled). Returns the
+    /// absolute start index of the block.
+    #[inline]
+    fn decode_block(&self, b: usize, scratch: &mut Vec<u64>) -> usize {
+        let start = b * BLOCK;
+        let end = ((b + 1) * BLOCK).min(self.len);
+        scratch.clear();
+        for i in start..end {
+            scratch.push(self.get(i));
+        }
+        start
+    }
+
     /// First index in `[lo, hi)` whose value is `>= value`, assuming the column
     /// is non-decreasing across that range. Mirrors `slice::partition_point(|x| x < value)`.
+    ///
+    /// Bisects over blocks (by each block's last value) to the single block that
+    /// can hold the boundary, decodes just that block into a contiguous scratch
+    /// buffer, and finishes with the SIMD `lower_bound`. Equivalent to
+    /// [`Self::lower_bound_scalar`] — see the `lower_bound_matches_scalar`
+    /// proptest.
     #[inline]
     pub fn lower_bound(&self, lo: usize, hi: usize, value: u64) -> usize {
+        if lo >= hi {
+            return lo;
+        }
+        let first_block = lo / BLOCK;
+        let last_block = (hi - 1) / BLOCK;
+        // Smallest block `b` in `[first_block, last_block]` whose last value is
+        // `>= value`; the boundary, if any, lies inside it. If every block's
+        // last value is `< value`, this settles on `last_block` and the SIMD
+        // finish below returns `hi`.
+        let mut blo = first_block;
+        let mut bhi = last_block;
+        while blo < bhi {
+            let mid = blo + (bhi - blo) / 2;
+            if self.block_last(mid) < value {
+                blo = mid + 1;
+            } else {
+                bhi = mid;
+            }
+        }
+        let b = blo;
+        // Decode the owning block and SIMD-finish within its active sub-range.
+        let mut scratch: Vec<u64> = Vec::with_capacity(BLOCK);
+        let block_start = self.decode_block(b, &mut scratch);
+        let sub_lo = lo.max(block_start);
+        let sub_hi = hi.min(block_start + scratch.len());
+        let rel_lo = sub_lo - block_start;
+        let rel_hi = sub_hi - block_start;
+        let off = horndb_simd::lower_bound(&scratch[rel_lo..rel_hi], value);
+        sub_lo + off
+    }
+
+    /// Scalar bisection lower-bound, retained as the correctness oracle for the
+    /// SIMD [`Self::lower_bound`].
+    #[inline]
+    pub fn lower_bound_scalar(&self, lo: usize, hi: usize, value: u64) -> usize {
         let (mut lo, mut hi) = (lo, hi);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
@@ -168,6 +231,36 @@ impl PackedColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn lower_bound_matches_scalar(mut vals: Vec<u64>, value: u64) {
+            vals.sort_unstable();
+            let col = PackedColumn::from_slice(&vals);
+            let n = vals.len();
+            let want = vals.partition_point(|&x| x < value);
+            prop_assert_eq!(col.lower_bound(0, n, value), want);
+            prop_assert_eq!(col.lower_bound_scalar(0, n, value), want);
+        }
+
+        #[test]
+        fn lower_bound_matches_scalar_subrange(
+            mut vals: Vec<u64>,
+            value: u64,
+            a: usize,
+            b: usize,
+        ) {
+            prop_assume!(!vals.is_empty());
+            vals.sort_unstable();
+            let n = vals.len();
+            let lo = a % n;
+            let hi = lo + (b % (n - lo + 1));
+            let col = PackedColumn::from_slice(&vals);
+            let want = lo + vals[lo..hi].partition_point(|&x| x < value);
+            prop_assert_eq!(col.lower_bound(lo, hi, value), want);
+        }
+    }
 
     fn roundtrip(values: &[u64]) {
         let col = PackedColumn::from_slice(values);

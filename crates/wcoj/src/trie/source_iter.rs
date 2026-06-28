@@ -199,6 +199,12 @@ impl<I: OrderedTripleIter> TrieIterator for PatternTrieIter<I> {
     }
 
     #[inline]
+    fn active_run(&mut self, depth: u8) -> Option<&[TermId]> {
+        let phys = self.phys_for(depth);
+        self.inner.active_run(phys)
+    }
+
+    #[inline]
     fn up(&mut self, depth: u8) {
         // Inverse of open_level(depth-1): undo physical levels touched
         // between phys_for(depth-1)+1 and phys_for(depth).

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/simd",
     "crates/harness",
     "crates/storage",
     "crates/wcoj",
@@ -16,6 +17,7 @@ members = [
 # oxigraph → oxrocksdb-sys (~700 MB) during local development. Use --workspace
 # in CI or pass -p horndb-harness explicitly to include them.
 default-members = [
+    "crates/simd",
     "crates/storage",
     "crates/wcoj",
     "crates/owlrl",
@@ -40,6 +42,9 @@ repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]
 
 [workspace.dependencies]
+# Internal leaf crate (SPEC-12). Consumers reference it with
+# `horndb-simd = { workspace = true }`.
+horndb-simd = { path = "crates/simd" }
 anyhow = "1"
 thiserror = "2"
 crossbeam-channel = "0.5"

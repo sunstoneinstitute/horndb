@@ -1,0 +1,16 @@
+[package]
+name = "horndb-simd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "intersect"
+harness = false

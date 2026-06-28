@@ -161,6 +161,22 @@ impl PredicatePartition {
             subjects: Arc::new(UInt64Array::from(s_col)),
         }
     }
+
+    /// Subjects whose object column equals `object`, in physical (SPO) order.
+    /// Vectorised: the object column is scanned with
+    /// [`horndb_simd::filter_indices_eq`] over the contiguous Arrow buffer to
+    /// collect matching positions, then [`horndb_simd::gather`] maps those
+    /// positions onto the subject column. This is the SIMD-friendly half of the
+    /// `rdf:type` partition scan (SPEC-12 F2 / SPEC-02 acceptance #4).
+    pub fn subjects_with_object(&self, object: u64) -> Vec<u64> {
+        let objs: &[u64] = self.objects.values();
+        let subs: &[u64] = self.subjects.values();
+        let mut positions: Vec<u32> = Vec::new();
+        horndb_simd::filter_indices_eq(objs, object, &mut positions);
+        let mut subjects = Vec::with_capacity(positions.len());
+        horndb_simd::gather(subs, &positions, &mut subjects);
+        subjects
+    }
 }
 
 /// A read-only view of a partition's two stored columns in one ordering's sort
@@ -275,5 +291,34 @@ impl PartitionBuilder {
             let _ = partition.object_major.set(partition.build_object_major());
         }
         partition
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_objects_equal_matches_scalar() {
+        // Build a partition with known (subject, object) rows; object in 0..5.
+        let mut b = PartitionBuilder::default();
+        for s in 0..100u64 {
+            b.append(TermId(s), TermId(s % 5));
+        }
+        let part = b.build();
+        // All subjects whose object == 3, in physical (SPO/ascending) order.
+        let want: Vec<u64> = (0..100u64).filter(|s| s % 5 == 3).collect();
+        let got = part.subjects_with_object(3);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn scan_objects_equal_no_match_is_empty() {
+        let mut b = PartitionBuilder::default();
+        for s in 0..10u64 {
+            b.append(TermId(s), TermId(s % 5));
+        }
+        let part = b.build();
+        assert!(part.subjects_with_object(42).is_empty());
     }
 }

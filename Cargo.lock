@@ -1133,6 +1133,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "horndb-simd"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "proptest",
+]
+
+[[package]]
 name = "horndb-sparql"
 version = "0.1.0"
 dependencies = [
@@ -1168,6 +1176,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "dashmap",
+ "horndb-simd",
  "oxrdf",
  "oxttl",
  "parking_lot",
@@ -1184,6 +1193,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "criterion",
+ "horndb-simd",
  "proptest",
  "thiserror",
 ]
