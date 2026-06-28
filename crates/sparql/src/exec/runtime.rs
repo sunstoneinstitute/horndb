@@ -1552,7 +1552,6 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// The pre-#128 string runtime, retained as a differential oracle for
     /// the slot port (consumed by the Task 8 differential proptest). Deleted
     /// when Slice 2 lands. Mirrors the `eval` that returned `Vec<Bindings>`.
-    #[allow(dead_code)]
     pub(crate) fn eval_legacy(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => Ok(self.exec.scan_bgp(patterns)?.collect()),
@@ -1841,4 +1840,98 @@ pub fn describe_triples<E: Executor + ?Sized>(
         }
     }
     Ok(out.into_iter().collect())
+}
+
+#[cfg(test)]
+mod slot_differential {
+    use super::*;
+    use crate::algebra::translate::translate_query_with;
+    use crate::exec::horn::HornBackend;
+    use crate::exec::mem::MemStore;
+    use crate::exec::Store;
+    use crate::parser::parse_query;
+    use crate::plan::planner;
+    use crate::{SparqlConfig, SparqlError};
+    use proptest::prelude::*;
+
+    /// Build a `PhysicalPlan` from a SELECT query string, mirroring
+    /// what `api::execute_query_with` does for the SELECT arm.
+    fn plan_select(q: &str) -> PhysicalPlan {
+        let parsed = parse_query(q).expect("query parse failed");
+        let inner = match parsed {
+            crate::parser::ParsedQuery::Select { inner } => inner,
+            other => panic!("expected SELECT, got {:?}", other),
+        };
+        let alg =
+            translate_query_with(&inner, &SparqlConfig::default()).expect("translation failed");
+        planner::plan(&alg).expect("planning failed")
+    }
+
+    /// Canonical string for a `Bindings` row, used as the sort key so
+    /// result sets from the two runtimes can be compared after sorting.
+    fn row_key(b: &Bindings) -> String {
+        let mut parts: Vec<String> = b.vars().map(|(k, t)| format!("{k}={t:?}")).collect();
+        parts.sort();
+        parts.join("|")
+    }
+
+    fn sort_rows(v: &mut [Bindings]) {
+        v.sort_by_key(row_key);
+    }
+
+    /// The three query shapes the differential check exercises on every
+    /// generated graph.
+    const QUERIES: &[&str] = &[
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }",
+        "SELECT ?p (COUNT(?s) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p",
+        "SELECT DISTINCT ?o WHERE { ?s ?p ?o }",
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn slot_runtime_matches_legacy(
+            // Small vocabulary so groups/DISTINCT actually collide.
+            triples in proptest::collection::vec((0u32..6, 0u32..3, 0u32..6), 0..40)
+        ) {
+            // Build both backends from the same set of triples.
+            let mut mem = MemStore::default();
+            let mut horn = HornBackend::new();
+            for (s, p, o) in &triples {
+                let st = crate::algebra::Term::Iri(format!("http://ex/s{s}"));
+                let pt = crate::algebra::Term::Iri(format!("http://ex/p{p}"));
+                let ot = crate::algebra::Term::Iri(format!("http://ex/o{o}"));
+                mem.insert_triple(st.clone(), pt.clone(), ot.clone());
+                horn.insert_triple(st, pt, ot);
+            }
+
+            for q in QUERIES {
+                let plan = plan_select(q);
+
+                // MemStore: slot path (Slot::Term) vs legacy oracle.
+                let mut got_mem: Vec<Bindings> =
+                    Runtime::new(&mem).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("mem run: {e}")))?
+                        .collect();
+                let mut want_mem = Runtime::new(&mem).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("mem legacy: {e}")))?;
+                sort_rows(&mut got_mem);
+                sort_rows(&mut want_mem);
+                prop_assert_eq!(got_mem, want_mem,
+                    "MemStore query `{}` diverged", q);
+
+                // HornBackend: slot path (Slot::Id) vs legacy oracle.
+                let mut got_h: Vec<Bindings> =
+                    Runtime::new(&horn).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("horn run: {e}")))?
+                        .collect();
+                let mut want_h = Runtime::new(&horn).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("horn legacy: {e}")))?;
+                sort_rows(&mut got_h);
+                sort_rows(&mut want_h);
+                prop_assert_eq!(got_h, want_h,
+                    "HornBackend query `{}` diverged", q);
+            }
+        }
+    }
 }
