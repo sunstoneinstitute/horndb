@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice); remaining fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice); remaining fan-out planned.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -480,8 +480,16 @@ per-phase latency histograms, `owlrl_triples_inferred_total`,
 `owlrl_rounds_total`, dirty-predicate prune counters; closure `input_nnz`
 observed alongside `output_nnz`; `storage_tier_bytes_estimated` now carries the
 `tier` label (`MemTier` enum wired, `tier="unknown"` until full HBM/CXL
-accounting lands). **Planned (remaining fan-out):** incremental, ml, the wcoj
-developer histograms, and response-byte accounting via a body-counting layer
+accounting lands). **Phase-2 Slice 2 (incremental):** `IncrementalMetrics`
+subsystem — `horndb_incremental_tick_duration_seconds` histogram (per-tick
+latency), `horndb_incremental_asserted_merged_total` /
+`horndb_incremental_derived_merged_total` counters (merge work per tick),
+`horndb_incremental_closure_withdraw_total` /
+`horndb_incremental_closure_promote_total` counters (retraction/promotion),
+`horndb_incremental_fixpoint_rounds` histogram (convergence depth); and
+`horndb_incremental_change_feed_subscribers` gauge (maintained at subscribe +
+publish-reap). **Planned (remaining fan-out):** ml, the wcoj developer
+histograms, and response-byte accounting via a body-counting layer
 (`TASKS.md`, Observability). **Deferred (next phase):** OTel traces and logs.
 Design: `docs/specs/2026-06-29-metrics-design.md`.
 

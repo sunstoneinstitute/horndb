@@ -186,13 +186,17 @@ Closed tasks are listed in [Done](#done-for-traceability).
   to `storage_tier_bytes_estimated` (`tier` label, `"unknown"` until full HBM/CXL
   accounting lands). Overhead micro-bench added (`crates/metrics/benches/overhead.rs`).
 
+  **Phase-2 Slice 2 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice2-incremental.md`):
+  incremental fan-out — `IncrementalMetrics` subsystem: tick-duration histogram,
+  asserted/derived-merged counters, closure-withdraw/promote counters,
+  fixpoint-rounds histogram; change-feed subscriber gauge maintained at subscribe +
+  publish-reap.
+
   **Remaining (fan-out):**
-  1. incremental — tick latency, asserted/derived merge counts, retract/promote
-     cardinalities, change-feed subscriber gauge (`TickReport` exists).
-  2. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
-  3. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
+  1. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
+  2. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
      completion (NO per-tuple/per-seek timing), peak active iterators.
-  4. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+  3. SPARQL response-byte accounting via a body-counting tower layer (deferred from
      Slice 1 — a middleware can't see the serialized size cheaply).
 
   **Deferred to a later phase:** OpenTelemetry traces and logs.

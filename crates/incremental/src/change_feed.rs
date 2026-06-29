@@ -29,10 +29,15 @@ impl ChangeFeed {
 
     pub fn subscribe(&self) -> ChangeFeedRx {
         let (tx, rx) = unbounded();
-        self.subscribers
-            .write()
-            .expect("change-feed lock poisoned")
-            .push(tx);
+        let count = {
+            let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
+            subs.push(tx);
+            subs.len()
+        };
+        horndb_metrics::metrics()
+            .incremental
+            .change_feed_subscribers
+            .set(count as i64);
         rx
     }
 
@@ -52,8 +57,15 @@ impl ChangeFeed {
     }
 
     pub fn publish_record(&self, rec: DeltaRecord) {
-        let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
-        subs.retain(|tx| tx.send(rec).is_ok());
+        let count = {
+            let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
+            subs.retain(|tx| tx.send(rec).is_ok());
+            subs.len()
+        };
+        horndb_metrics::metrics()
+            .incremental
+            .change_feed_subscribers
+            .set(count as i64);
     }
 
     pub fn subscriber_count(&self) -> usize {
