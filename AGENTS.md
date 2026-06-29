@@ -20,6 +20,7 @@ These files drive the project — keep them in mind when planning work:
 - `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and `TASKS.md` (outstanding work).
 - `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit. You can push commits that only contain task claims/updates to origin without asking. Its header carries the task↔GitHub-issue mirroring procedure.
 - `BENCHMARKS.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
+- `docs/metrics.md` — authoritative inventory of every metric and label HornDB exposes (`crates/metrics/`), one row per series. Keep it in lockstep with the code (see sync rule below). The `horndb-perftest-with-metrics` skill maps performance symptoms onto these metrics.
 - `harness/curation/owl2-rl-50.md` and `harness/selected.toml` — the conformance subset every spec is graded against.
 
 The harness-first rule (from SPEC-00): a SPEC is not satisfied until its referenced subset in SPEC-01's harness is green. Implementation work may *grow* a subset but never bypass it.
@@ -37,8 +38,9 @@ All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There 
 
 - **Change `TASKS.md`** (check off, add, remove, re-scope) → update the matching **Status** field in `docs/architecture.md`. Checking off a task usually flips a row **planned** → **implemented**; adding one usually flips **specified** → **planned**. Mirror the change to the task's GitHub issue too — procedure in the `TASKS.md` header.
 - **Change a SPEC or plan** such that the outstanding work changes → update `TASKS.md` (add or re-scope the tracking task), then reflect the new state in `docs/architecture.md`.
+- **Add, remove, rename, or re-type a metric or a metric label** (in `crates/metrics/`, or change an emit site / label-value enum in `crates/metrics/src/labels.rs`) → update the matching row in `docs/metrics.md` in the **same commit**. This covers the scraped name, type, labels, units/buckets, and meaning. `crates/metrics/src/*.rs` is the source of truth; if `docs/metrics.md` disagrees, fix the doc.
 
-Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*. When they disagree, **the code wins** — fix whichever is stale.
+Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*, `docs/metrics.md` for *the metrics surface*. When they disagree, **the code wins** — fix whichever is stale.
 
 **Never write a `#N` issue reference you haven't verified** (`gh issue view N`). A bare `#N` used as informal shorthand for a topic — rather than the real issue number — propagates across `TASKS.md`, `BENCHMARKS.md`, `docs/architecture.md`, and the SPECs, and unwinding it later is a multi-file `sed` sweep. If the issue isn't filed yet, write `#TODO` (or file it first), not a placeholder number.
 
