@@ -1100,6 +1100,7 @@ dependencies = [
  "criterion",
  "crossbeam-channel",
  "horndb-closure",
+ "horndb-metrics",
  "proptest",
  "thiserror",
 ]
