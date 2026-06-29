@@ -112,3 +112,13 @@ pub struct RuleLabel {
 pub struct TierLabel {
     pub tier: MemTier,
 }
+
+label_value_enum!(NlResult {
+    Ok => "ok",
+    Error => "error",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct NlResultLabel {
+    pub result: NlResult,
+}

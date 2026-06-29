@@ -8,6 +8,7 @@
 pub mod closure;
 pub mod incremental;
 pub mod labels;
+pub mod ml;
 pub mod owlrl;
 pub mod sparql;
 pub mod storage;
@@ -23,6 +24,7 @@ pub struct MetricsState {
     pub storage: storage::StorageMetrics,
     pub owlrl: owlrl::OwlrlMetrics,
     pub incremental: incremental::IncrementalMetrics,
+    pub ml: ml::MlMetrics,
 }
 
 impl MetricsState {
@@ -33,6 +35,7 @@ impl MetricsState {
         let storage = storage::StorageMetrics::register(&mut registry);
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
+        let ml = ml::MlMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
@@ -40,6 +43,7 @@ impl MetricsState {
             storage,
             owlrl,
             incremental,
+            ml,
         }
     }
 
