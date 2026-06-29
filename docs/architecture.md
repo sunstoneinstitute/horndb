@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1); fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 fan-out complete: owlrl + incremental + ml + wcoj + sparql-bytes slices); OTel traces/logs deferred to a later phase.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -474,12 +474,42 @@ count/latency/status + per-stage parse/translate/plan/exec timing +
 query-kind counters), the closure backend (`ClosureMetrics` → histograms), and
 storage sizes, exposed at `GET /metrics` (OpenMetrics text, behind the `server`
 feature). OTel interop is achieved off-box by a collector scraping `/metrics`;
-no in-process OTLP push. **Planned (fan-out):** owlrl, incremental, ml, the
-wcoj developer histograms, and response-byte accounting via a body-counting
-layer (`TASKS.md`, Observability). The `MemTier` label vocabulary
-(HBM/DRAM/CXL/Unknown) is defined but not yet attached to the storage byte
-gauges — wiring it is part of the memory-tiering fan-out. **Deferred (next
-phase):** OTel traces and logs. Design: `docs/specs/2026-06-29-metrics-design.md`.
+no in-process OTLP push. **Phase-2 Slice 1 (owlrl):** `OwlrlMetrics` subsystem
+— per-rule fire counts (`horndb_owlrl_rule_fires_total{rule}`), per-rule +
+per-phase latency histograms, `owlrl_triples_inferred_total`,
+`owlrl_rounds_total`, dirty-predicate prune counters; closure `input_nnz`
+observed alongside `output_nnz`; `storage_tier_bytes_estimated` now carries the
+`tier` label (`MemTier` enum wired, `tier="unknown"` until full HBM/CXL
+accounting lands). **Phase-2 Slice 2 (incremental):** `IncrementalMetrics`
+subsystem — `horndb_incremental_tick_duration_seconds` histogram (per-tick
+latency), `horndb_incremental_asserted_merged_total` /
+`horndb_incremental_derived_merged_total` counters (merge work per tick),
+`horndb_incremental_closure_withdraw_total` /
+`horndb_incremental_closure_promote_total` counters (retraction/promotion),
+`horndb_incremental_fixpoint_rounds` histogram (convergence depth); and
+`horndb_incremental_change_feed_subscribers` gauge (maintained at subscribe +
+publish-reap). **Phase-2 Slice 3 (ml):** `MlMetrics` subsystem (behind the
+`server` feature of `horndb-ml`) — `horndb_ml_nl_query_total{result}` counter
+(`result` ∈ `ok`/`error`); `horndb_ml_prompt_tokens_total`,
+`horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
+(from `CostJson`); `horndb_ml_translate_duration_seconds`,
+`horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
+histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on the
+`server` feature. **Phase-2 Slice 4 (wcoj):** `WcojMetrics` subsystem — three
+unlabelled histograms (`horndb_wcoj_seeks_per_query`,
+`horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators`) observed
+exactly once per query in `impl Drop for BatchIter`; the inner loop only
+increments plain `u64` struct fields (NO per-seek atomic/timing — strict §5.3
+compliance). Whole-query granularity only. **Phase-2 Slice 5 (sparql-bytes):**
+`horndb_sparql_request_bytes_total{endpoint}` and
+`horndb_sparql_response_bytes_total{endpoint}` counters added to `SparqlMetrics`;
+implemented via a `CountingBody` `http_body::Body` wrapper wired into the existing
+`record_request` middleware — tallies data-frame bytes and observes once on
+end-of-stream (exact, robust to streaming; not a `Content-Length` guess). Replaces
+the permanently-zero series removed in Slice 1 (commit `d2cace9`). **Phase-2
+fan-out is now complete** — no remaining Phase-2 fan-out items. **Deferred to a
+later phase:** OTel traces and logs.
+Design: `docs/specs/2026-06-29-metrics-design.md`.
 
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push

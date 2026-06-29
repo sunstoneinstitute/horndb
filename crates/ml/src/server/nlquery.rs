@@ -20,6 +20,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use horndb_metrics::labels::{NlResult, NlResultLabel};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +87,13 @@ pub async fn handle_nl_query(
     Json(req): Json<NlQueryRequest>,
 ) -> impl IntoResponse {
     if req.question.trim().is_empty() {
+        horndb_metrics::metrics()
+            .ml
+            .nl_query
+            .get_or_create(&NlResultLabel {
+                result: NlResult::Error,
+            })
+            .inc();
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorBody {
@@ -105,7 +113,14 @@ pub async fn handle_nl_query(
         model_id: req.model_id.clone(),
     };
 
-    let translation = match translator.translate(&q) {
+    let t0_translate = std::time::Instant::now();
+    let translate_result = translator.translate(&q);
+    horndb_metrics::metrics()
+        .ml
+        .translate_duration_seconds
+        .observe(t0_translate.elapsed().as_secs_f64());
+
+    let translation = match translate_result {
         Ok(t) => t,
         Err(e) => {
             // Disabled/no-op translator surfaces as 503; a genuine empty
@@ -132,6 +147,13 @@ pub async fn handle_nl_query(
                     TranslateError::Empty => TranslateError::Empty.to_string(),
                 }
             };
+            horndb_metrics::metrics()
+                .ml
+                .nl_query
+                .get_or_create(&NlResultLabel {
+                    result: NlResult::Error,
+                })
+                .inc();
             return (status, Json(ErrorBody { error })).into_response();
         }
     };
@@ -140,6 +162,13 @@ pub async fn handle_nl_query(
     // `TranslateError::Empty` for blank output. Enforce the empty-SPARQL
     // contract (422) at the boundary so we never execute whitespace.
     if translation.generated_sparql.trim().is_empty() {
+        horndb_metrics::metrics()
+            .ml
+            .nl_query
+            .get_or_create(&NlResultLabel {
+                result: NlResult::Error,
+            })
+            .inc();
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(ErrorBody {
@@ -156,6 +185,14 @@ pub async fn handle_nl_query(
         estimated_usd: translation.cost.estimated_usd,
     };
 
+    {
+        let m = &horndb_metrics::metrics().ml;
+        m.prompt_tokens.inc_by(translation.cost.prompt_tokens);
+        m.completion_tokens
+            .inc_by(translation.cost.completion_tokens);
+        m.estimated_usd.inc_by(translation.cost.estimated_usd);
+    }
+
     // Execute unless dry_run. The generated SPARQL is returned regardless.
     let (results, executed, execution_error) = if req.dry_run {
         (None, false, None)
@@ -164,10 +201,15 @@ pub async fn handle_nl_query(
             .accept
             .as_deref()
             .unwrap_or("application/sparql-results+json");
-        match state
+        let t0_execute = std::time::Instant::now();
+        let exec_result = state
             .executor
-            .execute(&translation.generated_sparql, accept)
-        {
+            .execute(&translation.generated_sparql, accept);
+        horndb_metrics::metrics()
+            .ml
+            .execute_duration_seconds
+            .observe(t0_execute.elapsed().as_secs_f64());
+        match exec_result {
             Ok(r) => (Some(r), true, None),
             Err(e) => (None, true, Some(e)),
         }
@@ -193,6 +235,14 @@ pub async fn handle_nl_query(
         execution_error,
         question_log,
     };
+
+    horndb_metrics::metrics()
+        .ml
+        .nl_query
+        .get_or_create(&NlResultLabel {
+            result: NlResult::Ok,
+        })
+        .inc();
 
     (StatusCode::OK, Json(body)).into_response()
 }

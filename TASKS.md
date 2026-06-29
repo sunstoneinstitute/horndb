@@ -179,20 +179,40 @@ Closed tasks are listed in [Done](#done-for-traceability).
   at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
   off-box — a collector scrapes `/metrics`; no in-process OTLP push.
 
-  **Remaining (fan-out, not started):**
-  1. owlrl — rule-fire counts, per-rule + per-phase latency, dirty-predicate prune rate
-     (`Stats`/`PhaseTimings` already exist).
-  2. incremental — tick latency, asserted/derived merge counts, retract/promote
-     cardinalities, change-feed subscriber gauge (`TickReport` exists).
-  3. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
-  4. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
-     completion (NO per-tuple/per-seek timing), peak active iterators.
-  5. SPARQL response-byte accounting via a body-counting tower layer (deferred from
-     Slice 1 — a middleware can't see the serialized size cheaply).
-  6. Real HBM/CXL byte accounting once memory tiering lands. The `MemTier` enum
-     (HBM/DRAM/CXL/Unknown) is defined (spec §7.3) but not yet attached to the storage
-     byte gauges; wiring the `tier` label is part of this step.
+  **Phase-2 Slice 1 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice1-owlrl.md`):
+  owlrl fan-out — `OwlrlMetrics` subsystem with per-rule fire counts, per-rule + per-phase
+  latency histograms, `owlrl_triples_inferred_total`, `owlrl_rounds_total`, dirty-predicate
+  prune counters; closure `input_nnz` observed alongside `output_nnz`; `MemTier` enum wired
+  to `storage_tier_bytes_estimated` (`tier` label, `"unknown"` until full HBM/CXL
+  accounting lands). Overhead micro-bench added (`crates/metrics/benches/overhead.rs`).
 
+  **Phase-2 Slice 2 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice2-incremental.md`):
+  incremental fan-out — `IncrementalMetrics` subsystem: tick-duration histogram,
+  asserted/derived-merged counters, closure-withdraw/promote counters,
+  fixpoint-rounds histogram; change-feed subscriber gauge maintained at subscribe +
+  publish-reap.
+
+  **Phase-2 Slice 3 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice3-ml.md`):
+  ml fan-out — `MlMetrics` subsystem (behind `horndb-ml`'s `server` feature):
+  `horndb_ml_nl_query_total{result}` counter; `horndb_ml_prompt_tokens_total`,
+  `horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
+  (from `CostJson`); `horndb_ml_translate_duration_seconds`,
+  `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
+  histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on `server`.
+
+  **Phase-2 Slice 4 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice4-wcoj.md`):
+  wcoj fan-out — `WcojMetrics` subsystem: `horndb_wcoj_seeks_per_query`,
+  `horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators` histograms,
+  all observed exactly once per query in `impl Drop for BatchIter`; inner loop
+  does plain `u64` field increments only (NO per-seek timing — §5.3 compliant).
+
+  **Phase-2 Slice 5 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice5-sparql-bytes.md`):
+  sparql-bytes fan-out — `horndb_sparql_request_bytes_total{endpoint}` and
+  `horndb_sparql_response_bytes_total{endpoint}` counters via a `CountingBody`
+  `http_body::Body` wrapper wired into the existing `record_request` middleware
+  (exact data-frame byte count on end-of-stream; not a `Content-Length` guess).
+
+  **Phase-2 fan-out is complete** — all subsystems instrumented; no remaining Phase-2 fan-out items.
   **Deferred to a later phase:** OpenTelemetry traces and logs.
 
 ## MEDIUM — Performance

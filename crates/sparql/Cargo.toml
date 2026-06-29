@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["server", "reasoner"]
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite"]
 reasoner = ["dep:horndb-owlrl"]
 
 [dependencies]
@@ -34,6 +34,9 @@ axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
+http-body = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+pin-project-lite = { workspace = true, optional = true }
 # Used only by the `serve` binary (gated on the `server` feature). Kept
 # non-optional for simplicity — they are small, pure-Rust deps and the
 # library code does not reference them.

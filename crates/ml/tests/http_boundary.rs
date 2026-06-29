@@ -356,6 +356,55 @@ async fn nl_query_returns_explanation_when_retention_allowed() {
     assert_eq!(v["explanation"], "you asked: who is alice?");
 }
 
+// ---------- metrics emission ----------
+
+/// Parse the value of a bare `<name> <value>` or `<name>{...} <value>` line.
+/// Scans every line that starts with `prefix`; returns the first numeric value found.
+fn parse_metric(text: &str, prefix: &str) -> u64 {
+    for line in text.lines() {
+        if line.starts_with(prefix) {
+            // The value is the last whitespace-separated token on the line.
+            if let Some(tok) = line.split_whitespace().last() {
+                if let Ok(f) = tok.parse::<f64>() {
+                    return f as u64;
+                }
+            }
+        }
+    }
+    0
+}
+
+#[tokio::test]
+async fn nl_query_emits_ok_metric_and_translate_latency() {
+    let reg = MlRegistry::new(MlConfig::enabled());
+    reg.register_translator(Arc::new(MockTranslator::new(
+        "mock-v1",
+        "SELECT * WHERE { ?s ?p ?o } LIMIT 1",
+    )));
+    let app = build_router(state_with(reg, false));
+
+    let resp = app
+        .oneshot(post_nl(serde_json::json!({"question": "metrics test"})))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = horndb_metrics::encode_metrics();
+    assert!(
+        text.contains("horndb_ml_nl_query_total"),
+        "nl_query counter not emitted:\n{text}"
+    );
+    assert!(
+        text.contains(r#"result="ok""#),
+        "result=ok label not present:\n{text}"
+    );
+    let count = parse_metric(&text, "horndb_ml_translate_duration_seconds_count");
+    assert!(
+        count >= 1,
+        "expected >= 1 translate latency sample, got {count}:\n{text}"
+    );
+}
+
 // ---------- F6: /ml-audit ----------
 
 fn seed_audit(reg: &MlRegistry, n: usize) {
@@ -474,4 +523,21 @@ async fn ml_audit_since_filters() {
     let entries = v["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["model"], "new");
+}
+
+#[tokio::test]
+async fn ml_audit_emits_query_latency_metric() {
+    let reg = MlRegistry::new(MlConfig::enabled());
+    seed_audit(&reg, 2);
+    let app = build_router(state_with(reg, false));
+
+    let resp = app.oneshot(get_audit("/ml-audit")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = horndb_metrics::encode_metrics();
+    let count = parse_metric(&text, "horndb_ml_audit_query_duration_seconds_count");
+    assert!(
+        count >= 1,
+        "expected >= 1 audit query latency sample, got {count}:\n{text}"
+    );
 }

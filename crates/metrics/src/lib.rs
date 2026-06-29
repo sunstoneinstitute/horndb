@@ -6,9 +6,13 @@
 //! registered with `register_collector`.
 
 pub mod closure;
+pub mod incremental;
 pub mod labels;
+pub mod ml;
+pub mod owlrl;
 pub mod sparql;
 pub mod storage;
+pub mod wcoj;
 
 use prometheus_client::collector::Collector;
 use prometheus_client::registry::Registry;
@@ -19,6 +23,10 @@ pub struct MetricsState {
     pub sparql: sparql::SparqlMetrics,
     pub closure: closure::ClosureSink,
     pub storage: storage::StorageMetrics,
+    pub owlrl: owlrl::OwlrlMetrics,
+    pub incremental: incremental::IncrementalMetrics,
+    pub ml: ml::MlMetrics,
+    pub wcoj: wcoj::WcojMetrics,
 }
 
 impl MetricsState {
@@ -27,11 +35,19 @@ impl MetricsState {
         let sparql = sparql::SparqlMetrics::register(&mut registry);
         let closure = closure::ClosureSink::register(&mut registry);
         let storage = storage::StorageMetrics::register(&mut registry);
+        let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
+        let incremental = incremental::IncrementalMetrics::register(&mut registry);
+        let ml = ml::MlMetrics::register(&mut registry);
+        let wcoj = wcoj::WcojMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
             closure,
             storage,
+            owlrl,
+            incremental,
+            ml,
+            wcoj,
         }
     }
 
