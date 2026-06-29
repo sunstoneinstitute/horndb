@@ -532,7 +532,8 @@ impl Circuit {
             // already shrunk `closure_support`, and the closure insertion pass
             // above has re-grown it with any post-tick replacement edges, so the
             // recompute below joins against the correct post-tick closure.
-            let new_rule = self.recompute_rule_closure();
+            let (new_rule, recompute_rounds) = self.recompute_rule_closure();
+            rounds_run = recompute_rounds;
             let old_rule: BTreeMap<TripleId, RuleId> = std::mem::take(&mut self.rule_attr);
 
             // Newly derivable rows → add + publish positive RuleInferred.
@@ -703,7 +704,10 @@ impl Circuit {
     /// (see the field doc): every seeded `closure_support` row is a live
     /// materialized derived row, never a triple that is merely asserted (and
     /// might have been retracted this tick).
-    fn recompute_rule_closure(&self) -> BTreeMap<TripleId, RuleId> {
+    /// Returns `(attr, rounds_run)` where `rounds_run` is the number of
+    /// fixpoint iterations executed (analogous to the insertion-path
+    /// `rounds_run`; 1 means the closure converged in a single pass).
+    fn recompute_rule_closure(&self) -> (BTreeMap<TripleId, RuleId>, usize) {
         // Bound the naïve fixpoint. The retraction path operates on small
         // working sets; a runaway means a non-terminating ruleset, which we
         // want to surface loudly rather than hang.
@@ -720,6 +724,7 @@ impl Circuit {
 
         let mut rounds = 0;
         loop {
+            rounds += 1;
             let mut changed = false;
             for (plan, rid) in &self.plans {
                 let dd = plan.apply_full(&closure);
@@ -734,13 +739,12 @@ impl Circuit {
             if !changed {
                 break;
             }
-            rounds += 1;
             assert!(
                 rounds < MAX_ROUNDS,
                 "rule closure failed to converge within {MAX_ROUNDS} rounds"
             );
         }
 
-        attr
+        (attr, rounds)
     }
 }

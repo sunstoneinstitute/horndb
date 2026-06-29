@@ -12,7 +12,6 @@
 use std::sync::RwLock;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use horndb_metrics;
 
 use crate::types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, TripleId};
 
