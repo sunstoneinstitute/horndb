@@ -1,6 +1,6 @@
 ---
 name: horndb-perftest-with-metrics
-description: Diagnose HornDB performance problems using its Prometheus metrics — start the server, scrape GET /metrics, and follow a symptom→metric decision tree (slow query, slow materialization, closure not converging, slow incremental tick, data-load latency, LLM cost). Use when a HornDB query/materialization/load is slow or regressed, when investigating latency/throughput, or when asked which metric explains a performance issue. The full metric inventory is docs/metrics.md.
+description: Diagnose HornDB performance via its Prometheus metrics with a symptom→metric decision tree. Use when a HornDB query, materialization, or data load is slow or regressed, when investigating latency/throughput, or when asked which metric explains a performance issue.
 ---
 
 # Diagnosing HornDB performance with metrics
