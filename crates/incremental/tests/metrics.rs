@@ -66,6 +66,15 @@ fn tick_records_incremental_metrics() {
     assert!(n >= 1, "expected >= 1 tick sample, got {n}:\n{text}");
 }
 
+#[test]
+fn change_feed_subscriber_gauge_tracks_subscribers() {
+    let feed = horndb_incremental::ChangeFeed::new();
+    let _rx = feed.subscribe();
+    let text = horndb_metrics::encode_metrics();
+    let n = parse_metric(&text, "horndb_incremental_change_feed_subscribers");
+    assert!(n >= 1, "expected >= 1 subscriber, got {n}:\n{text}");
+}
+
 /// Parse a bare `name <value>` line from OpenMetrics text (skips `#` comment lines).
 fn parse_metric(text: &str, name: &str) -> u64 {
     for line in text.lines() {
