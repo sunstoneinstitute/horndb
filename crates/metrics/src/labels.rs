@@ -8,7 +8,6 @@
 //! derived — it only governs the label *keys*, which already match the field
 //! names.
 use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
-use std::fmt::Write;
 
 /// Implement `EncodeLabelValue` for a fieldless enum by mapping each variant to
 /// a lowercase string literal.
@@ -29,7 +28,9 @@ macro_rules! label_value_enum {
 
         impl EncodeLabelValue for $name {
             fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
-                encoder.write_str(self.as_str())
+                // Fully-qualified so the macro is hygienic — it does not depend
+                // on `std::fmt::Write` being imported at the expansion site.
+                core::fmt::Write::write_str(encoder, self.as_str())
             }
         }
     };
