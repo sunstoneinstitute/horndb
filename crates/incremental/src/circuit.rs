@@ -252,6 +252,7 @@ impl Circuit {
     }
 
     pub fn tick(&mut self) -> TickReport {
+        let t_tick = std::time::Instant::now();
         // First, drain pending asserted records into asserted_base and
         // publish them. We need them in the base before running the
         // fixed-point so that subsequent rounds can join against them.
@@ -343,6 +344,9 @@ impl Circuit {
 
         let mut combined_base = self.combined_base();
         let mut derived_merged = 0;
+        let mut rounds_run = 0usize;
+        let mut withdraw_n = 0u64;
+        let mut promote_n = 0u64;
 
         if !has_retraction {
             // ---- Insertion-only regime (unchanged forward path) ----
@@ -362,7 +366,8 @@ impl Circuit {
             // `&self.plans` — the same borrow-checker dance the closure passes
             // use. Restored after the fixed-point loop.
             let plans = std::mem::take(&mut self.plans);
-            for _ in 0..MAX_ROUNDS {
+            for round in 0..MAX_ROUNDS {
+                rounds_run = round + 1;
                 let mut next_delta: Zset<TripleId> = Zset::new();
                 for (plan, rid) in &plans {
                     let dd = plan.apply_delta(&combined_base, &round_delta);
@@ -425,6 +430,8 @@ impl Circuit {
             for rule in &mut closure_plans {
                 let crate::closure_plan::ClosureRetractDelta { withdraw, promote } =
                     rule.apply_retract_delta(&asserted_delta_for_closure_retract);
+                withdraw_n += withdraw.len() as u64;
+                promote_n += promote.len() as u64;
                 for triple in withdraw {
                     // Closure loses ownership regardless.
                     let was_support = self.closure_support.remove(&triple);
@@ -598,6 +605,17 @@ impl Circuit {
             }
         }
 
+        {
+            let m = horndb_metrics::metrics();
+            m.incremental
+                .tick_duration_seconds
+                .observe(t_tick.elapsed().as_secs_f64());
+            m.incremental.asserted_merged.inc_by(asserted_merged as u64);
+            m.incremental.derived_merged.inc_by(derived_merged as u64);
+            m.incremental.closure_withdraw.inc_by(withdraw_n);
+            m.incremental.closure_promote.inc_by(promote_n);
+            m.incremental.fixpoint_rounds.observe(rounds_run as f64);
+        }
         TickReport {
             asserted_merged,
             derived_merged,
