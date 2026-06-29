@@ -2207,8 +2207,9 @@ mod slot_differential {
         v.sort_by_key(row_key);
     }
 
-    /// The three query shapes the differential check exercises on every
-    /// generated graph.
+    /// The query shapes the differential check exercises on every generated
+    /// graph — one (or more) per native operator, so the slot path is held
+    /// against the legacy string oracle across the whole runtime surface.
     const QUERIES: &[&str] = &[
         "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }",
         "SELECT ?p (COUNT(?s) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p",
@@ -2220,10 +2221,15 @@ mod slot_differential {
         // ORDER BY coverage: regression guard for the native OrderBy arm.
         "SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?o",
         "SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY DESC(?p) ASC(?o)",
+        // ORDER BY + LIMIT: native OrderBy feeding native Slice.
+        "SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?o ?s LIMIT 5",
+        // VALUES coverage: native Values joined with the native BGP scan, so a
+        // Slot::Term VALUES column meets Slot::Id BGP columns in the join.
+        "SELECT ?p ?o WHERE { ?s ?p ?o VALUES ?p { <http://ex/p0> <http://ex/p1> } }",
     ];
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+        #![proptest_config(ProptestConfig::with_cases(128))]
         #[test]
         fn slot_runtime_matches_legacy(
             // Small vocabulary so groups/DISTINCT actually collide.
@@ -2494,7 +2500,7 @@ mod slot_differential {
     // both subject and object, enabling chain-join patterns where the
     // OPTIONAL-only variable is also a subject in a subsequent BGP.
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+        #![proptest_config(ProptestConfig::with_cases(128))]
         #[test]
         fn slot_runtime_matches_legacy_joins(
             triples in proptest::collection::vec((0u32..6, 0u32..3, 0u32..6), 0..40)
