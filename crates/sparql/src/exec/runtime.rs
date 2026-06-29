@@ -174,17 +174,28 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Values { vars, rows } => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let mut b = Bindings::new();
-                    for (var, cell) in vars.iter().zip(row.iter()) {
-                        if let Some(term) = cell {
-                            b.set(var.name().to_owned(), term.clone());
-                        }
-                    }
-                    out.push(b);
-                }
-                Ok(Batch::from_bindings(out))
+                // Rows are guaranteed full-width by the spargebra parser (it
+                // rejects `VALUES` clauses where any row length != vars.len()),
+                // so `zip` stops correctly and no trailing-Unbound padding is
+                // needed.
+                let schema: Vec<Var> = vars.clone();
+                let out_rows = rows
+                    .iter()
+                    .map(|row| {
+                        Row(vars
+                            .iter()
+                            .zip(row.iter())
+                            .map(|(_, cell)| match cell {
+                                Some(t) => Slot::Term(t.clone()),
+                                None => Slot::Unbound,
+                            })
+                            .collect())
+                    })
+                    .collect();
+                Ok(Batch {
+                    schema,
+                    rows: out_rows,
+                })
             }
             PhysicalPlan::Group {
                 inner,
