@@ -108,6 +108,8 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
             if rule.delegated {
                 continue;
             }
+            // Count every non-delegated rule evaluation (prune denominator).
+            horndb_metrics::metrics().owlrl.rule_considered.inc();
             // eq-rep-p is special-cased: under the Optimized strategy the
             // engine substitutes a class-canonical pass (eq_rep_p_opt) for
             // the generated nested-loop fire — identical closure, bounded
@@ -116,15 +118,46 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
             if rule.id == "eq-rep-p" && opts.eq_rep_p == EqRepPStrategy::Optimized {
                 if rule_relevant(rule, dirty.as_ref(), store.vocab()) {
                     stats.rule_fires += 1;
+                    let label = horndb_metrics::labels::RuleLabel {
+                        rule: rule.id.to_string(),
+                    };
+                    horndb_metrics::metrics()
+                        .owlrl
+                        .rule_fires
+                        .get_or_create(&label)
+                        .inc();
+                    let t_rule = std::time::Instant::now();
                     round_delta.merge(fire_eq_rep_p_canonical(store_as_dyn(store)));
+                    horndb_metrics::metrics()
+                        .owlrl
+                        .rule_duration_seconds
+                        .get_or_create(&label)
+                        .observe(t_rule.elapsed().as_secs_f64());
+                } else {
+                    horndb_metrics::metrics().owlrl.rule_pruned.inc();
                 }
                 continue;
             }
             if !rule_relevant(rule, dirty.as_ref(), store.vocab()) {
+                horndb_metrics::metrics().owlrl.rule_pruned.inc();
                 continue;
             }
             stats.rule_fires += 1;
+            let label = horndb_metrics::labels::RuleLabel {
+                rule: rule.id.to_string(),
+            };
+            horndb_metrics::metrics()
+                .owlrl
+                .rule_fires
+                .get_or_create(&label)
+                .inc();
+            let t_rule = std::time::Instant::now();
             let d = (rule.fire)(store_as_dyn(store), &Delta::new());
+            horndb_metrics::metrics()
+                .owlrl
+                .rule_duration_seconds
+                .get_or_create(&label)
+                .observe(t_rule.elapsed().as_secs_f64());
             round_delta.merge(d);
         }
         stats.timings.compiled_rules += t_compiled.elapsed();
@@ -168,6 +201,27 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
             break;
         }
         dirty = Some(applied.dirty_predicates());
+    }
+    // Emit aggregate counters and per-phase histograms once per
+    // materialize_with call, after the loop converges.
+    {
+        let m = horndb_metrics::metrics();
+        m.owlrl
+            .triples_inferred
+            .inc_by(stats.triples_inferred as u64);
+        m.owlrl.rounds.inc_by(stats.rounds as u64);
+        use horndb_metrics::labels::{Phase, PhaseLabel};
+        for (phase, dur) in [
+            (Phase::CompiledRules, stats.timings.compiled_rules),
+            (Phase::ListRules, stats.timings.list_rules),
+            (Phase::ClosureBackend, stats.timings.closure_backend),
+            (Phase::Apply, stats.timings.apply),
+        ] {
+            m.owlrl
+                .phase_duration_seconds
+                .get_or_create(&PhaseLabel { phase })
+                .observe(dur.as_secs_f64());
+        }
     }
     stats
 }
