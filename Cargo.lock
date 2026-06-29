@@ -1120,6 +1120,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "horndb-metrics",
  "serde",
  "serde_json",
  "thiserror",
