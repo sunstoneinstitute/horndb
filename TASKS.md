@@ -37,7 +37,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
-- [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining (issue: _pending creation_)
+- [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
@@ -165,7 +165,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
 ## HIGH — Operational
 
 - [ ] **Observability metrics (Phase 1): prometheus-client + `/metrics` scrape.**
-  (issue: _pending creation_)
+  ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
   **Phase-1 Slice 1 landed** (design: `docs/specs/2026-06-29-metrics-design.md`;
   plan: `docs/plans/2026-06-29-metrics-phase1-slice1.md`). New foundational
   `horndb-metrics` crate: `prometheus-client` with typed `#[derive(EncodeLabelSet)]`
