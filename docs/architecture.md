@@ -462,6 +462,22 @@ SPEC-03 NF1 (`per_tuple` ≤2.5 ns/tuple) and the SPEC-02 NF2 STREAM `rdf:type` 
 are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows in
 sync with the `TASKS.md` performance entries.
 
+### Observability / metrics
+**Status: implemented (Phase-1 Slice 1); fan-out planned.** Metrics use
+`prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
+foundational `horndb-metrics` crate that owns a process-global `OnceLock`
+registry and the only `prometheus-client` dependency. Hot-path updates are
+direct atomic ops on cached handles; quantities that are expensive to compute
+(triple/dictionary/tier sizes) are pulled at scrape time via a `Collector`, not
+maintained continuously. Slice 1 ships the SPARQL HTTP layer (request
+count/latency/bytes/status + per-stage parse/translate/plan/exec timing +
+query-kind counters), the closure backend (`ClosureMetrics` → histograms), and
+storage sizes, exposed at `GET /metrics` (OpenMetrics text, behind the `server`
+feature). OTel interop is achieved off-box by a collector scraping `/metrics`;
+no in-process OTLP push. **Planned (fan-out):** owlrl, incremental, ml, and the
+wcoj developer histograms (`TASKS.md`, Observability). **Deferred (next phase):**
+OTel traces and logs. Design: `docs/specs/2026-06-29-metrics-design.md`.
+
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
 runs workspace `clippy -D warnings` + `cargo build`. CI mirrors this plus a
