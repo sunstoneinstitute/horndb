@@ -4,6 +4,7 @@
 //! Protocol is explicitly out of Stage 1 scope (see SPEC-07 Future
 //! Work).
 
+mod counting_body;
 pub mod metrics_route;
 pub mod query;
 pub mod update;
@@ -15,6 +16,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
+use counting_body::{CountingBody, Direction};
 use horndb_metrics::labels::{Endpoint, EndpointLabel, Method, RequestLabels};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -54,7 +56,7 @@ pub fn build_router<B: FullBackend + Send + Sync + 'static>(state: AppState<B>) 
         .with_state(state)
 }
 
-/// Instrument every request: record latency and a labelled request count.
+/// Instrument every request: record latency, request count, and body bytes.
 async fn record_request(req: Request, next: Next) -> Response {
     let endpoint = match req.uri().path() {
         "/query" => Some(Endpoint::Query),
@@ -68,19 +70,35 @@ async fn record_request(req: Request, next: Next) -> Response {
         Method::Post
     };
     let start = Instant::now();
-    let resp = next.run(req).await;
-    if let Some(endpoint) = endpoint {
+
+    // When the endpoint is known, wrap request and response bodies so bytes are
+    // tallied as the handler reads the request and the client drains the response.
+    let resp = if let Some(ep) = &endpoint {
+        let req = {
+            let (parts, body) = req.into_parts();
+            let counted = CountingBody::new(body, ep.clone(), Direction::Request);
+            axum::http::Request::from_parts(parts, axum::body::Body::new(counted))
+        };
+        let inner_resp = next.run(req).await;
+        let (parts, body) = inner_resp.into_parts();
+        let counted = CountingBody::new(body, ep.clone(), Direction::Response);
+        axum::response::Response::from_parts(parts, axum::body::Body::new(counted))
+    } else {
+        next.run(req).await
+    };
+
+    if let Some(ep) = endpoint {
         let m = horndb_metrics::metrics();
         m.sparql
             .request_duration_seconds
             .get_or_create(&EndpointLabel {
-                endpoint: endpoint.clone(),
+                endpoint: ep.clone(),
             })
             .observe(start.elapsed().as_secs_f64());
         m.sparql
             .requests
             .get_or_create(&RequestLabels {
-                endpoint,
+                endpoint: ep,
                 method,
                 status: resp.status().as_u16(),
             })

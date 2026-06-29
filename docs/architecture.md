@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice + Phase-2 ml slice + Phase-2 wcoj slice); remaining fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 fan-out complete: owlrl + incremental + ml + wcoj + sparql-bytes slices); OTel traces/logs deferred to a later phase.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -500,9 +500,15 @@ unlabelled histograms (`horndb_wcoj_seeks_per_query`,
 `horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators`) observed
 exactly once per query in `impl Drop for BatchIter`; the inner loop only
 increments plain `u64` struct fields (NO per-seek atomic/timing — strict §5.3
-compliance). Whole-query granularity only. **Planned (remaining fan-out):**
-SPARQL request/response byte accounting via a body-counting tower layer
-(`TASKS.md`, Observability). **Deferred (next phase):** OTel traces and logs.
+compliance). Whole-query granularity only. **Phase-2 Slice 5 (sparql-bytes):**
+`horndb_sparql_request_bytes_total{endpoint}` and
+`horndb_sparql_response_bytes_total{endpoint}` counters added to `SparqlMetrics`;
+implemented via a `CountingBody` `http_body::Body` wrapper wired into the existing
+`record_request` middleware — tallies data-frame bytes and observes once on
+end-of-stream (exact, robust to streaming; not a `Content-Length` guess). Replaces
+the permanently-zero series removed in Slice 1 (commit `d2cace9`). **Phase-2
+fan-out is now complete** — no remaining Phase-2 fan-out items. **Deferred to a
+later phase:** OTel traces and logs.
 Design: `docs/specs/2026-06-29-metrics-design.md`.
 
 ### Build & CI split
