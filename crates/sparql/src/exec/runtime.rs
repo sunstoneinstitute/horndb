@@ -158,9 +158,29 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(b)
             }
             PhysicalPlan::OrderBy { inner, keys } => {
-                let mut v = self.eval_rows(inner)?;
-                v.sort_by(|a, b| compare_by_keys(a, b, keys));
-                Ok(Batch::from_bindings(v))
+                let b = self.eval(inner)?;
+                let mut want = HashSet::new();
+                for (e, _) in keys {
+                    referenced_vars(e, &mut want);
+                }
+                // Pull schema and rows apart so the borrow checker sees two
+                // independent moves (no partial-move ambiguity on `b`).
+                let schema = b.schema;
+                let mut tagged: Vec<(Bindings, Row)> = b
+                    .rows
+                    .into_iter()
+                    .map(|r| {
+                        let env = self.decode_subset(&r, &schema, &want)?;
+                        Ok((env, r))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                // stable sort: equal-key rows keep their input order,
+                // matching the old Vec::sort_by behaviour.
+                tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
+                Ok(Batch {
+                    schema,
+                    rows: tagged.into_iter().map(|(_, r)| r).collect(),
+                })
             }
             PhysicalPlan::Extend { inner, var, expr } => {
                 // Native slot path: decode only the vars the expression reads,
@@ -1971,6 +1991,9 @@ mod slot_differential {
         // the legacy string path (regression guard for the native Extend arm).
         "SELECT ?s ?x WHERE { ?s ?p ?o . BIND(?o AS ?x) }",
         "SELECT ?s ?x WHERE { ?s ?p ?o . BIND(<http://ex/const> AS ?x) }",
+        // ORDER BY coverage: regression guard for the native OrderBy arm.
+        "SELECT ?s ?o WHERE { ?s ?p ?o } ORDER BY ?o",
+        "SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY DESC(?p) ASC(?o)",
     ];
 
     proptest! {
@@ -2102,6 +2125,92 @@ mod slot_differential {
         sort_rows(&mut got_sorted);
         sort_rows(&mut want);
         assert_eq!(got_sorted, want, "slot path diverged from legacy oracle");
+    }
+
+    /// Native `OrderBy` must not decode the columns it does not use for sorting.
+    /// BGP-scan columns must remain `Slot::Id` in the output batch — OrderBy
+    /// only reorders rows, it never touches the slot contents. Only the
+    /// transient `Bindings` built for comparison inside `sort_by` decode the
+    /// order-key columns; those are dropped immediately after the sort.
+    ///
+    /// This test is RED against the adapter-backed arm (which calls `eval_rows`
+    /// and wraps with `Batch::from_bindings`, producing `Slot::Term` for every
+    /// column). It goes GREEN when the native port lands.
+    #[test]
+    fn order_by_preserves_id_slots() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s1"), iri("p"), iri("b"));
+        horn.insert_triple(iri("s2"), iri("p"), iri("a"));
+
+        // SELECT ?s ?o WHERE { ?s <p> ?o } ORDER BY ?o
+        // The order key (?o) is also a BGP column — after a native port it
+        // must still be Slot::Id in the output (only decoded transiently for
+        // the comparator, never written back).
+        let plan = plan_select("SELECT ?s ?o WHERE { ?s <http://ex/p> ?o } ORDER BY ?o");
+
+        let rt = Runtime::new(&horn);
+        let batch = rt.eval(&plan).unwrap();
+
+        assert_eq!(batch.rows.len(), 2, "expected two result rows");
+
+        let s_idx = batch.col("s").expect("?s must be in output schema");
+        let o_idx = batch.col("o").expect("?o must be in output schema");
+
+        for (i, row) in batch.rows.iter().enumerate() {
+            assert!(
+                matches!(row.0[s_idx], Slot::Id(_)),
+                "row {i}: ?s from BGP scan should remain Slot::Id after OrderBy; \
+                 got {:?} — is the adapter-backed arm still active?",
+                row.0[s_idx]
+            );
+            assert!(
+                matches!(row.0[o_idx], Slot::Id(_)),
+                "row {i}: ?o (order key, BGP scan) should remain Slot::Id after OrderBy; \
+                 got {:?}",
+                row.0[o_idx]
+            );
+        }
+    }
+
+    /// Verify ORDER BY over unbound sort key and multi-key DESC/ASC against
+    /// the legacy oracle. Unbound-sorts-first semantics are baked into
+    /// `compare_by_keys` (None < Some) — this ensures the native arm's
+    /// transient-decode path reproduces that behaviour.
+    #[test]
+    fn order_by_multi_key_and_unbound_matches_legacy() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        // Insert triples with two different predicates so DESC(?p) gives a
+        // non-trivial ordering; also mix predicates so some ?q bindings are
+        // unbound for some rows.
+        horn.insert_triple(iri("s1"), iri("p1"), iri("o1"));
+        horn.insert_triple(iri("s2"), iri("p2"), iri("o1"));
+        horn.insert_triple(iri("s3"), iri("p1"), iri("o2"));
+
+        let q = "SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY DESC(?p) ASC(?o)";
+        let plan = plan_select(q);
+
+        let mut got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        let mut want = Runtime::new(&horn).eval_legacy(&plan).unwrap();
+
+        // ORDER BY output is order-sensitive: compare in-order, not sorted.
+        assert_eq!(got, want, "slot OrderBy diverged from legacy oracle");
+
+        // Also check an unbound key: BIND a variable only for some rows,
+        // then ORDER BY that variable (unbound rows should sort first).
+        let q2 = "SELECT ?s ?extra WHERE { \
+            ?s <http://ex/p1> ?o \
+            OPTIONAL { ?s <http://ex/p2> ?extra } \
+        } ORDER BY ?extra";
+        let plan2 = plan_select(q2);
+
+        got = Runtime::new(&horn).run(&plan2).unwrap().collect();
+        want = Runtime::new(&horn).eval_legacy(&plan2).unwrap();
+        assert_eq!(
+            got, want,
+            "slot OrderBy with unbound key diverged from legacy oracle"
+        );
     }
 
     // Differential proptest covering Join-over-adapter compositions (OPTIONAL
