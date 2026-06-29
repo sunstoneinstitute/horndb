@@ -10,7 +10,7 @@ publish = false
 # pulling in axum/tokio. The HTTP boundary (F3 `/nl-query`, F6 `/ml-audit`)
 # lives behind `server`.
 default = []
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:serde", "dep:serde_json"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:serde", "dep:serde_json", "dep:horndb-metrics"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -23,9 +23,11 @@ tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+horndb-metrics = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Server tests drive the axum router with tokio + tower::ServiceExt::oneshot.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true }
 serde_json = { workspace = true }
+horndb-metrics.workspace = true
