@@ -20,6 +20,7 @@ use oxrdf::{GraphName, Quad};
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::server::{build_router, AppState};
@@ -67,13 +68,26 @@ async fn main() -> Result<()> {
             // Parse all files into an oxrdf::Dataset, then run the OWL 2 RL
             // closure before loading into the served store.
             let mut dataset = oxrdf::Dataset::default();
+            let mut input_bytes: u64 = 0;
+            let t = Instant::now();
             for f in &files {
+                input_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
                 let n = collect_into_dataset(f, &mut dataset)
                     .with_context(|| format!("loading {}", f.display()))?;
                 eprintln!("serve: parsed {n} triples from {}", f.display());
             }
             let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset)
                 .context("OWL 2 RL materialization")?;
+            // Record the whole parse+materialize+load span once (no per-file
+            // double-count) against the load-path counters.
+            horndb_metrics::metrics()
+                .storage
+                .load_bytes
+                .inc_by(input_bytes);
+            horndb_metrics::metrics()
+                .storage
+                .load_duration_seconds
+                .observe(t.elapsed().as_secs_f64());
             eprintln!(
                 "serve: materialized closure — {} asserted, {} total loaded",
                 stats.asserted, stats.loaded
@@ -87,7 +101,14 @@ async fn main() -> Result<()> {
     } else {
         let mut loaded: u64 = 0;
         for f in &files {
+            let bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            let t = Instant::now();
             let n = load_file(&mut store, f).with_context(|| format!("loading {}", f.display()))?;
+            horndb_metrics::metrics().storage.load_bytes.inc_by(bytes);
+            horndb_metrics::metrics()
+                .storage
+                .load_duration_seconds
+                .observe(t.elapsed().as_secs_f64());
             eprintln!("serve: loaded {n} triples from {}", f.display());
             loaded += n;
         }
@@ -97,6 +118,27 @@ async fn main() -> Result<()> {
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(store)),
     };
+
+    // Scrape-time storage size collector: reads a cheap stats snapshot through
+    // a `Weak` ref to the live store. Steady-state cost is zero; the gauges are
+    // computed only when /metrics is scraped (and report nothing once the store
+    // is dropped).
+    let store_weak = Arc::downgrade(&state.store);
+    horndb_metrics::register_collector(Box::new(horndb_metrics::storage::StorageCollector::new(
+        move || {
+            let arc = store_weak.upgrade()?;
+            let guard = arc.read().ok()?;
+            let s = guard.storage_stats();
+            Some(horndb_metrics::storage::StorageSnapshot {
+                triples: s.triples as i64,
+                graphs: s.graphs as i64,
+                predicates: s.predicates as i64,
+                dictionary_terms: s.dictionary_terms as i64,
+                tier_bytes_estimated: s.bytes_estimated as i64,
+            })
+        },
+    )));
+
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind(&cli.bind)
