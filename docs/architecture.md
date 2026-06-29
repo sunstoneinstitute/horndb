@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1); fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice); remaining fan-out planned.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -474,12 +474,16 @@ count/latency/status + per-stage parse/translate/plan/exec timing +
 query-kind counters), the closure backend (`ClosureMetrics` → histograms), and
 storage sizes, exposed at `GET /metrics` (OpenMetrics text, behind the `server`
 feature). OTel interop is achieved off-box by a collector scraping `/metrics`;
-no in-process OTLP push. **Planned (fan-out):** owlrl, incremental, ml, the
-wcoj developer histograms, and response-byte accounting via a body-counting
-layer (`TASKS.md`, Observability). The `MemTier` label vocabulary
-(HBM/DRAM/CXL/Unknown) is defined but not yet attached to the storage byte
-gauges — wiring it is part of the memory-tiering fan-out. **Deferred (next
-phase):** OTel traces and logs. Design: `docs/specs/2026-06-29-metrics-design.md`.
+no in-process OTLP push. **Phase-2 Slice 1 (owlrl):** `OwlrlMetrics` subsystem
+— per-rule fire counts (`horndb_owlrl_rule_fires_total{rule}`), per-rule +
+per-phase latency histograms, `owlrl_triples_inferred_total`,
+`owlrl_rounds_total`, dirty-predicate prune counters; closure `input_nnz`
+observed alongside `output_nnz`; `storage_tier_bytes_estimated` now carries the
+`tier` label (`MemTier` enum wired, `tier="unknown"` until full HBM/CXL
+accounting lands). **Planned (remaining fan-out):** incremental, ml, the wcoj
+developer histograms, and response-byte accounting via a body-counting layer
+(`TASKS.md`, Observability). **Deferred (next phase):** OTel traces and logs.
+Design: `docs/specs/2026-06-29-metrics-design.md`.
 
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
