@@ -239,6 +239,68 @@ async fn explain_pragma_returns_text_plan() {
     assert!(text.contains("BgpScan"), "{text}");
 }
 
+/// Parse a prometheus-client text-format counter value for a metric line that
+/// starts with `metric_name` and contains `label_substr`.
+fn parse_counter(output: &str, metric_name: &str, label_substr: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        if line.starts_with(metric_name) && line.contains(label_substr) && !line.starts_with('#') {
+            line.split_whitespace().last()?.parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+#[tokio::test]
+async fn byte_counters_are_incremented() {
+    // POST a SELECT query to /query so the response has an actual JSON body
+    // (unlike /update which returns 204 No Content with no body).
+    let app = router_with_data();
+    let body_str = "SELECT ?o WHERE { ?s ?p ?o }";
+    let body_len = body_str.len() as u64;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(body_str))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Drain the response body so the response CountingBody fires its observation.
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        !body.is_empty(),
+        "response body must be non-empty for this test"
+    );
+
+    let metrics = horndb_metrics::encode_metrics();
+    let req_bytes = parse_counter(
+        &metrics,
+        "horndb_sparql_request_bytes_total",
+        r#"endpoint="query""#,
+    )
+    .unwrap_or(0);
+    let resp_bytes = parse_counter(
+        &metrics,
+        "horndb_sparql_response_bytes_total",
+        r#"endpoint="query""#,
+    )
+    .unwrap_or(0);
+
+    assert!(
+        req_bytes >= body_len,
+        "expected request_bytes >= {body_len}, got {req_bytes}\nmetrics:\n{metrics}"
+    );
+    assert!(
+        resp_bytes >= 1,
+        "expected response_bytes >= 1, got {resp_bytes}\nmetrics:\n{metrics}"
+    );
+}
+
 #[tokio::test]
 async fn explain_json_pragma_returns_json_plan() {
     let app = router_with_data();
