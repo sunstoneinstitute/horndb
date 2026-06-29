@@ -115,7 +115,12 @@ pub async fn handle_ml_audit(
     let offset = p.offset.unwrap_or(0);
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
+    let t = std::time::Instant::now();
     let page = state.registry.audit_log().query_since(since, offset, limit);
+    horndb_metrics::metrics()
+        .ml
+        .audit_query_duration_seconds
+        .observe(t.elapsed().as_secs_f64());
     let body = AuditResponse {
         entries: page.entries.iter().map(to_json).collect(),
         next_offset: page.next_offset,

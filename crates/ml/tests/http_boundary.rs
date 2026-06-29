@@ -524,3 +524,20 @@ async fn ml_audit_since_filters() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["model"], "new");
 }
+
+#[tokio::test]
+async fn ml_audit_emits_query_latency_metric() {
+    let reg = MlRegistry::new(MlConfig::enabled());
+    seed_audit(&reg, 2);
+    let app = build_router(state_with(reg, false));
+
+    let resp = app.oneshot(get_audit("/ml-audit")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = horndb_metrics::encode_metrics();
+    let count = parse_metric(&text, "horndb_ml_audit_query_duration_seconds_count");
+    assert!(
+        count >= 1,
+        "expected >= 1 audit query latency sample, got {count}:\n{text}"
+    );
+}
