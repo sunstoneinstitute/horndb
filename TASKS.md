@@ -37,6 +37,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
+- [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
@@ -160,6 +161,39 @@ Closed tasks are listed in [Done](#done-for-traceability).
   materialization-on-inference is follow-up. Still outstanding (keeps this box
   unchecked): the *serving slice* — F5 (compact crosswalk index) and F6 (crosswalk
   spine), plus GraphBLAS-backend T1 parity. Tracked as a separate serving-slice plan.
+
+## HIGH — Operational
+
+- [ ] **Observability metrics (Phase 1): prometheus-client + `/metrics` scrape.**
+  ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
+  **Phase-1 Slice 1 landed** (design: `docs/specs/2026-06-29-metrics-design.md`;
+  plan: `docs/plans/2026-06-29-metrics-phase1-slice1.md`). New foundational
+  `horndb-metrics` crate: `prometheus-client` with typed `#[derive(EncodeLabelSet)]`
+  labels (no strings), a process-global `OnceLock` registry, and free accessors —
+  hot-path updates are direct atomic ops on cached handles; quantities that are
+  expensive to compute (triple/dictionary/tier sizes) are pulled at scrape time via a
+  `Collector`, never maintained continuously. **Slice 1 instruments:** the SPARQL HTTP
+  layer (request count/latency/status via middleware + per-stage
+  parse/translate/plan/exec timing + query-kind/error counters), the closure backend
+  (`ClosureMetrics` → mxm/total/iterations/nnz histograms), and storage sizes; exposed
+  at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
+  off-box — a collector scrapes `/metrics`; no in-process OTLP push.
+
+  **Remaining (fan-out, not started):**
+  1. owlrl — rule-fire counts, per-rule + per-phase latency, dirty-predicate prune rate
+     (`Stats`/`PhaseTimings` already exist).
+  2. incremental — tick latency, asserted/derived merge counts, retract/promote
+     cardinalities, change-feed subscriber gauge (`TickReport` exists).
+  3. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
+  4. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
+     completion (NO per-tuple/per-seek timing), peak active iterators.
+  5. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+     Slice 1 — a middleware can't see the serialized size cheaply).
+  6. Real HBM/CXL byte accounting once memory tiering lands. The `MemTier` enum
+     (HBM/DRAM/CXL/Unknown) is defined (spec §7.3) but not yet attached to the storage
+     byte gauges; wiring the `tier` label is part of this step.
+
+  **Deferred to a later phase:** OpenTelemetry traces and logs.
 
 ## MEDIUM — Performance
 

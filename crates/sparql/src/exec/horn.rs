@@ -167,6 +167,16 @@ use horndb_wcoj::source::vec_source::VecTripleSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+/// Cheap size stats for scrape-time metrics (see [`HornBackend::storage_stats`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HornStorageStats {
+    pub triples: u64,
+    pub graphs: u64,
+    pub predicates: u64,
+    pub dictionary_terms: u64,
+    pub bytes_estimated: u64,
+}
+
 /// Storage + WCOJ backed SPARQL backend (issue #67).
 ///
 /// * Term identity: `horndb_storage::Dictionary` (kind-tagged TermIds).
@@ -217,6 +227,23 @@ impl HornBackend {
     /// Live triple count.
     pub fn len(&self) -> u64 {
         self.live
+    }
+
+    /// Cheap point-in-time size stats for scrape-time metrics: live triple
+    /// count plus the tier's already-tracked graph/predicate/byte estimates and
+    /// the dictionary term count. Bounded by the number of distinct
+    /// predicates/graphs — never an O(triples) traversal. `triples` reflects
+    /// the live count (storage is insertion-only, so the tier's own triple
+    /// count would include tombstoned rows).
+    pub fn storage_stats(&self) -> HornStorageStats {
+        let tier = self.store.stats();
+        HornStorageStats {
+            triples: self.live,
+            graphs: tier.graphs,
+            predicates: tier.predicates,
+            dictionary_terms: self.store.dictionary().len() as u64,
+            bytes_estimated: tier.bytes_estimated,
+        }
     }
 
     pub fn is_empty(&self) -> bool {

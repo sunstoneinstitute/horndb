@@ -12,6 +12,7 @@ members = [
     "crates/ml",
     "crates/hardware-ext",
     "crates/bench-rdfox",
+    "crates/metrics",
 ]
 # harness and bench-rdfox are excluded from default builds to avoid pulling in
 # oxigraph → oxrocksdb-sys (~700 MB) during local development. Use --workspace
@@ -26,6 +27,7 @@ default-members = [
     "crates/sparql",
     "crates/ml",
     "crates/hardware-ext",
+    "crates/metrics",
 ]
 
 [workspace.package]
@@ -45,6 +47,8 @@ authors = ["Sunstone Institute"]
 # Internal leaf crate (SPEC-12). Consumers reference it with
 # `horndb-simd = { workspace = true }`.
 horndb-simd = { path = "crates/simd" }
+horndb-metrics = { path = "crates/metrics" }
+prometheus-client = "0.25"
 anyhow = "1"
 thiserror = "2"
 crossbeam-channel = "0.5"

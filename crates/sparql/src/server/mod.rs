@@ -4,14 +4,20 @@
 //! Protocol is explicitly out of Stage 1 scope (see SPEC-07 Future
 //! Work).
 
+pub mod metrics_route;
 pub mod query;
 pub mod update;
 
 use crate::exec::mem::MemStore;
 use crate::exec::FullBackend;
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
+use horndb_metrics::labels::{Endpoint, EndpointLabel, Method, RequestLabels};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// Shared state, generic over the storage backend. Defaults to the
 /// Stage-1 `MemStore` so existing constructors keep compiling; the
@@ -43,5 +49,42 @@ pub fn build_router<B: FullBackend + Send + Sync + 'static>(state: AppState<B>) 
             get(query::handle_query_get::<B>).post(query::handle_query_post::<B>),
         )
         .route("/update", post(update::handle_update::<B>))
+        .route("/metrics", get(metrics_route::handle_metrics))
+        .layer(middleware::from_fn(record_request))
         .with_state(state)
+}
+
+/// Instrument every request: record latency and a labelled request count.
+async fn record_request(req: Request, next: Next) -> Response {
+    let endpoint = match req.uri().path() {
+        "/query" => Some(Endpoint::Query),
+        "/update" => Some(Endpoint::Update),
+        "/metrics" => Some(Endpoint::Metrics),
+        _ => None,
+    };
+    let method = if req.method() == axum::http::Method::GET {
+        Method::Get
+    } else {
+        Method::Post
+    };
+    let start = Instant::now();
+    let resp = next.run(req).await;
+    if let Some(endpoint) = endpoint {
+        let m = horndb_metrics::metrics();
+        m.sparql
+            .request_duration_seconds
+            .get_or_create(&EndpointLabel {
+                endpoint: endpoint.clone(),
+            })
+            .observe(start.elapsed().as_secs_f64());
+        m.sparql
+            .requests
+            .get_or_create(&RequestLabels {
+                endpoint,
+                method,
+                status: resp.status().as_u16(),
+            })
+            .inc();
+    }
+    resp
 }
