@@ -99,9 +99,41 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 })
             }
             PhysicalPlan::Union { left, right } => {
-                let mut a = self.eval_rows(left)?;
-                a.extend(self.eval_rows(right)?);
-                Ok(Batch::from_bindings(a))
+                let l = self.eval(left)?;
+                let r = self.eval(right)?;
+                // Schema = left schema ++ right-only vars (deterministic order).
+                let mut schema = l.schema.clone();
+                for v in &r.schema {
+                    if !schema.iter().any(|x| x.name() == v.name()) {
+                        schema.push(v.clone());
+                    }
+                }
+                // Place each child row's slots by var name, Unbound where the
+                // branch does not bind that schema var.
+                fn place(child: &Batch, schema: &[Var]) -> Vec<Row> {
+                    child
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            Row(schema
+                                .iter()
+                                .map(|v| match child.col(v.name()) {
+                                    Some(i) => row.0[i].clone(),
+                                    None => Slot::Unbound,
+                                })
+                                .collect())
+                        })
+                        .collect()
+                }
+                let mut rows = place(&l, &schema);
+                rows.extend(place(&r, &schema));
+                // Branches of differing provenance (native BGP → Slot::Id vs
+                // adapter-backed → Slot::Term, or Unbound where a branch omits
+                // a var) can leave a column mixing Id and Term for one logical
+                // value; Distinct/Group would then key Id(x) ≠ Lex(x). Restore
+                // within-column homogeneity (pure-Id columns pay zero decode).
+                self.normalize_columns(&mut rows, schema.len())?;
+                Ok(Batch { schema, rows })
             }
             PhysicalPlan::Project { vars, inner } => {
                 let b = self.eval(inner)?;
@@ -2117,6 +2149,55 @@ mod slot_differential {
             v,
             &Term::Iri("http://ex/X".into()),
             "?v must be <http://ex/X>"
+        );
+
+        // Differential check vs legacy oracle.
+        let mut got_sorted = got;
+        let mut want = Runtime::new(&horn).eval_legacy(&plan).unwrap();
+        sort_rows(&mut got_sorted);
+        sort_rows(&mut want);
+        assert_eq!(got_sorted, want, "slot path diverged from legacy oracle");
+    }
+
+    /// Regression: `Union` of a native-BGP branch (binds ?v as Slot::Id) and
+    /// an adapter-backed branch (LeftJoin → Slot::Term for ?v), both yielding
+    /// the SAME logical ?v, followed by DISTINCT ?v. Without restoring column
+    /// homogeneity on the merged rows (`normalize_columns`), the ?v column
+    /// mixes Id(x) and Term(x) for one logical value; DISTINCT keys them
+    /// differently (KeyPart::Id ≠ KeyPart::Lex) → two rows instead of one.
+    ///
+    /// Green on the adapter-backed Union (all Slot::Term, trivially
+    /// homogeneous) AND on the native port (where `normalize_columns` is what
+    /// keeps it homogeneous). Drop the normalize call from the native Union
+    /// arm and this test goes RED (got 2, want 1).
+    #[test]
+    fn distinct_union_mixed_provenance_no_column_mixing() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+        horn.insert_triple(iri("v1"), iri("q"), iri("z1"));
+
+        // Branch 1: native BGP → ?v is Slot::Id.
+        // Branch 2: BGP + OPTIONAL (LeftJoin, adapter-backed) → ?v is Slot::Term.
+        // Both bind ?v = <http://ex/v1>; DISTINCT must collapse to one row.
+        let q = "SELECT DISTINCT ?v WHERE { \
+            { ?v <http://ex/p> ?o } \
+            UNION \
+            { ?v <http://ex/p> ?o OPTIONAL { ?v <http://ex/q> ?z } } }";
+        let plan = plan_select(q);
+
+        let got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            got.len(),
+            1,
+            "DISTINCT over mixed-provenance UNION must deduplicate: got {} rows, want 1\nrows: {got:?}",
+            got.len()
+        );
+        let v = got[0].get("v").expect("?v must be bound");
+        assert_eq!(
+            v,
+            &Term::Iri("http://ex/v1".into()),
+            "?v must be <http://ex/v1>"
         );
 
         // Differential check vs legacy oracle.
