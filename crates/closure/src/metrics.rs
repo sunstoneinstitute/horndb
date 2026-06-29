@@ -139,6 +139,7 @@ pub fn valued_transitive_closure(
             total_time: total_start.elapsed(),
             carrier: CarrierShape::Scalar,
         };
+        emit_to_sink(&metrics);
         return Ok((out, metrics));
     }
 
@@ -204,5 +205,20 @@ pub fn valued_transitive_closure(
         total_time: total_start.elapsed(),
         carrier: CarrierShape::Scalar,
     };
+    emit_to_sink(&metrics);
     Ok((reach, metrics))
+}
+
+/// Record a finalized `ClosureMetrics` into the process-global metrics sink.
+/// Called once per `valued_transitive_closure` invocation (from each return
+/// path), so every closure — including those reached via
+/// `crosswalk::CrosswalkGraph::best_confidence_closure`, which calls through
+/// here — is counted exactly once.
+fn emit_to_sink(metrics: &ClosureMetrics) {
+    horndb_metrics::metrics().closure.observe(
+        metrics.mxm_time.as_secs_f64(),
+        metrics.total_time.as_secs_f64(),
+        metrics.iterations_to_fixpoint as u64,
+        metrics.closure_nnz,
+    );
 }

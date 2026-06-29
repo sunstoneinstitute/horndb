@@ -19,6 +19,7 @@ regen-bindings = ["dep:bindgen"]
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = "2"
+horndb-metrics.workspace = true
 
 [build-dependencies]
 bindgen = { version = "0.72", optional = true }
