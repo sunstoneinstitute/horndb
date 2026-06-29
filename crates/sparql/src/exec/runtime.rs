@@ -44,11 +44,46 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                         out_schema.push(v.clone());
                     }
                 }
+                // Hash inner join: index the right relation by its decoded
+                // join-var key (option (b) — see `row_join_key`); right rows
+                // missing a jvar fall to `unkeyed`. Each left row probes only
+                // its same-key bucket plus `unkeyed` (a left row missing a jvar
+                // can't be keyed and must probe ALL right rows). `merge_rows`
+                // still rejects any genuine conflict, so probing same-key
+                // candidates is sound: any pair the nested loop would merge
+                // shares the same decoded jvar key (or one side is unkeyed),
+                // and differing jvar values are rejected by `merge_rows`. No
+                // OPTIONAL semantics: a left row with zero matches contributes
+                // nothing (unlike LeftJoin).
+                let jvars = batch_join_vars(&l, &r);
+                let merge_plan = build_merge_plan(&l.schema, &r.schema, &out_schema);
+
+                let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
+                let mut unkeyed: Vec<&Row> = Vec::new();
+                for b in &r.rows {
+                    match self.row_join_key(b, &r.schema, &jvars)? {
+                        Some(k) => index.entry(k).or_default().push(b),
+                        None => unkeyed.push(b),
+                    }
+                }
+
                 let mut rows = Vec::new();
                 for a in &l.rows {
-                    for b in &r.rows {
-                        if let Some(m) = self.merge_rows(&l.schema, a, &r.schema, b, &out_schema)? {
-                            rows.push(m);
+                    match self.row_join_key(a, &l.schema, &jvars)? {
+                        Some(k) => {
+                            if let Some(bucket) = index.get(&k) {
+                                self.merge_all(a, bucket, &merge_plan, &mut rows)?;
+                            }
+                            if !unkeyed.is_empty() {
+                                self.merge_all(a, &unkeyed, &merge_plan, &mut rows)?;
+                            }
+                        }
+                        // Left row missing a join var: can't be keyed, so it may
+                        // still be compatible with any right row on the
+                        // remaining shared vars — probe ALL.
+                        None => {
+                            let all: Vec<&Row> = r.rows.iter().collect();
+                            self.merge_all(a, &all, &merge_plan, &mut rows)?;
                         }
                     }
                 }
@@ -601,6 +636,58 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(Some(Row(slots)))
     }
 
+    /// Merge the left row `a` against each candidate right row using a
+    /// precomputed `merge_plan` (column-index lookups hoisted out of the
+    /// per-pair loop), pushing every compatible union row into `out`.
+    fn merge_all(
+        &self,
+        a: &Row,
+        candidates: &[&Row],
+        merge_plan: &[(Option<usize>, Option<usize>)],
+        out: &mut Vec<Row>,
+    ) -> Result<()> {
+        for b in candidates {
+            if let Some(m) = self.merge_rows_with(a, b, merge_plan)? {
+                out.push(m);
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge two slot rows with a precomputed `merge_plan`: for each output
+    /// column, its `(left_col, right_col)` index in the respective schemas
+    /// (`None` when the var is absent on that side). Semantically identical to
+    /// [`Self::merge_rows`] but does no per-pair `position` lookups. See
+    /// [`build_merge_plan`].
+    fn merge_rows_with(
+        &self,
+        l: &Row,
+        r: &Row,
+        merge_plan: &[(Option<usize>, Option<usize>)],
+    ) -> Result<Option<Row>> {
+        let decode = |id| self.exec.decode_term(id);
+        let mut slots = Vec::with_capacity(merge_plan.len());
+        for &(li, ri) in merge_plan {
+            let chosen = match (li.map(|i| &l.0[i]), ri.map(|i| &r.0[i])) {
+                (Some(a), Some(b)) => match (a, b) {
+                    (Slot::Unbound, x) | (x, Slot::Unbound) => x.clone(),
+                    _ => {
+                        if Slot::eq(a, b, decode)? {
+                            a.clone()
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                },
+                (Some(a), None) => a.clone(),
+                (None, Some(b)) => b.clone(),
+                (None, None) => Slot::Unbound,
+            };
+            slots.push(chosen);
+        }
+        Ok(Some(Row(slots)))
+    }
+
     /// Build the native `LeftJoin` hash-index key for one slot row.
     ///
     /// Provenance choice — **option (b): key on the DECODED lexical form of
@@ -683,6 +770,26 @@ fn batch_join_vars(l: &Batch, r: &Batch) -> Vec<Var> {
     let lvars: BTreeSet<&str> = l.schema.iter().map(|v| v.name()).collect();
     let rvars: BTreeSet<&str> = r.schema.iter().map(|v| v.name()).collect();
     lvars.intersection(&rvars).map(|s| Var::new(*s)).collect()
+}
+
+/// Precompute, once per join, each `out_schema` column's source index in the
+/// left schema (`Option<usize>`) and the right schema (`Option<usize>`). These
+/// positions depend only on `(ls, rs, out_schema)`, not on the row pair, so
+/// hoisting them out of [`Runtime::merge_rows_with`]'s per-pair loop turns the
+/// O(width²) per-merged-row `position` scan into O(width) indexing.
+fn build_merge_plan(
+    ls: &[Var],
+    rs: &[Var],
+    out_schema: &[Var],
+) -> Vec<(Option<usize>, Option<usize>)> {
+    out_schema
+        .iter()
+        .map(|v| {
+            let li = ls.iter().position(|x| x.name() == v.name());
+            let ri = rs.iter().position(|x| x.name() == v.name());
+            (li, ri)
+        })
+        .collect()
 }
 
 /// Evaluate a recursive Kleene path `p+`/`p*`.
@@ -1945,6 +2052,78 @@ mod slot_differential {
             &Term::Iri("http://ex/X".into()),
             "?v must be <http://ex/X>"
         );
+    }
+
+    /// Recursively check whether a physical plan contains an inner `Join` node.
+    fn contains_inner_join(p: &PhysicalPlan) -> bool {
+        match p {
+            PhysicalPlan::Join { .. } => true,
+            PhysicalPlan::LeftJoin { left, right, .. } | PhysicalPlan::Union { left, right } => {
+                contains_inner_join(left) || contains_inner_join(right)
+            }
+            PhysicalPlan::Filter { inner, .. }
+            | PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::OrderBy { inner, .. }
+            | PhysicalPlan::Extend { inner, .. }
+            | PhysicalPlan::Group { inner, .. } => contains_inner_join(inner),
+            PhysicalPlan::PathClosure { edge, .. } => contains_inner_join(edge),
+            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => false,
+        }
+    }
+
+    /// Multi-row inner `Join` on a shared bound variable: some left rows match
+    /// several right rows, some match none. The hash-join refactor must produce
+    /// the exact same result multiset as the nested loop, so correct bucketing
+    /// by the decoded join-var key is required. Forced through the inner `Join`
+    /// arm by joining an outer BGP with a sub-SELECT (which spargebra keeps as a
+    /// `Join`, not a merged BGP).
+    #[test]
+    fn inner_join_multi_row_shared_var() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        // ?s <p> ?o
+        horn.insert_triple(iri("s1"), iri("p"), iri("o1"));
+        horn.insert_triple(iri("s2"), iri("p"), iri("o2"));
+        horn.insert_triple(iri("s3"), iri("p"), iri("o3")); // o3 has no <q> → no match
+                                                            // ?o <q> ?o2
+        horn.insert_triple(iri("o1"), iri("q"), iri("a1")); // o1 joins to two o2 values
+        horn.insert_triple(iri("o1"), iri("q"), iri("a2"));
+        horn.insert_triple(iri("o2"), iri("q"), iri("b1"));
+
+        // Outer BGP joined with a sub-SELECT on the shared bound var ?o.
+        let q = "SELECT ?s ?o2 WHERE { \
+            ?s <http://ex/p> ?o . \
+            { SELECT ?o ?o2 WHERE { ?o <http://ex/q> ?o2 } } }";
+        let plan = plan_select(q);
+        assert!(
+            contains_inner_join(&plan),
+            "test must exercise the inner Join arm; plan: {plan:?}"
+        );
+
+        let got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        let mut pairs: Vec<(String, String)> = got
+            .iter()
+            .map(|b| {
+                let s = match b.get("s").expect("?s bound") {
+                    Term::Iri(i) => i.clone(),
+                    other => panic!("?s not IRI: {other:?}"),
+                };
+                let o2 = match b.get("o2").expect("?o2 bound") {
+                    Term::Iri(i) => i.clone(),
+                    other => panic!("?o2 not IRI: {other:?}"),
+                };
+                (s, o2)
+            })
+            .collect();
+        pairs.sort();
+        let want = vec![
+            ("http://ex/s1".to_string(), "http://ex/a1".to_string()),
+            ("http://ex/s1".to_string(), "http://ex/a2".to_string()),
+            ("http://ex/s2".to_string(), "http://ex/b1".to_string()),
+        ];
+        assert_eq!(pairs, want, "inner join result multiset mismatch");
     }
 
     /// Regression: `Union` of a native-BGP branch (binds ?v as Slot::Id) and
