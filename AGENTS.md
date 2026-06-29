@@ -133,6 +133,11 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 
 ## Where deeper guidance lives
 
+**`AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it** (this directory and
+every crate). Edit `AGENTS.md` only — never write through the `CLAUDE.md` path or
+replace the symlink with a copy. New agent-doc directory → create `AGENTS.md`, then
+`ln -s AGENTS.md CLAUDE.md`.
+
 These nested `CLAUDE.md`/`AGENTS.md` files load on-demand when you work in their directory:
 
 - `crates/harness/` — running the `harness` binary, engines, suite keys, the RDF 1.2 N-Triples suite.
