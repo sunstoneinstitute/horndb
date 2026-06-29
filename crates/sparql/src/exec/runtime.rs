@@ -1,10 +1,14 @@
-//! Iterator-style runtime over [`PhysicalPlan`]. Each plan node
-//! yields a `Vec<Bindings>` because Stage 1 materialises per-node;
-//! true streaming is a Future Work item.
+//! Iterator-style runtime over [`PhysicalPlan`]. `eval` returns [`Batch`]
+//! (id-carrying slot rows); `run` decodes once at the boundary via
+//! `decode_term`. Each operator arm still materialises per-node (true
+//! streaming is Future Work). During Tasks 4–8 the per-arm `eval_rows`
+//! decode-adapter is replaced with native slot operations arm by arm;
+//! `eval_legacy` (test-only) is the string-based differential oracle until
+//! Slice 2 lands.
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
 use crate::error::{Result, SparqlError};
-use crate::exec::{Bindings, Executor};
+use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, Slot};
 use crate::plan::PhysicalPlan;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -19,85 +23,147 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Execute the plan and return all solution mappings.
     pub fn run(&self, plan: &PhysicalPlan) -> Result<std::vec::IntoIter<Bindings>> {
-        let v = self.eval(plan)?;
-        Ok(v.into_iter())
+        let batch = self.eval(plan)?;
+        let rows = batch.to_bindings(|id| self.exec.decode_term(id))?;
+        Ok(rows.into_iter())
     }
 
-    fn eval(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+    /// Decode a child plan's [`Batch`] back to `Vec<Bindings>` so an arm can
+    /// reuse today's string free-fns (the decode-adapter's input half).
+    /// Temporary scaffolding: each arm migrated to native slot ops in
+    /// Tasks 4–7 calls `self.eval(child)` directly instead; remove once the
+    /// last `eval_rows` caller is gone.
+    fn eval_rows(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+        self.eval(plan)?.to_bindings(|id| self.exec.decode_term(id))
+    }
+
+    /// Evaluate a plan node to a [`Batch`]. Until native slot ops land
+    /// (Tasks 4–8), every arm decodes its children via `eval_rows`, runs the
+    /// existing string free-fn, and re-wraps the result with
+    /// `Batch::from_bindings`.
+    fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
-            PhysicalPlan::BgpScan { patterns } => Ok(self.exec.scan_bgp(patterns)?.collect()),
+            PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
             PhysicalPlan::Join { left, right } => {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-                let mut out = Vec::new();
-                for a in &l {
-                    for b in &r {
-                        if let Some(m) = a.extend_compat(b) {
-                            out.push(m);
+                // Output schema = left schema ++ right-only vars.
+                let mut out_schema = l.schema.clone();
+                for v in &r.schema {
+                    if !out_schema.iter().any(|x| x.name() == v.name()) {
+                        out_schema.push(v.clone());
+                    }
+                }
+                let mut rows = Vec::new();
+                for a in &l.rows {
+                    for b in &r.rows {
+                        if let Some(m) = self.merge_rows(&l.schema, a, &r.schema, b, &out_schema)? {
+                            rows.push(m);
                         }
                     }
                 }
-                Ok(out)
+                // Restore within-column homogeneity: an adapter-backed child
+                // (LeftJoin/Union → all Slot::Term) may leave a shared var as
+                // Slot::Unbound on some rows; the native BGP child has Slot::Id
+                // for that var. merge_rows takes the non-Unbound side, so the
+                // output column holds both Term and Id for the same logical
+                // value. Distinct/Group key on KeyPart where Id(x) ≠ Lex(x)
+                // → equal solutions hash differently → wrong results.
+                // Only genuinely mixed (Id ∧ Term) columns are decoded; the
+                // pure-Id BGP-only aggregation hot path pays zero decode.
+                self.normalize_join_columns(&mut rows, out_schema.len())?;
+                Ok(Batch {
+                    schema: out_schema,
+                    rows,
+                })
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                hash_left_join(l, r, expr.as_ref())
+                let l = self.eval_rows(left)?;
+                let r = self.eval_rows(right)?;
+                Ok(Batch::from_bindings(hash_left_join(l, r, expr.as_ref())?))
             }
             PhysicalPlan::Filter { expr, inner } => {
-                let v = self.eval(inner)?;
-                v.into_iter()
-                    .map(|b| eval_expr(expr, &b).map(|keep| (b, keep)))
-                    .collect::<Result<Vec<_>>>()
-                    .map(|pairs| {
-                        pairs
-                            .into_iter()
-                            .filter(|(_, k)| *k)
-                            .map(|(b, _)| b)
-                            .collect()
-                    })
-            }
-            PhysicalPlan::Union { left, right } => {
-                let mut a = self.eval(left)?;
-                let b = self.eval(right)?;
-                a.extend(b);
-                Ok(a)
-            }
-            PhysicalPlan::Project { vars, inner } => {
-                let v = self.eval(inner)?;
-                Ok(v.into_iter().map(|b| project(&b, vars)).collect())
-            }
-            PhysicalPlan::Distinct { inner } => {
-                let v = self.eval(inner)?;
-                // Order-preserving dedup: O(n) membership via a hash set,
-                // keeping first-seen order (was an O(n^2) linear scan — the
-                // SPB aggregation gap, #128).
-                let mut seen: HashSet<Bindings> = HashSet::with_capacity(v.len());
-                let mut out: Vec<Bindings> = Vec::with_capacity(v.len());
-                for b in v {
-                    if seen.insert(b.clone()) {
-                        out.push(b);
+                let b = self.eval(inner)?;
+                let mut want = std::collections::HashSet::new();
+                referenced_vars(expr, &mut want);
+                let mut rows = Vec::with_capacity(b.rows.len());
+                for r in b.rows {
+                    let env = self.decode_subset(&r, &b.schema, &want)?;
+                    if eval_expr(expr, &env)? {
+                        rows.push(r);
                     }
                 }
-                Ok(out)
+                Ok(Batch {
+                    schema: b.schema,
+                    rows,
+                })
+            }
+            PhysicalPlan::Union { left, right } => {
+                let mut a = self.eval_rows(left)?;
+                a.extend(self.eval_rows(right)?);
+                Ok(Batch::from_bindings(a))
+            }
+            PhysicalPlan::Project { vars, inner } => {
+                let b = self.eval(inner)?;
+                if vars.is_empty() {
+                    // SELECT * / ASK: keep everything (parity with project()).
+                    return Ok(b);
+                }
+                // New schema = projected vars that exist in the input, in
+                // projection order; remap each row's slots by index.
+                let idx: Vec<Option<usize>> = vars.iter().map(|v| b.col(v.name())).collect();
+                let schema: Vec<Var> = vars
+                    .iter()
+                    .zip(&idx)
+                    .filter(|(_, i)| i.is_some())
+                    .map(|(v, _)| v.clone())
+                    .collect();
+                let rows = b
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        Row(idx
+                            .iter()
+                            .filter_map(|i| i.map(|i| r.0[i].clone()))
+                            .collect())
+                    })
+                    .collect();
+                Ok(Batch { schema, rows })
+            }
+            PhysicalPlan::Distinct { inner } => {
+                let b = self.eval(inner)?;
+                let mut seen: std::collections::HashSet<Vec<KeyPart>> =
+                    std::collections::HashSet::with_capacity(b.rows.len());
+                let mut rows = Vec::with_capacity(b.rows.len());
+                for r in b.rows {
+                    let key: Vec<KeyPart> = r.0.iter().map(|s| s.key_part()).collect();
+                    if seen.insert(key) {
+                        rows.push(r);
+                    }
+                }
+                Ok(Batch {
+                    schema: b.schema,
+                    rows,
+                })
             }
             PhysicalPlan::Slice {
                 inner,
                 start,
                 length,
             } => {
-                let v = self.eval(inner)?;
-                let s = *start;
-                let take = length.unwrap_or(v.len().saturating_sub(s));
-                Ok(v.into_iter().skip(s).take(take).collect())
+                let mut b = self.eval(inner)?;
+                let s = (*start).min(b.rows.len());
+                let take = length.unwrap_or(b.rows.len() - s);
+                b.rows = b.rows.into_iter().skip(s).take(take).collect();
+                Ok(b)
             }
             PhysicalPlan::OrderBy { inner, keys } => {
-                let mut v = self.eval(inner)?;
+                let mut v = self.eval_rows(inner)?;
                 v.sort_by(|a, b| compare_by_keys(a, b, keys));
-                Ok(v)
+                Ok(Batch::from_bindings(v))
             }
             PhysicalPlan::Extend { inner, var, expr } => {
-                let v = self.eval(inner)?;
+                let v = self.eval_rows(inner)?;
                 let mut out = Vec::with_capacity(v.len());
                 for mut b in v {
                     if let Some(t) = eval_expr_to_term(expr, &b)? {
@@ -105,7 +171,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     }
                     out.push(b);
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Values { vars, rows } => {
                 let mut out = Vec::with_capacity(rows.len());
@@ -118,15 +184,15 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     }
                     out.push(b);
                 }
-                Ok(out)
+                Ok(Batch::from_bindings(out))
             }
             PhysicalPlan::Group {
                 inner,
                 keys,
                 aggregates,
             } => {
-                let v = self.eval(inner)?;
-                eval_group(v, keys, aggregates)
+                let b = self.eval(inner)?;
+                self.eval_group_native(b, keys, aggregates)
             }
             PhysicalPlan::PathClosure {
                 subject,
@@ -134,10 +200,211 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
-                let edge_rows = self.eval(edge)?;
-                eval_path_closure(subject, object, &edge_rows, *reflexive)
+                let edge_rows = self.eval_rows(edge)?;
+                Ok(Batch::from_bindings(eval_path_closure(
+                    subject, object, &edge_rows, *reflexive,
+                )?))
             }
         }
+    }
+
+    /// Decode just the named columns of a slot row into a `Bindings`, for
+    /// reusing the string expression/aggregate evaluator verbatim.
+    fn decode_subset(&self, row: &Row, schema: &[Var], want: &HashSet<String>) -> Result<Bindings> {
+        let mut b = Bindings::new();
+        for (i, v) in schema.iter().enumerate() {
+            if !want.contains(v.name()) {
+                continue;
+            }
+            match &row.0[i] {
+                Slot::Id(id) => b.set(v.name().to_owned(), self.exec.decode_term(*id)?),
+                Slot::Term(t) => b.set(v.name().to_owned(), t.clone()),
+                Slot::Unbound => {}
+            }
+        }
+        Ok(b)
+    }
+
+    fn eval_group_native(&self, b: Batch, keys: &[Var], aggregates: &[Aggregate]) -> Result<Batch> {
+        let key_idx: Vec<Option<usize>> = keys.iter().map(|k| b.col(k.name())).collect();
+
+        struct Grp {
+            key_slots: Vec<Slot>,
+            members: Vec<Row>,
+        }
+        let mut groups: HashMap<Vec<KeyPart>, Grp> = HashMap::new();
+        for r in b.rows {
+            let gkey: Vec<KeyPart> = key_idx
+                .iter()
+                .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
+                .collect();
+            let entry = groups.entry(gkey).or_insert_with(|| Grp {
+                key_slots: key_idx
+                    .iter()
+                    .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
+                    .collect(),
+                members: Vec::new(),
+            });
+            entry.members.push(r);
+        }
+
+        // Implicit grouping with no input rows still yields one empty group
+        // (SPARQL §11.2: COUNT(*) of nothing is one row with 0).
+        if keys.is_empty() && groups.is_empty() {
+            groups.insert(
+                Vec::new(),
+                Grp {
+                    key_slots: Vec::new(),
+                    members: Vec::new(),
+                },
+            );
+        }
+
+        // Output schema = keys ++ aggregate output vars.
+        let mut schema: Vec<Var> = keys.to_vec();
+        for agg in aggregates {
+            schema.push(agg.out.clone());
+        }
+
+        // Which input columns each aggregate's inner expression references.
+        let agg_vars: Vec<HashSet<String>> = aggregates
+            .iter()
+            .map(|agg| {
+                let mut s = HashSet::new();
+                for e in agg_inner_exprs(agg) {
+                    referenced_vars(e, &mut s);
+                }
+                s
+            })
+            .collect();
+
+        let mut out: Vec<(Vec<Option<String>>, Row)> = Vec::with_capacity(groups.len());
+        for grp in groups.into_values() {
+            let mut slots: Vec<Slot> = grp.key_slots.clone();
+
+            for (agg, want) in aggregates.iter().zip(&agg_vars) {
+                let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
+                    // COUNT(*) fast path: member count needs no decode at all.
+                    Some(integer_literal(grp.members.len() as i64))
+                } else if matches!(agg.func, AggFunc::CountStar) {
+                    // COUNT(DISTINCT *): distinct whole-solution rows.
+                    // agg_inner_exprs returns empty for CountStar, so `want`
+                    // is empty and decode_subset would yield empty Bindings
+                    // for every row — all deduped to 1, wrong count.
+                    // Instead, key on Vec<KeyPart> directly: within-column
+                    // homogeneity ensures same-value cells hash identically,
+                    // giving the same deduplication as the old
+                    // `HashSet<&Bindings>` path without any decode.
+                    let distinct: HashSet<Vec<KeyPart>> = grp
+                        .members
+                        .iter()
+                        .map(|r| r.0.iter().map(|s| s.key_part()).collect())
+                        .collect();
+                    Some(integer_literal(distinct.len() as i64))
+                } else {
+                    let members_decoded: Vec<Bindings> = grp
+                        .members
+                        .iter()
+                        .map(|r| self.decode_subset(r, &b.schema, want))
+                        .collect::<Result<Vec<_>>>()?;
+                    eval_aggregate(agg, &members_decoded)?
+                };
+                match value {
+                    Some(t) => slots.push(Slot::Term(t)),
+                    None => slots.push(Slot::Unbound),
+                }
+            }
+
+            // Sort key: decoded lexical of each group key slot. Reproduces
+            // the pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering
+            // exactly (None < Some(...) in BTreeMap order is the same as
+            // Option<String> Ord ordering used in sort_by).
+            let sort_key: Vec<Option<String>> = grp
+                .key_slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Unbound => Ok(None),
+                    Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
+                    Slot::Term(t) => Ok(Some(lex(t))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            out.push((sort_key, Row(slots)));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+
+        Ok(Batch {
+            schema,
+            rows: out.into_iter().map(|(_, r)| r).collect(),
+        })
+    }
+
+    /// Decode Id cells in columns that mix Slot::Id and Slot::Term, restoring
+    /// the within-column homogeneity invariant after a native Join.
+    ///
+    /// See the comment in the Join arm for the full explanation of why mixing
+    /// occurs (adapter-backed child leaves Slot::Unbound on some rows while
+    /// the native BGP child has Slot::Id → merge_rows takes Id on those rows).
+    fn normalize_join_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
+        for c in 0..width {
+            let mut has_id = false;
+            let mut has_term = false;
+            for row in rows.iter() {
+                match &row.0[c] {
+                    Slot::Id(_) => has_id = true,
+                    Slot::Term(_) => has_term = true,
+                    Slot::Unbound => {}
+                }
+                if has_id && has_term {
+                    break;
+                }
+            }
+            if has_id && has_term {
+                for row in rows.iter_mut() {
+                    if let Slot::Id(id) = row.0[c] {
+                        row.0[c] = Slot::Term(self.exec.decode_term(id)?);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Merge two slot rows if compatible (shared vars equal by the slot
+    /// rule), producing the union row over `out_schema`. Returns None if any
+    /// shared bound var disagrees. Mirrors `Bindings::extend_compat` on slots:
+    /// an `Unbound` slot is treated as an absent var (a wildcard that never
+    /// conflicts), matching how `Bindings` simply lacks an unbound key.
+    fn merge_rows(
+        &self,
+        ls: &[Var],
+        l: &Row,
+        rs: &[Var],
+        r: &Row,
+        out_schema: &[Var],
+    ) -> Result<Option<Row>> {
+        let decode = |id| self.exec.decode_term(id);
+        let lget = |name: &str| ls.iter().position(|v| v.name() == name).map(|i| &l.0[i]);
+        let rget = |name: &str| rs.iter().position(|v| v.name() == name).map(|i| &r.0[i]);
+        let mut slots = Vec::with_capacity(out_schema.len());
+        for v in out_schema {
+            let chosen = match (lget(v.name()), rget(v.name())) {
+                (Some(a), Some(b)) => match (a, b) {
+                    (Slot::Unbound, x) | (x, Slot::Unbound) => x.clone(),
+                    _ => {
+                        if Slot::eq(a, b, decode)? {
+                            a.clone()
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                },
+                (Some(a), None) => a.clone(),
+                (None, Some(b)) => b.clone(),
+                (None, None) => Slot::Unbound,
+            };
+            slots.push(chosen);
+        }
+        Ok(Some(Row(slots)))
     }
 }
 
@@ -379,6 +646,66 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
     }
 }
 
+/// Collect the variable names an expression reads, so a slot operator can
+/// decode only those columns into a transient `Bindings`.
+fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Term(Term::Var(v)) => {
+            out.insert(v.name().to_owned());
+        }
+        Expr::Term(_) => {}
+        Expr::Bound(v) => {
+            out.insert(v.name().to_owned());
+        }
+        Expr::Eq(a, b)
+        | Expr::Ne(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Le(a, b)
+        | Expr::Ge(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b) => {
+            referenced_vars(a, out);
+            referenced_vars(b, out);
+        }
+        Expr::Not(a) | Expr::Neg(a) => referenced_vars(a, out),
+        Expr::If(a, b, c) => {
+            referenced_vars(a, out);
+            referenced_vars(b, out);
+            referenced_vars(c, out);
+        }
+        Expr::In(a, list) => {
+            referenced_vars(a, out);
+            for x in list {
+                referenced_vars(x, out);
+            }
+        }
+        Expr::Coalesce(args) | Expr::Func(_, args) => {
+            for x in args {
+                referenced_vars(x, out);
+            }
+        }
+    }
+}
+
+/// The inner expression(s) an aggregate evaluates over its members.
+fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
+    match &agg.func {
+        AggFunc::CountStar => Vec::new(),
+        AggFunc::Count(e)
+        | AggFunc::Sum(e)
+        | AggFunc::Avg(e)
+        | AggFunc::Min(e)
+        | AggFunc::Max(e)
+        | AggFunc::Sample(e) => vec![&**e],
+        AggFunc::GroupConcat { expr, .. } => vec![&**expr],
+    }
+}
+
 /// Evaluate `GROUP BY` + aggregates over a materialised input.
 ///
 /// Rows are partitioned by the lexical form of the key-variable
@@ -387,6 +714,7 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
 /// (`keys` empty) yields exactly one group — even over zero input rows,
 /// per SPARQL 1.1 §11.2: `SELECT (COUNT(*) AS ?c) WHERE { … }` returns
 /// a single row with `?c = 0` when nothing matches.
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)])
 fn eval_group(
     rows: Vec<Bindings>,
     keys: &[Var],
@@ -831,6 +1159,7 @@ fn dedup_terms(vals: &mut Vec<Term>) {
     vals.retain(|t| seen.insert(t.clone()));
 }
 
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)])
 fn project(b: &Bindings, vars: &[Var]) -> Bindings {
     if vars.is_empty() {
         // SELECT * with no projected vars (e.g. ASK): preserve.
@@ -866,7 +1195,7 @@ fn compare_by_keys(a: &Bindings, b: &Bindings, keys: &[(Expr, OrderDir)]) -> std
     std::cmp::Ordering::Equal
 }
 
-fn lex(t: &Term) -> String {
+pub(crate) fn lex(t: &Term) -> String {
     match t {
         Term::Iri(s) | Term::Literal(s) | Term::BlankNode(s) => s.clone(),
         Term::Var(v) => v.name().to_owned(),
@@ -1259,6 +1588,129 @@ fn _witness() -> Result<()> {
     Err(SparqlError::Executor("unreachable".into()))
 }
 
+#[cfg(test)]
+impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
+    /// The pre-#128 string runtime, retained as a differential oracle for
+    /// the slot port (consumed by the Task 8 differential proptest). Deleted
+    /// when Slice 2 lands. Mirrors the `eval` that returned `Vec<Bindings>`.
+    pub(crate) fn eval_legacy(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
+        match plan {
+            PhysicalPlan::BgpScan { patterns } => Ok(self.exec.scan_bgp(patterns)?.collect()),
+            PhysicalPlan::Join { left, right } => {
+                let l = self.eval_legacy(left)?;
+                let r = self.eval_legacy(right)?;
+                let mut out = Vec::new();
+                for a in &l {
+                    for b in &r {
+                        if let Some(m) = a.extend_compat(b) {
+                            out.push(m);
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            PhysicalPlan::LeftJoin { left, right, expr } => {
+                let l = self.eval_legacy(left)?;
+                let r = self.eval_legacy(right)?;
+                hash_left_join(l, r, expr.as_ref())
+            }
+            PhysicalPlan::Filter { expr, inner } => {
+                let v = self.eval_legacy(inner)?;
+                v.into_iter()
+                    .map(|b| eval_expr(expr, &b).map(|keep| (b, keep)))
+                    .collect::<Result<Vec<_>>>()
+                    .map(|pairs| {
+                        pairs
+                            .into_iter()
+                            .filter(|(_, k)| *k)
+                            .map(|(b, _)| b)
+                            .collect()
+                    })
+            }
+            PhysicalPlan::Union { left, right } => {
+                let mut a = self.eval_legacy(left)?;
+                let b = self.eval_legacy(right)?;
+                a.extend(b);
+                Ok(a)
+            }
+            PhysicalPlan::Project { vars, inner } => {
+                let v = self.eval_legacy(inner)?;
+                Ok(v.into_iter().map(|b| project(&b, vars)).collect())
+            }
+            PhysicalPlan::Distinct { inner } => {
+                let v = self.eval_legacy(inner)?;
+                // Order-preserving dedup: O(n) membership via a hash set,
+                // keeping first-seen order (was an O(n^2) linear scan — the
+                // SPB aggregation gap, #128).
+                let mut seen: HashSet<Bindings> = HashSet::with_capacity(v.len());
+                let mut out: Vec<Bindings> = Vec::with_capacity(v.len());
+                for b in v {
+                    if seen.insert(b.clone()) {
+                        out.push(b);
+                    }
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Slice {
+                inner,
+                start,
+                length,
+            } => {
+                let v = self.eval_legacy(inner)?;
+                let s = *start;
+                let take = length.unwrap_or(v.len().saturating_sub(s));
+                Ok(v.into_iter().skip(s).take(take).collect())
+            }
+            PhysicalPlan::OrderBy { inner, keys } => {
+                let mut v = self.eval_legacy(inner)?;
+                v.sort_by(|a, b| compare_by_keys(a, b, keys));
+                Ok(v)
+            }
+            PhysicalPlan::Extend { inner, var, expr } => {
+                let v = self.eval_legacy(inner)?;
+                let mut out = Vec::with_capacity(v.len());
+                for mut b in v {
+                    if let Some(t) = eval_expr_to_term(expr, &b)? {
+                        b.set(var.name().to_owned(), t);
+                    }
+                    out.push(b);
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Values { vars, rows } => {
+                let mut out = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let mut b = Bindings::new();
+                    for (var, cell) in vars.iter().zip(row.iter()) {
+                        if let Some(term) = cell {
+                            b.set(var.name().to_owned(), term.clone());
+                        }
+                    }
+                    out.push(b);
+                }
+                Ok(out)
+            }
+            PhysicalPlan::Group {
+                inner,
+                keys,
+                aggregates,
+            } => {
+                let v = self.eval_legacy(inner)?;
+                eval_group(v, keys, aggregates)
+            }
+            PhysicalPlan::PathClosure {
+                subject,
+                object,
+                edge,
+                reflexive,
+            } => {
+                let edge_rows = self.eval_legacy(edge)?;
+                eval_path_closure(subject, object, &edge_rows, *reflexive)
+            }
+        }
+    }
+}
+
 /// Render a CONSTRUCT template against a stream of solution mappings.
 ///
 /// Returns concrete `(s, p, o)` lexical-form triples. Triples whose
@@ -1429,4 +1881,196 @@ pub fn describe_triples<E: Executor + ?Sized>(
         }
     }
     Ok(out.into_iter().collect())
+}
+
+#[cfg(test)]
+mod slot_differential {
+    use super::*;
+    use crate::algebra::translate::translate_query_with;
+    use crate::exec::horn::HornBackend;
+    use crate::exec::mem::MemStore;
+    use crate::exec::Store;
+    use crate::parser::parse_query;
+    use crate::plan::planner;
+    use crate::{SparqlConfig, SparqlError};
+    use proptest::prelude::*;
+
+    /// Build a `PhysicalPlan` from a SELECT query string, mirroring
+    /// what `api::execute_query_with` does for the SELECT arm.
+    fn plan_select(q: &str) -> PhysicalPlan {
+        let parsed = parse_query(q).expect("query parse failed");
+        let inner = match parsed {
+            crate::parser::ParsedQuery::Select { inner } => inner,
+            other => panic!("expected SELECT, got {:?}", other),
+        };
+        let alg =
+            translate_query_with(&inner, &SparqlConfig::default()).expect("translation failed");
+        planner::plan(&alg).expect("planning failed")
+    }
+
+    /// Canonical string for a `Bindings` row, used as the sort key so
+    /// result sets from the two runtimes can be compared after sorting.
+    fn row_key(b: &Bindings) -> String {
+        let mut parts: Vec<String> = b.vars().map(|(k, t)| format!("{k}={t:?}")).collect();
+        parts.sort();
+        parts.join("|")
+    }
+
+    fn sort_rows(v: &mut [Bindings]) {
+        v.sort_by_key(row_key);
+    }
+
+    /// The three query shapes the differential check exercises on every
+    /// generated graph.
+    const QUERIES: &[&str] = &[
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }",
+        "SELECT ?p (COUNT(?s) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p",
+        "SELECT DISTINCT ?o WHERE { ?s ?p ?o }",
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn slot_runtime_matches_legacy(
+            // Small vocabulary so groups/DISTINCT actually collide.
+            triples in proptest::collection::vec((0u32..6, 0u32..3, 0u32..6), 0..40)
+        ) {
+            // Build both backends from the same set of triples.
+            let mut mem = MemStore::default();
+            let mut horn = HornBackend::new();
+            for (s, p, o) in &triples {
+                let st = crate::algebra::Term::Iri(format!("http://ex/s{s}"));
+                let pt = crate::algebra::Term::Iri(format!("http://ex/p{p}"));
+                let ot = crate::algebra::Term::Iri(format!("http://ex/o{o}"));
+                mem.insert_triple(st.clone(), pt.clone(), ot.clone());
+                horn.insert_triple(st, pt, ot);
+            }
+
+            for q in QUERIES {
+                let plan = plan_select(q);
+
+                // MemStore: slot path (Slot::Term) vs legacy oracle.
+                let mut got_mem: Vec<Bindings> =
+                    Runtime::new(&mem).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("mem run: {e}")))?
+                        .collect();
+                let mut want_mem = Runtime::new(&mem).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("mem legacy: {e}")))?;
+                sort_rows(&mut got_mem);
+                sort_rows(&mut want_mem);
+                prop_assert_eq!(got_mem, want_mem,
+                    "MemStore query `{}` diverged", q);
+
+                // HornBackend: slot path (Slot::Id) vs legacy oracle.
+                let mut got_h: Vec<Bindings> =
+                    Runtime::new(&horn).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("horn run: {e}")))?
+                        .collect();
+                let mut want_h = Runtime::new(&horn).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("horn legacy: {e}")))?;
+                sort_rows(&mut got_h);
+                sort_rows(&mut want_h);
+                prop_assert_eq!(got_h, want_h,
+                    "HornBackend query `{}` diverged", q);
+            }
+        }
+    }
+
+    /// Regression: Join(LeftJoin(A,B), BGP(C)) where the OPTIONAL makes ?v
+    /// Slot::Term-or-Unbound on the left and Slot::Id on the right →
+    /// column mixing → DISTINCT deduplication failure (bug fixed in #128).
+    #[test]
+    fn distinct_join_over_optional_no_column_mixing() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s1"), iri("p"), iri("a0"));
+        horn.insert_triple(iri("s1"), iri("opt"), iri("X"));
+        horn.insert_triple(iri("s2"), iri("p"), iri("a0"));
+        horn.insert_triple(iri("X"), iri("r"), iri("o1"));
+
+        let q = "SELECT DISTINCT ?v WHERE { \
+            ?a <http://ex/p> ?a0 . \
+            OPTIONAL { ?a <http://ex/opt> ?v } \
+            ?v <http://ex/r> ?o }";
+        let plan = plan_select(q);
+
+        let got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            got.len(),
+            1,
+            "DISTINCT must deduplicate: got {} rows, want 1\nrows: {got:?}",
+            got.len()
+        );
+        let v = got[0].get("v").expect("?v must be bound");
+        assert_eq!(
+            v,
+            &Term::Iri("http://ex/X".into()),
+            "?v must be <http://ex/X>"
+        );
+
+        // Differential check vs legacy oracle.
+        let mut got_sorted = got;
+        let mut want = Runtime::new(&horn).eval_legacy(&plan).unwrap();
+        sort_rows(&mut got_sorted);
+        sort_rows(&mut want);
+        assert_eq!(got_sorted, want, "slot path diverged from legacy oracle");
+    }
+
+    // Differential proptest covering Join-over-adapter compositions (OPTIONAL
+    // and asymmetric UNION) that the single-pattern proptest cannot reach.
+    // Uses a shared node namespace (http://ex/n{n}) so a node can appear as
+    // both subject and object, enabling chain-join patterns where the
+    // OPTIONAL-only variable is also a subject in a subsequent BGP.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn slot_runtime_matches_legacy_joins(
+            triples in proptest::collection::vec((0u32..6, 0u32..3, 0u32..6), 0..40)
+        ) {
+            let mut horn = HornBackend::new();
+            for (s, p, o) in &triples {
+                // Shared namespace so `?mid`/`?v` bound as objects can also
+                // appear as subjects in the chained BGP — needed to exercise
+                // the Join(LeftJoin, BGP) column-mixing bug.
+                let st = Term::Iri(format!("http://ex/n{s}"));
+                let pt = Term::Iri(format!("http://ex/p{p}"));
+                let ot = Term::Iri(format!("http://ex/n{o}"));
+                horn.insert_triple(st, pt, ot);
+            }
+
+            // OPTIONAL+DISTINCT: ?v is Slot::Term on matched left rows and
+            // Slot::Unbound on unmatched; the right BGP produces Slot::Id for
+            // ?v → mixing without the normalize_join_columns fix.
+            let optional_q =
+                "SELECT DISTINCT ?v WHERE { \
+                    ?s <http://ex/p0> ?mid . \
+                    OPTIONAL { ?s <http://ex/p1> ?v } \
+                    ?v <http://ex/p2> ?o }";
+            // Asymmetric UNION: one branch has ?o, the other doesn't, then
+            // Join with a native BGP → same Unbound-vs-Id mixing for ?o.
+            let union_q =
+                "SELECT DISTINCT ?o WHERE { \
+                    { ?s <http://ex/p0> ?o } UNION { ?s <http://ex/p1> ?y } . \
+                    ?o <http://ex/p2> ?x }";
+            // GROUP BY over the mixed column: wrong groups without the fix.
+            let group_q =
+                "SELECT ?v (COUNT(*) AS ?c) WHERE { \
+                    ?s <http://ex/p0> ?mid . \
+                    OPTIONAL { ?s <http://ex/p1> ?v } \
+                    ?v <http://ex/p2> ?o } GROUP BY ?v";
+
+            for q in [optional_q, union_q, group_q] {
+                let plan = plan_select(q);
+                let mut got: Vec<Bindings> =
+                    Runtime::new(&horn).run(&plan)
+                        .map_err(|e: SparqlError| TestCaseError::fail(format!("run: {e}")))?
+                        .collect();
+                let mut want = Runtime::new(&horn).eval_legacy(&plan)
+                    .map_err(|e: SparqlError| TestCaseError::fail(format!("legacy: {e}")))?;
+                sort_rows(&mut got);
+                sort_rows(&mut want);
+                prop_assert_eq!(got, want, "HornBackend join query `{}` diverged", q);
+            }
+        }
+    }
 }

@@ -477,6 +477,7 @@ impl Store for HornBackend {
 }
 
 impl Executor for HornBackend {
+    // keep in sync with scan_bgp_ids (its compilation loop is a verbatim copy of this one)
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
@@ -631,6 +632,166 @@ impl Executor for HornBackend {
         }
 
         Ok(Box::new(rows.into_iter()))
+    }
+
+    /// Decode a dictionary id to its term.
+    /// keep in sync with scan_bgp's dict.lookup + oxrdf_to_algebra call shape.
+    fn decode_term(&self, id: TermId) -> Result<Term> {
+        let ox = self
+            .store
+            .dictionary()
+            .lookup(id)
+            .ok_or_else(|| SparqlError::Executor(format!("dangling TermId {id:?}")))?;
+        Ok(oxrdf_to_algebra(&ox))
+    }
+
+    /// Scan a BGP returning id-carrying slot rows without decoding TermId → String.
+    /// The diagonal filter is applied inline by comparing raw ids; aliases are
+    /// excluded from the output schema.
+    // keep in sync with scan_bgp
+    fn scan_bgp_ids(
+        &self,
+        patterns: &[crate::algebra::TriplePattern],
+    ) -> Result<crate::exec::Batch> {
+        use crate::algebra::Var;
+        use crate::exec::{Batch, Row, Slot};
+
+        if patterns.is_empty() {
+            return Ok(Batch::unit());
+        }
+
+        let snapshot = self.wcoj_snapshot();
+        let dict = self.store.dictionary();
+
+        // === VERBATIM copy from scan_bgp: pattern compilation ===
+        let mut var_index: HashMap<String, u8> = HashMap::new();
+        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
+        let mut wpatterns: Vec<WPattern> = Vec::new();
+        let mut ground: Vec<WTriple> = Vec::new();
+
+        for pattern in patterns {
+            let mut seen_here: HashSet<&str> = HashSet::new();
+            let mut slots = [WTerm::Var(WVar(0)); 3];
+            let mut all_bound = true;
+            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+            for (slot_no, term) in slot_terms.into_iter().enumerate() {
+                slots[slot_no] = match term {
+                    Term::Var(v) => {
+                        all_bound = false;
+                        let name = v.name();
+                        let effective = if seen_here.contains(name) {
+                            let alias = format!(" dup_{name}_{slot_no}");
+                            diagonal_filters.push((name.to_owned(), alias.clone()));
+                            alias
+                        } else {
+                            seen_here.insert(name);
+                            name.to_owned()
+                        };
+                        let idx = match var_index.get(&effective) {
+                            Some(&i) => i,
+                            None => {
+                                let next = var_index.len();
+                                if next > u8::MAX as usize {
+                                    return Err(SparqlError::Executor(
+                                        "BGP exceeds 256 distinct variables".into(),
+                                    ));
+                                }
+                                var_index.insert(effective, next as u8);
+                                next as u8
+                            }
+                        };
+                        WTerm::Var(WVar(idx))
+                    }
+                    constant => {
+                        let ox = algebra_to_oxrdf(constant)?;
+                        match dict.get(&ox) {
+                            Some(id) => WTerm::Bound(id.0),
+                            None => return Ok(Batch::empty()),
+                        }
+                    }
+                };
+            }
+            if all_bound {
+                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
+                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
+            } else {
+                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+            }
+        }
+
+        if ground.iter().any(|t| !snapshot.contains(t)) {
+            return Ok(Batch::empty());
+        }
+        if wpatterns.is_empty() {
+            return Ok(Batch::unit());
+        }
+        // === END verbatim copy ===
+
+        // Output schema: var_index entries in ascending WVar (u8) order,
+        // minus diagonal aliases (stripped from output like scan_bgp does).
+        let aliases: HashSet<&str> = diagonal_filters.iter().map(|(_, a)| a.as_str()).collect();
+        let mut ordered: Vec<(String, u8)> = var_index
+            .iter()
+            .filter(|(name, _)| !aliases.contains(name.as_str()))
+            .map(|(n, i)| (n.clone(), *i))
+            .collect();
+        ordered.sort_by_key(|(_, i)| *i);
+        let schema: Vec<Var> = ordered.iter().map(|(n, _)| Var::new(n.as_str())).collect();
+
+        let bgp = WBgp::new(wpatterns);
+        let mut rows: Vec<Row> = Vec::new();
+        for batch in WcojExecutor::for_bgp(
+            snapshot.as_ref(),
+            &bgp,
+            &Planner::default(),
+            CancelToken::new(),
+        ) {
+            let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
+            let arrow_schema = batch.schema();
+            // Include ALL vars from var_index (including aliases) so the
+            // diagonal check can compare original vs alias columns.
+            let mut cols: Vec<(&str, &UInt64Array)> = Vec::with_capacity(var_index.len());
+            for (name, idx) in &var_index {
+                let Some((col_idx, _)) = arrow_schema.column_with_name(&format!("v{idx}")) else {
+                    continue;
+                };
+                let arr = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| {
+                        SparqlError::Executor(format!("wcoj batch column v{idx} is not UInt64"))
+                    })?;
+                cols.push((name.as_str(), arr));
+            }
+            // Precompute column indices once per batch (avoid an O(cols) search per row).
+            let pos = |want: &str| cols.iter().position(|(n, _)| *n == want);
+            let diag_col_idx: Vec<(usize, usize)> = diagonal_filters
+                .iter()
+                .filter_map(|(orig, alias)| Some((pos(orig)?, pos(alias)?)))
+                .collect();
+            let schema_col_idx: Vec<Option<usize>> = schema.iter().map(|v| pos(v.name())).collect();
+            for r in 0..batch.num_rows() {
+                // Diagonal filter: compare raw ids for alias pairs (no decode needed).
+                // filter_map above drops any pair whose orig or alias column is absent —
+                // that preserves the previous "missing column ⇒ no constraint" semantics.
+                let keep = diag_col_idx
+                    .iter()
+                    .all(|&(io, ia)| cols[io].1.value(r) == cols[ia].1.value(r));
+                if !keep {
+                    continue;
+                }
+                let slots = schema_col_idx
+                    .iter()
+                    .map(|idx| match idx {
+                        Some(i) => Slot::Id(TermId(cols[*i].1.value(r))),
+                        None => Slot::Unbound,
+                    })
+                    .collect();
+                rows.push(Row(slots));
+            }
+        }
+        Ok(Batch { schema, rows })
     }
 
     fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {

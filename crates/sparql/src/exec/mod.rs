@@ -4,6 +4,8 @@
 //! over a `HashSet<(s,p,o)>`. SPEC-03 (WCOJ engine) will provide a
 //! production implementation through the same trait.
 
+pub mod batch;
+pub use batch::{Batch, KeyPart, Row, Slot};
 pub mod horn;
 pub mod mem;
 pub mod runtime;
@@ -70,6 +72,27 @@ pub trait Executor {
         &self,
         patterns: &[TriplePattern],
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>>;
+
+    /// Scan a BGP returning id-carrying slot rows (no `TermId → String`
+    /// decode). The default adapts the string [`scan_bgp`] for backends
+    /// without a dictionary (e.g. `MemStore`, test doubles): the rows come
+    /// back as `Slot::Term`. `HornBackend` overrides this to read the WCOJ
+    /// id columns directly.
+    // keep in sync with HornBackend::scan_bgp_ids
+    fn scan_bgp_ids(&self, patterns: &[TriplePattern]) -> Result<Batch> {
+        let rows: Vec<Bindings> = self.scan_bgp(patterns)?.collect();
+        Ok(Batch::from_bindings(rows))
+    }
+
+    /// Decode a dictionary id to its term. Only meaningful for backends that
+    /// produce `Slot::Id` (i.e. `HornBackend`); the default errors and is
+    /// never reached for backends whose `scan_bgp_ids` yields only
+    /// `Slot::Term`.
+    fn decode_term(&self, id: horndb_storage::TermId) -> Result<Term> {
+        Err(crate::error::SparqlError::Executor(format!(
+            "backend has no dictionary to decode {id:?}"
+        )))
+    }
 
     /// Best-effort estimate of how many solution rows a BGP yields,
     /// used by `EXPLAIN` (SPEC-07 F9) for per-node cardinality

@@ -47,20 +47,30 @@ Closed tasks are listed in [Done](#done-for-traceability).
 
 - [ ] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
   ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
-  The SPB nightly serves ~12 aggregation-qps where GraphDB Free serves ~150 (~12×).
-  Diagnosis (in-process against the real `HornBackend`; harness at
-  `crates/sparql/examples/agg_profile.rs`) shows the gap is structural in the SPARQL
-  runtime, not codegen — **PGO is the wrong lever** here. Three causes, by impact:
-  (1) the dictionary is defeated at the SPARQL boundary — `HornBackend::scan_bgp`
-  (`exec/horn.rs:597-606`) decodes every `TermId` back to a heap `Term::Iri(String)`
-  and `Bindings` is `BTreeMap<String, Term>` (`exec/mod.rs:19-22`), so `COUNT(*)` spends
-  269 ms allocating 400k×3 strings to count what `len()` knows instantly; (2) `DISTINCT`
-  dedup is a linear scan (`runtime.rs::dedup_terms`, O(n·d)→O(n²)) — **fixed separately**
-  by the HashSet PR; (3) no streaming / no projection or aggregate pushdown
-  (`runtime.rs:26-28` materializes a full `Vec<Bindings>` per node; `plan/planner.rs`
-  is a 1:1 lowering with no cost model). Scope: hash group-by, id-based `Bindings`
-  (decode to strings only at serialization), then streaming + pushdown. Revisit PGO
-  only after this lands. See `docs/architecture.md` §9 and `BENCHMARKS.md`.
+  **Slice 1 (id-based slot bindings) landed** on branch `perf/id-based-slot-rows-slice1`
+  (design spec: `docs/specs/2026-06-28-id-based-slot-rows-design.md`; plan:
+  `docs/plans/2026-06-28-id-based-slot-rows-slice1.md`). The SPARQL runtime now carries
+  id-based slot rows (`Slot`/`Row`/`Batch`) with native `scan_bgp_ids` + slot-native
+  BgpScan/Slice/Project/Distinct/Group/Filter/Join; `Runtime::run` decodes once at the
+  boundary. Directional laptop `agg_profile` Q1 COUNT(*): ~133 ms → ~39 ms (~3.4×);
+  Q2 GROUP BY: ~55 ms → ~38 ms (~1.5×). The ~12× SPB nightly gap is **not** closed —
+  streaming and planner pushdown own the remainder.
+
+  **Remaining work (Slice 2 and beyond):**
+  1. Native ports of the six adapter-backed operators: LeftJoin, Union, OrderBy, Extend,
+     Values, PathClosure; then delete the `from_bindings`/`to_bindings` decode-adapter,
+     the `cfg(test) eval_legacy` oracle, and the `#[allow(dead_code)]` free fns it keeps
+     alive (`eval_group`, `project`, literal helpers).
+  2. Hash join for native `Join` (currently a faithful nested loop); hoist the `merge_rows`
+     per-pair column-index lookups.
+  3. `Group` micro-opts: share decoded members across aggregates referencing the same
+     column; avoid the per-group `key_slots` clone.
+  4. Streaming (no full per-node `Batch` materialization).
+  5. Planner projection/aggregate pushdown.
+  6. A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the Task 8 proptest
+     covers it only indirectly via small-vocab groups).
+
+  See `docs/architecture.md` §9 and `BENCHMARKS.md`.
 
 - [ ] **SPEC-12 SIMD acceleration layer.** ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
   A new stable-Rust `std::arch` SIMD layer with runtime AVX-512/AVX2/NEON dispatch +
