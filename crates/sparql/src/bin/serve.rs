@@ -78,8 +78,10 @@ async fn main() -> Result<()> {
             }
             let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset)
                 .context("OWL 2 RL materialization")?;
-            // Record the whole parse+materialize+load span once (no per-file
-            // double-count) against the load-path counters.
+            // Record the whole parse+materialize+load span as ONE observation
+            // (no per-file double-count). Note: this branch's
+            // `load_duration_seconds` sample is per-batch, whereas the
+            // non-materialize branch below records one sample per file.
             horndb_metrics::metrics()
                 .storage
                 .load_bytes
@@ -101,6 +103,8 @@ async fn main() -> Result<()> {
     } else {
         let mut loaded: u64 = 0;
         for f in &files {
+            // One `load_duration_seconds`/`load_bytes` observation per file
+            // (cf. the materialize branch, which records once per batch).
             let bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
             let t = Instant::now();
             let n = load_file(&mut store, f).with_context(|| format!("loading {}", f.display()))?;
