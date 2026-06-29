@@ -46,4 +46,5 @@ async fn metrics_endpoint_exposes_request_counter() {
         text.contains("horndb_sparql_requests_total"),
         "got:\n{text}"
     );
+    assert!(text.contains("endpoint=\"query\""), "got:\n{text}");
 }

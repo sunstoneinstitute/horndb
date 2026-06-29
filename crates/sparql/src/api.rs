@@ -12,6 +12,44 @@ use crate::plan::explain::{explain, ExecutionMode, ExplainFormat};
 use crate::plan::planner;
 use crate::update::apply_update_with;
 use crate::SparqlConfig;
+use horndb_metrics::labels::{QueryKind, QueryKindLabel, Stage, StageLabel};
+use std::time::Instant;
+
+/// Time the closure as a single pipeline `stage`, recording its wall-clock
+/// duration in `stage_duration_seconds` and, on `Err`, bumping the
+/// `query_errors` counter for that stage. Behaviour-preserving: the closure's
+/// `Result` is returned verbatim so `?` propagation is unchanged. Only
+/// whole-stage timing is recorded here — never per-tuple/per-row work.
+fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let m = horndb_metrics::metrics();
+    let start = Instant::now();
+    let out = f();
+    m.sparql
+        .stage_duration_seconds
+        .get_or_create(&StageLabel {
+            stage: stage.clone(),
+        })
+        .observe(start.elapsed().as_secs_f64());
+    if out.is_err() {
+        m.sparql
+            .query_errors
+            .get_or_create(&StageLabel { stage })
+            .inc();
+    }
+    out
+}
+
+/// Classify a parsed query into its metric `QueryKind`. `EXPLAIN` is reported
+/// as the kind of the query it wraps.
+fn classify_kind(parsed: &ParsedQuery) -> QueryKind {
+    match parsed {
+        ParsedQuery::Select { .. } => QueryKind::Select,
+        ParsedQuery::Ask { .. } => QueryKind::Ask,
+        ParsedQuery::Construct { .. } => QueryKind::Construct,
+        ParsedQuery::Describe { .. } => QueryKind::Describe,
+        ParsedQuery::Explain { inner, .. } => classify_kind(inner),
+    }
+}
 
 /// What `execute_query` returns. Variant chosen by query form.
 #[derive(Debug, Clone)]
@@ -43,25 +81,40 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     exec: &E,
     cfg: &SparqlConfig,
 ) -> Result<QueryAnswer> {
-    let parsed = parse_query(query)?;
+    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    horndb_metrics::metrics()
+        .sparql
+        .query_total
+        .get_or_create(&QueryKindLabel {
+            kind: classify_kind(&parsed),
+        })
+        .inc();
     match parsed {
         ParsedQuery::Select { inner } => {
-            let alg = translate_query_with(&inner, cfg)?;
+            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let vars = projected_vars(&alg);
-            let plan = planner::plan(&alg)?;
-            let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
+            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let rows: Vec<Bindings> = timed(Stage::Exec, || {
+                Runtime::new(exec).run(&plan).map(Iterator::collect)
+            })?;
             Ok(QueryAnswer::Solutions { vars, rows })
         }
         ParsedQuery::Ask { inner } => {
-            let alg = translate_query_with(&inner, cfg)?;
-            let plan = planner::plan(&alg)?;
-            let any = Runtime::new(exec).run(&plan)?.next().is_some();
+            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let any = timed(Stage::Exec, || {
+                Runtime::new(exec)
+                    .run(&plan)
+                    .map(|mut it| it.next().is_some())
+            })?;
             Ok(QueryAnswer::Boolean(any))
         }
         ParsedQuery::Construct { inner } => {
-            let alg = translate_query_with(&inner, cfg)?;
-            let plan = planner::plan(&alg)?;
-            let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
+            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let rows: Vec<Bindings> = timed(Stage::Exec, || {
+                Runtime::new(exec).run(&plan).map(Iterator::collect)
+            })?;
             let triples = construct_triples(&inner, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
@@ -79,10 +132,12 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             // clause yields zero rows. We therefore seed those explicit IRIs
             // unconditionally (see `explicit_describe_iris`) so they are
             // described even when the WHERE matches nothing.
-            let alg = translate_query_with(&inner, cfg)?;
+            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let seeds = explicit_describe_iris(&alg);
-            let plan = planner::plan(&alg)?;
-            let rows: Vec<Bindings> = Runtime::new(exec).run(&plan)?.collect();
+            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let rows: Vec<Bindings> = timed(Stage::Exec, || {
+                Runtime::new(exec).run(&plan).map(Iterator::collect)
+            })?;
             let triples = describe_triples(exec, &seeds, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
@@ -91,7 +146,9 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             // render. The execution mode is the entailment regime;
             // backward-chaining (#55) is not yet selectable, so it is
             // always `Materialized` today (the renderer labels that).
-            let plan = plan_of(&inner, cfg)?;
+            // `plan_of` fuses translate + plan and EXPLAIN never executes, so
+            // record a single `Plan` stage (no `Exec`).
+            let plan = timed(Stage::Plan, || plan_of(&inner, cfg))?;
             let format = if json {
                 ExplainFormat::Json
             } else {
@@ -132,8 +189,15 @@ pub fn execute_update_with<B: FullBackend>(
     store: &mut B,
     cfg: &SparqlConfig,
 ) -> Result<()> {
-    let parsed = parse_update(update)?;
-    apply_update_with(&parsed, store, cfg)
+    let parsed = timed(Stage::Parse, || parse_update(update))?;
+    horndb_metrics::metrics()
+        .sparql
+        .query_total
+        .get_or_create(&QueryKindLabel {
+            kind: QueryKind::Update,
+        })
+        .inc();
+    timed(Stage::Exec, || apply_update_with(&parsed, store, cfg))
 }
 
 fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
