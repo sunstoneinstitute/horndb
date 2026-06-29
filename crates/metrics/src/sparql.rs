@@ -10,7 +10,9 @@ use crate::labels::{EndpointLabel, QueryKindLabel, RequestLabels, StageLabel};
 pub struct SparqlMetrics {
     pub requests: Family<RequestLabels, Counter>,
     pub request_duration_seconds: Family<EndpointLabel, Histogram>,
-    pub response_bytes: Family<EndpointLabel, Counter>,
+    // Response-byte accounting is deferred to the fan-out (issue #148): it wants a
+    // body-counting tower layer, not a middleware that can't see the serialized
+    // size cheaply. Omitted here rather than shipped as a permanently-zero series.
     pub query_total: Family<QueryKindLabel, Counter>,
     pub query_errors: Family<StageLabel, Counter>,
     pub stage_duration_seconds: Family<StageLabel, Histogram>,
@@ -25,7 +27,6 @@ impl SparqlMetrics {
         let requests = Family::<RequestLabels, Counter>::default();
         let request_duration_seconds =
             Family::<EndpointLabel, Histogram>::new_with_constructor(latency_hist);
-        let response_bytes = Family::<EndpointLabel, Counter>::default();
         let query_total = Family::<QueryKindLabel, Counter>::default();
         let query_errors = Family::<StageLabel, Counter>::default();
         let stage_duration_seconds =
@@ -40,11 +41,6 @@ impl SparqlMetrics {
             "sparql_request_duration_seconds",
             "SPARQL request latency",
             request_duration_seconds.clone(),
-        );
-        reg.register(
-            "sparql_response_bytes",
-            "SPARQL response bytes written",
-            response_bytes.clone(),
         );
         reg.register(
             "sparql_query",
@@ -65,7 +61,6 @@ impl SparqlMetrics {
         Self {
             requests,
             request_duration_seconds,
-            response_bytes,
             query_total,
             query_errors,
             stage_duration_seconds,

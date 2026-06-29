@@ -154,13 +154,15 @@ scrape-endpoint → expensive-gauge-collector all work end to end.
 **sparql HTTP layer** (highest operator value; nothing exists today)
 - `horndb_sparql_requests_total{endpoint,method,status}` — counter.
 - `horndb_sparql_request_duration_seconds{endpoint}` — histogram (per request).
-- `horndb_sparql_request_bytes_total{direction}` / response bytes — counters.
 - `horndb_sparql_query_total{kind}` — counter, kind ∈ {select,ask,construct,describe,update}.
 - `horndb_sparql_query_errors_total{stage}` — counter, stage ∈ {parse,translate,plan,exec}.
 - Developer histograms: `parse_duration_seconds`, `plan_duration_seconds`,
   `exec_duration_seconds`.
-- Integration point: an axum middleware layer for request/latency/bytes/status; per-stage
+- Integration point: an axum middleware layer for request/latency/status; per-stage
   timing inside `execute_query` / `execute_update`.
+- **Deferred to fan-out:** request/response **byte** counters. A middleware can't see the
+  serialized response size cheaply; this wants a dedicated body-counting tower layer, so
+  it moves to §7.2 rather than shipping as a zero series.
 
 **closure** (`ClosureMetrics` already ~90% there — register as gauges/histograms)
 - `horndb_closure_mxm_seconds`, `horndb_closure_total_seconds` — histograms.
@@ -188,14 +190,18 @@ scrape-endpoint → expensive-gauge-collector all work end to end.
 - **wcoj** (developer-facing, careful) — seeks-per-query and iterations-to-match as
   plain counters read at query completion (NOT per-seek timing); peak active iterators;
   ground-pattern pre-check pass rate.
+- **sparql request/response bytes** — a body-counting tower layer (deferred from Slice 1).
+- **closure `input_nnz`** — observe alongside the existing `output_nnz` per call.
 
 ### 7.3 Memory-tier accommodation (ambition)
 
 The schema must *accommodate* HBM / regular-RAM / CXL byte accounting even though the
-tiering is not yet built. Provide a `tier` label
-(`#[derive(EncodeLabelValue)] enum MemTier { Hbm, Dram, Cxl, Unknown }`) on the
-storage byte gauges now, defaulting to `Dram`/`Unknown`, so adding real tiering later is
-a value change, not a schema change.
+tiering is not yet built. The `MemTier { Hbm, Dram, Cxl, Unknown }` label vocabulary
+(`#[derive(EncodeLabelValue)]`) is **defined in Slice 1** so the intent is recorded.
+**Status:** the enum exists but is **not yet attached** to the storage byte gauges
+(Slice 1 emits `storage_tier_bytes_estimated` as an unlabelled gauge). Attaching the
+`tier` label — defaulting to `Unknown` — lands with the memory-tiering fan-out (§7.2),
+at which point adding real tiers is a value change, not a schema change.
 
 ## 8. Testing strategy
 

@@ -173,7 +173,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   hot-path updates are direct atomic ops on cached handles; quantities that are
   expensive to compute (triple/dictionary/tier sizes) are pulled at scrape time via a
   `Collector`, never maintained continuously. **Slice 1 instruments:** the SPARQL HTTP
-  layer (request count/latency/bytes/status via middleware + per-stage
+  layer (request count/latency/status via middleware + per-stage
   parse/translate/plan/exec timing + query-kind/error counters), the closure backend
   (`ClosureMetrics` → mxm/total/iterations/nnz histograms), and storage sizes; exposed
   at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
@@ -187,8 +187,11 @@ Closed tasks are listed in [Done](#done-for-traceability).
   3. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
   4. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
      completion (NO per-tuple/per-seek timing), peak active iterators.
-  5. Real HBM/CXL byte accounting once memory tiering lands — the `MemTier` label is
-     already in the schema (spec §7.3), so it is a value change, not a schema change.
+  5. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+     Slice 1 — a middleware can't see the serialized size cheaply).
+  6. Real HBM/CXL byte accounting once memory tiering lands. The `MemTier` enum
+     (HBM/DRAM/CXL/Unknown) is defined (spec §7.3) but not yet attached to the storage
+     byte gauges; wiring the `tier` label is part of this step.
 
   **Deferred to a later phase:** OpenTelemetry traces and logs.
 
