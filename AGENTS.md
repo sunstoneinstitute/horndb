@@ -40,6 +40,8 @@ All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There 
 
 Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*. When they disagree, **the code wins** — fix whichever is stale.
 
+**Never write a `#N` issue reference you haven't verified** (`gh issue view N`). A bare `#N` used as informal shorthand for a topic — rather than the real issue number — propagates across `TASKS.md`, `BENCHMARKS.md`, `docs/architecture.md`, and the SPECs, and unwinding it later is a multi-file `sed` sweep. If the issue isn't filed yet, write `#TODO` (or file it first), not a placeholder number.
+
 ## Workspace layout
 
 Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.90.0` via `rust-toolchain.toml`:
@@ -137,7 +139,9 @@ These nested `CLAUDE.md`/`AGENTS.md` files load on-demand when you work in their
 - `crates/owlrl/` — the `rules.toml` → Rust codegen pipeline (canonical contributor guide). See also the `add-owlrl-rule` skill.
 - `crates/closure/` — SuiteSparse:GraphBLAS linkage and the shared vendored build.
 - `crates/wcoj/` — SPEC-03 status, the differential fuzzer, the 4-cycle bench.
-- `crates/sparql/` — RDF 1.2 / `SparqlConfig::rdf12()`, feature flags, server tests.
+- `crates/sparql/` — RDF 1.2 / `SparqlConfig::rdf12()`, feature flags, server tests, `agg_profile` perf harness.
 - `crates/incremental/` — insertion vs retraction status.
+- `crates/simd/` — runtime ISA dispatch; the x86-kernels-don't-run-on-the-aarch64-laptop false-green gotcha.
+- `crates/python/` — PyO3/maturin rdflib-compatible binding; keeping the workspace Python-free.
 - `.github/` — Action SHA-pinning, dependabot, CI/nightly layout.
 - `docs/` — keeping `docs/index.md` current.

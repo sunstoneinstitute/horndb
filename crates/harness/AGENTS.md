@@ -33,6 +33,18 @@ cargo run -p horndb-harness --bin harness -- report --suite ldbc-spb-256 --metri
 Harness state lives in `target/harness.sqlite`; CI publishes JUnit to
 `target/junit.xml`. Fetched corpora go under `crates/harness/data/` (gitignored).
 
+**`run` has no `--suite` filter** — it always executes the whole `selected.toml`
+set. `--suite` is a `report`-only flag (the `report --suite ldbc-spb-256` example
+above seeds the wrong guess). To narrow what `run` executes, edit
+`harness/selected.toml`. `--engine` is a *global* flag and goes **before** the
+`run`/`report` subcommand.
+
+**GraphDB bench-runner scripts must use a `pkill` pattern that can't self-match**
+(e.g. `graphdb-[0-9]`, matching the server JVM's `-Dgraphdb.dist=…/graphdb-<ver>`).
+Linux `procps pkill -f` matches the start script's own argv and SIGTERMs it
+(exit 143); macOS BSD `pkill` spares the caller, so a self-matching pattern is a
+silent false-pass locally that only fails on the Linux bench host.
+
 ## Selection file
 
 The canonical selection file is `harness/selected.toml` at the workspace root. It

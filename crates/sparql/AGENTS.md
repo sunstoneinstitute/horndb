@@ -17,4 +17,16 @@ on by default).
 - HTTP server tests: `cargo test -p horndb-sparql --features server` — required for
   a full SPARQL pass.
 
+## Aggregation perf profiling
+
+`examples/agg_profile.rs` is the diagnostic harness for the aggregation-qps
+investigation (the "12-vs-150 agg-qps" work): it synthesises an SPB-ish graph and
+times `COUNT` / `GROUP BY` / `DISTINCT` with ablations that isolate the per-row
+`String`-materialization tax from the WCOJ join. It is **not** a recorded bench, so
+it is fine to run on the laptop — recorded numbers come from the SPB-256 nightly.
+
+```bash
+cargo run -p horndb-sparql --release --example agg_profile -- [works]
+```
+
 See `INTEGRATION-NOTES.md` for design decisions.
