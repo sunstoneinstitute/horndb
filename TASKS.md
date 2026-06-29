@@ -206,10 +206,13 @@ Closed tasks are listed in [Done](#done-for-traceability).
   all observed exactly once per query in `impl Drop for BatchIter`; inner loop
   does plain `u64` field increments only (NO per-seek timing — §5.3 compliant).
 
-  **Remaining (fan-out):**
-  1. SPARQL response-byte accounting via a body-counting tower layer (deferred from
-     Slice 1 — a middleware can't see the serialized size cheaply).
+  **Phase-2 Slice 5 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice5-sparql-bytes.md`):
+  sparql-bytes fan-out — `horndb_sparql_request_bytes_total{endpoint}` and
+  `horndb_sparql_response_bytes_total{endpoint}` counters via a `CountingBody`
+  `http_body::Body` wrapper wired into the existing `record_request` middleware
+  (exact data-frame byte count on end-of-stream; not a `Content-Length` guess).
 
+  **Phase-2 fan-out is complete** — all subsystems instrumented; no remaining Phase-2 fan-out items.
   **Deferred to a later phase:** OpenTelemetry traces and logs.
 
 ## MEDIUM — Performance
