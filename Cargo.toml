@@ -36,7 +36,7 @@ default-members = [
 # scripts/bump-version.py + .github/workflows/bump-version-on-merge.yml, then
 # tagged `vX.Y.Z` by tag-version.yml. `crates/python` is deliberately outside
 # this workspace, so it keeps its own version.
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.87"
 license = "Apache-2.0"
