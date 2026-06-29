@@ -78,9 +78,108 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 })
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
-                let l = self.eval_rows(left)?;
-                let r = self.eval_rows(right)?;
-                Ok(Batch::from_bindings(hash_left_join(l, r, expr.as_ref())?))
+                // Native slot hash-left-join mirroring `hash_left_join`:
+                // O(|l|+|r|) via a hash index on the join-variable key, with a
+                // conservative `unkeyed` bucket for rows that leave a jvar
+                // unbound. Output provenance mixes exactly like Join (matched
+                // rows carry right slots, unmatched carry Unbound), so the
+                // merged rows are `normalize_columns`'d before returning.
+                let l = self.eval(left)?;
+                let r = self.eval(right)?;
+
+                // Output schema = left schema ++ right-only vars (like Join).
+                let mut out_schema = l.schema.clone();
+                for v in &r.schema {
+                    if !out_schema.iter().any(|x| x.name() == v.name()) {
+                        out_schema.push(v.clone());
+                    }
+                }
+
+                let jvars = batch_join_vars(&l, &r);
+
+                // Index the right relation by its decoded join key (option (b)
+                // — see `row_join_key`); rows missing a jvar fall to `unkeyed`.
+                let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
+                let mut unkeyed: Vec<&Row> = Vec::new();
+                for b in &r.rows {
+                    match self.row_join_key(b, &r.schema, &jvars)? {
+                        Some(k) => index.entry(k).or_default().push(b),
+                        None => unkeyed.push(b),
+                    }
+                }
+
+                // Columns the inner FILTER reads (decoded per merged row).
+                let mut want = HashSet::new();
+                if let Some(e) = expr.as_ref() {
+                    referenced_vars(e, &mut want);
+                }
+
+                let mut rows = Vec::new();
+                for a in &l.rows {
+                    let mut matched = false;
+                    match self.row_join_key(a, &l.schema, &jvars)? {
+                        Some(k) => {
+                            if let Some(bucket) = index.get(&k) {
+                                matched |= self.probe_into_slots(
+                                    &l.schema,
+                                    a,
+                                    &r.schema,
+                                    bucket,
+                                    &out_schema,
+                                    expr.as_ref(),
+                                    &want,
+                                    &mut rows,
+                                )?;
+                            }
+                            if !unkeyed.is_empty() {
+                                matched |= self.probe_into_slots(
+                                    &l.schema,
+                                    a,
+                                    &r.schema,
+                                    &unkeyed,
+                                    &out_schema,
+                                    expr.as_ref(),
+                                    &want,
+                                    &mut rows,
+                                )?;
+                            }
+                        }
+                        // Left row missing a join var: may still be compatible
+                        // with any right row on the remaining shared vars.
+                        None => {
+                            let all: Vec<&Row> = r.rows.iter().collect();
+                            matched |= self.probe_into_slots(
+                                &l.schema,
+                                a,
+                                &r.schema,
+                                &all,
+                                &out_schema,
+                                expr.as_ref(),
+                                &want,
+                                &mut rows,
+                            )?;
+                        }
+                    }
+                    if !matched {
+                        // OPTIONAL: the left row survives with right-only vars
+                        // unbound. Merging with an all-Unbound right row takes
+                        // the left side and leaves right vars Unbound — exactly
+                        // what `hash_left_join` does (emit the left row; right
+                        // vars simply absent → decoded as Unbound).
+                        let unbound = Row(vec![Slot::Unbound; r.schema.len()]);
+                        if let Some(m) =
+                            self.merge_rows(&l.schema, a, &r.schema, &unbound, &out_schema)?
+                        {
+                            rows.push(m);
+                        }
+                    }
+                }
+
+                self.normalize_columns(&mut rows, out_schema.len())?;
+                Ok(Batch {
+                    schema: out_schema,
+                    rows,
+                })
             }
             PhysicalPlan::Filter { expr, inner } => {
                 let b = self.eval(inner)?;
@@ -499,6 +598,80 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         }
         Ok(Some(Row(slots)))
     }
+
+    /// Slot analogue of [`join_key`] for the native `LeftJoin` hash index.
+    ///
+    /// Provenance choice — **option (b): key on the DECODED lexical form of
+    /// each join variable.** A left BGP row keys `?x` as `Slot::Id(5)` while a
+    /// right adapter-backed row may key the same logical `?x` as
+    /// `Slot::Term(...)`; `Slot::key_part()` would map those to
+    /// `KeyPart::Id(5)` vs `KeyPart::Lex(...)` — *different* hash buckets — and
+    /// a valid match would be missed. Decoding the jvar columns on both sides
+    /// makes the bucket key provenance-independent (identical to
+    /// `hash_left_join`'s `lex(b.get(v))`), so equal values always collide in
+    /// the same bucket. Only the (few) jvar columns decode; every non-jvar
+    /// column stays native `Slot::Id` and is normalized only if the merge
+    /// genuinely mixes Id and Term.
+    ///
+    /// Returns `None` if any jvar is `Unbound` in this row (such a row can't be
+    /// keyed and takes the conservative `unkeyed` path, exactly like
+    /// [`join_key`]).
+    fn row_join_key(
+        &self,
+        row: &Row,
+        schema: &[Var],
+        jvars: &[Var],
+    ) -> Result<Option<Vec<String>>> {
+        let mut key = Vec::with_capacity(jvars.len());
+        for jv in jvars {
+            // jvars ⊆ schema by construction (batch_join_vars), so this is
+            // always Some; treat a missing column conservatively as unkeyed.
+            let Some(i) = schema.iter().position(|v| v.name() == jv.name()) else {
+                return Ok(None);
+            };
+            match &row.0[i] {
+                Slot::Unbound => return Ok(None),
+                Slot::Id(id) => key.push(lex(&self.exec.decode_term(*id)?)),
+                Slot::Term(t) => key.push(lex(t)),
+            }
+        }
+        Ok(Some(key))
+    }
+
+    /// Slot analogue of [`probe_into`]: merge the left row `a` against each
+    /// candidate right row, apply the OPTIONAL's inner `FILTER` (`expr`) on the
+    /// merged row by decoding just its referenced columns (`want`), push every
+    /// kept merged row into `out`, and report whether any candidate matched.
+    #[allow(clippy::too_many_arguments)]
+    fn probe_into_slots(
+        &self,
+        ls: &[Var],
+        a: &Row,
+        rs: &[Var],
+        candidates: &[&Row],
+        out_schema: &[Var],
+        expr: Option<&Expr>,
+        want: &HashSet<String>,
+        out: &mut Vec<Row>,
+    ) -> Result<bool> {
+        let mut matched = false;
+        for b in candidates {
+            if let Some(m) = self.merge_rows(ls, a, rs, b, out_schema)? {
+                let keep = match expr {
+                    Some(e) => {
+                        let env = self.decode_subset(&m, out_schema, want)?;
+                        eval_expr(e, &env)?
+                    }
+                    None => true,
+                };
+                if keep {
+                    matched = true;
+                    out.push(m);
+                }
+            }
+        }
+        Ok(matched)
+    }
 }
 
 /// Hash left-join (`OPTIONAL`): pair each left row with the compatible
@@ -523,6 +696,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 /// *every* left row, and a left row missing a join var probes the whole
 /// right relation. When there are no shared variables the single (empty)
 /// key collapses to the cartesian product, matching `OPTIONAL` there.
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)]); the native
+                    // LeftJoin arm is the slot port of this (see `eval`).
 fn hash_left_join(
     l: Vec<Bindings>,
     r: Vec<Bindings>,
@@ -571,6 +746,7 @@ fn hash_left_join(
 /// kept merged solution into `out`. Returns whether any candidate matched
 /// (so the caller can decide to emit the unmatched left row). `expr` is
 /// the `OPTIONAL`'s inner `FILTER`, evaluated over the merged row.
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)])
 fn probe_into(
     a: &Bindings,
     candidates: &[&Bindings],
@@ -595,6 +771,8 @@ fn probe_into(
 
 /// The join-variable set: variables bound somewhere in *both* relations.
 /// Sorted (via `BTreeSet`) so the key column order is deterministic.
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)]); slot analogue
+                    // is `batch_join_vars`.
 fn join_vars(left: &[Bindings], right: &[Bindings]) -> Vec<String> {
     use std::collections::BTreeSet;
     let lvars: BTreeSet<&str> = left.iter().flat_map(|b| b.keys()).collect();
@@ -605,12 +783,25 @@ fn join_vars(left: &[Bindings], right: &[Bindings]) -> Vec<String> {
 /// The probe/build key for a row: the lexical value of each join variable,
 /// in `jvars` order. `None` if the row leaves any join variable unbound
 /// (such rows can't be hash-keyed and take the conservative path).
+#[allow(dead_code)] // used only from eval_legacy (#[cfg(test)]); slot analogue
+                    // is `row_join_key`.
 fn join_key(b: &Bindings, jvars: &[String]) -> Option<Vec<String>> {
     let mut key = Vec::with_capacity(jvars.len());
     for v in jvars {
         key.push(lex(b.get(v)?));
     }
     Some(key)
+}
+
+/// Slot analogue of [`join_vars`] for the native `LeftJoin`: the variables
+/// present in *both* batch schemas, in deterministic (sorted) order. Mirrors
+/// `join_vars`' `BTreeSet` intersection — a column listed in a batch schema is
+/// the slot-world analogue of "a variable bound somewhere in the relation".
+fn batch_join_vars(l: &Batch, r: &Batch) -> Vec<Var> {
+    use std::collections::BTreeSet;
+    let lvars: BTreeSet<&str> = l.schema.iter().map(|v| v.name()).collect();
+    let rvars: BTreeSet<&str> = r.schema.iter().map(|v| v.name()).collect();
+    lvars.intersection(&rvars).map(|s| Var::new(*s)).collect()
 }
 
 /// Evaluate a recursive Kleene path `p+`/`p*`.
@@ -2350,5 +2541,60 @@ mod slot_differential {
                 prop_assert_eq!(got, want, "HornBackend join query `{}` diverged", q);
             }
         }
+    }
+
+    /// Native `LeftJoin` (OPTIONAL) must not decode the columns it inherits
+    /// from its children. A matched left row carries the left BGP-scan columns
+    /// as `Slot::Id` (only the right-side columns come from the right child,
+    /// also `Slot::Id` here); an unmatched left row carries `Slot::Unbound`
+    /// for the right-only var. The adapter-backed arm wraps everything via
+    /// `Batch::from_bindings`, turning every column into `Slot::Term` — so the
+    /// `Slot::Id` assertion below is the RED marker that flips GREEN only when
+    /// the native port is active. The OPTIONAL's join var (?s) is keyed by
+    /// decoded lexical (option (b)) but the *output* column is not rewritten,
+    /// so it stays `Slot::Id`.
+    #[test]
+    fn left_join_preserves_id_slots_and_unbound() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        // s1 has a label (matched); s2 has none (unmatched → ?l Unbound).
+        horn.insert_triple(iri("s1"), iri("type"), iri("T"));
+        horn.insert_triple(iri("s2"), iri("type"), iri("T"));
+        horn.insert_triple(iri("s1"), iri("label"), iri("L"));
+
+        let plan = plan_select(
+            "SELECT ?s ?l WHERE { \
+             ?s <http://ex/type> <http://ex/T> . \
+             OPTIONAL { ?s <http://ex/label> ?l } }",
+        );
+
+        let rt = Runtime::new(&horn);
+        let batch = rt.eval(&plan).unwrap();
+        assert_eq!(batch.rows.len(), 2, "two left rows survive the OPTIONAL");
+
+        let s_idx = batch.col("s").expect("?s must be in output schema");
+        let l_idx = batch.col("l").expect("?l must be in output schema");
+
+        // ?s is a left BGP-scan column on every row → Slot::Id (native port).
+        for (i, row) in batch.rows.iter().enumerate() {
+            assert!(
+                matches!(row.0[s_idx], Slot::Id(_)),
+                "row {i}: ?s from BGP scan should remain Slot::Id after native \
+                 LeftJoin; got {:?} — is the adapter-backed arm still active?",
+                row.0[s_idx]
+            );
+        }
+
+        // Exactly one matched (?l = Slot::Id <L>) and one unmatched (?l Unbound).
+        let mut matched = 0;
+        let mut unbound = 0;
+        for row in &batch.rows {
+            match &row.0[l_idx] {
+                Slot::Id(_) => matched += 1,
+                Slot::Unbound => unbound += 1,
+                Slot::Term(t) => panic!("?l should be Id or Unbound, got Term({t:?})"),
+            }
+        }
+        assert_eq!((matched, unbound), (1, 1), "one matched, one unmatched");
     }
 }
