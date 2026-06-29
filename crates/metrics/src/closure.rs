@@ -7,6 +7,7 @@ pub struct ClosureSink {
     pub mxm_seconds: Histogram,
     pub total_seconds: Histogram,
     pub iterations_to_fixpoint: Histogram,
+    pub input_nnz: Histogram,
     pub output_nnz: Histogram,
 }
 
@@ -15,6 +16,7 @@ impl ClosureSink {
         let mxm_seconds = Histogram::new(exponential_buckets(1e-4, 3.0, 12));
         let total_seconds = Histogram::new(exponential_buckets(1e-4, 3.0, 12));
         let iterations_to_fixpoint = Histogram::new(exponential_buckets(1.0, 2.0, 10));
+        let input_nnz = Histogram::new(exponential_buckets(10.0, 10.0, 9));
         let output_nnz = Histogram::new(exponential_buckets(10.0, 10.0, 9));
         reg.register(
             "closure_mxm_seconds",
@@ -32,6 +34,11 @@ impl ClosureSink {
             iterations_to_fixpoint.clone(),
         );
         reg.register(
+            "closure_input_nnz",
+            "Closure input matrix nnz",
+            input_nnz.clone(),
+        );
+        reg.register(
             "closure_output_nnz",
             "Closure output non-zeros per call",
             output_nnz.clone(),
@@ -40,14 +47,16 @@ impl ClosureSink {
             mxm_seconds,
             total_seconds,
             iterations_to_fixpoint,
+            input_nnz,
             output_nnz,
         }
     }
 
-    pub fn observe(&self, mxm: f64, total: f64, iterations: u64, output_nnz: u64) {
+    pub fn observe(&self, mxm: f64, total: f64, iterations: u64, input_nnz: u64, output_nnz: u64) {
         self.mxm_seconds.observe(mxm);
         self.total_seconds.observe(total);
         self.iterations_to_fixpoint.observe(iterations as f64);
+        self.input_nnz.observe(input_nnz as f64);
         self.output_nnz.observe(output_nnz as f64);
     }
 }

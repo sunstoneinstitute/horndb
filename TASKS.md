@@ -179,19 +179,21 @@ Closed tasks are listed in [Done](#done-for-traceability).
   at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
   off-box — a collector scrapes `/metrics`; no in-process OTLP push.
 
-  **Remaining (fan-out, not started):**
-  1. owlrl — rule-fire counts, per-rule + per-phase latency, dirty-predicate prune rate
-     (`Stats`/`PhaseTimings` already exist).
-  2. incremental — tick latency, asserted/derived merge counts, retract/promote
+  **Phase-2 Slice 1 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice1-owlrl.md`):
+  owlrl fan-out — `OwlrlMetrics` subsystem with per-rule fire counts, per-rule + per-phase
+  latency histograms, `owlrl_triples_inferred_total`, `owlrl_rounds_total`, dirty-predicate
+  prune counters; closure `input_nnz` observed alongside `output_nnz`; `MemTier` enum wired
+  to `storage_tier_bytes_estimated` (`tier` label, `"unknown"` until full HBM/CXL
+  accounting lands). Overhead micro-bench added (`crates/metrics/benches/overhead.rs`).
+
+  **Remaining (fan-out):**
+  1. incremental — tick latency, asserted/derived merge counts, retract/promote
      cardinalities, change-feed subscriber gauge (`TickReport` exists).
-  3. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
-  4. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
+  2. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
+  3. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
      completion (NO per-tuple/per-seek timing), peak active iterators.
-  5. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+  4. SPARQL response-byte accounting via a body-counting tower layer (deferred from
      Slice 1 — a middleware can't see the serialized size cheaply).
-  6. Real HBM/CXL byte accounting once memory tiering lands. The `MemTier` enum
-     (HBM/DRAM/CXL/Unknown) is defined (spec §7.3) but not yet attached to the storage
-     byte gauges; wiring the `tier` label is part of this step.
 
   **Deferred to a later phase:** OpenTelemetry traces and logs.
 

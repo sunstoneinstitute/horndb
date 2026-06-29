@@ -23,6 +23,7 @@ rayon = { workspace = true }
 # firing the in-crate `RuleFiringBackend`. Enable `graphblas-backend` to make
 # `BackendChoice::GraphBlas` / `GraphBlasBackend` available (see SPEC-05, #61).
 horndb-closure = { path = "../closure", optional = true }
+horndb-metrics = { workspace = true }
 
 [features]
 default = []

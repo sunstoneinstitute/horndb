@@ -35,4 +35,5 @@ fn closure_call_records_metrics() {
         total_seconds_count(&text) >= 1,
         "expected the closure call to record a sample, got count 0:\n{text}"
     );
+    assert!(text.contains("horndb_closure_input_nnz"), "got:\n{text}");
 }

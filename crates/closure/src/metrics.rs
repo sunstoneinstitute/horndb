@@ -219,6 +219,7 @@ fn emit_to_sink(metrics: &ClosureMetrics) {
         metrics.mxm_time.as_secs_f64(),
         metrics.total_time.as_secs_f64(),
         metrics.iterations_to_fixpoint as u64,
+        metrics.input_nnz,
         metrics.closure_nnz,
     );
 }

@@ -7,6 +7,7 @@
 
 pub mod closure;
 pub mod labels;
+pub mod owlrl;
 pub mod sparql;
 pub mod storage;
 
@@ -19,6 +20,7 @@ pub struct MetricsState {
     pub sparql: sparql::SparqlMetrics,
     pub closure: closure::ClosureSink,
     pub storage: storage::StorageMetrics,
+    pub owlrl: owlrl::OwlrlMetrics,
 }
 
 impl MetricsState {
@@ -27,11 +29,13 @@ impl MetricsState {
         let sparql = sparql::SparqlMetrics::register(&mut registry);
         let closure = closure::ClosureSink::register(&mut registry);
         let storage = storage::StorageMetrics::register(&mut registry);
+        let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
             closure,
             storage,
+            owlrl,
         }
     }
 

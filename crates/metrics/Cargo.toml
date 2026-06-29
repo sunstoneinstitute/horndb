@@ -9,3 +9,10 @@ authors.workspace = true
 
 [dependencies]
 prometheus-client.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "overhead"
+harness = false

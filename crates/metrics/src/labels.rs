@@ -90,3 +90,25 @@ pub struct QueryKindLabel {
 pub struct StageLabel {
     pub stage: Stage,
 }
+
+label_value_enum!(Phase {
+    CompiledRules => "compiled_rules",
+    ListRules => "list_rules",
+    ClosureBackend => "closure_backend",
+    Apply => "apply",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PhaseLabel {
+    pub phase: Phase,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RuleLabel {
+    pub rule: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TierLabel {
+    pub tier: MemTier,
+}
