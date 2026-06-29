@@ -107,3 +107,8 @@ pub struct PhaseLabel {
 pub struct RuleLabel {
     pub rule: String,
 }
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TierLabel {
+    pub tier: MemTier,
+}

@@ -3,6 +3,7 @@
 //! SCRAPE TIME via [`StorageCollector`], which reads a cheap stats snapshot
 //! through a closure the server installs over a `Weak` ref to the live store.
 //! Steady-state cost is therefore zero.
+use crate::labels::{MemTier, TierLabel};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
 use prometheus_client::metrics::counter::Counter;
@@ -81,15 +82,23 @@ impl Collector for StorageCollector {
                 "Interned dictionary terms",
                 snap.dictionary_terms,
             ),
-            (
-                "storage_tier_bytes_estimated",
-                "Estimated tier bytes",
-                snap.tier_bytes_estimated,
-            ),
         ] {
             let g = ConstGauge::new(val);
             let me = enc.encode_descriptor(name, help, None, g.metric_type())?;
             g.encode(me)?;
+        }
+        {
+            let g = ConstGauge::new(snap.tier_bytes_estimated);
+            let mut me = enc.encode_descriptor(
+                "storage_tier_bytes_estimated",
+                "Estimated tier bytes",
+                None,
+                g.metric_type(),
+            )?;
+            let sub = me.encode_family(&TierLabel {
+                tier: MemTier::Unknown,
+            })?;
+            g.encode(sub)?;
         }
         Ok(())
     }
@@ -117,6 +126,10 @@ mod tests {
         assert!(buf.contains("horndb_storage_triples 42"), "got:\n{buf}");
         assert!(
             buf.contains("horndb_storage_dictionary_terms 99"),
+            "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_storage_tier_bytes_estimated{tier=\"unknown\"}"),
             "got:\n{buf}"
         );
     }
