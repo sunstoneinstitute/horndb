@@ -47,28 +47,33 @@ Closed tasks are listed in [Done](#done-for-traceability).
 
 - [ ] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
   ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
-  **Slice 1 (id-based slot bindings) landed** on branch `perf/id-based-slot-rows-slice1`
-  (design spec: `docs/specs/2026-06-28-id-based-slot-rows-design.md`; plan:
-  `docs/plans/2026-06-28-id-based-slot-rows-slice1.md`). The SPARQL runtime now carries
-  id-based slot rows (`Slot`/`Row`/`Batch`) with native `scan_bgp_ids` + slot-native
-  BgpScan/Slice/Project/Distinct/Group/Filter/Join; `Runtime::run` decodes once at the
-  boundary. Directional laptop `agg_profile` Q1 COUNT(*): ~133 ms → ~39 ms (~3.4×);
-  Q2 GROUP BY: ~55 ms → ~38 ms (~1.5×). The ~12× SPB nightly gap is **not** closed —
-  streaming and planner pushdown own the remainder.
+  **Slice 1 + Slice 2 (id-based slot rows) landed** (design spec:
+  `docs/specs/2026-06-28-id-based-slot-rows-design.md`; plans:
+  `docs/plans/2026-06-28-id-based-slot-rows-slice1.md`,
+  `docs/plans/2026-06-29-id-based-slot-rows-slice2.md`). **All 13 runtime operators now
+  run native on id-based slot rows** (`Slot`/`Row`/`Batch`): Slice 1 did
+  BgpScan/Slice/Project/Distinct/Group/Filter/Join + native `scan_bgp_ids`; Slice 2
+  ported the last six (LeftJoin, Union, OrderBy, Extend, Values, PathClosure) and
+  **removed the `from_bindings`/`to_bindings` decode-adapter (`eval_rows`), the
+  `cfg(test) eval_legacy` oracle, and the dead helpers it kept alive (`eval_group`,
+  `project`, `hash_left_join`/`probe_into`/`join_vars`/`join_key`)** — one slot runtime.
+  `Runtime::run` decodes once at the boundary. **Official nightly `aggregation-qps`
+  (hornbench, 2026-06-29): ~13 → ~23 (~1.77×) vs GraphDB Free ~148 — the ~12× gap
+  narrowed to ~6.5×.** Slice 2 does not touch the aggregation arms, so aggregation-qps
+  is a Slice-1 number. The remaining gap is owned by streaming + planner pushdown.
 
-  **Remaining work (Slice 2 and beyond):**
-  1. Native ports of the six adapter-backed operators: LeftJoin, Union, OrderBy, Extend,
-     Values, PathClosure; then delete the `from_bindings`/`to_bindings` decode-adapter,
-     the `cfg(test) eval_legacy` oracle, and the `#[allow(dead_code)]` free fns it keeps
-     alive (`eval_group`, `project`, literal helpers).
-  2. Hash join for native `Join` (currently a faithful nested loop); hoist the `merge_rows`
-     per-pair column-index lookups.
-  3. `Group` micro-opts: share decoded members across aggregates referencing the same
+  **Remaining work (not yet started):**
+  1. Hash join for native `Join` (currently a faithful nested loop); hoist the `merge_rows`
+     per-pair column-index lookups. The native `LeftJoin` is already a hash probe.
+  2. `Group` micro-opts: share decoded members across aggregates referencing the same
      column; avoid the per-group `key_slots` clone.
-  4. Streaming (no full per-node `Batch` materialization).
-  5. Planner projection/aggregate pushdown.
-  6. A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the Task 8 proptest
+  3. **Streaming** (no full per-node `Batch` materialization) — the headline remaining lever.
+  4. **Planner projection/aggregate pushdown.**
+  5. A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the differential proptest
      covers it only indirectly via small-vocab groups).
+  6. `batch_join_vars` intersects child *schemas*, not *bound* keys (native `LeftJoin`); a
+     shared var unbound in every right row degrades that probe toward O(|l|·|r|) — correct
+     but potentially slow on a pathological workload (does not arise in the SPB mix).
 
   See `docs/architecture.md` §9 and `BENCHMARKS.md`.
 

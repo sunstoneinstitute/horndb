@@ -1156,7 +1156,6 @@ dependencies = [
  "oxrdf",
  "oxttl",
  "pretty_assertions",
- "proptest",
  "regex",
  "serde",
  "serde_json",

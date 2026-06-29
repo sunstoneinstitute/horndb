@@ -20,8 +20,8 @@ use horndb_storage::TermId;
 pub enum Slot {
     /// Dictionary id straight from the scan — the hot, no-string case.
     Id(TermId),
-    /// A materialized term: BIND/aggregate output, VALUES literal,
-    /// path-synthesized, or any cell produced by the decode-adapter.
+    /// A materialized term: BIND/aggregate output, VALUES literal, or a
+    /// path-synthesized endpoint.
     Term(Term),
     /// No binding (OPTIONAL right-side with no match).
     Unbound,
@@ -112,10 +112,11 @@ impl Batch {
         self.schema.iter().position(|v| v.name() == var)
     }
 
-    /// Wrap decoded `Bindings` rows as a `Batch` of `Slot::Term` cells. The
-    /// schema is the sorted union of all bound variable names; a row that
-    /// does not bind a schema var gets `Slot::Unbound` there. This is the
-    /// decode-adapter's re-encode half (the inverse of `to_bindings`).
+    /// Wrap decoded `Bindings` rows as a `Batch` of `Slot::Term` cells (the
+    /// inverse of `to_bindings`). The schema is the sorted union of all bound
+    /// variable names; a row that does not bind a schema var gets
+    /// `Slot::Unbound` there. Used where an operator's output is born as
+    /// decoded terms (the path-closure endpoints).
     pub fn from_bindings(rows: Vec<Bindings>) -> Self {
         use std::collections::BTreeSet;
         let mut names: BTreeSet<String> = BTreeSet::new();
