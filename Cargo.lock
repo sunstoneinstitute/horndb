@@ -1161,6 +1161,7 @@ dependencies = [
  "arrow",
  "axum",
  "clap",
+ "horndb-metrics",
  "horndb-owlrl",
  "horndb-storage",
  "horndb-wcoj",
