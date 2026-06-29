@@ -6,7 +6,6 @@ use horndb_sparql::exec::mem::MemStore;
 fn query_kind_and_stage_metrics_recorded() {
     let store = MemStore::default();
     let q = "SELECT * WHERE { ?s ?p ?o } LIMIT 1";
-    // Real signature is `execute_query(query, exec)` (query first).
     let _ = execute_query(q, &store).expect("query ok");
 
     let text = horndb_metrics::encode_metrics();

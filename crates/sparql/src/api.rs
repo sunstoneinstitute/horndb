@@ -24,17 +24,13 @@ fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let m = horndb_metrics::metrics();
     let start = Instant::now();
     let out = f();
+    let label = StageLabel { stage };
     m.sparql
         .stage_duration_seconds
-        .get_or_create(&StageLabel {
-            stage: stage.clone(),
-        })
+        .get_or_create(&label)
         .observe(start.elapsed().as_secs_f64());
     if out.is_err() {
-        m.sparql
-            .query_errors
-            .get_or_create(&StageLabel { stage })
-            .inc();
+        m.sparql.query_errors.get_or_create(&label).inc();
     }
     out
 }
