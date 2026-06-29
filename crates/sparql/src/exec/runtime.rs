@@ -163,15 +163,44 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(Batch::from_bindings(v))
             }
             PhysicalPlan::Extend { inner, var, expr } => {
-                let v = self.eval_rows(inner)?;
-                let mut out = Vec::with_capacity(v.len());
-                for mut b in v {
-                    if let Some(t) = eval_expr_to_term(expr, &b)? {
-                        b.set(var.name().to_owned(), t);
-                    }
-                    out.push(b);
+                // Native slot path: decode only the vars the expression reads,
+                // preserving Slot::Id for all other columns (e.g. BGP scan ids).
+                // Mirrors the Filter arm — same referenced_vars + decode_subset seam.
+                //
+                // re-BIND semantics: SPARQL 1.1 §18.1.10 forbids BIND targeting a
+                // var already in scope; spargebra enforces this at parse time
+                // ("BIND is overriding an existing variable"). Therefore `existing`
+                // is always `None` in production — the `Some` branch is dead code
+                // kept for safety.  The adapter's None-result behaviour (leave the
+                // prior binding unchanged) differs from the native path (overwrite
+                // with Slot::Unbound); since the branch is unreachable, the
+                // divergence never surfaces.
+                let b = self.eval(inner)?;
+                let mut want = HashSet::new();
+                referenced_vars(expr, &mut want);
+                let existing = b.col(var.name()); // Some(i) ⇒ re-BIND (dead code)
+                let mut schema = b.schema.clone();
+                if existing.is_none() {
+                    schema.push(var.clone());
                 }
-                Ok(Batch::from_bindings(out))
+                let mut out_rows = Vec::with_capacity(b.rows.len());
+                for r in &b.rows {
+                    let env = self.decode_subset(r, &b.schema, &want)?;
+                    let slot = match eval_expr_to_term(expr, &env)? {
+                        Some(t) => Slot::Term(t),
+                        None => Slot::Unbound,
+                    };
+                    let mut slots = r.0.clone();
+                    match existing {
+                        Some(i) => slots[i] = slot,
+                        None => slots.push(slot),
+                    }
+                    out_rows.push(Row(slots));
+                }
+                Ok(Batch {
+                    schema,
+                    rows: out_rows,
+                })
             }
             PhysicalPlan::Values { vars, rows } => {
                 // Rows are guaranteed full-width by the spargebra parser (it
@@ -1938,6 +1967,10 @@ mod slot_differential {
         "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }",
         "SELECT ?p (COUNT(?s) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p",
         "SELECT DISTINCT ?o WHERE { ?s ?p ?o }",
+        // BIND coverage: slot path must produce the same decoded output as
+        // the legacy string path (regression guard for the native Extend arm).
+        "SELECT ?s ?x WHERE { ?s ?p ?o . BIND(?o AS ?x) }",
+        "SELECT ?s ?x WHERE { ?s ?p ?o . BIND(<http://ex/const> AS ?x) }",
     ];
 
     proptest! {
@@ -1986,6 +2019,49 @@ mod slot_differential {
                     "HornBackend query `{}` diverged", q);
             }
         }
+    }
+
+    /// Native `Extend` (BIND) must not decode the columns it inherits from
+    /// the child batch. A BGP-scan column must remain `Slot::Id` in the
+    /// batch; only the freshly-computed BIND column is `Slot::Term`. The
+    /// adapter-backed arm decodes the whole child through `eval_rows`, so
+    /// every column becomes `Slot::Term` — this test is RED until the
+    /// native port lands.
+    #[test]
+    fn extend_preserves_id_slots() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s"), iri("p"), iri("o"));
+
+        // SELECT ?s ?x WHERE { ?s <p> <o> . BIND(<c> AS ?x) }
+        // Plan: Project { vars:[?s,?x], inner: Extend { var:?x, inner: BgpScan } }
+        let plan = plan_select(
+            "SELECT ?s ?x WHERE { ?s <http://ex/p> <http://ex/o> . BIND(<http://ex/c> AS ?x) }",
+        );
+
+        let rt = Runtime::new(&horn);
+        let batch = rt.eval(&plan).unwrap();
+
+        assert_eq!(batch.rows.len(), 1, "expected exactly one result row");
+
+        // ?s comes from a BGP scan. Native Extend preserves Slot::Id;
+        // the adapter decodes it to Slot::Term — so this assert is the RED
+        // marker.
+        let s_idx = batch.col("s").expect("?s must be in output schema");
+        assert!(
+            matches!(batch.rows[0].0[s_idx], Slot::Id(_)),
+            "?s from BGP scan should remain Slot::Id after native Extend; \
+             got {:?} — is the adapter-backed arm still active?",
+            batch.rows[0].0[s_idx]
+        );
+
+        // ?x is the BIND result: always Slot::Term (computed, never Id).
+        let x_idx = batch.col("x").expect("?x must be in output schema");
+        assert!(
+            matches!(batch.rows[0].0[x_idx], Slot::Term(_)),
+            "?x from BIND should be Slot::Term; got {:?}",
+            batch.rows[0].0[x_idx]
+        );
     }
 
     /// Regression: Join(LeftJoin(A,B), BGP(C)) where the OPTIONAL makes ?v
