@@ -71,7 +71,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 // → equal solutions hash differently → wrong results.
                 // Only genuinely mixed (Id ∧ Term) columns are decoded; the
                 // pure-Id BGP-only aggregation hot path pays zero decode.
-                self.normalize_join_columns(&mut rows, out_schema.len())?;
+                self.normalize_columns(&mut rows, out_schema.len())?;
                 Ok(Batch {
                     schema: out_schema,
                     rows,
@@ -339,12 +339,13 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     }
 
     /// Decode Id cells in columns that mix Slot::Id and Slot::Term, restoring
-    /// the within-column homogeneity invariant after a native Join.
+    /// the within-column homogeneity invariant for any operator that unions or
+    /// merges children of differing slot provenance (Join, Union, LeftJoin).
     ///
     /// See the comment in the Join arm for the full explanation of why mixing
     /// occurs (adapter-backed child leaves Slot::Unbound on some rows while
     /// the native BGP child has Slot::Id → merge_rows takes Id on those rows).
-    fn normalize_join_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
+    fn normalize_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
         for c in 0..width {
             let mut has_id = false;
             let mut has_term = false;
@@ -2040,7 +2041,7 @@ mod slot_differential {
 
             // OPTIONAL+DISTINCT: ?v is Slot::Term on matched left rows and
             // Slot::Unbound on unmatched; the right BGP produces Slot::Id for
-            // ?v → mixing without the normalize_join_columns fix.
+            // ?v → mixing without the normalize_columns fix.
             let optional_q =
                 "SELECT DISTINCT ?v WHERE { \
                     ?s <http://ex/p0> ?mid . \
