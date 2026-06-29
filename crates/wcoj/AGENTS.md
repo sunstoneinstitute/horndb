@@ -10,5 +10,10 @@ Leapfrog Triejoin executor, trie iterators, planner.
   `SyntheticGraph::skewed_four_cycle`) beats the binary-hash reference on the
   canonical skewed win case.
 - Magic-sets / SLG tabling remain deferred.
+- **Trie-seek micro-opt gotcha:** only the depth-0 full-data level is worth a SIMD
+  SoA `LevelColumn` rebuild. Rebuilding the transient SoA on every `open_level` is
+  O(range) per descent and was a measured **~760× `four_cycle` regression**; deeper
+  levels stay on scalar AoS `partition_point`. Re-measure `four_cycle` before
+  touching the seek path.
 
 See `INTEGRATION-NOTES.md` for design decisions.

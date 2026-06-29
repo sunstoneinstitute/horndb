@@ -520,6 +520,13 @@ of that matters. Not a memory leak that affects the final binary.
    `const OWL_… : &str = "http://…"` block and the `build_vocab`
    helper). This is a third file only if you go through the
    `Engine` façade — pure rule additions do not require it.
+   **Also bump `const USER_TERMS_BASE`** (`integration.rs`, currently
+   `68`) by the number of vocab IDs you added: it must equal
+   *(count of `Vocabulary` fields) + 1*, i.e. the first id handed out
+   to user/dictionary terms after the fixed vocab block. `build_vocab`
+   ends with `debug_assert_eq!(id, USER_TERMS_BASE)`, so a stale value
+   panics in debug builds (and silently mis-allocates dictionary ids in
+   release) — don't re-count by hand, just add your delta.
 5. **Do not edit `codegen/parse.rs`.** The QName map is
    auto-derived; the parser picks up your new term on the next
    build.
