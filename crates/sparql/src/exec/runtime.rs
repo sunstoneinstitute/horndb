@@ -1,12 +1,13 @@
 //! Iterator-style runtime over [`PhysicalPlan`]. `eval` returns [`Batch`]
 //! (id-carrying slot rows); `run` decodes once at the boundary via
 //! `decode_term`. Each operator arm still materialises per-node (true
-//! streaming is Future Work). During Tasks 4–8 the per-arm `eval_rows`
-//! decode-adapter is replaced with native slot operations arm by arm;
+//! streaming is Future Work). All operator arms now use native slot ops;
 //! `eval_legacy` (test-only) is the string-based differential oracle until
 //! Slice 2 lands.
 
-use crate::algebra::{AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var};
+use crate::algebra::{
+    AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
+};
 use crate::error::{Result, SparqlError};
 use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, Slot};
 use crate::plan::PhysicalPlan;
@@ -28,19 +29,9 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(rows.into_iter())
     }
 
-    /// Decode a child plan's [`Batch`] back to `Vec<Bindings>` so an arm can
-    /// reuse today's string free-fns (the decode-adapter's input half).
-    /// Temporary scaffolding: each arm migrated to native slot ops in
-    /// Tasks 4–7 calls `self.eval(child)` directly instead; remove once the
-    /// last `eval_rows` caller is gone.
-    fn eval_rows(&self, plan: &PhysicalPlan) -> Result<Vec<Bindings>> {
-        self.eval(plan)?.to_bindings(|id| self.exec.decode_term(id))
-    }
-
-    /// Evaluate a plan node to a [`Batch`]. Until native slot ops land
-    /// (Tasks 4–8), every arm decodes its children via `eval_rows`, runs the
-    /// existing string free-fn, and re-wraps the result with
-    /// `Batch::from_bindings`.
+    /// Evaluate a plan node to a [`Batch`]. All operator arms use native slot
+    /// ops (Tasks 1–7 complete); `eval_legacy` (test-only) is the
+    /// string-based differential oracle until Slice 2 lands.
     fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
@@ -391,7 +382,19 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
-                let edge_rows = self.eval_rows(edge)?;
+                let eb = self.eval(edge)?;
+                // The edge batch binds exactly the two synthetic endpoint vars; decode
+                // only those, then reuse the string BFS unchanged.
+                // deferred: id-native BFS (#128)
+                let want: HashSet<String> = [PATH_SRC_VAR, PATH_DST_VAR]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let edge_rows: Vec<Bindings> = eb
+                    .rows
+                    .iter()
+                    .map(|r| self.decode_subset(r, &eb.schema, &want))
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(Batch::from_bindings(eval_path_closure(
                     subject, object, &edge_rows, *reflexive,
                 )?))
