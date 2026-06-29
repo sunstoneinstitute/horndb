@@ -1,5 +1,12 @@
 # Metrics Phase 1 — Slice 1 Implementation Plan
 
+> **Status: implemented** (branch `feat/metrics-phase1`, PR #149, issue #148). All
+> seven tasks landed via subagent-driven development; each passed spec-compliance +
+> code-quality review, with a final holistic branch review. Workspace
+> `clippy --all-targets -D warnings` and `nextest` (metrics/closure/storage + sparql
+> `--features server`, 280 passed) are green. Fan-out (owlrl/incremental/ml/wcoj,
+> response-byte layer, `MemTier` wiring) tracked in #148.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship an end-to-end metrics vertical slice — a new `horndb-metrics` crate with a global registry and typed labels, a `GET /metrics` scrape endpoint, and live instrumentation of the SPARQL HTTP layer, the closure backend, and storage sizes.
@@ -39,7 +46,7 @@
 - Modify: `Cargo.toml` (root) — `[workspace.dependencies]`, `members`, `default-members`
 - Test: `crates/metrics/src/lib.rs` (inline `#[cfg(test)]`)
 
-- [ ] **Step 1: Add the crate to the workspace**
+- [x] **Step 1: Add the crate to the workspace**
 
 In root `Cargo.toml`, add `"crates/metrics",` to both `members` and `default-members`, and under `[workspace.dependencies]`:
 
@@ -48,7 +55,7 @@ horndb-metrics = { path = "crates/metrics" }
 prometheus-client = "0.23"
 ```
 
-- [ ] **Step 2: Write `crates/metrics/Cargo.toml`**
+- [x] **Step 2: Write `crates/metrics/Cargo.toml`**
 
 ```toml
 [package]
@@ -64,7 +71,7 @@ authors.workspace = true
 prometheus-client.workspace = true
 ```
 
-- [ ] **Step 3: Write the failing test**
+- [x] **Step 3: Write the failing test**
 
 In `crates/metrics/src/lib.rs`:
 
@@ -91,12 +98,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Run to verify it fails**
+- [x] **Step 4: Run to verify it fails**
 
 Run: `cargo test -p horndb-metrics`
 Expected: FAIL — `MetricsState`, `labels`, etc. do not exist yet.
 
-- [ ] **Step 5: Implement the registry skeleton**
+- [x] **Step 5: Implement the registry skeleton**
 
 In `crates/metrics/src/lib.rs`:
 
@@ -179,11 +186,11 @@ pub fn register_collector(c: Box<dyn Collector>) {
 > `prometheus-client` version names the method differently, adapt — the test in
 > Step 3 asserts the final `horndb_sparql_requests_total` string.
 
-- [ ] **Step 6: Run the test (will still fail until Tasks 2 modules exist)**
+- [x] **Step 6: Run the test (will still fail until Tasks 2 modules exist)**
 
 The `labels`, `sparql`, `closure`, `storage` modules are created in Task 2. Proceed to Task 2, then return and run `cargo test -p horndb-metrics` — expected PASS.
 
-- [ ] **Step 7: Commit (after Task 2 compiles)**
+- [x] **Step 7: Commit (after Task 2 compiles)**
 
 ```bash
 git add Cargo.toml crates/metrics
@@ -200,7 +207,7 @@ git commit -m "feat(metrics): horndb-metrics crate skeleton + global OnceLock re
 - Create: `crates/metrics/src/closure.rs`
 - Create: `crates/metrics/src/storage.rs`
 
-- [ ] **Step 1: Write `labels.rs`**
+- [x] **Step 1: Write `labels.rs`**
 
 ```rust
 //! Typed label sets and values. No strings at call sites.
@@ -241,7 +248,7 @@ pub struct QueryKindLabel { pub kind: QueryKind }
 pub struct StageLabel { pub stage: Stage }
 ```
 
-- [ ] **Step 2: Write `sparql.rs`**
+- [x] **Step 2: Write `sparql.rs`**
 
 ```rust
 //! SPARQL HTTP + pipeline metrics.
@@ -290,7 +297,7 @@ impl SparqlMetrics {
 }
 ```
 
-- [ ] **Step 3: Write `closure.rs`**
+- [x] **Step 3: Write `closure.rs`**
 
 ```rust
 //! Closure backend metrics. Fed from `horndb_closure::ClosureMetrics` after each
@@ -329,7 +336,7 @@ impl ClosureSink {
 }
 ```
 
-- [ ] **Step 4: Write `storage.rs` (counters now; the scrape-time collector is added in Task 6)**
+- [x] **Step 4: Write `storage.rs` (counters now; the scrape-time collector is added in Task 6)**
 
 ```rust
 //! Storage metrics. Load-path counters live here; size gauges are produced by a
@@ -355,12 +362,12 @@ impl StorageMetrics {
 }
 ```
 
-- [ ] **Step 5: Run Task 1's test**
+- [x] **Step 5: Run Task 1's test**
 
 Run: `cargo test -p horndb-metrics`
 Expected: PASS (`encode_contains_registered_metric`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/metrics
@@ -377,11 +384,11 @@ git commit -m "feat(metrics): typed labels + sparql/closure/storage metric struc
 - Modify: `crates/sparql/src/server/mod.rs` — add route + middleware
 - Test: `crates/sparql/tests/metrics_endpoint.rs`
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In `crates/sparql/Cargo.toml` `[dependencies]`: `horndb-metrics.workspace = true`.
 
-- [ ] **Step 2: Write the failing integration test**
+- [x] **Step 2: Write the failing integration test**
 
 `crates/sparql/tests/metrics_endpoint.rs`:
 
@@ -422,12 +429,12 @@ async fn metrics_endpoint_exposes_request_counter() {
 > Add `urlencoding` as a dev-dependency only if not already present, or build the
 > query string with `axum`'s test helpers used elsewhere.
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cargo test -p horndb-sparql --features server metrics_endpoint`
 Expected: FAIL — no `/metrics` route (404).
 
-- [ ] **Step 4: Write the `/metrics` handler**
+- [x] **Step 4: Write the `/metrics` handler**
 
 `crates/sparql/src/server/metrics_route.rs`:
 
@@ -442,7 +449,7 @@ pub async fn handle_metrics() -> impl IntoResponse {
 }
 ```
 
-- [ ] **Step 5: Add the route and the instrumentation middleware**
+- [x] **Step 5: Add the route and the instrumentation middleware**
 
 In `crates/sparql/src/server/mod.rs`, add `pub mod metrics_route;` and extend `build_router`:
 
@@ -494,12 +501,12 @@ async fn record_request(req: Request, next: Next) -> Response {
 }
 ```
 
-- [ ] **Step 6: Run the test**
+- [x] **Step 6: Run the test**
 
 Run: `cargo test -p horndb-sparql --features server metrics_endpoint`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sparql
@@ -514,7 +521,7 @@ git commit -m "feat(metrics): /metrics endpoint + request instrumentation middle
 - Modify: `crates/sparql/src/api.rs` (around `execute_query_with` ~line 41, `execute_update_with` ~line 130)
 - Test: `crates/sparql/tests/metrics_pipeline.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `crates/sparql/tests/metrics_pipeline.rs`:
 
@@ -539,12 +546,12 @@ fn query_kind_and_stage_metrics_recorded() {
 > Match the real signature of `execute_query` (Task scan: `api.rs:35`). If it needs a
 > `SparqlConfig`, use `execute_query_with` with the default config, mirroring existing tests.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p horndb-sparql --features server metrics_pipeline`
 Expected: FAIL — no `horndb_sparql_query_total`.
 
-- [ ] **Step 3: Instrument the pipeline**
+- [x] **Step 3: Instrument the pipeline**
 
 In `crates/sparql/src/api.rs`, wrap each stage with `Instant::now()` and record. Sketch (adapt to the real control flow):
 
@@ -590,17 +597,17 @@ In `execute_update_with`, increment `query_total{kind=update}` and time an `Exec
 > existing calls; do not restructure the pipeline. If the function returns early in
 > several places, record the error counter at each early-return matching the stage.
 
-- [ ] **Step 4: Run the test**
+- [x] **Step 4: Run the test**
 
 Run: `cargo test -p horndb-sparql --features server metrics_pipeline`
 Expected: PASS.
 
-- [ ] **Step 5: Run the full sparql suite to check no regressions**
+- [x] **Step 5: Run the full sparql suite to check no regressions**
 
 Run: `cargo test -p horndb-sparql --features server`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sparql
@@ -616,11 +623,11 @@ git commit -m "feat(metrics): per-stage timing + query-kind counters in SPARQL p
 - Modify: `crates/closure/src/metrics.rs` (the `valued_transitive_closure` return path, ~line 107/193) and/or `crates/closure/src/crosswalk.rs:73-94`
 - Test: `crates/closure/tests/metrics_sink.rs`
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In `crates/closure/Cargo.toml` `[dependencies]`: `horndb-metrics.workspace = true`.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/closure/tests/metrics_sink.rs`:
 
@@ -639,12 +646,12 @@ fn closure_call_records_metrics() {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cargo test -p horndb-closure metrics_sink`
 Expected: FAIL.
 
-- [ ] **Step 4: Emit into the sink where `ClosureMetrics` is finalized**
+- [x] **Step 4: Emit into the sink where `ClosureMetrics` is finalized**
 
 At the point `valued_transitive_closure` builds its `ClosureMetrics` (before returning), add:
 
@@ -660,12 +667,12 @@ horndb_metrics::metrics().closure.observe(
 (Use the actual field names from `ClosureMetrics` in `crates/closure/src/metrics.rs:41-80`:
 `mxm_time`, `total_time`, `iterations_to_fixpoint`, `closure_nnz`.)
 
-- [ ] **Step 5: Run the test + closure suite**
+- [x] **Step 5: Run the test + closure suite**
 
 Run: `cargo test -p horndb-closure`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/closure
@@ -686,7 +693,7 @@ git commit -m "feat(metrics): record ClosureMetrics into the global closure sink
 > the load counters are recorded in `serve.rs`. The owlrl/incremental fan-out is where
 > lower crates start depending on `horndb-metrics` directly.
 
-- [ ] **Step 1: Add a scrape-time collector to `storage.rs`**
+- [x] **Step 1: Add a scrape-time collector to `storage.rs`**
 
 ```rust
 use prometheus_client::collector::Collector;
@@ -744,7 +751,7 @@ impl Collector for StorageCollector {
 > `prometheus-client` minor versions. If signatures differ, follow the version's
 > `collector` module docs; the contract is: emit five gauges from one `StorageSnapshot`.
 
-- [ ] **Step 2: Inline test for the collector**
+- [x] **Step 2: Inline test for the collector**
 
 ```rust
 #[cfg(test)]
@@ -766,19 +773,19 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails, then it passes after Step 1 compiles**
+- [x] **Step 3: Run to verify it fails, then it passes after Step 1 compiles**
 
 Run: `cargo test -p horndb-metrics collector_emits_storage_gauges`
 Expected: PASS once the collector compiles.
 
-- [ ] **Step 4: Provide a cheap snapshot from the store**
+- [x] **Step 4: Provide a cheap snapshot from the store**
 
 Confirm `HornBackend` (or the underlying storage tier) exposes a cheap stats accessor
 (`TierStats` is used at `crates/storage/src/store.rs:47,67,72`). If a public
 `fn stats(&self) -> TierStats` (or similar) is missing, add a thin one that returns the
 already-computed counts — do NOT add an O(n) scan. Map its fields into `StorageSnapshot`.
 
-- [ ] **Step 5: Register the collector + count load in `serve.rs`**
+- [x] **Step 5: Register the collector + count load in `serve.rs`**
 
 In `crates/sparql/src/bin/serve.rs`, after building `state` (line ~97) and before serving:
 
@@ -810,13 +817,13 @@ horndb_metrics::metrics().storage.load_duration_seconds.observe(elapsed_secs);
 > `serve.rs` currently does not time loads; wrap the existing per-file load with an
 > `Instant::now()`/`.elapsed()` and pass the file byte length as `bytes_read`.
 
-- [ ] **Step 6: Build the serve binary + run metrics crate tests**
+- [x] **Step 6: Build the serve binary + run metrics crate tests**
 
 Run: `cargo build -p horndb-sparql --features server --bin serve`
 Run: `cargo test -p horndb-metrics`
 Expected: both succeed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/metrics crates/storage crates/sparql
@@ -832,19 +839,19 @@ git commit -m "feat(metrics): scrape-time storage size collector + load-path cou
 - Modify: `TASKS.md` (add metrics epic + slice-1 done + fan-out tasks)
 - Mirror to a GitHub issue per the `TASKS.md` header procedure
 
-- [ ] **Step 1: Update `docs/architecture.md`**
+- [x] **Step 1: Update `docs/architecture.md`**
 
 Add a row/section for **Observability / Metrics**: Status **implemented** for Slice 1
 (prometheus-client, `/metrics`, sparql+closure+storage), **planned** for the owlrl /
 incremental / ml / wcoj fan-out. Link the spec.
 
-- [ ] **Step 2: Update `TASKS.md`**
+- [x] **Step 2: Update `TASKS.md`**
 
 Add a metrics epic with Slice 1 checked off and the fan-out items listed (owlrl,
 incremental, ml, wcoj, traces/logs as a future phase), at the priority the project lead
 sets. Mirror to a GitHub issue per the header procedure.
 
-- [ ] **Step 3: Workspace lint + build (what CI runs)**
+- [x] **Step 3: Workspace lint + build (what CI runs)**
 
 Run: `cargo fmt --all`
 Run: `cargo clippy --workspace --all-targets -- -D warnings`
@@ -852,7 +859,7 @@ Run: `cargo nextest run -p horndb-metrics -p horndb-closure -p horndb-storage`
 Run: `cargo nextest run -p horndb-sparql --features server`
 Expected: all green.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/architecture.md TASKS.md
