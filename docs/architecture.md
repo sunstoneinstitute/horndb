@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice + Phase-2 ml slice); remaining fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice + Phase-2 ml slice + Phase-2 wcoj slice); remaining fan-out planned.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -495,8 +495,13 @@ publish-reap). **Phase-2 Slice 3 (ml):** `MlMetrics` subsystem (behind the
 (from `CostJson`); `horndb_ml_translate_duration_seconds`,
 `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
 histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on the
-`server` feature. **Planned (remaining fan-out):** the wcoj developer
-histograms, and response-byte accounting via a body-counting layer
+`server` feature. **Phase-2 Slice 4 (wcoj):** `WcojMetrics` subsystem — three
+unlabelled histograms (`horndb_wcoj_seeks_per_query`,
+`horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators`) observed
+exactly once per query in `impl Drop for BatchIter`; the inner loop only
+increments plain `u64` struct fields (NO per-seek atomic/timing — strict §5.3
+compliance). Whole-query granularity only. **Planned (remaining fan-out):**
+SPARQL request/response byte accounting via a body-counting tower layer
 (`TASKS.md`, Observability). **Deferred (next phase):** OTel traces and logs.
 Design: `docs/specs/2026-06-29-metrics-design.md`.
 

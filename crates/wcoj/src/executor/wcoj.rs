@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use horndb_metrics::metrics;
 
 use crate::batch::BindingBatchBuilder;
 use crate::cancel::CancelToken;
@@ -207,6 +208,10 @@ pub struct BatchIter<'src, S: TripleSource + ?Sized + 'src> {
     depth: u8,
     finished: bool,
     pending_error: Option<crate::error::WcojError>,
+    /// Accumulated seek count for Drop→observe. §5.3: plain integer only.
+    seeks: u64,
+    /// Accumulated leapfrog iteration count for Drop→observe. §5.3: plain integer only.
+    iterations: u64,
 }
 
 impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
@@ -374,6 +379,8 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             depth: 0,
             finished,
             pending_error,
+            seeks: 0,
+            iterations: 0,
         }
     }
 
@@ -434,6 +441,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         let cur_iter = self.sorted_idxs[d][p];
         let cur = self.iters[cur_iter].peek(depth).unwrap();
         self.iters[cur_iter].seek(depth, cur.wrapping_add(1));
+        self.seeks += 1; // a seek: advance iter past current match
         if self.iters[cur_iter].peek(depth).is_none() {
             self.state[d].as_mut().unwrap().done = true;
             return None;
@@ -446,6 +454,8 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         let d = depth as usize;
         let k = self.contributing[d].len();
         loop {
+            // one leapfrog convergence iteration (plain integer; §5.3)
+            self.iterations += 1;
             // Loop invariant (maintained by sorting on prime and by each
             // successful seek making `iter[p]` the new max):
             // `iter[sorted_idxs[d][p+i]]` are non-decreasing in `i` mod k,
@@ -464,6 +474,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             // peek is *less than* target (impossible if seek honors >=
             // semantics), bail to avoid infinite loops.
             self.iters[iter_p].seek(depth, target);
+            self.seeks += 1; // a seek: advance iter toward target
             match self.iters[iter_p].peek(depth) {
                 None => {
                     self.state[d].as_mut().unwrap().done = true;
@@ -577,5 +588,14 @@ impl<'src, S: TripleSource + ?Sized + 'src> Iterator for BatchIter<'src, S> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
         self.step()
+    }
+}
+
+impl<'src, S: TripleSource + ?Sized + 'src> Drop for BatchIter<'src, S> {
+    fn drop(&mut self) {
+        let m = metrics();
+        m.wcoj.seeks_per_query.observe(self.seeks as f64);
+        m.wcoj.iterations_per_query.observe(self.iterations as f64);
+        m.wcoj.peak_iterators.observe(self.iters.len() as f64);
     }
 }
