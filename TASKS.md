@@ -192,11 +192,18 @@ Closed tasks are listed in [Done](#done-for-traceability).
   fixpoint-rounds histogram; change-feed subscriber gauge maintained at subscribe +
   publish-reap.
 
+  **Phase-2 Slice 3 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice3-ml.md`):
+  ml fan-out — `MlMetrics` subsystem (behind `horndb-ml`'s `server` feature):
+  `horndb_ml_nl_query_total{result}` counter; `horndb_ml_prompt_tokens_total`,
+  `horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
+  (from `CostJson`); `horndb_ml_translate_duration_seconds`,
+  `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
+  histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on `server`.
+
   **Remaining (fan-out):**
-  1. ml — NL-query counts, LLM tokens/cost (`CostJson`), translate/execute/audit latency.
-  2. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
+  1. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
      completion (NO per-tuple/per-seek timing), peak active iterators.
-  3. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+  2. SPARQL response-byte accounting via a body-counting tower layer (deferred from
      Slice 1 — a middleware can't see the serialized size cheaply).
 
   **Deferred to a later phase:** OpenTelemetry traces and logs.

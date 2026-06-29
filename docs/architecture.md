@@ -463,7 +463,7 @@ are now owned by **SPEC-12** (§14, the SIMD layer). Keep `BENCHMARKS.md` rows i
 sync with the `TASKS.md` performance entries.
 
 ### Observability / metrics
-**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice); remaining fan-out planned.** Metrics use
+**Status: implemented (Phase-1 Slice 1 + Phase-2 owlrl slice + Phase-2 incremental slice + Phase-2 ml slice); remaining fan-out planned.** Metrics use
 `prometheus-client` (typed `#[derive(EncodeLabelSet)]` labels, no strings) in a
 foundational `horndb-metrics` crate that owns a process-global `OnceLock`
 registry and the only `prometheus-client` dependency. Hot-path updates are
@@ -488,7 +488,14 @@ latency), `horndb_incremental_asserted_merged_total` /
 `horndb_incremental_closure_promote_total` counters (retraction/promotion),
 `horndb_incremental_fixpoint_rounds` histogram (convergence depth); and
 `horndb_incremental_change_feed_subscribers` gauge (maintained at subscribe +
-publish-reap). **Planned (remaining fan-out):** ml, the wcoj developer
+publish-reap). **Phase-2 Slice 3 (ml):** `MlMetrics` subsystem (behind the
+`server` feature of `horndb-ml`) — `horndb_ml_nl_query_total{result}` counter
+(`result` ∈ `ok`/`error`); `horndb_ml_prompt_tokens_total`,
+`horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
+(from `CostJson`); `horndb_ml_translate_duration_seconds`,
+`horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
+histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on the
+`server` feature. **Planned (remaining fan-out):** the wcoj developer
 histograms, and response-byte accounting via a body-counting layer
 (`TASKS.md`, Observability). **Deferred (next phase):** OTel traces and logs.
 Design: `docs/specs/2026-06-29-metrics-design.md`.
