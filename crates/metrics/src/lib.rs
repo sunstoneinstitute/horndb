@@ -12,6 +12,7 @@ pub mod ml;
 pub mod owlrl;
 pub mod sparql;
 pub mod storage;
+pub mod wcoj;
 
 use prometheus_client::collector::Collector;
 use prometheus_client::registry::Registry;
@@ -25,6 +26,7 @@ pub struct MetricsState {
     pub owlrl: owlrl::OwlrlMetrics,
     pub incremental: incremental::IncrementalMetrics,
     pub ml: ml::MlMetrics,
+    pub wcoj: wcoj::WcojMetrics,
 }
 
 impl MetricsState {
@@ -36,6 +38,7 @@ impl MetricsState {
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
         let ml = ml::MlMetrics::register(&mut registry);
+        let wcoj = wcoj::WcojMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
@@ -44,6 +47,7 @@ impl MetricsState {
             owlrl,
             incremental,
             ml,
+            wcoj,
         }
     }
 
