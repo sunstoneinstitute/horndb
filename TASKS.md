@@ -200,10 +200,14 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
   histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on `server`.
 
+  **Phase-2 Slice 4 landed** (plan: `docs/plans/2026-06-29-metrics-phase2-slice4-wcoj.md`):
+  wcoj fan-out — `WcojMetrics` subsystem: `horndb_wcoj_seeks_per_query`,
+  `horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators` histograms,
+  all observed exactly once per query in `impl Drop for BatchIter`; inner loop
+  does plain `u64` field increments only (NO per-seek timing — §5.3 compliant).
+
   **Remaining (fan-out):**
-  1. wcoj — seeks-per-query / iterations-to-match as plain counters read at query
-     completion (NO per-tuple/per-seek timing), peak active iterators.
-  2. SPARQL response-byte accounting via a body-counting tower layer (deferred from
+  1. SPARQL response-byte accounting via a body-counting tower layer (deferred from
      Slice 1 — a middleware can't see the serialized size cheaply).
 
   **Deferred to a later phase:** OpenTelemetry traces and logs.
