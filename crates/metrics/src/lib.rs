@@ -6,6 +6,7 @@
 //! registered with `register_collector`.
 
 pub mod closure;
+pub mod incremental;
 pub mod labels;
 pub mod owlrl;
 pub mod sparql;
@@ -21,6 +22,7 @@ pub struct MetricsState {
     pub closure: closure::ClosureSink,
     pub storage: storage::StorageMetrics,
     pub owlrl: owlrl::OwlrlMetrics,
+    pub incremental: incremental::IncrementalMetrics,
 }
 
 impl MetricsState {
@@ -30,12 +32,14 @@ impl MetricsState {
         let closure = closure::ClosureSink::register(&mut registry);
         let storage = storage::StorageMetrics::register(&mut registry);
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
+        let incremental = incremental::IncrementalMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
             closure,
             storage,
             owlrl,
+            incremental,
         }
     }
 
