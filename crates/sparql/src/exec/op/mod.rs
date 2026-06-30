@@ -5,7 +5,7 @@
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
-use source::{ScanOp, ValuesOp};
+use source::{CountScanOp, ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
@@ -83,6 +83,9 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => {
                 Ok(Box::new(ScanOp::new(self.exec().scan_bgp_ids(patterns)?)))
+            }
+            PhysicalPlan::CountScan { patterns, out_var } => {
+                Ok(Box::new(CountScanOp::new(self.exec(), patterns, out_var)?))
             }
             PhysicalPlan::Filter { expr, inner } => {
                 let child = self.build(inner)?;

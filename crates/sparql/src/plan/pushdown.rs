@@ -58,20 +58,168 @@
 //! * **`PathClosure`** — the `edge` keeps its full natural output (the synthetic
 //!   `?pp_src`/`?pp_dst` endpoints the BFS needs); we never prune inside it.
 
-use crate::algebra::{AggFunc, Term, TriplePattern, Var};
+use crate::algebra::{AggFunc, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
 use crate::exec::runtime::{agg_inner_exprs, referenced_vars};
 use crate::plan::PhysicalPlan;
 use std::collections::HashSet;
 
-/// Rewrite `plan` into a result-equivalent plan with interior columns no
-/// ancestor needs dropped. The root output schema is preserved exactly.
+/// Rewrite `plan` into a result-equivalent plan. Two passes run in order:
+///
+/// 1. [`push_aggregates`] — turn a `COUNT(*)`/`COUNT(?v)` over a bare `BgpScan`
+///    into a [`PhysicalPlan::CountScan`], answering the count without
+///    materializing rows (#144).
+/// 2. column pruning ([`prune`]) — drop interior columns no ancestor needs.
+///
+/// Both are result-invariant; `Runtime::run` must yield byte-identical
+/// `Bindings` with and without this rewrite.
 pub fn rewrite(plan: &PhysicalPlan) -> Result<PhysicalPlan> {
+    let plan = push_aggregates(plan.clone());
     // The root must emit exactly what it emits today, so it demands its own
     // full natural output. No narrowing happens at the root level; only
     // interior edges (and leaves below them) can be pruned.
-    let demanded: HashSet<String> = output_vars(plan).into_iter().collect();
-    Ok(prune(plan, &demanded))
+    let demanded: HashSet<String> = output_vars(&plan).into_iter().collect();
+    Ok(prune(&plan, &demanded))
+}
+
+/// Recognize the narrow `COUNT`-over-BGP shape and rewrite it to a
+/// [`PhysicalPlan::CountScan`]; recurse into every other node unchanged.
+///
+/// The matched shape is EXACTLY:
+/// `Group { inner: BgpScan { patterns }, keys, aggregates }` where
+/// * `keys.is_empty()` (implicit grouping — no `GROUP BY`), AND
+/// * `aggregates.len() == 1`, AND
+/// * the single aggregate has `distinct == false` and is either
+///   * `COUNT(*)` (`AggFunc::CountStar`), or
+///   * `COUNT(?v)` (`AggFunc::Count(Expr::Term(Term::Var(v)))`) where `?v` is
+///     one of the BGP's output variables.
+///
+/// The `?v ∈ BGP vars` guard is what makes `COUNT(?v)` equivalent to the
+/// solution count: a BGP binds every one of its variables in every solution,
+/// so `COUNT(?v)` over a bound BGP var equals `COUNT(*)`. A `COUNT(?z)` over a
+/// var the BGP does not produce would count 0, so it is deliberately NOT
+/// rewritten and stays a `Group`.
+fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
+    use PhysicalPlan::*;
+    match plan {
+        Group {
+            inner,
+            keys,
+            aggregates,
+        } if keys.is_empty() && aggregates.len() == 1 => {
+            // Only a bare BgpScan inner qualifies.
+            if let BgpScan { patterns } = *inner {
+                let agg = &aggregates[0];
+                let count_over_bgp = !agg.distinct
+                    && match &agg.func {
+                        AggFunc::CountStar => true,
+                        AggFunc::Count(e) => match &**e {
+                            Expr::Term(Term::Var(v)) => {
+                                let bgp_vars: HashSet<String> = output_vars(&BgpScan {
+                                    patterns: patterns.clone(),
+                                })
+                                .into_iter()
+                                .collect();
+                                bgp_vars.contains(v.name())
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                if count_over_bgp {
+                    return CountScan {
+                        patterns,
+                        out_var: agg.out.clone(),
+                    };
+                }
+                // Not the count shape: rebuild the Group unchanged.
+                return Group {
+                    inner: Box::new(BgpScan { patterns }),
+                    keys,
+                    aggregates,
+                };
+            }
+            // Inner is not a bare BgpScan: recurse into it, keep the Group.
+            Group {
+                inner: Box::new(push_aggregates(*inner)),
+                keys,
+                aggregates,
+            }
+        }
+        // Everything else: recurse into children unchanged.
+        other => map_children(other, push_aggregates),
+    }
+}
+
+/// Apply `f` to each direct child of `node`, rebuilding `node` with the
+/// rewritten children. Leaves are returned unchanged.
+fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> PhysicalPlan {
+    use PhysicalPlan::*;
+    match node {
+        leaf @ (BgpScan { .. } | CountScan { .. } | Values { .. }) => leaf,
+        Join { left, right } => Join {
+            left: Box::new(f(*left)),
+            right: Box::new(f(*right)),
+        },
+        LeftJoin { left, right, expr } => LeftJoin {
+            left: Box::new(f(*left)),
+            right: Box::new(f(*right)),
+            expr,
+        },
+        Union { left, right } => Union {
+            left: Box::new(f(*left)),
+            right: Box::new(f(*right)),
+        },
+        Filter { expr, inner } => Filter {
+            expr,
+            inner: Box::new(f(*inner)),
+        },
+        Project { vars, inner } => Project {
+            vars,
+            inner: Box::new(f(*inner)),
+        },
+        Distinct { inner } => Distinct {
+            inner: Box::new(f(*inner)),
+        },
+        Slice {
+            inner,
+            start,
+            length,
+        } => Slice {
+            inner: Box::new(f(*inner)),
+            start,
+            length,
+        },
+        OrderBy { inner, keys } => OrderBy {
+            inner: Box::new(f(*inner)),
+            keys,
+        },
+        Extend { inner, var, expr } => Extend {
+            inner: Box::new(f(*inner)),
+            var,
+            expr,
+        },
+        Group {
+            inner,
+            keys,
+            aggregates,
+        } => Group {
+            inner: Box::new(f(*inner)),
+            keys,
+            aggregates,
+        },
+        PathClosure {
+            subject,
+            object,
+            edge,
+            reflexive,
+        } => PathClosure {
+            subject,
+            object,
+            edge: Box::new(f(*edge)),
+            reflexive,
+        },
+    }
 }
 
 /// A node's natural output variables, computed structurally, in a deterministic
@@ -92,6 +240,7 @@ pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
             }
             out
         }
+        CountScan { out_var, .. } => vec![out_var.name().to_owned()],
         Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
             let mut out = output_vars(left);
             for v in output_vars(right) {
@@ -217,6 +366,9 @@ fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
                 demanded,
             )
         }
+        // Already a count over a BGP: a leaf with no child to prune, and its
+        // single output column is exactly what its parent demands. Unchanged.
+        CountScan { .. } => node.clone(),
         // The Project itself is the restriction point: it forwards exactly its
         // own `vars` to the child (ignoring the incoming demand, which can only
         // be a subset and is re-applied by this Project's own output).
@@ -584,6 +736,150 @@ mod tests {
         );
     }
 
+    // ---- COUNT-over-BGP pushdown (#144) ----
+
+    /// True iff the plan tree contains a `CountScan` node anywhere.
+    fn has_count_scan(p: &PhysicalPlan) -> bool {
+        match p {
+            PhysicalPlan::CountScan { .. } => true,
+            PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Filter { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::OrderBy { inner, .. }
+            | PhysicalPlan::Extend { inner, .. }
+            | PhysicalPlan::Group { inner, .. } => has_count_scan(inner),
+            PhysicalPlan::Join { left, right }
+            | PhysicalPlan::LeftJoin { left, right, .. }
+            | PhysicalPlan::Union { left, right } => has_count_scan(left) || has_count_scan(right),
+            PhysicalPlan::PathClosure { edge, .. } => has_count_scan(edge),
+            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => false,
+        }
+    }
+
+    /// A store with exactly `n` triples on predicate `p` (distinct subjects).
+    fn n_triples(n: usize) -> HornBackend {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        for i in 0..n {
+            horn.insert_triple(iri(&format!("s{i}")), iri("p"), iri(&format!("o{i}")));
+        }
+        horn
+    }
+
+    /// The single `?n` count value of a one-row result, as its lexical form.
+    fn single_count(rows: &[Bindings]) -> String {
+        assert_eq!(rows.len(), 1, "expected exactly one result row: {rows:?}");
+        format!("{:?}", rows[0].get("n").expect("?n must be bound"))
+    }
+
+    #[test]
+    fn count_star_over_bgp_pushes_down_and_counts() {
+        let horn = n_triples(7);
+        let plan = plan_select("SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/p> ?o }");
+        let rewritten = rewrite(&plan).unwrap();
+        assert!(
+            has_count_scan(&rewritten),
+            "COUNT(*) over a bare BGP must rewrite to CountScan; got {rewritten:#?}"
+        );
+        let out: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            single_count(&out),
+            format!("{:?}", crate::exec::runtime::integer_literal(7))
+        );
+    }
+
+    #[test]
+    fn count_var_over_bound_bgp_var_pushes_down_and_counts() {
+        let horn = n_triples(5);
+        // ?s is bound by every BGP solution, so COUNT(?s) == COUNT(*) == 5.
+        let plan = plan_select("SELECT (COUNT(?s) AS ?n) WHERE { ?s <http://ex/p> ?o }");
+        let rewritten = rewrite(&plan).unwrap();
+        assert!(
+            has_count_scan(&rewritten),
+            "COUNT(?s) over a bound BGP var must rewrite to CountScan; got {rewritten:#?}"
+        );
+        let out: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            single_count(&out),
+            format!("{:?}", crate::exec::runtime::integer_literal(5))
+        );
+    }
+
+    #[test]
+    fn count_pushdown_parity_with_streaming_group() {
+        let horn = fixture();
+        for q in [
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o }",
+            "SELECT (COUNT(?s) AS ?n) WHERE { ?s <http://ex/knows> ?o }",
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }",
+            // No solutions: COUNT(*) of nothing is one row with 0.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/nope> ?o }",
+        ] {
+            let plan = plan_select(q);
+            // The pushdown path (run) vs the streaming Group baseline.
+            let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+            let without = run_raw(&horn, &plan);
+            assert_eq!(canon(with), canon(without), "count parity broke for:\n{q}");
+        }
+    }
+
+    #[test]
+    fn scope_guard_keeps_group_and_stays_correct() {
+        let horn = fixture();
+        // Each of these must NOT become a CountScan, and must still be correct.
+        let cases = [
+            // DISTINCT count: not the plain-count shape.
+            "SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s <http://ex/name> ?o }",
+            // GROUP BY: non-empty keys.
+            "SELECT ?c (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?c } GROUP BY ?c",
+            // Inner is Filter(BGP), not a bare BgpScan.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/age> ?o FILTER(?o > \"20\") }",
+            // Two aggregates.
+            "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/name> ?o }",
+            // COUNT over a var the BGP does not bind: must count 0, not solutions.
+            "SELECT (COUNT(?z) AS ?n) WHERE { ?s <http://ex/name> ?o }",
+        ];
+        for q in cases {
+            let plan = plan_select(q);
+            let rewritten = rewrite(&plan).unwrap();
+            assert!(
+                !has_count_scan(&rewritten),
+                "scope guard failed — this must stay a Group:\n{q}\ngot {rewritten:#?}"
+            );
+            let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+            let without = run_raw(&horn, &plan);
+            assert_eq!(canon(with), canon(without), "result parity broke for:\n{q}");
+        }
+    }
+
+    #[test]
+    fn count_scan_falls_back_when_count_bgp_is_none() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::mem::MemStore;
+        // MemStore uses the default `count_bgp` (None), exercising the
+        // `scan_bgp_ids().rows.len()` correctness fallback in CountScanOp.
+        let mut mem = MemStore::default();
+        for i in 0..4 {
+            mem.insert((format!("s{i}"), "p".into(), format!("o{i}")));
+        }
+        let var = |n: &str| Term::Var(Var::new(n));
+        let plan = PhysicalPlan::CountScan {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("p".into()),
+                object: var("o"),
+            }],
+            out_var: Var::new("n"),
+        };
+        let out: Vec<Bindings> = Runtime::new(&mem).run(&plan).unwrap().collect();
+        assert_eq!(
+            single_count(&out),
+            format!("{:?}", crate::exec::runtime::integer_literal(4)),
+            "default count_bgp (None) must fall back to scan+len"
+        );
+    }
+
     // ---- structural test helpers ----
 
     fn scan_is_narrowed_to(p: &PhysicalPlan, want: &[&str]) -> bool {
@@ -607,7 +903,9 @@ mod tests {
                 scan_is_narrowed_to(left, want) || scan_is_narrowed_to(right, want)
             }
             PhysicalPlan::PathClosure { edge, .. } => scan_is_narrowed_to(edge, want),
-            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => false,
+            PhysicalPlan::BgpScan { .. }
+            | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::Values { .. } => false,
         }
     }
 
@@ -632,7 +930,7 @@ mod tests {
                 find_bgp_vars(right, out);
             }
             PhysicalPlan::PathClosure { edge, .. } => find_bgp_vars(edge, out),
-            PhysicalPlan::Values { .. } => {}
+            PhysicalPlan::CountScan { .. } | PhysicalPlan::Values { .. } => {}
         }
     }
 
@@ -651,7 +949,9 @@ mod tests {
                 distinct_inner(left).or_else(|| distinct_inner(right))
             }
             PhysicalPlan::PathClosure { edge, .. } => distinct_inner(edge),
-            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => None,
+            PhysicalPlan::BgpScan { .. }
+            | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::Values { .. } => None,
         }
     }
 }

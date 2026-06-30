@@ -73,6 +73,8 @@ pub fn explain<E: Executor + ?Sized>(
 fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize> {
     match plan {
         PhysicalPlan::BgpScan { patterns } => exec.cardinality_estimate(patterns),
+        // A pushed-down COUNT always yields exactly one row.
+        PhysicalPlan::CountScan { .. } => Some(1),
         PhysicalPlan::Values { rows, .. } => Some(rows.len()),
         // Join: upper-bounded by the product of inputs. We keep the
         // textbook product (an upper bound when join vars are absent) but
@@ -130,6 +132,14 @@ fn node_label(plan: &PhysicalPlan) -> String {
                 "BgpScan({} pattern{})",
                 patterns.len(),
                 plural(patterns.len())
+            )
+        }
+        PhysicalPlan::CountScan { patterns, out_var } => {
+            format!(
+                "CountScan({} pattern{} -> ?{})",
+                patterns.len(),
+                plural(patterns.len()),
+                out_var.name()
             )
         }
         PhysicalPlan::Join { .. } => "Join".to_owned(),
@@ -196,7 +206,9 @@ fn plural(n: usize) -> &'static str {
 /// The direct children of a node, in render order.
 fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
     match plan {
-        PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => vec![],
+        PhysicalPlan::BgpScan { .. }
+        | PhysicalPlan::CountScan { .. }
+        | PhysicalPlan::Values { .. } => vec![],
         PhysicalPlan::Join { left, right }
         | PhysicalPlan::LeftJoin { left, right, .. }
         | PhysicalPlan::Union { left, right } => vec![left, right],

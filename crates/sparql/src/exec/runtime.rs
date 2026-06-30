@@ -971,7 +971,7 @@ pub(crate) fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
 }
 
 /// Render an `xsd:integer` typed literal in N-Triples lexical form.
-fn integer_literal(n: i64) -> Term {
+pub(crate) fn integer_literal(n: i64) -> Term {
     Term::Literal(format!(
         "\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
     ))
@@ -2077,7 +2077,9 @@ mod slot_differential {
             | PhysicalPlan::Extend { inner, .. }
             | PhysicalPlan::Group { inner, .. } => contains_inner_join(inner),
             PhysicalPlan::PathClosure { edge, .. } => contains_inner_join(edge),
-            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => false,
+            PhysicalPlan::BgpScan { .. }
+            | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::Values { .. } => false,
         }
     }
 

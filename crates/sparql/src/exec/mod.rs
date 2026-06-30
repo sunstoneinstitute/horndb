@@ -108,6 +108,15 @@ pub trait Executor {
     fn cardinality_estimate(&self, _patterns: &[TriplePattern]) -> Option<usize> {
         None
     }
+
+    /// Count solutions to a BGP without materializing rows. `None` = "no fast
+    /// count available" (caller falls back to scanning). Additive; does not
+    /// change `scan_bgp_ids`. The returned count, when `Some`, MUST equal the
+    /// number of solution rows `scan_bgp_ids` would produce (one row per BGP
+    /// solution).
+    fn count_bgp(&self, _patterns: &[TriplePattern]) -> Result<Option<usize>> {
+        Ok(None)
+    }
 }
 
 /// A storage-side write seam used by [`crate::update`].

@@ -834,6 +834,113 @@ impl Executor for HornBackend {
         // within `usize` on 32-bit targets.
         Some(usize::try_from(self.len()).unwrap_or(usize::MAX))
     }
+
+    /// Count BGP solutions without decoding terms or materializing rows.
+    ///
+    /// The count returned (when `Some`) is exactly the number of solution rows
+    /// `scan_bgp_ids` would produce. It reuses the same pattern-compilation as
+    /// `scan_bgp`/`scan_bgp_ids` (kept verbatim, like the existing copies), but
+    /// instead of building `Row`s it sums the WCOJ batch row counts.
+    ///
+    /// One case falls back to the scan-and-count path (`Ok(None)`): a BGP with
+    /// a variable repeated *within a single pattern* (e.g. `?s ?p ?s`). That
+    /// needs a per-row "diagonal" filter to drop off-diagonal WCOJ rows, which
+    /// cannot be done by a bare `num_rows()` sum. Returning `None` keeps the
+    /// result correct via the caller's scan+len fallback.
+    // keep in sync with scan_bgp_ids
+    fn count_bgp(&self, patterns: &[TriplePattern]) -> Result<Option<usize>> {
+        // The empty BGP is the join identity: one solution.
+        if patterns.is_empty() {
+            return Ok(Some(1));
+        }
+
+        let snapshot = self.wcoj_snapshot();
+        let dict = self.store.dictionary();
+
+        let mut var_index: HashMap<String, u8> = HashMap::new();
+        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
+        let mut wpatterns: Vec<WPattern> = Vec::new();
+        let mut ground: Vec<WTriple> = Vec::new();
+
+        for pattern in patterns {
+            let mut seen_here: HashSet<&str> = HashSet::new();
+            let mut slots = [WTerm::Var(WVar(0)); 3];
+            let mut all_bound = true;
+            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+            for (slot_no, term) in slot_terms.into_iter().enumerate() {
+                slots[slot_no] = match term {
+                    Term::Var(v) => {
+                        all_bound = false;
+                        let name = v.name();
+                        let effective = if seen_here.contains(name) {
+                            let alias = format!(" dup_{name}_{slot_no}");
+                            diagonal_filters.push((name.to_owned(), alias.clone()));
+                            alias
+                        } else {
+                            seen_here.insert(name);
+                            name.to_owned()
+                        };
+                        let idx = match var_index.get(&effective) {
+                            Some(&i) => i,
+                            None => {
+                                let next = var_index.len();
+                                if next > u8::MAX as usize {
+                                    return Err(SparqlError::Executor(
+                                        "BGP exceeds 256 distinct variables".into(),
+                                    ));
+                                }
+                                var_index.insert(effective, next as u8);
+                                next as u8
+                            }
+                        };
+                        WTerm::Var(WVar(idx))
+                    }
+                    constant => {
+                        let ox = algebra_to_oxrdf(constant)?;
+                        match dict.get(&ox) {
+                            Some(id) => WTerm::Bound(id.0),
+                            None => return Ok(Some(0)),
+                        }
+                    }
+                };
+            }
+            if all_bound {
+                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
+                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
+            } else {
+                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+            }
+        }
+
+        if ground.iter().any(|t| !snapshot.contains(t)) {
+            return Ok(Some(0));
+        }
+        if wpatterns.is_empty() {
+            // All patterns ground and present: one solution (ASK/unit).
+            return Ok(Some(1));
+        }
+
+        // A within-pattern repeated variable needs the per-row diagonal filter;
+        // a bare row-count sum would overcount. Fall back to scan+len.
+        if !diagonal_filters.is_empty() {
+            return Ok(None);
+        }
+
+        // No diagonal filter: every WCOJ row is one solution, so the solution
+        // count is the sum of batch row counts — no decode, no Row build.
+        let bgp = WBgp::new(wpatterns);
+        let mut count: usize = 0;
+        for batch in WcojExecutor::for_bgp(
+            snapshot.as_ref(),
+            &bgp,
+            &Planner::default(),
+            CancelToken::new(),
+        ) {
+            let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
+            count += batch.num_rows();
+        }
+        Ok(Some(count))
+    }
 }
 
 #[cfg(test)]

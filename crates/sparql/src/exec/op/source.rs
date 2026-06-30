@@ -1,9 +1,9 @@
 //! Source operators: leaves with no child input.
 
 use super::{ChunkedBatch, Op};
-use crate::algebra::{Term, Var};
+use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
-use crate::exec::{Batch, Row, Slot};
+use crate::exec::{Batch, Executor, Row, Slot};
 
 /// Scans a BGP once via the executor, then hands the rows out in chunks.
 /// The scan seam is unchanged (`scan_bgp_ids` returns a whole `Batch`); this
@@ -27,6 +27,49 @@ impl Op for ScanOp {
 
     fn next(&mut self) -> Result<Option<Batch>> {
         Ok(self.inner.next_chunk())
+    }
+}
+
+/// Pushed-down `COUNT(*)` / `COUNT(?v)` over a BGP (#144). Computes the
+/// solution count via the executor's `count_bgp` fast path (falling back to
+/// `scan_bgp_ids().rows.len()` when the backend has no fast count) and emits a
+/// single row binding `out_var` to that count as an `xsd:integer` literal —
+/// byte-identical to what the streaming `Group` would produce.
+pub struct CountScanOp {
+    schema: Vec<Var>,
+    batch: Option<Batch>,
+}
+
+impl CountScanOp {
+    pub fn new<E: Executor + ?Sized>(
+        exec: &E,
+        patterns: &[TriplePattern],
+        out_var: &Var,
+    ) -> Result<Self> {
+        let n = match exec.count_bgp(patterns)? {
+            Some(n) => n,
+            // Correctness fallback: count the id-rows the scan would yield.
+            None => exec.scan_bgp_ids(patterns)?.rows.len(),
+        };
+        let lit = crate::exec::runtime::integer_literal(i64::try_from(n).unwrap_or(i64::MAX));
+        let batch = Batch {
+            schema: vec![out_var.clone()],
+            rows: vec![Row(vec![Slot::Term(lit)])],
+        };
+        Ok(Self {
+            schema: vec![out_var.clone()],
+            batch: Some(batch),
+        })
+    }
+}
+
+impl Op for CountScanOp {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+
+    fn next(&mut self) -> Result<Option<Batch>> {
+        Ok(self.batch.take())
     }
 }
 
