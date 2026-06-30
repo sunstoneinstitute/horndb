@@ -5,7 +5,6 @@
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
-pub(crate) use source::build_values_batch;
 use source::{ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};

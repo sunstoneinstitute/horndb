@@ -1,9 +1,8 @@
-//! Iterator-style runtime over [`PhysicalPlan`]. `eval` returns [`Batch`]
-//! (id-carrying slot rows); `run` decodes once at the boundary via
-//! `decode_term`. Each operator arm still materialises per-node (true
-//! streaming is Future Work). Every operator runs native on slot rows —
-//! there is a single runtime (the test-only string oracle that gated the slot
-//! port was removed once Slice 2 landed).
+//! Streaming runtime over [`PhysicalPlan`]. `run` drives the pull-based
+//! operator tree built by `build` and decodes slot ids once at the boundary
+//! via `decode_term`. Every operator runs native on slot rows — there is a
+//! single runtime (the test-only string oracle that gated the slot port was
+//! removed once Slice 2 landed).
 
 use crate::algebra::{
     AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
@@ -39,113 +38,9 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(out.into_iter())
     }
 
-    /// Evaluate a plan node to a [`Batch`]. All operator arms run native on
-    /// slot rows — one runtime, no decode adapter.
-    ///
-    /// Production code now goes through `build` / `run`; `eval` is kept for
-    /// the legacy test suite that calls it directly.
-    #[allow(dead_code)]
-    pub(crate) fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
-        match plan {
-            PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
-            PhysicalPlan::Join { left, right } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                self.compute_join(l, r)
-            }
-            PhysicalPlan::LeftJoin { left, right, expr } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                self.compute_left_join(l, r, expr)
-            }
-            PhysicalPlan::Filter { expr, inner } => {
-                let child = self.eval(inner)?;
-                self.apply_filter(child, expr)
-            }
-            PhysicalPlan::Union { left, right } => {
-                let l = self.eval(left)?;
-                let r = self.eval(right)?;
-                // Schema = left schema ++ right-only vars (deterministic order).
-                let merged = self.union_schema(&l.schema, &r.schema);
-                // Place each child's rows into merged schema order; normalize
-                // over the COMBINED rows so that a column that is all-Id in one
-                // branch and all-Term in the other is unified (per-child the
-                // column looks homogeneous, but the union is mixed).
-                let mut rows = self.apply_union_chunk(l, &merged)?;
-                rows.extend(self.apply_union_chunk(r, &merged)?);
-                self.normalize_columns(&mut rows, merged.len())?;
-                Ok(Batch {
-                    schema: merged,
-                    rows,
-                })
-            }
-            PhysicalPlan::Project { vars, inner } => {
-                let child = self.eval(inner)?;
-                self.apply_project(child, vars)
-            }
-            PhysicalPlan::Distinct { inner } => {
-                let b = self.eval(inner)?;
-                let mut seen: std::collections::HashSet<Vec<KeyPart>> =
-                    std::collections::HashSet::with_capacity(b.rows.len());
-                let mut rows = Vec::with_capacity(b.rows.len());
-                for r in b.rows {
-                    let key: Vec<KeyPart> = r.0.iter().map(|s| s.key_part()).collect();
-                    if seen.insert(key) {
-                        rows.push(r);
-                    }
-                }
-                Ok(Batch {
-                    schema: b.schema,
-                    rows,
-                })
-            }
-            PhysicalPlan::Slice {
-                inner,
-                start,
-                length,
-            } => {
-                let mut b = self.eval(inner)?;
-                let s = (*start).min(b.rows.len());
-                let take = length.unwrap_or(b.rows.len() - s);
-                b.rows = b.rows.into_iter().skip(s).take(take).collect();
-                Ok(b)
-            }
-            PhysicalPlan::OrderBy { inner, keys } => {
-                let b = self.eval(inner)?;
-                self.compute_order_by(b, keys)
-            }
-            PhysicalPlan::Extend { inner, var, expr } => {
-                let child = self.eval(inner)?;
-                self.apply_extend(child, var, expr)
-            }
-            PhysicalPlan::Values { vars, rows } => Ok(super::op::build_values_batch(vars, rows)),
-            PhysicalPlan::Group {
-                inner,
-                keys,
-                aggregates,
-            } => {
-                let b = self.eval(inner)?;
-                self.eval_group_native(b, keys, aggregates)
-            }
-            PhysicalPlan::PathClosure {
-                subject,
-                object,
-                edge,
-                reflexive,
-            } => {
-                // The edge batch binds exactly the two synthetic endpoint vars;
-                // decode only those, then reuse the string BFS unchanged.
-                // deferred: id-native BFS (#128)
-                let eb = self.eval(edge)?;
-                self.compute_path_closure(eb, subject, object, *reflexive)
-            }
-        }
-    }
-
     /// Keep the rows of `batch` for which `expr` evaluates true. Decodes only
     /// the referenced columns (`decode_subset`), preserving `Slot::Id` for the
-    /// rest. The single source of truth for Filter, shared by the legacy
-    /// `eval` arm and the streaming `FilterOp`.
+    /// rest. Shared helper called by the streaming `FilterOp`.
     pub(crate) fn apply_filter(&self, batch: Batch, expr: &Expr) -> Result<Batch> {
         let mut want = HashSet::new();
         referenced_vars(expr, &mut want);
@@ -168,8 +63,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Restrict `batch` to `vars` (in projection order), remapping each row's
     /// slots. Empty `vars` (SELECT * / ASK) returns the batch unchanged.
-    /// The single source of truth for Project, shared by the legacy `eval`
-    /// arm and the streaming `ProjectOp`.
+    /// Shared helper called by the streaming `ProjectOp`.
     pub(crate) fn apply_project(&self, batch: Batch, vars: &[Var]) -> Result<Batch> {
         if vars.is_empty() {
             // SELECT * / ASK: keep everything (parity with project()).
@@ -199,8 +93,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Evaluate `expr` per row and bind the result to `var` (BIND). Appends a
     /// new column when `var` is new, overwrites it when already present.
-    /// The single source of truth for Extend, shared by the legacy `eval`
-    /// arm and the streaming `ExtendOp`.
+    /// Shared helper called by the streaming `ExtendOp`.
     ///
     /// re-BIND semantics: SPARQL 1.1 §18.1.10 forbids BIND targeting a var
     /// already in scope; spargebra enforces this at parse time so the `Some`
@@ -262,9 +155,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         schema
     }
 
-    /// Sort `batch` by `keys` (ORDER BY). Body relocated from the legacy
-    /// `OrderBy` arm, unchanged. Output schema = input schema (sort is
-    /// schema-preserving).
+    /// Sort `batch` by `keys` (ORDER BY). Output schema = input schema (sort is
+    /// schema-preserving). Shared by `OrderByOp`.
     pub(crate) fn compute_order_by(
         &self,
         batch: Batch,
@@ -294,9 +186,9 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         })
     }
 
-    /// Evaluate the transitive closure of the edge relation. Body mirrors the
-    /// legacy `PathClosure` arm: decodes the edge batch's endpoint vars (the
-    /// two synthetic `?pp_*` vars) and delegates to `eval_path_closure`.
+    /// Evaluate the transitive closure of the edge relation: decodes the edge
+    /// batch's endpoint vars (the two synthetic `?pp_*` vars) and delegates to
+    /// `eval_path_closure`. Shared by `PathClosureOp`.
     pub(crate) fn compute_path_closure(
         &self,
         edge_batch: Batch,
@@ -434,8 +326,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         })
     }
 
-    /// Merged UNION schema: left schema followed by right-only vars (the legacy
-    /// Union arm's schema rule).
+    /// Merged UNION schema: left schema followed by right-only vars. Also the
+    /// output schema of `Join`/`LeftJoin` (shared by `UnionOp`/`JoinOp`/`LeftJoinOp`).
     pub(crate) fn union_schema(&self, left: &[Var], right: &[Var]) -> Vec<Var> {
         let mut s = left.to_vec();
         for v in right {
@@ -446,8 +338,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         s
     }
 
-    /// Hash inner join of two already-evaluated batches. Body relocated from
-    /// the legacy `Join` arm (everything after the two child evals), unchanged.
+    /// Hash inner join of two materialized batches. Called by `JoinOp`.
     pub(crate) fn compute_join(&self, l: Batch, r: Batch) -> Result<Batch> {
         // Output schema = left schema ++ right-only vars.
         let mut out_schema = l.schema.clone();
@@ -515,8 +406,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         })
     }
 
-    /// Hash left-outer join. Body relocated from the legacy `LeftJoin` arm
-    /// (after the child evals), unchanged. `expr` is the optional ON filter.
+    /// Hash left-outer join of two evaluated batches. `expr` is the optional ON
+    /// filter. Shared by `LeftJoinOp`.
     pub(crate) fn compute_left_join(
         &self,
         l: Batch,
@@ -2052,6 +1943,22 @@ mod slot_differential {
     use crate::plan::planner;
     use crate::SparqlConfig;
 
+    /// Run a plan through the streaming operator tree and concatenate all
+    /// chunks into a single `Batch`, preserving slot provenance (Slot::Id vs
+    /// Slot::Term). Replaces the removed `Runtime::eval` at the test call sites.
+    fn eval_to_batch<E: crate::exec::Executor + ?Sized>(
+        rt: &Runtime<'_, E>,
+        plan: &PhysicalPlan,
+    ) -> Batch {
+        let mut op = rt.build(plan).unwrap();
+        let schema = op.schema().to_vec();
+        let mut rows = Vec::new();
+        while let Some(b) = op.next().unwrap() {
+            rows.extend(b.rows);
+        }
+        Batch { schema, rows }
+    }
+
     /// Build a `PhysicalPlan` from a SELECT query string, mirroring
     /// what `api::execute_query_with` does for the SELECT arm.
     fn plan_select(q: &str) -> PhysicalPlan {
@@ -2081,7 +1988,7 @@ mod slot_differential {
         );
 
         let rt = Runtime::new(&horn);
-        let batch = rt.eval(&plan).unwrap();
+        let batch = eval_to_batch(&rt, &plan);
 
         assert_eq!(batch.rows.len(), 1, "expected exactly one result row");
 
@@ -2268,7 +2175,7 @@ mod slot_differential {
         let plan = plan_select("SELECT ?s ?o WHERE { ?s <http://ex/p> ?o } ORDER BY ?o");
 
         let rt = Runtime::new(&horn);
-        let batch = rt.eval(&plan).unwrap();
+        let batch = eval_to_batch(&rt, &plan);
 
         assert_eq!(batch.rows.len(), 2, "expected two result rows");
 
@@ -2378,7 +2285,7 @@ mod slot_differential {
         );
 
         let rt = Runtime::new(&horn);
-        let batch = rt.eval(&plan).unwrap();
+        let batch = eval_to_batch(&rt, &plan);
         assert_eq!(batch.rows.len(), 2, "two left rows survive the OPTIONAL");
 
         let s_idx = batch.col("s").expect("?s must be in output schema");

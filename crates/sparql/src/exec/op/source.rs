@@ -31,8 +31,8 @@ impl Op for ScanOp {
 }
 
 /// Materialize VALUES rows into a `Batch` (`Slot::Term`/`Slot::Unbound` cells).
-/// Mirrors the legacy `Values` eval arm.
-pub(crate) fn build_values_batch(vars: &[Var], rows: &[Vec<Option<Term>>]) -> Batch {
+/// Used by `ValuesOp`.
+pub(super) fn build_values_batch(vars: &[Var], rows: &[Vec<Option<Term>>]) -> Batch {
     // Rows are guaranteed full-width by the spargebra parser (it rejects
     // `VALUES` clauses where any row length != vars.len()), so `zip` stops
     // correctly and no trailing-Unbound padding is needed.
