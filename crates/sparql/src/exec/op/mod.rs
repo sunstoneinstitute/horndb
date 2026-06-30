@@ -3,7 +3,7 @@
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
-use blocking::UnionOp;
+use blocking::{JoinOp, LeftJoinOp, UnionOp};
 mod source;
 pub(crate) use source::build_values_batch;
 use source::{ScanOp, ValuesOp};
@@ -128,6 +128,16 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 let l = self.build(left)?;
                 let r = self.build(right)?;
                 Ok(Box::new(UnionOp::new(self, l, r)))
+            }
+            PhysicalPlan::Join { left, right } => {
+                let l = self.build(left)?;
+                let r = self.build(right)?;
+                Ok(Box::new(JoinOp::new(self, l, r)))
+            }
+            PhysicalPlan::LeftJoin { left, right, expr } => {
+                let l = self.build(left)?;
+                let r = self.build(right)?;
+                Ok(Box::new(LeftJoinOp::new(self, l, r, expr.clone())))
             }
             _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
         }

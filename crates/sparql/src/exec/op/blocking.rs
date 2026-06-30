@@ -11,10 +11,20 @@
 //! chunks via `ChunkedBatch`.
 
 use super::{ChunkedBatch, Op};
-use crate::algebra::Var;
+use crate::algebra::{Expr, Var};
 use crate::error::Result;
 use crate::exec::runtime::Runtime;
 use crate::exec::{Batch, Executor, Row};
+
+/// Pull an op to exhaustion, concatenating its chunks into one `Batch`.
+pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
+    let schema = op.schema().to_vec();
+    let mut rows: Vec<Row> = Vec::new();
+    while let Some(b) = op.next()? {
+        rows.extend(b.rows);
+    }
+    Ok(Batch { schema, rows })
+}
 
 /// UNION: drains both children eagerly to guarantee that `normalize_columns`
 /// sees the full combined row set (required for correctness when the two
@@ -73,6 +83,90 @@ impl<'r, E: Executor + ?Sized> Op for UnionOp<'r, E> {
             rows,
         };
         self.buffer = Some(ChunkedBatch::new(batch));
+        Ok(self.buffer.as_mut().unwrap().next_chunk())
+    }
+}
+
+/// Inner hash join. First cut: drains both children, runs the whole-batch
+/// `compute_join`, then emits the result via `ChunkedBatch`. (Probe-side
+/// streaming is a possible future optimization.)
+pub struct JoinOp<'r, E: Executor + ?Sized> {
+    rt: &'r Runtime<'r, E>,
+    left: Box<dyn Op + 'r>,
+    right: Box<dyn Op + 'r>,
+    buffer: Option<ChunkedBatch>,
+    schema: Vec<Var>,
+}
+
+impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
+    pub fn new(rt: &'r Runtime<'r, E>, left: Box<dyn Op + 'r>, right: Box<dyn Op + 'r>) -> Self {
+        let schema = rt.union_schema(left.schema(), right.schema());
+        Self {
+            rt,
+            left,
+            right,
+            buffer: None,
+            schema,
+        }
+    }
+}
+
+impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+    fn next(&mut self) -> Result<Option<Batch>> {
+        if self.buffer.is_none() {
+            let l = drain(&mut self.left)?;
+            let r = drain(&mut self.right)?;
+            self.buffer = Some(ChunkedBatch::new(self.rt.compute_join(l, r)?));
+        }
+        Ok(self.buffer.as_mut().unwrap().next_chunk())
+    }
+}
+
+/// Left-outer hash join (OPTIONAL). First cut: drains both children, runs the
+/// whole-batch `compute_left_join`, then emits the result via `ChunkedBatch`.
+pub struct LeftJoinOp<'r, E: Executor + ?Sized> {
+    rt: &'r Runtime<'r, E>,
+    left: Box<dyn Op + 'r>,
+    right: Box<dyn Op + 'r>,
+    expr: Option<Expr>,
+    buffer: Option<ChunkedBatch>,
+    schema: Vec<Var>,
+}
+
+impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
+    pub fn new(
+        rt: &'r Runtime<'r, E>,
+        left: Box<dyn Op + 'r>,
+        right: Box<dyn Op + 'r>,
+        expr: Option<Expr>,
+    ) -> Self {
+        let schema = rt.union_schema(left.schema(), right.schema());
+        Self {
+            rt,
+            left,
+            right,
+            expr,
+            buffer: None,
+            schema,
+        }
+    }
+}
+
+impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+    fn next(&mut self) -> Result<Option<Batch>> {
+        if self.buffer.is_none() {
+            let l = drain(&mut self.left)?;
+            let r = drain(&mut self.right)?;
+            self.buffer = Some(ChunkedBatch::new(
+                self.rt.compute_left_join(l, r, &self.expr)?,
+            ));
+        }
         Ok(self.buffer.as_mut().unwrap().next_chunk())
     }
 }

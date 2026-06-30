@@ -47,174 +47,12 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             PhysicalPlan::Join { left, right } => {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-                // Output schema = left schema ++ right-only vars.
-                let mut out_schema = l.schema.clone();
-                for v in &r.schema {
-                    if !out_schema.iter().any(|x| x.name() == v.name()) {
-                        out_schema.push(v.clone());
-                    }
-                }
-                // Hash inner join: index the right relation by its decoded
-                // join-var key (option (b) — see `row_join_key`); right rows
-                // missing a jvar fall to `unkeyed`. Each left row probes only
-                // its same-key bucket plus `unkeyed` (a left row missing a jvar
-                // can't be keyed and must probe ALL right rows). `merge_rows`
-                // still rejects any genuine conflict, so probing same-key
-                // candidates is sound: any pair the nested loop would merge
-                // shares the same decoded jvar key (or one side is unkeyed),
-                // and differing jvar values are rejected by `merge_rows`. No
-                // OPTIONAL semantics: a left row with zero matches contributes
-                // nothing (unlike LeftJoin).
-                let jvars = batch_join_vars(&l, &r);
-                let merge_plan = build_merge_plan(&l.schema, &r.schema, &out_schema);
-
-                let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
-                let mut unkeyed: Vec<&Row> = Vec::new();
-                for b in &r.rows {
-                    match self.row_join_key(b, &r.schema, &jvars)? {
-                        Some(k) => index.entry(k).or_default().push(b),
-                        None => unkeyed.push(b),
-                    }
-                }
-
-                let mut rows = Vec::new();
-                for a in &l.rows {
-                    match self.row_join_key(a, &l.schema, &jvars)? {
-                        Some(k) => {
-                            if let Some(bucket) = index.get(&k) {
-                                self.merge_all(a, bucket, &merge_plan, &mut rows)?;
-                            }
-                            if !unkeyed.is_empty() {
-                                self.merge_all(a, &unkeyed, &merge_plan, &mut rows)?;
-                            }
-                        }
-                        // Left row missing a join var: can't be keyed, so it may
-                        // still be compatible with any right row on the
-                        // remaining shared vars — probe ALL.
-                        None => {
-                            let all: Vec<&Row> = r.rows.iter().collect();
-                            self.merge_all(a, &all, &merge_plan, &mut rows)?;
-                        }
-                    }
-                }
-                // Restore within-column homogeneity: an adapter-backed child
-                // (LeftJoin/Union → all Slot::Term) may leave a shared var as
-                // Slot::Unbound on some rows; the native BGP child has Slot::Id
-                // for that var. merge_rows takes the non-Unbound side, so the
-                // output column holds both Term and Id for the same logical
-                // value. Distinct/Group key on KeyPart where Id(x) ≠ Lex(x)
-                // → equal solutions hash differently → wrong results.
-                // Only genuinely mixed (Id ∧ Term) columns are decoded; the
-                // pure-Id BGP-only aggregation hot path pays zero decode.
-                self.normalize_columns(&mut rows, out_schema.len())?;
-                Ok(Batch {
-                    schema: out_schema,
-                    rows,
-                })
+                self.compute_join(l, r)
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
-                // Native slot hash-left-join: O(|l|+|r|) via a hash index on
-                // the join-variable key, with a
-                // conservative `unkeyed` bucket for rows that leave a jvar
-                // unbound. Output provenance mixes exactly like Join (matched
-                // rows carry right slots, unmatched carry Unbound), so the
-                // merged rows are `normalize_columns`'d before returning.
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
-
-                // Output schema = left schema ++ right-only vars (like Join).
-                let mut out_schema = l.schema.clone();
-                for v in &r.schema {
-                    if !out_schema.iter().any(|x| x.name() == v.name()) {
-                        out_schema.push(v.clone());
-                    }
-                }
-
-                let jvars = batch_join_vars(&l, &r);
-
-                // Index the right relation by its decoded join key (option (b)
-                // — see `row_join_key`); rows missing a jvar fall to `unkeyed`.
-                let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
-                let mut unkeyed: Vec<&Row> = Vec::new();
-                for b in &r.rows {
-                    match self.row_join_key(b, &r.schema, &jvars)? {
-                        Some(k) => index.entry(k).or_default().push(b),
-                        None => unkeyed.push(b),
-                    }
-                }
-
-                // Columns the inner FILTER reads (decoded per merged row).
-                let mut want = HashSet::new();
-                if let Some(e) = expr.as_ref() {
-                    referenced_vars(e, &mut want);
-                }
-
-                let mut rows = Vec::new();
-                for a in &l.rows {
-                    let mut matched = false;
-                    match self.row_join_key(a, &l.schema, &jvars)? {
-                        Some(k) => {
-                            if let Some(bucket) = index.get(&k) {
-                                matched |= self.probe_into_slots(
-                                    &l.schema,
-                                    a,
-                                    &r.schema,
-                                    bucket,
-                                    &out_schema,
-                                    expr.as_ref(),
-                                    &want,
-                                    &mut rows,
-                                )?;
-                            }
-                            if !unkeyed.is_empty() {
-                                matched |= self.probe_into_slots(
-                                    &l.schema,
-                                    a,
-                                    &r.schema,
-                                    &unkeyed,
-                                    &out_schema,
-                                    expr.as_ref(),
-                                    &want,
-                                    &mut rows,
-                                )?;
-                            }
-                        }
-                        // Left row missing a join var: may still be compatible
-                        // with any right row on the remaining shared vars.
-                        None => {
-                            let all: Vec<&Row> = r.rows.iter().collect();
-                            matched |= self.probe_into_slots(
-                                &l.schema,
-                                a,
-                                &r.schema,
-                                &all,
-                                &out_schema,
-                                expr.as_ref(),
-                                &want,
-                                &mut rows,
-                            )?;
-                        }
-                    }
-                    if !matched {
-                        // OPTIONAL: the left row survives with right-only vars
-                        // unbound. Merging with an all-Unbound right row takes
-                        // the left side and leaves right vars Unbound (emit the
-                        // left row; right vars simply absent → decoded as
-                        // Unbound).
-                        let unbound = Row(vec![Slot::Unbound; r.schema.len()]);
-                        if let Some(m) =
-                            self.merge_rows(&l.schema, a, &r.schema, &unbound, &out_schema)?
-                        {
-                            rows.push(m);
-                        }
-                    }
-                }
-
-                self.normalize_columns(&mut rows, out_schema.len())?;
-                Ok(Batch {
-                    schema: out_schema,
-                    rows,
-                })
+                self.compute_left_join(l, r, expr)
             }
             PhysicalPlan::Filter { expr, inner } => {
                 let child = self.eval(inner)?;
@@ -564,6 +402,183 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             }
         }
         s
+    }
+
+    /// Hash inner join of two already-evaluated batches. Body relocated from
+    /// the legacy `Join` arm (everything after the two child evals), unchanged.
+    pub(crate) fn compute_join(&self, l: Batch, r: Batch) -> Result<Batch> {
+        // Output schema = left schema ++ right-only vars.
+        let mut out_schema = l.schema.clone();
+        for v in &r.schema {
+            if !out_schema.iter().any(|x| x.name() == v.name()) {
+                out_schema.push(v.clone());
+            }
+        }
+        // Hash inner join: index the right relation by its decoded
+        // join-var key (option (b) — see `row_join_key`); right rows
+        // missing a jvar fall to `unkeyed`. Each left row probes only
+        // its same-key bucket plus `unkeyed` (a left row missing a jvar
+        // can't be keyed and must probe ALL right rows). `merge_rows`
+        // still rejects any genuine conflict, so probing same-key
+        // candidates is sound: any pair the nested loop would merge
+        // shares the same decoded jvar key (or one side is unkeyed),
+        // and differing jvar values are rejected by `merge_rows`. No
+        // OPTIONAL semantics: a left row with zero matches contributes
+        // nothing (unlike LeftJoin).
+        let jvars = batch_join_vars(&l, &r);
+        let merge_plan = build_merge_plan(&l.schema, &r.schema, &out_schema);
+
+        let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
+        let mut unkeyed: Vec<&Row> = Vec::new();
+        for b in &r.rows {
+            match self.row_join_key(b, &r.schema, &jvars)? {
+                Some(k) => index.entry(k).or_default().push(b),
+                None => unkeyed.push(b),
+            }
+        }
+
+        let mut rows = Vec::new();
+        for a in &l.rows {
+            match self.row_join_key(a, &l.schema, &jvars)? {
+                Some(k) => {
+                    if let Some(bucket) = index.get(&k) {
+                        self.merge_all(a, bucket, &merge_plan, &mut rows)?;
+                    }
+                    if !unkeyed.is_empty() {
+                        self.merge_all(a, &unkeyed, &merge_plan, &mut rows)?;
+                    }
+                }
+                // Left row missing a join var: can't be keyed, so it may
+                // still be compatible with any right row on the
+                // remaining shared vars — probe ALL.
+                None => {
+                    let all: Vec<&Row> = r.rows.iter().collect();
+                    self.merge_all(a, &all, &merge_plan, &mut rows)?;
+                }
+            }
+        }
+        // Restore within-column homogeneity: an adapter-backed child
+        // (LeftJoin/Union → all Slot::Term) may leave a shared var as
+        // Slot::Unbound on some rows; the native BGP child has Slot::Id
+        // for that var. merge_rows takes the non-Unbound side, so the
+        // output column holds both Term and Id for the same logical
+        // value. Distinct/Group key on KeyPart where Id(x) ≠ Lex(x)
+        // → equal solutions hash differently → wrong results.
+        // Only genuinely mixed (Id ∧ Term) columns are decoded; the
+        // pure-Id BGP-only aggregation hot path pays zero decode.
+        self.normalize_columns(&mut rows, out_schema.len())?;
+        Ok(Batch {
+            schema: out_schema,
+            rows,
+        })
+    }
+
+    /// Hash left-outer join. Body relocated from the legacy `LeftJoin` arm
+    /// (after the child evals), unchanged. `expr` is the optional ON filter.
+    pub(crate) fn compute_left_join(
+        &self,
+        l: Batch,
+        r: Batch,
+        expr: &Option<Expr>,
+    ) -> Result<Batch> {
+        // Native slot hash-left-join: O(|l|+|r|) via a hash index on
+        // the join-variable key, with a
+        // conservative `unkeyed` bucket for rows that leave a jvar
+        // unbound. Output provenance mixes exactly like Join (matched
+        // rows carry right slots, unmatched carry Unbound), so the
+        // merged rows are `normalize_columns`'d before returning.
+
+        // Output schema = left schema ++ right-only vars (like Join).
+        let mut out_schema = l.schema.clone();
+        for v in &r.schema {
+            if !out_schema.iter().any(|x| x.name() == v.name()) {
+                out_schema.push(v.clone());
+            }
+        }
+
+        let jvars = batch_join_vars(&l, &r);
+
+        // Index the right relation by its decoded join key (option (b)
+        // — see `row_join_key`); rows missing a jvar fall to `unkeyed`.
+        let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
+        let mut unkeyed: Vec<&Row> = Vec::new();
+        for b in &r.rows {
+            match self.row_join_key(b, &r.schema, &jvars)? {
+                Some(k) => index.entry(k).or_default().push(b),
+                None => unkeyed.push(b),
+            }
+        }
+
+        // Columns the inner FILTER reads (decoded per merged row).
+        let mut want = HashSet::new();
+        if let Some(e) = expr.as_ref() {
+            referenced_vars(e, &mut want);
+        }
+
+        let mut rows = Vec::new();
+        for a in &l.rows {
+            let mut matched = false;
+            match self.row_join_key(a, &l.schema, &jvars)? {
+                Some(k) => {
+                    if let Some(bucket) = index.get(&k) {
+                        matched |= self.probe_into_slots(
+                            &l.schema,
+                            a,
+                            &r.schema,
+                            bucket,
+                            &out_schema,
+                            expr.as_ref(),
+                            &want,
+                            &mut rows,
+                        )?;
+                    }
+                    if !unkeyed.is_empty() {
+                        matched |= self.probe_into_slots(
+                            &l.schema,
+                            a,
+                            &r.schema,
+                            &unkeyed,
+                            &out_schema,
+                            expr.as_ref(),
+                            &want,
+                            &mut rows,
+                        )?;
+                    }
+                }
+                // Left row missing a join var: may still be compatible
+                // with any right row on the remaining shared vars.
+                None => {
+                    let all: Vec<&Row> = r.rows.iter().collect();
+                    matched |= self.probe_into_slots(
+                        &l.schema,
+                        a,
+                        &r.schema,
+                        &all,
+                        &out_schema,
+                        expr.as_ref(),
+                        &want,
+                        &mut rows,
+                    )?;
+                }
+            }
+            if !matched {
+                // OPTIONAL: the left row survives with right-only vars
+                // unbound. Merging with an all-Unbound right row takes
+                // the left side and leaves right vars Unbound (emit the
+                // left row; right vars simply absent → decoded as
+                // Unbound).
+                let unbound = Row(vec![Slot::Unbound; r.schema.len()]);
+                if let Some(m) = self.merge_rows(&l.schema, a, &r.schema, &unbound, &out_schema)? {
+                    rows.push(m);
+                }
+            }
+        }
+
+        self.normalize_columns(&mut rows, out_schema.len())?;
+        Ok(Batch {
+            schema: out_schema,
+            rows,
+        })
     }
 
     /// Remap one child batch into `merged` schema order, placing `Slot::Unbound`
