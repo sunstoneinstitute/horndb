@@ -4,7 +4,8 @@ use super::Op;
 use crate::algebra::{Expr, Var};
 use crate::error::Result;
 use crate::exec::runtime::Runtime;
-use crate::exec::{Batch, Executor};
+use crate::exec::{Batch, Executor, KeyPart};
+use std::collections::HashSet;
 
 /// Streams its child, evaluating `expr` and binding the result to `var` (BIND).
 /// Never drops rows — an unbound expr result leaves the slot as `Slot::Unbound`.
@@ -183,6 +184,50 @@ impl<'r, E: Executor + ?Sized> Op for FilterOp<'r, E> {
     }
 }
 
+/// Deduplicates rows by their `KeyPart` vector. The seen-set persists across
+/// chunks, so only first-seen rows are emitted; loops internally to skip a
+/// chunk that turns out to be all duplicates (never yields an empty chunk).
+pub struct DistinctOp<'r> {
+    child: Box<dyn Op + 'r>,
+    seen: HashSet<Vec<KeyPart>>,
+    schema: Vec<Var>,
+}
+
+impl<'r> DistinctOp<'r> {
+    pub fn new(child: Box<dyn Op + 'r>) -> Self {
+        let schema = child.schema().to_vec();
+        Self {
+            child,
+            seen: HashSet::new(),
+            schema,
+        }
+    }
+}
+
+impl<'r> Op for DistinctOp<'r> {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+    fn next(&mut self) -> Result<Option<Batch>> {
+        while let Some(chunk) = self.child.next()? {
+            let mut kept = Vec::new();
+            for row in chunk.rows {
+                let key: Vec<KeyPart> = row.0.iter().map(|s| s.key_part()).collect();
+                if self.seen.insert(key) {
+                    kept.push(row);
+                }
+            }
+            if !kept.is_empty() {
+                return Ok(Some(Batch {
+                    schema: self.schema.clone(),
+                    rows: kept,
+                }));
+            }
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::algebra::{Term, TriplePattern, Var};
@@ -251,5 +296,43 @@ mod tests {
         // OFFSET 25 > 10 rows -> 0 rows.
         assert_eq!(slice_count(25, Some(5)), 0);
         assert_eq!(slice_count(25, None), 0);
+    }
+
+    /// Insert (e0,p,X),(e1,p,X),(e2,p,Y).  Distinct over Project(?o, BgpScan)
+    /// must emit exactly 2 rows ({X, Y}) and no empty chunk mid-stream. This
+    /// pins the dedup *count*; the cross-chunk seen-set (dedup spanning chunk
+    /// boundaries) is exercised by the Task 13 chunk-boundary suite, which
+    /// shrinks BATCH_ROWS to force multiple chunks.
+    #[test]
+    fn distinct_deduplicates_rows() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("e0"), iri("p"), iri("X"));
+        horn.insert_triple(iri("e1"), iri("p"), iri("X"));
+        horn.insert_triple(iri("e2"), iri("p"), iri("Y"));
+
+        let scan = PhysicalPlan::BgpScan {
+            patterns: vec![TriplePattern {
+                subject: Term::Var(Var::new("s")),
+                predicate: iri("p"),
+                object: Term::Var(Var::new("o")),
+            }],
+        };
+        let proj = PhysicalPlan::Project {
+            vars: vec![Var::new("o")],
+            inner: Box::new(scan),
+        };
+        let plan = PhysicalPlan::Distinct {
+            inner: Box::new(proj),
+        };
+
+        let rt = Runtime::new(&horn);
+        let mut op = rt.build(&plan).unwrap();
+        let mut total = 0;
+        while let Some(b) = op.next().unwrap() {
+            assert!(!b.rows.is_empty(), "no empty chunks mid-stream");
+            total += b.rows.len();
+        }
+        assert_eq!(total, 2, "distinct ?o should be {{X, Y}}");
     }
 }

@@ -6,7 +6,7 @@ mod source;
 pub(crate) use source::build_values_batch;
 use source::{ScanOp, ValuesOp};
 mod stream;
-use stream::{ExtendOp, FilterOp, ProjectOp, SliceOp};
+use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
 use crate::algebra::Var;
 use crate::error::Result;
@@ -118,6 +118,10 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 Ok(Box::new(SliceOp::new(child, *start, *length)))
             }
             PhysicalPlan::Values { vars, rows } => Ok(Box::new(ValuesOp::new(vars, rows))),
+            PhysicalPlan::Distinct { inner } => {
+                let child = self.build(inner)?;
+                Ok(Box::new(DistinctOp::new(child)))
+            }
             _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
         }
     }
