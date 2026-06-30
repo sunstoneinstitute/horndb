@@ -1,5 +1,5 @@
 //! Pull-based physical operators (#143). Each `Op` yields `Batch` chunks of
-//! at most `BATCH_ROWS` rows, all sharing `schema()`. `next` returns `None`
+//! at most `batch_rows()` rows, all sharing `schema()`. `next` returns `None`
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
@@ -14,8 +14,22 @@ use crate::error::Result;
 use crate::exec::{Batch, Executor, Row};
 use crate::plan::PhysicalPlan;
 
-/// Target rows per emitted chunk.
-pub const BATCH_ROWS: usize = 4096;
+/// Target rows per emitted chunk. Test builds can shrink this via
+/// `TEST_BATCH_ROWS` to force multi-chunk operator behavior; release builds
+/// use a fixed constant.
+#[cfg(not(test))]
+pub(crate) fn batch_rows() -> usize {
+    4096
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_BATCH_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(4096) };
+}
+#[cfg(test)]
+pub(crate) fn batch_rows() -> usize {
+    TEST_BATCH_ROWS.with(|c| c.get())
+}
 
 /// A pull-based physical operator. The trait itself is lifetime-free; an
 /// operator that borrows the runtime carries its own lifetime on the struct
@@ -25,7 +39,7 @@ pub trait Op {
     fn next(&mut self) -> Result<Option<Batch>>;
 }
 
-/// Hands out the rows of a fully-materialized `Batch` in `BATCH_ROWS` chunks.
+/// Hands out the rows of a fully-materialized `Batch` in `batch_rows()` chunks.
 /// Shared by source ops (`ScanOp`, `ValuesOp`) and the blocking ops.
 pub(crate) struct ChunkedBatch {
     schema: Vec<Var>,
@@ -39,9 +53,9 @@ impl ChunkedBatch {
             rows: batch.rows.into_iter(),
         }
     }
-    /// Next `BATCH_ROWS`-sized chunk, or `None` when exhausted (never `Some(empty)`).
+    /// Next `batch_rows()`-sized chunk, or `None` when exhausted (never `Some(empty)`).
     pub(crate) fn next_chunk(&mut self) -> Option<Batch> {
-        let chunk: Vec<Row> = self.rows.by_ref().take(BATCH_ROWS).collect();
+        let chunk: Vec<Row> = self.rows.by_ref().take(batch_rows()).collect();
         if chunk.is_empty() {
             None
         } else {
@@ -55,6 +69,9 @@ impl ChunkedBatch {
         &self.schema
     }
 }
+
+#[cfg(test)]
+mod chunk_tests;
 
 impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     /// Build the pull-based operator tree for `plan`. Every `PhysicalPlan`

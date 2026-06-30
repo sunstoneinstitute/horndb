@@ -7,7 +7,7 @@
 //! per-child — per-chunk normalize would leave it mixed in the union output,
 //! causing DISTINCT/GROUP BY to treat Id(x) and Term(x) as different keys for
 //! the same logical value. `UnionOp` therefore drains both children eagerly,
-//! normalizes the combined rows, and then hands them out in `BATCH_ROWS`
+//! normalizes the combined rows, and then hands them out in `batch_rows()`-sized
 //! chunks via `ChunkedBatch`.
 
 use super::{ChunkedBatch, Op};
@@ -30,8 +30,8 @@ pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
 /// sees the full combined row set (required for correctness when the two
 /// children have differing slot provenance — see module doc). Rows are
 /// remapped into the merged schema per-child using `apply_union_chunk`, then
-/// the combined set is normalized once, and finally handed out in `BATCH_ROWS`
-/// chunks via `ChunkedBatch`.
+/// the combined set is normalized once, and finally handed out in
+/// `batch_rows()`-sized chunks via `ChunkedBatch`.
 pub struct UnionOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
     left: Box<dyn Op + 'r>,

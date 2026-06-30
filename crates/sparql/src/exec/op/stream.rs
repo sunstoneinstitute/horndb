@@ -302,7 +302,7 @@ mod tests {
     /// must emit exactly 2 rows ({X, Y}) and no empty chunk mid-stream. This
     /// pins the dedup *count*; the cross-chunk seen-set (dedup spanning chunk
     /// boundaries) is exercised by the Task 13 chunk-boundary suite, which
-    /// shrinks BATCH_ROWS to force multiple chunks.
+    /// shrinks `TEST_BATCH_ROWS` to force multiple chunks.
     #[test]
     fn distinct_deduplicates_rows() {
         let mut horn = HornBackend::new();
