@@ -2325,4 +2325,59 @@ mod slot_differential {
         }
         assert_eq!((matched, unbound), (1, 1), "one matched, one unmatched");
     }
+
+    /// GROUP BY ?c with COUNT(DISTINCT *) must count distinct *solution
+    /// mappings*, not raw BGP rows. Pins the id-based distinct-key path
+    /// (KeyPart over slot rows) on the current materialised runtime.
+    ///
+    /// cat A: distinct (?e,?c,?k) mappings = {(e1,A,x),(e2,A,x),(e3,A,y)} = 3
+    /// cat B: {(e4,B,x),(e5,B,y)} = 2
+    ///
+    /// The duplicate insert of (e1,cat,A) exercises storage-level dedup;
+    /// it must not inflate the COUNT.
+    #[test]
+    fn group_by_count_distinct_star_is_deterministic() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        for (s, p, o) in [
+            ("e1", "cat", "A"),
+            ("e1", "kind", "x"),
+            ("e2", "cat", "A"),
+            ("e2", "kind", "x"),
+            ("e3", "cat", "A"),
+            ("e3", "kind", "y"),
+            ("e1", "cat", "A"), // duplicate triple — must not double-count
+            ("e4", "cat", "B"),
+            ("e4", "kind", "x"),
+            ("e5", "cat", "B"),
+            ("e5", "kind", "y"),
+        ] {
+            horn.insert_triple(iri(s), iri(p), iri(o));
+        }
+        let plan = plan_select(
+            "SELECT ?c (COUNT(DISTINCT *) AS ?n) WHERE { \
+             ?e <http://ex/cat> ?c . ?e <http://ex/kind> ?k } \
+             GROUP BY ?c ORDER BY ?c",
+        );
+        let rows: Vec<_> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(rows.len(), 2, "expected two groups (A and B)");
+
+        let expected = vec![
+            (iri("A"), integer_literal(3)),
+            (iri("B"), integer_literal(2)),
+        ];
+        let got: Vec<_> = rows
+            .iter()
+            .map(|b| {
+                (
+                    b.get("c").cloned().expect("?c must be bound"),
+                    b.get("n").cloned().expect("?n must be bound"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got, expected,
+            "GROUP BY ?c ORDER BY ?c with COUNT(DISTINCT *): wrong counts or order"
+        );
+    }
 }
