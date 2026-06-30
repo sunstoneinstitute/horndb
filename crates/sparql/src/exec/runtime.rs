@@ -22,6 +22,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Self { exec }
     }
 
+    pub(crate) fn exec(&self) -> &'a E {
+        self.exec
+    }
+
     // NOTE: `build` (the pull-based operator-tree constructor that `run` uses)
     // is defined in `crate::exec::op` alongside the `Op` trait.
 

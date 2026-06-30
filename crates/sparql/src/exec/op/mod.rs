@@ -2,6 +2,9 @@
 //! at most `BATCH_ROWS` rows, all sharing `schema()`. `next` returns `None`
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
+mod source;
+use source::ScanOp;
+
 use crate::algebra::Var;
 use crate::error::Result;
 use crate::exec::{Batch, Executor, Row};
@@ -60,6 +63,11 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     where
         E: 'r,
     {
-        Ok(Box::new(MaterializedOp::new(self.eval(plan)?)))
+        match plan {
+            PhysicalPlan::BgpScan { patterns } => {
+                Ok(Box::new(ScanOp::new(self.exec().scan_bgp_ids(patterns)?)))
+            }
+            _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
+        }
     }
 }
