@@ -32,13 +32,14 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 ## Index
 
-- [v] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)) — _wip: faccb9c1@Stigs-MacBook-Pro.local · task-128-native-hash-join · 2026-06-29T09:25:43Z_
-- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; wire the SIMD intersect into `BatchIter`'s inlined leapfrog (the production executor hot path — `LeapfrogJoin` is only used by `trie/leapfrog.rs` today); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
+- [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
+- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
+- [ ] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
@@ -74,20 +75,22 @@ Closed tasks are listed in [Done](#done-for-traceability).
   **#144 Planner pushdown LANDED** (2026-06-30, this branch): column pruning
   (`plan/pushdown.rs`) + COUNT-over-BGP aggregate pushdown (`Executor::count_bgp`
   + `CountScan` + `CountScanOp`). **#145 deterministic `GROUP BY` +
-  `COUNT(DISTINCT *)` test LANDED.** SPB-256 re-measurement on hornbench is
+  `COUNT(DISTINCT *)` test LANDED** (this branch pins it in `exec/runtime.rs`
+  `slot_differential`; [#161](https://github.com/sunstoneinstitute/horndb/issues/145)
+  also added `group_by_count_distinct_star` in `crates/sparql/tests/exec_aggregate.rs`).
+  **`Group` micro-opts LANDED** via #167 (share decoded members across aggregates;
+  drop the per-group `key_slots` clone). SPB-256 re-measurement on hornbench is
   **PENDING**.
 
   **Remaining / deferred work:**
-  1. `Group` micro-opts: share decoded members across aggregates referencing the
-     same column; avoid the per-group `key_slots` clone.
-  2. Probe-side streaming for `Join` — joins currently drain both children before
+  1. Probe-side streaming for `Join` — joins currently drain both children before
      emitting any output tuple (deferred; does not arise in the SPB mix but blocks
      full end-to-end streaming).
-  3. Filter-aware / grouped / multi-aggregate count pushdown (deferred; only
+  2. Filter-aware / grouped / multi-aggregate count pushdown (deferred; only
      COUNT-over-full-BGP is pushed down today).
-  4. Streaming results out to the HTTP layer — `Runtime::run` still collects a
+  3. Streaming results out to the HTTP layer — `Runtime::run` still collects a
      `Vec<Bindings>` before serializing (deferred).
-  5. `batch_join_vars` intersects child *schemas*, not *bound* keys (native
+  4. `batch_join_vars` intersects child *schemas*, not *bound* keys (native
      `LeftJoin`); a shared var unbound in every right row degrades the probe
      toward O(|l|·|r|) — correct but potentially slow on a pathological workload
      (does not arise in the SPB mix).
@@ -104,9 +107,21 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `crates/simd` (AVX2/AVX-512 on x86_64, NEON on aarch64; scalar-forced build green on
   stable 1.90). Kernels that don't yet clear the NF2 floor ship the scalar-equivalent
   galloping form; the bench is wired but **awaits hornbench measurement** before any wide
-  compress/compare kernel is hand-written. **Stage 1b — OPEN:** the WCOJ seek/intersect
-  consumer to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle`
-  no-regress).
+  compress/compare kernel is hand-written. **Stage 1b — DONE (kernels; hornbench numbers
+  pending):** the WCOJ seek/intersect consumer is now live in the **production executor**.
+  `executor/wcoj.rs::BatchIter`'s inlined leapfrog gains a k==2 `horndb_simd::intersect`
+  fast path (mirroring the standalone `LeapfrogJoin`): when both contributing iters at a
+  depth expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the whole pairwise intersection
+  is precomputed once and drained, replacing per-candidate round-robin seeks. To honour the
+  leapfrog's distinct-key contract, `active_run` now returns a **deduplicated** view
+  (`LevelColumn::distinct_run`) — the raw SoA column keeps its duplicates for the seek
+  index-mapping, but the intersect path consumes a cached distinct copy, so a subject with
+  many objects still emits each leapfrog key once. Output bit-identical to scalar, gated by
+  the WCOJ differential fuzzer (narrow + a new wide `N_WIDE > 64` variant that actually
+  arms the intersect), the leapfrog BTreeSet oracle, and `tests/batchiter_simd.rs` (incl.
+  the duplicate-subject hazard); `four_cycle` no-regress confirmed locally (WCOJ ~40× over
+  binary-hash). **Remaining for NF1:** record `benches/per_tuple.rs` ≤2.5 ns/tuple on
+  hornbench.
   **Stage 2 — DONE (kernels + benches; hornbench numbers pending):** `horndb-storage`
   consumes `horndb-simd` for bulk inline-int dictionary decode
   (`Dictionary::decode_inline_ints`/`lookup_inline_int_batch`/`lookup_batch`) and the
@@ -246,6 +261,24 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `datasetSize` (currently 18,644,617) with what is actually loaded; move the
   trend metric to `editorial-qps`. See `BENCHMARKS.md` and the SPB nightly row
   in `docs/architecture.md`.
+
+## MEDIUM — Conformance
+
+- [ ] **Close the RL-reachable OWL 2 RL conformance gap.**
+  ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
+  The W3C `owl2-w3c-rl` subset is **97 of 115 green** (`harness/selected.toml`);
+  the 18 reds are documented in `harness/KNOWN-MANIFEST-BUGS.md`. Most are
+  intentionally out of OWL 2 RL scope (OWL 2 DL entailments / fresh-bnode TGD
+  generation — explicit SPEC-04 non-goals) and stay excluded by design. This
+  task tracks only the **RL-reachable remainder**, currently unowned after #4
+  closed: (1) datatype value-space *intersection* narrowing —
+  `WebOnt-I5.8-008-pe` (`short ∩ unsignedInt ⊆ unsignedShort`),
+  `WebOnt-I5.8-009-pe` (`nonNegativeInteger ∩ nonPositiveInteger = {0} ⊆ short`)
+  — needs a value-space intersection solver beyond the static `dt-type2`
+  subsumption lattice; (2) `owl:imports` external resolution —
+  `WebOnt-imports-011-pe`, the loader does not fetch imported ontologies. When a
+  case goes green, move its id from `KNOWN-MANIFEST-BUGS.md` into `selected.toml`
+  and bump the counts in `docs/architecture.md` in the same commit.
 
 ## LOW — Operational
 

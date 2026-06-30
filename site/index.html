@@ -52,7 +52,7 @@
         Forward <em>and</em> backward chaining over OWL&nbsp;2&nbsp;RL semantics, with a
         SPARQL&nbsp;1.1 frontend. Apache-2.0, EU-developed, open from the start.
       </p>
-      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 complete — the storage&nbsp;→&nbsp;SPARQL stack runs end-to-end; 96 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases green, WCOJ past its acceptance gate, incremental insert&nbsp;<em>and</em>&nbsp;retraction landed</p>
+      <p class="status"><span class="status-dot" aria-hidden="true"></span> Active development · Apache-2.0 — the storage&nbsp;→&nbsp;SPARQL stack runs end-to-end today, with forward&nbsp;<em>and</em>&nbsp;backward chaining and incremental insert&nbsp;<em>and</em>&nbsp;retraction</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/sunstoneinstitute/horndb/blob/main/docs/specs/SPEC-00-vision.md">Read the vision</a>
@@ -119,7 +119,7 @@
     <section class="band">
       <div class="wrap">
         <h2>What runs today</h2>
-        <p class="section-lede">Stage&nbsp;1 is a working engine, not a paper design. Every subsystem below has code in the repository, exercised by tests and the conformance harness.</p>
+        <p class="section-lede">HornDB is a working engine, not a paper design. Every subsystem below has code in the repository, exercised by tests and the conformance harness.</p>
         <ul class="cards">
           <li class="card">
             <h3>Tiered storage <span class="badge">implemented</span></h3>
@@ -131,7 +131,7 @@
           </li>
           <li class="card">
             <h3>Compiled OWL&nbsp;2&nbsp;RL rules <span class="badge">implemented</span></h3>
-            <p>Entailment rules compiled ahead-of-time to native Rust — no interpreter in the hot path — evaluated semi-naïvely to a fixpoint. 96 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases pass.</p>
+            <p>Entailment rules compiled ahead-of-time to native Rust — no interpreter in the hot path — evaluated semi-naïvely to a fixpoint. 97 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases pass.</p>
           </li>
           <li class="card">
             <h3>GraphBLAS closure <span class="badge">implemented</span></h3>
@@ -169,43 +169,41 @@
       </div>
     </section>
 
-    <!-- Goals / roadmap -->
+    <!-- What's next -->
     <section class="band band-alt">
-      <div class="wrap narrow">
-        <h2>Where it's going</h2>
+      <div class="wrap">
+        <h2>What's next</h2>
         <p class="section-lede">
-          The harness comes first by design: every spec's acceptance criteria reference a concrete
-          test subset, and a spec is not satisfied until its subset is green.
+          HornDB is young and under active development. The harness comes first by design — every
+          spec's acceptance criteria reference a concrete test subset, and a spec is not satisfied
+          until its subset is green. Here's what we're building toward.
         </p>
-        <div class="table-scroll">
-          <table class="roadmap">
-            <thead>
-              <tr><th>Stage</th><th>Scope</th><th>Gate</th></tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><span class="stage">Stage 0</span></td>
-                <td>Harness bootstrap</td>
-                <td>Selected suite plumbing green; a deliberate failure is correctly flagged red.</td>
-              </tr>
-              <tr>
-                <td><span class="stage">Stage 1</span> <span class="badge">complete</span></td>
-                <td>Storage + WCOJ + an OWL&nbsp;2&nbsp;RL slice through to SPARQL</td>
-                <td>≥50 W3C OWL&nbsp;2&nbsp;RL cases green (96 today); WCOJ past its four-cycle gate. Open gaps tracked in TASKS.md.</td>
-              </tr>
-              <tr class="active-stage">
-                <td><span class="stage">Stage 2</span> <span class="badge">next</span></td>
-                <td>Full storage→SPARQL stack + RDF&nbsp;1.2 triple terms</td>
-                <td>Full W3C OWL&nbsp;2&nbsp;RL + SPARQL&nbsp;1.1 + Entailment Regimes green; ORE&nbsp;2015 RL fragment solved.</td>
-              </tr>
-              <tr>
-                <td><span class="stage">Stage 3</span></td>
-                <td>Hardware specialization</td>
-                <td>GPU GraphBLAS + WCOJ, CXL tiering, multi-node. The Stage-2 conformance bar does not drop.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <ul class="cards">
+          <li class="card">
+            <h3>Aggregation at scale <span class="badge">in&nbsp;progress</span></h3>
+            <p>Streaming execution and planner push-down to close the remaining gap to commercial engines on the LDBC Semantic Publishing Benchmark query mix.</p>
+          </li>
+          <li class="card">
+            <h3>Faster materialization <span class="badge badge-deferred">planned</span></h3>
+            <p>A within-partition object index and delta-driven semi-naïve rule firing, so <code>rdf:type</code> reasoning scales with the size of each class extent rather than the whole store.</p>
+          </li>
+          <li class="card">
+            <h3>Crosswalk serving <span class="badge">in&nbsp;progress</span></h3>
+            <p>A compact crosswalk index (~10&nbsp;bytes per mapping pair) and spine over the SSSOM mapping reasoner, for serving large ontology-alignment sets.</p>
+          </li>
+          <li class="card">
+            <h3>Full-scale benchmarks <span class="badge badge-deferred">planned</span></h3>
+            <p>LDBC&nbsp;SPB at full scale (256M triples) with live editorial insert&nbsp;/&nbsp;update&nbsp;/&nbsp;delete agents, published against an open commercial baseline.</p>
+          </li>
+          <li class="card">
+            <h3>Hardware specialization <span class="badge badge-deferred">planned</span></h3>
+            <p>The long-term bet: GPU GraphBLAS and worst-case-optimal joins, CXL&nbsp;/&nbsp;HBM memory tiering, and multi-node — without lowering the conformance bar as the hardware grows.</p>
+          </li>
+          <li class="card">
+            <h3>Tracing &amp; logs <span class="badge badge-deferred">deferred</span></h3>
+            <p>OpenTelemetry traces and structured logs alongside the Prometheus metrics already exposed at <code>/metrics</code>.</p>
+          </li>
+        </ul>
         <p class="muted-note">
           Non-goals: OWL&nbsp;2&nbsp;DL completeness, property-graph compatibility, or embedding-based
           “neural” reasoning as the source of truth. The symbolic engine is always the source of truth.

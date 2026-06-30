@@ -192,3 +192,63 @@ fn count_distinct_term_and_star() {
     );
     assert_eq!(val(rows[0].get("c").unwrap()), "4");
 }
+
+/// Three entities over two categories: cat A has {e1, e2}, cat B has {e3}.
+fn cat_store() -> MemStore {
+    let mut s = MemStore::default();
+    for (e, c) in [("e1", "A"), ("e2", "A"), ("e3", "B")] {
+        s.insert_triple(
+            iri(&format!("http://ex/{e}")),
+            iri("http://ex/cat"),
+            iri(&format!("http://ex/{c}")),
+        );
+    }
+    s
+}
+
+/// Targeted `GROUP BY` + `COUNT(DISTINCT *)` (#145, increment 5 of #128).
+///
+/// The differential proptest exercises this only indirectly; this case pins the
+/// per-group id-based distinct path directly (`eval_group_native`, the
+/// `Vec<KeyPart>` `HashSet` over a group's member slot rows). A self-`UNION`
+/// duplicates every solution as a multiset (`PhysicalPlan::Union` is
+/// `rows.extend`, no dedup), so within each group `COUNT(DISTINCT *)` must
+/// collapse the duplicate `(?e, ?c)` rows back down while plain `COUNT(*)` sees
+/// the doubled multiset. Asserting both per group proves the distinct keying is
+/// scoped to the group and actually dedups — not just a member tally.
+#[test]
+fn group_by_count_distinct_star() {
+    let s = cat_store();
+    let rows = solutions(
+        "SELECT ?c (COUNT(*) AS ?all) (COUNT(DISTINCT *) AS ?dist) \
+         WHERE { { ?e <http://ex/cat> ?c } UNION { ?e <http://ex/cat> ?c } } \
+         GROUP BY ?c",
+        &s,
+    );
+
+    // Two groups; MemStore's scan order is non-deterministic, so key by ?c.
+    use std::collections::HashMap;
+    let got: HashMap<String, (String, String)> = rows
+        .iter()
+        .map(|r| {
+            (
+                val(r.get("c").unwrap()),
+                (val(r.get("all").unwrap()), val(r.get("dist").unwrap())),
+            )
+        })
+        .collect();
+    assert_eq!(got.len(), 2, "one row per category");
+
+    // cat A: {e1, e2} doubled by UNION → COUNT(*) = 4, distinct (?e,?c) = 2.
+    assert_eq!(
+        got.get("http://ex/A"),
+        Some(&("4".to_owned(), "2".to_owned())),
+        "cat A: COUNT(*)=4, COUNT(DISTINCT *)=2"
+    );
+    // cat B: {e3} doubled by UNION → COUNT(*) = 2, distinct (?e,?c) = 1.
+    assert_eq!(
+        got.get("http://ex/B"),
+        Some(&("2".to_owned(), "1".to_owned())),
+        "cat B: COUNT(*)=2, COUNT(DISTINCT *)=1"
+    );
+}

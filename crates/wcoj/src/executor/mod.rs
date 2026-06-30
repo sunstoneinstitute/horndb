@@ -21,7 +21,11 @@ pub type BatchStream<'a> = Box<dyn Iterator<Item = Result<RecordBatch>> + 'a>;
 /// Dispatch enum: the planner picks WCOJ or BinaryHash and this wrapper
 /// hides the choice from callers.
 pub enum Executor<'src, S: TripleSource + ?Sized + 'src> {
-    Wcoj(wcoj::BatchIter<'src, S>),
+    // Boxed: the WCOJ `BatchIter` carries the per-depth leapfrog state stack
+    // and its SIMD intersect buffers, so it is much larger than the BinaryHash
+    // variant. Boxing keeps the enum compact (`large_enum_variant`) at the
+    // cost of one indirection per *batch* — not per tuple.
+    Wcoj(Box<wcoj::BatchIter<'src, S>>),
     BinaryHash(binary_hash::BatchIter<'src, S>),
 }
 
@@ -32,7 +36,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> Executor<'src, S> {
         match plan.kind {
             PlanKind::Wcoj => {
                 let exec = wcoj::WcojExecutor::new(source, bgp, &plan, cancel);
-                Executor::Wcoj(exec.into_iter())
+                Executor::Wcoj(Box::new(exec.into_iter()))
             }
             PlanKind::BinaryHash => {
                 let out_vars = if plan.var_order.is_empty() {

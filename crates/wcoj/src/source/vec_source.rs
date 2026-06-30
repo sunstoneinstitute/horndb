@@ -218,9 +218,12 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
             }
             self.col_view[d] = Some(LevelColumn::from_aos(self.data, lo, hi, depth));
         }
-        let col = self.col_view[d].as_ref()?;
-        // The column covers [lo, hi); slice from the cursor to the level end.
-        Some(&col.values()[start - lo..hi - lo])
+        let col = self.col_view[d].as_mut()?;
+        // The leapfrog needs the level's *distinct* keys from the cursor on:
+        // the raw column repeats a key once per child row (e.g. a subject with
+        // several objects), but the SIMD `intersect` and the leapfrog itself
+        // operate on distinct level keys. `distinct_run` dedups (cached).
+        Some(col.distinct_run(start))
     }
 }
 

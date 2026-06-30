@@ -24,7 +24,19 @@ use horndb_wcoj::source::vec_source::VecTripleSource;
 const N_VERTICES: u64 = 30;
 const PREDICATES: &[u64] = &[100, 101, 102];
 
+/// Wide vocabulary for the SIMD-coverage variant. The leapfrog's `k == 2`
+/// intersect fast path only arms when a level's run is `>= SIMD_SEEK_MIN_RUN`
+/// (64), so the default 30-vertex graph never exercises it. `N_WIDE > 64`
+/// makes a free-subject pattern's depth-0 run wide enough that
+/// `VecIter::active_run` materialises an SoA column and the SIMD path engages
+/// — the binary-hash oracle then cross-checks it across random BGP shapes.
+const N_WIDE: u64 = 160;
+
 fn build_source(seed: u64) -> VecTripleSource {
+    build_source_n(seed, N_VERTICES)
+}
+
+fn build_source_n(seed: u64, n: u64) -> VecTripleSource {
     let mut state = seed | 1;
     let mut rand = || {
         state ^= state << 13;
@@ -33,11 +45,11 @@ fn build_source(seed: u64) -> VecTripleSource {
         state
     };
     let mut triples = Vec::new();
-    for s in 0..N_VERTICES {
+    for s in 0..n {
         for &p in PREDICATES {
             // Each (s, p) yields 0-3 edges with random objects.
             for _ in 0..(rand() % 4) {
-                let o = rand() % N_VERTICES;
+                let o = rand() % n;
                 triples.push(Triple::new(s, p, o));
             }
         }
@@ -94,6 +106,37 @@ fn arb_bgp() -> impl Strategy<Value = Bgp> {
     prop::collection::vec(arb_pattern(), 2..=6).prop_map(Bgp::new)
 }
 
+/// Wide-vocabulary term: bound constants range over `0..N_WIDE` so a
+/// free-subject pattern's depth-0 run can exceed the SIMD threshold. Biased
+/// toward variables (2:1) so multiple patterns tend to share a free
+/// leapfrog variable — the shape that arms the `k == 2` intersect.
+fn arb_term_wide() -> impl Strategy<Value = Term> {
+    prop_oneof![
+        2 => (0u8..3u8).prop_map(|v| Term::Var(Var(v))),
+        1 => (0u64..N_WIDE).prop_map(Term::Bound),
+    ]
+}
+
+fn arb_pattern_wide() -> impl Strategy<Value = TriplePattern> {
+    (arb_term_wide(), arb_predicate_term(), arb_term_wide())
+        .prop_map(|(s, p, o)| TriplePattern::new(s, p, o))
+        .prop_filter("no self-loop variables", |pat| {
+            let mut seen = std::collections::HashSet::new();
+            for t in [pat.s, pat.p, pat.o] {
+                if let Term::Var(v) = t {
+                    if !seen.insert(v) {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+}
+
+fn arb_bgp_wide() -> impl Strategy<Value = Bgp> {
+    prop::collection::vec(arb_pattern_wide(), 2..=4).prop_map(Bgp::new)
+}
+
 proptest! {
     // Stage-1: 256 cases (was 16 while the over-production bug was being
     // diagnosed). Once SPEC-01 conformance harness can load LUBM-100 the
@@ -103,6 +146,30 @@ proptest! {
     #[test]
     fn wcoj_matches_binary_hash(seed in any::<u64>(), bgp in arb_bgp()) {
         let src = build_source(seed);
+        let out_vars = bgp.variables();
+        prop_assume!(!out_vars.is_empty());
+
+        let plan = ExecutionPlan {
+            kind: PlanKind::Wcoj,
+            var_order: out_vars.clone(),
+        };
+        let wcoj_rows = collect_rows(
+            WcojExecutor::new(&src, &bgp, &plan, CancelToken::new()).into_iter(),
+        );
+        let bh_rows = collect_rows(
+            BinaryHashExecutor::new(&src, &bgp, out_vars, CancelToken::new()).into_iter(),
+        );
+        prop_assert_eq!(wcoj_rows, bh_rows);
+    }
+
+    // SIMD-coverage variant: a wide graph (N_WIDE > SIMD_SEEK_MIN_RUN) so the
+    // leapfrog's `k == 2` SIMD intersect fast path actually arms, with the
+    // binary-hash executor as the differential oracle. Guards against the
+    // active_run dedup hazard (a subject with many objects must still emit
+    // each leapfrog key once) across random BGP shapes.
+    #[test]
+    fn wcoj_matches_binary_hash_wide(seed in any::<u64>(), bgp in arb_bgp_wide()) {
+        let src = build_source_n(seed, N_WIDE);
         let out_vars = bgp.variables();
         prop_assume!(!out_vars.is_empty());
 
