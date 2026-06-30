@@ -494,47 +494,73 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             schema.push(agg.out.clone());
         }
 
-        // Which input columns each aggregate's inner expression references.
-        let agg_vars: Vec<HashSet<String>> = aggregates
+        // The union of input columns referenced by all aggregates' inner
+        // expressions. Decoding this union once per group (below) lets
+        // aggregates over the same column share a single decode pass instead of
+        // each re-decoding its own subset. `eval_aggregate` reads only its own
+        // inner-expression vars, so extra keys in the shared `Bindings` are
+        // inert; the `CountStar` arms never take the decode path.
+        let mut union_want: HashSet<String> = HashSet::new();
+        for agg in aggregates {
+            for e in agg_inner_exprs(agg) {
+                referenced_vars(e, &mut union_want);
+            }
+        }
+        // COUNT(*) / COUNT(DISTINCT *) are answered without decoding; any other
+        // aggregate needs the decoded members.
+        let needs_decode = aggregates
             .iter()
-            .map(|agg| {
-                let mut s = HashSet::new();
-                for e in agg_inner_exprs(agg) {
-                    referenced_vars(e, &mut s);
-                }
-                s
-            })
-            .collect();
+            .any(|agg| !matches!(agg.func, AggFunc::CountStar));
 
         let mut out: Vec<(Vec<Option<String>>, Row)> = Vec::with_capacity(groups.len());
         for grp in groups.into_values() {
-            let mut slots: Vec<Slot> = grp.key_slots.clone();
+            let Grp { key_slots, members } = grp;
 
-            for (agg, want) in aggregates.iter().zip(&agg_vars) {
+            // Sort key: decoded lexical of each group key slot. Reproduces the
+            // pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering exactly
+            // (None < Some(...) in BTreeMap order is the same as Option<String>
+            // Ord ordering used in sort_by). Computed before `key_slots` is
+            // moved into `slots`, which lets us avoid cloning it.
+            let sort_key: Vec<Option<String>> = key_slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Unbound => Ok(None),
+                    Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
+                    Slot::Term(t) => Ok(Some(lex(t))),
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            // Decode the union of referenced columns once for this group; every
+            // decoding aggregate shares it.
+            let members_decoded: Vec<Bindings> = if needs_decode {
+                members
+                    .iter()
+                    .map(|r| self.decode_subset(r, &b.schema, &union_want))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
+            };
+
+            let mut slots: Vec<Slot> = key_slots;
+            for agg in aggregates {
                 let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
                     // COUNT(*) fast path: member count needs no decode at all.
-                    Some(integer_literal(grp.members.len() as i64))
+                    Some(integer_literal(members.len() as i64))
                 } else if matches!(agg.func, AggFunc::CountStar) {
                     // COUNT(DISTINCT *): distinct whole-solution rows.
-                    // agg_inner_exprs returns empty for CountStar, so `want`
-                    // is empty and decode_subset would yield empty Bindings
-                    // for every row — all deduped to 1, wrong count.
-                    // Instead, key on Vec<KeyPart> directly: within-column
-                    // homogeneity ensures same-value cells hash identically,
-                    // giving the same deduplication as the old
-                    // `HashSet<&Bindings>` path without any decode.
-                    let distinct: HashSet<Vec<KeyPart>> = grp
-                        .members
+                    // agg_inner_exprs returns empty for CountStar, so the
+                    // decoded union would yield empty Bindings for every row —
+                    // all deduped to 1, wrong count. Instead, key on
+                    // Vec<KeyPart> directly: within-column homogeneity ensures
+                    // same-value cells hash identically, giving the same
+                    // deduplication as the old `HashSet<&Bindings>` path without
+                    // any decode.
+                    let distinct: HashSet<Vec<KeyPart>> = members
                         .iter()
                         .map(|r| r.0.iter().map(|s| s.key_part()).collect())
                         .collect();
                     Some(integer_literal(distinct.len() as i64))
                 } else {
-                    let members_decoded: Vec<Bindings> = grp
-                        .members
-                        .iter()
-                        .map(|r| self.decode_subset(r, &b.schema, want))
-                        .collect::<Result<Vec<_>>>()?;
                     eval_aggregate(agg, &members_decoded)?
                 };
                 match value {
@@ -543,19 +569,6 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 }
             }
 
-            // Sort key: decoded lexical of each group key slot. Reproduces
-            // the pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering
-            // exactly (None < Some(...) in BTreeMap order is the same as
-            // Option<String> Ord ordering used in sort_by).
-            let sort_key: Vec<Option<String>> = grp
-                .key_slots
-                .iter()
-                .map(|s| match s {
-                    Slot::Unbound => Ok(None),
-                    Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
-                    Slot::Term(t) => Ok(Some(lex(t))),
-                })
-                .collect::<Result<Vec<_>>>()?;
             out.push((sort_key, Row(slots)));
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
