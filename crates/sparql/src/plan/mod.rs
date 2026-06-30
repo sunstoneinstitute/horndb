@@ -3,6 +3,7 @@
 
 pub mod explain;
 pub mod planner;
+pub mod pushdown;
 
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 
@@ -10,6 +11,13 @@ use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 pub enum PhysicalPlan {
     /// Leaf: scan a BGP via the executor.
     BgpScan { patterns: Vec<TriplePattern> },
+    /// Pushed-down COUNT over a BGP (#144): yields one row binding `out_var` to
+    /// the solution count, without materializing rows. Falls back to scan+count
+    /// when the backend has no fast `count_bgp`.
+    CountScan {
+        patterns: Vec<TriplePattern>,
+        out_var: Var,
+    },
     /// Cartesian/equi-join of two child plans on shared variables.
     Join {
         left: Box<PhysicalPlan>,
