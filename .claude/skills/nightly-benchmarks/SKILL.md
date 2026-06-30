@@ -13,14 +13,44 @@ once against **HornDB** and once against **GraphDB Free** (A/B). Trigger ad-hoc 
 
 ## Metrics recorded (suite `ldbc-spb-256`)
 
-Each leg records three metrics into the `metrics` table, keyed by engine label in the
-`dataset` column (`horndb`, `graphdb-free`; `rdfox` if that leg is run):
+Each leg records the **full SPB driver report** into the `metrics` table, keyed by
+engine label in the `dataset` column (`horndb`, `graphdb-free`; `rdfox` if that leg
+is run). The parser is `crates/harness/src/ldbc_spb.rs` (it scrapes the driver's
+final cumulative block + header).
+
+**Headline (always present)** — the stable reporting contract; `harness report
+--metric <name>` and the README query these by name:
 
 | metric_name      | units | meaning                                  |
 |------------------|-------|------------------------------------------|
 | `editorial-qps`  | ops   | editorial (write-side) operations/sec    |
 | `aggregation-qps`| qps   | aggregation **read** queries/sec         |
 | `duration-s`     | s     | wall-clock of the driver run             |
+
+**Full report (also recorded; per-section, all from the final cumulative block).**
+The `q<N>-*`, per-op timing, and error series exist only when the driver ran
+**verbose** (the nightly scenario sets `verbose=true`); a non-verbose run records
+the count-only subset. `<N>` is the aggregation query-type id (`q1`, `q2`, …):
+
+| metric_name | units | meaning |
+|---|---|---|
+| `q<N>-count` | ops | executions of query type `Q<N>` |
+| `q<N>-avg-ms` / `-min-ms` / `-max-ms` | ms | `Q<N>` execution time (verbose) |
+| `q<N>-errors` | count | `Q<N>` failed executions (verbose) |
+| `aggregation-total-queries` | ops | total retrieval queries |
+| `aggregation-errors` | count | total aggregation errors (verbose) |
+| `editorial-total-ops` | ops | total CW insert+update+delete ops |
+| `editorial-{insert,update,delete}-count` | ops | per-op counts |
+| `editorial-{insert,update,delete}-{avg,min,max}-ms` | ms | per-op timing (verbose) |
+| `editorial-{insert,update,delete}-errors` | count | per-op errors (verbose) |
+| `cw-count` | count | Creative Works in the dataset (header) |
+| `reference-entities` | count | reference entities (header) |
+| `geo-locations` | count | geo locations (header) |
+| `completed-query-mixes` **or** `completed-query-runs` | count | whichever the driver reported |
+
+> With `editorialAgents=0` (the current nightly scenario) the editorial series are
+> present but zero; they become meaningful once editorial agents are enabled
+> ([#125](https://github.com/sunstoneinstitute/horndb/issues/125)).
 
 ## The trend DB is append-only
 
