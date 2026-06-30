@@ -20,9 +20,12 @@ deferred. The OWL 2 RL rule names follow the W3C
 
 ## Summary (2026-06-01 survey, post `task-34-dt-datatype-rules`)
 
-19 of the 115 synthesised entries fail today (down from 22: the #34
-datatype-subsumption + `scm-eqc-rev` batch flipped 3 cases green —
-`I5.8-006-pe`, `I5.8-011-pe`, `equivalentClass-003-pe`). They fall into
+18 of the 115 synthesised entries fail today (down from 22 → 19 after the
+#34 datatype-subsumption + `scm-eqc-rev` batch flipped 3 cases green —
+`I5.8-006-pe`, `I5.8-011-pe`, `equivalentClass-003-pe` — then → 18 after
+#40's `dt-diff` flipped `New-Feature-Keys-006-incons` green; see the note
+below). The RL-reachable remainder is tracked in
+[#160](https://github.com/sunstoneinstitute/horndb/issues/160). They fall into
 the following buckets, grouped by the missing capability — not by a
 single rule name — because the residue is mostly tests that need
 *combinations* of features (datatype value-space intersection,
