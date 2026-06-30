@@ -112,9 +112,14 @@ Closed tasks are listed in [Done](#done-for-traceability).
   differential-proptested bit-identical vs scalar on every host ISA path, plus the F5
   `with_forced_isa` override and the `intersect` SIMD-vs-scalar bench) landed in
   `crates/simd` (AVX2/AVX-512 on x86_64, NEON on aarch64; scalar-forced build green on
-  stable 1.90). Kernels that don't yet clear the NF2 floor ship the scalar-equivalent
-  galloping form; the bench is wired but **awaits hornbench measurement** before any wide
-  compress/compare kernel is hand-written. **Stage 1b — DONE (kernels; hornbench numbers
+    stable 1.90). `intersect` now ships genuine wide kernels (AVX-512 `cmpeq`-mask +
+  `compressstore`, AVX2 OR-reduced `cmpeq`+`movemask`, NEON `uint64x2`); `lower_bound`/
+  `filter_indices_eq`/`gather` carry real intrinsics; only `merge` (all arms) and
+  `filter_range`'s AVX2 arm remain scalar-equivalent behind the ISA gate. Per-host kernel
+  choice is resolved by **startup micro-calibration** (`HORNDB_SIMD_AUTOTUNE`, default on),
+  which auto-selects the fastest kernel per primitive (measured: AVX-512 `intersect` ~2.5×
+  on Intel SPR, scalar on Zen4 + for `lower_bound` everywhere) and exports it as the
+  `horndb_simd_kernel_isa{kernel,isa}` metric — no hardcoded CPU blocklist. **Stage 1b — DONE (kernels; hornbench numbers
   pending):** the WCOJ seek/intersect consumer is now live in the **production executor**.
   `executor/wcoj.rs::BatchIter`'s inlined leapfrog gains a k==2 `horndb_simd::intersect`
   fast path (mirroring the standalone `LeapfrogJoin`): when both contributing iters at a
