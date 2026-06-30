@@ -314,44 +314,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 })
             }
             PhysicalPlan::Extend { inner, var, expr } => {
-                // Native slot path: decode only the vars the expression reads,
-                // preserving Slot::Id for all other columns (e.g. BGP scan ids).
-                // Mirrors the Filter arm — same referenced_vars + decode_subset seam.
-                //
-                // re-BIND semantics: SPARQL 1.1 §18.1.10 forbids BIND targeting a
-                // var already in scope; spargebra enforces this at parse time
-                // ("BIND is overriding an existing variable"). Therefore `existing`
-                // is always `None` in production — the `Some` branch is dead code
-                // kept for safety.  The adapter's None-result behaviour (leave the
-                // prior binding unchanged) differs from the native path (overwrite
-                // with Slot::Unbound); since the branch is unreachable, the
-                // divergence never surfaces.
-                let b = self.eval(inner)?;
-                let mut want = HashSet::new();
-                referenced_vars(expr, &mut want);
-                let existing = b.col(var.name()); // Some(i) ⇒ re-BIND (dead code)
-                let mut schema = b.schema.clone();
-                if existing.is_none() {
-                    schema.push(var.clone());
-                }
-                let mut out_rows = Vec::with_capacity(b.rows.len());
-                for r in &b.rows {
-                    let env = self.decode_subset(r, &b.schema, &want)?;
-                    let slot = match eval_expr_to_term(expr, &env)? {
-                        Some(t) => Slot::Term(t),
-                        None => Slot::Unbound,
-                    };
-                    let mut slots = r.0.clone();
-                    match existing {
-                        Some(i) => slots[i] = slot,
-                        None => slots.push(slot),
-                    }
-                    out_rows.push(Row(slots));
-                }
-                Ok(Batch {
-                    schema,
-                    rows: out_rows,
-                })
+                let child = self.eval(inner)?;
+                self.apply_extend(child, var, expr)
             }
             PhysicalPlan::Values { vars, rows } => {
                 // Rows are guaranteed full-width by the spargebra parser (it
@@ -464,6 +428,43 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             })
             .collect();
         Ok(Batch { schema, rows })
+    }
+
+    /// Evaluate `expr` per row and bind the result to `var` (BIND). Appends a
+    /// new column when `var` is new, overwrites it when already present.
+    /// The single source of truth for Extend, shared by the legacy `eval`
+    /// arm and the streaming `ExtendOp`.
+    ///
+    /// re-BIND semantics: SPARQL 1.1 §18.1.10 forbids BIND targeting a var
+    /// already in scope; spargebra enforces this at parse time so the `Some`
+    /// branch is dead code kept for safety. An unbound expr result maps to
+    /// `Slot::Unbound` — Extend never drops rows.
+    pub(crate) fn apply_extend(&self, batch: Batch, var: &Var, expr: &Expr) -> Result<Batch> {
+        let mut want = HashSet::new();
+        referenced_vars(expr, &mut want);
+        let existing = batch.col(var.name()); // Some(i) ⇒ re-BIND (dead code)
+        let mut schema = batch.schema.clone();
+        if existing.is_none() {
+            schema.push(var.clone());
+        }
+        let mut out_rows = Vec::with_capacity(batch.rows.len());
+        for r in &batch.rows {
+            let env = self.decode_subset(r, &batch.schema, &want)?;
+            let slot = match eval_expr_to_term(expr, &env)? {
+                Some(t) => Slot::Term(t),
+                None => Slot::Unbound,
+            };
+            let mut slots = r.0.clone();
+            match existing {
+                Some(i) => slots[i] = slot,
+                None => slots.push(slot),
+            }
+            out_rows.push(Row(slots));
+        }
+        Ok(Batch {
+            schema,
+            rows: out_rows,
+        })
     }
 
     /// Decode just the named columns of a slot row into a `Bindings`, for

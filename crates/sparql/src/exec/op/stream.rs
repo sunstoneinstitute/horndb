@@ -6,6 +6,46 @@ use crate::error::Result;
 use crate::exec::runtime::Runtime;
 use crate::exec::{Batch, Executor};
 
+/// Streams its child, evaluating `expr` and binding the result to `var` (BIND).
+/// Never drops rows — an unbound expr result leaves the slot as `Slot::Unbound`.
+pub struct ExtendOp<'r, E: Executor + ?Sized> {
+    rt: &'r Runtime<'r, E>,
+    child: Box<dyn Op + 'r>,
+    var: Var,
+    expr: Expr,
+    schema: Vec<Var>,
+}
+
+impl<'r, E: Executor + ?Sized> ExtendOp<'r, E> {
+    pub fn new(rt: &'r Runtime<'r, E>, child: Box<dyn Op + 'r>, var: Var, expr: Expr) -> Self {
+        // Mirror apply_extend's output schema rule exactly: append var iff
+        // absent from child schema (re-BIND overwrites in place, no schema change).
+        let mut schema = child.schema().to_vec();
+        if !schema.iter().any(|v| v.name() == var.name()) {
+            schema.push(var.clone());
+        }
+        Self {
+            rt,
+            child,
+            var,
+            expr,
+            schema,
+        }
+    }
+}
+
+impl<'r, E: Executor + ?Sized> Op for ExtendOp<'r, E> {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+    fn next(&mut self) -> Result<Option<Batch>> {
+        match self.child.next()? {
+            Some(chunk) => Ok(Some(self.rt.apply_extend(chunk, &self.var, &self.expr)?)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Streams its child, projecting each chunk to `vars`.
 pub struct ProjectOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
