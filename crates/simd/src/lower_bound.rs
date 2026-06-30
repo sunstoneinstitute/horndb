@@ -54,18 +54,21 @@ fn neon_safe(haystack: &[u64], value: u64) -> usize {
     unsafe { neon(haystack, value) }
 }
 
-/// Galloping probe then a 2-lane (`uint64x2_t`) linear compare. Same result
-/// as the scalar oracle for all non-decreasing inputs.
+/// Galloping probe to bound the window, then a 2-lane (`uint64x2_t`) linear
+/// SIMD scan: broadcast `value`, compare two `u64` lanes per step with
+/// `vcltq_u64`, and stop at the first lane `>= value` (found by lane
+/// extraction). NEON's `u64` compare is unsigned, so no sign-bias is needed
+/// (unlike the AVX2 kernel). Returns the same index as the scalar oracle for
+/// all non-decreasing inputs.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn neon(haystack: &[u64], value: u64) -> usize {
-    // Correctness-first galloping form (no intrinsics needed for correctness;
-    // the NEON win is a throughput optimisation the bench gates). Equivalent
-    // to partition_point.
+    use std::arch::aarch64::*;
     let n = haystack.len();
     if n == 0 {
         return 0;
     }
+    // Gallop: find a window [lo, hi) containing the boundary.
     let mut lo = 0usize;
     let mut step = 1usize;
     while lo + step < n && *haystack.get_unchecked(lo + step) < value {
@@ -73,7 +76,24 @@ unsafe fn neon(haystack: &[u64], value: u64) -> usize {
         step *= 2;
     }
     let hi = (lo + step).min(n);
+    // Linear NEON scan of [lo, hi): broadcast `value`, compare 2 lanes/step,
+    // stop at the first lane >= value. `vcltq_u64` yields all-ones in a lane
+    // where `chunk[lane] < value`; the slice is non-decreasing, so the per-lane
+    // mask is monotone (1,1 / 1,0 / 0,0) and the first zero lane is the answer.
+    let needle = vdupq_n_u64(value);
     let mut i = lo;
+    while i + 2 <= hi {
+        let chunk = vld1q_u64(haystack.as_ptr().add(i));
+        let lt = vcltq_u64(chunk, needle);
+        if vgetq_lane_u64(lt, 0) == 0 {
+            return i;
+        }
+        if vgetq_lane_u64(lt, 1) == 0 {
+            return i + 1;
+        }
+        i += 2;
+    }
+    // Tail: scalar.
     while i < hi && *haystack.get_unchecked(i) < value {
         i += 1;
     }
@@ -156,12 +176,19 @@ mod tests {
 
     #[test]
     fn boundaries() {
+        // 100 elements: exercises both the 2-lane wide scan and the scalar tail.
         let h: Vec<u64> = (0..100u64).map(|x| x * 2).collect();
         for v in [0, 1, 2, 99, 100, 198, 199, 200] {
             check(&h, v);
         }
-        check(&[], 5);
-        check(&[7], 7);
+        check(&[], 5); // empty
+        check(&[7], 7); // single element
         check(&[7], 8);
+        check(&[0, 0, 0], 0); // all-zero block
+                              // u64::MAX boundary (and an odd length so the tail runs).
+        let m: Vec<u64> = vec![0, 1, 2, u64::MAX, u64::MAX];
+        for v in [0, 3, u64::MAX] {
+            check(&m, v);
+        }
     }
 }

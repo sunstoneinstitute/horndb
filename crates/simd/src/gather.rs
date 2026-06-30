@@ -37,6 +37,10 @@ fn resolve() -> Fn_ {
             if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
             }
+            // No NEON arm on aarch64: NEON has no gather instruction (no
+            // `vpgatherqq` equivalent), so a vectorised indexed load decomposes
+            // into the same scalar loads plus lane-assembly overhead and cannot
+            // beat the scalar path. Scalar is optimal here.
             scalar::gather
         }
     }
