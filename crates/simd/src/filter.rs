@@ -19,6 +19,12 @@ pub fn filter_range(values: &[u64], lo: u64, hi: u64, out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], u64, u64, &mut Vec<u64>);
 
+/// The cached `(chosen ISA, kernel)` pair, calibrated once on first call.
+fn cached() -> (Isa, Fn_) {
+    static CACHE: OnceLock<(Isa, Fn_)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -26,8 +32,49 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached `filter_range` kernel (paying any calibration cost now).
+/// Called by [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached `filter_range` kernel (calibrating if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner.
+fn choose() -> (Isa, Fn_) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, range_scalar)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon") {
+        candidates.push((Isa::Neon, neon_safe));
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        return *candidates.last().expect("scalar baseline always present");
+    }
+
+    // Deterministic L2-resident column + a mid range (~50% selectivity, no `rand`).
+    const N: u64 = 4096;
+    let values: Vec<u64> = (0..N).map(|x| x % 1000).collect();
+    let (lo, hi) = (250u64, 750u64);
+    let mut out: Vec<u64> = Vec::with_capacity(values.len());
+    crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&values, lo, hi, &mut out);
+        core::hint::black_box(&out);
+    })
 }
 
 fn resolve() -> Fn_ {

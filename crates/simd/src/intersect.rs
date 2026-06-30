@@ -13,6 +13,12 @@ pub fn intersect(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], &[u64], &mut Vec<u64>);
 
+/// The cached `(chosen ISA, kernel)` pair, calibrated once on first call.
+fn cached() -> (Isa, Fn_) {
+    static CACHE: OnceLock<(Isa, Fn_)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -20,8 +26,62 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached kernel (paying any calibration cost now). Called by
+/// [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached kernel (calibrating on first call if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner.
+fn choose() -> (Isa, Fn_) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::intersect)];
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Push order is scalar, avx2, avx512 so "last" = the widest available,
+        // matching `resolve`'s avx512-over-avx2 preference.
+        if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+            candidates.push((Isa::Avx2, avx2_safe));
+        }
+        if crate::dispatch::allows(Isa::Avx512) && is_x86_feature_detected!("avx512f") {
+            candidates.push((Isa::Avx512, avx512_safe));
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon") {
+        candidates.push((Isa::Neon, neon_safe));
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        return *candidates.last().expect("scalar baseline always present");
+    }
+
+    let (a, b) = calib_input();
+    let mut out: Vec<u64> = Vec::with_capacity(a.len());
+    crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&a, &b, &mut out);
+        core::hint::black_box(&out);
+    })
+}
+
+/// Deterministic L2-resident workload: two sorted, deduped runs with ~50%
+/// overlap (no `rand`).
+fn calib_input() -> (Vec<u64>, Vec<u64>) {
+    const N: u64 = 4096;
+    let a: Vec<u64> = (0..N).map(|x| x * 2).collect();
+    let b: Vec<u64> = (0..N).map(|x| x * 2 + (x % 2)).collect();
+    (a, b)
 }
 
 fn resolve() -> Fn_ {
