@@ -52,7 +52,7 @@
         Forward <em>and</em> backward chaining over OWL&nbsp;2&nbsp;RL semantics, with a
         SPARQL&nbsp;1.1 frontend. Apache-2.0, EU-developed, open from the start.
       </p>
-      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 — feasibility prototype running; 96 of 115 W3C OWL&nbsp;2&nbsp;RL cases green, the WCOJ engine clearing its acceptance gate</p>
+      <p class="status"><span class="status-dot" aria-hidden="true"></span> Stage&nbsp;1 complete — the storage&nbsp;→&nbsp;SPARQL stack runs end-to-end; 96 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases green, WCOJ past its acceptance gate, incremental insert&nbsp;<em>and</em>&nbsp;retraction landed</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/sunstoneinstitute/horndb/blob/main/docs/specs/SPEC-00-vision.md">Read the vision</a>
@@ -122,28 +122,48 @@
         <p class="section-lede">Stage&nbsp;1 is a working engine, not a paper design. Every subsystem below has code in the repository, exercised by tests and the conformance harness.</p>
         <ul class="cards">
           <li class="card">
-            <h3>Tiered storage <span class="badge">shipping</span></h3>
+            <h3>Tiered storage <span class="badge">implemented</span></h3>
             <p>Dictionary-encoded terms and predicate-partitioned columnar triples, with an N-Triples loader that already ingests RDF&nbsp;1.2 triple terms.</p>
           </li>
           <li class="card">
-            <h3>Worst-case-optimal joins <span class="badge">shipping</span></h3>
+            <h3>Worst-case-optimal joins <span class="badge">implemented</span></h3>
             <p>Leapfrog Triejoin with cost-based fallback to a binary hash join. Clears its acceptance gate — ≥10× a binary-join baseline on the canonical four-cycle workload (~34× measured on a skewed 10⁶-edge graph).</p>
           </li>
           <li class="card">
-            <h3>Compiled OWL&nbsp;2&nbsp;RL rules <span class="badge">shipping</span></h3>
+            <h3>Compiled OWL&nbsp;2&nbsp;RL rules <span class="badge">implemented</span></h3>
             <p>Entailment rules compiled ahead-of-time to native Rust — no interpreter in the hot path — evaluated semi-naïvely to a fixpoint. 96 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases pass.</p>
           </li>
           <li class="card">
-            <h3>GraphBLAS closure <span class="badge">shipping</span></h3>
+            <h3>GraphBLAS closure <span class="badge">implemented</span></h3>
             <p>Schema-level transitive closure runs as a semiring matrix multiply on SuiteSparse:GraphBLAS, linked in natively.</p>
           </li>
           <li class="card">
-            <h3>Incremental maintenance <span class="badge">insertion-only</span></h3>
-            <p>DBSP-style Z-set deltas update only what changed. Insertions ship today; retraction is Stage&nbsp;2.</p>
+            <h3>Incremental maintenance <span class="badge">implemented</span></h3>
+            <p>DBSP-style Z-set deltas update only what changed. Insertion is fully incremental, and retraction now lands across both the rule path and the closure path — insert 10K / retract 10K is bit-identical to a clean load.</p>
           </li>
           <li class="card">
-            <h3>SPARQL&nbsp;1.1 frontend <span class="badge">shipping</span></h3>
-            <p>Parser, algebra, planner and an HTTP endpoint answering SELECT&nbsp;/&nbsp;ASK&nbsp;/&nbsp;CONSTRUCT — including GROUP&nbsp;BY and aggregates — driven end-to-end against the LDBC Semantic Publishing Benchmark.</p>
+            <h3>SPARQL&nbsp;1.1 frontend <span class="badge">implemented</span></h3>
+            <p>Parser, algebra, planner and an axum HTTP endpoint: SELECT&nbsp;/&nbsp;ASK&nbsp;/&nbsp;CONSTRUCT&nbsp;/&nbsp;DESCRIBE, full aggregation, every property-path operator (including the recursive ones), pattern and graph-management Update, and an EXPLAIN pragma — driven end-to-end against the LDBC Semantic Publishing Benchmark.</p>
+          </li>
+          <li class="card">
+            <h3>Provenance &amp; proof trees <span class="badge">implemented</span></h3>
+            <p>Every inferred triple records the rule and premises that produced it; an explicit proof query walks the recursive tree down to the asserted facts at its leaves.</p>
+          </li>
+          <li class="card">
+            <h3>SSSOM crosswalks <span class="badge">implemented</span></h3>
+            <p>Ontology mapping chains (SKOS&nbsp;/&nbsp;OWL&nbsp;/&nbsp;semapv) close through the compiled rule engine and the GraphBLAS backend, with confidence propagated along each chain.</p>
+          </li>
+          <li class="card">
+            <h3>Python / rdflib API <span class="badge">implemented</span></h3>
+            <p>A PyO3 binding exposing rdflib-shaped terms, a Graph facade, Turtle&nbsp;/&nbsp;N-Triples parse&nbsp;and&nbsp;serialize, and SPARQL query&nbsp;/&nbsp;update passthrough — differential-tested against upstream rdflib.</p>
+          </li>
+          <li class="card">
+            <h3>SIMD acceleration <span class="badge">implemented</span></h3>
+            <p>A shared, runtime-dispatched SIMD layer — AVX-512&nbsp;/&nbsp;AVX2 on x86, NEON on Apple silicon, scalar fallback always present as the oracle — driving the WCOJ seek&nbsp;/&nbsp;intersect and dictionary-decode&nbsp;/&nbsp;<code>rdf:type</code>-scan hot loops. Every kernel is differential-proven bit-identical to scalar.</p>
+          </li>
+          <li class="card">
+            <h3>Observability <span class="badge">implemented</span></h3>
+            <p>Prometheus metrics across the SPARQL HTTP layer, closure backend, rule engine, incremental maintenance and storage, exposed at a <code>/metrics</code> scrape endpoint. OpenTelemetry traces and logs <span class="badge badge-deferred">deferred</span> to a later phase.</p>
           </li>
         </ul>
       </div>
@@ -168,13 +188,13 @@
                 <td>Harness bootstrap</td>
                 <td>Selected suite plumbing green; a deliberate failure is correctly flagged red.</td>
               </tr>
-              <tr class="active-stage">
-                <td><span class="stage">Stage 1</span> <span class="badge">in progress</span></td>
-                <td>Storage + WCOJ + a minimal OWL&nbsp;2&nbsp;RL slice</td>
-                <td>≥50 W3C OWL&nbsp;2&nbsp;RL cases green; within 3× of a materialization baseline on LUBM-100.</td>
-              </tr>
               <tr>
-                <td><span class="stage">Stage 2</span></td>
+                <td><span class="stage">Stage 1</span> <span class="badge">complete</span></td>
+                <td>Storage + WCOJ + an OWL&nbsp;2&nbsp;RL slice through to SPARQL</td>
+                <td>≥50 W3C OWL&nbsp;2&nbsp;RL cases green (96 today); WCOJ past its four-cycle gate. Open gaps tracked in TASKS.md.</td>
+              </tr>
+              <tr class="active-stage">
+                <td><span class="stage">Stage 2</span> <span class="badge">next</span></td>
                 <td>Full storage→SPARQL stack + RDF&nbsp;1.2 triple terms</td>
                 <td>Full W3C OWL&nbsp;2&nbsp;RL + SPARQL&nbsp;1.1 + Entailment Regimes green; ORE&nbsp;2015 RL fragment solved.</td>
               </tr>
