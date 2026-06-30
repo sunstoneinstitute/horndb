@@ -26,7 +26,25 @@
 //! only production detection, not the test/bench [`with_forced_isa`] override, so
 //! the differential suite still exercises every kernel the host can run.
 //! Query the active cap with [`configured_max_isa`].
+//!
+//! ## Startup calibration (`HORNDB_SIMD_AUTOTUNE`)
+//!
+//! Benchmarks proved the fastest ISA is **host-dependent** with no cheap runtime
+//! bit to tell hosts apart: AVX-512 `intersect` wins ~2.5× on Intel Sapphire
+//! Rapids but *loses* ~2.5× on AMD Zen4's double-pumped AVX-512; SIMD
+//! `lower_bound` loses to scalar binary search on both. So each primitive
+//! **micro-calibrates** on first use (or eagerly via [`init`]): it times every
+//! kernel its host can run on a small L2-resident workload and caches the
+//! fastest, adopting a SIMD kernel only when it beats scalar by a safety margin.
+//!
+//! Calibration is **on by default**. Disable it with `HORNDB_SIMD_AUTOTUNE=off`
+//! (also `0`/`false`/`no`), which falls back to the static widest-ISA
+//! preference. The `HORNDB_SIMD_MAX_ISA` cap still bounds the candidate set in
+//! both modes. Call [`init`] at startup to pay the calibration cost up front;
+//! [`calibration_report`] returns the chosen ISA per primitive (for logging),
+//! and [`configured_autotune`] reports whether auto-tune is enabled.
 
+mod calibrate;
 mod dedup;
 mod dispatch;
 mod filter;
@@ -45,7 +63,39 @@ pub use intersect::intersect;
 pub use lower_bound::lower_bound;
 pub use merge::merge;
 
-pub use dispatch::{configured_max_isa, forced_isa, Isa};
+pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa};
+
+/// Eagerly calibrate every primitive's kernel, paying the (small) startup
+/// calibration cost up front instead of lazily on first use. Hosts that want
+/// deterministic first-call latency call this once at startup; otherwise each
+/// primitive calibrates on its first call. A no-op beyond the first call per
+/// primitive (results are cached). Honours `HORNDB_SIMD_AUTOTUNE` and
+/// `HORNDB_SIMD_MAX_ISA`.
+pub fn init() {
+    intersect::prime();
+    lower_bound::prime();
+    merge::prime();
+    dedup::prime();
+    filter::prime();
+    filter_indices::prime();
+    gather::prime();
+}
+
+/// The kernel ISA chosen for each dispatched primitive, one `(name, isa)` per
+/// primitive. Triggers calibration for any not-yet-resolved primitive. Intended
+/// for startup logging, e.g.
+/// `for (n, isa) in horndb_simd::calibration_report() { tracing::info!(%n, ?isa); }`.
+pub fn calibration_report() -> Vec<(&'static str, Isa)> {
+    vec![
+        ("intersect", intersect::chosen()),
+        ("lower_bound", lower_bound::chosen()),
+        ("merge", merge::chosen()),
+        ("dedup", dedup::chosen()),
+        ("filter_range", filter::chosen()),
+        ("filter_indices_eq", filter_indices::chosen()),
+        ("gather", gather::chosen()),
+    ]
+}
 
 /// Test-support API (see [`dispatch::with_forced_isa`]): pins a specific ISA
 /// dispatch path for the differential proptests and the intersect bench, which

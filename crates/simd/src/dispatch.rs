@@ -126,6 +126,46 @@ pub fn configured_max_isa() -> Option<Isa> {
     isa_cap()
 }
 
+// --- Startup auto-calibration toggle (HORNDB_SIMD_AUTOTUNE) -----------------
+//
+// Per-host kernel benchmarks proved the fastest ISA is host-dependent (AVX-512
+// `intersect` wins 2.5x on Sapphire Rapids but loses 2.5x on Zen4, etc.) with
+// no cheap runtime bit to tell the cases apart. So each primitive can
+// micro-calibrate at startup: time every available kernel and cache the
+// fastest. The behaviour is on by default and disabled with
+// `HORNDB_SIMD_AUTOTUNE=off` (also `0`/`false`/`no`), which falls back to the
+// static widest-ISA preference. The `HORNDB_SIMD_MAX_ISA` cap still bounds the
+// candidate set either way.
+
+/// Pure parse of a `HORNDB_SIMD_AUTOTUNE` value (testable without touching the
+/// environment). Auto-tune is *disabled* iff the trimmed, lowercased value is
+/// one of `off`, `0`, `false`, `no`. Unset (`None`) or anything else ⇒ enabled.
+fn autotune_from(s: Option<&str>) -> bool {
+    match s {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// Whether startup micro-calibration is enabled, read once from
+/// `HORNDB_SIMD_AUTOTUNE`. Defaults to `true`.
+pub(crate) fn autotune_enabled() -> bool {
+    use std::sync::OnceLock;
+    static AUTOTUNE: OnceLock<bool> = OnceLock::new();
+    *AUTOTUNE.get_or_init(|| autotune_from(std::env::var("HORNDB_SIMD_AUTOTUNE").ok().as_deref()))
+}
+
+/// Whether startup micro-calibration is enabled (`HORNDB_SIMD_AUTOTUNE`, default
+/// on). Exposed so a host can log the effective SIMD policy at startup alongside
+/// [`configured_max_isa`]. When off, each primitive uses its static widest-ISA
+/// preference; the `HORNDB_SIMD_MAX_ISA` cap applies in both modes.
+pub fn configured_autotune() -> bool {
+    autotune_enabled()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +205,23 @@ mod tests {
         assert!(cap_allows(Isa::Scalar, cap));
         for isa in [Isa::Avx2, Isa::Avx512, Isa::Neon] {
             assert!(!cap_allows(isa, cap), "{isa:?} must be capped out");
+        }
+    }
+
+    #[test]
+    fn autotune_default_on_when_unset_or_unknown() {
+        assert!(autotune_from(None), "unset ⇒ on");
+        assert!(autotune_from(Some("on")));
+        assert!(autotune_from(Some("1")));
+        assert!(autotune_from(Some("true")));
+        assert!(autotune_from(Some("garbage")));
+        assert!(autotune_from(Some("")));
+    }
+
+    #[test]
+    fn autotune_off_spellings_disable() {
+        for v in ["off", "0", "false", "no", "OFF", " Off ", "FALSE", "No"] {
+            assert!(!autotune_from(Some(v)), "{v:?} must disable autotune");
         }
     }
 
