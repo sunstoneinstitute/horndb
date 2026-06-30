@@ -217,20 +217,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 })
             }
             PhysicalPlan::Filter { expr, inner } => {
-                let b = self.eval(inner)?;
-                let mut want = std::collections::HashSet::new();
-                referenced_vars(expr, &mut want);
-                let mut rows = Vec::with_capacity(b.rows.len());
-                for r in b.rows {
-                    let env = self.decode_subset(&r, &b.schema, &want)?;
-                    if eval_expr(expr, &env)? {
-                        rows.push(r);
-                    }
-                }
-                Ok(Batch {
-                    schema: b.schema,
-                    rows,
-                })
+                let child = self.eval(inner)?;
+                self.apply_filter(child, expr)
             }
             PhysicalPlan::Union { left, right } => {
                 let l = self.eval(left)?;
@@ -444,6 +432,30 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 )?))
             }
         }
+    }
+
+    /// Keep the rows of `batch` for which `expr` evaluates true. Decodes only
+    /// the referenced columns (`decode_subset`), preserving `Slot::Id` for the
+    /// rest. The single source of truth for Filter, shared by the legacy
+    /// `eval` arm and the streaming `FilterOp`.
+    pub(crate) fn apply_filter(&self, batch: Batch, expr: &Expr) -> Result<Batch> {
+        let mut want = HashSet::new();
+        referenced_vars(expr, &mut want);
+        // Pessimistic for a selective filter (frees the slack on return), but
+        // avoids reallocs in the common high-pass-rate case. Filter is the one
+        // streaming op that drops rows; transform-like ops (Project/Extend)
+        // keep every row, so for those the same hint is exact, not pessimistic.
+        let mut kept = Vec::with_capacity(batch.rows.len());
+        for row in batch.rows {
+            let b = self.decode_subset(&row, &batch.schema, &want)?;
+            if eval_expr(expr, &b)? {
+                kept.push(row);
+            }
+        }
+        Ok(Batch {
+            schema: batch.schema,
+            rows: kept,
+        })
     }
 
     /// Decode just the named columns of a slot row into a `Bindings`, for

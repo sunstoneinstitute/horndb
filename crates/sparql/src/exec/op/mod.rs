@@ -4,6 +4,8 @@
 
 mod source;
 use source::ScanOp;
+mod stream;
+use stream::FilterOp;
 
 use crate::algebra::Var;
 use crate::error::Result;
@@ -66,6 +68,10 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => {
                 Ok(Box::new(ScanOp::new(self.exec().scan_bgp_ids(patterns)?)))
+            }
+            PhysicalPlan::Filter { expr, inner } => {
+                let child = self.build(inner)?;
+                Ok(Box::new(FilterOp::new(self, child, expr.clone())))
             }
             _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
         }
