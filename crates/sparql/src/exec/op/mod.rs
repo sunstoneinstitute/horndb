@@ -2,6 +2,8 @@
 //! at most `BATCH_ROWS` rows, all sharing `schema()`. `next` returns `None`
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
+mod blocking;
+use blocking::UnionOp;
 mod source;
 pub(crate) use source::build_values_batch;
 use source::{ScanOp, ValuesOp};
@@ -121,6 +123,11 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
             PhysicalPlan::Distinct { inner } => {
                 let child = self.build(inner)?;
                 Ok(Box::new(DistinctOp::new(child)))
+            }
+            PhysicalPlan::Union { left, right } => {
+                let l = self.build(left)?;
+                let r = self.build(right)?;
+                Ok(Box::new(UnionOp::new(self, l, r)))
             }
             _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
         }

@@ -224,38 +224,18 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 let l = self.eval(left)?;
                 let r = self.eval(right)?;
                 // Schema = left schema ++ right-only vars (deterministic order).
-                let mut schema = l.schema.clone();
-                for v in &r.schema {
-                    if !schema.iter().any(|x| x.name() == v.name()) {
-                        schema.push(v.clone());
-                    }
-                }
-                // Place each child row's slots by var name, Unbound where the
-                // branch does not bind that schema var.
-                fn place(child: &Batch, schema: &[Var]) -> Vec<Row> {
-                    child
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            Row(schema
-                                .iter()
-                                .map(|v| match child.col(v.name()) {
-                                    Some(i) => row.0[i].clone(),
-                                    None => Slot::Unbound,
-                                })
-                                .collect())
-                        })
-                        .collect()
-                }
-                let mut rows = place(&l, &schema);
-                rows.extend(place(&r, &schema));
-                // Branches of differing provenance (native BGP → Slot::Id vs
-                // adapter-backed → Slot::Term, or Unbound where a branch omits
-                // a var) can leave a column mixing Id and Term for one logical
-                // value; Distinct/Group would then key Id(x) ≠ Lex(x). Restore
-                // within-column homogeneity (pure-Id columns pay zero decode).
-                self.normalize_columns(&mut rows, schema.len())?;
-                Ok(Batch { schema, rows })
+                let merged = self.union_schema(&l.schema, &r.schema);
+                // Place each child's rows into merged schema order; normalize
+                // over the COMBINED rows so that a column that is all-Id in one
+                // branch and all-Term in the other is unified (per-child the
+                // column looks homogeneous, but the union is mixed).
+                let mut rows = self.apply_union_chunk(l, &merged)?;
+                rows.extend(self.apply_union_chunk(r, &merged)?);
+                self.normalize_columns(&mut rows, merged.len())?;
+                Ok(Batch {
+                    schema: merged,
+                    rows,
+                })
             }
             PhysicalPlan::Project { vars, inner } => {
                 let child = self.eval(inner)?;
@@ -574,6 +554,42 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         })
     }
 
+    /// Merged UNION schema: left schema followed by right-only vars (the legacy
+    /// Union arm's schema rule).
+    pub(crate) fn union_schema(&self, left: &[Var], right: &[Var]) -> Vec<Var> {
+        let mut s = left.to_vec();
+        for v in right {
+            if !s.iter().any(|x| x.name() == v.name()) {
+                s.push(v.clone());
+            }
+        }
+        s
+    }
+
+    /// Remap one child batch into `merged` schema order, placing `Slot::Unbound`
+    /// for vars absent from the child. Does NOT call `normalize_columns` —
+    /// normalization must run over the fully combined row set (left + right
+    /// concatenated) because a column that is all-Id in one child and all-Term
+    /// in the other looks homogeneous per-child but is mixed in the union.
+    /// Callers are responsible for calling `normalize_columns` after combining
+    /// both children's output.
+    pub(crate) fn apply_union_chunk(&self, chunk: Batch, merged: &[Var]) -> Result<Vec<Row>> {
+        let Batch { schema, rows } = chunk;
+        let out = rows
+            .into_iter()
+            .map(|row| {
+                Row(merged
+                    .iter()
+                    .map(|v| match schema.iter().position(|c| c.name() == v.name()) {
+                        Some(i) => row.0[i].clone(),
+                        None => Slot::Unbound,
+                    })
+                    .collect())
+            })
+            .collect();
+        Ok(out)
+    }
+
     /// Decode Id cells in columns that mix Slot::Id and Slot::Term, restoring
     /// the within-column homogeneity invariant for any operator that unions or
     /// merges children of differing slot provenance (Join, Union, LeftJoin).
@@ -581,7 +597,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// See the comment in the Join arm for the full explanation of why mixing
     /// occurs (adapter-backed child leaves Slot::Unbound on some rows while
     /// the native BGP child has Slot::Id → merge_rows takes Id on those rows).
-    fn normalize_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
+    pub(crate) fn normalize_columns(&self, rows: &mut [Row], width: usize) -> Result<()> {
         for c in 0..width {
             let mut has_id = false;
             let mut has_term = false;
