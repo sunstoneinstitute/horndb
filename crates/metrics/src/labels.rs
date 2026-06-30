@@ -122,3 +122,26 @@ label_value_enum!(NlResult {
 pub struct NlResultLabel {
     pub result: NlResult,
 }
+
+label_value_enum!(SimdKernel {
+    Intersect => "intersect",
+    LowerBound => "lower_bound",
+    Merge => "merge",
+    Dedup => "dedup",
+    FilterRange => "filter_range",
+    FilterIndicesEq => "filter_indices_eq",
+    Gather => "gather",
+});
+
+label_value_enum!(SimdIsa {
+    Scalar => "scalar",
+    Avx2 => "avx2",
+    Avx512 => "avx512",
+    Neon => "neon",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SimdKernelLabel {
+    pub kernel: SimdKernel,
+    pub isa: SimdIsa,
+}

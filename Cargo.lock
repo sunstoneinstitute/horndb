@@ -1169,6 +1169,7 @@ dependencies = [
  "clap",
  "horndb-metrics",
  "horndb-owlrl",
+ "horndb-simd",
  "horndb-storage",
  "horndb-wcoj",
  "http-body",

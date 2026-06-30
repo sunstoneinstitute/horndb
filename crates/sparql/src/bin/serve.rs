@@ -50,6 +50,10 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Pay the SIMD startup micro-calibration cost up front and publish which
+    // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
+    record_simd_calibration();
+
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
         collect_data_files(path, &mut files)
@@ -155,6 +159,42 @@ async fn main() -> Result<()> {
         .await
         .context("axum serve loop")?;
     Ok(())
+}
+
+/// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
+/// per primitive as `horndb_simd_kernel_isa` gauges (1 on the active series).
+/// The metrics crate keeps its own `SimdKernel`/`SimdIsa` label enums, so this
+/// is the one place the two type universes are bridged.
+fn record_simd_calibration() {
+    use horndb_metrics::labels::{SimdIsa, SimdKernel};
+
+    horndb_simd::init();
+    let metrics = horndb_metrics::metrics();
+    for (name, isa) in horndb_simd::calibration_report() {
+        let kernel = match name {
+            "intersect" => SimdKernel::Intersect,
+            "lower_bound" => SimdKernel::LowerBound,
+            "merge" => SimdKernel::Merge,
+            "dedup" => SimdKernel::Dedup,
+            "filter_range" => SimdKernel::FilterRange,
+            "filter_indices_eq" => SimdKernel::FilterIndicesEq,
+            "gather" => SimdKernel::Gather,
+            other => {
+                // A primitive added to horndb-simd but not mapped here: skip
+                // rather than panic at startup.
+                eprintln!("serve: skipping unknown SIMD primitive {other:?} in calibration report");
+                continue;
+            }
+        };
+        let simd_isa = match isa {
+            horndb_simd::Isa::Scalar => SimdIsa::Scalar,
+            horndb_simd::Isa::Avx2 => SimdIsa::Avx2,
+            horndb_simd::Isa::Avx512 => SimdIsa::Avx512,
+            horndb_simd::Isa::Neon => SimdIsa::Neon,
+        };
+        eprintln!("serve: SIMD calibration — {name} -> {isa:?}");
+        metrics.simd.record(kernel, simd_isa);
+    }
 }
 
 /// Recursively collect `.nt`/`.ttl` files under `path` (or `path` itself

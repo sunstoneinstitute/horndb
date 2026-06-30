@@ -64,6 +64,8 @@ registered the collector. In tests, read the registry directly with
 | `rule` | OWL-RL rule id (string, e.g. `cax-sco`) | `owlrl_rule_fires`, `owlrl_rule_duration_seconds` |
 | `tier` | `dram`, `hbm`, `cxl`, `unknown` | `storage_tier_bytes_estimated` (only `unknown` emitted today — tiering is Stage-3) |
 | `result` | `ok`, `error` | `ml_nl_query` |
+| `kernel` | `intersect`, `lower_bound`, `merge`, `dedup`, `filter_range`, `filter_indices_eq`, `gather` | `simd_kernel_isa` |
+| `isa` | `scalar`, `avx2`, `avx512`, `neon` | `simd_kernel_isa` |
 
 ## SPARQL HTTP + pipeline (`crates/metrics/src/sparql.rs`)
 
@@ -157,3 +159,18 @@ drop) — never per-seek/per-tuple (design §5.3).
 | `horndb_wcoj_seeks_per_query` | histogram | — | count `(1 ×4 ×12)` | trie-iterator seeks per WCOJ query |
 | `horndb_wcoj_iterations_per_query` | histogram | — | count `(1 ×4 ×12)` | leapfrog convergence iterations per query |
 | `horndb_wcoj_peak_iterators` | histogram | — | count `(1 ×2 ×12)` | active trie iterators per query |
+
+## SIMD kernel selection (`crates/metrics/src/simd.rs`)
+
+Emitted once at server startup by `crates/sparql/src/bin/serve.rs`
+(`record_simd_calibration`), which runs `horndb_simd::init()` and publishes
+`horndb_simd::calibration_report()`. One series is set to `1` per primitive — the
+`(kernel, isa)` chosen by the `horndb-simd` startup micro-calibration.
+
+| Metric (scraped name) | Type | Labels | Unit / buckets | Meaning |
+|---|---|---|---|---|
+| `horndb_simd_kernel_isa` | gauge | `kernel`, `isa` | count | 1 on the `(kernel, isa)` series chosen by startup calibration; emitted once at server startup |
+
+> **Caveat.** Under `HORNDB_SIMD_AUTOTUNE=off`, `merge`/`filter_range` report their
+> widest *available* ISA label even though those kernels currently run scalar
+> bodies; the default autotune-on path reports `scalar` for them correctly.
