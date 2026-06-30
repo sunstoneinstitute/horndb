@@ -5,7 +5,7 @@
 mod source;
 use source::ScanOp;
 mod stream;
-use stream::{ExtendOp, FilterOp, ProjectOp};
+use stream::{ExtendOp, FilterOp, ProjectOp, SliceOp};
 
 use crate::algebra::Var;
 use crate::error::Result;
@@ -85,6 +85,14 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                     var.clone(),
                     expr.clone(),
                 )))
+            }
+            PhysicalPlan::Slice {
+                inner,
+                start,
+                length,
+            } => {
+                let child = self.build(inner)?;
+                Ok(Box::new(SliceOp::new(child, *start, *length)))
             }
             _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
         }
