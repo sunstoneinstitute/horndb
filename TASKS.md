@@ -41,6 +41,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
+- [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
 
 Closed tasks are listed in [Done](#done-for-traceability).
 
@@ -61,20 +62,35 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `Runtime::run` decodes once at the boundary. **Official nightly `aggregation-qps`
   (hornbench, 2026-06-29): ~13 → ~23 (~1.77×) vs GraphDB Free ~148 — the ~12× gap
   narrowed to ~6.5×.** Slice 2 does not touch the aggregation arms, so aggregation-qps
-  is a Slice-1 number. The remaining gap is owned by streaming + planner pushdown.
+  is a Slice-1 number. The remaining gap at that point was owned by streaming + planner
+  pushdown; both have since landed (#143, #144) — see below.
 
-  **Remaining work (not yet started):**
-  1. Hash join for native `Join` (currently a faithful nested loop); hoist the `merge_rows`
-     per-pair column-index lookups. The native `LeftJoin` is already a hash probe.
-  2. `Group` micro-opts: share decoded members across aggregates referencing the same
-     column; avoid the per-group `key_slots` clone.
-  3. **Streaming** (no full per-node `Batch` materialization) — the headline remaining lever.
-  4. **Planner projection/aggregate pushdown.**
-  5. A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the differential proptest
-     covers it only indirectly via small-vocab groups).
-  6. `batch_join_vars` intersects child *schemas*, not *bound* keys (native `LeftJoin`); a
-     shared var unbound in every right row degrades that probe toward O(|l|·|r|) — correct
-     but potentially slow on a pathological workload (does not arise in the SPB mix).
+  **#143 Streaming pull-based runtime LANDED** (2026-06-30, this branch): the
+  SPARQL runtime is now a pull-based, batch-at-a-time operator tree
+  (`crates/sparql/src/exec/op/`); every operator (Scan/Filter/Project/Extend/
+  Slice/Values/Distinct/Union/Join/LeftJoin/Group/OrderBy/PathClosure) is a
+  native `Op`; legacy materializing `eval` deleted; chunk-boundary invariance
+  tested. Design: `docs/specs/2026-06-30-streaming-runtime-pushdown-design.md`.
+  **#144 Planner pushdown LANDED** (2026-06-30, this branch): column pruning
+  (`plan/pushdown.rs`) + COUNT-over-BGP aggregate pushdown (`Executor::count_bgp`
+  + `CountScan` + `CountScanOp`). **#145 deterministic `GROUP BY` +
+  `COUNT(DISTINCT *)` test LANDED.** SPB-256 re-measurement on hornbench is
+  **PENDING**.
+
+  **Remaining / deferred work:**
+  1. `Group` micro-opts: share decoded members across aggregates referencing the
+     same column; avoid the per-group `key_slots` clone.
+  2. Probe-side streaming for `Join` — joins currently drain both children before
+     emitting any output tuple (deferred; does not arise in the SPB mix but blocks
+     full end-to-end streaming).
+  3. Filter-aware / grouped / multi-aggregate count pushdown (deferred; only
+     COUNT-over-full-BGP is pushed down today).
+  4. Streaming results out to the HTTP layer — `Runtime::run` still collects a
+     `Vec<Bindings>` before serializing (deferred).
+  5. `batch_join_vars` intersects child *schemas*, not *bound* keys (native
+     `LeftJoin`); a shared var unbound in every right row degrades the probe
+     toward O(|l|·|r|) — correct but potentially slow on a pathological workload
+     (does not arise in the SPB mix).
 
   See `docs/architecture.md` §9 and `BENCHMARKS.md`.
 
@@ -247,6 +263,15 @@ Closed tasks are listed in [Done](#done-for-traceability).
   failed" during long agent sessions even when the desktop app is unlocked. Fix:
   keep the app foregrounded during long sessions, or pre-cache an unencrypted
   signing key for CI. (Bypassing signing is not acceptable — global rule.)
+
+## LOW — Maintainability
+
+- [ ] **Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs`.**
+  (#TODO — file a `priority: low` / `category: maintainability` issue)
+  `count_bgp`, `scan_bgp`, and `scan_bgp_ids` now share a near-identical
+  pattern-compilation prologue (building `WcojPattern`s, looking up dictionary
+  IDs, etc.), kept in sync by a comment. Extract a `compile_bgp_patterns` helper
+  to make this a single maintenance point. Low-risk, self-contained.
 
 ## Done (for traceability)
 
