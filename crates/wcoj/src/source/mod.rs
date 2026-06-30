@@ -93,11 +93,13 @@ pub trait OrderedTripleIter: Send {
     }
 
     /// If this cursor can cheaply expose its active level's remaining values
-    /// (from the current cursor to the level end) as a contiguous sorted
-    /// `&[TermId]`, return it — for the leapfrog SIMD-intersect fast path.
-    /// Default `None`. Takes `&mut self` because a source may need to
-    /// materialise the contiguous view on demand (e.g. the dense AoS `VecIter`
-    /// builds its SoA column lazily).
+    /// (from the current cursor to the level end) as a contiguous,
+    /// non-decreasing `&[TermId]`, return it — for the leapfrog SIMD-intersect
+    /// fast path. The slice is sorted but **not** deduplicated: the raw level
+    /// column repeats a key once per child row, so callers that need distinct
+    /// values must dedup it. Default `None`. Takes `&mut self` because a source
+    /// may need to materialise the contiguous view on demand (e.g. the dense
+    /// AoS `VecIter` builds its SoA column lazily).
     fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
         None
     }

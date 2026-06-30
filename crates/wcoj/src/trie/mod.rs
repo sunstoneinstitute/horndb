@@ -44,8 +44,13 @@ pub trait TrieIterator {
     /// contiguous sorted `&[TermId]`, return it (for the leapfrog SIMD
     /// intersect fast path). Default `None` — the leapfrog falls back to
     /// seek/peek. The slice runs from the current cursor to the level end, in
-    /// trie order, with no duplicates (matching the source's dedup). Takes
-    /// `&mut self` so a source can materialise the view on demand.
+    /// non-decreasing trie order. It is **not** deduplicated: when this
+    /// pattern descends below the level, the underlying column repeats each key
+    /// once per child row, so a key can appear multiple times. Callers that
+    /// need each distinct value once (e.g. feeding `horndb_simd::intersect`,
+    /// whose contract requires deduped inputs) must dedup it themselves — see
+    /// `executor::wcoj::BatchIter::try_arm_simd`. Takes `&mut self` so a source
+    /// can materialise the view on demand.
     fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
         None
     }
