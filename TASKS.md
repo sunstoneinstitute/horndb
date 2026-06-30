@@ -33,7 +33,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 ## Index
 
 - [v] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)) — _wip: 9e4f2cd3@hornbench · task-128-group-microopts · 2026-06-30T11:42:06Z_
-- [v] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; wire the SIMD intersect into `BatchIter`'s inlined leapfrog (the production executor hot path — `LeapfrogJoin` is only used by `trie/leapfrog.rs` today); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132)) — _wip: 562fd02e@Stigs-MacBook-Pro.local · task-164-batchiter-simd-intersect · 2026-06-30T12:03:16Z_
+- [v] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132)) — _wip: 562fd02e@Stigs-MacBook-Pro.local · task-164-batchiter-simd-intersect · 2026-06-30T12:03:16Z_
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
@@ -91,9 +91,21 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `crates/simd` (AVX2/AVX-512 on x86_64, NEON on aarch64; scalar-forced build green on
   stable 1.90). Kernels that don't yet clear the NF2 floor ship the scalar-equivalent
   galloping form; the bench is wired but **awaits hornbench measurement** before any wide
-  compress/compare kernel is hand-written. **Stage 1b — OPEN:** the WCOJ seek/intersect
-  consumer to close SPEC-03 NF1 (`benches/per_tuple.rs` ≤2.5 ns/tuple; `four_cycle`
-  no-regress).
+  compress/compare kernel is hand-written. **Stage 1b — DONE (kernels; hornbench numbers
+  pending):** the WCOJ seek/intersect consumer is now live in the **production executor**.
+  `executor/wcoj.rs::BatchIter`'s inlined leapfrog gains a k==2 `horndb_simd::intersect`
+  fast path (mirroring the standalone `LeapfrogJoin`): when both contributing iters at a
+  depth expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the whole pairwise intersection
+  is precomputed once and drained, replacing per-candidate round-robin seeks. To honour the
+  leapfrog's distinct-key contract, `active_run` now returns a **deduplicated** view
+  (`LevelColumn::distinct_run`) — the raw SoA column keeps its duplicates for the seek
+  index-mapping, but the intersect path consumes a cached distinct copy, so a subject with
+  many objects still emits each leapfrog key once. Output bit-identical to scalar, gated by
+  the WCOJ differential fuzzer (narrow + a new wide `N_WIDE > 64` variant that actually
+  arms the intersect), the leapfrog BTreeSet oracle, and `tests/batchiter_simd.rs` (incl.
+  the duplicate-subject hazard); `four_cycle` no-regress confirmed locally (WCOJ ~40× over
+  binary-hash). **Remaining for NF1:** record `benches/per_tuple.rs` ≤2.5 ns/tuple on
+  hornbench.
   **Stage 2 — DONE (kernels + benches; hornbench numbers pending):** `horndb-storage`
   consumes `horndb-simd` for bulk inline-int dictionary decode
   (`Dictionary::decode_inline_ints`/`lookup_inline_int_batch`/`lookup_batch`) and the
