@@ -3,6 +3,7 @@
 
 pub mod explain;
 pub mod planner;
+pub mod pushdown;
 
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 

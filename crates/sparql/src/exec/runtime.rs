@@ -30,12 +30,32 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Execute the plan and return all solution mappings.
     pub fn run(&self, plan: &PhysicalPlan) -> Result<std::vec::IntoIter<Bindings>> {
-        let mut op = self.build(plan)?;
+        let plan = crate::plan::pushdown::rewrite(plan)?;
+        let mut op = self.build(&plan)?;
         let mut out = Vec::new();
         while let Some(batch) = op.next()? {
             out.extend(batch.to_bindings(|id| self.exec.decode_term(id))?);
         }
         Ok(out.into_iter())
+    }
+
+    /// Execute the plan WITHOUT the column-pruning rewrite. Used only in tests
+    /// to provide a no-rewrite baseline for the result-invariance check in
+    /// `crate::plan::pushdown`.
+    #[cfg(test)]
+    pub(crate) fn run_unpruned_for_test(&self, plan: &PhysicalPlan) -> Vec<Bindings> {
+        let mut op = self
+            .build(plan)
+            .expect("build failed in run_unpruned_for_test");
+        let mut out = Vec::new();
+        while let Some(batch) = op.next().expect("op.next failed in run_unpruned_for_test") {
+            out.extend(
+                batch
+                    .to_bindings(|id| self.exec.decode_term(id))
+                    .expect("to_bindings failed in run_unpruned_for_test"),
+            );
+        }
+        out
     }
 
     /// Keep the rows of `batch` for which `expr` evaluates true. Decodes only
@@ -892,7 +912,7 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
 
 /// Collect the variable names an expression reads, so a slot operator can
 /// decode only those columns into a transient `Bindings`.
-fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
+pub(crate) fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
     match e {
         Expr::Term(Term::Var(v)) => {
             out.insert(v.name().to_owned());
@@ -937,7 +957,7 @@ fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
 }
 
 /// The inner expression(s) an aggregate evaluates over its members.
-fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
+pub(crate) fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
     match &agg.func {
         AggFunc::CountStar => Vec::new(),
         AggFunc::Count(e)
