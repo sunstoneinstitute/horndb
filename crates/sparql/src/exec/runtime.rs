@@ -41,6 +41,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Evaluate a plan node to a [`Batch`]. All operator arms run native on
     /// slot rows — one runtime, no decode adapter.
+    ///
+    /// Production code now goes through `build` / `run`; `eval` is kept for
+    /// the legacy test suite that calls it directly.
+    #[allow(dead_code)]
     pub(crate) fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
@@ -108,28 +112,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             }
             PhysicalPlan::OrderBy { inner, keys } => {
                 let b = self.eval(inner)?;
-                let mut want = HashSet::new();
-                for (e, _) in keys {
-                    referenced_vars(e, &mut want);
-                }
-                // Pull schema and rows apart so the borrow checker sees two
-                // independent moves (no partial-move ambiguity on `b`).
-                let schema = b.schema;
-                let mut tagged: Vec<(Bindings, Row)> = b
-                    .rows
-                    .into_iter()
-                    .map(|r| {
-                        let env = self.decode_subset(&r, &schema, &want)?;
-                        Ok((env, r))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                // stable sort: equal-key rows keep their input order,
-                // matching the old Vec::sort_by behaviour.
-                tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
-                Ok(Batch {
-                    schema,
-                    rows: tagged.into_iter().map(|(_, r)| r).collect(),
-                })
+                self.compute_order_by(b, keys)
             }
             PhysicalPlan::Extend { inner, var, expr } => {
                 let child = self.eval(inner)?;
@@ -150,22 +133,11 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
-                let eb = self.eval(edge)?;
-                // The edge batch binds exactly the two synthetic endpoint vars; decode
-                // only those, then reuse the string BFS unchanged.
+                // The edge batch binds exactly the two synthetic endpoint vars;
+                // decode only those, then reuse the string BFS unchanged.
                 // deferred: id-native BFS (#128)
-                let want: HashSet<String> = [PATH_SRC_VAR, PATH_DST_VAR]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                let edge_rows: Vec<Bindings> = eb
-                    .rows
-                    .iter()
-                    .map(|r| self.decode_subset(r, &eb.schema, &want))
-                    .collect::<Result<Vec<_>>>()?;
-                Ok(Batch::from_bindings(eval_path_closure(
-                    subject, object, &edge_rows, *reflexive,
-                )?))
+                let eb = self.eval(edge)?;
+                self.compute_path_closure(eb, subject, object, *reflexive)
             }
         }
     }
@@ -279,7 +251,79 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(b)
     }
 
-    fn eval_group_native(&self, b: Batch, keys: &[Var], aggregates: &[Aggregate]) -> Result<Batch> {
+    /// Output schema of a GROUP BY: the grouping keys followed by each
+    /// aggregate's output var. Must match `eval_group_native`'s output batch
+    /// schema exactly (and `eval_group_native` uses this to stay in sync).
+    pub(crate) fn group_output_schema(&self, keys: &[Var], aggregates: &[Aggregate]) -> Vec<Var> {
+        let mut schema: Vec<Var> = keys.to_vec();
+        for agg in aggregates {
+            schema.push(agg.out.clone());
+        }
+        schema
+    }
+
+    /// Sort `batch` by `keys` (ORDER BY). Body relocated from the legacy
+    /// `OrderBy` arm, unchanged. Output schema = input schema (sort is
+    /// schema-preserving).
+    pub(crate) fn compute_order_by(
+        &self,
+        batch: Batch,
+        keys: &[(Expr, OrderDir)],
+    ) -> Result<Batch> {
+        let mut want = HashSet::new();
+        for (e, _) in keys {
+            referenced_vars(e, &mut want);
+        }
+        // Pull schema and rows apart so the borrow checker sees two
+        // independent moves (no partial-move ambiguity on `batch`).
+        let schema = batch.schema;
+        let mut tagged: Vec<(Bindings, Row)> = batch
+            .rows
+            .into_iter()
+            .map(|r| {
+                let env = self.decode_subset(&r, &schema, &want)?;
+                Ok((env, r))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // stable sort: equal-key rows keep their input order,
+        // matching the old Vec::sort_by behaviour.
+        tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
+        Ok(Batch {
+            schema,
+            rows: tagged.into_iter().map(|(_, r)| r).collect(),
+        })
+    }
+
+    /// Evaluate the transitive closure of the edge relation. Body mirrors the
+    /// legacy `PathClosure` arm: decodes the edge batch's endpoint vars (the
+    /// two synthetic `?pp_*` vars) and delegates to `eval_path_closure`.
+    pub(crate) fn compute_path_closure(
+        &self,
+        edge_batch: Batch,
+        subject: &Term,
+        object: &Term,
+        reflexive: bool,
+    ) -> Result<Batch> {
+        let want: HashSet<String> = [PATH_SRC_VAR, PATH_DST_VAR]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let edge_rows: Vec<Bindings> = edge_batch
+            .rows
+            .iter()
+            .map(|r| self.decode_subset(r, &edge_batch.schema, &want))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Batch::from_bindings(eval_path_closure(
+            subject, object, &edge_rows, reflexive,
+        )?))
+    }
+
+    pub(crate) fn eval_group_native(
+        &self,
+        b: Batch,
+        keys: &[Var],
+        aggregates: &[Aggregate],
+    ) -> Result<Batch> {
         let key_idx: Vec<Option<usize>> = keys.iter().map(|k| b.col(k.name())).collect();
 
         struct Grp {
@@ -314,11 +358,9 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             );
         }
 
-        // Output schema = keys ++ aggregate output vars.
-        let mut schema: Vec<Var> = keys.to_vec();
-        for agg in aggregates {
-            schema.push(agg.out.clone());
-        }
+        // Output schema = keys ++ aggregate output vars (via group_output_schema
+        // so the two cannot drift apart).
+        let schema = self.group_output_schema(keys, aggregates);
 
         // Which input columns each aggregate's inner expression references.
         let agg_vars: Vec<HashSet<String>> = aggregates

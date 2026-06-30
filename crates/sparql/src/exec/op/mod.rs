@@ -3,7 +3,7 @@
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
-use blocking::{JoinOp, LeftJoinOp, UnionOp};
+use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
 pub(crate) use source::build_values_batch;
 use source::{ScanOp, ValuesOp};
@@ -27,8 +27,7 @@ pub trait Op {
 }
 
 /// Hands out the rows of a fully-materialized `Batch` in `BATCH_ROWS` chunks.
-/// The shared chunker for source ops (`ScanOp`, `ValuesOp`) and the
-/// `MaterializedOp` adapter; later reused as the emit tail of blocking ops.
+/// Shared by source ops (`ScanOp`, `ValuesOp`) and the blocking ops.
 pub(crate) struct ChunkedBatch {
     schema: Vec<Var>,
     rows: std::vec::IntoIter<Row>,
@@ -58,34 +57,9 @@ impl ChunkedBatch {
     }
 }
 
-/// Adapter wrapping a not-yet-converted subtree: evaluates it once via the
-/// legacy `Runtime::eval`, then hands rows out in `BATCH_ROWS` chunks.
-/// Deleted in a later task once every variant has a native `Op`.
-pub struct MaterializedOp {
-    inner: ChunkedBatch,
-}
-
-impl MaterializedOp {
-    pub fn new(batch: Batch) -> Self {
-        Self {
-            inner: ChunkedBatch::new(batch),
-        }
-    }
-}
-
-impl Op for MaterializedOp {
-    fn schema(&self) -> &[Var] {
-        self.inner.schema()
-    }
-    fn next(&mut self) -> Result<Option<Batch>> {
-        Ok(self.inner.next_chunk())
-    }
-}
-
 impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
-    /// Build the pull-based operator tree for `plan`. During conversion,
-    /// unconverted variants fall through to a `MaterializedOp` wrapping the
-    /// legacy `eval` of that subtree.
+    /// Build the pull-based operator tree for `plan`. Every `PhysicalPlan`
+    /// variant has a native `Op` — there is no longer a fallback path.
     pub(crate) fn build<'r>(&'r self, plan: &PhysicalPlan) -> Result<Box<dyn Op + 'r>>
     where
         E: 'r,
@@ -139,7 +113,38 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 let r = self.build(right)?;
                 Ok(Box::new(LeftJoinOp::new(self, l, r, expr.clone())))
             }
-            _ => Ok(Box::new(MaterializedOp::new(self.eval(plan)?))),
+            PhysicalPlan::Group {
+                inner,
+                keys,
+                aggregates,
+            } => {
+                let child = self.build(inner)?;
+                Ok(Box::new(GroupOp::new(
+                    self,
+                    child,
+                    keys.clone(),
+                    aggregates.clone(),
+                )))
+            }
+            PhysicalPlan::OrderBy { inner, keys } => {
+                let child = self.build(inner)?;
+                Ok(Box::new(OrderByOp::new(self, child, keys.clone())))
+            }
+            PhysicalPlan::PathClosure {
+                subject,
+                object,
+                edge,
+                reflexive,
+            } => {
+                let edge_op = self.build(edge)?;
+                Ok(Box::new(PathClosureOp::new(
+                    self,
+                    subject.clone(),
+                    object.clone(),
+                    edge_op,
+                    *reflexive,
+                )))
+            }
         }
     }
 }
