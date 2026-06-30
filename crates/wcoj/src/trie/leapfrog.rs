@@ -128,6 +128,14 @@ impl<'a> LeapfrogJoin<'a> {
         let b = right[0].active_run(depth);
         if let (Some(a), Some(b)) = (a, b) {
             self.simd_buf.clear();
+            // NB: `a`/`b` are passed to `intersect` WITHOUT deduping, but
+            // `intersect`'s contract requires deduped inputs. This is safe only
+            // because the sole exerciser of `LeapfrogJoin` (`tests/leapfrog.rs`)
+            // feeds distinct-keyed runs; an `active_run` over a *descending*
+            // pattern repeats each key per child row and would over-produce.
+            // The production executor's deduped version is
+            // `BatchIter::try_arm_simd` (see #164) — copy THAT, not this, if you
+            // wire the leapfrog onto descending patterns.
             horndb_simd::intersect(a, b, &mut self.simd_buf);
             self.simd_pos = 0;
             self.simd_active = true;
