@@ -39,6 +39,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
+- [ ] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 
@@ -230,6 +231,24 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `datasetSize` (currently 18,644,617) with what is actually loaded; move the
   trend metric to `editorial-qps`. See `BENCHMARKS.md` and the SPB nightly row
   in `docs/architecture.md`.
+
+## MEDIUM — Conformance
+
+- [ ] **Close the RL-reachable OWL 2 RL conformance gap.**
+  ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
+  The W3C `owl2-w3c-rl` subset is **97 of 115 green** (`harness/selected.toml`);
+  the 18 reds are documented in `harness/KNOWN-MANIFEST-BUGS.md`. Most are
+  intentionally out of OWL 2 RL scope (OWL 2 DL entailments / fresh-bnode TGD
+  generation — explicit SPEC-04 non-goals) and stay excluded by design. This
+  task tracks only the **RL-reachable remainder**, currently unowned after #4
+  closed: (1) datatype value-space *intersection* narrowing —
+  `WebOnt-I5.8-008-pe` (`short ∩ unsignedInt ⊆ unsignedShort`),
+  `WebOnt-I5.8-009-pe` (`nonNegativeInteger ∩ nonPositiveInteger = {0} ⊆ short`)
+  — needs a value-space intersection solver beyond the static `dt-type2`
+  subsumption lattice; (2) `owl:imports` external resolution —
+  `WebOnt-imports-011-pe`, the loader does not fetch imported ontologies. When a
+  case goes green, move its id from `KNOWN-MANIFEST-BUGS.md` into `selected.toml`
+  and bump the counts in `docs/architecture.md` in the same commit.
 
 ## LOW — Operational
 

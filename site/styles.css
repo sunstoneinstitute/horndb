@@ -231,29 +231,7 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
   color: var(--text);
 }
 
-/* ---- Roadmap table ------------------------------------------------------- */
-.table-scroll { overflow-x: auto; }
-.roadmap {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 8px;
-  font-size: 0.96rem;
-}
-.roadmap th, .roadmap td {
-  text-align: left;
-  padding: 13px 14px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-}
-.roadmap th {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
-}
-.roadmap td:last-child { color: var(--text-muted); }
-.roadmap .stage { font-weight: 700; color: var(--text); white-space: nowrap; }
-.roadmap .active-stage { background: color-mix(in srgb, var(--rust) 8%, transparent); }
+/* ---- Badges -------------------------------------------------------------- */
 .badge {
   display: inline-block;
   margin-left: 4px;
