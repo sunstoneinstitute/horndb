@@ -317,30 +317,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 let child = self.eval(inner)?;
                 self.apply_extend(child, var, expr)
             }
-            PhysicalPlan::Values { vars, rows } => {
-                // Rows are guaranteed full-width by the spargebra parser (it
-                // rejects `VALUES` clauses where any row length != vars.len()),
-                // so `zip` stops correctly and no trailing-Unbound padding is
-                // needed.
-                let schema: Vec<Var> = vars.clone();
-                let out_rows = rows
-                    .iter()
-                    .map(|row| {
-                        Row(vars
-                            .iter()
-                            .zip(row.iter())
-                            .map(|(_, cell)| match cell {
-                                Some(t) => Slot::Term(t.clone()),
-                                None => Slot::Unbound,
-                            })
-                            .collect())
-                    })
-                    .collect();
-                Ok(Batch {
-                    schema,
-                    rows: out_rows,
-                })
-            }
+            PhysicalPlan::Values { vars, rows } => Ok(super::op::build_values_batch(vars, rows)),
             PhysicalPlan::Group {
                 inner,
                 keys,
