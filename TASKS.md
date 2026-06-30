@@ -70,8 +70,10 @@ Closed tasks are listed in [Done](#done-for-traceability).
      column; avoid the per-group `key_slots` clone.
   3. **Streaming** (no full per-node `Batch` materialization) — the headline remaining lever.
   4. **Planner projection/aggregate pushdown.**
-  5. A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the differential proptest
-     covers it only indirectly via small-vocab groups).
+  5. ~~A targeted test for explicit `GROUP BY` + `COUNT(DISTINCT *)` (the differential proptest
+     covers it only indirectly via small-vocab groups).~~ **Done ([#145](https://github.com/sunstoneinstitute/horndb/issues/145)):**
+     `group_by_count_distinct_star` in `crates/sparql/tests/exec_aggregate.rs` pins the
+     per-group `Vec<KeyPart>` distinct path in `eval_group_native` directly.
   6. `batch_join_vars` intersects child *schemas*, not *bound* keys (native `LeftJoin`); a
      shared var unbound in every right row degrades that probe toward O(|l|·|r|) — correct
      but potentially slow on a pathological workload (does not arise in the SPB mix).
