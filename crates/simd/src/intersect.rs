@@ -3,12 +3,64 @@
 //! AVX-512, >=2x on NEON, measured at L2-resident sizes.
 
 use crate::dispatch::{forced_isa, Isa};
+use crate::lower_bound::lower_bound;
 use crate::scalar;
 use std::sync::OnceLock;
 
+/// Skew threshold above which galloping beats the block-vs-block SIMD kernels.
+///
+/// The block kernels are O(|large|) — they walk the entire larger side — while
+/// galloping is O(|small|·log|large|). Measured on the hornbench Zen4 host: at
+/// `hi/lo` ≈ 16 the two break even (block ~0.4× at parity), below it the block
+/// kernel's balanced throughput wins, and above it galloping wins by 1–3 orders
+/// of magnitude on skewed shapes (e.g. 64×1_000_000 was 747× slower on block).
+/// Leapfrog feeds `intersect` exactly these skewed `active_run`s, so the gate
+/// matters in production. Repairs the regression bisected to `ccecd5f`.
+const GALLOP_RATIO: usize = 16;
+
 /// Append `a ∩ b` (both sorted-ascending, deduped) to `out`, in order.
 pub fn intersect(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
-    (dispatch())(a, b, out)
+    // A forced ISA (tests/benches) must exercise that *exact* block kernel, so
+    // bypass the size-ratio gate and route straight to it — the force is a
+    // test/bench affordance to verify/measure one specific kernel, and letting
+    // the gate divert it to the scalar galloping path would defeat the
+    // differential proptest. The gate is a production-only optimisation.
+    if forced_isa().is_some() {
+        return (resolve())(a, b, out);
+    }
+    // Production path: skewed size ratios make the block kernel walk the whole
+    // larger side; galloping is far cheaper there. Balanced inputs keep the
+    // block-SIMD win.
+    let lo = a.len().min(b.len());
+    let hi = a.len().max(b.len());
+    if hi >= GALLOP_RATIO * lo.max(1) {
+        gallop(a, b, out);
+    } else {
+        cached().1(a, b, out);
+    }
+}
+
+/// Galloping (ISA-independent) intersection for skewed inputs: walk the smaller
+/// side and exponential/binary-search each element in the larger side via
+/// [`crate::lower_bound::lower_bound`], advancing a monotone cursor.
+/// O(|small|·log|large|) vs the block kernels' O(|large|). Inputs are
+/// sorted-ascending and deduped; the result is appended in ascending order,
+/// byte-identical to the scalar two-pointer oracle. Correct regardless of which
+/// operand is larger.
+fn gallop(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
+    // Iterate the smaller side ascending so the appended output stays sorted.
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let mut pos = 0usize; // cursor into `large`; only ever advances
+    for &v in small {
+        pos += lower_bound(&large[pos..], v);
+        if pos >= large.len() {
+            break;
+        }
+        if large[pos] == v {
+            out.push(v);
+            pos += 1; // deduped: next match is strictly after this one
+        }
+    }
 }
 
 type Fn_ = fn(&[u64], &[u64], &mut Vec<u64>);
@@ -17,16 +69,6 @@ type Fn_ = fn(&[u64], &[u64], &mut Vec<u64>);
 fn cached() -> (Isa, Fn_) {
     static CACHE: OnceLock<(Isa, Fn_)> = OnceLock::new();
     *CACHE.get_or_init(choose)
-}
-
-fn dispatch() -> Fn_ {
-    // A forced ISA (tests/benches) must take effect on every call, so bypass
-    // the cache while a force is active. Production never forces: one
-    // thread-local read, then the cached fn pointer.
-    if forced_isa().is_some() {
-        return resolve();
-    }
-    cached().1
 }
 
 /// Prime the cached kernel (paying any calibration cost now). Called by

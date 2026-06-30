@@ -26,6 +26,37 @@ Before claiming any x86 SIMD kernel correct:
 - Boundary values (`0`, `u64::MAX`, empty/one-element slices) are the usual
   killers — add them as explicit differential cases, not just proptest-random.
 
+## `intersect`: skew gate — benches MUST include skew; calibration stays balanced
+
+`intersect` selects **galloping** (scalar, `O(|small|·log|large|)`) for skewed
+size ratios and the **block-SIMD** kernels (`O(|large|)`) for balanced inputs,
+gated by `GALLOP_RATIO` (= 16) on `max(|a|,|b|) / min(|a|,|b|)`. Leapfrog feeds
+`intersect` skewed `active_run`s (e.g. 3 keys vs 50 000), so the skewed regime is
+the common production case.
+
+**Benches MUST include skewed shapes, not just balanced ones.** A balanced-only
+bench (`make_runs(4096)`) false-greened a −7% SPB-256 aggregation-qps regression
+(bisected to `ccecd5f`, which replaced galloping with block-only on every arm);
+block was 50–2000× slower on skew. Benches feed the *unforced* `auto` path, so
+they must carry skew to keep that regression visible. Skew bench coverage lives
+in `benches/intersect.rs`; correctness coverage in `tests/skew_intersect.rs`.
+
+**Calibration (`calib_input`, intersect.rs, N=4096) MUST stay balanced-only —
+this is intentional, do NOT "fix" it to add a skewed shape.** Calibration picks
+the fastest *block kernel* and bypasses the gate (it invokes the block kernels
+directly). Post-gate, the calibrated block kernel only ever runs on **balanced**
+inputs in production — the skew path is the uncalibrated scalar gallop, which has
+no kernel to choose. Calibrating on a skewed shape would benchmark the block
+kernels on data they never see in production and pick a kernel that never runs on
+skew: a net regression. Balanced-only calibration matches what production
+actually dispatches.
+
+The `forced_isa` bypass routes straight to the forced block kernel and skips the
+gate on purpose — the force is a test/bench affordance to exercise one specific
+kernel; the gate is production-only. So `tests/differential.rs` (which forces
+each ISA) still covers the block kernels, and `tests/skew_intersect.rs` (which
+runs *unforced*) covers the galloping path.
+
 ## Build & test
 
 ```bash
