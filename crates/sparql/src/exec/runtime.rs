@@ -258,31 +258,8 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(Batch { schema, rows })
             }
             PhysicalPlan::Project { vars, inner } => {
-                let b = self.eval(inner)?;
-                if vars.is_empty() {
-                    // SELECT * / ASK: keep everything (parity with project()).
-                    return Ok(b);
-                }
-                // New schema = projected vars that exist in the input, in
-                // projection order; remap each row's slots by index.
-                let idx: Vec<Option<usize>> = vars.iter().map(|v| b.col(v.name())).collect();
-                let schema: Vec<Var> = vars
-                    .iter()
-                    .zip(&idx)
-                    .filter(|(_, i)| i.is_some())
-                    .map(|(v, _)| v.clone())
-                    .collect();
-                let rows = b
-                    .rows
-                    .iter()
-                    .map(|r| {
-                        Row(idx
-                            .iter()
-                            .filter_map(|i| i.map(|i| r.0[i].clone()))
-                            .collect())
-                    })
-                    .collect();
-                Ok(Batch { schema, rows })
+                let child = self.eval(inner)?;
+                self.apply_project(child, vars)
             }
             PhysicalPlan::Distinct { inner } => {
                 let b = self.eval(inner)?;
@@ -456,6 +433,37 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             schema: batch.schema,
             rows: kept,
         })
+    }
+
+    /// Restrict `batch` to `vars` (in projection order), remapping each row's
+    /// slots. Empty `vars` (SELECT * / ASK) returns the batch unchanged.
+    /// The single source of truth for Project, shared by the legacy `eval`
+    /// arm and the streaming `ProjectOp`.
+    pub(crate) fn apply_project(&self, batch: Batch, vars: &[Var]) -> Result<Batch> {
+        if vars.is_empty() {
+            // SELECT * / ASK: keep everything (parity with project()).
+            return Ok(batch);
+        }
+        // New schema = projected vars that exist in the input, in
+        // projection order; remap each row's slots by index.
+        let idx: Vec<Option<usize>> = vars.iter().map(|v| batch.col(v.name())).collect();
+        let schema: Vec<Var> = vars
+            .iter()
+            .zip(&idx)
+            .filter(|(_, i)| i.is_some())
+            .map(|(v, _)| v.clone())
+            .collect();
+        let rows = batch
+            .rows
+            .iter()
+            .map(|r| {
+                Row(idx
+                    .iter()
+                    .filter_map(|i| i.map(|i| r.0[i].clone()))
+                    .collect())
+            })
+            .collect();
+        Ok(Batch { schema, rows })
     }
 
     /// Decode just the named columns of a slot row into a `Bindings`, for
