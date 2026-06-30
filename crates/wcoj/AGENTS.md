@@ -15,5 +15,17 @@ Leapfrog Triejoin executor, trie iterators, planner.
   O(range) per descent and was a measured **~760× `four_cycle` regression**; deeper
   levels stay on scalar AoS `partition_point`. Re-measure `four_cycle` before
   touching the seek path.
+- **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
+  production executor (`executor/wcoj.rs::BatchIter`) has a k==2
+  `horndb_simd::intersect` fast path: at prime time, if both contributing iters
+  expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the pairwise intersection is
+  precomputed once into `simd_buf[depth]` and drained. **Hazard:** the leapfrog
+  requires *distinct* level keys, but the SoA `LevelColumn.values` keeps duplicates
+  (it must, for `lower_bound_from`'s row index-mapping). So `active_run` returns the
+  separate, cached `LevelColumn::distinct_run` view — feeding the raw column to
+  `intersect` over-produces (a subject with N objects emits the binding N times). The
+  `tests/batchiter_simd.rs` duplicate-subject test and the wide
+  (`N_WIDE > 64`) `differential_fuzz` variant guard this; the narrow fuzzer (vocab 30)
+  never crosses the threshold, so it does **not** cover the SIMD path on its own.
 
 See `INTEGRATION-NOTES.md` for design decisions.

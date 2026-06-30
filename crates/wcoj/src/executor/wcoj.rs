@@ -154,6 +154,13 @@ struct DepthState {
     /// once for the current binding (i.e. the leapfrog yielded a match).
     /// When ascending, this signals "advance past the match and re-leapfrog".
     has_descended: bool,
+    /// Armed when `k == 2` and both contributing iters exposed a contiguous
+    /// `active_run` at prime time: the whole pairwise intersection was
+    /// precomputed once into `simd_buf[depth]` and `find_match` drains it
+    /// instead of round-robin seeking. `simd_pos` is the read cursor into
+    /// that buffer. Mirrors `LeapfrogJoin`'s `simd_active`/`simd_pos`.
+    simd_active: bool,
+    simd_pos: usize,
 }
 
 impl DepthState {
@@ -163,6 +170,8 @@ impl DepthState {
             primed: false,
             done: false,
             has_descended: false,
+            simd_active: false,
+            simd_pos: 0,
         }
     }
 }
@@ -203,6 +212,11 @@ pub struct BatchIter<'src, S: TripleSource + ?Sized + 'src> {
     /// iters by current peek. One buffer shared across all depths
     /// because priming is not re-entrant.
     prime_scratch: Vec<(usize, TermId)>,
+    /// Per-depth precomputed pairwise intersection for the `k == 2` SIMD
+    /// fast path (see `DepthState::simd_active`). One buffer per depth
+    /// because the leapfrog is re-entrant across depths; the `Vec` capacity
+    /// survives the per-descent state reset and is reused on re-prime.
+    simd_buf: Vec<Vec<TermId>>,
     /// Current binding per depth.
     binding: Vec<TermId>,
     depth: u8,
@@ -362,6 +376,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         let sorted_idxs = (0..n_vars)
             .map(|d| Vec::with_capacity(contributing[d].len()))
             .collect();
+        let simd_buf = (0..n_vars).map(|_| Vec::new()).collect();
         let max_k = contributing.iter().map(|c| c.len()).max().unwrap_or(0);
 
         Self {
@@ -375,6 +390,7 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             state,
             sorted_idxs,
             prime_scratch: Vec::with_capacity(max_k),
+            simd_buf,
             binding,
             depth: 0,
             finished,
@@ -400,6 +416,19 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         }
 
         if !primed {
+            // Try the `k == 2` SIMD intersect fast path first: when both
+            // contributing iters expose a contiguous `active_run` at prime
+            // time (cursors at the level start), precompute the whole
+            // intersection once and drain it from `find_match`. Falls through
+            // to the scalar round-robin when `active_run` is unavailable
+            // (`k != 2`, short run, or no SoA column).
+            if k == 2 {
+                self.try_arm_simd(depth);
+            }
+            if self.state[d].as_ref().unwrap().simd_active {
+                self.state[d].as_mut().unwrap().primed = true;
+                return self.find_match(depth);
+            }
             // Sort the contributing iters by their current peek so the
             // classic leapfrog invariant holds: `sorted_idxs[d]` lists
             // iters in non-decreasing key order, `p` starts at the
@@ -435,6 +464,13 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             return self.find_match(depth);
         }
 
+        // Subsequent call with the SIMD fast path armed: the precomputed
+        // intersection already skipped every non-matching candidate, so just
+        // drain the next entry — no scalar rotate/seek.
+        if self.state[d].as_ref().unwrap().simd_active {
+            return self.find_match(depth);
+        }
+
         // Subsequent call: advance the iter that just produced the match
         // past it, then re-leapfrog. Use `sorted_idxs` so the leapfrog
         // invariant (iter at `prev` holds the max) is preserved.
@@ -450,8 +486,62 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         self.find_match(depth)
     }
 
+    /// Try to arm the `k == 2` SIMD intersect fast path for `depth`. When
+    /// both contributing iters expose a contiguous `active_run`, precompute
+    /// their intersection once into `simd_buf[depth]`; `find_match` then
+    /// drains it. A pairwise accelerator inside the leapfrog: it emits
+    /// exactly the same values, in the same (sorted) order, as the scalar
+    /// round-robin — `intersect` is symmetric, so the index reordering used
+    /// to obtain disjoint borrows does not affect the output. Mirrors
+    /// `LeapfrogJoin::try_arm_simd` in `trie/leapfrog.rs`.
+    fn try_arm_simd(&mut self, depth: u8) {
+        let d = depth as usize;
+        debug_assert_eq!(self.contributing[d].len(), 2);
+        let i0 = self.contributing[d][0];
+        let i1 = self.contributing[d][1];
+        // Two distinct iters (a BGP pattern never appears twice in
+        // `contributing[d]`); `split_at_mut` hands out the disjoint `&mut`
+        // borrows `active_run` needs to materialise both views at once.
+        let (lo, hi) = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+        let (left, right) = self.iters.split_at_mut(hi);
+        let a = match left[lo].active_run(depth) {
+            Some(a) => a,
+            None => return,
+        };
+        let b = match right[0].active_run(depth) {
+            Some(b) => b,
+            None => return,
+        };
+        let buf = &mut self.simd_buf[d];
+        buf.clear();
+        horndb_simd::intersect(a, b, buf);
+        let st = self.state[d].as_mut().unwrap();
+        st.simd_pos = 0;
+        st.simd_active = true;
+    }
+
     fn find_match(&mut self, depth: u8) -> Option<TermId> {
         let d = depth as usize;
+        // SIMD fast path: drain the precomputed intersection. Each emitted
+        // value leaves both cursors positioned at it so the executor's
+        // descent (`open_level` on the children) binds the right sub-range —
+        // one seek per *emitted* match, not per candidate (the candidate
+        // skipping was done in bulk by `intersect`).
+        if self.state[d].as_ref().unwrap().simd_active {
+            let pos = self.state[d].as_ref().unwrap().simd_pos;
+            if pos < self.simd_buf[d].len() {
+                let v = self.simd_buf[d][pos];
+                self.state[d].as_mut().unwrap().simd_pos = pos + 1;
+                let i0 = self.contributing[d][0];
+                let i1 = self.contributing[d][1];
+                self.iters[i0].seek(depth, v);
+                self.iters[i1].seek(depth, v);
+                self.seeks += 2;
+                return Some(v);
+            }
+            self.state[d].as_mut().unwrap().done = true;
+            return None;
+        }
         let k = self.contributing[d].len();
         loop {
             // one leapfrog convergence iteration (plain integer; §5.3)
