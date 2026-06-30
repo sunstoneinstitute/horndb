@@ -22,16 +22,22 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Self { exec }
     }
 
+    // NOTE: `build` (the pull-based operator-tree constructor that `run` uses)
+    // is defined in `crate::exec::op` alongside the `Op` trait.
+
     /// Execute the plan and return all solution mappings.
     pub fn run(&self, plan: &PhysicalPlan) -> Result<std::vec::IntoIter<Bindings>> {
-        let batch = self.eval(plan)?;
-        let rows = batch.to_bindings(|id| self.exec.decode_term(id))?;
-        Ok(rows.into_iter())
+        let mut op = self.build(plan)?;
+        let mut out = Vec::new();
+        while let Some(batch) = op.next()? {
+            out.extend(batch.to_bindings(|id| self.exec.decode_term(id))?);
+        }
+        Ok(out.into_iter())
     }
 
     /// Evaluate a plan node to a [`Batch`]. All operator arms run native on
     /// slot rows — one runtime, no decode adapter.
-    fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
+    pub(crate) fn eval(&self, plan: &PhysicalPlan) -> Result<Batch> {
         match plan {
             PhysicalPlan::BgpScan { patterns } => self.exec.scan_bgp_ids(patterns),
             PhysicalPlan::Join { left, right } => {

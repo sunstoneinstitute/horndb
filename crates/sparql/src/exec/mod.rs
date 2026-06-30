@@ -8,6 +8,7 @@ pub mod batch;
 pub use batch::{Batch, KeyPart, Row, Slot};
 pub mod horn;
 pub mod mem;
+pub mod op;
 pub mod runtime;
 
 use crate::algebra::{Term, TriplePattern};

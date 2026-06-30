@@ -10,6 +10,13 @@
 
 **Reference design:** `docs/specs/2026-06-30-streaming-runtime-pushdown-design.md`.
 
+**Op trait shape (decided in Task 1):** the `Op` trait is **lifetime-free** —
+`pub trait Op { fn schema(&self) -> &[Var]; fn next(&mut self) -> Result<Option<Batch>>; }`.
+Operators that borrow the runtime carry their own lifetime on the struct and impl
+as `impl<'r, E: Executor + ?Sized> Op for FooOp<'r, E>`; `build<'r>(&'r self, …)`
+boxes them as `Box<dyn Op + 'r>`. (Code blocks below that still show `Op<'a>`/`Op<'r>`
+on the trait predate this decision — use the lifetime-free trait form.)
+
 **Conventions for every task:**
 - Run tests with `cargo nextest run -p horndb-sparql` (and `--features server` where noted). `cargo nextest` does not run doctests; this crate has none.
 - Keep `cargo clippy -p horndb-sparql --all-targets -- -D warnings` and `cargo fmt --all -- --check` clean before each commit (pre-push runs clippy workspace-wide).
