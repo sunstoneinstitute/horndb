@@ -79,8 +79,15 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `slot_differential`; [#161](https://github.com/sunstoneinstitute/horndb/issues/145)
   also added `group_by_count_distinct_star` in `crates/sparql/tests/exec_aggregate.rs`).
   **`Group` micro-opts LANDED** via #167 (share decoded members across aggregates;
-  drop the per-group `key_slots` clone). SPB-256 re-measurement on hornbench is
-  **PENDING**.
+  drop the per-group `key_slots` clone). SPB-256 **re-measured on hornbench
+  2026-06-30: HornDB ~30.8 qps (branch `4ce02e10` 30.78 ≈ same-day main
+  `b142f00c` 30.71) vs GraphDB Free ~153 → ~5.0× gap** (was ~6.5× at ~23).
+  The 23 → ~30.7 gain was **bisected locally to Slice 2's native-slot
+  `LeftJoin`/`OPTIONAL` hash probe (`309c2db`)** (secondary: native `Extend`/`BIND`
+  `bca05f2`) — the SPB aggregation queries are `OPTIONAL`-heavy (query1 has 15
+  `OPTIONAL`s), so the nested-loop→hash-probe rewrite lifts their qps; `agg_profile`
+  Q1–Q5 (no `OPTIONAL`) were blind to it. **#143/#144 are net-neutral on top** (branch
+  with them 30.78 ≈ same-day main without 30.71). See BENCHMARKS.md.
 
   **Remaining / deferred work:**
   1. Probe-side streaming for `Join` — joins currently drain both children before
