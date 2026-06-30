@@ -46,6 +46,7 @@ horndb-owlrl = { path = "../owlrl", optional = true }
 horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
 horndb-metrics.workspace = true
+horndb-simd.workspace = true
 arrow = { workspace = true }
 
 [[bin]]
