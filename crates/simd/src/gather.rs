@@ -54,6 +54,12 @@ fn choose() -> (Isa, Fn_) {
         candidates.push((Isa::Avx2, avx2_safe));
     }
 
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some(pair) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::Gather) {
+        return pair;
+    }
+
     if !crate::dispatch::autotune_enabled() {
         return *candidates.last().expect("scalar baseline always present");
     }
