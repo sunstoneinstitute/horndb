@@ -1,7 +1,7 @@
 //! `dedup`: collapse runs of equal values in a non-decreasing slice, appending
 //! each distinct value once (in order) to `out`.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -12,9 +12,10 @@ pub fn dedup(sorted: &[u64], out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], &mut Vec<u64>);
 
-/// The cached `(chosen ISA, kernel)` pair, calibrated once on first call.
-fn cached() -> (Isa, Fn_) {
-    static CACHE: OnceLock<(Isa, Fn_)> = OnceLock::new();
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
     *CACHE.get_or_init(choose)
 }
 
@@ -39,10 +40,16 @@ pub(crate) fn chosen() -> Isa {
     cached().0
 }
 
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
 /// Build the host-supported, cap-allowed candidate list and pick the kernel:
 /// the static widest preference when auto-tune is off, else the micro-calibrated
 /// winner.
-fn choose() -> (Isa, Fn_) {
+fn choose() -> (Isa, Fn_, Source) {
     #[allow(unused_mut)]
     let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::dedup)];
     #[cfg(target_arch = "x86_64")]
@@ -56,23 +63,25 @@ fn choose() -> (Isa, Fn_) {
 
     // Known-CPU table: an authoritative per-host choice wins with no timing,
     // provided that ISA is present in the capped candidate list.
-    if let Some(pair) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::Dedup) {
-        return pair;
+    if let Some((isa, f)) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::Dedup) {
+        return (isa, f, Source::Table);
     }
 
     if !crate::dispatch::autotune_enabled() {
-        return *candidates.last().expect("scalar baseline always present");
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
     }
 
     // Deterministic L2-resident sorted run with clustered duplicates (no `rand`).
     const N: u64 = 4096;
     let sorted: Vec<u64> = (0..N).map(|x| x / 2).collect();
     let mut out: Vec<u64> = Vec::with_capacity(sorted.len());
-    crate::calibrate::pick(&candidates, |f| {
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
         out.clear();
         f(&sorted, &mut out);
         core::hint::black_box(&out);
-    })
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {

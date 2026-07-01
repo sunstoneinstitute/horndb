@@ -21,6 +21,34 @@ pub enum Isa {
     Neon,
 }
 
+/// Which selection path chose a primitive's cached kernel. Reported alongside
+/// the `(Isa, kernel)` by [`crate::calibration_report`] so fleet ops can see
+/// *why* an ISA was picked — e.g. spot hosts that fell through to calibration
+/// because they're absent from the known-CPU table.
+///
+/// Production never uses the `forced_isa` test/bench override for the cache, so
+/// there is deliberately no `Forced` variant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// The host matched an authoritative row in the known-CPU table.
+    Table,
+    /// Chosen by the startup micro-calibration (representative timing).
+    Calibrated,
+    /// The static widest-ISA preference (auto-tune disabled).
+    Static,
+}
+
+impl Source {
+    /// Stable, human-readable name: "table" / "calibrated" / "static".
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Table => "table",
+            Source::Calibrated => "calibrated",
+            Source::Static => "static",
+        }
+    }
+}
+
 thread_local! {
     static FORCED: std::cell::Cell<Option<Isa>> = const { std::cell::Cell::new(None) };
 }

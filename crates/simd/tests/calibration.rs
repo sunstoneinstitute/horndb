@@ -28,8 +28,15 @@ fn init_then_report_has_seven_host_runnable_entries() {
     init();
     let report = calibration_report();
     assert_eq!(report.len(), 7, "one entry per dispatched primitive");
-    for (name, isa) in report {
-        assert!(host_runnable(isa), "{name}: chose non-runnable ISA {isa:?}");
+    for (kernel, isa, source) in report {
+        assert!(
+            host_runnable(isa),
+            "{}: chose non-runnable ISA {isa:?}",
+            kernel.name()
+        );
+        // Under auto-tune ON, an unknown host picks via calibration; a known-CPU
+        // host (Zen4/SPR) via the table. Either way a source is reported.
+        let _ = source.name();
     }
 }
 

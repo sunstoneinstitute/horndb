@@ -2,7 +2,7 @@
 //! Galloping (exponential) probe narrows the window, then a SIMD block
 //! compare finishes it. Scalar oracle = `slice::partition_point`.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -15,9 +15,10 @@ pub fn lower_bound(haystack: &[u64], value: u64) -> usize {
 
 type Fn_ = fn(&[u64], u64) -> usize;
 
-/// The cached `(chosen ISA, kernel)` pair, calibrated once on first call.
-fn cached() -> (Isa, Fn_) {
-    static CACHE: OnceLock<(Isa, Fn_)> = OnceLock::new();
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
     *CACHE.get_or_init(choose)
 }
 
@@ -42,10 +43,16 @@ pub(crate) fn chosen() -> Isa {
     cached().0
 }
 
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
 /// Build the host-supported, cap-allowed candidate list and pick the kernel:
 /// the static widest preference when auto-tune is off, else the micro-calibrated
 /// winner. No AVX-512 kernel exists for `lower_bound`.
-fn choose() -> (Isa, Fn_) {
+fn choose() -> (Isa, Fn_, Source) {
     #[allow(unused_mut)]
     let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::lower_bound)];
     #[cfg(target_arch = "x86_64")]
@@ -59,12 +66,14 @@ fn choose() -> (Isa, Fn_) {
 
     // Known-CPU table: an authoritative per-host choice wins with no timing,
     // provided that ISA is present in the capped candidate list.
-    if let Some(pair) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::LowerBound) {
-        return pair;
+    if let Some((isa, f)) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::LowerBound)
+    {
+        return (isa, f, Source::Table);
     }
 
     if !crate::dispatch::autotune_enabled() {
-        return *candidates.last().expect("scalar baseline always present");
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
     }
 
     // Production-representative seek mix. SPB-256 showed the old single-midpoint
@@ -84,13 +93,14 @@ fn choose() -> (Isa, Fn_) {
     let needles: Vec<u64> = (0..256u64)
         .map(|i| i.wrapping_mul(2654435761) % (4 * N))
         .collect();
-    crate::calibrate::pick(&candidates, |f| {
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
         let mut acc = 0usize;
         for &needle in &needles {
             acc = acc.wrapping_add(f(&h, needle));
         }
         core::hint::black_box(acc);
-    })
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {

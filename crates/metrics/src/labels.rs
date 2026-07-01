@@ -140,8 +140,15 @@ label_value_enum!(SimdIsa {
     Neon => "neon",
 });
 
+label_value_enum!(SimdSource {
+    Table => "table",
+    Calibrated => "calibrated",
+    Static => "static",
+});
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct SimdKernelLabel {
     pub kernel: SimdKernel,
     pub isa: SimdIsa,
+    pub source: SimdSource,
 }
