@@ -68,12 +68,17 @@ fn choose() -> (Isa, Fn_) {
         return *candidates.last().expect("scalar baseline always present");
     }
 
-    // Deterministic L2-resident column + a sparse needle (~few matches, the
-    // shape where this primitive wins; no `rand`).
-    const N: u64 = 4096;
-    let values: Vec<u64> = (0..N).map(|x| x % 256).collect();
-    let needle = 7u64;
-    let mut out: Vec<u32> = Vec::with_capacity(64);
+    // Representative scan shape — NOT the SIMD-favorable one. SPB-256 showed the
+    // old cherry-picked sparse case (N=4096, ~0.4% matches) calibrated on exactly
+    // the shape where the SIMD kernel wins, so it was adopted even though real
+    // partition scans run at moderate selectivity where the scalar scan is
+    // competitive. Calibrate on a larger column at MODERATE selectivity (~1/3 of
+    // rows match) so the SIMD kernel is adopted only if it genuinely wins a
+    // realistic case. Deterministic (no `rand`, no wall-clock).
+    const N: u64 = 65_536;
+    let values: Vec<u64> = (0..N).map(|x| x % 3).collect();
+    let needle = 0u64; // matches ~1/3 of the column
+    let mut out: Vec<u32> = Vec::with_capacity(N as usize / 2);
     crate::calibrate::pick(&candidates, |f| {
         out.clear();
         f(&values, needle, &mut out);

@@ -67,12 +67,29 @@ fn choose() -> (Isa, Fn_) {
         return *candidates.last().expect("scalar baseline always present");
     }
 
-    // Deterministic L2-resident sorted run + a mid needle (no `rand`).
-    const N: u64 = 4096;
+    // Production-representative seek mix. SPB-256 showed the old single-midpoint
+    // probe over an L2-resident N=4096 run mis-picked: every leapfrog seek calls
+    // `lower_bound` with a *varied* target over a *larger* run, where scalar
+    // `partition_point` (binary search) beats the AVX2 gallop+linear-window scan.
+    // Time a sweep of many needles (front / interior / back, incl. above-max
+    // misses) across a > L2 haystack so calibration reflects the real seek mix,
+    // not one cherry-picked midpoint. Deterministic (no `rand`, no wall-clock).
+    const N: u64 = 65_536;
     let h: Vec<u64> = (0..N).map(|x| x * 2).collect();
-    let needle = N; // ~midpoint of the value range
+    // 256 needles spread across [0, 4*N) via a Knuth multiplicative hash. The
+    // haystack holds even values 0,2,...,2*(N-1) (max 2*N-2), so needles in
+    // [0, 2*N) land in-range (front / interior / back — even values hit, odd
+    // values fall between neighbours) while needles in [2*N-1, 4*N) — roughly
+    // half — exceed the max and exercise the above-max miss tail.
+    let needles: Vec<u64> = (0..256u64)
+        .map(|i| i.wrapping_mul(2654435761) % (4 * N))
+        .collect();
     crate::calibrate::pick(&candidates, |f| {
-        core::hint::black_box(f(&h, needle));
+        let mut acc = 0usize;
+        for &needle in &needles {
+            acc = acc.wrapping_add(f(&h, needle));
+        }
+        core::hint::black_box(acc);
     })
 }
 
