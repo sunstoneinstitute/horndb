@@ -64,8 +64,13 @@ fn choose() -> (Isa, Fn_) {
         return *candidates.last().expect("scalar baseline always present");
     }
 
-    // Deterministic L2-resident base + a strided index set (no `rand`).
-    const N: u64 = 4096;
+    // Production gathers from columns LARGER than L2. SPB-256 showed the old
+    // N=4096 / 32 KB L2-resident base mis-picked: a base that fits in L2 makes
+    // the microcoded AVX2 `vpgatherqq` look competitive, but real gathers hit a
+    // > L2 column where the scalar indexed-load loop wins. Size the base past L2
+    // (262_144 u64 = 2 MB) with the same scattered-index scheme. Deterministic
+    // (no `rand`, no wall-clock).
+    const N: u64 = 262_144;
     let base: Vec<u64> = (0..N).map(|x| x * 3).collect();
     let indices: Vec<u32> = (0..N as u32)
         .map(|i| i.wrapping_mul(2654435761) % N as u32)

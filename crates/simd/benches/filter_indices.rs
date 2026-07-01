@@ -79,7 +79,9 @@ fn bench_one(
 
 fn bench_filter_indices(c: &mut Criterion) {
     let mut group = c.benchmark_group("filter_indices_eq");
-    for &n in &[1024usize, 4096, 16384] {
+    // Include production-scale sizes (65_536 > L2) so a calibration regression
+    // that only shows up past L2 can't false-green on the small sizes.
+    for &n in &[1024usize, 4096, 16384, 65_536] {
         let sparse = make_column(n, 100); // ~1% match
         let dense = make_column(n, 2); // ~50% match
         bench_one(&mut group, "sparse", n, &sparse);

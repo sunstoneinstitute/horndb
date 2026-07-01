@@ -25,7 +25,10 @@ fn make_inputs(n: usize) -> (Vec<u64>, Vec<u32>) {
 
 fn bench_gather(c: &mut Criterion) {
     let mut group = c.benchmark_group("gather");
-    for &n in &[1024usize, 4096, 16384] {
+    // Include production-scale sizes (65_536, 262_144 = 2 MB > L2) so the scalar
+    // win on a > L2 base is visible and a calibration regression can't
+    // false-green on the small L2-resident sizes.
+    for &n in &[1024usize, 4096, 16384, 65_536, 262_144] {
         let (base, indices) = make_inputs(n);
         group.throughput(Throughput::Elements(indices.len() as u64));
         let mut out = Vec::with_capacity(n);

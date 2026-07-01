@@ -37,7 +37,9 @@ fn run_probes(haystack: &[u64], probes: &[u64]) -> usize {
 
 fn bench_lower_bound(c: &mut Criterion) {
     let mut group = c.benchmark_group("lower_bound");
-    for &n in &[1024usize, 4096, 16384] {
+    // Include production-scale sizes (65_536) so a calibration regression that
+    // only shows up past L2 can't false-green on the small sizes.
+    for &n in &[1024usize, 4096, 16384, 65_536] {
         let haystack = make_haystack(n);
         let probes = make_probes(n);
         group.throughput(Throughput::Elements(probes.len() as u64));
