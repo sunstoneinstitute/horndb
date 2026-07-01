@@ -19,6 +19,15 @@ Treat it as the front door to the docs tree.
 - If a doc grows into a distinct topic, split it into a new file and add the new file to the index.
 - When a task touches query/update/reasoning behavior, make sure the index points the reader at the relevant spec or crate note before they start editing.
 
+## architecture.md vs. architecture/
+
+Keep these two separate — they answer different questions:
+
+- `docs/architecture.md` is the single-page **status map**: one row per subsystem/feature with an implemented / specified / planned / deferred **Status**, kept in sync with `../TASKS.md`. It says *what exists today*, briefly.
+- `docs/architecture/<subsystem>.md` holds per-subsystem **deep-dive guides** (e.g. `architecture/wcoj.md`): how a subsystem actually works, its invariants, and its gotchas. These say *how it works*, at length.
+
+When you write a deep-dive, put it under `docs/architecture/`, link it from the index, and cross-link it from the relevant crate `AGENTS.md`/`INTEGRATION-NOTES.md`. Do not bloat the single-page map with deep-dive prose, and do not duplicate the status table inside a deep-dive.
+
 ## Good index shape
 
 - Start here / orientation
