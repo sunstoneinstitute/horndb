@@ -163,28 +163,22 @@ async fn main() -> Result<()> {
 
 /// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
 /// per primitive as `horndb_simd_kernel_isa` gauges (1 on the active series).
-/// The metrics crate keeps its own `SimdKernel`/`SimdIsa` label enums, so this
-/// is the one place the two type universes are bridged.
+/// The metrics crate keeps its own `SimdKernel`/`SimdIsa`/`SimdSource` label
+/// enums, so this is the one place the two type universes are bridged.
 fn record_simd_calibration() {
-    use horndb_metrics::labels::{SimdIsa, SimdKernel};
+    use horndb_metrics::labels::{SimdIsa, SimdKernel, SimdSource};
 
     horndb_simd::init();
     let metrics = horndb_metrics::metrics();
-    for (name, isa) in horndb_simd::calibration_report() {
-        let kernel = match name {
-            "intersect" => SimdKernel::Intersect,
-            "lower_bound" => SimdKernel::LowerBound,
-            "merge" => SimdKernel::Merge,
-            "dedup" => SimdKernel::Dedup,
-            "filter_range" => SimdKernel::FilterRange,
-            "filter_indices_eq" => SimdKernel::FilterIndicesEq,
-            "gather" => SimdKernel::Gather,
-            other => {
-                // A primitive added to horndb-simd but not mapped here: skip
-                // rather than panic at startup.
-                eprintln!("serve: skipping unknown SIMD primitive {other:?} in calibration report");
-                continue;
-            }
+    for (kernel, isa, source) in horndb_simd::calibration_report() {
+        let simd_kernel = match kernel {
+            horndb_simd::Kernel::Intersect => SimdKernel::Intersect,
+            horndb_simd::Kernel::LowerBound => SimdKernel::LowerBound,
+            horndb_simd::Kernel::Merge => SimdKernel::Merge,
+            horndb_simd::Kernel::Dedup => SimdKernel::Dedup,
+            horndb_simd::Kernel::FilterRange => SimdKernel::FilterRange,
+            horndb_simd::Kernel::FilterIndicesEq => SimdKernel::FilterIndicesEq,
+            horndb_simd::Kernel::Gather => SimdKernel::Gather,
         };
         let simd_isa = match isa {
             horndb_simd::Isa::Scalar => SimdIsa::Scalar,
@@ -192,8 +186,18 @@ fn record_simd_calibration() {
             horndb_simd::Isa::Avx512 => SimdIsa::Avx512,
             horndb_simd::Isa::Neon => SimdIsa::Neon,
         };
-        eprintln!("serve: SIMD calibration — {name} -> {isa:?}");
-        metrics.simd.record(kernel, simd_isa);
+        let simd_source = match source {
+            horndb_simd::Source::Table => SimdSource::Table,
+            horndb_simd::Source::Calibrated => SimdSource::Calibrated,
+            horndb_simd::Source::Static => SimdSource::Static,
+        };
+        eprintln!(
+            "serve: SIMD calibration — {} -> {:?} ({})",
+            kernel.name(),
+            isa,
+            source.name()
+        );
+        metrics.simd.record(simd_kernel, simd_isa, simd_source);
     }
 }
 

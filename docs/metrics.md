@@ -66,6 +66,7 @@ registered the collector. In tests, read the registry directly with
 | `result` | `ok`, `error` | `ml_nl_query` |
 | `kernel` | `intersect`, `lower_bound`, `merge`, `dedup`, `filter_range`, `filter_indices_eq`, `gather` | `simd_kernel_isa` |
 | `isa` | `scalar`, `avx2`, `avx512`, `neon` | `simd_kernel_isa` |
+| `source` | `table`, `calibrated`, `static` | `simd_kernel_isa` — which selection path chose this `(kernel, isa)` (known-CPU table / micro-calibration / static widest) |
 
 ## SPARQL HTTP + pipeline (`crates/metrics/src/sparql.rs`)
 
@@ -165,11 +166,12 @@ drop) — never per-seek/per-tuple (design §5.3).
 Emitted once at server startup by `crates/sparql/src/bin/serve.rs`
 (`record_simd_calibration`), which runs `horndb_simd::init()` and publishes
 `horndb_simd::calibration_report()`. One series is set to `1` per primitive — the
-`(kernel, isa)` chosen by the `horndb-simd` startup micro-calibration.
+`(kernel, isa, source)` chosen by `horndb-simd` startup selection, where `source`
+records which path picked it (known-CPU table / micro-calibration / static widest).
 
 | Metric (scraped name) | Type | Labels | Unit / buckets | Meaning |
 |---|---|---|---|---|
-| `horndb_simd_kernel_isa` | gauge | `kernel`, `isa` | count | 1 on the `(kernel, isa)` series chosen by startup calibration; emitted once at server startup |
+| `horndb_simd_kernel_isa` | gauge | `kernel`, `isa`, `source` | count | 1 on the `(kernel, isa, source)` series chosen by startup selection; `source` = which path chose it (table/calibrated/static); emitted once at server startup |
 
 > **Caveat.** Under `HORNDB_SIMD_AUTOTUNE=off` on x86, `merge` (all arms) and
 > `filter_range` (its AVX2 arm) report their widest *available* ISA label even

@@ -65,7 +65,7 @@ pub use lower_bound::lower_bound;
 pub use merge::merge;
 
 pub use cpu::Kernel;
-pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa};
+pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa, Source};
 
 /// Eagerly calibrate every primitive's kernel, paying the (small) startup
 /// calibration cost up front instead of lazily on first use. Hosts that want
@@ -83,26 +83,31 @@ pub fn init() {
     gather::prime();
 }
 
-/// The kernel ISA chosen for each dispatched primitive, one `(name, isa)` per
-/// primitive. Triggers calibration for any not-yet-resolved primitive. Intended
-/// for startup logging, e.g.
-/// `for (n, isa) in horndb_simd::calibration_report() { tracing::info!(%n, ?isa); }`.
-pub fn calibration_report() -> Vec<(&'static str, Isa)> {
-    // Pair each `Kernel` variant with its primitive's `chosen()`, deriving the
-    // name from `Kernel::name()` so it can never drift from the enum. Order is
-    // the stable report order (intersect, lower_bound, …, gather).
-    let entries: [(Kernel, fn() -> Isa); 7] = [
-        (Kernel::Intersect, intersect::chosen),
-        (Kernel::LowerBound, lower_bound::chosen),
-        (Kernel::Merge, merge::chosen),
-        (Kernel::Dedup, dedup::chosen),
-        (Kernel::FilterRange, filter::chosen),
-        (Kernel::FilterIndicesEq, filter_indices::chosen),
-        (Kernel::Gather, gather::chosen),
+/// The kernel chosen for each dispatched primitive, one `(kernel, isa, source)`
+/// per primitive: the [`Kernel`], the [`Isa`] its calibration picked, and the
+/// [`Source`] selection path that chose it. Triggers calibration for any
+/// not-yet-resolved primitive. Intended for startup logging, e.g.
+/// `for (k, isa, src) in horndb_simd::calibration_report() { tracing::info!(name = k.name(), ?isa, source = src.name()); }`.
+pub fn calibration_report() -> Vec<(Kernel, Isa, Source)> {
+    // Pair each `Kernel` variant with its primitive's `chosen()`/`source()`.
+    // Order is the stable report order (intersect, lower_bound, …, gather).
+    type ReportEntry = (Kernel, fn() -> Isa, fn() -> Source);
+    let entries: [ReportEntry; 7] = [
+        (Kernel::Intersect, intersect::chosen, intersect::source),
+        (Kernel::LowerBound, lower_bound::chosen, lower_bound::source),
+        (Kernel::Merge, merge::chosen, merge::source),
+        (Kernel::Dedup, dedup::chosen, dedup::source),
+        (Kernel::FilterRange, filter::chosen, filter::source),
+        (
+            Kernel::FilterIndicesEq,
+            filter_indices::chosen,
+            filter_indices::source,
+        ),
+        (Kernel::Gather, gather::chosen, gather::source),
     ];
     entries
         .into_iter()
-        .map(|(k, chosen)| (k.name(), chosen()))
+        .map(|(k, chosen, source)| (k, chosen(), source()))
         .collect()
 }
 
@@ -129,7 +134,16 @@ mod tests {
             Kernel::FilterIndicesEq.name(),
             Kernel::Gather.name(),
         ];
-        let names: Vec<&'static str> = calibration_report().into_iter().map(|(n, _)| n).collect();
+        let report = calibration_report();
+        let names: Vec<&'static str> = report.iter().map(|(k, _, _)| k.name()).collect();
         assert_eq!(names, expected);
+        // Every entry carries a selection source (one of table/calibrated/static).
+        for (k, _, source) in &report {
+            assert!(
+                matches!(source, Source::Table | Source::Calibrated | Source::Static),
+                "{}: unexpected source {source:?}",
+                k.name()
+            );
+        }
     }
 }
