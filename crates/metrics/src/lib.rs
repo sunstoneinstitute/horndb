@@ -10,6 +10,7 @@ pub mod incremental;
 pub mod labels;
 pub mod ml;
 pub mod owlrl;
+pub mod simd;
 pub mod sparql;
 pub mod storage;
 pub mod wcoj;
@@ -27,6 +28,7 @@ pub struct MetricsState {
     pub incremental: incremental::IncrementalMetrics,
     pub ml: ml::MlMetrics,
     pub wcoj: wcoj::WcojMetrics,
+    pub simd: simd::SimdMetrics,
 }
 
 impl MetricsState {
@@ -39,6 +41,7 @@ impl MetricsState {
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
         let ml = ml::MlMetrics::register(&mut registry);
         let wcoj = wcoj::WcojMetrics::register(&mut registry);
+        let simd = simd::SimdMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
@@ -48,6 +51,7 @@ impl MetricsState {
             incremental,
             ml,
             wcoj,
+            simd,
         }
     }
 

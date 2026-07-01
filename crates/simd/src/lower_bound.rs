@@ -2,7 +2,7 @@
 //! Galloping (exponential) probe narrows the window, then a SIMD block
 //! compare finishes it. Scalar oracle = `slice::partition_point`.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -15,6 +15,13 @@ pub fn lower_bound(haystack: &[u64], value: u64) -> usize {
 
 type Fn_ = fn(&[u64], u64) -> usize;
 
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -22,8 +29,78 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached kernel (paying any calibration cost now). Called by
+/// [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached kernel (calibrating on first call if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner. No AVX-512 kernel exists for `lower_bound`.
+fn choose() -> (Isa, Fn_, Source) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::lower_bound)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon") {
+        candidates.push((Isa::Neon, neon_safe));
+    }
+
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some((isa, f)) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::LowerBound)
+    {
+        return (isa, f, Source::Table);
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
+    }
+
+    // Production-representative seek mix. SPB-256 showed the old single-midpoint
+    // probe over an L2-resident N=4096 run mis-picked: every leapfrog seek calls
+    // `lower_bound` with a *varied* target over a *larger* run, where scalar
+    // `partition_point` (binary search) beats the AVX2 gallop+linear-window scan.
+    // Time a sweep of many needles (front / interior / back, incl. above-max
+    // misses) across a > L2 haystack so calibration reflects the real seek mix,
+    // not one cherry-picked midpoint. Deterministic (no `rand`, no wall-clock).
+    const N: u64 = 65_536;
+    let h: Vec<u64> = (0..N).map(|x| x * 2).collect();
+    // 256 needles spread across [0, 4*N) via a Knuth multiplicative hash. The
+    // haystack holds even values 0,2,...,2*(N-1) (max 2*N-2), so needles in
+    // [0, 2*N) land in-range (front / interior / back — even values hit, odd
+    // values fall between neighbours) while needles in [2*N-1, 4*N) — roughly
+    // half — exceed the max and exercise the above-max miss tail.
+    let needles: Vec<u64> = (0..256u64)
+        .map(|i| i.wrapping_mul(2654435761) % (4 * N))
+        .collect();
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
+        let mut acc = 0usize;
+        for &needle in &needles {
+            acc = acc.wrapping_add(f(&h, needle));
+        }
+        core::hint::black_box(acc);
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {
@@ -54,18 +131,21 @@ fn neon_safe(haystack: &[u64], value: u64) -> usize {
     unsafe { neon(haystack, value) }
 }
 
-/// Galloping probe then a 2-lane (`uint64x2_t`) linear compare. Same result
-/// as the scalar oracle for all non-decreasing inputs.
+/// Galloping probe to bound the window, then a 2-lane (`uint64x2_t`) linear
+/// SIMD scan: broadcast `value`, compare two `u64` lanes per step with
+/// `vcltq_u64`, and stop at the first lane `>= value` (found by lane
+/// extraction). NEON's `u64` compare is unsigned, so no sign-bias is needed
+/// (unlike the AVX2 kernel). Returns the same index as the scalar oracle for
+/// all non-decreasing inputs.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn neon(haystack: &[u64], value: u64) -> usize {
-    // Correctness-first galloping form (no intrinsics needed for correctness;
-    // the NEON win is a throughput optimisation the bench gates). Equivalent
-    // to partition_point.
+    use std::arch::aarch64::*;
     let n = haystack.len();
     if n == 0 {
         return 0;
     }
+    // Gallop: find a window [lo, hi) containing the boundary.
     let mut lo = 0usize;
     let mut step = 1usize;
     while lo + step < n && *haystack.get_unchecked(lo + step) < value {
@@ -73,7 +153,24 @@ unsafe fn neon(haystack: &[u64], value: u64) -> usize {
         step *= 2;
     }
     let hi = (lo + step).min(n);
+    // Linear NEON scan of [lo, hi): broadcast `value`, compare 2 lanes/step,
+    // stop at the first lane >= value. `vcltq_u64` yields all-ones in a lane
+    // where `chunk[lane] < value`; the slice is non-decreasing, so the per-lane
+    // mask is monotone (1,1 / 1,0 / 0,0) and the first zero lane is the answer.
+    let needle = vdupq_n_u64(value);
     let mut i = lo;
+    while i + 2 <= hi {
+        let chunk = vld1q_u64(haystack.as_ptr().add(i));
+        let lt = vcltq_u64(chunk, needle);
+        if vgetq_lane_u64(lt, 0) == 0 {
+            return i;
+        }
+        if vgetq_lane_u64(lt, 1) == 0 {
+            return i + 1;
+        }
+        i += 2;
+    }
+    // Tail: scalar.
     while i < hi && *haystack.get_unchecked(i) < value {
         i += 1;
     }
@@ -156,12 +253,19 @@ mod tests {
 
     #[test]
     fn boundaries() {
+        // 100 elements: exercises both the 2-lane wide scan and the scalar tail.
         let h: Vec<u64> = (0..100u64).map(|x| x * 2).collect();
         for v in [0, 1, 2, 99, 100, 198, 199, 200] {
             check(&h, v);
         }
-        check(&[], 5);
-        check(&[7], 7);
+        check(&[], 5); // empty
+        check(&[7], 7); // single element
         check(&[7], 8);
+        check(&[0, 0, 0], 0); // all-zero block
+                              // u64::MAX boundary (and an odd length so the tail runs).
+        let m: Vec<u64> = vec![0, 1, 2, u64::MAX, u64::MAX];
+        for v in [0, 3, u64::MAX] {
+            check(&m, v);
+        }
     }
 }

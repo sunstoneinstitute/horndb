@@ -3,7 +3,7 @@
 //! boundary). `filter_range` is the concrete `lo <= v < hi` specialisation the
 //! storage partition scan needs (SPEC-12 F2) and *is* vectorised.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -19,6 +19,13 @@ pub fn filter_range(values: &[u64], lo: u64, hi: u64, out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], u64, u64, &mut Vec<u64>);
 
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -26,8 +33,65 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached `filter_range` kernel (paying any calibration cost now).
+/// Called by [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached `filter_range` kernel (calibrating if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// The selection source of the cached `filter_range` kernel (calibrating if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner.
+fn choose() -> (Isa, Fn_, Source) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, range_scalar)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon") {
+        candidates.push((Isa::Neon, neon_safe));
+    }
+
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some((isa, f)) =
+        crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::FilterRange)
+    {
+        return (isa, f, Source::Table);
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
+    }
+
+    // Deterministic L2-resident column + a mid range (~50% selectivity, no `rand`).
+    const N: u64 = 4096;
+    let values: Vec<u64> = (0..N).map(|x| x % 1000).collect();
+    let (lo, hi) = (250u64, 750u64);
+    let mut out: Vec<u64> = Vec::with_capacity(values.len());
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&values, lo, hi, &mut out);
+        core::hint::black_box(&out);
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {
@@ -35,10 +99,17 @@ fn resolve() -> Fn_ {
         Some(Isa::Scalar) => range_scalar,
         #[cfg(target_arch = "x86_64")]
         Some(Isa::Avx2) if is_x86_feature_detected!("avx2") => avx2_safe,
+        #[cfg(target_arch = "aarch64")]
+        Some(Isa::Neon) if std::arch::is_aarch64_feature_detected!("neon") => neon_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
             if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
+            }
+            #[cfg(target_arch = "aarch64")]
+            if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon")
+            {
+                return neon_safe;
             }
             range_scalar
         }
@@ -70,6 +141,46 @@ unsafe fn avx2(values: &[u64], lo: u64, hi: u64, out: &mut Vec<u64>) {
     range_scalar(values, lo, hi, out);
 }
 
+#[cfg(target_arch = "aarch64")]
+fn neon_safe(values: &[u64], lo: u64, hi: u64, out: &mut Vec<u64>) {
+    // Safety: `resolve` returns this pointer only after proving neon present.
+    unsafe { neon(values, lo, hi, out) }
+}
+
+/// 2-lane range compare: `(v >= lo) & (v < hi)` via `vcgeq_u64` AND `vcltq_u64`
+/// (NEON's `u64` compares are unsigned, so no sign-bias is needed), appending
+/// the kept lanes in order. Tail is scalar. Differential-proven equal to
+/// `range_scalar`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon(values: &[u64], lo: u64, hi: u64, out: &mut Vec<u64>) {
+    use std::arch::aarch64::*;
+    let n = values.len();
+    let lo_v = vdupq_n_u64(lo);
+    let hi_v = vdupq_n_u64(hi);
+    let mut i = 0usize;
+    while i + 2 <= n {
+        let chunk = vld1q_u64(values.as_ptr().add(i));
+        let ge = vcgeq_u64(chunk, lo_v);
+        let lt = vcltq_u64(chunk, hi_v);
+        let keep = vandq_u64(ge, lt); // all-ones lane where lo <= v < hi
+        if vgetq_lane_u64(keep, 0) != 0 {
+            out.push(*values.get_unchecked(i));
+        }
+        if vgetq_lane_u64(keep, 1) != 0 {
+            out.push(*values.get_unchecked(i + 1));
+        }
+        i += 2;
+    }
+    while i < n {
+        let v = *values.get_unchecked(i);
+        if v >= lo && v < hi {
+            out.push(v);
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +194,10 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {
             paths.push(Isa::Avx2);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            paths.push(Isa::Neon);
         }
         for isa in paths {
             let mut got = Vec::new();
