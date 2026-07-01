@@ -45,6 +45,7 @@
 //! and [`configured_autotune`] reports whether auto-tune is enabled.
 
 mod calibrate;
+mod cpu;
 mod dedup;
 mod dispatch;
 mod filter;
@@ -63,6 +64,7 @@ pub use intersect::intersect;
 pub use lower_bound::lower_bound;
 pub use merge::merge;
 
+pub use cpu::Kernel;
 pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa};
 
 /// Eagerly calibrate every primitive's kernel, paying the (small) startup
@@ -86,15 +88,22 @@ pub fn init() {
 /// for startup logging, e.g.
 /// `for (n, isa) in horndb_simd::calibration_report() { tracing::info!(%n, ?isa); }`.
 pub fn calibration_report() -> Vec<(&'static str, Isa)> {
-    vec![
-        ("intersect", intersect::chosen()),
-        ("lower_bound", lower_bound::chosen()),
-        ("merge", merge::chosen()),
-        ("dedup", dedup::chosen()),
-        ("filter_range", filter::chosen()),
-        ("filter_indices_eq", filter_indices::chosen()),
-        ("gather", gather::chosen()),
-    ]
+    // Pair each `Kernel` variant with its primitive's `chosen()`, deriving the
+    // name from `Kernel::name()` so it can never drift from the enum. Order is
+    // the stable report order (intersect, lower_bound, …, gather).
+    let entries: [(Kernel, fn() -> Isa); 7] = [
+        (Kernel::Intersect, intersect::chosen),
+        (Kernel::LowerBound, lower_bound::chosen),
+        (Kernel::Merge, merge::chosen),
+        (Kernel::Dedup, dedup::chosen),
+        (Kernel::FilterRange, filter::chosen),
+        (Kernel::FilterIndicesEq, filter_indices::chosen),
+        (Kernel::Gather, gather::chosen),
+    ];
+    entries
+        .into_iter()
+        .map(|(k, chosen)| (k.name(), chosen()))
+        .collect()
 }
 
 /// Test-support API (see [`dispatch::with_forced_isa`]): pins a specific ISA
@@ -102,3 +111,25 @@ pub fn calibration_report() -> Vec<(&'static str, Isa)> {
 /// compile this crate as an ordinary dependency. Production callers never use
 /// it.
 pub use dispatch::with_forced_isa;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_report_names_match_kernel_names() {
+        // The report must expose exactly each `Kernel`'s `name()`, in the stable
+        // order — so the two lists can never drift.
+        let expected = [
+            Kernel::Intersect.name(),
+            Kernel::LowerBound.name(),
+            Kernel::Merge.name(),
+            Kernel::Dedup.name(),
+            Kernel::FilterRange.name(),
+            Kernel::FilterIndicesEq.name(),
+            Kernel::Gather.name(),
+        ];
+        let names: Vec<&'static str> = calibration_report().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, expected);
+    }
+}
