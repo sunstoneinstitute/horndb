@@ -178,3 +178,12 @@ records which path picked it (known-CPU table / micro-calibration / static wides
 > though those kernels run scalar bodies there; the default autotune-on path
 > reports `scalar` for them correctly. (`filter_range`'s NEON arm is genuinely
 > vectorized, so this only affects the x86 server where the metric is emitted.)
+>
+> **Caveat (`intersect`).** The `intersect` series reports the *balanced-input*
+> block kernel chosen by the table/calibration. `intersect` additionally applies
+> a size-ratio skew-gate at call time: skewed operands (the common leapfrog
+> `active_run` shape, e.g. 3 keys vs 50 000) dispatch to the ISA-independent
+> scalar gallop, not the reported kernel. So on an unlisted CPU whose calibration
+> picks `intersect=avx2`, the join hot path still runs scalar gallop for skewed
+> inputs even though the series shows `avx2`. On the two table-pinned hosts
+> (Zen4, Sapphire Rapids) `intersect=scalar`, so there is no discrepancy there.
