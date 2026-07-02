@@ -33,7 +33,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 ## Index
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
-- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `intersect` (≥4× AVX-512 / ≥2× NEON), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
+- [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **Remaining:** record `per_tuple` (≤2.5 ns/tuple), `dict_decode` (≥4×), and `partition_scan` (≥80% STREAM-Triad, NUMA-pinned) numbers on hornbench; delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
@@ -112,9 +112,22 @@ Closed tasks are listed in [Done](#done-for-traceability).
   differential-proptested bit-identical vs scalar on every host ISA path, plus the F5
   `with_forced_isa` override and the `intersect` SIMD-vs-scalar bench) landed in
   `crates/simd` (AVX2/AVX-512 on x86_64, NEON on aarch64; scalar-forced build green on
-  stable 1.90). Kernels that don't yet clear the NF2 floor ship the scalar-equivalent
-  galloping form; the bench is wired but **awaits hornbench measurement** before any wide
-  compress/compare kernel is hand-written. **Stage 1b — DONE (kernels; hornbench numbers
+    stable 1.90). `intersect` now ships genuine wide kernels (AVX-512 `cmpeq`-mask +
+  `compressstore`, AVX2 OR-reduced `cmpeq`+`movemask`, NEON `uint64x2`); `lower_bound`/
+  `filter_indices_eq`/`gather` carry real intrinsics; only `merge` (all arms) and
+  `filter_range`'s AVX2 arm remain scalar-equivalent behind the ISA gate. **Kernel selection
+  reworked 2026-07-01** after a same-session LDBC SPB-256 A/B (Zen4 hornbench + Intel SPR
+  hel01) proved the calibrated SIMD kernels **net-harmful vs scalar on both** (culprit: AVX2
+  `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 `intersect` ~2.5× on Intel"
+  microbench claim was fiction for SPB — AVX-512 runs ~half scalar throughput there).
+  Selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed,
+  SPB-derived; pins scalar for both measured hosts) → representative-input calibration
+  (seek-sweep / >L2 base / moderate selectivity so an unlisted CPU also rejects the killers)
+  → static widest`; the intersect skew-gate stays, and the selection tier is exported as the
+  `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log.
+  SPB-256 aggregation-qps recovered on Zen4 (28.6 regression → **36.16**, table all-scalar;
+  Intel steady 34.4). See `docs/plans/2026-07-01-simd-cpu-table-representative-calibration.md`.
+  **Stage 1b — DONE (kernels; hornbench numbers
   pending):** the WCOJ seek/intersect consumer is now live in the **production executor**.
   `executor/wcoj.rs::BatchIter`'s inlined leapfrog gains a k==2 `horndb_simd::intersect`
   fast path (mirroring the standalone `LeapfrogJoin`): when both contributing iters at a

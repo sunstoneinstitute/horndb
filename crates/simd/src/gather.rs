@@ -1,6 +1,6 @@
 //! `gather`: indexed load — append `base[indices[i]]` for each `i`, in order.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -16,6 +16,13 @@ pub fn gather(base: &[u64], indices: &[u32], out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], &[u32], &mut Vec<u64>);
 
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -23,8 +30,66 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached kernel (paying any calibration cost now). Called by
+/// [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached kernel (calibrating on first call if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner. Only an AVX2 kernel exists for `gather` (NEON has no gather).
+fn choose() -> (Isa, Fn_, Source) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::gather)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some((isa, f)) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::Gather) {
+        return (isa, f, Source::Table);
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
+    }
+
+    // Production gathers from columns LARGER than L2. SPB-256 showed the old
+    // N=4096 / 32 KB L2-resident base mis-picked: a base that fits in L2 makes
+    // the microcoded AVX2 `vpgatherqq` look competitive, but real gathers hit a
+    // > L2 column where the scalar indexed-load loop wins. Size the base past L2
+    // (262_144 u64 = 2 MB) with the same scattered-index scheme. Deterministic
+    // (no `rand`, no wall-clock).
+    const N: u64 = 262_144;
+    let base: Vec<u64> = (0..N).map(|x| x * 3).collect();
+    let indices: Vec<u32> = (0..N as u32)
+        .map(|i| i.wrapping_mul(2654435761) % N as u32)
+        .collect();
+    let mut out: Vec<u64> = Vec::with_capacity(indices.len());
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&base, &indices, &mut out);
+        core::hint::black_box(&out);
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {
@@ -37,6 +102,10 @@ fn resolve() -> Fn_ {
             if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
             }
+            // No NEON arm on aarch64: NEON has no gather instruction (no
+            // `vpgatherqq` equivalent), so a vectorised indexed load decomposes
+            // into the same scalar loads plus lane-assembly overhead and cannot
+            // beat the scalar path. Scalar is optimal here.
             scalar::gather
         }
     }

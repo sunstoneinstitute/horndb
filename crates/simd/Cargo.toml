@@ -14,3 +14,15 @@ criterion = { workspace = true }
 [[bench]]
 name = "intersect"
 harness = false
+
+[[bench]]
+name = "lower_bound"
+harness = false
+
+[[bench]]
+name = "gather"
+harness = false
+
+[[bench]]
+name = "filter_indices"
+harness = false

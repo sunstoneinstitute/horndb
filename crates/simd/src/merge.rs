@@ -1,7 +1,7 @@
 //! `merge`: full two-way merge (keeps duplicates) of two ascending slices.
 //! Appends the sorted union-with-multiplicity to `out`.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use crate::scalar;
 use std::sync::OnceLock;
 
@@ -13,6 +13,13 @@ pub fn merge(a: &[u64], b: &[u64], out: &mut Vec<u64>) {
 
 type Fn_ = fn(&[u64], &[u64], &mut Vec<u64>);
 
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -20,8 +27,59 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached kernel (paying any calibration cost now). Called by
+/// [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached kernel (calibrating on first call if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner. Only an AVX2 kernel exists for `merge`.
+fn choose() -> (Isa, Fn_, Source) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar::merge)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some((isa, f)) = crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::Merge) {
+        return (isa, f, Source::Table);
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
+    }
+
+    // Deterministic L2-resident interleaved runs (no `rand`).
+    const N: u64 = 4096;
+    let a: Vec<u64> = (0..N).map(|x| x * 2).collect();
+    let b: Vec<u64> = (0..N).map(|x| x * 2 + 1).collect();
+    let mut out: Vec<u64> = Vec::with_capacity(a.len() + b.len());
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&a, &b, &mut out);
+        core::hint::black_box(&out);
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {

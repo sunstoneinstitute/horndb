@@ -50,6 +50,10 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Pay the SIMD startup micro-calibration cost up front and publish which
+    // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
+    record_simd_calibration();
+
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
         collect_data_files(path, &mut files)
@@ -155,6 +159,46 @@ async fn main() -> Result<()> {
         .await
         .context("axum serve loop")?;
     Ok(())
+}
+
+/// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
+/// per primitive as `horndb_simd_kernel_isa` gauges (1 on the active series).
+/// The metrics crate keeps its own `SimdKernel`/`SimdIsa`/`SimdSource` label
+/// enums, so this is the one place the two type universes are bridged.
+fn record_simd_calibration() {
+    use horndb_metrics::labels::{SimdIsa, SimdKernel, SimdSource};
+
+    horndb_simd::init();
+    let metrics = horndb_metrics::metrics();
+    for (kernel, isa, source) in horndb_simd::calibration_report() {
+        let simd_kernel = match kernel {
+            horndb_simd::Kernel::Intersect => SimdKernel::Intersect,
+            horndb_simd::Kernel::LowerBound => SimdKernel::LowerBound,
+            horndb_simd::Kernel::Merge => SimdKernel::Merge,
+            horndb_simd::Kernel::Dedup => SimdKernel::Dedup,
+            horndb_simd::Kernel::FilterRange => SimdKernel::FilterRange,
+            horndb_simd::Kernel::FilterIndicesEq => SimdKernel::FilterIndicesEq,
+            horndb_simd::Kernel::Gather => SimdKernel::Gather,
+        };
+        let simd_isa = match isa {
+            horndb_simd::Isa::Scalar => SimdIsa::Scalar,
+            horndb_simd::Isa::Avx2 => SimdIsa::Avx2,
+            horndb_simd::Isa::Avx512 => SimdIsa::Avx512,
+            horndb_simd::Isa::Neon => SimdIsa::Neon,
+        };
+        let simd_source = match source {
+            horndb_simd::Source::Table => SimdSource::Table,
+            horndb_simd::Source::Calibrated => SimdSource::Calibrated,
+            horndb_simd::Source::Static => SimdSource::Static,
+        };
+        eprintln!(
+            "serve: SIMD calibration — {} -> {:?} ({})",
+            kernel.name(),
+            isa,
+            source.name()
+        );
+        metrics.simd.record(simd_kernel, simd_isa, simd_source);
+    }
 }
 
 /// Recursively collect `.nt`/`.ttl` files under `path` (or `path` itself

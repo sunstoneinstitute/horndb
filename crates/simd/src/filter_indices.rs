@@ -2,7 +2,7 @@
 //! The scan+index-compact primitive behind the storage partition scan
 //! (SPEC-12 F2). Output indices are appended in ascending order.
 
-use crate::dispatch::{forced_isa, Isa};
+use crate::dispatch::{forced_isa, Isa, Source};
 use std::sync::OnceLock;
 
 /// Append the indices `i` (as `u32`, ascending) where `values[i] == needle`.
@@ -14,6 +14,13 @@ pub fn filter_indices_eq(values: &[u64], needle: u64, out: &mut Vec<u32>) {
 
 type Fn_ = fn(&[u64], u64, &mut Vec<u32>);
 
+/// The cached `(chosen ISA, kernel, selection source)`, calibrated once on
+/// first call.
+fn cached() -> (Isa, Fn_, Source) {
+    static CACHE: OnceLock<(Isa, Fn_, Source)> = OnceLock::new();
+    *CACHE.get_or_init(choose)
+}
+
 fn dispatch() -> Fn_ {
     // A forced ISA (tests/benches) must take effect on every call, so bypass
     // the cache while a force is active. Production never forces: one
@@ -21,8 +28,71 @@ fn dispatch() -> Fn_ {
     if forced_isa().is_some() {
         return resolve();
     }
-    static CACHE: OnceLock<Fn_> = OnceLock::new();
-    *CACHE.get_or_init(resolve)
+    cached().1
+}
+
+/// Prime the cached kernel (paying any calibration cost now). Called by
+/// [`crate::init`].
+pub(crate) fn prime() {
+    let _ = cached();
+}
+
+/// The ISA of the cached kernel (calibrating on first call if needed).
+pub(crate) fn chosen() -> Isa {
+    cached().0
+}
+
+/// The selection source of the cached kernel (calibrating on first call if
+/// needed).
+pub(crate) fn source() -> Source {
+    cached().2
+}
+
+/// Build the host-supported, cap-allowed candidate list and pick the kernel:
+/// the static widest preference when auto-tune is off, else the micro-calibrated
+/// winner.
+fn choose() -> (Isa, Fn_, Source) {
+    #[allow(unused_mut)]
+    let mut candidates: Vec<(Isa, Fn_)> = vec![(Isa::Scalar, scalar)];
+    #[cfg(target_arch = "x86_64")]
+    if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
+        candidates.push((Isa::Avx2, avx2_safe));
+    }
+    #[cfg(target_arch = "aarch64")]
+    if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon") {
+        candidates.push((Isa::Neon, neon_safe));
+    }
+
+    // Known-CPU table: an authoritative per-host choice wins with no timing,
+    // provided that ISA is present in the capped candidate list.
+    if let Some((isa, f)) =
+        crate::cpu::table_pick_pair(&candidates, crate::cpu::Kernel::FilterIndicesEq)
+    {
+        return (isa, f, Source::Table);
+    }
+
+    if !crate::dispatch::autotune_enabled() {
+        let &(isa, f) = candidates.last().expect("scalar baseline always present");
+        return (isa, f, Source::Static);
+    }
+
+    // Representative scan shape — NOT the SIMD-favorable one. SPB-256 showed the
+    // old cherry-picked sparse case (N=4096, ~0.4% matches) calibrated on exactly
+    // the shape where the SIMD kernel wins, so it was adopted even though real
+    // partition scans run at moderate selectivity where the scalar scan is
+    // competitive. Calibrate on a larger column at MODERATE selectivity (~1/3 of
+    // rows match) so the SIMD kernel is adopted only if it genuinely wins a
+    // realistic case. Deterministic (no `rand`, no wall-clock).
+    const N: u64 = 65_536;
+    let values: Vec<u64> = (0..N).map(|x| x % 3).collect();
+    let needle = 0u64; // matches ~1/3 of the column
+    let mut out: Vec<u32> = Vec::with_capacity(N as usize / 2);
+    let (isa, f) = crate::calibrate::pick(&candidates, |f| {
+        out.clear();
+        f(&values, needle, &mut out);
+        core::hint::black_box(&out);
+    });
+    (isa, f, Source::Calibrated)
 }
 
 fn resolve() -> Fn_ {
@@ -30,10 +100,17 @@ fn resolve() -> Fn_ {
         Some(Isa::Scalar) => scalar,
         #[cfg(target_arch = "x86_64")]
         Some(Isa::Avx2) if is_x86_feature_detected!("avx2") => avx2_safe,
+        #[cfg(target_arch = "aarch64")]
+        Some(Isa::Neon) if std::arch::is_aarch64_feature_detected!("neon") => neon_safe,
         _ => {
             #[cfg(target_arch = "x86_64")]
             if crate::dispatch::allows(Isa::Avx2) && is_x86_feature_detected!("avx2") {
                 return avx2_safe;
+            }
+            #[cfg(target_arch = "aarch64")]
+            if crate::dispatch::allows(Isa::Neon) && std::arch::is_aarch64_feature_detected!("neon")
+            {
+                return neon_safe;
             }
             scalar
         }
@@ -83,6 +160,42 @@ unsafe fn avx2(values: &[u64], needle: u64, out: &mut Vec<u32>) {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn neon_safe(values: &[u64], needle: u64, out: &mut Vec<u32>) {
+    // Safety: `resolve` returns this pointer only after proving neon present.
+    unsafe { neon(values, needle, out) }
+}
+
+/// 2-lane (u64) equality compare (`vceqq_u64`) against a broadcast needle;
+/// extract the two lane masks and append the set-bit positions (`i`, then
+/// `i + 1`) in ascending order. Tail is scalar. Differential-proven equal to
+/// `scalar`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn neon(values: &[u64], needle: u64, out: &mut Vec<u32>) {
+    use std::arch::aarch64::*;
+    let n = values.len();
+    let needle_v = vdupq_n_u64(needle);
+    let mut i = 0usize;
+    while i + 2 <= n {
+        let chunk = vld1q_u64(values.as_ptr().add(i));
+        let eq = vceqq_u64(chunk, needle_v); // all-ones lane where chunk == needle
+        if vgetq_lane_u64(eq, 0) != 0 {
+            out.push(i as u32);
+        }
+        if vgetq_lane_u64(eq, 1) != 0 {
+            out.push((i + 1) as u32);
+        }
+        i += 2;
+    }
+    while i < n {
+        if *values.get_unchecked(i) == needle {
+            out.push(i as u32);
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +220,12 @@ mod tests {
                 v.push(Isa::Avx2);
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        {
+            if std::arch::is_aarch64_feature_detected!("neon") {
+                v.push(Isa::Neon);
+            }
+        }
         v
     }
 
@@ -116,10 +235,12 @@ mod tests {
         check(&v, 3);
         check(&v, 0);
         check(&v, 99); // no match
-        check(&[], 1);
-        check(&[7], 7);
+        check(&[], 1); // empty
+        check(&[7], 7); // single element
         check(&[7], 8);
-        // dense matches across a wide block boundary
+        check(&[0u64, 0, 0], 0); // all-equal, value 0
+        check(&[u64::MAX, u64::MAX, u64::MAX], u64::MAX); // all-equal, value MAX
+                                                          // dense matches across a wide block boundary (odd length -> wide + tail)
         let all3 = vec![3u64; 17];
         check(&all3, 3);
     }

@@ -10,6 +10,17 @@ use horndb_wcoj::source::synthetic::SyntheticGraph;
 
 #[test]
 fn cancellation_returns_within_100ms() {
+    // Pay SIMD kernel calibration up front so it is not on the cancellation
+    // critical path. Calibration is a one-time startup cost (production primes
+    // it via `horndb_simd::init()` at server startup), not per-cancellation
+    // latency. On a CPU absent from the known-CPU table the kernels calibrate
+    // *lazily* on first use — which, without this prime, happens mid-descent
+    // between the executor's depth-0 cancellation checks. In a debug build that
+    // lazy calibration takes ~350ms, so it would spuriously blow the <100ms
+    // budget on CI (an unlisted x86 runner built without `--release`) even
+    // though real cancellation latency is ~35ms. See crates/simd/AGENTS.md.
+    horndb_simd::init();
+
     // Build a graph dense enough that the optimized 4-cycle executor
     // is still doing work well after the 10ms cancel deadline. A
     // 250K-vertex × 4-out-edge cyclic graph is the same shape the
