@@ -6,7 +6,9 @@ primitive resolves the widest kernel the host supports (scalar / AVX2 / AVX-512 
 NEON) once, caching a function pointer, and is proven bit-identical to the scalar
 oracle by the differential proptest in `tests/differential.rs`. This is the **only**
 crate allowed to carry hand-written SIMD intrinsics. See the `src/lib.rs` module doc
-for the dispatch story and the `HORNDB_SIMD_MAX_ISA` operational cap.
+for the dispatch story and the `HORNDB_SIMD_MAX_ISA` operational cap, and
+`docs/architecture/simd.md` for the subsystem-level guide (selection ladder,
+consumers, env-var knobs).
 
 ## ⚠️ Cross-arch false-green — read before trusting a local green run
 
