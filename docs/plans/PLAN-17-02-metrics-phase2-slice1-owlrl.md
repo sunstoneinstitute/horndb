@@ -14,7 +14,7 @@ scope: "Metrics Phase 2 — Slice 1 (owlrl + cleanups)"
 
 **Tech Stack:** Rust 1.90, `prometheus-client` 0.25 (typed `EncodeLabelSet`; lowercase label *values* via the existing `label_value_enum!` macro — the 0.25 derive does **not** rename), the existing `horndb-metrics`, `horndb-owlrl`, `horndb-closure`, `horndb-storage` crates.
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md` §7.2 (fan-out), §5.3 (histogram cost boundary). Epic: GitHub #148.
+**Reference spec:** `docs/specs/SPEC-17-metrics.md` §7.2 (fan-out), §5.3 (histogram cost boundary). Epic: GitHub #148.
 
 **Branch:** stacked on `feat/metrics-phase1` (PR #149, unmerged). Create `feat/metrics-phase2-owlrl` off `feat/metrics-phase1`.
 

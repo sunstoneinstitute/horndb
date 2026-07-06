@@ -8,7 +8,7 @@ scope: "Streaming SPARQL runtime + projection/aggregate pushdown — design"
 
 **Date:** 2026-06-30
 **Issues:** [#143](https://github.com/sunstoneinstitute/horndb/issues/143) (streaming runtime) + [#144](https://github.com/sunstoneinstitute/horndb/issues/144) (planner pushdown), under epic [#128](https://github.com/sunstoneinstitute/horndb/issues/128).
-**Builds on:** [SPEC-17](SPEC-17-id-based-slot-rows.md) (id-based slot rows) — this spec delivers the streaming + pushdown remainder that SPEC-17 deferred.
+**Builds on:** [SPEC-16](SPEC-16-id-based-slot-rows.md) (id-based slot rows) — this spec delivers the streaming + pushdown remainder that SPEC-16 deferred.
 **Status:** design — pending implementation plan.
 
 ## Problem

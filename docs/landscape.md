@@ -1,9 +1,3 @@
----
-status: research-note
-date: 2026-06-05
-scope: "Competitive landscape: provenance proof + symbolic reasoning"
----
-
 # Competitive landscape: provenance proof + symbolic reasoning
 
 **Date:** 2026-06-05

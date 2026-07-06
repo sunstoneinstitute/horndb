@@ -178,7 +178,7 @@ Two observations worth carrying into SPEC-03/SPEC-05 work:
   triejoin executor and planner.
 - [`specs/SPEC-05-closure-backend.md`](specs/SPEC-05-closure-backend.md) — the
   GraphBLAS closure backend.
-- [`specs/SPEC-15-provenance-symbolic-reasoning-landscape.md`](specs/SPEC-15-provenance-symbolic-reasoning-landscape.md)
+- [`landscape.md`](landscape.md)
   — the broader competitive landscape for provenance + symbolic reasoning.
 - [`rdflib.md`](rdflib.md) — the other related-systems comparison (Python-side).
 

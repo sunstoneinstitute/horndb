@@ -1,7 +1,7 @@
 # HornDB metrics reference
 
 Authoritative list of every metric and label HornDB exposes. The design rationale
-is in [`specs/SPEC-18-metrics.md`](specs/SPEC-18-metrics.md);
+is in [`specs/SPEC-17-metrics.md`](specs/SPEC-17-metrics.md);
 this file is the *inventory*. To **diagnose** a performance problem with these
 metrics, use the `horndb-perftest-with-metrics` skill — it maps symptoms to the
 metrics below.

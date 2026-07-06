@@ -51,9 +51,9 @@ Closed tasks are listed in [Done](#done-for-traceability).
 - [ ] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
   ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
   **Slice 1 + Slice 2 (id-based slot rows) landed** (design spec:
-  `docs/specs/SPEC-17-id-based-slot-rows.md`; plans:
-  `docs/plans/PLAN-17-01-id-based-slot-rows-slice1.md`,
-  `docs/plans/PLAN-17-02-id-based-slot-rows-slice2.md`). **All 13 runtime operators now
+  `docs/specs/SPEC-16-id-based-slot-rows.md`; plans:
+  `docs/plans/PLAN-16-01-id-based-slot-rows-slice1.md`,
+  `docs/plans/PLAN-16-02-id-based-slot-rows-slice2.md`). **All 13 runtime operators now
   run native on id-based slot rows** (`Slot`/`Row`/`Batch`): Slice 1 did
   BgpScan/Slice/Project/Distinct/Group/Filter/Join + native `scan_bgp_ids`; Slice 2
   ported the last six (LeftJoin, Union, OrderBy, Extend, Values, PathClosure) and
@@ -71,7 +71,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   (`crates/sparql/src/exec/op/`); every operator (Scan/Filter/Project/Extend/
   Slice/Values/Distinct/Union/Join/LeftJoin/Group/OrderBy/PathClosure) is a
   native `Op`; legacy materializing `eval` deleted; chunk-boundary invariance
-  tested. Design: `docs/specs/SPEC-20-streaming-runtime-pushdown.md`.
+  tested. Design: `docs/specs/SPEC-19-streaming-runtime-pushdown.md`.
   **#144 Planner pushdown LANDED** (2026-06-30, this branch): column pruning
   (`plan/pushdown.rs`) + COUNT-over-BGP aggregate pushdown (`Executor::count_bgp`
   + `CountScan` + `CountScanOp`). **#145 deterministic `GROUP BY` +
@@ -166,7 +166,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   — no codegen/`FireFn`/engine change, just `MemStore` internals — so this is the
   low-risk, independently-shippable half. Turns the compiled `cax-sco` inner loop (and
   the F5 list-rule probes) from O(N) to O(|extent(c1)|). Ship **first**.
-  Spec: `docs/specs/SPEC-16-owlrl-type-index-seminaive.md` (fix #1). Gate:
+  Spec: `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #1). Gate:
   `compiled_rules_ms` drop on the owlrl materialize A/B LUBM-shaped row + resident-set
   delta recorded in `docs/benchmarks.md`; all differential gates stay green.
 
@@ -179,7 +179,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   already-computed `applied` delta. Compounds with the object index; do **second**,
   measure between. Must stay differential-equal (closure-backend + rdf_type_skew +
   owl2-w3c-rl + acceptance #4 green). Spec:
-  `docs/specs/SPEC-16-owlrl-type-index-seminaive.md` (fix #2). Gate: round/inner-loop
+  `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #2). Gate: round/inner-loop
   work counters drop, reason-time falls.
 
 ## HIGH — Completeness
@@ -217,8 +217,8 @@ Closed tasks are listed in [Done](#done-for-traceability).
 
 - [ ] **Observability metrics (Phase 1): prometheus-client + `/metrics` scrape.**
   ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
-  **Phase-1 Slice 1 landed** (design: `docs/specs/SPEC-18-metrics.md`;
-  plan: `docs/plans/PLAN-18-01-metrics-phase1-slice1.md`). New foundational
+  **Phase-1 Slice 1 landed** (design: `docs/specs/SPEC-17-metrics.md`;
+  plan: `docs/plans/PLAN-17-01-metrics-phase1-slice1.md`). New foundational
   `horndb-metrics` crate: `prometheus-client` with typed `#[derive(EncodeLabelSet)]`
   labels (no strings), a process-global `OnceLock` registry, and free accessors —
   hot-path updates are direct atomic ops on cached handles; quantities that are
@@ -230,20 +230,20 @@ Closed tasks are listed in [Done](#done-for-traceability).
   at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
   off-box — a collector scrapes `/metrics`; no in-process OTLP push.
 
-  **Phase-2 Slice 1 landed** (plan: `docs/plans/PLAN-18-02-metrics-phase2-slice1-owlrl.md`):
+  **Phase-2 Slice 1 landed** (plan: `docs/plans/PLAN-17-02-metrics-phase2-slice1-owlrl.md`):
   owlrl fan-out — `OwlrlMetrics` subsystem with per-rule fire counts, per-rule + per-phase
   latency histograms, `owlrl_triples_inferred_total`, `owlrl_rounds_total`, dirty-predicate
   prune counters; closure `input_nnz` observed alongside `output_nnz`; `MemTier` enum wired
   to `storage_tier_bytes_estimated` (`tier` label, `"unknown"` until full HBM/CXL
   accounting lands). Overhead micro-bench added (`crates/metrics/benches/overhead.rs`).
 
-  **Phase-2 Slice 2 landed** (plan: `docs/plans/PLAN-18-03-metrics-phase2-slice2-incremental.md`):
+  **Phase-2 Slice 2 landed** (plan: `docs/plans/PLAN-17-03-metrics-phase2-slice2-incremental.md`):
   incremental fan-out — `IncrementalMetrics` subsystem: tick-duration histogram,
   asserted/derived-merged counters, closure-withdraw/promote counters,
   fixpoint-rounds histogram; change-feed subscriber gauge maintained at subscribe +
   publish-reap.
 
-  **Phase-2 Slice 3 landed** (plan: `docs/plans/PLAN-18-04-metrics-phase2-slice3-ml.md`):
+  **Phase-2 Slice 3 landed** (plan: `docs/plans/PLAN-17-04-metrics-phase2-slice3-ml.md`):
   ml fan-out — `MlMetrics` subsystem (behind `horndb-ml`'s `server` feature):
   `horndb_ml_nl_query_total{result}` counter; `horndb_ml_prompt_tokens_total`,
   `horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
@@ -251,13 +251,13 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
   histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on `server`.
 
-  **Phase-2 Slice 4 landed** (plan: `docs/plans/PLAN-18-05-metrics-phase2-slice4-wcoj.md`):
+  **Phase-2 Slice 4 landed** (plan: `docs/plans/PLAN-17-05-metrics-phase2-slice4-wcoj.md`):
   wcoj fan-out — `WcojMetrics` subsystem: `horndb_wcoj_seeks_per_query`,
   `horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators` histograms,
   all observed exactly once per query in `impl Drop for BatchIter`; inner loop
   does plain `u64` field increments only (NO per-seek timing — §5.3 compliant).
 
-  **Phase-2 Slice 5 landed** (plan: `docs/plans/PLAN-18-06-metrics-phase2-slice5-sparql-bytes.md`):
+  **Phase-2 Slice 5 landed** (plan: `docs/plans/PLAN-17-06-metrics-phase2-slice5-sparql-bytes.md`):
   sparql-bytes fan-out — `horndb_sparql_request_bytes_total{endpoint}` and
   `horndb_sparql_response_bytes_total{endpoint}` counters via a `CountingBody`
   `http_body::Body` wrapper wired into the existing `record_request` middleware
@@ -340,7 +340,7 @@ Completed tasks; issues closed, links kept.
 - [x] **HIGH** · _Completeness_ — SPEC-07 SPARQL aggregation (`GROUP BY`/`COUNT`/`SUM`) + expanded `FILTER`/`BIND`/`IF` expressions (trainmarks-blocking) ([#66](https://github.com/sunstoneinstitute/horndb/issues/66))
 - [x] **HIGH** · _Completeness_ — SPEC-07 wire SPARQL frontend onto real storage + WCOJ + materialized closure (trainmarks-blocking) ([#67](https://github.com/sunstoneinstitute/horndb/issues/67))
 - [x] **HIGH** · _Completeness_ — SPEC-07 pattern-based Update (`INSERT`/`DELETE … WHERE`) (trainmarks-blocking) ([#51](https://github.com/sunstoneinstitute/horndb/issues/51))
-- [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — class-canonical union-find pass (`eq_rep_p_opt.rs`), default `Optimized`; downstream `rdf:type` partition-by-class-id (F5) remains under #39. The compiled-rule `rdf:type`-scan hotspot is its own work (object index #133 + semi-naïve #134) per `docs/specs/SPEC-16-owlrl-type-index-seminaive.md` — not this (closed) eq-rep-p issue.
+- [x] **MEDIUM** · _Performance_ — SPEC-04 eq-rep-p skew ([#2](https://github.com/sunstoneinstitute/horndb/issues/2)) — class-canonical union-find pass (`eq_rep_p_opt.rs`), default `Optimized`; downstream `rdf:type` partition-by-class-id (F5) remains under #39. The compiled-rule `rdf:type`-scan hotspot is its own work (object index #133 + semi-naïve #134) per `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` — not this (closed) eq-rep-p issue.
 - [x] **MEDIUM** · _Conformance_ — W3C OWL 2 RL test-suite ingestion pipeline (`harness extract-owl2-rl`; 91 cases → 78 green in `[suites.owl2-w3c-rl]`, reds in `KNOWN-MANIFEST-BUGS.md`).
 - [x] **MEDIUM** · _Completeness_ — SPEC-02 storage (HDT cold tier, CXL/NVMe tiering, MVCC, …) ([#3](https://github.com/sunstoneinstitute/horndb/issues/3))
 - [x] **MEDIUM** · _Completeness_ — SPEC-04 rules (`dt-*`, `cls-maxc*`, F5 skew, …) ([#4](https://github.com/sunstoneinstitute/horndb/issues/4))

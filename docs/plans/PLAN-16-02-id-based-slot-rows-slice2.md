@@ -12,7 +12,7 @@ scope: "id-based slot rows for the SPARQL runtime — Slice 2"
 
 **Non-goal (still deferred under #128):** streaming (every node still buffers a whole `Batch`) and planner projection/aggregate pushdown. Those are independent follow-ups; do **not** start them here.
 
-**Source of truth:** `docs/specs/SPEC-17-id-based-slot-rows.md` §5 ("Slice 2. Port the remaining six operators to native slots; remove the decode-adapter") and §6 (correctness invariants). Read it before starting. The Slice 1 plan (`docs/plans/PLAN-17-01-id-based-slot-rows-slice1.md`) is the companion — its `merge_rows`, `decode_subset`, `referenced_vars`, `normalize_join_columns`, and `KeyPart` helpers are the building blocks Slice 2 reuses.
+**Source of truth:** `docs/specs/SPEC-16-id-based-slot-rows.md` §5 ("Slice 2. Port the remaining six operators to native slots; remove the decode-adapter") and §6 (correctness invariants). Read it before starting. The Slice 1 plan (`docs/plans/PLAN-16-01-id-based-slot-rows-slice1.md`) is the companion — its `merge_rows`, `decode_subset`, `referenced_vars`, `normalize_join_columns`, and `KeyPart` helpers are the building blocks Slice 2 reuses.
 
 **Tech Stack:** Rust 1.90 (pinned), `horndb-sparql` crate, `horndb-storage::TermId`, `proptest` (already a dev-dep), `cargo nextest`.
 

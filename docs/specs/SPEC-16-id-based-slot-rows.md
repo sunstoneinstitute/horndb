@@ -169,7 +169,7 @@ operators: `BgpScan`, `Join`, `LeftJoin`, `Filter`, `Union`, `Project`,
   decode-adapter.
 
 **Deferred — out of scope here, remain open under #128** (picked up by
-[SPEC-20](SPEC-20-streaming-runtime-pushdown.md)):
+[SPEC-19](SPEC-19-streaming-runtime-pushdown.md)):
 
 - Streaming / no full per-node `Vec` materialisation (every node still
   buffers a whole `Batch`). Tracked alongside the deferred F6 streaming row in

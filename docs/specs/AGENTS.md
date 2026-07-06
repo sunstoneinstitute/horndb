@@ -8,7 +8,9 @@ These rules apply to every file in `docs/specs/` (except `README.md`, the index)
    Take the next free number; never renumber an existing spec. This applies to
    *all* specs: standing subsystem contracts and narrower point/design specs
    alike (the frontmatter `scope:` line is what tells them apart, not the
-   filename).
+   filename). Research notes and landscape surveys with no design or
+   acceptance criteria are not specs — put those under `docs/` (e.g.
+   `../landscape.md`) and link them from `../index.md`.
 
 ## Frontmatter
 
@@ -16,7 +18,7 @@ These rules apply to every file in `docs/specs/` (except `README.md`, the index)
 
    ```yaml
    ---
-   status: draft | approved | specified | implemented | roadmap | research-note
+   status: draft | approved | specified | implemented | roadmap
    date: YYYY-MM-DD        # the day the spec was written (not last edited)
    scope: "one line: what this spec covers"
    ---

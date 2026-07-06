@@ -14,7 +14,7 @@ scope: "id-based slot rows for the SPARQL runtime — Slice 1"
 
 **Tech Stack:** Rust 1.90 (pinned), `horndb-sparql` crate, `horndb-storage::TermId`, `arrow::array::UInt64Array`, `proptest` (workspace dep), `cargo nextest`.
 
-**Source of truth:** `docs/specs/SPEC-17-id-based-slot-rows.md`. Read it before starting.
+**Source of truth:** `docs/specs/SPEC-16-id-based-slot-rows.md`. Read it before starting.
 
 ---
 

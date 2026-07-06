@@ -14,7 +14,7 @@ scope: "Metrics Phase 2 — Slice 2 (incremental)"
 
 **Tech Stack:** Rust 1.90, prometheus-client 0.25, `horndb-metrics`, `horndb-incremental`.
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md` §7.2 (incremental), §5.3 (cost boundary). Epic: #148.
+**Reference spec:** `docs/specs/SPEC-17-metrics.md` §7.2 (incremental), §5.3 (cost boundary). Epic: #148.
 
 **Branch:** `feat/metrics-phase2-incremental`, stacked on `feat/metrics-phase2-owlrl`.
 

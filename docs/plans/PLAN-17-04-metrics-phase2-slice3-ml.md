@@ -14,7 +14,7 @@ scope: "Metrics Phase 2 — Slice 3 (ml)"
 
 **Tech Stack:** Rust 1.90, prometheus-client 0.25, axum/tokio (behind `server`), `horndb-metrics`, `horndb-ml`.
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md` §7.2 (ml). Epic: #148.
+**Reference spec:** `docs/specs/SPEC-17-metrics.md` §7.2 (ml). Epic: #148.
 
 **Branch:** `feat/metrics-phase2-ml`, stacked on `feat/metrics-phase2-incremental`.
 

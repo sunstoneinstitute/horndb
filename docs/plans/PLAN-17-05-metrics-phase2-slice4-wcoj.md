@@ -14,7 +14,7 @@ scope: "Metrics Phase 2 — Slice 4 (wcoj)"
 
 **Tech Stack:** Rust 1.90, prometheus-client 0.25, `horndb-metrics`, `horndb-wcoj`.
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md` §7.2 (wcoj), §5.3 (the per-tuple prohibition — this slice is the canonical place that boundary matters). Epic: #148.
+**Reference spec:** `docs/specs/SPEC-17-metrics.md` §7.2 (wcoj), §5.3 (the per-tuple prohibition — this slice is the canonical place that boundary matters). Epic: #148.
 
 **Branch:** `feat/metrics-phase2-wcoj`, stacked on `feat/metrics-phase2-ml`.
 

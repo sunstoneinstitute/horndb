@@ -14,7 +14,7 @@ scope: "Metrics Phase 2 — Slice 5 (SPARQL request/response bytes)"
 
 **Tech Stack:** Rust 1.90, prometheus-client 0.25, axum 0.8, tower 0.5, http-body 1.0, bytes 1, `horndb-metrics`, `horndb-sparql` (`server` feature).
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md` §7.1 (deferral note), §7.2 (the fan-out item). Epic: #148. Note commit `d2cace9` removed a permanently-zero `response_bytes` series in Slice 1; this slice adds it back properly.
+**Reference spec:** `docs/specs/SPEC-17-metrics.md` §7.1 (deferral note), §7.2 (the fan-out item). Epic: #148. Note commit `d2cace9` removed a permanently-zero `response_bytes` series in Slice 1; this slice adds it back properly.
 
 **Branch:** `feat/metrics-phase2-sparql-bytes`, stacked on `feat/metrics-phase2-wcoj`.
 

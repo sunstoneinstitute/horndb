@@ -21,7 +21,7 @@ scope: "Metrics Phase 1 — Slice 1"
 
 **Tech Stack:** Rust 1.90, `prometheus-client` 0.23, axum 0.8, tokio, the existing `horndb-storage` / `horndb-closure` / `horndb-sparql` crates.
 
-**Reference spec:** `docs/specs/SPEC-18-metrics.md`
+**Reference spec:** `docs/specs/SPEC-17-metrics.md`
 
 ---
 

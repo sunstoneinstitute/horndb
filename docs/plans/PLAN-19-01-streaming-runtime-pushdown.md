@@ -14,7 +14,7 @@ scope: "Streaming SPARQL runtime + projection/aggregate pushdown"
 
 **Tech Stack:** Rust 1.90, `horndb-sparql` crate, `cargo nextest`, criterion (`agg_profile`).
 
-**Reference design:** `docs/specs/SPEC-20-streaming-runtime-pushdown.md`.
+**Reference design:** `docs/specs/SPEC-19-streaming-runtime-pushdown.md`.
 
 **Op trait shape (decided in Task 1):** the `Op` trait is **lifetime-free** —
 `pub trait Op { fn schema(&self) -> &[Var]; fn next(&mut self) -> Result<Option<Batch>>; }`.
