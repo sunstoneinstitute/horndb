@@ -26,6 +26,9 @@ pub enum PhysicalPlan {
     /// back to scan + hash-count when the backend has no fast
     /// `count_bgp_grouped`. Output rows are sorted by the decoded lexical
     /// form of the key slots — the same order the streaming `Group` emits.
+    /// RDF 1.2 triple-term keys all lex-serialize to "" (Stage-1 limitation),
+    /// so their relative group order is unspecified — on both this leaf and
+    /// the streaming path.
     GroupCountScan {
         patterns: Vec<TriplePattern>,
         keys: Vec<Var>,

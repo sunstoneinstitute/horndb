@@ -969,6 +969,8 @@ mod tests {
             // Equality filter on the GROUP BY key itself: substitution would
             // erase the key column, so the streaming Group stays.
             "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") } GROUP BY ?o",
+            // Zero-aggregate GROUP BY: deferred shape, stays streaming.
+            "SELECT ?o WHERE { ?s <http://ex/name> ?o } GROUP BY ?o",
         ];
         for q in cases {
             let plan = plan_select(q);
@@ -1290,6 +1292,11 @@ mod tests {
             "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/nope> ?o } GROUP BY ?o",
             // Zero solutions, implicit group, two counts: one row of zeros.
             "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/nope> ?o }",
+            // ORDER BY DESC + LIMIT: stable-sort tie-break over the pushed-down leaf.
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o ORDER BY DESC(?c) LIMIT 2",
+            // HAVING: a Filter ABOVE the lowered Group (distinct from the
+            // inlining Filter below it).
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o HAVING (COUNT(*) > 1)",
         ] {
             let plan = plan_select(q);
             let rewritten = rewrite(&plan).unwrap();
