@@ -75,6 +75,10 @@ fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize
         PhysicalPlan::BgpScan { patterns } => exec.cardinality_estimate(patterns),
         // A pushed-down COUNT always yields exactly one row.
         PhysicalPlan::CountScan { .. } => Some(1),
+        // Grouped-count leaf: at most one row per underlying solution, so the
+        // scan estimate is a sound upper bound (the same signal a Group over
+        // the scan reports today).
+        PhysicalPlan::GroupCountScan { patterns, .. } => exec.cardinality_estimate(patterns),
         PhysicalPlan::Values { rows, .. } => Some(rows.len()),
         // Join: upper-bounded by the product of inputs. We keep the
         // textbook product (an upper bound when join vars are absent) but
@@ -140,6 +144,21 @@ fn node_label(plan: &PhysicalPlan) -> String {
                 patterns.len(),
                 plural(patterns.len()),
                 out_var.name()
+            )
+        }
+        PhysicalPlan::GroupCountScan {
+            patterns,
+            keys,
+            out_vars,
+        } => {
+            format!(
+                "GroupCountScan({} pattern{}, {} key{} -> {} count{})",
+                patterns.len(),
+                plural(patterns.len()),
+                keys.len(),
+                plural(keys.len()),
+                out_vars.len(),
+                plural(out_vars.len())
             )
         }
         PhysicalPlan::Join { .. } => "Join".to_owned(),
@@ -208,6 +227,7 @@ fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
     match plan {
         PhysicalPlan::BgpScan { .. }
         | PhysicalPlan::CountScan { .. }
+        | PhysicalPlan::GroupCountScan { .. }
         | PhysicalPlan::Values { .. } => vec![],
         PhysicalPlan::Join { left, right }
         | PhysicalPlan::LeftJoin { left, right, .. }

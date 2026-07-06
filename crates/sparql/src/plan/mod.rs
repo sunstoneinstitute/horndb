@@ -18,6 +18,19 @@ pub enum PhysicalPlan {
         patterns: Vec<TriplePattern>,
         out_var: Var,
     },
+    /// Pushed-down grouped / multi-output COUNT over a BGP (#128): one row
+    /// per group — the key slots followed by one `xsd:integer` count per
+    /// `out_vars` entry. Every aggregate this node replaces is a plain
+    /// (non-DISTINCT) count of the group size, so all outputs carry the same
+    /// number. `keys` may be empty (implicit grouping with ≥2 counts). Falls
+    /// back to scan + hash-count when the backend has no fast
+    /// `count_bgp_grouped`. Output rows are sorted by the decoded lexical
+    /// form of the key slots — the same order the streaming `Group` emits.
+    GroupCountScan {
+        patterns: Vec<TriplePattern>,
+        keys: Vec<Var>,
+        out_vars: Vec<Var>,
+    },
     /// Cartesian/equi-join of two child plans on shared variables.
     Join {
         left: Box<PhysicalPlan>,

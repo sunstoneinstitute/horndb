@@ -156,7 +156,7 @@ fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
 fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> PhysicalPlan {
     use PhysicalPlan::*;
     match node {
-        leaf @ (BgpScan { .. } | CountScan { .. } | Values { .. }) => leaf,
+        leaf @ (BgpScan { .. } | CountScan { .. } | GroupCountScan { .. } | Values { .. }) => leaf,
         Join { left, right } => Join {
             left: Box::new(f(*left)),
             right: Box::new(f(*right)),
@@ -241,6 +241,16 @@ pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
             out
         }
         CountScan { out_var, .. } => vec![out_var.name().to_owned()],
+        GroupCountScan { keys, out_vars, .. } => {
+            let mut out: Vec<String> = Vec::new();
+            for k in keys {
+                push_unique(&mut out, k.name());
+            }
+            for v in out_vars {
+                push_unique(&mut out, v.name());
+            }
+            out
+        }
         Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
             let mut out = output_vars(left);
             for v in output_vars(right) {
@@ -366,9 +376,10 @@ fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
                 demanded,
             )
         }
-        // Already a count over a BGP: a leaf with no child to prune, and its
-        // single output column is exactly what its parent demands. Unchanged.
-        CountScan { .. } => node.clone(),
+        // Count leaves: nothing below them to prune, and their output columns
+        // are exactly the replaced Group's output (narrowed, if at all, by an
+        // ancestor Project). Unchanged.
+        CountScan { .. } | GroupCountScan { .. } => node.clone(),
         // The Project itself is the restriction point: it forwards exactly its
         // own `vars` to the child (ignoring the incoming demand, which can only
         // be a subset and is re-applied by this Project's own output).
@@ -753,7 +764,9 @@ mod tests {
             | PhysicalPlan::LeftJoin { left, right, .. }
             | PhysicalPlan::Union { left, right } => has_count_scan(left) || has_count_scan(right),
             PhysicalPlan::PathClosure { edge, .. } => has_count_scan(edge),
-            PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => false,
+            PhysicalPlan::BgpScan { .. }
+            | PhysicalPlan::GroupCountScan { .. }
+            | PhysicalPlan::Values { .. } => false,
         }
     }
 
@@ -880,6 +893,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn group_count_scan_falls_back_when_seam_is_none() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::mem::MemStore;
+        // MemStore uses the default `count_bgp_grouped` (None), exercising the
+        // scan + hash-count fallback in GroupCountScanOp.
+        let mut mem = MemStore::default();
+        // s0 has two objects, s1 has one.
+        mem.insert(("s0".into(), "p".into(), "o0".into()));
+        mem.insert(("s0".into(), "p".into(), "o1".into()));
+        mem.insert(("s1".into(), "p".into(), "o2".into()));
+        let var = |n: &str| Term::Var(Var::new(n));
+        let plan = PhysicalPlan::GroupCountScan {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("p".into()),
+                object: var("o"),
+            }],
+            keys: vec![Var::new("s")],
+            out_vars: vec![Var::new("c")],
+        };
+        let out: Vec<Bindings> = Runtime::new(&mem).run(&plan).unwrap().collect();
+        // Same deterministic order as eval_group_native: decoded-lexical key
+        // sort, so s0 before s1.
+        assert_eq!(out.len(), 2, "one row per group: {out:?}");
+        assert_eq!(out[0].get("s"), Some(&Term::Iri("s0".into())));
+        assert_eq!(
+            format!("{:?}", out[0].get("c").expect("?c bound")),
+            format!("{:?}", crate::exec::runtime::integer_literal(2))
+        );
+        assert_eq!(out[1].get("s"), Some(&Term::Iri("s1".into())));
+        assert_eq!(
+            format!("{:?}", out[1].get("c").expect("?c bound")),
+            format!("{:?}", crate::exec::runtime::integer_literal(1))
+        );
+    }
+
+    #[test]
+    fn group_count_scan_no_keys_is_implicit_group() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::mem::MemStore;
+        let var = |n: &str| Term::Var(Var::new(n));
+        let mk_plan = || PhysicalPlan::GroupCountScan {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("p".into()),
+                object: var("o"),
+            }],
+            keys: vec![],
+            out_vars: vec![Var::new("n"), Var::new("m")],
+        };
+        // Zero solutions + implicit group: exactly one row of zeros
+        // (SPARQL §11.2 — COUNT of nothing is 0).
+        let empty = MemStore::default();
+        let out: Vec<Bindings> = Runtime::new(&empty).run(&mk_plan()).unwrap().collect();
+        assert_eq!(out.len(), 1, "implicit group yields one row: {out:?}");
+        for v in ["n", "m"] {
+            assert_eq!(
+                format!("{:?}", out[0].get(v).expect("count var bound")),
+                format!("{:?}", crate::exec::runtime::integer_literal(0))
+            );
+        }
+        // Three solutions: both counts carry 3.
+        let mut mem = MemStore::default();
+        for i in 0..3 {
+            mem.insert((format!("s{i}"), "p".into(), format!("o{i}")));
+        }
+        let out: Vec<Bindings> = Runtime::new(&mem).run(&mk_plan()).unwrap().collect();
+        assert_eq!(out.len(), 1);
+        for v in ["n", "m"] {
+            assert_eq!(
+                format!("{:?}", out[0].get(v).expect("count var bound")),
+                format!("{:?}", crate::exec::runtime::integer_literal(3))
+            );
+        }
+    }
+
+    #[test]
+    fn group_count_scan_zero_solutions_with_keys_yields_no_rows() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::mem::MemStore;
+        let empty = MemStore::default();
+        let var = |n: &str| Term::Var(Var::new(n));
+        let plan = PhysicalPlan::GroupCountScan {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("p".into()),
+                object: var("o"),
+            }],
+            keys: vec![Var::new("s")],
+            out_vars: vec![Var::new("c")],
+        };
+        let out: Vec<Bindings> = Runtime::new(&empty).run(&plan).unwrap().collect();
+        assert!(
+            out.is_empty(),
+            "keyed grouping of nothing has no groups: {out:?}"
+        );
+    }
+
     // ---- structural test helpers ----
 
     fn scan_is_narrowed_to(p: &PhysicalPlan, want: &[&str]) -> bool {
@@ -905,6 +1017,7 @@ mod tests {
             PhysicalPlan::PathClosure { edge, .. } => scan_is_narrowed_to(edge, want),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::GroupCountScan { .. }
             | PhysicalPlan::Values { .. } => false,
         }
     }
@@ -930,7 +1043,9 @@ mod tests {
                 find_bgp_vars(right, out);
             }
             PhysicalPlan::PathClosure { edge, .. } => find_bgp_vars(edge, out),
-            PhysicalPlan::CountScan { .. } | PhysicalPlan::Values { .. } => {}
+            PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::GroupCountScan { .. }
+            | PhysicalPlan::Values { .. } => {}
         }
     }
 
@@ -951,6 +1066,7 @@ mod tests {
             PhysicalPlan::PathClosure { edge, .. } => distinct_inner(edge),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::GroupCountScan { .. }
             | PhysicalPlan::Values { .. } => None,
         }
     }

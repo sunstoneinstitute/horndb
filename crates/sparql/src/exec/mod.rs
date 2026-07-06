@@ -11,7 +11,7 @@ pub mod mem;
 pub mod op;
 pub mod runtime;
 
-use crate::algebra::{Term, TriplePattern};
+use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
 use std::collections::BTreeMap;
 
@@ -62,6 +62,10 @@ impl Bindings {
         self.inner.is_empty()
     }
 }
+
+/// One group's key slots and its row count, as produced by
+/// [`Executor::count_bgp_grouped`].
+pub type GroupCount = (Vec<Slot>, usize);
 
 /// The single seam Stage 1 needs from the storage/join backend.
 /// SPEC-03 will eventually back this with Leapfrog Triejoin; in the
@@ -115,6 +119,21 @@ pub trait Executor {
     /// number of solution rows `scan_bgp_ids` would produce (one row per BGP
     /// solution).
     fn count_bgp(&self, _patterns: &[TriplePattern]) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
+    /// Per-group solution counts for a BGP grouped by `keys`, without
+    /// materializing rows. `None` = "no fast grouped count available" (the
+    /// caller falls back to scanning + hash-counting the key columns).
+    /// Additive; does not change `scan_bgp_ids`. When `Some`, the groups
+    /// MUST partition the rows `scan_bgp_ids` would produce, keyed by term
+    /// identity of the key columns: each entry carries one group's key slots
+    /// (scan provenance preserved) and its row count, in no particular order.
+    fn count_bgp_grouped(
+        &self,
+        _patterns: &[TriplePattern],
+        _keys: &[Var],
+    ) -> Result<Option<Vec<GroupCount>>> {
         Ok(None)
     }
 }
