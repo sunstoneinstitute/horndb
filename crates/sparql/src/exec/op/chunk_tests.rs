@@ -531,3 +531,54 @@ fn distinct_over_streamed_join_build_term_trigger() {
         "both merged rows carry the same logical ?v=v1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// run_stream: chunked boundary decode (#128 HTTP streaming increment)
+// ---------------------------------------------------------------------------
+
+/// 7 VALUES rows at chunk size 3 → chunks of 3/3/1; concatenation must equal
+/// `run`'s output, chunks must respect batch_rows() and never be empty.
+#[test]
+fn run_stream_chunks_match_run() {
+    let horn = HornBackend::new();
+    let plan = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: (0u8..7).map(|i| vec![some_iri(&format!("v{i}"))]).collect(),
+    };
+
+    super::TEST_BATCH_ROWS.with(|c| c.set(3));
+    let rt = Runtime::new(&horn);
+    let mut stream = rt.run_stream(&plan).unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next_chunk().unwrap() {
+        assert!(!chunk.is_empty(), "no empty chunks mid-stream");
+        assert!(chunk.len() <= 3, "chunk exceeds batch_rows()");
+        chunks.push(chunk);
+    }
+    assert!(
+        chunks.len() >= 3,
+        "7 rows at chunk size 3 must span >=3 chunks"
+    );
+    let streamed: Vec<String> = chunks.concat().iter().map(|b| format!("{b:?}")).collect();
+    let collected: Vec<String> = rt.run(&plan).unwrap().map(|b| format!("{b:?}")).collect();
+    super::TEST_BATCH_ROWS.with(|c| c.set(4096));
+    assert_eq!(streamed, collected);
+}
+
+/// The row-at-a-time Iterator view must yield the same rows as `run`.
+#[test]
+fn run_stream_iterator_matches_run() {
+    let horn = HornBackend::new();
+    let plan = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: (0u8..7).map(|i| vec![some_iri(&format!("v{i}"))]).collect(),
+    };
+
+    super::TEST_BATCH_ROWS.with(|c| c.set(2));
+    let rt = Runtime::new(&horn);
+    let stream = rt.run_stream(&plan).unwrap();
+    let via_iter: Vec<String> = stream.map(|r| format!("{:?}", r.unwrap())).collect();
+    let via_run: Vec<String> = rt.run(&plan).unwrap().map(|b| format!("{b:?}")).collect();
+    super::TEST_BATCH_ROWS.with(|c| c.set(4096));
+    assert_eq!(via_iter, via_run);
+}
