@@ -371,74 +371,6 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         s
     }
 
-    /// Hash inner join of two materialized batches. Called by `JoinOp`.
-    pub(crate) fn compute_join(&self, l: Batch, r: Batch) -> Result<Batch> {
-        // Output schema = left schema ++ right-only vars.
-        let mut out_schema = l.schema.clone();
-        for v in &r.schema {
-            if !out_schema.iter().any(|x| x.name() == v.name()) {
-                out_schema.push(v.clone());
-            }
-        }
-        // Hash inner join: index the right relation by its decoded
-        // join-var key (option (b) — see `row_join_key`); right rows
-        // missing a jvar fall to `unkeyed`. Each left row probes only
-        // its same-key bucket plus `unkeyed` (a left row missing a jvar
-        // can't be keyed and must probe ALL right rows). `merge_rows`
-        // still rejects any genuine conflict, so probing same-key
-        // candidates is sound: any pair the nested loop would merge
-        // shares the same decoded jvar key (or one side is unkeyed),
-        // and differing jvar values are rejected by `merge_rows`. No
-        // OPTIONAL semantics: a left row with zero matches contributes
-        // nothing (unlike LeftJoin).
-        let jvars = bound_join_vars(&l.schema, &r);
-        let merge_plan = build_merge_plan(&l.schema, &r.schema, &out_schema);
-
-        let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
-        let mut unkeyed: Vec<&Row> = Vec::new();
-        for b in &r.rows {
-            match self.row_join_key(b, &r.schema, &jvars)? {
-                Some(k) => index.entry(k).or_default().push(b),
-                None => unkeyed.push(b),
-            }
-        }
-
-        let mut rows = Vec::new();
-        for a in &l.rows {
-            match self.row_join_key(a, &l.schema, &jvars)? {
-                Some(k) => {
-                    if let Some(bucket) = index.get(&k) {
-                        self.merge_all(a, bucket, &merge_plan, &mut rows)?;
-                    }
-                    if !unkeyed.is_empty() {
-                        self.merge_all(a, &unkeyed, &merge_plan, &mut rows)?;
-                    }
-                }
-                // Left row missing a join var: can't be keyed, so it may
-                // still be compatible with any right row on the
-                // remaining shared vars — probe ALL.
-                None => {
-                    let all: Vec<&Row> = r.rows.iter().collect();
-                    self.merge_all(a, &all, &merge_plan, &mut rows)?;
-                }
-            }
-        }
-        // Restore within-column homogeneity: an adapter-backed child
-        // (LeftJoin/Union → all Slot::Term) may leave a shared var as
-        // Slot::Unbound on some rows; the native BGP child has Slot::Id
-        // for that var. merge_rows takes the non-Unbound side, so the
-        // output column holds both Term and Id for the same logical
-        // value. Distinct/Group key on KeyPart where Id(x) ≠ Lex(x)
-        // → equal solutions hash differently → wrong results.
-        // Only genuinely mixed (Id ∧ Term) columns are decoded; the
-        // pure-Id BGP-only aggregation hot path pays zero decode.
-        self.normalize_columns(&mut rows, out_schema.len())?;
-        Ok(Batch {
-            schema: out_schema,
-            rows,
-        })
-    }
-
     /// Hash left-outer join of two evaluated batches. `expr` is the optional ON
     /// filter. Shared by `LeftJoinOp`.
     pub(crate) fn compute_left_join(
@@ -641,24 +573,6 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(Some(Row(slots)))
     }
 
-    /// Merge the left row `a` against each candidate right row using a
-    /// precomputed `merge_plan` (column-index lookups hoisted out of the
-    /// per-pair loop), pushing every compatible union row into `out`.
-    fn merge_all(
-        &self,
-        a: &Row,
-        candidates: &[&Row],
-        merge_plan: &[(Option<usize>, Option<usize>)],
-        out: &mut Vec<Row>,
-    ) -> Result<()> {
-        for b in candidates {
-            if let Some(m) = self.merge_rows_with(a, b, merge_plan)? {
-                out.push(m);
-            }
-        }
-        Ok(())
-    }
-
     /// Merge two slot rows with a precomputed `merge_plan`: for each output
     /// column, its `(left_col, right_col)` index in the respective schemas
     /// (`None` when the var is absent on that side). Semantically identical to
@@ -764,6 +678,155 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         }
         Ok(matched)
     }
+
+    /// Drain-side setup for the streaming hash joins (#128): index the build
+    /// batch by its bound join-variable key and precompute the merge plan and
+    /// the forced-decode column set. `left_may_term` is the probe child's
+    /// `Op::may_emit_term()`.
+    pub(crate) fn build_join_state(
+        &self,
+        left_schema: &[Var],
+        left_may_term: &[bool],
+        build: Batch,
+    ) -> Result<JoinState> {
+        let out_schema = self.union_schema(left_schema, &build.schema);
+        let jvars = bound_join_vars(left_schema, &build);
+        let merge_plan = build_merge_plan(left_schema, &build.schema, &out_schema);
+
+        // Index the build rows by decoded join key (option (b) — see
+        // `row_join_key`); rows with an unbound jvar fall to `unkeyed`.
+        let mut index: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+        let mut unkeyed: Vec<usize> = Vec::new();
+        for (i, row) in build.rows.iter().enumerate() {
+            match self.row_join_key(row, &build.schema, &jvars)? {
+                Some(k) => index.entry(k).or_default().push(i),
+                None => unkeyed.push(i),
+            }
+        }
+
+        // forced_term[c]: decode Slot::Id → Slot::Term on emit. Only SHARED
+        // columns can mix provenance (a one-sided column passes a single
+        // stream-homogeneous source through); a shared column is forced iff a
+        // Term source exists on either side — statically on the probe side
+        // (may_emit_term), actually on the drained build side. Deciding this
+        // BEFORE the first emission is what keeps the whole output stream
+        // free of Id∧Term mixing (per-chunk normalize_columns cannot: an
+        // all-Id chunk followed by an all-Term chunk is mixed stream-wide but
+        // homogeneous per chunk). BGP⋈BGP (no Term source) forces nothing
+        // and pays zero decode.
+        let forced_term: Vec<bool> = out_schema
+            .iter()
+            .map(|v| {
+                let li = left_schema.iter().position(|x| x.name() == v.name());
+                let ri = build.schema.iter().position(|x| x.name() == v.name());
+                match (li, ri) {
+                    (Some(l), Some(r)) => {
+                        left_may_term[l]
+                            || build
+                                .rows
+                                .iter()
+                                .any(|row| matches!(row.0[r], Slot::Term(_)))
+                    }
+                    _ => false,
+                }
+            })
+            .collect();
+
+        Ok(JoinState {
+            build,
+            index,
+            unkeyed,
+            jvars,
+            out_schema,
+            merge_plan,
+            forced_term,
+        })
+    }
+
+    /// Probe one left-side chunk against the build state (inner join),
+    /// returning the merged rows with forced columns decoded. May return an
+    /// empty vec — the calling op loops (the Op contract forbids emitting
+    /// `Some(empty)`).
+    pub(crate) fn probe_join_chunk(&self, st: &JoinState, chunk: &Batch) -> Result<Vec<Row>> {
+        let mut out = Vec::new();
+        for a in &chunk.rows {
+            match self.row_join_key(a, &chunk.schema, &st.jvars)? {
+                Some(k) => {
+                    if let Some(bucket) = st.index.get(&k) {
+                        self.merge_all_indexed(a, st, bucket, &mut out)?;
+                    }
+                    if !st.unkeyed.is_empty() {
+                        self.merge_all_indexed(a, st, &st.unkeyed, &mut out)?;
+                    }
+                }
+                // Probe row with an unbound jvar: compatible with any value
+                // of that var (SPARQL §18.3), so it must be checked against
+                // ALL build rows; merge_rows_with still arbitrates each pair.
+                None => {
+                    let all: Vec<usize> = (0..st.build.rows.len()).collect();
+                    self.merge_all_indexed(a, st, &all, &mut out)?;
+                }
+            }
+        }
+        self.force_term_columns(&mut out, &st.forced_term)?;
+        Ok(out)
+    }
+
+    /// Merge probe row `a` against the build rows at `candidates`, appending
+    /// every compatible union row to `out`.
+    fn merge_all_indexed(
+        &self,
+        a: &Row,
+        st: &JoinState,
+        candidates: &[usize],
+        out: &mut Vec<Row>,
+    ) -> Result<()> {
+        for &i in candidates {
+            if let Some(m) = self.merge_rows_with(a, &st.build.rows[i], &st.merge_plan)? {
+                out.push(m);
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode `Slot::Id → Slot::Term` in every forced column. The streaming
+    /// replacement for the joins' old whole-batch `normalize_columns` call:
+    /// it keeps a join's output stream free of Id∧Term mixing without ever
+    /// seeing the whole output. Id→Term decoding is semantically the
+    /// identity at the Bindings boundary.
+    fn force_term_columns(&self, rows: &mut [Row], forced: &[bool]) -> Result<()> {
+        for (c, &f) in forced.iter().enumerate() {
+            if !f {
+                continue;
+            }
+            for row in rows.iter_mut() {
+                if let Slot::Id(id) = row.0[c] {
+                    row.0[c] = Slot::Term(self.exec.decode_term(id)?);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Hash-join build state shared by the streaming `JoinOp`/`LeftJoinOp`
+/// (#128): the fully-drained build side (right child) plus everything
+/// derived from it. Built once on the operator's first `next()`; immutable
+/// while the probe side streams. The index stores row *indices* into
+/// `build.rows` (not `&Row`) so the state can own the batch it indexes.
+pub(crate) struct JoinState {
+    build: Batch,
+    index: HashMap<Vec<String>, Vec<usize>>,
+    unkeyed: Vec<usize>,
+    jvars: Vec<Var>,
+    // Unused until the LeftJoinOp streaming rewrite (Task 4, #128) reuses
+    // this state; kept now so JoinState's shape doesn't churn between tasks.
+    #[allow(dead_code)]
+    out_schema: Vec<Var>,
+    merge_plan: Vec<(Option<usize>, Option<usize>)>,
+    /// Per-output-column: decode `Slot::Id → Slot::Term` on emit (see
+    /// `force_term_columns` and the design doc §3).
+    forced_term: Vec<bool>,
 }
 
 /// Join-key variables for the hash joins: the variables present in both

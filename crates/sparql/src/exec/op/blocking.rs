@@ -1,5 +1,6 @@
-//! Operators that consume children eagerly or sequentially (union, joins,
-//! group, sort, path).
+//! Operators that consume at least one child eagerly (union, group, sort,
+//! path) plus the hybrid hash joins, which drain only their build side
+//! (right) and stream their probe side (left) chunk-by-chunk (#128).
 //!
 //! UNION normalize-scope note: `normalize_columns` must run over the
 //! fully-combined (left + right) row set, not per-child. A column that is
@@ -13,7 +14,7 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::Result;
-use crate::exec::runtime::Runtime;
+use crate::exec::runtime::{JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
 
 /// Pull an op to exhaustion, concatenating its chunks into one `Batch`.
@@ -119,14 +120,17 @@ impl<'r, E: Executor + ?Sized> Op for UnionOp<'r, E> {
     }
 }
 
-/// Inner hash join. First cut: drains both children, runs the whole-batch
-/// `compute_join`, then emits the result via `ChunkedBatch`. (Probe-side
-/// streaming is a possible future optimization.)
+/// Inner hash join, probe-side streaming (#128): the build side (right) is
+/// drained into a `JoinState` on the first `next()`; the probe side (left)
+/// is pulled chunk-by-chunk and never fully materialized. `pending` carries
+/// a probe chunk's fan-out when it exceeds `batch_rows()`.
 pub struct JoinOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
     left: Box<dyn Op + 'r>,
     right: Box<dyn Op + 'r>,
-    buffer: Option<ChunkedBatch>,
+    state: Option<JoinState>,
+    pending: Option<ChunkedBatch>,
+    done: bool,
     schema: Vec<Var>,
 }
 
@@ -137,7 +141,9 @@ impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
             rt,
             left,
             right,
-            buffer: None,
+            state: None,
+            pending: None,
+            done: false,
             schema,
         }
     }
@@ -151,12 +157,52 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
         merged_term_columns(&self.schema, self.left.as_ref(), self.right.as_ref())
     }
     fn next(&mut self) -> Result<Option<Batch>> {
-        if self.buffer.is_none() {
-            let l = drain(&mut self.left)?;
-            let r = drain(&mut self.right)?;
-            self.buffer = Some(ChunkedBatch::new(self.rt.compute_join(l, r)?));
+        loop {
+            // 1. Serve buffered fan-out from the previous probe chunk.
+            if let Some(buf) = self.pending.as_mut() {
+                if let Some(chunk) = buf.next_chunk() {
+                    return Ok(Some(chunk));
+                }
+                self.pending = None;
+            }
+            if self.done {
+                return Ok(None);
+            }
+            // 2. First call: drain the build side and index it.
+            if self.state.is_none() {
+                let build = drain(&mut self.right)?;
+                if build.rows.is_empty() {
+                    // Inner join over an empty build side is empty; end the
+                    // stream without pulling the probe side at all.
+                    self.done = true;
+                    return Ok(None);
+                }
+                let left_may_term = self.left.may_emit_term();
+                self.state = Some(self.rt.build_join_state(
+                    self.left.schema(),
+                    &left_may_term,
+                    build,
+                )?);
+            }
+            // 3. Stream the probe side, one chunk per iteration; loop so a
+            //    fully-unmatched chunk never yields Some(empty).
+            match self.left.next()? {
+                None => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Some(chunk) => {
+                    let st = self.state.as_ref().expect("join state built above");
+                    let rows = self.rt.probe_join_chunk(st, &chunk)?;
+                    if !rows.is_empty() {
+                        self.pending = Some(ChunkedBatch::new(Batch {
+                            schema: self.schema.clone(),
+                            rows,
+                        }));
+                    }
+                }
+            }
         }
-        Ok(self.buffer.as_mut().unwrap().next_chunk())
     }
 }
 
@@ -391,5 +437,82 @@ impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
             )?));
         }
         Ok(self.buffer.as_mut().unwrap().next_chunk())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::source::ValuesOp;
+    use super::super::{Op, TEST_BATCH_ROWS};
+    use super::JoinOp;
+    use crate::algebra::{Term, Var};
+    use crate::error::Result;
+    use crate::exec::horn::HornBackend;
+    use crate::exec::runtime::Runtime;
+    use crate::exec::Batch;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// Wraps an op and counts `next()` pulls, to observe streaming behavior.
+    struct CountingOp<'r> {
+        inner: Box<dyn Op + 'r>,
+        pulls: Rc<Cell<usize>>,
+    }
+
+    impl<'r> Op for CountingOp<'r> {
+        fn schema(&self) -> &[Var] {
+            self.inner.schema()
+        }
+        fn may_emit_term(&self) -> Vec<bool> {
+            self.inner.may_emit_term()
+        }
+        fn next(&mut self) -> Result<Option<Batch>> {
+            self.pulls.set(self.pulls.get() + 1);
+            self.inner.next()
+        }
+    }
+
+    fn some_iri(s: &str) -> Option<Term> {
+        Some(Term::Iri(format!("http://ex/{s}")))
+    }
+
+    /// The first `next()` on a Join must drain the build side, pull exactly
+    /// ONE probe chunk, and emit — not drain the probe side. RED against the
+    /// drain-both implementation (which pulls the probe side to exhaustion:
+    /// 4 chunks + the final None = 5 pulls at chunk size 1).
+    #[test]
+    fn join_streams_probe_side() {
+        TEST_BATCH_ROWS.with(|c| c.set(1));
+        let horn = HornBackend::new();
+        let rt = Runtime::new(&horn);
+
+        let left_rows: Vec<Vec<Option<Term>>> =
+            (0u8..4).map(|i| vec![some_iri(&format!("a{i}"))]).collect();
+        let right_rows: Vec<Vec<Option<Term>>> = (0u8..4)
+            .map(|i| vec![some_iri(&format!("a{i}")), some_iri(&format!("b{i}"))])
+            .collect();
+
+        let pulls = Rc::new(Cell::new(0));
+        let left = CountingOp {
+            inner: Box::new(ValuesOp::new(&[Var::new("a")], &left_rows)),
+            pulls: Rc::clone(&pulls),
+        };
+        let right = ValuesOp::new(&[Var::new("a"), Var::new("b")], &right_rows);
+        let mut join = JoinOp::new(&rt, Box::new(left), Box::new(right));
+
+        let first = join.next().unwrap().expect("join must produce output");
+        assert!(!first.rows.is_empty(), "no empty chunks");
+        assert_eq!(
+            pulls.get(),
+            1,
+            "first next() must pull exactly ONE probe chunk, not drain the probe side"
+        );
+
+        let mut total = first.rows.len();
+        while let Some(b) = join.next().unwrap() {
+            total += b.rows.len();
+        }
+        assert_eq!(total, 4, "all probe rows must still join");
+        TEST_BATCH_ROWS.with(|c| c.set(4096));
     }
 }

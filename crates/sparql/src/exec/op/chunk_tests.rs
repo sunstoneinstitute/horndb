@@ -5,9 +5,10 @@
 //! state (DistinctOp's seen-set, SliceOp's counters, ChunkedBatch tails
 //! from every blocking op, etc.).
 
-use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 use crate::exec::horn::HornBackend;
 use crate::exec::runtime::Runtime;
+use crate::exec::Store;
 use crate::plan::PhysicalPlan;
 
 // ---------------------------------------------------------------------------
@@ -323,4 +324,84 @@ fn join_unbound_build_var_cross_chunk() {
 
     let big = run_sorted(&horn, &plan, 4096);
     assert_eq!(big.len(), 2, "each left row joins exactly its ?w partner");
+}
+
+// ---------------------------------------------------------------------------
+// Join: probe-side streaming (#128)
+// ---------------------------------------------------------------------------
+
+/// Each probe row matches 4 build rows: at chunk size 1/2 the merged output
+/// of ONE probe chunk exceeds the chunk size, exercising the pending-buffer
+/// carry inside the streaming JoinOp.
+#[test]
+fn join_fanout_exceeds_chunk_size() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("a")],
+        rows: (0u8..3).map(|i| vec![some_iri(&format!("a{i}"))]).collect(),
+    };
+    let mut right_rows: Vec<Vec<Option<Term>>> = Vec::new();
+    for i in 0u8..3 {
+        for j in 0u8..4 {
+            right_rows.push(vec![
+                some_iri(&format!("a{i}")),
+                some_iri(&format!("b{i}{j}")),
+            ]);
+        }
+    }
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("a"), Var::new("b")],
+        rows: right_rows,
+    };
+    let plan = PhysicalPlan::Join {
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join fan-out");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 12, "3 probe rows x 4 matches");
+}
+
+/// Mixed-provenance regression for the streamed Join (design doc §3): the
+/// probe side (VALUES, Term provenance) has an UNDEF ?v row FIRST; the build
+/// side (BGP scan) binds ?v as Slot::Id. At chunk size 1 the UNDEF probe row
+/// merges the build side's Id(v1) into the output stream before any probe
+/// Term(v1) appears — per-chunk normalize_columns would leave chunk 1 as Id
+/// and chunk 2 as Term, and the cross-chunk DISTINCT seen-set would count
+/// one logical ?v twice. The forced-term column set keeps the whole stream
+/// Term-homogeneous. Goes RED if the force_term_columns call is dropped
+/// from probe_join_chunk.
+#[test]
+fn distinct_over_streamed_join_mixed_provenance() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v")],
+        rows: vec![vec![None], vec![some_iri("v1")]],
+    };
+    let right = PhysicalPlan::BgpScan {
+        patterns: vec![TriplePattern {
+            subject: Term::Var(Var::new("v")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join mixed provenance");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 1, "both probe rows bind the same logical ?v=v1");
 }
