@@ -52,7 +52,7 @@
 ## File structure
 
 - **Modify** `crates/sparql/src/exec/runtime.rs` — six native operator arms + supporting helpers; rename `normalize_join_columns`→`normalize_columns`; expand then remove the differential oracle; delete `eval_rows`, `eval_legacy`, `eval_group`, `project`, `hash_left_join`/`probe_into`/`join_vars`/`join_key`.
-- **Modify** docs (final task): `TASKS.md`, `docs/architecture.md`, `BENCHMARKS.md`, GitHub issue #128.
+- **Modify** docs (final task): `TASKS.md`, `docs/architecture.md`, `docs/benchmarks.md`, GitHub issue #128.
 
 Single-file change (plus docs). Every task commits independently and keeps `cargo nextest run -p horndb-sparql` (+ `--features server`) green.
 
@@ -319,7 +319,7 @@ Now there is exactly one runtime. Per design §6, delete `eval_legacy` (and what
 ## Task 10: Measure + docs-sync
 
 - [ ] **Step 1:** `agg_profile` directional smoke (laptop, *not* recorded): `cargo run -p horndb-sparql --release --example agg_profile 100000`. Slice 2 targets the non-aggregation operators, so Q1–Q5 should be **flat vs Slice 1** (no regression) — that's the expected result; the win was Slice 1's. Record this as "no aggregation regression; Slice 2 is correctness/consistency + adapter removal."
-- [ ] **Step 2:** `BENCHMARKS.md` — update the `agg_profile` row note: Slice 2 landed (all operators native; adapter + oracle removed); aggregation numbers unchanged from Slice 1; the ~12× SPB gap remainder is owned by the still-deferred streaming + planner pushdown (state explicitly). The official nightly `aggregation-qps` continues to be tracked by the scheduled run.
+- [ ] **Step 2:** `docs/benchmarks.md` — update the `agg_profile` row note: Slice 2 landed (all operators native; adapter + oracle removed); aggregation numbers unchanged from Slice 1; the ~12× SPB gap remainder is owned by the still-deferred streaming + planner pushdown (state explicitly). The official nightly `aggregation-qps` continues to be tracked by the scheduled run.
 - [ ] **Step 3:** `docs/architecture.md` §9 — flip the runtime row note: the six adapter-backed operators are now native; the decode-adapter and the `cfg(test)` legacy oracle are gone; the string `scan_bgp` remains only for DESCRIBE; streaming + planner pushdown remain the open #128 items.
 - [ ] **Step 4:** `TASKS.md` (#128 task, line ~48) — check off the Slice 2 sub-bullet (remaining six operators ported; adapter removed). **Do not close #128** — streaming + planner projection/aggregate pushdown remain; re-scope the task body to exactly those two. Mirror the note to GitHub issue #128 per the `TASKS.md` header procedure (do not auto-close).
 - [ ] **Step 5:** Commit:

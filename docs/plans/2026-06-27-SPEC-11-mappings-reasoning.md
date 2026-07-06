@@ -59,7 +59,7 @@ SPEC-11 §F3 names the rule families but defers exact predicate scoping to SSSOM
 - Create: `harness/curation/sssom-mappings.md` — the curated-subset rationale doc.
 
 **docs sync (same commits as the code):**
-- Modify: `docs/architecture.md` §13 (flip Status fields), `BENCHMARKS.md` (NF rows), `TASKS.md` (#130), `docs/index.md` (if a new doc is linked).
+- Modify: `docs/architecture.md` §13 (flip Status fields), `docs/benchmarks.md` (NF rows), `TASKS.md` (#130), `docs/index.md` (if a new doc is linked).
 
 ---
 
@@ -1360,7 +1360,7 @@ git commit -m 'feat(harness): wire SPEC-11 sssom-mappings conformance suite'
 
 **Files:**
 - Modify: `docs/architecture.md` (§13 Status fields)
-- Modify: `BENCHMARKS.md` (SPEC-11 NF rows — targets only; numbers come from hornbench later)
+- Modify: `docs/benchmarks.md` (SPEC-11 NF rows — targets only; numbers come from hornbench later)
 - Modify: `TASKS.md` (#130 progress)
 - Modify: `docs/index.md` (link the new curation doc if appropriate)
 
@@ -1368,7 +1368,7 @@ Per the project CLAUDE.md, `docs/architecture.md`, `TASKS.md`, and the SPECs are
 
 - [ ] **Step 1: Flip Status fields in `docs/architecture.md` §13** — change these rows from **planned** to **implemented**: the vocabulary row (F1), the chaining-rules row (F3), the negative-chaining row (F4), the confidence row (F7), the provenance row (F8), and the harness-loader row (F9). Leave the mapping-representation row (F2) as **partial** (n-ary node builder exists; full materialization on inference is follow-up), and leave the compact-index (F5) and crosswalk-spine (F6) rows **planned** (separate plan). Update the "Overall status" line to **partial / in progress**.
 
-- [ ] **Step 2: Add the SPEC-11 section to `BENCHMARKS.md`** — add a `### SPEC-11 — SSSOM mappings & crosswalk index` subsection with target rows (NF1 throughput TBD, NF2 ≤10 B/pair, NF3 full-closure vs OxO2 1.16M/17min baseline) marked "Measured: pending hornbench (F5/F6 follow-up)". Do **not** invent measured numbers — those are produced only on hornbench per the project rule.
+- [ ] **Step 2: Add the SPEC-11 section to `docs/benchmarks.md`** — add a `### SPEC-11 — SSSOM mappings & crosswalk index` subsection with target rows (NF1 throughput TBD, NF2 ≤10 B/pair, NF3 full-closure vs OxO2 1.16M/17min baseline) marked "Measured: pending hornbench (F5/F6 follow-up)". Do **not** invent measured numbers — those are produced only on hornbench per the project rule.
 
 - [ ] **Step 3: Update `TASKS.md` #130** — annotate the task body to record that the reasoning slice (F1–F4, F7, F8, F9 + conformance) is implemented and the serving slice (F5/F6, and GraphBLAS-backend T1 parity) remains. Do not check off the top-level box (the task isn't fully done until the index/spine land). Follow the claim/checkoff procedure in the `TASKS.md` header and mirror the note to GitHub issue #130.
 
@@ -1387,7 +1387,7 @@ Expected: clean fmt, zero clippy warnings, all owlrl + harness tests green.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add docs/architecture.md BENCHMARKS.md TASKS.md docs/index.md
+git add docs/architecture.md docs/benchmarks.md TASKS.md docs/index.md
 git commit -m 'docs(spec): SPEC-11 reasoning slice — sync architecture/benchmarks/tasks'
 ```
 

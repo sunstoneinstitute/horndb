@@ -7,7 +7,7 @@
 //! micro-sequenced. This bench compares the forced AVX2 path against scalar so
 //! the maintainer can confirm whether the AVX2 kernel is a pessimization on the
 //! hornbench host and decide whether to keep dispatching to it. Throughput is
-//! counted in gathered indices. Run on hornbench; record in BENCHMARKS.md.
+//! counted in gathered indices. Run on hornbench; record in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use horndb_simd::{gather, with_forced_isa, Isa};

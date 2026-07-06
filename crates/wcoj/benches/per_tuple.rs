@@ -1,6 +1,6 @@
 //! SPEC-12 acceptance #2 / SPEC-03 NF1: per-tuple WCOJ overhead.
 //! Target: <=2.5 ns/tuple on hornbench (from the <=5 ns Stage-1 envelope toward
-//! DuckDB's ~2 ns). Records the `per_tuple` row in BENCHMARKS.md.
+//! DuckDB's ~2 ns). Records the `per_tuple` row in docs/benchmarks.md.
 //!
 //! The bench runs a 2-variable star join whose output is large and
 //! seek-dominated, so the measured time/tuple isolates the cursor seek +

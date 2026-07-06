@@ -2,7 +2,7 @@
 //! runs (AVX2 / NEON hand-written kernels). Each iteration runs a fixed batch
 //! of probes spanning below-min / interior / above-max so branch behaviour and
 //! the galloping window are exercised representatively. Throughput is counted
-//! in probes. Run on hornbench; record the ratio in BENCHMARKS.md.
+//! in probes. Run on hornbench; record the ratio in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use horndb_simd::{lower_bound, with_forced_isa, Isa};

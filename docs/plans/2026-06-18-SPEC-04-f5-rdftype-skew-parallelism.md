@@ -47,7 +47,7 @@ embarrassingly parallel.
 
 5. **Bench** (`benches/rdf_type_skew.rs`): an LUBM-shaped skewed input
    (one giant class extent feeding `cls-int1`/`cls-uni`) benched `Auto` vs
-   `Serial`, registered in `Cargo.toml`. Record the number in `BENCHMARKS.md`.
+   `Serial`, registered in `Cargo.toml`. Record the number in `docs/benchmarks.md`.
 
 ## Out of scope (deferred, documented)
 
@@ -60,5 +60,5 @@ embarrassingly parallel.
 
 - Parallel path (`Auto`) is the default for the four affected rules, behind a
   differential test proving identical output to `Serial`.
-- A bench demonstrates the win; `BENCHMARKS.md` SPEC-04 row updated.
+- A bench demonstrates the win; `docs/benchmarks.md` SPEC-04 row updated.
 - `cargo fmt`/`clippy`/`test` green; W3C OWL 2 RL subset stays green.

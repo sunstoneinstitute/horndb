@@ -211,7 +211,7 @@ at which point adding real tiers is a value change, not a schema change.
   `horndb_sparql_requests_total` incremented and the latency histogram has samples.
 - Scrape-time gauge test: load data, scrape, assert `horndb_storage_triples` reflects the
   loaded count (proves the `Collector` reads live state).
-- Overhead guard: a micro-bench (not recorded to BENCHMARKS.md) confirming a resolved
+- Overhead guard: a micro-bench (not recorded to docs/benchmarks.md) confirming a resolved
   counter `.inc()` is on the order of a few ns.
 
 ## 9. Acceptance criteria

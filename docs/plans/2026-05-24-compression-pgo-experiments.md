@@ -965,14 +965,14 @@ cargo run -p horndb-harness --release --bin harness -- \
   autoresearch experiments/baseline.toml --baseline baseline
 ```
 
-- [ ] **Step 2: Update `BENCHMARKS.md` with current numbers**
+- [ ] **Step 2: Update `docs/benchmarks.md` with current numbers**
 
-Read the existing `BENCHMARKS.md` and replace the "current measured" rows for the 6 benches with what the autoresearch verdict JSON reports. Commit the BENCHMARKS.md change separately so it's easy to bisect later.
+Read the existing `docs/benchmarks.md` and replace the "current measured" rows for the 6 benches with what the autoresearch verdict JSON reports. Commit the docs/benchmarks.md change separately so it's easy to bisect later.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add BENCHMARKS.md
+git add docs/benchmarks.md
 git commit -m 'docs(benchmarks): record initial autoresearch baseline numbers'
 ```
 

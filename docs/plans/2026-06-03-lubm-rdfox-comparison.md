@@ -22,7 +22,7 @@
 | `scripts/bench/compare-rdfox.sh` | Modify | Add `--lubm N` / `--cap-seconds`, `cap_run` helper, `lubm_compare`, parity gate. |
 | `scripts/bench/README.md` | Modify | Document `--lubm`, Java requirement, disk footprint. |
 | `.gitignore` | Modify | Ensure `scripts/bench/results/` is gitignored (RDFox numbers). |
-| `BENCHMARKS.md` | Modify | Status-only note under Stage gates (no RDFox number). |
+| `docs/benchmarks.md` | Modify | Status-only note under Stage gates (no RDFox number). |
 | `TASKS.md` + issue #10 | Modify | Reflect the wired LUBM A/B. |
 
 **Key facts the engineer must not re-derive:**
@@ -691,16 +691,16 @@ Note the N=100 outcome (ratio or "did not complete") for the Task 6 status updat
 
 ---
 
-## Task 6: Sync BENCHMARKS.md / TASKS.md / issue #10
+## Task 6: Sync docs/benchmarks.md / TASKS.md / issue #10
 
 **Files:**
-- Modify: `BENCHMARKS.md`
+- Modify: `docs/benchmarks.md`
 - Modify: `TASKS.md`
 - GitHub: issue #10
 
 - [ ] **Step 1: Add a status-only note under the Stage gates table**
 
-In `BENCHMARKS.md`, immediately after the Stage gates table (after line 41), add:
+In `docs/benchmarks.md`, immediately after the Stage gates table (after line 41), add:
 
 ```markdown
 > **Stage-1 LUBM gate — measurement status (internal):** wired and runnable via
@@ -734,7 +734,7 @@ If issue #10 also has a body heading in TASKS.md (search the file body, not just
 
 - [ ] **Step 3: Verify the docs are internally consistent**
 
-Run: `grep -n 'lubm\|LUBM\|--lubm' BENCHMARKS.md scripts/bench/README.md TASKS.md`
+Run: `grep -n 'lubm\|LUBM\|--lubm' docs/benchmarks.md scripts/bench/README.md TASKS.md`
 Expected: the LUBM mode is referenced consistently across all three; no RDFox number appears anywhere.
 
 - [ ] **Step 4: Update the GitHub issue to match**
@@ -748,7 +748,7 @@ gh issue comment 10 --body "LUBM materialization A/B now wired via \`scripts/ben
 - [ ] **Step 5: Commit**
 
 ```bash
-git add BENCHMARKS.md TASKS.md docs/architecture.md
+git add docs/benchmarks.md TASKS.md docs/architecture.md
 git commit -F /dev/stdin <<'EOF'
 docs: record LUBM A/B wiring status across BENCHMARKS/TASKS
 

@@ -80,7 +80,7 @@ the `serve` startup log.
 2. Add a match arm in `cpu.rs::table_pick` keyed on `(Vendor, family, model)`,
    returning the winning `Isa` per `Kernel`. Cite the SPB-256 basis in a comment,
    as the existing rows do.
-3. Sync `BENCHMARKS.md`, `docs/architecture.md`, and `TASKS.md`.
+3. Sync `docs/benchmarks.md`, `docs/architecture.md`, and `TASKS.md`.
 
 ### Representative-calibration rule (applies to every primitive EXCEPT intersect)
 Calibration inputs MUST reflect production access patterns, or calibration

@@ -7,7 +7,7 @@
 > dictionary is no longer defeated at the SPARQL boundary. Diagnostic harness:
 > [`crates/sparql/examples/agg_profile.rs`](../../crates/sparql/examples/agg_profile.rs).
 > Gates on the existing `cargo nextest` suite (bit-identical results) per the
-> harness-first rule (SPEC-00). See `architecture.md` §9 and `BENCHMARKS.md`.
+> harness-first rule (SPEC-00). See `architecture.md` §9 and `docs/benchmarks.md`.
 
 ## Purpose
 
@@ -229,7 +229,7 @@ aggregation bench moves.
    `hornbench` (stable env), never the laptop.
 5. **Nightly `aggregation-qps` moves materially off ~13** on the SPB-256
    nightly. Record the new HornDB number (and the GraphDB A/B baseline) in
-   `BENCHMARKS.md`. The 12× gap will **not** fully close here — the deferred
+   `docs/benchmarks.md`. The 12× gap will **not** fully close here — the deferred
    streaming/pushdown work owns the remainder; say so in the bench note.
 6. **Docs sync (during implementation, not in the spec commit):** check off the
    #128 sub-scope in `TASKS.md`, flip the matching `architecture.md` §9 rows
@@ -243,7 +243,7 @@ Ship **Slice 1 first** — it is the tracer bullet that proves the seam end to
 end (native `scan_bgp_ids` → slot Join/Group/Distinct/Project/Filter → boundary
 decode) and delivers the measurable nightly jump, with the other six operators
 correct-but-adapter-backed so nothing regresses. Land it and record the
-`agg_profile` + nightly numbers in `BENCHMARKS.md` against the pre-change
+`agg_profile` + nightly numbers in `docs/benchmarks.md` against the pre-change
 baseline. **Then Slice 2** (port the remaining operators, drop the adapter),
 measuring against the Slice-1 baseline so attribution stays honest. The
 streaming and pushdown follow-ups stay under #128 and are picked up only after

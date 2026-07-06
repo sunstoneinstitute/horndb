@@ -3,7 +3,7 @@
 //! two selectivities — sparse (~1% match) and dense (~50% match) — because the
 //! match density drives the set-bit-extraction / compaction cost that dominates
 //! once the compare is vectorized. Throughput is counted in scanned elements.
-//! Run on hornbench; record the ratios in BENCHMARKS.md.
+//! Run on hornbench; record the ratios in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use horndb_simd::{filter_indices_eq, with_forced_isa, Isa};

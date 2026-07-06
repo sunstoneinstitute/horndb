@@ -94,7 +94,7 @@ Work top-down: start at the request, then drill into the stage the time is in.
   §5.3). For sub-microsecond costs, reach for the criterion benches (`per_tuple`,
   `four_cycle`, `load_lubm`, …) on `hornbench`, not metrics.
 - **Metrics ≠ recorded benchmarks.** `/metrics` is live in-process observation;
-  `BENCHMARKS.md` numbers come from `cargo bench` on `hornbench`. Don't record a
+  `docs/benchmarks.md` numbers come from `cargo bench` on `hornbench`. Don't record a
   scraped number as a benchmark result.
 - ML metrics are behind the `server` feature; the `/metrics` endpoint itself is
   behind `server` (on by default in `horndb-sparql`).

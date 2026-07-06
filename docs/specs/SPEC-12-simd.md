@@ -6,7 +6,7 @@ Define a single, shared, runtime-dispatched SIMD layer for HornDB's data-paralle
 hot loops, and the contract every consumer of it obeys. The motivating gap is
 SPEC-03 NF1: the WCOJ per-tuple overhead target is ≤5 ns/tuple against DuckDB's
 ~2 ns/tuple, and the Stage-1 executor is explicitly allowed to miss it because it
-is "binary-search-based seek, no SIMD yet" (`BENCHMARKS.md`, *Scaffolded* table,
+is "binary-search-based seek, no SIMD yet" (`docs/benchmarks.md`, *Scaffolded* table,
 `benches/per_tuple.rs`). This SPEC is the contract for closing that gap — and the
 analogous gaps in dictionary decode and the columnar `rdf:type` partition scan —
 with **explicit intrinsics behind runtime CPU feature detection**, not with
@@ -197,7 +197,7 @@ overhead to the scalar baseline.
 - **SPEC-03 (wcoj)** — the F1 consumer; the highest-payoff path.
 - **SPEC-04 (owlrl)** — the F3 consumer, **gated on issue
   [#133](https://github.com/sunstoneinstitute/horndb/issues/133)**.
-- **SPEC-01 (harness / BENCHMARKS.md)** — the per_tuple / intersect / decode /
+- **SPEC-01 (harness / docs/benchmarks.md)** — the per_tuple / intersect / decode /
   partition-scan benches that gate this SPEC.
 - No new external crates: `std::arch` intrinsics only.
 
@@ -216,7 +216,7 @@ to get them).
 
 Honoring the harness-first rule (SPEC-00): each criterion gates on a named
 criterion/harness bench, every recorded number measured on hornbench and written to
-`BENCHMARKS.md`.
+`docs/benchmarks.md`.
 
 1. **Primitives differential.** A proptest suite in `horndb-simd` proves every
    primitive (`lower_bound`, `intersect`, `merge`, `dedup`, `filter`, `gather`)
@@ -224,10 +224,10 @@ criterion/harness bench, every recorded number measured on hornbench and written
    can execute (forced via F5). Zero mismatches. (NF3)
 2. **WCOJ per-tuple.** `benches/per_tuple.rs` (replacing the current stub) is wired
    as a real microbench and reaches **≤2.5 ns/tuple** on hornbench; `four_cycle.rs`
-   stays ≥10× (no regression). New/updated `BENCHMARKS.md` row: `per_tuple`. (NF1)
+   stays ≥10× (no regression). New/updated `docs/benchmarks.md` row: `per_tuple`. (NF1)
 3. **Intersection throughput.** A new `benches/intersect.rs` (in `horndb-wcoj` or
    `horndb-simd`) shows ≥4× SIMD-over-scalar on AVX-512 / ≥2× on NEON, recorded in
-   `BENCHMARKS.md`. (NF2)
+   `docs/benchmarks.md`. (NF2)
 4. **Dictionary decode + partition scan.** A new dictionary-decode microbench shows
    ≥4× scalar; the `rdf:type` partition scan reaches ≥80% STREAM-Triad on the
    NUMA-pinned hornbench bench (jointly satisfies SPEC-02 acceptance #4). (NF4)

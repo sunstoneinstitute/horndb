@@ -8,7 +8,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 - [`specs/README.md`](specs/README.md) — index of the authoritative SPEC documents.
 - [`adr/README.md`](adr/README.md) — Architecture Decision Records: the *why* behind the cross-cutting choices (the six SPEC-00 bets plus major tech decisions).
 - [`../TASKS.md`](../TASKS.md) — live follow-up list and current gaps.
-- [`../BENCHMARKS.md`](../BENCHMARKS.md) — performance targets, baselines, and measurement commands.
+- [`benchmarks.md`](benchmarks.md) — performance targets, baselines, current measured results, and reproduction commands.
 
 ## Docs in this directory
 

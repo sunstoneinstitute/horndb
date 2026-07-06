@@ -6,12 +6,12 @@ prints a side-by-side table with the goal verdict.
 
 > **Licence note.** RDFox commercial/evaluation licences forbid *publishing*
 > comparative benchmark numbers (the "DeWitt clause"). This harness is for
-> **internal** use only — see the baseline note in [`../../BENCHMARKS.md`](../../BENCHMARKS.md).
+> **internal** use only — see the baseline note in [`../../docs/benchmarks.md`](../../docs/benchmarks.md).
 > Keep the numbers it prints out of public docs, commit messages, and issues.
 
 ## What it measures
 
-| Comparison    | HornDB path                                          | Goal (BENCHMARKS.md)            | Apples-to-apples? |
+| Comparison    | HornDB path                                          | Goal (docs/benchmarks.md)            | Apples-to-apples? |
 |---------------|------------------------------------------------------|---------------------------------|-------------------|
 | `import`      | `horndb_storage` N-Triples bulk loader               | SPEC-02 F8 — ≥ 1 M triples/sec  | exact (same file) |
 | `transitive`  | `horndb_closure` GraphBLAS transitive closure        | SPEC-05 acc#1 — ≥ 10× RDFox     | exact closure (count cross-checked) |
@@ -76,7 +76,7 @@ gen_workload.py ──┬─► chain.nt ──────────► hornd
     directly). To drive `horndb-bench materialize` (OWL 2 RL) with the same
     chain you **must** add `--transitive`, which declares the predicate
     `owl:TransitiveProperty` so `prp-trp` fires — that is the
-    closure-dominated regime in BENCHMARKS.md's owlrl materialize A/B. Without
+    closure-dominated regime in docs/benchmarks.md's owlrl materialize A/B. Without
     it `materialize` infers ~nothing and the GraphBLAS backend looks *slower*
     than rule-firing (there is no closure to do).
 - `rules/owl2rl-core.dlog` — the two OWL 2 RL rules (`cax-sco`, `scm-sco`) the
@@ -99,7 +99,7 @@ gen_workload.py ──┬─► chain.nt ──────────► hornd
   broader, so the ratio flatters HornDB — it matches the SPEC-05 acc#1 framing
   ("the closure is faster than RDFox"), not a like-for-like store materialization.
 - **Wall-clock, single run.** No warmup, no repeats, no criterion intervals.
-  For a tracked number use the in-repo criterion benches (`BENCHMARKS.md`); this
+  For a tracked number use the in-repo criterion benches (`docs/benchmarks.md`); this
   harness is for the cross-engine ratio, run it a few times and eyeball variance.
 - **Hardware fingerprint matters.** Comparisons are only valid within one
   machine; don't compare a run here to a number measured elsewhere.
