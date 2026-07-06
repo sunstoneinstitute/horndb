@@ -36,7 +36,7 @@ SPEC-00..12 above are the standing subsystem contracts. Point/design specs — n
 | [SPEC-16](SPEC-16-owlrl-type-index-seminaive.md) | `owlrl` `rdf:type` object index + genuine semi-naïve firing | SPEC-04 (rule engine, F5-adjacent; [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) | Draft |
 | [SPEC-17](SPEC-17-id-based-slot-rows.md) | id-based slot rows for the SPARQL runtime | SPEC-07 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)) | Implemented |
 | [SPEC-18](SPEC-18-metrics.md) | Metrics & observability (Phase 1: metrics) | cross-cutting (`crates/metrics/`) | Specified |
-| [SPEC-19](SPEC-19-spb-full-metrics.md) | SPB-256: record the full driver report | SPEC-01 (harness trend DB) | Approved |
+| [SPEC-19](SPEC-19-spb-driver-report.md) | SPB-256: record the full driver report | SPEC-01 (harness trend DB) | Approved |
 | [SPEC-20](SPEC-20-streaming-runtime-pushdown.md) | Streaming SPARQL runtime + projection/aggregate pushdown | SPEC-07 ([#143](https://github.com/sunstoneinstitute/horndb/issues/143), [#144](https://github.com/sunstoneinstitute/horndb/issues/144)) | Approved |
 
 ## Reading order
