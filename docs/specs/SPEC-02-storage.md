@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-02 — Storage & Dictionary Encoding"
+---
+
 # SPEC-02 — Storage & Dictionary Encoding
 
 ## Purpose

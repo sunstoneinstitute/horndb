@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-01 — Conformance & Benchmarking Harness"
+---
+
 # SPEC-01 — Conformance & Benchmarking Harness
 
 ## Purpose

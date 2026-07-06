@@ -11,27 +11,32 @@ The **Plan** column links to each spec's Stage-1 implementation plan under `../p
 | SPEC | Subsystem | Status | Plan |
 |------|-----------|--------|------|
 | [SPEC-00](SPEC-00-vision.md) | Project vision & architecture | Draft | — (vision) |
-| [SPEC-01](SPEC-01-conformance-benchmarks.md) | Conformance & benchmarking harness — **built first** | Draft | [SPEC-01 plan](../plans/2026-05-24-SPEC-01-conformance-harness.md) |
-| [SPEC-02](SPEC-02-storage.md) | Storage & dictionary encoding | Draft | [SPEC-02 plan](../plans/2026-05-24-SPEC-02-storage.md) |
-| [SPEC-03](SPEC-03-query-engine.md) | WCOJ query engine | Draft | [SPEC-03 plan](../plans/2026-05-24-SPEC-03-wcoj-query-engine.md) |
-| [SPEC-04](SPEC-04-rule-engine.md) | OWL 2 RL rule engine | Draft | [SPEC-04 plan](../plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md) |
-| [SPEC-05](SPEC-05-closure-backend.md) | GraphBLAS closure backend | Draft | [SPEC-05 plan](../plans/2026-05-24-SPEC-05-graphblas-closure-backend.md) |
-| [SPEC-06](SPEC-06-incremental-maintenance.md) | DBSP incremental maintenance | Draft | [SPEC-06 plan](../plans/2026-05-24-SPEC-06-dbsp-incremental-maintenance.md) |
-| [SPEC-07](SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend | Draft | [SPEC-07 plan](../plans/2026-05-24-SPEC-07-sparql-frontend.md) |
-| [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/2026-05-24-SPEC-08-ml-integration.md) |
-| [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/2026-05-24-SPEC-09-hardware-specialization.md) (roadmap-only) |
+| [SPEC-01](SPEC-01-conformance-benchmarks.md) | Conformance & benchmarking harness — **built first** | Draft | [SPEC-01 plan](../plans/PLAN-01-01-conformance-harness.md) |
+| [SPEC-02](SPEC-02-storage.md) | Storage & dictionary encoding | Draft | [SPEC-02 plan](../plans/PLAN-02-01-storage.md) |
+| [SPEC-03](SPEC-03-query-engine.md) | WCOJ query engine | Draft | [SPEC-03 plan](../plans/PLAN-03-01-wcoj-query-engine.md) |
+| [SPEC-04](SPEC-04-rule-engine.md) | OWL 2 RL rule engine | Draft | [SPEC-04 plan](../plans/PLAN-04-01-owl-rl-rule-engine.md) |
+| [SPEC-05](SPEC-05-closure-backend.md) | GraphBLAS closure backend | Draft | [SPEC-05 plan](../plans/PLAN-05-01-graphblas-closure-backend.md) |
+| [SPEC-06](SPEC-06-incremental-maintenance.md) | DBSP incremental maintenance | Draft | [SPEC-06 plan](../plans/PLAN-06-01-dbsp-incremental-maintenance.md) |
+| [SPEC-07](SPEC-07-sparql-frontend.md) | SPARQL 1.1 frontend | Draft | [SPEC-07 plan](../plans/PLAN-07-01-sparql-frontend.md) |
+| [SPEC-08](SPEC-08-ml-integration.md) | ML / LLM integration boundary | Draft | [SPEC-08 plan](../plans/PLAN-08-01-ml-integration.md) |
+| [SPEC-09](SPEC-09-hardware-specialization.md) | Hardware specialization (Stage 3) | Roadmap | [SPEC-09 plan](../plans/PLAN-09-01-hardware-specialization.md) (roadmap-only) |
 | [SPEC-10](SPEC-10-rdflib-compatible-python-api.md) | rdflib-compatible Python API | Draft | — |
 | [SPEC-11](SPEC-11-mappings.md) | SSSOM mappings & crosswalk index | Draft | — |
 | [SPEC-12](SPEC-12-simd.md) | SIMD acceleration layer | Draft | — |
 
-## Dated design specs
+## Point / design specs (SPEC-13+)
 
-Numbered `SPEC-NN` files are the standing subsystem contracts above. Point design specs — narrower decisions that refine a subsystem rather than define it — use a `YYYY-MM-DD-<slug>.md` prefix and live alongside them here:
+SPEC-00..12 above are the standing subsystem contracts. Point/design specs — narrower decisions that refine a subsystem rather than define it — use the same `SPEC-NN-<slug>.md` naming (next free number) and live alongside them here. Each file's frontmatter carries `status:` / `date:` / `scope:` (see `AGENTS.md`).
 
-| Design spec | Refines | Status |
-|------|---------|--------|
-| [Shared, lock-guarded GraphBLAS build across worktrees](2026-05-31-shared-graphblas-build-design.md) | SPEC-05 (closure backend) | Approved |
-| [`owlrl` `rdf:type` object index + genuine semi-naïve firing](2026-06-27-owlrl-type-index-seminaive.md) | SPEC-04 (rule engine, F5-adjacent; [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) | Draft |
+| SPEC | Design spec | Refines | Status |
+|------|-------------|---------|--------|
+| [SPEC-13](SPEC-13-shared-graphblas-build.md) | Shared, lock-guarded GraphBLAS build across worktrees | SPEC-05 (closure backend) | Approved |
+| [SPEC-14](SPEC-14-lubm-rdfox-comparison.md) | Real LUBM-100 materialization comparison vs RDFox | SPEC-01 (benchmarks) | Approved |
+| [SPEC-15](SPEC-15-owlrl-type-index-seminaive.md) | `owlrl` `rdf:type` object index + genuine semi-naïve firing | SPEC-04 (rule engine, F5-adjacent; [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) | Draft |
+| [SPEC-16](SPEC-16-id-based-slot-rows.md) | id-based slot rows for the SPARQL runtime | SPEC-07 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)) | Implemented |
+| [SPEC-17](SPEC-17-metrics.md) | Metrics & observability (Phase 1: metrics) | cross-cutting (`crates/metrics/`) | Specified |
+| [SPEC-18](SPEC-18-spb-driver-report.md) | SPB-256: record the full driver report | SPEC-01 (harness trend DB) | Approved |
+| [SPEC-19](SPEC-19-streaming-runtime-pushdown.md) | Streaming SPARQL runtime + projection/aggregate pushdown | SPEC-07 ([#143](https://github.com/sunstoneinstitute/horndb/issues/143), [#144](https://github.com/sunstoneinstitute/horndb/issues/144)) | Approved |
 
 ## Reading order
 

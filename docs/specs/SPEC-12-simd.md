@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-06-27
+scope: "SPEC-12 — SIMD Acceleration Layer"
+---
+
 # SPEC-12 — SIMD Acceleration Layer
 
 ## Purpose

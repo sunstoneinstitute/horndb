@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-07 — SPARQL 1.1 Frontend"
+---
+
 # SPEC-07 — SPARQL 1.1 Frontend
 
 ## Purpose

@@ -1,6 +1,6 @@
 //! Canonical kind-tagged byte encoding of terms for the snapshot dictionary.
 //!
-//! See the format spec in docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md.
+//! See the format spec in docs/plans/PLAN-02-02-hdt-snapshot.md.
 
 use super::varint::{read_uvarint, write_uvarint, zigzag_decode, zigzag_encode};
 use crate::error::{Result, StorageError};

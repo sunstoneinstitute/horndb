@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-00 — Project Vision & Architecture"
+---
+
 # SPEC-00 — Project Vision & Architecture
 
 ## Purpose

@@ -100,4 +100,4 @@ Work top-down: start at the request, then drill into the stage the time is in.
   behind `server` (on by default in `horndb-sparql`).
 
 See [`docs/metrics.md`](../../../docs/metrics.md) for the authoritative series list and
-[`docs/specs/2026-06-29-metrics-design.md`](../../../docs/specs/2026-06-29-metrics-design.md) for design rationale.
+[`docs/specs/SPEC-17-metrics.md`](../../../docs/specs/SPEC-17-metrics.md) for design rationale.

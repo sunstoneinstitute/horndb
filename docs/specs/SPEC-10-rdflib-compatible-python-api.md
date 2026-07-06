@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-25
+scope: "SPEC-10 — rdflib-Compatible Python API"
+---
+
 # SPEC-10 — rdflib-Compatible Python API
 
 ## Purpose

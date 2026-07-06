@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-08 — ML / LLM Integration Boundary"
+---
+
 # SPEC-08 — ML / LLM Integration Boundary
 
 ## Purpose

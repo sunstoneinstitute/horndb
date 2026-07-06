@@ -6,7 +6,7 @@
 //! are a documented follow-up — [`export_snapshot`] errors if the store holds
 //! named-graph data rather than silently dropping it.
 //!
-//! Format spec: docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md.
+//! Format spec: docs/plans/PLAN-02-02-hdt-snapshot.md.
 
 pub mod format;
 pub mod term_codec;
