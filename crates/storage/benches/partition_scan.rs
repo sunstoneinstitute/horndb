@@ -1,6 +1,6 @@
 //! SPEC-12 acceptance #4 / SPEC-02 NF2: rdf:type partition scan reaches
 //! ≥80% STREAM-Triad bandwidth. Run NUMA-pinned on hornbench; record GB/s
-//! and the STREAM-Triad fraction in BENCHMARKS.md.
+//! and the STREAM-Triad fraction in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use horndb_storage::partition::PartitionBuilder;

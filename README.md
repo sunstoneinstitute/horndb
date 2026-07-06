@@ -135,7 +135,7 @@ initial-research.md       # Feasibility study and competitive landscape
 
 ## Performance
 
-Targets, baselines, current measurements, and reproduction commands live in [`BENCHMARKS.md`](BENCHMARKS.md). Live performance gaps are tracked in [`TASKS.md`](TASKS.md) alongside correctness gaps.
+Targets, baselines, current measurements, and reproduction commands live in [`docs/benchmarks.md`](docs/benchmarks.md). Live performance gaps are tracked in [`TASKS.md`](TASKS.md) alongside correctness gaps.
 
 ## The name
 

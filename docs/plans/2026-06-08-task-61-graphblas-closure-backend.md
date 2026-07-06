@@ -124,7 +124,7 @@ discipline to the owlrl path (issue acceptance #3).
   phase attribution JSON.
 - Generate LUBM(1) via `scripts/bench/gen_lubm.sh` if the toolchain is available;
   otherwise fall back to a synthetic closure-heavy dataset and **say so** in the
-  report (no silent substitution). Run A/B, record numbers in `BENCHMARKS.md`
+  report (no silent substitution). Run A/B, record numbers in `docs/benchmarks.md`
   and a short attribution note; report how much of the 3× gap the swap closes
   and what remains (cross-ref the `rdf:type`-scan work, #133/#134).
 
@@ -132,7 +132,7 @@ discipline to the owlrl path (issue acceptance #3).
 
 - `TASKS.md`: `[v]` → `[x]` on index + body, drop the wip tag, keep `(#61)`.
 - `docs/architecture.md`: flip the SPEC-05-closure-wiring / LUBM A/B Status.
-- `BENCHMARKS.md`: materialize row with the A/B numbers.
+- `docs/benchmarks.md`: materialize row with the A/B numbers.
 - PR body: `Closes #61`.
 
 ## Execution order (atomic commits)
@@ -142,7 +142,7 @@ discipline to the owlrl path (issue acceptance #3).
 3. Injectable `Engine` (`BackendChoice` + `with_backend`), wire `load()`.
 4. Differential parity test (feature on) — the gate.
 5. Profiling instrumentation in `materialize_with` + `bench-rdfox --backend`.
-6. Run LUBM(1) (or documented synthetic) A/B; record in `BENCHMARKS.md` + note.
+6. Run LUBM(1) (or documented synthetic) A/B; record in `docs/benchmarks.md` + note.
 7. Docs sync + close.
 
 ## Verification

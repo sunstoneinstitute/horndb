@@ -29,7 +29,7 @@
 - **Modify** `crates/sparql/src/exec/horn.rs` — `HornBackend` impls of `scan_bgp_ids` (id-returning scan) and `decode_term` (dict lookup).
 - **Modify** `crates/sparql/src/exec/runtime.rs` — `eval` returns `Batch`; adapter wiring; native operator ports; `referenced_vars`; transient-Bindings decode; `cfg(test)` `eval_legacy` oracle; differential proptest.
 - **Modify** `crates/sparql/Cargo.toml` — add `proptest` to `[dev-dependencies]`.
-- **Modify** docs (final task): `TASKS.md`, `docs/architecture.md`, `BENCHMARKS.md`, GitHub issue #128.
+- **Modify** docs (final task): `TASKS.md`, `docs/architecture.md`, `docs/benchmarks.md`, GitHub issue #128.
 
 **Dependency order (hard barrier marked):** Task 1 → Task 2 → **Task 3 (eval→Batch, all-adapter; BARRIER)** → Tasks 4–7 (native ports, each independent and parallelizable after Task 3) → Task 8 (differential test) → Task 9 (measure + docs).
 
@@ -1298,7 +1298,7 @@ EOF
 ## Task 9: Measure + docs-sync
 
 **Files:**
-- Modify: `BENCHMARKS.md`, `TASKS.md`, `docs/architecture.md`
+- Modify: `docs/benchmarks.md`, `TASKS.md`, `docs/architecture.md`
 - GitHub issue #128 (mirror)
 
 - [ ] **Step 1: Full-workspace green + clippy (the acceptance gate)**
@@ -1312,7 +1312,7 @@ Expected: all green, no warnings. (Criterion 1.)
 
 Per CLAUDE.md, recorded numbers come from **hornbench**, but `agg_profile` is explicitly *not* a recorded bench, so a laptop before/after delta is acceptable for the plan's evidence; note the env. If a hornbench run is convenient, prefer it. Capture Q1–Q5 per/q + qps at `agg_profile 100000` against the pre-change baseline (Q1 ~133 ms, Q2 ~55 ms, Q3 ~81 ms, Q4 ~111 ms, Q5 ~37 ms).
 
-- [ ] **Step 3: Update `BENCHMARKS.md`**
+- [ ] **Step 3: Update `docs/benchmarks.md`**
 
 Add/refresh the SPB aggregation row with the new `agg_profile` deltas and a note that the SPB **nightly** `aggregation-qps` will be recorded on the next nightly (or trigger `gh workflow run nightly.yml`). State explicitly that the 12× gap is **not** fully closed here — streaming/pushdown (deferred under #128) own the remainder. (Criteria 4–5.)
 
@@ -1328,7 +1328,7 @@ Add/refresh the SPB aggregation row with the new `agg_profile` deltas and a note
 - [ ] **Step 6: Commit the docs-sync**
 
 ```bash
-git add BENCHMARKS.md TASKS.md docs/architecture.md
+git add docs/benchmarks.md TASKS.md docs/architecture.md
 git commit -F - <<'EOF'
 docs: record id-based slot rows Slice 1 (#128)
 
@@ -1344,7 +1344,7 @@ EOF
 
 ## Self-review notes (author)
 
-- **Spec coverage:** types (T1), Resolver/decode seam (T2), `scan_bgp_ids` (T2), `eval`→`Batch` boundary (T3), native Join/Group/Distinct/Project/Filter + Slice (T4–T7), adapter for the other six (T3 leaves them adapter-backed — correct), decode at boundary (T3 `run`), slot-comparison unit test (T1), differential proptest with `eval_legacy` oracle (T8), `agg_profile` + nightly + `BENCHMARKS.md` + docs-sync (T9). All acceptance criteria mapped.
+- **Spec coverage:** types (T1), Resolver/decode seam (T2), `scan_bgp_ids` (T2), `eval`→`Batch` boundary (T3), native Join/Group/Distinct/Project/Filter + Slice (T4–T7), adapter for the other six (T3 leaves them adapter-backed — correct), decode at boundary (T3 `run`), slot-comparison unit test (T1), differential proptest with `eval_legacy` oracle (T8), `agg_profile` + nightly + `docs/benchmarks.md` + docs-sync (T9). All acceptance criteria mapped.
 - **No placeholders:** every code step shows complete code or an exact copy-anchor (`horn.rs:504-558`, the `eval` body) with the precise transformation.
 - **Type consistency:** `Slot`/`Row`/`Batch`/`KeyPart` names, `scan_bgp_ids`/`decode_term`/`to_bindings`/`from_bindings`/`key_part`/`referenced_vars`/`decode_subset`/`merge_rows`/`eval_group_native`/`agg_inner_exprs`/`eval_legacy` are used identically across tasks. `lex` made `pub(crate)` in T1.
 - **Open risk to watch during execution:** the two cross-check notes (exhaustive `Expr` match in `referenced_vars`, `AggFunc` arms in `agg_inner_exprs`) — the compiler enforces both, so a missed variant fails the build, not silently.

@@ -561,7 +561,7 @@ Replace `crates/wcoj/benches/per_tuple.rs`:
 ```rust
 //! SPEC-12 acceptance #2 / SPEC-03 NF1: per-tuple WCOJ overhead.
 //! Target: <=2.5 ns/tuple on hornbench (from the <=5 ns Stage-1 envelope toward
-//! DuckDB's ~2 ns). Records the `per_tuple` row in BENCHMARKS.md.
+//! DuckDB's ~2 ns). Records the `per_tuple` row in docs/benchmarks.md.
 //!
 //! The bench runs a 2-variable join whose output is large and seek-dominated,
 //! so the measured time/tuple isolates the cursor seek + leapfrog inner loop.
@@ -642,14 +642,14 @@ Expected: WCOJ still ≥10× binary-hash (the SIMD seek must not regress the win
 
 `ssh hornbench`, check out the branch, `cargo bench -p horndb-wcoj --bench per_tuple` and `--bench four_cycle`. Record `per_tuple` ns/tuple and the four_cycle ratio.
 
-- [ ] **Step 5: Update `BENCHMARKS.md`**
+- [ ] **Step 5: Update `docs/benchmarks.md`**
 
 Update the `per_tuple` row with the measured ns/tuple (note it must reach ≤2.5 ns to satisfy acceptance #2) and confirm the four_cycle row stays ≥10×. Note the host (EPYC Zen4) and the dispatched ISA.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/wcoj/benches/per_tuple.rs BENCHMARKS.md
+git add crates/wcoj/benches/per_tuple.rs docs/benchmarks.md
 git commit -m "bench(wcoj): real per_tuple microbench + BENCHMARKS row (SPEC-12 #2, NF1)"
 ```
 
@@ -688,7 +688,7 @@ git commit -m "test(wcoj): confirm differential fuzzer green with SIMD seek/inte
 ### Task 8: Docs sync
 
 **Files:**
-- Modify: `docs/architecture.md`, `TASKS.md`, `BENCHMARKS.md` (already touched), `docs/index.md`
+- Modify: `docs/architecture.md`, `TASKS.md`, `docs/benchmarks.md` (already touched), `docs/index.md`
 
 - [ ] **Step 1: Update `docs/architecture.md`** — flip the WCOJ row's SIMD-seek note to **implemented**, referencing SPEC-12 F1 and the `per_tuple` number.
 

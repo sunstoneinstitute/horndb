@@ -7,7 +7,7 @@
 //! workloads, running the equivalent RDFox commands, and computing the
 //! comparison — lives in `scripts/bench/compare-rdfox.sh`.
 //!
-//! | Subcommand    | HornDB path                                   | Goal (BENCHMARKS.md)                         |
+//! | Subcommand    | HornDB path                                   | Goal (docs/benchmarks.md)                         |
 //! |---------------|-----------------------------------------------|----------------------------------------------|
 //! | `import`      | `horndb_storage` N-Triples bulk loader        | SPEC-02 F8: ≥1 M triples/sec bulk import     |
 //! | `transitive`  | `horndb_closure` GraphBLAS transitive closure | SPEC-05 acc#1: ≥10× RDFox on a chain         |

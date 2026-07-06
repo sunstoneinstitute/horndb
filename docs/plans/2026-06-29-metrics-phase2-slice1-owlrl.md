@@ -561,7 +561,7 @@ git commit -m 'feat(metrics): attach tier="unknown" label to storage_tier_bytes_
 - Create: `crates/metrics/benches/overhead.rs`
 - Modify: `crates/metrics/Cargo.toml`
 
-> This bench is **not** run in CI and its numbers are **not** recorded to `BENCHMARKS.md` from the laptop — it exists so the overhead can be confirmed on `hornbench`. It just needs to compile and run.
+> This bench is **not** run in CI and its numbers are **not** recorded to `docs/benchmarks.md` from the laptop — it exists so the overhead can be confirmed on `hornbench`. It just needs to compile and run.
 
 - [ ] **Step 1: Add the criterion dev-dep + bench target**
 

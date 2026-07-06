@@ -21,7 +21,7 @@
 - **Create `crates/closure/tests/incremental.rs`** — differential test (incremental ≡ GraphBLAS full closure) + end-to-end sink delta test.
 - **Create `crates/closure/benches/incremental.rs`** + **modify `crates/closure/Cargo.toml`** — criterion bench: incremental single-edge insert vs full recompute.
 - **Modify `docs/architecture.md`** — flip SPEC-05 "Incremental closure updates (F6)" row planned → partially implemented (insertion-only); note F5 pairing.
-- **Modify `BENCHMARKS.md`** — add SPEC-05 incremental-closure bench row.
+- **Modify `docs/benchmarks.md`** — add SPEC-05 incremental-closure bench row.
 - **Modify `TASKS.md`** — mark #42 increment delivered in the #5 breakdown note (parent stays `[v]`).
 
 ---
@@ -725,11 +725,11 @@ git commit -m "bench(closure): incremental insert vs full recompute (SPEC-05 F6)
 
 ---
 
-## Task 5: Documentation sync (architecture.md, BENCHMARKS.md, TASKS.md)
+## Task 5: Documentation sync (architecture.md, docs/benchmarks.md, TASKS.md)
 
 **Files:**
 - Modify: `docs/architecture.md`
-- Modify: `BENCHMARKS.md`
+- Modify: `docs/benchmarks.md`
 - Modify: `TASKS.md`
 
 Per CLAUDE.md "Keep the docs in sync" — same change as the code.
@@ -745,9 +745,9 @@ In `docs/architecture.md`, change the "Incremental closure updates (F6)" row
 
 Also update the SPEC-06 row at line ~245 "Closure-operator deltas (F5) | **planned** | Pairs with SPEC-05 incremental closure." — leave `**planned**` but append: "Insertion-side SPEC-05 incremental closure now ships ([#42](https://github.com/sunstoneinstitute/horndb/issues/42)); the SPEC-06 delta-feed pairing is still planned."
 
-- [ ] **Step 2: Add the BENCHMARKS.md row**
+- [ ] **Step 2: Add the docs/benchmarks.md row**
 
-In `BENCHMARKS.md`, under the SPEC-05 section (near the `transitive`/`sameas`
+In `docs/benchmarks.md`, under the SPEC-05 section (near the `transitive`/`sameas`
 bench rows ~line 157), add a row to the bench-inventory table:
 
 ```markdown
@@ -789,7 +789,7 @@ parent epic is not done.)
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/architecture.md BENCHMARKS.md TASKS.md
+git add docs/architecture.md docs/benchmarks.md TASKS.md
 git commit -m "docs(closure): record SPEC-05 F6 incremental closure (#42) in architecture/benchmarks/tasks"
 ```
 

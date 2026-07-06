@@ -1266,7 +1266,7 @@ Run: `cargo test -p horndb-storage --test snapshot_footprint -- --nocapture`
 Expected: PASS; printed B/triple < 6.0. If it is marginal (>6), the corpus is
 not representative enough — increase term reuse (more students per department),
 which is realistic for larger LUBM, until it passes with margin. Do **not** relax
-the 6.0 bound. Record the measured number for the PR / BENCHMARKS.md.
+the 6.0 bound. Record the measured number for the PR / docs/benchmarks.md.
 
 - [ ] **Step 3: Commit**
 
@@ -1285,7 +1285,7 @@ git commit -m "test(storage): SPEC-02 NF1 snapshot footprint <= 6 B/triple"
 - Modify: `crates/storage/INTEGRATION-NOTES.md`
 - Modify: `docs/architecture.md`
 - Modify: `docs/index.md`
-- Modify: `BENCHMARKS.md` (if a storage cold-tier row exists)
+- Modify: `docs/benchmarks.md` (if a storage cold-tier row exists)
 
 - [ ] **Step 1: Update the lib.rs scope comment**
 

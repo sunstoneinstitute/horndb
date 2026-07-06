@@ -19,7 +19,7 @@ These files drive the project — keep them in mind when planning work:
 - `docs/plans/2026-05-24-SPEC-*.md` — the one-per-spec implementation plans the Stage-1 pass executed.
 - `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and `TASKS.md` (outstanding work).
 - `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit. You can push commits that only contain task claims/updates to origin without asking. Its header carries the task↔GitHub-issue mirroring procedure.
-- `BENCHMARKS.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
+- `docs/benchmarks.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
 - `docs/metrics.md` — authoritative inventory of every metric and label HornDB exposes (`crates/metrics/`), one row per series. Keep it in lockstep with the code (see sync rule below). The `horndb-perftest-with-metrics` skill maps performance symptoms onto these metrics.
 - `harness/curation/owl2-rl-50.md` and `harness/selected.toml` — the conformance subset every spec is graded against.
 
@@ -42,7 +42,7 @@ All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There 
 
 Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*, `docs/metrics.md` for *the metrics surface*. When they disagree, **the code wins** — fix whichever is stale.
 
-**Never write a `#N` issue reference you haven't verified** (`gh issue view N`). A bare `#N` used as informal shorthand for a topic — rather than the real issue number — propagates across `TASKS.md`, `BENCHMARKS.md`, `docs/architecture.md`, and the SPECs, and unwinding it later is a multi-file `sed` sweep. If the issue isn't filed yet, write `#TODO` (or file it first), not a placeholder number.
+**Never write a `#N` issue reference you haven't verified** (`gh issue view N`). A bare `#N` used as informal shorthand for a topic — rather than the real issue number — propagates across `TASKS.md`, `docs/benchmarks.md`, `docs/architecture.md`, and the SPECs, and unwinding it later is a multi-file `sed` sweep. If the issue isn't filed yet, write `#TODO` (or file it first), not a placeholder number.
 
 ## Workspace layout
 
@@ -114,12 +114,12 @@ cargo install cargo-nextest --version '0.9.78' --locked   # build-from-source pa
 CI runs `cargo nextest run --profile ci` plus a separate `cargo test --doc`.
 
 **Run benchmarks on the `hornbench` server, never the laptop.** Any `cargo bench`
-run that produces numbers for `BENCHMARKS.md` must execute on the dedicated
+run that produces numbers for `docs/benchmarks.md` must execute on the dedicated
 benchmark host so results stay comparable over time (and to spare laptop battery
 and thermals). Procedure: `ssh hornbench`; the repo is at `~/src/horndb`; `git
 fetch`/`pull` and check out the commit under test (or `rsync` over any
 not-yet-committed files), then run the bench there and record the numbers (note
-the env) back in `BENCHMARKS.md`. Local `cargo bench` is fine only for a quick
+the env) back in `docs/benchmarks.md`. Local `cargo bench` is fine only for a quick
 smoke-check you are *not* going to record.
 
 **macOS dev tip:** the workspace builds ~90 separate test binaries, and each freshly-linked one triggers a Gatekeeper (`syspolicyd`) + XProtect scan on first run — which can pin those daemons near 100% CPU during `cargo test`/`build`. Add your terminal to System Settings → Privacy & Security → **Developer Tools** (or run `sudo spctl developer-mode enable-terminal` once) to exempt its child processes from Gatekeeper assessment. This and `cargo nextest` (above) are complementary: the exemption removes the per-binary scan, nextest removes the serial-per-binary run.

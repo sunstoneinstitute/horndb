@@ -39,7 +39,7 @@ on the trait predate this decision — use the lifetime-free trait form.)
 | `crates/sparql/src/plan/pushdown.rs` | `rewrite`, `needed_vars` (column pruning), aggregate pushdown to `CountScan` | 14, 15 |
 | `crates/sparql/src/plan/mod.rs` | Add `pushdown` module; add `PhysicalPlan::CountScan` variant | 14, 15 |
 | `crates/sparql/src/plan/explain.rs` | Render the new `CountScan` node | 15 |
-| `BENCHMARKS.md`, `TASKS.md`, `docs/architecture.md` | Doc sync | 16 |
+| `docs/benchmarks.md`, `TASKS.md`, `docs/architecture.md` | Doc sync | 16 |
 
 ---
 
@@ -1462,7 +1462,7 @@ git commit -m "feat(sparql): COUNT-over-BGP aggregate pushdown via count_bgp + C
 ## Task 16: Benchmark + docs sync
 
 **Files:**
-- Modify: `BENCHMARKS.md`, `TASKS.md`, `docs/architecture.md`
+- Modify: `docs/benchmarks.md`, `TASKS.md`, `docs/architecture.md`
 
 - [ ] **Step 1: Run `agg_profile` locally (smoke only, not recorded)**
 
@@ -1475,7 +1475,7 @@ sharply (pushdown) and intermediate-heavy queries improved.
 
 Per root `CLAUDE.md`: `ssh hornbench`, repo at `~/src/horndb`, `git fetch` +
 checkout this branch (or `rsync` uncommitted files), run the SPB-256
-aggregation-qps bench there, and record the before/after in `BENCHMARKS.md`
+aggregation-qps bench there, and record the before/after in `docs/benchmarks.md`
 (note the env). Do **not** record laptop numbers.
 
 - [ ] **Step 3: Sync `TASKS.md` + `docs/architecture.md`**
@@ -1489,7 +1489,7 @@ aggregate-pushdown scope).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add BENCHMARKS.md TASKS.md docs/architecture.md
+git add docs/benchmarks.md TASKS.md docs/architecture.md
 git commit -m "docs: record streaming runtime + pushdown bench + sync TASKS/architecture (#143, #144)"
 ```
 

@@ -11,7 +11,7 @@
 #   materialize  OWL 2 RL forward materialization  (Stage-1:     within 3x RDFox)
 #
 # RDFox commercial licences forbid *publishing* comparative numbers (the
-# "DeWitt clause"); this script is for INTERNAL use only. See BENCHMARKS.md.
+# "DeWitt clause"); this script is for INTERNAL use only. See docs/benchmarks.md.
 #
 # Usage:
 #   scripts/bench/compare-rdfox.sh [--chain N] [--depth D] [--instances I] [--keep]

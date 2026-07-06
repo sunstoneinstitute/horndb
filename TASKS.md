@@ -87,7 +87,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `bca05f2`) — the SPB aggregation queries are `OPTIONAL`-heavy (query1 has 15
   `OPTIONAL`s), so the nested-loop→hash-probe rewrite lifts their qps; `agg_profile`
   Q1–Q5 (no `OPTIONAL`) were blind to it. **#143/#144 are net-neutral on top** (branch
-  with them 30.78 ≈ same-day main without 30.71). See BENCHMARKS.md.
+  with them 30.78 ≈ same-day main without 30.71). See docs/benchmarks.md.
 
   **Remaining / deferred work:**
   1. Probe-side streaming for `Join` — joins currently drain both children before
@@ -102,7 +102,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
      toward O(|l|·|r|) — correct but potentially slow on a pathological workload
      (does not arise in the SPB mix).
 
-  See `docs/architecture.md` §9 and `BENCHMARKS.md`.
+  See `docs/architecture.md` §9 and `docs/benchmarks.md`.
 
 - [ ] **SPEC-12 SIMD acceleration layer.** ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
   A new stable-Rust `std::arch` SIMD layer with runtime AVX-512/AVX2/NEON dispatch +
@@ -150,13 +150,13 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `gather`; the primitive is differential-proptested bit-identical vs scalar on every
   host ISA path). The `dict_decode` (≥4×) and `partition_scan` (≥80% STREAM-Triad)
   microbenches are wired and smoke-run; the ≥4× ratio and the NUMA-pinned STREAM-Triad
-  fraction are the deferred hornbench-host measurement (`BENCHMARKS.md` rows marked
+  fraction are the deferred hornbench-host measurement (`docs/benchmarks.md` rows marked
   pending hornbench). The F2 "encode" stretch (vectorised `intern`) is out of scope.
   **Gated:** the delta-apply merge/dedup SIMD blocks on
   [#133](https://github.com/sunstoneinstitute/horndb/issues/133) (object index) +
   [#134](https://github.com/sunstoneinstitute/horndb/issues/134) (semi-naïve)
   and may be descoped; the `cax-sco` partition-filter scan is out of scope (superseded
-  by #133). See `docs/specs/SPEC-12-simd.md`, `docs/architecture.md` §14, `BENCHMARKS.md`.
+  by #133). See `docs/specs/SPEC-12-simd.md`, `docs/architecture.md` §14, `docs/benchmarks.md`.
 
 - [ ] **SPEC-04: within-partition object index on `MemStore`.**
   ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
@@ -168,7 +168,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   the F5 list-rule probes) from O(N) to O(|extent(c1)|). Ship **first**.
   Spec: `docs/specs/2026-06-27-owlrl-type-index-seminaive.md` (fix #1). Gate:
   `compiled_rules_ms` drop on the owlrl materialize A/B LUBM-shaped row + resident-set
-  delta recorded in `BENCHMARKS.md`; all differential gates stay green.
+  delta recorded in `docs/benchmarks.md`; all differential gates stay green.
 
 - [ ] **SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules.**
   ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
@@ -279,7 +279,7 @@ Closed tasks are listed in [Done](#done-for-traceability).
   `serve`, GraphDB Free `spb` repo) can hold it; flip `editorialAgents` on in
   `crates/harness/scenarios/spb-nightly.properties` and reconcile the nominal
   `datasetSize` (currently 18,644,617) with what is actually loaded; move the
-  trend metric to `editorial-qps`. See `BENCHMARKS.md` and the SPB nightly row
+  trend metric to `editorial-qps`. See `docs/benchmarks.md` and the SPB nightly row
   in `docs/architecture.md`.
 
 ## MEDIUM — Conformance

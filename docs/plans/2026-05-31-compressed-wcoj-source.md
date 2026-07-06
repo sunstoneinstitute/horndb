@@ -18,7 +18,7 @@
 - **Modify** `crates/wcoj/src/source/synthetic.rs` — extract the edge generator into a reusable `pub fn cyclic_edges(n,k,predicate,seed) -> Vec<Triple>` so both `VecTripleSource` and `CompressedTripleSource` can be built from identical edges in the bench.
 - **Create** `crates/wcoj/tests/source_parity.rs` — proptest asserting `WcojExecutor` over `CompressedTripleSource` produces identical result sets to `WcojExecutor` over `VecTripleSource`.
 - **Modify** `crates/wcoj/benches/four_cycle.rs` — add `wcoj_compressed` and `binary_hash_compressed` bench functions over a `CompressedTripleSource` built from the same edges, plus a one-time footprint print.
-- **Modify** `BENCHMARKS.md`, `docs/architecture.md`, `TASKS.md` — record measured numbers and bookkeeping (Task 5).
+- **Modify** `docs/benchmarks.md`, `docs/architecture.md`, `TASKS.md` — record measured numbers and bookkeeping (Task 5).
 
 ---
 
@@ -885,7 +885,7 @@ git commit -m "bench(wcoj): run four_cycle over compressed source; report footpr
 ### Task 5: Record measured results + docs/issue bookkeeping
 
 **Files:**
-- Modify: `BENCHMARKS.md`
+- Modify: `docs/benchmarks.md`
 - Modify: `docs/architecture.md`
 - Modify: `TASKS.md`
 
@@ -893,15 +893,15 @@ git commit -m "bench(wcoj): run four_cycle over compressed source; report footpr
 > REAL numbers. The placeholders `<…>` below MUST be replaced with captured
 > values before committing.
 
-- [ ] **Step 1: Update `BENCHMARKS.md` 4-cycle row**
+- [ ] **Step 1: Update `docs/benchmarks.md` 4-cycle row**
 
-Find the `four_cycle` row (around `BENCHMARKS.md:144`) and update the "current measured" cell to include the compressed numbers, e.g.:
+Find the `four_cycle` row (around `docs/benchmarks.md:144`) and update the "current measured" cell to include the compressed numbers, e.g.:
 
 ```
 | 4-cycle, 10⁶-edge synthetic (`benches/four_cycle.rs`) | `horndb-wcoj` | WCOJ ≥10× binary-hash | dense: WCOJ <X> s vs binary-hash <Y> s; **compressed: WCOJ <A> s vs binary-hash <B> s → <R>× faster**; source footprint <F> B/triple (was 144) (2026-05-31) | <RED if R<10 else GREEN — note> |
 ```
 
-Also update the warm-tier/footprint discussion lines (around `BENCHMARKS.md:101-150`) to note the compressed-source result and whether it closed the L3 gap.
+Also update the warm-tier/footprint discussion lines (around `docs/benchmarks.md:101-150`) to note the compressed-source result and whether it closed the L3 gap.
 
 - [ ] **Step 2: Update `docs/architecture.md`**
 
@@ -920,13 +920,13 @@ Example breakdown edit:
 
 - [ ] **Step 4: Verify the docs reference real numbers**
 
-Run: `grep -n "<" BENCHMARKS.md docs/architecture.md TASKS.md | grep -E "<[A-Za-z]" || echo "no placeholders remain"`
+Run: `grep -n "<" docs/benchmarks.md docs/architecture.md TASKS.md | grep -E "<[A-Za-z]" || echo "no placeholders remain"`
 Expected: `no placeholders remain` (every `<…>` placeholder replaced).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add BENCHMARKS.md docs/architecture.md TASKS.md
+git add docs/benchmarks.md docs/architecture.md TASKS.md
 git commit -m "docs(wcoj): record compressed four_cycle results; close #15 increment"
 ```
 

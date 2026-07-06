@@ -93,7 +93,7 @@ build/buy call for JIT/PreJIT is measured, not guessed.
   `ValuedKernel::{Builtin, Udf}` toggles the kernel under test.
 - `benches/valued_readiness.rs` produces the two decision-relevant numbers
   (valued-vs-boolean kernel split; generic-kernel penalty). Results +
-  decision rule live in `BENCHMARKS.md`. `tests/valued_closure.rs` pins
+  decision rule live in `docs/benchmarks.md`. `tests/valued_closure.rs` pins
   correctness, including that the builtin and UDF kernels are bit-identical.
 
 **Why FP64 / `(max, ×)` and not the boolean wrapper:** boolean matrices can use

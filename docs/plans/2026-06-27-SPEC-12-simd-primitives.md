@@ -1342,7 +1342,7 @@ Create `crates/simd/benches/intersect.rs`:
 ```rust
 //! SPEC-12 acceptance #3 / NF2: intersect SIMD-over-scalar speedup on
 //! L2-resident sorted u64 runs. Target: >=4x on AVX-512, >=2x on NEON.
-//! Run on hornbench; record the ratio in BENCHMARKS.md.
+//! Run on hornbench; record the ratio in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use horndb_simd::{intersect, with_forced_isa, Isa};
@@ -1416,14 +1416,14 @@ Expected: completes, prints scalar + (host SIMD) numbers. **Do not record laptop
 
 Per `CLAUDE.md`: `ssh hornbench`, repo at `~/src/horndb`, `git fetch && git checkout <this branch>`, then `cargo bench -p horndb-simd --bench intersect`. Capture the AVX2 vs AVX-512 vs scalar ratios.
 
-- [ ] **Step 4: Record the result in `BENCHMARKS.md`**
+- [ ] **Step 4: Record the result in `docs/benchmarks.md`**
 
 Add/update a SPEC-12 `intersect` row with the measured speedup, the host (EPYC Zen4), and the ISA the dispatcher would pick. If AVX-512 < AVX2 on Zen4 (the downclocking risk), note it and flip the production preference in `intersect::resolve()` to prefer AVX2 — with a comment citing the bench.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/simd/benches/intersect.rs BENCHMARKS.md crates/simd/src/intersect.rs
+git add crates/simd/benches/intersect.rs docs/benchmarks.md crates/simd/src/intersect.rs
 git commit -m "bench(simd): intersect SIMD-vs-scalar microbench + BENCHMARKS row (SPEC-12 #3, NF2)"
 ```
 

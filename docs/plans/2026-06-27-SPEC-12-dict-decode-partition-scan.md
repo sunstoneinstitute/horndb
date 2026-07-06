@@ -417,7 +417,7 @@ Create `crates/storage/benches/dict_decode.rs`:
 
 ```rust
 //! SPEC-12 acceptance #4 / NF4: bulk inline-int decode >=4x scalar.
-//! Run on hornbench; record the ratio in BENCHMARKS.md.
+//! Run on hornbench; record the ratio in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use horndb_simd::{with_forced_isa, Isa};
@@ -467,14 +467,14 @@ harness = false
 Run: `cargo bench -p horndb-storage --bench dict_decode -- --warm-up-time 1 --measurement-time 2`
 Expected: completes.
 
-- [ ] **Step 4: Record on hornbench + BENCHMARKS.md**
+- [ ] **Step 4: Record on hornbench + docs/benchmarks.md**
 
-`ssh hornbench`, check out the branch, run the bench, record the scalar-vs-AVX2 ratio in a SPEC-12 `dict_decode` row of `BENCHMARKS.md`. Must show ≥4× to satisfy acceptance #4.
+`ssh hornbench`, check out the branch, run the bench, record the scalar-vs-AVX2 ratio in a SPEC-12 `dict_decode` row of `docs/benchmarks.md`. Must show ≥4× to satisfy acceptance #4.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/storage/benches/dict_decode.rs crates/storage/Cargo.toml BENCHMARKS.md
+git add crates/storage/benches/dict_decode.rs crates/storage/Cargo.toml docs/benchmarks.md
 git commit -m "bench(storage): inline-int decode SIMD-vs-scalar + BENCHMARKS row (SPEC-12 #4, NF4)"
 ```
 
@@ -493,7 +493,7 @@ Create `crates/storage/benches/partition_scan.rs`:
 ```rust
 //! SPEC-12 acceptance #4 / SPEC-02 NF2: rdf:type partition scan reaches
 //! >=80% STREAM-Triad bandwidth. Run NUMA-pinned on hornbench; record GB/s
-//! and the STREAM-Triad fraction in BENCHMARKS.md.
+//! and the STREAM-Triad fraction in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use horndb_storage::partition::PartitionBuilder; // adapt to real path
@@ -524,7 +524,7 @@ criterion_group!(benches, bench_scan);
 criterion_main!(benches);
 ```
 
-> Adapt `PartitionBuilder`/`build`/`push`/`Partition` to the real storage API (read the existing partition tests). `Throughput::Bytes` makes criterion report GB/s; divide by the host's STREAM-Triad GB/s (measure once on hornbench, note it in `BENCHMARKS.md`) to get the fraction. The ≥80% gate is the NUMA-pinned hornbench number, not the laptop.
+> Adapt `PartitionBuilder`/`build`/`push`/`Partition` to the real storage API (read the existing partition tests). `Throughput::Bytes` makes criterion report GB/s; divide by the host's STREAM-Triad GB/s (measure once on hornbench, note it in `docs/benchmarks.md`) to get the fraction. The ≥80% gate is the NUMA-pinned hornbench number, not the laptop.
 
 - [ ] **Step 2: Register the bench** in `crates/storage/Cargo.toml`:
 
@@ -541,12 +541,12 @@ Expected: completes, prints GB/s.
 
 - [ ] **Step 4: Record NUMA-pinned on hornbench**
 
-`ssh hornbench`; measure STREAM-Triad once (record the host number); run the partition scan NUMA-pinned (e.g. `numactl --cpunodebind=0 --membind=0 cargo bench …`); compute the fraction. Record GB/s + STREAM-Triad fraction in `BENCHMARKS.md` (SPEC-12 `rdf_type_partition_scan` row). Must reach ≥80%.
+`ssh hornbench`; measure STREAM-Triad once (record the host number); run the partition scan NUMA-pinned (e.g. `numactl --cpunodebind=0 --membind=0 cargo bench …`); compute the fraction. Record GB/s + STREAM-Triad fraction in `docs/benchmarks.md` (SPEC-12 `rdf_type_partition_scan` row). Must reach ≥80%.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/storage/benches/partition_scan.rs crates/storage/Cargo.toml BENCHMARKS.md
+git add crates/storage/benches/partition_scan.rs crates/storage/Cargo.toml docs/benchmarks.md
 git commit -m "bench(storage): rdf:type partition scan bandwidth + STREAM-Triad fraction (SPEC-12 #4)"
 ```
 

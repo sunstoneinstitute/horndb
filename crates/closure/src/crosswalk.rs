@@ -26,7 +26,7 @@
 //! custom-semiring / PreJIT apparatus (Fork B / PreJIT) is **deferred** until a
 //! use case needs a *structured* carrier `(confidence, match-type, provenance)`
 //! that the built-in semirings cannot express. See `docs/specs/SPEC-05-*.md`
-//! (valued-reasoning addendum) and `BENCHMARKS.md`.
+//! (valued-reasoning addendum) and `docs/benchmarks.md`.
 //!
 //! ## Dictionary IDs → dense matrix indices
 //!

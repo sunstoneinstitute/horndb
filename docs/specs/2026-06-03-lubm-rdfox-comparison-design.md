@@ -3,7 +3,7 @@
 **Date:** 2026-06-03
 **Status:** Design — approved for planning
 **Tracks:** TASKS.md MEDIUM · _Conformance_ — SPEC-01 harness (RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
-**Gate:** BENCHMARKS.md Stage-1 — *LUBM-100 materialization within 3× of RDFox*.
+**Gate:** docs/benchmarks.md Stage-1 — *LUBM-100 materialization within 3× of RDFox*.
 
 ## Problem
 
@@ -53,8 +53,8 @@ materialization wall-clock and **cross-check closure counts**.
 
 RDFox numbers are **internal only** (DeWitt clause). All measured RDFox results
 land in gitignored `scripts/bench/results/` and `target/bench-rdfox/`. No measured
-RDFox number is ever committed — not in `BENCHMARKS.md`, commits, issues, or this
-doc. `BENCHMARKS.md` receives **status-only** updates.
+RDFox number is ever committed — not in `docs/benchmarks.md`, commits, issues, or this
+doc. `docs/benchmarks.md` receives **status-only** updates.
 
 ## Why HornDB's coverage makes this tractable
 
@@ -183,6 +183,6 @@ gitignored under `target/bench-rdfox/`.
 4. `compare-rdfox.sh --lubm 100` runs to a recorded outcome (a timing within the
    cap **or** an explicit "did not complete within cap"), with the parity gate
    evaluated.
-5. `BENCHMARKS.md` Stage-1 row updated **status-only** (no RDFox number);
+5. `docs/benchmarks.md` Stage-1 row updated **status-only** (no RDFox number);
    `TASKS.md` #10 reflects the new state; pre-push gate (clippy + build) stays
    green.

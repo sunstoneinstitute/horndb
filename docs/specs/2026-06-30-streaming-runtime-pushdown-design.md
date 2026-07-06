@@ -190,7 +190,7 @@ A `MaterializedOp` adapter wraps any not-yet-converted subtree: it calls the old
 - **Final gate:** `cargo nextest run -p horndb-sparql` and
   `cargo nextest run -p horndb-sparql --features server` green; clippy/fmt clean.
 - **Benchmark:** record the `agg_profile` deltas and the hornbench SPB-256
-  aggregation-qps move in `BENCHMARKS.md`; sync `TASKS.md` and `docs/architecture.md`
+  aggregation-qps move in `docs/benchmarks.md`; sync `TASKS.md` and `docs/architecture.md`
   in the same commit (per root `CLAUDE.md` doc-sync rule).
 
 ## Landing sequence
@@ -201,7 +201,7 @@ A `MaterializedOp` adapter wraps any not-yet-converted subtree: it calls the old
 4. Convert blocking/join operators; delete old `eval`.
 5. #144 column-pruning rewrite.
 6. #144 `CountScan` + `count_bgp` seam.
-7. Benchmark on hornbench + docs sync (`BENCHMARKS.md`, `TASKS.md`,
+7. Benchmark on hornbench + docs sync (`docs/benchmarks.md`, `TASKS.md`,
    `docs/architecture.md`).
 
 ## Risks

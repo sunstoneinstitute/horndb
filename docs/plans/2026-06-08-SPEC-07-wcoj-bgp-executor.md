@@ -217,7 +217,7 @@ pub struct WcojBackend {
 - [ ] Reproduce the SPB aggregation A/B per handoff §8 (serve + driver in one shell command; driver in
       foreground; no bare `wait`; `kill $SERVEPID`). Record before/after `aggregation-qps` in the
       harness DB and per-query latencies.
-- [ ] Update `BENCHMARKS.md` SPARQL row. **RDFox numbers stay out of committed files (DeWitt clause).**
+- [ ] Update `docs/benchmarks.md` SPARQL row. **RDFox numbers stay out of committed files (DeWitt clause).**
 
 ### Task 8 — docs + issue bookkeeping (same commit as the code)
 - [ ] `docs/architecture.md` §9: flip the SPEC-07 "runtime executes against `MemStore`" row to
@@ -266,4 +266,4 @@ pub struct WcojBackend {
 2. `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --workspace` green.
 3. The `serve` binary answers SPARQL over the WCOJ backend (Task 5).
 4. Task 7 shows SPB aggregation per-query latency dropping from ~0.5–7 s toward ~1–10 ms and aggregate
-   q/s rising by orders of magnitude (exact target per `BENCHMARKS.md`).
+   q/s rising by orders of magnitude (exact target per `docs/benchmarks.md`).

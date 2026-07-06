@@ -96,7 +96,7 @@ CPU also rejects the losing kernels:
   representative-calibration rule (supersede the balanced-only-calibration note
   where needed — it was for intersect's gate; calibration inputs elsewhere must
   be representative).
-- `BENCHMARKS.md`: record the cross-host SPB-256 ISA sweep (Zen4 + Intel).
+- `docs/benchmarks.md`: record the cross-host SPB-256 ISA sweep (Zen4 + Intel).
 - `TASKS.md` + `docs/architecture.md`: sync the SPEC-12 (#132) state; mirror to
   the GH issue.
 

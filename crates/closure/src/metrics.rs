@@ -12,7 +12,7 @@
 //!   Boolean-reachability baseline on the *same* shape (see the
 //!   `valued_readiness` bench), and the semiring op's share of closure time.
 //!
-//! The decision rule this enables (recorded in `BENCHMARKS.md`): stay on
+//! The decision rule this enables (recorded in `docs/benchmarks.md`): stay on
 //! built-in semirings while the carrier is scalar **or** `N` is small; reach
 //! for a custom semiring only when a use case needs a *structured* carrier;
 //! PreJIT only when the measured generic-kernel share × the generic→inlined

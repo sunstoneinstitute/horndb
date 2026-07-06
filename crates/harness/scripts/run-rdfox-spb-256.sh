@@ -9,7 +9,7 @@
 # publishing comparative benchmark numbers ("DeWitt clause").
 # Internal use under a benchmarking license is permitted; anything
 # leaving the project (paper, blog, deck) needs legal review first.
-# See SPEC-01 Risks and BENCHMARKS.md.
+# See SPEC-01 Risks and docs/benchmarks.md.
 #
 # Pre-conditions (must be satisfied before this script runs):
 #

@@ -131,7 +131,7 @@ uploaded cumulative sqlite artifact (`harness-<run_id>`). No raw-report artifact
 - `.claude/skills/nightly-benchmarks/SKILL.md` — expand the "Metrics recorded" table.
 - `crates/harness/src/ldbc_spb.rs` module doc — replace the "What we parse back out"
   section to describe the full set.
-- `BENCHMARKS.md` — note the expanded SPB metric surface on the relevant row.
+- `docs/benchmarks.md` — note the expanded SPB metric surface on the relevant row.
 
 Out of scope: `docs/metrics.md` (that is the Prometheus `crates/metrics` surface, a
 different store from the harness sqlite DB).

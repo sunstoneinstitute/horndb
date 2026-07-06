@@ -10,7 +10,7 @@
 
 Cut the ~480–530 ms `cax-sco` / `rdf:type` materialization cost on
 LUBM-shaped workloads (taxonomy depth 12, 40 k instances). Profiling
-(`BENCHMARKS.md`, owlrl materialize A/B row, [#61](https://github.com/sunstoneinstitute/horndb/issues/61))
+(`docs/benchmarks.md`, owlrl materialize A/B row, [#61](https://github.com/sunstoneinstitute/horndb/issues/61))
 established the cost is **not** closure: the GraphBLAS closure phase is
 ~0.3 % of reason time. The gap is two compounding inefficiencies in the
 compiled-rule + apply path. This spec proposes two ranked fixes, #1
@@ -26,7 +26,7 @@ Call path (confirmed firsthand, `cargo` workspace at this commit):
   `apply`. The reason loop runs against `horndb-owlrl`'s own `MemStore`
   (the `Engine` façade in `crates/owlrl/src/integration.rs` wraps
   `MemStore`, **not** `crates/storage`).
-- Measured split (`BENCHMARKS.md`, taxonomy d=12 / 40 k inst, 480 k
+- Measured split (`docs/benchmarks.md`, taxonomy d=12 / 40 k inst, 480 k
   inferred): reason ~627 ms, of which compiled-rules ~360 ms + apply
   ~200 ms; closure ~4 ms (noise).
 
@@ -205,7 +205,7 @@ differential gates stay green.
    40000`), the `compiled_rules_ms` phase drops materially (target: the
    `cax-sco` inner loop is O(|extent|), so compiled-rules cost scales
    with closed type count, not N × S). Record before/after
-   `compiled_rules_ms` and resident-set delta in `BENCHMARKS.md` (owlrl
+   `compiled_rules_ms` and resident-set delta in `docs/benchmarks.md` (owlrl
    materialize A/B row). The existing `rdf_type_skew` bench should also
    improve (its `Serial`/`Auto` probes go O(|extent|)).
 3. **Fix #2 — semi-naïve.** Round count and per-round delta size at
@@ -213,7 +213,7 @@ differential gates stay green.
    *work* (sum of inner-loop iterations) drops from ~O(rounds × S × N) to
    ~O(S × N) once. Record reason-time and the round/delta counters.
 4. **Combined:** measurable progress toward the Stage-1 LUBM **3×**
-   gate (`BENCHMARKS.md`, Stage-1 row). The gate need not fully close
+   gate (`docs/benchmarks.md`, Stage-1 row). The gate need not fully close
    here, but the compiled-rule + apply share of reason time must fall.
 
 **New measurement needed (instrument before optimizing):** extend
@@ -231,7 +231,7 @@ secondary proof-flag opt can be evaluated independently.
 
 Ship **#1 first** (object index — no trait/codegen/engine change, just
 `MemStore` internals + the new counters), land it, and record the
-`compiled_rules_ms` drop in `BENCHMARKS.md`. **Then #2** (semi-naïve —
+`compiled_rules_ms` drop in `docs/benchmarks.md`. **Then #2** (semi-naïve —
 `FireFn` signature + codegen + engine plumbing), measuring the round/work
 reduction against the #1 baseline. The two compound; measuring between
 them keeps the attribution honest and lets #1 land even if #2 slips.

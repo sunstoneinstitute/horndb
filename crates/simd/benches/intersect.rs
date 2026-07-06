@@ -1,6 +1,6 @@
 //! SPEC-12 acceptance #3 / NF2: intersect SIMD-over-scalar speedup on
 //! L2-resident sorted u64 runs. Target: >=4x on AVX-512, >=2x on NEON.
-//! Run on hornbench; record the ratio in BENCHMARKS.md.
+//! Run on hornbench; record the ratio in docs/benchmarks.md.
 //!
 //! Shapes cover BOTH the balanced regime (where block-vs-block SIMD wins) AND
 //! the skewed regime (where leapfrog feeds `intersect` lopsided `active_run`s

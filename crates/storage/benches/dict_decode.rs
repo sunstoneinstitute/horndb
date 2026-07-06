@@ -1,5 +1,5 @@
 //! SPEC-12 acceptance #4 / NF4: bulk inline-int decode ≥4× scalar.
-//! Run on hornbench; record the ratio in BENCHMARKS.md.
+//! Run on hornbench; record the ratio in docs/benchmarks.md.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use horndb_simd::{with_forced_isa, Isa};

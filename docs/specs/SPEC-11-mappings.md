@@ -72,7 +72,7 @@ The index is rebuilt/overlaid per hydration view; branch overlays compose with t
 
 **NF1. Crosswalk throughput.** Batch translation of a column of `TermId`s through a resident crosswalk index achieves ≥ (target TBD, benched on hornbench) IDs/sec, dominated by the vectorized lower-bound + add, not by allocation.
 
-**NF2. Index size.** ≤ ~10 bytes/pair bidirectional on a real mapping set (rung-2), beating the 16 B (unidirectional) / 32 B (bidirectional) naive two-column baseline. Recorded in `BENCHMARKS.md`.
+**NF2. Index size.** ≤ ~10 bytes/pair bidirectional on a real mapping set (rung-2), beating the 16 B (unidirectional) / 32 B (bidirectional) naive two-column baseline. Recorded in `docs/benchmarks.md`.
 
 **NF3. Chain-rule materialization.** Full chaining closure over a ~1.16M-mapping corpus (OxO2's reference: 1,160,020 asserted → +49,536 inferred in ~17 min / ~380 MB on a laptop) completes **≥ one order of magnitude faster** on the hornbench reference host — target ≤ ~1 min, ideally seconds — exploiting compiled rules + GraphBLAS closure.
 
@@ -94,7 +94,7 @@ The index is rebuilt/overlaid per hydration view; branch overlays compose with t
 3. **Negative chaining:** the `inference.md` xanthene example (positive ∘ `Not` ⟹ `Not`) is derived correctly, and no positive `exactMatch` is derived across a negative link.
 4. **Identity isolation (ADR-0017):** a differential test confirms `skos:exactMatch` never yields `owl:sameAs` entailment (no `eq-rep-*` firing on mapping edges), while `owl:sameAs`/`equivalentClass` mappings do reach identity.
 5. **Index correctness:** crosswalk-index lookup is bit-identical to a base-triple scan over the same mappings (differential test), in both directions.
-6. **Index size + throughput** measured on hornbench and recorded in `BENCHMARKS.md`: ≤ ~10 B/pair (NF2); throughput (NF1); full-closure time vs the OxO2 baseline (NF3).
+6. **Index size + throughput** measured on hornbench and recorded in `docs/benchmarks.md`: ≤ ~10 B/pair (NF2); throughput (NF1); full-closure time vs the OxO2 baseline (NF3).
 7. **Crosswalk-in-every-query:** a designated spine set is resident and crosswalkable without per-query hydration.
 8. **Provenance:** every inferred mapping returns a proof tree / `derived_from` chain bottoming out at asserted mappings (ADR-0013).
 

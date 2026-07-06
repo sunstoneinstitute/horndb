@@ -103,7 +103,7 @@ autotune-off fallback). Change only the production cache:
    (`(&str, horndb_simd::Isa)`) to `SimdMetrics::record`. Update `docs/metrics.md`
    with the new series row in the **same commit**.
 
-3. **Docs sync.** `BENCHMARKS.md`: record the hel01 (Intel) column next to the
+3. **Docs sync.** `docs/benchmarks.md`: record the hel01 (Intel) column next to the
    Zen4 numbers and replace the hand-tuned RED/GREEN verdicts with the
    calibration outcome (dispatch now auto-selects per host; the floor-miss on
    intersect is noted but no longer drives a manual default). `lib.rs`/`dispatch.rs`

@@ -97,7 +97,7 @@ on GraphBLAS's generic kernel. Deferred until such a use case is real.
 `libgraphblas` *only if* the metrics show the generic kernel hurts at scale.
 
 **Measured decision (from the #11 readiness metrics + #12 Fork-A bench, both on
-`hornbench`; see `BENCHMARKS.md`):** the **generic-kernel penalty for a scalar
+`hornbench`; see `docs/benchmarks.md`):** the **generic-kernel penalty for a scalar
 FP64 `(max, ×)` op is ≈1.0×** — a user-defined-op kernel is *not* meaningfully
 slower than the FactoryKernel on the vendored SuiteSparse v10.3.x build. Two
 consequences: (a) Fork A correctly stays on the built-in semiring — there is no
@@ -111,7 +111,7 @@ reaches ~69× — because OpenMP parallelises boolean's iso/bitmap fast path acr
 cores while the FP64 non-iso accumulation stays effectively serial. This is a
 property of the carrier, not the kernel (the generic-kernel penalty is still
 ~1.0×), and Fork A accepts it as the price of best-confidence semantics. See
-`BENCHMARKS.md` for the per-shape numbers.
+`docs/benchmarks.md` for the per-shape numbers.
 
 **Open questions for the eventual Fork-B spec (unchanged from #12):** fixed-size
 encoding of the structured carrier; exact `⊕`/`⊗` definitions and the semiring
