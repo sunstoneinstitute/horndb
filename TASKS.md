@@ -89,18 +89,30 @@ Closed tasks are listed in [Done](#done-for-traceability).
   Q1–Q5 (no `OPTIONAL`) were blind to it. **#143/#144 are net-neutral on top** (branch
   with them 30.78 ≈ same-day main without 30.71). See docs/benchmarks.md.
 
-  **Remaining / deferred work:**
-  1. Probe-side streaming for `Join` — joins currently drain both children before
-     emitting any output tuple (deferred; does not arise in the SPB mix but blocks
-     full end-to-end streaming).
-  2. Filter-aware / grouped / multi-aggregate count pushdown (deferred; only
-     COUNT-over-full-BGP is pushed down today).
+  **Remaining work — all four increments planned 2026-07-06 (specs + plans in tree):**
+  1. Probe-side streaming for `Join`/`LeftJoin` — joins currently drain both children
+     before emitting any output tuple (does not arise in the SPB mix but blocks full
+     end-to-end streaming) — **planned together with item 4**:
+     `docs/specs/2026-07-06-join-probe-streaming-design.md` +
+     `docs/plans/2026-07-06-join-probe-streaming.md`.
+  2. Filter-aware / grouped / multi-aggregate count pushdown (only
+     COUNT-over-full-BGP is pushed down today) — **planned**:
+     `docs/specs/2026-07-06-count-pushdown-extensions-design.md` (covers
+     equality-filter inlining, grouped COUNT via an additive
+     `Executor::count_bgp_grouped` seam, multi-aggregate all-plain-counts; defers
+     mixed COUNT+SUM, COUNT(DISTINCT), non-equality filters, with reasons) +
+     `docs/plans/2026-07-06-count-pushdown-extensions.md`.
   3. Streaming results out to the HTTP layer — `Runtime::run` still collects a
-     `Vec<Bindings>` before serializing (deferred).
+     `Vec<Bindings>` before serializing — **planned**:
+     `docs/specs/2026-07-06-http-streaming-results-design.md` (new
+     `Runtime::run_stream`/`BindingsStream`, all four SELECT formats stream via
+     `spawn_blocking` + bounded-channel body, first chunk pre-buffered for clean
+     early 400s) + `docs/plans/2026-07-06-http-streaming-results.md`.
   4. `batch_join_vars` intersects child *schemas*, not *bound* keys (native
      `LeftJoin`); a shared var unbound in every right row degrades the probe
      toward O(|l|·|r|) — correct but potentially slow on a pathological workload
-     (does not arise in the SPB mix).
+     (does not arise in the SPB mix) — **planned**, folded into item 1's spec/plan
+     (`bound_join_vars` computed from the drained build side).
 
   See `docs/architecture.md` §9 and `docs/benchmarks.md`.
 
