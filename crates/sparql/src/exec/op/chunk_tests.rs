@@ -477,22 +477,38 @@ fn left_join_empty_optional_cross_chunk() {
 
 /// Pins the build-actual-Term trigger of `forced_term` (the sibling test
 /// `distinct_over_streamed_join_mixed_provenance` pins the probe-claim
-/// trigger): here the probe side (BGP scan) is Slot::Id provenance and the
-/// build side (VALUES) actually holds Slot::Term rows. DISTINCT ?v must see
-/// exactly one solution at every chunk size.
+/// trigger). The probe side is a LeftJoin of Values [?x] over a BGP scan
+/// binding ?v, so its `may_emit_term` claim for ?v is FALSE (the Values
+/// child lacks ?v; the scan side is all-Id) — only the drained build data
+/// (VALUES actually holding Slot::Term) forces the decode. Probe row ?x=a
+/// matches the scan and carries ?v=Id(v1); probe row ?x=b leaves ?v Unbound,
+/// keys as None, probes ALL build rows and takes the build's Term(v1) in the
+/// merge. Without the forced decode the output stream mixes Id(v1) and
+/// Term(v1) in ?v and cross-chunk DISTINCT counts one logical value twice.
+/// Goes RED if the build-side `.any(Slot::Term)` arm is dropped from
+/// `build_join_state`.
 #[test]
 fn distinct_over_streamed_join_build_term_trigger() {
     let mut horn = HornBackend::new();
-    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+    horn.insert_triple(iri("a"), iri("q"), iri("v1"));
 
-    let left = PhysicalPlan::BgpScan {
-        patterns: vec![TriplePattern {
-            subject: Term::Var(Var::new("v")),
-            predicate: iri("p"),
-            object: Term::Var(Var::new("o")),
-        }],
+    // Probe: (?x=a, ?v=Id(v1)) and (?x=b, ?v=Unbound).
+    let probe = PhysicalPlan::LeftJoin {
+        left: Box::new(PhysicalPlan::Values {
+            vars: vec![Var::new("x")],
+            rows: vec![vec![some_iri("a")], vec![some_iri("b")]],
+        }),
+        right: Box::new(PhysicalPlan::BgpScan {
+            patterns: vec![TriplePattern {
+                subject: Term::Var(Var::new("x")),
+                predicate: iri("q"),
+                object: Term::Var(Var::new("v")),
+            }],
+        }),
+        expr: None,
     };
-    let right = PhysicalPlan::Values {
+    // Build: actual Slot::Term rows for ?v.
+    let build = PhysicalPlan::Values {
         vars: vec![Var::new("v"), Var::new("z")],
         rows: vec![vec![some_iri("v1"), some_iri("z1")]],
     };
@@ -500,8 +516,8 @@ fn distinct_over_streamed_join_build_term_trigger() {
         inner: Box::new(PhysicalPlan::Project {
             vars: vec![Var::new("v")],
             inner: Box::new(PhysicalPlan::Join {
-                left: Box::new(left),
-                right: Box::new(right),
+                left: Box::new(probe),
+                right: Box::new(build),
             }),
         }),
     };
@@ -509,5 +525,9 @@ fn distinct_over_streamed_join_build_term_trigger() {
     assert_chunk_invariant!(&horn, &plan, "Join build-term trigger");
 
     let big = run_sorted(&horn, &plan, 4096);
-    assert_eq!(big.len(), 1, "single logical ?v=v1 solution");
+    assert_eq!(
+        big.len(),
+        1,
+        "both merged rows carry the same logical ?v=v1"
+    );
 }
