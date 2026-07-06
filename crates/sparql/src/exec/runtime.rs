@@ -738,7 +738,7 @@ pub(crate) struct JoinState {
 /// scans — O(|l|·|r|) with correct results. Such a variable carries zero
 /// selectivity; dropping it restores hashing on the remaining key vars.
 ///
-/// Correctness is unaffected: `merge_rows`/`merge_rows_with` still check
+/// Correctness is unaffected: `merge_rows_with` still checks
 /// every shared variable per candidate pair, and an unbound variable is
 /// compatible with anything (SPARQL §18.3), so key selection only shapes the
 /// candidate buckets, never the match set. A *partially* bound variable

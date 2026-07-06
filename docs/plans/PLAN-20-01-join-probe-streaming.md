@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-06
 scope: "Probe-side streaming Join/LeftJoin + bound-key join-variable selection"
 ---
@@ -47,7 +47,7 @@ Fixes deferred item 4: the join key must come from the build side's actually-bou
 - Modify: `crates/sparql/src/exec/runtime.rs:769-778` (replace `batch_join_vars` incl. its doc comment), `:394` and `:465` (call sites in `compute_join`/`compute_left_join`)
 - Test: `crates/sparql/src/exec/runtime.rs` (new `join_key_tests` module at end of file), `crates/sparql/src/exec/op/chunk_tests.rs` (semantics pin)
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
 
 Append at the very end of `crates/sparql/src/exec/runtime.rs` (after the closing brace of `mod slot_differential`):
 
@@ -126,12 +126,12 @@ mod join_key_tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p horndb-sparql join_key_tests`
 Expected: FAIL to compile — `error[E0425]: cannot find function 'bound_join_vars' in this scope`
 
-- [ ] **Step 3: Implement `bound_join_vars` and delete `batch_join_vars`**
+- [x] **Step 3: Implement `bound_join_vars` and delete `batch_join_vars`**
 
 In `crates/sparql/src/exec/runtime.rs`, replace the whole `batch_join_vars` function and its doc comment (lines 769-778, starting `/// The join-variable set for the native LeftJoin ...`) with:
 
@@ -203,12 +203,12 @@ to
         let jvars = bound_join_vars(&l.schema, &r);
 ```
 
-- [ ] **Step 4: Run the unit tests to verify they pass**
+- [x] **Step 4: Run the unit tests to verify they pass**
 
 Run: `cargo nextest run -p horndb-sparql join_key_tests`
 Expected: PASS (4 tests)
 
-- [ ] **Step 5: Add the end-to-end semantics pin (chunk-boundary suite)**
+- [x] **Step 5: Add the end-to-end semantics pin (chunk-boundary suite)**
 
 Append at the end of `crates/sparql/src/exec/op/chunk_tests.rs`:
 
@@ -253,12 +253,12 @@ fn join_unbound_build_var_cross_chunk() {
 }
 ```
 
-- [ ] **Step 6: Run the no-change gates**
+- [x] **Step 6: Run the no-change gates**
 
 Run: `cargo nextest run -p horndb-sparql`
 Expected: PASS — all tests including `slot_differential`, `chunk_tests`, and the new `join_unbound_build_var_cross_chunk`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/sparql/src/exec/runtime.rs crates/sparql/src/exec/op/chunk_tests.rs
@@ -278,7 +278,7 @@ Infrastructure for Task 3: every operator declares, per output column, whether i
 - Modify: `crates/sparql/src/exec/op/blocking.rs` (all six `impl Op` blocks + new helper)
 - Create: `crates/sparql/src/exec/op/provenance_tests.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/sparql/src/exec/op/provenance_tests.rs`:
 
@@ -416,12 +416,12 @@ mod chunk_tests;
 mod provenance_tests;
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo nextest run -p horndb-sparql provenance_tests`
 Expected: FAIL to compile — `error[E0599]: no method named 'may_emit_term' found for ... Box<dyn Op ...>`
 
-- [ ] **Step 3: Add the trait method and all thirteen implementations**
+- [x] **Step 3: Add the trait method and all thirteen implementations**
 
 In `crates/sparql/src/exec/op/mod.rs`, replace the `Op` trait (lines 34-40) with:
 
@@ -610,17 +610,17 @@ Add to `impl Op for PathClosureOp`:
     }
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo nextest run -p horndb-sparql provenance_tests`
 Expected: PASS (5 tests)
 
-- [ ] **Step 5: Run the full crate suite**
+- [x] **Step 5: Run the full crate suite**
 
 Run: `cargo nextest run -p horndb-sparql`
 Expected: PASS — no behavior changed, only a new trait method
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/sparql/src/exec/op/
@@ -638,7 +638,7 @@ The build side (right) is drained into a `JoinState` on first `next()`; the prob
 - Modify: `crates/sparql/src/exec/op/blocking.rs` (rewrite `JoinOp` at :90-126; module doc; new `tests` module)
 - Test: `crates/sparql/src/exec/op/blocking.rs` (`join_streams_probe_side`), `crates/sparql/src/exec/op/chunk_tests.rs` (fan-out + mixed provenance)
 
-- [ ] **Step 1: Write the failing streaming-behavior test**
+- [x] **Step 1: Write the failing streaming-behavior test**
 
 Append at the end of `crates/sparql/src/exec/op/blocking.rs`:
 
@@ -721,12 +721,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo nextest run -p horndb-sparql join_streams_probe_side`
 Expected: FAIL — assertion `pulls.get() == 1` fails with left `5` (drain-both pulls the probe side to exhaustion before the first emission)
 
-- [ ] **Step 3: Add `JoinState` and the probe machinery to the runtime**
+- [x] **Step 3: Add `JoinState` and the probe machinery to the runtime**
 
 In `crates/sparql/src/exec/runtime.rs`, first **delete** `compute_join` (lines 374-440, from `/// Hash inner join of two materialized batches. Called by 'JoinOp'.` through its closing brace) and **delete** `merge_all` (lines 644-660, from `/// Merge the left row 'a' against each candidate right row using a` through its closing brace).
 
@@ -884,7 +884,7 @@ pub(crate) struct JoinState {
 }
 ```
 
-- [ ] **Step 4: Rewrite `JoinOp` as a streaming operator**
+- [x] **Step 4: Rewrite `JoinOp` as a streaming operator**
 
 In `crates/sparql/src/exec/op/blocking.rs`:
 
@@ -1005,12 +1005,12 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
 }
 ```
 
-- [ ] **Step 5: Run the streaming test to verify it passes**
+- [x] **Step 5: Run the streaming test to verify it passes**
 
 Run: `cargo nextest run -p horndb-sparql join_streams_probe_side`
 Expected: PASS
 
-- [ ] **Step 6: Add the chunk-boundary regression tests**
+- [x] **Step 6: Add the chunk-boundary regression tests**
 
 Append at the end of `crates/sparql/src/exec/op/chunk_tests.rs` (this needs one new import — change the first `use` line of the file from `use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};` to `use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, TriplePattern, Var};` and add `use crate::exec::Store;` below the existing imports):
 
@@ -1096,12 +1096,12 @@ fn distinct_over_streamed_join_mixed_provenance() {
 }
 ```
 
-- [ ] **Step 7: Run the full crate suite (no-change gates)**
+- [x] **Step 7: Run the full crate suite (no-change gates)**
 
 Run: `cargo nextest run -p horndb-sparql`
 Expected: PASS — including `slot_differential` (esp. `inner_join_multi_row_shared_var`, `distinct_join_over_optional_no_column_mixing`), `join_cross_chunk`, `join_unbound_build_var_cross_chunk`, and the two new tests
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/sparql/src/exec/runtime.rs crates/sparql/src/exec/op/blocking.rs crates/sparql/src/exec/op/chunk_tests.rs
@@ -1119,7 +1119,7 @@ Same skeleton as Task 3 with two differences: an unmatched probe row is emitted 
 - Modify: `crates/sparql/src/exec/op/blocking.rs` (rewrite `LeftJoinOp`; extend `tests`)
 - Test: `crates/sparql/src/exec/op/blocking.rs` (`left_join_streams_probe_side`), `crates/sparql/src/exec/op/chunk_tests.rs` (mixed provenance + empty OPTIONAL)
 
-- [ ] **Step 1: Write the failing streaming-behavior test**
+- [x] **Step 1: Write the failing streaming-behavior test**
 
 In the `mod tests` block at the end of `crates/sparql/src/exec/op/blocking.rs`, change the import line `use super::JoinOp;` to `use super::{JoinOp, LeftJoinOp};` and append inside the module:
 
@@ -1165,12 +1165,12 @@ In the `mod tests` block at the end of `crates/sparql/src/exec/op/blocking.rs`, 
     }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo nextest run -p horndb-sparql left_join_streams_probe_side`
 Expected: FAIL — assertion `pulls.get() == 1` fails with left `5`
 
-- [ ] **Step 3: Add the left-join probe machinery to the runtime**
+- [x] **Step 3: Add the left-join probe machinery to the runtime**
 
 In `crates/sparql/src/exec/runtime.rs`, **delete** `compute_left_join` (the function starting `/// Hash left-outer join of two evaluated batches.` through its closing brace — lines 442-548 pre-Task-3) and **delete** `probe_into_slots` (starting `/// Merge the left row 'a' against each candidate right row, apply the` through its closing brace, including its `#[allow(clippy::too_many_arguments)]`).
 
@@ -1276,7 +1276,7 @@ Finally, update the `normalize_columns` doc comment (the line `/// merges childr
     /// `force_term_columns` instead (they never see their whole output).
 ```
 
-- [ ] **Step 4: Rewrite `LeftJoinOp` as a streaming operator**
+- [x] **Step 4: Rewrite `LeftJoinOp` as a streaming operator**
 
 In `crates/sparql/src/exec/op/blocking.rs`, replace the whole `LeftJoinOp` section (struct + `impl LeftJoinOp` + `impl Op for LeftJoinOp`, including the Task 2 `may_emit_term` which reappears below) with:
 
@@ -1374,12 +1374,12 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
 }
 ```
 
-- [ ] **Step 5: Run the streaming test to verify it passes**
+- [x] **Step 5: Run the streaming test to verify it passes**
 
 Run: `cargo nextest run -p horndb-sparql left_join_streams_probe_side`
 Expected: PASS
 
-- [ ] **Step 6: Add the chunk-boundary regression tests**
+- [x] **Step 6: Add the chunk-boundary regression tests**
 
 Append at the end of `crates/sparql/src/exec/op/chunk_tests.rs`:
 
@@ -1454,12 +1454,12 @@ fn left_join_empty_optional_cross_chunk() {
 }
 ```
 
-- [ ] **Step 7: Run the full crate suite (no-change gates)**
+- [x] **Step 7: Run the full crate suite (no-change gates)**
 
 Run: `cargo nextest run -p horndb-sparql`
 Expected: PASS — including `left_join_cross_chunk`, `distinct_join_over_optional_no_column_mixing`, `distinct_union_mixed_provenance_no_column_mixing`, and the two new tests
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/sparql/src/exec/runtime.rs crates/sparql/src/exec/op/blocking.rs crates/sparql/src/exec/op/chunk_tests.rs
@@ -1475,7 +1475,7 @@ git commit -m 'perf(sparql): stream the probe side of the native LeftJoin (#128)
 - Modify: `docs/architecture.md` (§9 SPARQL streaming-runtime status note)
 - Modify: `docs/index.md` (add the new design doc + plan, per `docs/CLAUDE.md`)
 
-- [ ] **Step 1: Format and lint**
+- [x] **Step 1: Format and lint**
 
 Run: `cargo fmt --all`
 Expected: no output (files already formatted or now fixed)
@@ -1483,7 +1483,7 @@ Expected: no output (files already formatted or now fixed)
 Run: `cargo clippy -p horndb-sparql --all-targets -- -D warnings`
 Expected: clean, exit 0. (Pre-push runs the full `--workspace` clippy; this scoped run avoids rebuilding `oxrocksdb-sys` locally.)
 
-- [ ] **Step 2: Full test gates**
+- [x] **Step 2: Full test gates**
 
 Run: `cargo nextest run -p horndb-sparql`
 Expected: PASS, zero failures
@@ -1491,16 +1491,16 @@ Expected: PASS, zero failures
 Run: `cargo nextest run -p horndb-sparql --features server`
 Expected: PASS, zero failures (required for a full SPARQL pass per `crates/sparql/CLAUDE.md`)
 
-- [ ] **Step 3: Local smoke bench (NOT recorded)**
+- [x] **Step 3: Local smoke bench (NOT recorded)**
 
 Run: `cargo run -p horndb-sparql --release --example agg_profile`
 Expected: completes; timings in the same ballpark as before this branch (Q1-Q5 have no OPTIONAL and small probe sides, so expect noise-level deltas). This is a laptop smoke check only — do **not** record these numbers anywhere.
 
-- [ ] **Step 4: Official benchmark on hornbench (record-keeping note)**
+- [x] **Step 4: Official benchmark on hornbench (record-keeping note)**
 
 Per root `CLAUDE.md`, any recorded numbers must come from the `hornbench` host: `ssh hornbench`, repo at `~/src/horndb`, `git fetch` and check out this branch's commit, then run the SPB-256 suite there (or wait for the nightly on the merged commit). Expected outcome: **net-neutral aggregation-qps** (the SPB mix has small probe sides and no all-unbound shared join vars). Only update `docs/benchmarks.md` if the recorded number actually moves; otherwise leave it untouched.
 
-- [ ] **Step 5: Docs sync (same commit)**
+- [x] **Step 5: Docs sync (same commit)**
 
 In `TASKS.md`, under the #128 entry's "Remaining / deferred work" list (lines 92-104), remove items 1 and 4 and renumber, then add a LANDED note after the list. Replace the list block:
 
@@ -1544,7 +1544,7 @@ In `docs/architecture.md` §9, update the streaming-runtime status text: where i
 
 In `docs/index.md`, ensure `docs/specs/SPEC-20-join-probe-streaming.md` (purpose: streaming joins + bound-key selection design, read before touching `exec/op/blocking.rs` join code) and `docs/plans/PLAN-20-01-join-probe-streaming.md` (its implementation plan) are each listed with one line, per `docs/CLAUDE.md`. They may already be there from the plan-authoring branch — if so, skip.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add TASKS.md docs/architecture.md docs/index.md
@@ -1556,5 +1556,5 @@ git commit -m 'docs: sync TASKS/architecture/index for join probe streaming (#12
 ## Self-review notes
 
 - **Spec coverage:** design §1 (sides) → Tasks 3-4; §2 (state machine, pending carry, empty-build fast path) → Tasks 3-4; §3 (`may_emit_term`, forced columns) → Tasks 2-4; §4 (`bound_join_vars`) → Task 1; testing section → the red tests in Tasks 1-4 plus gates in Task 5.
-- **Deletions accounted for:** `batch_join_vars` (Task 1), `compute_join` + `merge_all` (Task 3), `compute_left_join` + `probe_into_slots` (Task 4). `merge_rows`, `merge_rows_with`, `row_join_key`, `build_merge_plan`, `union_schema`, `normalize_columns` (Union-only now), and `drain` survive.
+- **Deletions accounted for:** `batch_join_vars` (Task 1), `compute_join` + `merge_all` (Task 3), `compute_left_join` + `probe_into_slots` (Task 4). `merge_rows` was also deleted post-plan: a Task-4 review follow-up switched the OPTIONAL pad path to the precomputed merge plan, leaving it without callers. `merge_rows_with`, `row_join_key`, `build_merge_plan`, `union_schema`, `normalize_columns` (Union-only now), and `drain` survive.
 - **Type consistency:** `JoinState` fields are private to `runtime.rs`; the ops hold it opaquely and go through `build_join_state` / `probe_join_chunk` / `probe_left_join_chunk`. `bound_join_vars(left_schema: &[Var], build: &Batch)` is used with that exact signature in Tasks 1 and 3.
