@@ -7,6 +7,7 @@
 mod counting_body;
 pub mod metrics_route;
 pub mod query;
+mod stream_body;
 pub mod update;
 
 use crate::exec::mem::MemStore;
