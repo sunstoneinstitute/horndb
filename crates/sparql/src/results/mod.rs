@@ -48,3 +48,26 @@ impl ResultFormat {
         }
     }
 }
+
+use crate::exec::Bindings;
+
+/// Incremental SELECT serializer: `header` → zero or more `chunk`s →
+/// `footer`. Invariant (gated by `tests/results_streaming.rs`):
+/// concatenating the pieces over ANY chunking of the same rows yields
+/// exactly the one-shot `write_select_*` document — those functions are
+/// wrappers over this trait, so there is a single serialization path.
+pub trait SelectSerializer {
+    fn header(&mut self, vars: &[String]) -> String;
+    fn chunk(&mut self, vars: &[String], rows: &[Bindings]) -> String;
+    fn footer(&mut self) -> String;
+}
+
+/// Construct the incremental serializer for a wire format.
+pub fn select_serializer(fmt: ResultFormat) -> Box<dyn SelectSerializer + Send> {
+    match fmt {
+        ResultFormat::Json => Box::new(json::JsonSelectSerializer::default()),
+        ResultFormat::Xml => Box::new(xml::XmlSelectSerializer),
+        ResultFormat::Csv => Box::new(csv::CsvSelectSerializer),
+        ResultFormat::Tsv => Box::new(tsv::TsvSelectSerializer),
+    }
+}

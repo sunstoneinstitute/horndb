@@ -2,22 +2,46 @@
 
 use crate::algebra::Term;
 use crate::exec::Bindings;
+use crate::results::SelectSerializer;
+
+/// Incremental SPARQL-CSV SELECT serializer. Stateless: lines are
+/// self-contained.
+pub struct CsvSelectSerializer;
+
+impl SelectSerializer for CsvSelectSerializer {
+    fn header(&mut self, vars: &[String]) -> String {
+        let mut out = String::new();
+        out.push_str(&vars.join(","));
+        out.push_str("\r\n");
+        out
+    }
+
+    fn chunk(&mut self, vars: &[String], rows: &[Bindings]) -> String {
+        let mut out = String::new();
+        for row in rows {
+            let cells: Vec<String> = vars
+                .iter()
+                .map(|v| match row.get(v) {
+                    None => String::new(),
+                    Some(t) => csv_escape(&term_to_lex(t)),
+                })
+                .collect();
+            out.push_str(&cells.join(","));
+            out.push_str("\r\n");
+        }
+        out
+    }
+
+    fn footer(&mut self) -> String {
+        String::new()
+    }
+}
 
 pub fn write_select_csv(vars: &[String], rows: &[Bindings]) -> String {
-    let mut out = String::new();
-    out.push_str(&vars.join(","));
-    out.push_str("\r\n");
-    for row in rows {
-        let cells: Vec<String> = vars
-            .iter()
-            .map(|v| match row.get(v) {
-                None => String::new(),
-                Some(t) => csv_escape(&term_to_lex(t)),
-            })
-            .collect();
-        out.push_str(&cells.join(","));
-        out.push_str("\r\n");
-    }
+    let mut ser = CsvSelectSerializer;
+    let mut out = ser.header(vars);
+    out.push_str(&ser.chunk(vars, rows));
+    out.push_str(&ser.footer());
     out
 }
 

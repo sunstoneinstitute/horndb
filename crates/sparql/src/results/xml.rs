@@ -11,34 +11,56 @@
 use crate::algebra::Term;
 use crate::exec::runtime::literal_parts;
 use crate::exec::Bindings;
+use crate::results::SelectSerializer;
+
+/// Incremental SPARQL-XML SELECT serializer. Stateless: `<result>` blocks
+/// are self-contained, so chunks need no cross-chunk bookkeeping.
+pub struct XmlSelectSerializer;
+
+impl SelectSerializer for XmlSelectSerializer {
+    fn header(&mut self, vars: &[String]) -> String {
+        let mut out = String::new();
+        out.push_str(r#"<?xml version="1.0"?>"#);
+        out.push_str("\n<sparql xmlns=\"http://www.w3.org/2005/sparql-results#\">\n");
+        out.push_str("  <head>\n");
+        for v in vars {
+            out.push_str(&format!(
+                "    <variable name=\"{}\"/>\n",
+                xml_attr_escape(v)
+            ));
+        }
+        out.push_str("  </head>\n");
+        out.push_str("  <results>\n");
+        out
+    }
+
+    fn chunk(&mut self, vars: &[String], rows: &[Bindings]) -> String {
+        let mut out = String::new();
+        for row in rows {
+            out.push_str("    <result>\n");
+            for v in vars {
+                if let Some(t) = row.get(v) {
+                    out.push_str(&format!("      <binding name=\"{}\">", xml_attr_escape(v)));
+                    out.push_str(&term_to_xml(t));
+                    out.push_str("</binding>\n");
+                }
+            }
+            out.push_str("    </result>\n");
+        }
+        out
+    }
+
+    fn footer(&mut self) -> String {
+        "  </results>\n</sparql>\n".to_string()
+    }
+}
 
 /// Serialise a SELECT result set as SPARQL Results XML.
 pub fn write_select_xml(vars: &[String], rows: &[Bindings]) -> String {
-    let mut out = String::new();
-    out.push_str(r#"<?xml version="1.0"?>"#);
-    out.push_str("\n<sparql xmlns=\"http://www.w3.org/2005/sparql-results#\">\n");
-    out.push_str("  <head>\n");
-    for v in vars {
-        out.push_str(&format!(
-            "    <variable name=\"{}\"/>\n",
-            xml_attr_escape(v)
-        ));
-    }
-    out.push_str("  </head>\n");
-    out.push_str("  <results>\n");
-    for row in rows {
-        out.push_str("    <result>\n");
-        for v in vars {
-            if let Some(t) = row.get(v) {
-                out.push_str(&format!("      <binding name=\"{}\">", xml_attr_escape(v)));
-                out.push_str(&term_to_xml(t));
-                out.push_str("</binding>\n");
-            }
-        }
-        out.push_str("    </result>\n");
-    }
-    out.push_str("  </results>\n");
-    out.push_str("</sparql>\n");
+    let mut ser = XmlSelectSerializer;
+    let mut out = ser.header(vars);
+    out.push_str(&ser.chunk(vars, rows));
+    out.push_str(&ser.footer());
     out
 }
 
