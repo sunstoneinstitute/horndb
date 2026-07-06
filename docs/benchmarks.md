@@ -238,40 +238,38 @@ with **no DeWitt clause**, so these numbers may be recorded and published.
 
 Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
 `scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
-below: **`hornbench`, release, 2026-06-20**, best-of-3 warm per upstream
-protocol (q4 column is single-run / timeout — see note).
+below: **`hornbench`, release, 2026-07-06** (commit `c4645f0`, post hash
+`LeftJoin`), best-of-3 warm per upstream protocol.
 
 | operation | medium (~100K) | large (~1M) | xlarge (~10M) |
 |---|---|---|---|
-| read_turtle | 0.185s | 2.075s | 22.58s |
-| write_turtle | 0.030s | 0.389s | 3.86s |
-| write_ntriples | 0.027s | 0.351s | 3.66s |
-| read_ntriples | 0.138s | 1.723s | 20.04s |
-| q1 `COUNT(*)` | 0.091s | 1.120s | 7.92s |
-| q2 group/sum/limit | 0.018s | 0.334s | 5.33s |
-| q3 3-join + filter + limit | 0.009s | 0.135s | 2.37s |
-| q4 `OPTIONAL` + `COUNT DISTINCT` | 1.447s | **~231s** ¹ | **TIMEOUT** ¹ |
-| q5 `CONSTRUCT` | 0.002s | 0.037s | 1.05s |
-| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.667s | 10.99s |
+| read_turtle | 0.183s | 2.068s | 23.12s |
+| write_turtle | 0.030s | 0.363s | 3.94s |
+| write_ntriples | 0.027s | 0.341s | 3.76s |
+| read_ntriples | 0.139s | 1.746s | 19.69s |
+| q1 `COUNT(*)` | 0.006s | 0.069s | 1.24s |
+| q2 group/sum/limit | 0.016s | 0.245s | 4.99s |
+| q3 3-join + filter + limit | 0.008s | 0.133s | 2.39s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.021s | 0.334s | 6.80s |
+| q5 `CONSTRUCT` | 0.002s | 0.038s | 1.16s |
+| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.682s | 11.52s |
 
-**Status — all six queries execute correctly at every scale; the suite is
-runnable. The table is a pre-fix baseline: re-run pending on `hornbench`.**
+**Status — GREEN: all six queries complete at every scale, no timeouts.**
 
-¹ **Stale — the q4 cliff has since been fixed.** At measurement time (2026-06-20)
-the `OPTIONAL` left-join was a nested loop and scaled ~quadratically (1.45s@100K
-→ ~231s cold@1M → did not complete@10M within the 600s upstream cap). That was
-filed and fixed as [#116](https://github.com/sunstoneinstitute/horndb/issues/116)
-(closed 2026-06-25): `exec/runtime.rs` now runs `LeftJoin` as a slot hash-probe
-keyed on the shared variables ([#128](https://github.com/sunstoneinstitute/horndb/issues/128)
-Slice 2), ~linear in the common case. The [#128](https://github.com/sunstoneinstitute/horndb/issues/128)
-aggregation-runtime rework also post-dates this table, so the q1/q2 numbers are
-likely stale too. The driver's per-query watchdog records `TIMEOUT` and
-continues to the next query, so one slow query never blocks the rest of the
-suite (matching upstream's rdflib behaviour).
+The q4 `OPTIONAL` cliff from the first baseline (2026-06-20: 1.45s@100K →
+~231s cold@1M → `TIMEOUT`@10M under the 600s upstream cap, when `LeftJoin` was
+a nested loop) is gone: the slot hash-probe `LeftJoin`
+([#116](https://github.com/sunstoneinstitute/horndb/issues/116),
+[#128](https://github.com/sunstoneinstitute/horndb/issues/128) Slice 2) brings
+q4 to **0.334s@1M (~690×) and 6.80s@10M**. The #128 aggregation rework also
+moved q1 (7.92s → 1.24s @10M warm; the warm/cold split is a `COUNT`-pushdown
+effect — cold q1@10M is ~4.0s). The driver's per-query watchdog (records
+`TIMEOUT`, continues to the next query, matching upstream's rdflib behaviour)
+is retained but no longer triggers.
 
-Two smaller follow-ups surfaced at measurement time: (a) `SUM` over `xsd:double`
-yields `xsd:decimal` (value correct, datatype deviates from SPARQL type
-promotion); (b) no `LIMIT` pushdown. See the `HornBackend` scale notes
+Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
+`xsd:decimal` (value correct, datatype deviates from SPARQL type promotion);
+(b) no `LIMIT` pushdown. See the `HornBackend` scale notes
 (`crates/sparql/tests/horn_load_hammer.rs`) for the companion ~10M load-path
 memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
 duplication).
