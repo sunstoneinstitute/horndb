@@ -331,3 +331,57 @@ async fn explain_json_pragma_returns_json_plan() {
     assert_eq!(v["mode"], "materialized");
     assert!(v["plan"]["op"].is_string());
 }
+
+/// 5000 rows is above the fixed release batch_rows() of 4096, so a streamed
+/// body must arrive in >= 2 data frames. One frame == the old materialized
+/// path (this is the memory-win mechanism proof: multiple frames means the
+/// full serialized document never existed in one buffer).
+#[tokio::test]
+async fn large_select_streams_in_multiple_chunks() {
+    use http_body::Body as _;
+
+    let mut s = MemStore::default();
+    for i in 0..5000 {
+        s.insert_triple(
+            iri(&format!("http://ex/s{i}")),
+            iri("http://ex/p"),
+            iri(&format!("http://ex/o{i}")),
+        );
+    }
+    let state = AppState {
+        store: Arc::new(RwLock::new(s)),
+    };
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/query?query=SELECT%20%3Fs%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()["content-type"],
+        "application/sparql-results+json"
+    );
+
+    let mut body = resp.into_body();
+    let mut frames = 0usize;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        let frame = frame.expect("clean stream");
+        if let Ok(data) = frame.into_data() {
+            frames += 1;
+            buf.extend_from_slice(&data);
+        }
+    }
+    assert!(
+        frames >= 2,
+        "expected a chunked body, got {frames} frame(s)"
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&buf).expect("frames concatenate to valid JSON");
+    assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 5000);
+}

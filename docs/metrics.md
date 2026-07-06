@@ -77,8 +77,8 @@ registered the collector. In tests, read the registry directly with
 | `horndb_sparql_request_bytes_total` | counter | `endpoint` | bytes | request body bytes (exact at end-of-stream) |
 | `horndb_sparql_response_bytes_total` | counter | `endpoint` | bytes | response body bytes |
 | `horndb_sparql_query_total` | counter | `kind` | count | query/update operations by kind |
-| `horndb_sparql_query_errors_total` | counter | `stage` | count | pipeline errors by stage |
-| `horndb_sparql_stage_duration_seconds` | histogram | `stage` | s `(1e-4 ×3 ×12)` | per-stage pipeline latency |
+| `horndb_sparql_query_errors_total` | counter | `stage` | count | pipeline errors by stage; `exec` includes mid-stream errors of HTTP-streamed SELECTs (which abort the response body rather than producing a 4xx/5xx) |
+| `horndb_sparql_stage_duration_seconds` | histogram | `stage` | s `(1e-4 ×3 ×12)` | per-stage pipeline latency; for HTTP-streamed SELECTs, `exec` measures plan→first-result-chunk (the full drain is visible in `horndb_sparql_request_duration_seconds`), and non-SELECT `/query` requests record one extra `parse` observation from streaming-path routing |
 
 Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) and
 `crates/sparql/src/api.rs` (`timed()`, query-kind classification).

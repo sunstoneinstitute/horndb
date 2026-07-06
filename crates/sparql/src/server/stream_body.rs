@@ -19,15 +19,12 @@ use tokio::sync::mpsc::Receiver;
 /// Dropping this body drops the receiver, which makes the serializer's
 /// `blocking_send` fail — the blocking task returns early and releases the
 /// store read lock. That is the client-disconnect cancellation path.
-// Constructed here; consumed by the server/query.rs streaming handler (Task 6).
-#[allow(dead_code)]
 pub(crate) struct ChannelBody {
     first: Option<Bytes>,
     rx: Receiver<Result<Bytes, SparqlError>>,
 }
 
 impl ChannelBody {
-    #[allow(dead_code)]
     pub(crate) fn new(first: Bytes, rx: Receiver<Result<Bytes, SparqlError>>) -> Self {
         Self {
             first: Some(first),
