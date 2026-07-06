@@ -1,0 +1,22 @@
+PREFIX : <http://benchmark.example/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+CONSTRUCT {
+    ?customer rdf:type :Customer .
+    ?customer rdfs:label ?name .
+    ?customer :country :Norway .
+    ?order :placedBy ?customer .
+    ?order :totalAmount ?amount .
+    ?order :contains ?product .
+    ?product rdfs:label ?productName .
+}
+WHERE {
+    ?customer rdf:type :Customer ;
+              rdfs:label ?name ;
+              :country :Norway .
+    ?order :placedBy ?customer ;
+           :totalAmount ?amount ;
+           :contains ?product .
+    ?product rdfs:label ?productName .
+}

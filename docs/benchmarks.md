@@ -227,6 +227,53 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)) | **HornDB 36.16 qps** (Zen4 hornbench, 2026-07-01, all-scalar SIMD table) vs **GraphDB Free ~153 qps** → **~4.2× gap**; Intel SPR hel01: 34.4 (don't compare qps across hosts — measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2; the step was bisected to the native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → 36.16 (SIMD known-CPU table replacing the net-harmful calibrated kernels). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)** — remaining levers: probe-side join streaming, filter-aware/multi-aggregate pushdown, HTTP result streaming |
 
+### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
+
+The [DataTreehouse **trainmarks**](https://github.com/DataTreehouse/trainmarks)
+benchmark — a synthetic e-commerce graph (customers / orders / products) at
+three scales with six SPARQL queries and Turtle/N-Triples I/O timing, **no OWL
+reasoning** — runs end-to-end against the storage/WCOJ `HornBackend`. Unlike
+the RDFox comparison, trainmarks is a public, permissively-licensed benchmark
+with **no DeWitt clause**, so these numbers may be recorded and published.
+
+Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
+`scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
+below: **`hornbench`, release, 2026-07-06** (commit `c4645f0`, post hash
+`LeftJoin`), best-of-3 warm per upstream protocol.
+
+| operation | medium (~100K) | large (~1M) | xlarge (~10M) |
+|---|---|---|---|
+| read_turtle | 0.183s | 2.068s | 23.12s |
+| write_turtle | 0.030s | 0.363s | 3.94s |
+| write_ntriples | 0.027s | 0.341s | 3.76s |
+| read_ntriples | 0.139s | 1.746s | 19.69s |
+| q1 `COUNT(*)` | 0.006s | 0.069s | 1.24s |
+| q2 group/sum/limit | 0.016s | 0.245s | 4.99s |
+| q3 3-join + filter + limit | 0.008s | 0.133s | 2.39s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.021s | 0.334s | 6.80s |
+| q5 `CONSTRUCT` | 0.002s | 0.038s | 1.16s |
+| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.682s | 11.52s |
+
+**Status — GREEN: all six queries complete at every scale, no timeouts.**
+
+The q4 `OPTIONAL` cliff from the first baseline (2026-06-20: 1.45s@100K →
+~231s cold@1M → `TIMEOUT`@10M under the 600s upstream cap, when `LeftJoin` was
+a nested loop) is gone: the slot hash-probe `LeftJoin`
+([#116](https://github.com/sunstoneinstitute/horndb/issues/116),
+[#128](https://github.com/sunstoneinstitute/horndb/issues/128) Slice 2) brings
+q4 to **0.334s@1M (~690×) and 6.80s@10M**. The #128 aggregation rework also
+moved q1 (7.92s → 1.24s @10M warm; the warm/cold split is a `COUNT`-pushdown
+effect — cold q1@10M is ~4.0s). The driver's per-query watchdog (records
+`TIMEOUT`, continues to the next query, matching upstream's rdflib behaviour)
+is retained but no longer triggers.
+
+Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
+`xsd:decimal` (value correct, datatype deviates from SPARQL type promotion);
+(b) no `LIMIT` pushdown. See the `HornBackend` scale notes
+(`crates/sparql/tests/horn_load_hammer.rs`) for the companion ~10M load-path
+memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
+duplication).
+
 ### Scaffolded but not yet evaluated against targets
 
 These benches compile and run on synthetic fixtures so future regressions are

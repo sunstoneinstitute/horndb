@@ -433,6 +433,21 @@ impl HornBackend {
         self.stored_keys.contains(&key)
     }
 
+    /// Materialize every live triple as oxrdf terms, for export /
+    /// serialization (the load path is insertion-only and the server never
+    /// dumps, so this is the read-back seam). Tombstoned triples are skipped;
+    /// any triple whose TermIds no longer resolve in the dictionary is
+    /// silently dropped (cannot happen for an insertion-only dictionary).
+    pub fn iter_oxrdf(&self) -> Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> {
+        let dict = self.store.dictionary();
+        self.store
+            .scan_all_term_ids()
+            .into_iter()
+            .filter(|(s, p, o)| !self.tombstones.contains(&(s.0, p.0, o.0)))
+            .filter_map(|(s, p, o)| Some((dict.lookup(s)?, dict.lookup(p)?, dict.lookup(o)?)))
+            .collect()
+    }
+
     /// Get-or-build the WCOJ snapshot.
     pub(crate) fn wcoj_snapshot(&self) -> Arc<VecTripleSource> {
         let mut guard = self.snapshot.lock().expect("snapshot lock poisoned");
