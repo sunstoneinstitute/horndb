@@ -1,6 +1,6 @@
 //! Byte-level reader/writer for the HDT-derived snapshot format.
 //!
-//! Layout is specified in docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md.
+//! Layout is specified in docs/plans/PLAN-02-02-hdt-snapshot.md.
 
 use super::varint::{read_uvarint, write_uvarint};
 use crate::error::{Result, StorageError};

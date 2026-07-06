@@ -37,7 +37,7 @@
 //! 2. `cargo build -p horndb-owlrl` regenerates `generated_rules.rs`.
 //! 3. Add a unit test in `tests/single_rule.rs`.
 //!
-//! See `plans/2026-05-24-SPEC-04-owl-rl-rule-engine.md` for the full plan.
+//! See `plans/PLAN-04-01-owl-rl-rule-engine.md` for the full plan.
 
 pub mod backend;
 pub mod datatype_literals;

@@ -16,7 +16,7 @@ HornDB is a hybrid forward/backward-chaining RDF reasoner targeting OWL 2 RL wit
 These files drive the project — keep them in mind when planning work:
 
 - `docs/specs/SPEC-00..10-*.md` — subsystem contracts. Each ends with **Acceptance criteria** that gate the spec.
-- `docs/plans/2026-05-24-SPEC-*.md` — the one-per-spec implementation plans the Stage-1 pass executed.
+- `docs/plans/PLAN-NN-MM-*.md` — implementation plans, numbered by origin spec (the `PLAN-NN-01` set for SPEC-01..09 is the Stage-1 pass).
 - `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and `TASKS.md` (outstanding work).
 - `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit. You can push commits that only contain task claims/updates to origin without asking. Its header carries the task↔GitHub-issue mirroring procedure.
 - `docs/benchmarks.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
@@ -29,8 +29,9 @@ The harness-first rule (from SPEC-00): a SPEC is not satisfied until its referen
 
 All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There is exactly one home for each — **do not create a parallel tree**. When a superpowers skill (brainstorming, `writing-plans`, `writing-skills`, etc.) or any other tool defaults to writing under `docs/superpowers/` (or any other subdirectory), redirect its output to `docs/specs/` or `docs/plans/` instead. Naming:
 
-- Subsystem contracts use the `SPEC-NN-<slug>.md` form and gate on **Acceptance criteria** (`docs/specs/`).
-- Dated design specs and implementation plans use a `YYYY-MM-DD-<slug>.md` prefix (`docs/specs/` and `docs/plans/` respectively).
+- Every spec is `SPEC-NN-<slug>.md` (`docs/specs/`) — subsystem contracts and point/design specs alike; take the next free `NN`. Subsystem contracts gate on **Acceptance criteria**.
+- Every plan is `PLAN-NN-MM-<slug>.md` (`docs/plans/`) — `NN` is the origin spec (`00` if none), `MM` the per-spec sequence number.
+- Both carry `status:` / `date:` / `scope:` YAML frontmatter. Full rules live in `docs/specs/AGENTS.md` and `docs/plans/AGENTS.md`.
 
 ### Keep the docs in sync (do this in the same commit)
 
@@ -130,7 +131,7 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 
 - Common deps go in the root `[workspace.dependencies]` and are referenced with `dep.workspace = true` from each crate. Add new shared deps there, not per-crate.
 - Each subsystem crate has an `INTEGRATION-NOTES.md` (sometimes also `FUTURE-WORK.md` or `STAGE1-ACCEPTANCE.md`). Read these before changing the public API of a crate — they record decisions that aren't in the specs.
-- Plans (`docs/plans/2026-05-24-*.md`) are historical implementation logs of the Stage-1 dispatch; treat them as commit-message-grade context, not as a source of truth for current behaviour.
+- Executed plans (`docs/plans/PLAN-*.md` with `status: executed`) are historical implementation logs; treat them as commit-message-grade context, not as a source of truth for current behaviour.
 - `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (TASKS.md LOW).
 
 ## Where deeper guidance lives

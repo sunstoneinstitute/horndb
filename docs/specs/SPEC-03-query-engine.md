@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-03 — WCOJ Query Engine"
+---
+
 # SPEC-03 — WCOJ Query Engine
 
 ## Purpose

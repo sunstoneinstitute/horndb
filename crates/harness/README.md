@@ -2,7 +2,7 @@
 
 SPEC-01 conformance and benchmarking harness. See
 `specs/SPEC-01-conformance-benchmarks.md` and
-`plans/2026-05-24-SPEC-01-conformance-harness.md`.
+`plans/PLAN-01-01-conformance-harness.md`.
 
 ## Local invocation
 

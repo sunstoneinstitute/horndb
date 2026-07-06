@@ -26,7 +26,7 @@ pub mod term;
 pub mod tier;
 
 // Re-exports below are added incrementally as each module is implemented.
-// See plans/2026-05-24-SPEC-02-storage.md tasks 2–9.
+// See plans/PLAN-02-01-storage.md tasks 2–9.
 
 pub use dictionary::Dictionary;
 pub use error::StorageError;

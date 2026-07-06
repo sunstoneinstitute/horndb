@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-04 — OWL 2 RL Rule Engine"
+---
+
 # SPEC-04 — OWL 2 RL Rule Engine
 
 ## Purpose

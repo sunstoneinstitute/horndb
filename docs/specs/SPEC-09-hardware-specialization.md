@@ -1,3 +1,9 @@
+---
+status: roadmap
+date: 2026-05-24
+scope: "SPEC-09 — Hardware Specialization Roadmap"
+---
+
 # SPEC-09 — Hardware Specialization Roadmap
 
 ## Purpose

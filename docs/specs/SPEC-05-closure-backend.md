@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-05 — GraphBLAS Closure Backend"
+---
+
 # SPEC-05 — GraphBLAS Closure Backend
 
 ## Purpose

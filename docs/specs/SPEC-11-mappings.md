@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-06-27
+scope: "SPEC-11 — SSSOM Mappings and Crosswalk Index"
+---
+
 # SPEC-11 — SSSOM Mappings and Crosswalk Index
 
 ## Purpose

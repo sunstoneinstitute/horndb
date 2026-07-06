@@ -69,7 +69,7 @@ free fns `export_snapshot` / `import_snapshot`, accounting via
   treating NF1 as comfortably banked.
 
 Full byte-level layout and the canonical term encoding are specified in
-`docs/plans/2026-06-14-SPEC-02-hdt-snapshot.md` (see its "Format
+`docs/plans/PLAN-02-02-hdt-snapshot.md` (see its "Format
 specification" section).
 
 ## Copy-on-write snapshot isolation (SPEC-02 #19, delivered)

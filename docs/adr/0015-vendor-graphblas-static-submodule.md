@@ -4,7 +4,7 @@
 
 **Date:** 2026-06-02
 
-**Source:** Extracted retrospectively from SPEC-05, `docs/specs/2026-05-31-shared-graphblas-build-design.md`, and `docs/architecture.md`.
+**Source:** Extracted retrospectively from SPEC-05, `docs/specs/SPEC-13-shared-graphblas-build.md`, and `docs/architecture.md`.
 
 ## Context
 
@@ -30,7 +30,7 @@ Vendor GraphBLAS as a statically linked git submodule with checked-in bindings, 
 ## Related
 
 - Governing spec: `docs/specs/SPEC-05-closure-backend.md`.
-- Design: `docs/specs/2026-05-31-shared-graphblas-build-design.md`.
+- Design: `docs/specs/SPEC-13-shared-graphblas-build.md`.
 - Architecture: `docs/architecture.md` §7.
 - Integration notes: `crates/closure/INTEGRATION-NOTES.md`.
 - Siblings: ADR-0006.

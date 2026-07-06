@@ -1,3 +1,9 @@
+---
+status: draft
+date: 2026-05-24
+scope: "SPEC-06 — DBSP Incremental Maintenance"
+---
+
 # SPEC-06 — DBSP Incremental Maintenance
 
 ## Purpose
