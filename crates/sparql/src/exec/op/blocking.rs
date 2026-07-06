@@ -14,8 +14,9 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::Result;
-use crate::exec::runtime::{JoinState, Runtime};
+use crate::exec::runtime::{referenced_vars, JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
+use std::collections::HashSet;
 
 /// Pull an op to exhaustion, concatenating its chunks into one `Batch`.
 pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
@@ -218,6 +219,9 @@ pub struct LeftJoinOp<'r, E: Executor + ?Sized> {
     left: Box<dyn Op + 'r>,
     right: Box<dyn Op + 'r>,
     expr: Option<Expr>,
+    /// Vars referenced by `expr` (constant for the operator's lifetime;
+    /// computed once here so the probe path doesn't rebuild it per chunk).
+    want: HashSet<String>,
     state: Option<JoinState>,
     pending: Option<ChunkedBatch>,
     done: bool,
@@ -232,11 +236,16 @@ impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
         expr: Option<Expr>,
     ) -> Self {
         let schema = rt.union_schema(left.schema(), right.schema());
+        let mut want = HashSet::new();
+        if let Some(e) = &expr {
+            referenced_vars(e, &mut want);
+        }
         Self {
             rt,
             left,
             right,
             expr,
+            want,
             state: None,
             pending: None,
             done: false,
@@ -283,9 +292,12 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
                 }
                 Some(chunk) => {
                     let st = self.state.as_ref().expect("join state built above");
-                    let rows = self
-                        .rt
-                        .probe_left_join_chunk(st, &chunk, self.expr.as_ref())?;
+                    let rows = self.rt.probe_left_join_chunk(
+                        st,
+                        &chunk,
+                        self.expr.as_ref(),
+                        &self.want,
+                    )?;
                     if !rows.is_empty() {
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),

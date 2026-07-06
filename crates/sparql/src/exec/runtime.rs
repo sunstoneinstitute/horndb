@@ -425,48 +425,13 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     }
 
     /// Merge two slot rows if compatible (shared vars equal by the slot
-    /// rule), producing the union row over `out_schema`. Returns None if any
-    /// shared bound var disagrees. Mirrors `Bindings::extend_compat` on slots:
-    /// an `Unbound` slot is treated as an absent var (a wildcard that never
-    /// conflicts), matching how `Bindings` simply lacks an unbound key.
-    fn merge_rows(
-        &self,
-        ls: &[Var],
-        l: &Row,
-        rs: &[Var],
-        r: &Row,
-        out_schema: &[Var],
-    ) -> Result<Option<Row>> {
-        let decode = |id| self.exec.decode_term(id);
-        let lget = |name: &str| ls.iter().position(|v| v.name() == name).map(|i| &l.0[i]);
-        let rget = |name: &str| rs.iter().position(|v| v.name() == name).map(|i| &r.0[i]);
-        let mut slots = Vec::with_capacity(out_schema.len());
-        for v in out_schema {
-            let chosen = match (lget(v.name()), rget(v.name())) {
-                (Some(a), Some(b)) => match (a, b) {
-                    (Slot::Unbound, x) | (x, Slot::Unbound) => x.clone(),
-                    _ => {
-                        if Slot::eq(a, b, decode)? {
-                            a.clone()
-                        } else {
-                            return Ok(None);
-                        }
-                    }
-                },
-                (Some(a), None) => a.clone(),
-                (None, Some(b)) => b.clone(),
-                (None, None) => Slot::Unbound,
-            };
-            slots.push(chosen);
-        }
-        Ok(Some(Row(slots)))
-    }
-
-    /// Merge two slot rows with a precomputed `merge_plan`: for each output
-    /// column, its `(left_col, right_col)` index in the respective schemas
-    /// (`None` when the var is absent on that side). Semantically identical to
-    /// [`Self::merge_rows`] but does no per-pair `position` lookups. See
-    /// [`build_merge_plan`].
+    /// rule), producing the union row, with a precomputed `merge_plan`: for
+    /// each output column, its `(left_col, right_col)` index in the
+    /// respective schemas (`None` when the var is absent on that side).
+    /// Returns None if any shared bound var disagrees. Mirrors
+    /// `Bindings::extend_compat` on slots: an `Unbound` slot is treated as an
+    /// absent var (a wildcard that never conflicts), matching how `Bindings`
+    /// simply lacks an unbound key. See [`build_merge_plan`].
     fn merge_rows_with(
         &self,
         l: &Row,
@@ -628,48 +593,45 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Probe one left-side chunk against the build state (left-outer join /
     /// OPTIONAL). `expr` is the OPTIONAL's inner FILTER, applied per merged
-    /// row; a probe row with no surviving candidate is emitted with the
-    /// build-side-only columns `Unbound`. Matched/unmatched is decided per
-    /// probe row against the complete build state, so OPTIONAL semantics are
-    /// chunk-independent. Forced columns are decoded before returning.
+    /// row; `want` is its referenced-vars set (constant per operator, so the
+    /// caller computes it once). A probe row with no surviving candidate is
+    /// emitted with the build-side-only columns `Unbound`. Matched/unmatched
+    /// is decided per probe row against the complete build state, so OPTIONAL
+    /// semantics are chunk-independent. Forced columns are decoded before
+    /// returning.
     pub(crate) fn probe_left_join_chunk(
         &self,
         st: &JoinState,
         chunk: &Batch,
         expr: Option<&Expr>,
+        want: &HashSet<String>,
     ) -> Result<Vec<Row>> {
-        // Columns the inner FILTER reads (decoded per merged row).
-        let mut want = HashSet::new();
-        if let Some(e) = expr {
-            referenced_vars(e, &mut want);
-        }
         let mut out = Vec::new();
+        // OPTIONAL pad for unmatched probe rows (allocated once per chunk).
+        let unbound = Row(vec![Slot::Unbound; st.build.schema.len()]);
         for a in &chunk.rows {
             let mut matched = false;
             match self.row_join_key(a, &chunk.schema, &st.jvars)? {
                 Some(k) => {
                     if let Some(bucket) = st.index.get(&k) {
-                        matched |= self.probe_into_indexed(a, st, bucket, expr, &want, &mut out)?;
+                        matched |= self.probe_into_indexed(a, st, bucket, expr, want, &mut out)?;
                     }
                     if !st.unkeyed.is_empty() {
                         matched |=
-                            self.probe_into_indexed(a, st, &st.unkeyed, expr, &want, &mut out)?;
+                            self.probe_into_indexed(a, st, &st.unkeyed, expr, want, &mut out)?;
                     }
                 }
                 // Probe row with an unbound jvar: may match any build row.
                 None => {
                     let all: Vec<usize> = (0..st.build.rows.len()).collect();
-                    matched |= self.probe_into_indexed(a, st, &all, expr, &want, &mut out)?;
+                    matched |= self.probe_into_indexed(a, st, &all, expr, want, &mut out)?;
                 }
             }
             if !matched {
                 // OPTIONAL: the probe row survives with build-only vars
                 // unbound (merging with an all-Unbound build row takes the
                 // probe side and leaves build-only vars Unbound).
-                let unbound = Row(vec![Slot::Unbound; st.build.schema.len()]);
-                if let Some(m) =
-                    self.merge_rows(&chunk.schema, a, &st.build.schema, &unbound, &st.out_schema)?
-                {
+                if let Some(m) = self.merge_rows_with(a, &unbound, &st.merge_plan)? {
                     out.push(m);
                 }
             }
