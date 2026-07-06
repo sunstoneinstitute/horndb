@@ -40,6 +40,7 @@ SPEC-00..12 above are the standing subsystem contracts. Point/design specs — n
 | [SPEC-20](SPEC-20-join-probe-streaming.md) | Probe-side streaming Join/LeftJoin + bound-key join-variable selection | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining items 1+4) | Implemented |
 | [SPEC-21](SPEC-21-count-pushdown-extensions.md) | Count-pushdown extensions — equality-filter inlining, grouped COUNT, multi-count | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 2) | Draft |
 | [SPEC-22](SPEC-22-http-streaming-results.md) | Streaming SELECT results end-to-end to the HTTP layer | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 3) | Draft |
+| [SPEC-23](SPEC-23-optimizer-framework.md) | Query optimizer framework — logical IR, pass registry, statistics seam, cost-based ordering | SPEC-03 (F2/F6) + SPEC-07 | Draft |
 
 ## Reading order
 

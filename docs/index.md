@@ -21,6 +21,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 - [`maplib.md`](maplib.md) — related-systems comparison with DataTreehouse's maplib: shared DNA, divergence, and a source-grounded look at its SPARQL-on-Polars execution model vs. HornDB's WCOJ executor (SPEC-03) and GraphBLAS closure (SPEC-05). Read before query-execution or closure work where the other Polars-native RDF engine is a useful reference.
 - [`ideas/silicondb-horndb-claim-layer.md`](ideas/silicondb-horndb-claim-layer.md) — design sketch for a probabilistic claim layer with HornDB certification.
 - [`landscape.md`](landscape.md) — competitive landscape: who else combines provenance proof with symbolic reasoning (EYE, RDFox, Stardog, GraphDB, Soufflé, Scallop, ZK-SPARQL). Read before scoping verifiable-justification work in SPEC-04/SPEC-08.
+- [`specs/SPEC-23-optimizer-framework.md`](specs/SPEC-23-optimizer-framework.md) — design for a query optimizer *framework* (logical IR + flat n-ary BGP, binding/type lattice, typed toggleable pass registry, `Stats` seam, and a single bimodal cost-based ordering stage — WCOJ variable-order + AGM bound vs binary-hash DP/greedy). Synthesizes prior art from Oxigraph `sparopt`, DuckDB, and ClickHouse. Read before turning the Stage-1 planner stubs (`crates/wcoj/src/planner.rs`, `crates/sparql/src/plan/planner.rs`) into a real optimizer; realizes SPEC-03 F2/F6 and consumes SPEC-08 F2 (`PlanAdvisor`).
 
 ## Where to go next
 
