@@ -370,5 +370,13 @@ Review follow-ups (non-blocking, from the branch's code reviews):
   translate→plan sequence. Nothing diverges today (the pushdown rewrite
   lives inside `run_stream`/`build`), but if a rewrite step is ever added
   between translate and plan, extract a shared helper first.
+- Measured on hornbench (2026-07-06, AMD Ryzen 7 7700, b94ba14 vs main):
+  full-scan 5M-triple SELECT peak RSS 4.8 GiB vs 37.2 GiB (-87%, the
+  query no longer adds to the load-time peak) and 4.9x faster drain --
+  but LDBC SPB-256 aggregation-qps paid ~3% (35.4/34.9 vs main's
+  36.2-36.4, GraphDB control flat): the per-query `spawn_blocking` +
+  channel hop is measurable on small results. If that 3% matters, a
+  size-based fast path (serialize inline when the first chunk is also
+  the last) is the obvious lever.
 
 Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
