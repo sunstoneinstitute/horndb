@@ -42,3 +42,29 @@ fn end_to_end_construct() {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+#[test]
+fn plan_select_routes_only_plain_select() {
+    use horndb_sparql::api::plan_select;
+    use horndb_sparql::SparqlConfig;
+
+    let cfg = SparqlConfig::default();
+    let (vars, _plan) = plan_select("SELECT ?s ?o WHERE { ?s ?p ?o }", &cfg)
+        .unwrap()
+        .expect("a plain SELECT plans for streaming");
+    assert_eq!(vars, vec!["s".to_string(), "o".to_string()]);
+
+    for q in [
+        "ASK { ?s ?p ?o }",
+        "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+        "DESCRIBE <http://ex/a>",
+        "EXPLAIN SELECT ?s WHERE { ?s ?p ?o }",
+    ] {
+        assert!(
+            plan_select(q, &cfg).unwrap().is_none(),
+            "{q} must fall back to execute_query"
+        );
+    }
+
+    assert!(plan_select("SELECT ?s WHERE { ?s", &cfg).is_err());
+}

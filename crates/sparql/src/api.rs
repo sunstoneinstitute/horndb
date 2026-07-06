@@ -156,6 +156,36 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     }
 }
 
+/// Parse → translate → plan a query for streaming execution, without
+/// running it. Returns `Some((projected_vars, plan))` for a plain SELECT;
+/// `None` for every other form (ASK / CONSTRUCT / DESCRIBE / EXPLAIN),
+/// which the caller answers via [`execute_query`]. Records the same
+/// Parse/Translate/Plan stage metrics as `execute_query`;
+/// `query_total{kind=select}` is bumped only on the `Some` path so the
+/// fallback keeps per-kind counts exact (a non-SELECT query costs one
+/// extra `parse` stage observation from the routing double-parse — noted
+/// in `docs/metrics.md`).
+pub fn plan_select(
+    query: &str,
+    cfg: &SparqlConfig,
+) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan)>> {
+    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    let ParsedQuery::Select { inner } = parsed else {
+        return Ok(None);
+    };
+    horndb_metrics::metrics()
+        .sparql
+        .query_total
+        .get_or_create(&QueryKindLabel {
+            kind: QueryKind::Select,
+        })
+        .inc();
+    let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+    let vars = projected_vars(&alg);
+    let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+    Ok(Some((vars, plan)))
+}
+
 /// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,
 /// without executing it. Shared by the `EXPLAIN` path. Nested `EXPLAIN`
 /// (`EXPLAIN EXPLAIN …`) is rejected — it is not meaningful.
