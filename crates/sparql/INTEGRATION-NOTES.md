@@ -383,3 +383,34 @@ Review follow-ups (non-blocking, from the branch's code reviews):
   (b0a701b) vs main's 36.2-36.4 nightly cluster - recovered to noise.
 
 Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
+
+## Count pushdown (#128: #144 first cut + 2026-07-06 extensions)
+
+The pushdown pass (`plan/pushdown.rs::rewrite`) lowers count-only aggregation
+shapes into scan-side count leaves so the runtime never materializes solution
+rows for them:
+
+- `COUNT(*)` / `COUNT(?bound-bgp-var)` over a bare BGP → `CountScan` +
+  `Executor::count_bgp` (landed 2026-06-30).
+- The same with an intervening `FILTER` that is a conjunction of
+  `?v = <const>` / `sameTerm(?v, <const>)` equalities → the constants are
+  substituted into the BGP first. Result-invariant because engine `Expr::Eq`
+  is structural term equality over oxrdf-normalized forms, which coincides
+  with the dictionary term identity BGP constants match by; if `Expr::Eq`
+  ever gains numeric *value* semantics, the literal-constant case must be
+  restricted to IRIs (pinned by `eq_filter_literal_term_identity_pin`).
+- `GROUP BY` keys and/or multiple plain counts → `GroupCountScan` +
+  `Executor::count_bgp_grouped`. `HornBackend` answers it by hashing the raw
+  u64 WCOJ key columns (no `Row` build, no decode); other backends fall back
+  to scan + hash-count on the key columns. Output rows sort by
+  decoded-lexical key, byte-identical to `eval_group_native`'s order
+  (observable under LIMIT).
+
+`HornBackend::count_bgp_grouped` is the fourth instance of the `scan_bgp`
+pattern-compilation block (`keep in sync` markers in `exec/horn.rs`); if a
+fifth instance is ever needed, extract a shared `compile_patterns` helper
+instead.
+
+Deferred with reasons (mixed count+value aggregates, `COUNT(DISTINCT …)`,
+non-equality filters, partial inlining, zero-aggregate `GROUP BY`):
+`docs/specs/SPEC-21-count-pushdown-extensions.md`.
