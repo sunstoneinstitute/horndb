@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: executed
 date: 2026-07-06
 scope: "Streaming SELECT results end-to-end to the HTTP layer"
 ---
