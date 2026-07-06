@@ -385,3 +385,130 @@ async fn large_select_streams_in_multiple_chunks() {
         serde_json::from_slice(&buf).expect("frames concatenate to valid JSON");
     assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 5000);
 }
+
+mod streaming_error_semantics {
+    use super::*;
+    use horndb_sparql::algebra::{TriplePattern, Var};
+    use horndb_sparql::exec::{Batch, Bindings, Executor, Row, Slot};
+    use horndb_sparql::SparqlError;
+    use horndb_storage::TermId;
+
+    /// Backend whose scan fails immediately: the error lands before the
+    /// first chunk, so the response must be a clean 400.
+    struct FailingScan;
+
+    impl Executor for FailingScan {
+        fn scan_bgp(
+            &self,
+            _patterns: &[TriplePattern],
+        ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+            Err(SparqlError::Executor("scan exploded".into()))
+        }
+    }
+    impl horndb_sparql::exec::Store for FailingScan {
+        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
+        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
+        fn clear_all(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn exec_error_before_first_chunk_returns_400() {
+        let state = AppState {
+            store: Arc::new(RwLock::new(FailingScan)),
+        };
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+            .header("accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// 5000 id-rows; decoding any id >= 4096 fails. Chunk 1 (4096 rows)
+    /// serializes and commits the 200; the failure lands in chunk 2, so the
+    /// body must abort mid-stream (protocol-level truncation), NOT morph
+    /// into an error status.
+    struct DecodeFailsLate;
+
+    impl Executor for DecodeFailsLate {
+        fn scan_bgp(
+            &self,
+            _patterns: &[TriplePattern],
+        ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+            unreachable!("scan_bgp_ids is overridden")
+        }
+        fn scan_bgp_ids(&self, _patterns: &[TriplePattern]) -> horndb_sparql::Result<Batch> {
+            Ok(Batch {
+                schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
+                rows: (0u64..5000)
+                    .map(|i| {
+                        Row(vec![
+                            Slot::Id(TermId(i)),
+                            Slot::Id(TermId(i)),
+                            Slot::Id(TermId(i)),
+                        ])
+                    })
+                    .collect(),
+            })
+        }
+        fn decode_term(&self, id: TermId) -> horndb_sparql::Result<Term> {
+            if id.0 < 4096 {
+                Ok(Term::Iri(format!("http://ex/t{}", id.0)))
+            } else {
+                Err(SparqlError::Executor("decode failed mid-stream".into()))
+            }
+        }
+    }
+    impl horndb_sparql::exec::Store for DecodeFailsLate {
+        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
+        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
+        fn clear_all(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn exec_error_mid_stream_aborts_body_after_200() {
+        use http_body::Body as _;
+
+        let state = AppState {
+            store: Arc::new(RwLock::new(DecodeFailsLate)),
+        };
+        let app = build_router(state);
+        // SELECT all three vars so column pruning keeps every column.
+        let req = Request::builder()
+            .uri(
+                "/query?query=SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D",
+            )
+            .header("accept", "text/csv")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "headers are already committed when the error hits"
+        );
+
+        let mut body = resp.into_body();
+        let mut data_frames = 0usize;
+        let mut saw_error = false;
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame {
+                Ok(f) => {
+                    if f.into_data().is_ok() {
+                        data_frames += 1;
+                    }
+                }
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(data_frames >= 1, "chunk 1 was delivered before the error");
+        assert!(saw_error, "the body must surface the mid-stream error");
+    }
+}
