@@ -39,6 +39,17 @@ impl<'r, E: Executor + ?Sized> Op for ExtendOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
     }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Child columns keep their provenance; the BIND output column is a
+        // computed Slot::Term (or Unbound). Covers both the appended-column
+        // case (index past the child schema) and the re-BIND overwrite case.
+        let child = self.child.may_emit_term();
+        self.schema
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v.name() == self.var.name() || child.get(i).copied().unwrap_or(true))
+            .collect()
+    }
     fn next(&mut self) -> Result<Option<Batch>> {
         match self.child.next()? {
             Some(chunk) => Ok(Some(self.rt.apply_extend(chunk, &self.var, &self.expr)?)),
@@ -84,6 +95,21 @@ impl<'r, E: Executor + ?Sized> Op for ProjectOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
     }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Remap the child's claims into projection order.
+        let child_terms = self.child.may_emit_term();
+        let child_schema = self.child.schema();
+        self.schema
+            .iter()
+            .map(|v| {
+                child_schema
+                    .iter()
+                    .position(|c| c.name() == v.name())
+                    .map(|i| child_terms[i])
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
     fn next(&mut self) -> Result<Option<Batch>> {
         match self.child.next()? {
             Some(chunk) => Ok(Some(self.rt.apply_project(chunk, &self.vars)?)),
@@ -116,6 +142,9 @@ impl<'r> SliceOp<'r> {
 impl<'r> Op for SliceOp<'r> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        self.child.may_emit_term()
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.remaining == Some(0) {
@@ -173,6 +202,9 @@ impl<'r, E: Executor + ?Sized> Op for FilterOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
     }
+    fn may_emit_term(&self) -> Vec<bool> {
+        self.child.may_emit_term()
+    }
     fn next(&mut self) -> Result<Option<Batch>> {
         while let Some(chunk) = self.child.next()? {
             let kept = self.rt.apply_filter(chunk, &self.expr)?;
@@ -207,6 +239,9 @@ impl<'r> DistinctOp<'r> {
 impl<'r> Op for DistinctOp<'r> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        self.child.may_emit_term()
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         while let Some(chunk) = self.child.next()? {

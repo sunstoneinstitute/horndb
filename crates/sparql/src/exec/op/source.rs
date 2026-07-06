@@ -25,6 +25,11 @@ impl Op for ScanOp {
         self.inner.schema()
     }
 
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Scan rows come straight from the dictionary: always Slot::Id.
+        vec![false; self.inner.schema().len()]
+    }
+
     fn next(&mut self) -> Result<Option<Batch>> {
         Ok(self.inner.next_chunk())
     }
@@ -66,6 +71,11 @@ impl CountScanOp {
 impl Op for CountScanOp {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        // The count is a computed xsd:integer literal (Slot::Term).
+        vec![true; self.schema.len()]
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
@@ -115,6 +125,11 @@ impl ValuesOp {
 impl Op for ValuesOp {
     fn schema(&self) -> &[Var] {
         self.inner.schema()
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        // VALUES cells are Slot::Term (or Slot::Unbound for UNDEF).
+        vec![true; self.inner.schema().len()]
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {

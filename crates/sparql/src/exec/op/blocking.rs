@@ -26,6 +26,34 @@ pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
     Ok(Batch { schema, rows })
 }
 
+/// Static `may_emit_term` for a two-child merge (`Union`, `Join`, `LeftJoin`):
+/// an output column may yield `Slot::Term` iff either contributing child
+/// claims it may. A var absent from a side contributes only `Slot::Unbound`
+/// there. (For Union this also covers `normalize_columns`: it only decodes
+/// Id→Term when a Term is actually present, i.e. when a child claimed one.)
+pub(super) fn merged_term_columns(out_schema: &[Var], left: &dyn Op, right: &dyn Op) -> Vec<bool> {
+    let lt = left.may_emit_term();
+    let rt = right.may_emit_term();
+    let ls = left.schema();
+    let rs = right.schema();
+    out_schema
+        .iter()
+        .map(|v| {
+            let l = ls
+                .iter()
+                .position(|x| x.name() == v.name())
+                .map(|i| lt[i])
+                .unwrap_or(false);
+            let r = rs
+                .iter()
+                .position(|x| x.name() == v.name())
+                .map(|i| rt[i])
+                .unwrap_or(false);
+            l || r
+        })
+        .collect()
+}
+
 /// UNION: drains both children eagerly to guarantee that `normalize_columns`
 /// sees the full combined row set (required for correctness when the two
 /// children have differing slot provenance — see module doc). Rows are
@@ -57,6 +85,10 @@ impl<'r, E: Executor + ?Sized> UnionOp<'r, E> {
 impl<'r, E: Executor + ?Sized> Op for UnionOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        merged_term_columns(&self.schema, self.left.as_ref(), self.right.as_ref())
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
@@ -115,6 +147,9 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
     }
+    fn may_emit_term(&self) -> Vec<bool> {
+        merged_term_columns(&self.schema, self.left.as_ref(), self.right.as_ref())
+    }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
             let l = drain(&mut self.left)?;
@@ -158,6 +193,9 @@ impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
 impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        merged_term_columns(&self.schema, self.left.as_ref(), self.right.as_ref())
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
@@ -205,6 +243,28 @@ impl<'r, E: Executor + ?Sized> Op for GroupOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
     }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Key columns clone a representative input slot (child provenance);
+        // aggregate outputs are computed Slot::Term values. Schema order is
+        // keys ++ aggregate outs (group_output_schema).
+        let child_terms = self.child.may_emit_term();
+        let child_schema = self.child.schema();
+        self.schema
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i < self.keys.len() {
+                    child_schema
+                        .iter()
+                        .position(|c| c.name() == v.name())
+                        .map(|ci| child_terms[ci])
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .collect()
+    }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
             let b = drain(&mut self.child)?;
@@ -249,6 +309,10 @@ impl<'r, E: Executor + ?Sized> OrderByOp<'r, E> {
 impl<'r, E: Executor + ?Sized> Op for OrderByOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Sort only reorders rows; slots pass through untouched.
+        self.child.may_emit_term()
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
@@ -311,6 +375,10 @@ impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
 impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Closure endpoints are rebuilt via Batch::from_bindings: all Term.
+        vec![true; self.schema.len()]
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {

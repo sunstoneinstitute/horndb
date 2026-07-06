@@ -34,8 +34,23 @@ pub(crate) fn batch_rows() -> usize {
 /// A pull-based physical operator. The trait itself is lifetime-free; an
 /// operator that borrows the runtime carries its own lifetime on the struct
 /// (`impl<'r, …> Op for FooOp<'r, …>`) and `build` boxes it as `dyn Op + 'r`.
+///
+/// Stream-wide column-provenance invariant: across ALL chunks an op ever
+/// yields, a given column never mixes `Slot::Id` and `Slot::Term`
+/// (`Slot::Unbound` may appear anywhere). Cross-chunk keyed consumers
+/// (`DistinctOp`'s seen-set, `GroupOp`) rely on this — `KeyPart::Id(x)` and
+/// `KeyPart::Lex(lex(x))` hash differently for the same logical term.
+/// `may_emit_term` is the static contract that lets the streaming joins
+/// uphold it without seeing their whole output first.
 pub trait Op {
     fn schema(&self) -> &[Var];
+    /// Static per-column provenance claim, parallel to `schema()`: `true` at
+    /// index `i` means column `i` MAY yield a `Slot::Term` somewhere in this
+    /// op's output stream. Over-approximation; `false` is a guarantee (the
+    /// column only ever holds `Slot::Id`/`Slot::Unbound`). Required — a new
+    /// operator that forgets to declare provenance must fail to compile, not
+    /// silently break cross-chunk DISTINCT/GROUP BY keying.
+    fn may_emit_term(&self) -> Vec<bool>;
     fn next(&mut self) -> Result<Option<Batch>>;
 }
 
@@ -72,6 +87,8 @@ impl ChunkedBatch {
 
 #[cfg(test)]
 mod chunk_tests;
+#[cfg(test)]
+mod provenance_tests;
 
 impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     /// Build the pull-based operator tree for `plan`. Every `PhysicalPlan`
