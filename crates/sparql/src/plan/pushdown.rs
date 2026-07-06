@@ -68,7 +68,7 @@ use std::collections::HashSet;
 ///
 /// 1. [`push_aggregates`] — lower count-only `Group`s over a (possibly
 ///    equality-filtered) bare `BgpScan` to count leaves, answering them
-///    without materializing rows (#144 + the 2026-07-06 extensions).
+///    without materializing rows (#144 + the SPEC-21 extensions).
 /// 2. column pruning ([`prune`]) — drop interior columns no ancestor needs.
 ///
 /// Both are result-invariant; `Runtime::run` must yield byte-identical
@@ -110,10 +110,10 @@ fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
 /// shape over a bare — or equality-filtered — `BgpScan`; `None` otherwise
 /// (the caller keeps the `Group` and recurses into its child).
 ///
-/// Lowered here: `keys == []` + a single plain count → [`PhysicalPlan::CountScan`]
-/// (the shape landed with #144), now also reachable through an inlinable
-/// `FILTER`. Grouped / multi-count lowering to `GroupCountScan` is the next
-/// task of this plan and currently returns `None`.
+/// Lowered shapes: `keys == []` + a single plain count →
+/// [`PhysicalPlan::CountScan`] (landed with #144); any other combination of
+/// keys and ≥1 plain counts → [`PhysicalPlan::GroupCountScan`]. Both are
+/// reachable through an inlinable equality `FILTER`.
 fn lower_count_group(
     inner: &PhysicalPlan,
     keys: &[Var],
@@ -178,15 +178,18 @@ fn lower_count_group(
         .map(|p| substitute_pattern(p, &subst))
         .collect();
 
-    // 6. Lower. The landed single implicit-group count keeps CountScan.
-    if keys.is_empty() && aggregates.len() == 1 {
-        return Some(CountScan {
-            patterns,
-            out_var: aggregates[0].out.clone(),
-        });
+    // 6. Lower. The landed single implicit-group count keeps CountScan;
+    //    every other qualifying shape becomes a GroupCountScan.
+    let out_vars: Vec<Var> = aggregates.iter().map(|a| a.out.clone()).collect();
+    if keys.is_empty() && out_vars.len() == 1 {
+        let out_var = out_vars.into_iter().next().expect("len checked == 1");
+        return Some(CountScan { patterns, out_var });
     }
-    // Grouped / multi-count lowering (GroupCountScan) lands in the next task.
-    None
+    Some(GroupCountScan {
+        patterns,
+        keys: keys.to_vec(),
+        out_vars,
+    })
 }
 
 /// True iff `agg` is a plain (non-DISTINCT) count whose value equals the
@@ -216,6 +219,9 @@ fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
 /// term identity BGP constants match by — full argument and the coupling
 /// note about future value-equality semantics in
 /// docs/specs/SPEC-21-count-pushdown-extensions.md.
+///
+/// Constants are assumed to be in translate.rs's canonical oxrdf-printed form
+/// (true for all planner-produced plans).
 fn eq_conjuncts(expr: &Expr, out: &mut Vec<(String, Term)>) -> bool {
     match expr {
         Expr::And(a, b) => eq_conjuncts(a, out) && eq_conjuncts(b, out),
@@ -949,22 +955,26 @@ mod tests {
     #[test]
     fn scope_guard_keeps_group_and_stays_correct() {
         let horn = fixture();
-        // Each of these must NOT become a CountScan, and must still be correct.
+        // Each of these must NOT become a CountScan or GroupCountScan, and
+        // must still be correct.
         let cases = [
-            // DISTINCT count: not the plain-count shape.
+            // DISTINCT count: not a plain count.
             "SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s <http://ex/name> ?o }",
-            // GROUP BY: non-empty keys.
-            "SELECT ?c (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?c } GROUP BY ?c",
-            // Two aggregates.
-            "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/name> ?o }",
+            // DISTINCT count with a key.
+            "SELECT ?o (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o",
+            // Mixed count + value aggregate: SUM needs member values.
+            "SELECT ?o (COUNT(*) AS ?n) (SUM(?age) AS ?t) WHERE { ?s <http://ex/name> ?o . ?s <http://ex/age> ?age } GROUP BY ?o",
             // COUNT over a var the BGP does not bind: must count 0, not solutions.
             "SELECT (COUNT(?z) AS ?n) WHERE { ?s <http://ex/name> ?o }",
+            // Equality filter on the GROUP BY key itself: substitution would
+            // erase the key column, so the streaming Group stays.
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") } GROUP BY ?o",
         ];
         for q in cases {
             let plan = plan_select(q);
             let rewritten = rewrite(&plan).unwrap();
             assert!(
-                !has_count_scan(&rewritten),
+                !has_count_scan(&rewritten) && !has_group_count_scan(&rewritten),
                 "scope guard failed — this must stay a Group:\n{q}\ngot {rewritten:#?}"
             );
             let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
@@ -1141,6 +1151,11 @@ mod tests {
                 "SELECT (COUNT(?o) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") }",
                 2,
             ),
+            // Three-conjunct chain (nested And tree).
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o FILTER(?s = <http://ex/a> && ?p = <http://ex/name> && ?o = \"Alice\") }",
+                1,
+            ),
         ] {
             let plan = plan_select(q);
             let rewritten = rewrite(&plan).unwrap();
@@ -1177,6 +1192,10 @@ mod tests {
             "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o != \"Alice\") }",
             // Range comparison: not expressible as a pattern constant.
             "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/age> ?o FILTER(?o > \"20\") }",
+            // Or nested under And: still not a pure conjunction of equalities.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?s = <http://ex/a> && (?o = \"Alice\" || ?o = \"Bob\")) }",
+            // Self-equality: var-to-var, no constant to substitute.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = ?o) }",
         ];
         for q in cases {
             let plan = plan_select(q);
@@ -1196,7 +1215,8 @@ mod tests {
     /// term-distinct literals ("42" vs "042") match on neither path, so the
     /// inlining is exact. If Expr::Eq ever gains numeric VALUE semantics,
     /// this test fails and the literal-constant case of the inlining must be
-    /// restricted to IRIs (see the 2026-07-06 design spec coupling note).
+    /// restricted to IRIs (see the SPEC-21 coupling note
+    /// (docs/specs/SPEC-21-count-pushdown-extensions.md)).
     #[test]
     fn eq_filter_literal_term_identity_pin() {
         let mut horn = HornBackend::new();
@@ -1219,6 +1239,121 @@ mod tests {
             single_count(&with),
             format!("{:?}", crate::exec::runtime::integer_literal(1)),
             "term-identity equality must count only the exact term"
+        );
+    }
+
+    // ---- grouped / multi-count pushdown (#128 count-pushdown extensions) ----
+
+    /// True iff the plan tree contains a `GroupCountScan` node anywhere.
+    fn has_group_count_scan(p: &PhysicalPlan) -> bool {
+        match p {
+            PhysicalPlan::GroupCountScan { .. } => true,
+            PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Filter { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::OrderBy { inner, .. }
+            | PhysicalPlan::Extend { inner, .. }
+            | PhysicalPlan::Group { inner, .. } => has_group_count_scan(inner),
+            PhysicalPlan::Join { left, right }
+            | PhysicalPlan::LeftJoin { left, right, .. }
+            | PhysicalPlan::Union { left, right } => {
+                has_group_count_scan(left) || has_group_count_scan(right)
+            }
+            PhysicalPlan::PathClosure { edge, .. } => has_group_count_scan(edge),
+            PhysicalPlan::BgpScan { .. }
+            | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::Values { .. } => false,
+        }
+    }
+
+    /// Structural + order/value parity for every grouped / multi-count shape.
+    /// Full `Vec` equality (NOT `canon`): the decoded-lexical group order is
+    /// part of the contract because a parent LIMIT observes it.
+    #[test]
+    fn grouped_count_parity_battery() {
+        let horn = fixture();
+        for q in [
+            // GROUP BY + COUNT(*) over a 1-pattern BGP.
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o",
+            // GROUP BY + COUNT(?s) over a 2-pattern BGP (agg_profile Q3 shape).
+            "SELECT ?o (COUNT(?s) AS ?c) WHERE { ?s <http://ex/name> ?o . ?s <http://ex/knows> ?k } GROUP BY ?o",
+            // Multi-key GROUP BY.
+            "SELECT ?p ?o (COUNT(*) AS ?c) WHERE { ?s ?p ?o } GROUP BY ?p ?o",
+            // Multiple plain counts, implicit group.
+            "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/name> ?o }",
+            // Multiple plain counts WITH a key.
+            "SELECT ?o (COUNT(*) AS ?n) (COUNT(?s) AS ?m) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o",
+            // Composed with Task 2's equality-filter inlining.
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/knows> ?k . ?s <http://ex/name> ?o FILTER(?k = <http://ex/b>) } GROUP BY ?o",
+            // Zero solutions with keys: no groups, no rows.
+            "SELECT ?o (COUNT(*) AS ?c) WHERE { ?s <http://ex/nope> ?o } GROUP BY ?o",
+            // Zero solutions, implicit group, two counts: one row of zeros.
+            "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/nope> ?o }",
+        ] {
+            let plan = plan_select(q);
+            let rewritten = rewrite(&plan).unwrap();
+            assert!(
+                has_group_count_scan(&rewritten),
+                "must lower to GroupCountScan:\n{q}\ngot {rewritten:#?}"
+            );
+            let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+            let without = run_raw(&horn, &plan);
+            assert_eq!(with, without, "order/value parity broke for:\n{q}");
+        }
+    }
+
+    #[test]
+    fn grouped_count_order_observable_under_limit() {
+        let horn = fixture();
+        let q = "SELECT ?o (COUNT(?s) AS ?c) WHERE { ?s <http://ex/name> ?o } GROUP BY ?o LIMIT 2";
+        let plan = plan_select(q);
+        assert!(has_group_count_scan(&rewrite(&plan).unwrap()));
+        let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        let without = run_raw(&horn, &plan);
+        assert_eq!(
+            with, without,
+            "LIMIT over a grouped count must see the same order"
+        );
+        assert_eq!(with.len(), 2);
+        // eval_group_native sorts groups by decoded key lexical: Alice first
+        // (fixture names: Alice ×2, Bob, Carol).
+        assert_eq!(
+            with[0].get("o"),
+            Some(&Term::Literal("\"Alice\"".into())),
+            "first group must be Alice (lexical sort): {with:?}"
+        );
+        assert_eq!(
+            format!("{:?}", with[0].get("c").expect("?c bound")),
+            format!("{:?}", crate::exec::runtime::integer_literal(2))
+        );
+    }
+
+    /// A GROUP BY key the BGP does not bind stays a streaming Group (the
+    /// query level can't easily express this, so hand-build the plan).
+    #[test]
+    fn grouped_count_key_not_bound_by_bgp_stays_group() {
+        use crate::algebra::TriplePattern;
+        let var = |n: &str| Term::Var(Var::new(n));
+        let plan = PhysicalPlan::Group {
+            inner: Box::new(PhysicalPlan::BgpScan {
+                patterns: vec![TriplePattern {
+                    subject: var("s"),
+                    predicate: Term::Iri("http://ex/p".into()),
+                    object: var("o"),
+                }],
+            }),
+            keys: vec![Var::new("z")], // not produced by the BGP
+            aggregates: vec![Aggregate {
+                out: Var::new("c"),
+                func: AggFunc::CountStar,
+                distinct: false,
+            }],
+        };
+        let rewritten = rewrite(&plan).unwrap();
+        assert!(
+            !has_group_count_scan(&rewritten),
+            "unbound key must keep the streaming Group; got {rewritten:#?}"
         );
     }
 
