@@ -391,7 +391,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         // and differing jvar values are rejected by `merge_rows`. No
         // OPTIONAL semantics: a left row with zero matches contributes
         // nothing (unlike LeftJoin).
-        let jvars = batch_join_vars(&l, &r);
+        let jvars = bound_join_vars(&l.schema, &r);
         let merge_plan = build_merge_plan(&l.schema, &r.schema, &out_schema);
 
         let mut index: HashMap<Vec<String>, Vec<&Row>> = HashMap::new();
@@ -462,7 +462,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             }
         }
 
-        let jvars = batch_join_vars(&l, &r);
+        let jvars = bound_join_vars(&l.schema, &r);
 
         // Index the right relation by its decoded join key (option (b)
         // — see `row_join_key`); rows missing a jvar fall to `unkeyed`.
@@ -716,7 +716,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     ) -> Result<Option<Vec<String>>> {
         let mut key = Vec::with_capacity(jvars.len());
         for jv in jvars {
-            // jvars ⊆ schema by construction (batch_join_vars), so this is
+            // jvars ⊆ schema by construction (bound_join_vars), so this is
             // always Some; treat a missing column conservatively as unkeyed.
             let Some(i) = schema.iter().position(|v| v.name() == jv.name()) else {
                 return Ok(None);
@@ -766,15 +766,39 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     }
 }
 
-/// The join-variable set for the native `LeftJoin`: the variables present in
-/// *both* batch schemas, in deterministic (sorted, via `BTreeSet`) order — a
-/// column listed in a batch schema is the slot-world analogue of "a variable
-/// bound somewhere in the relation".
-fn batch_join_vars(l: &Batch, r: &Batch) -> Vec<Var> {
-    use std::collections::BTreeSet;
-    let lvars: BTreeSet<&str> = l.schema.iter().map(|v| v.name()).collect();
-    let rvars: BTreeSet<&str> = r.schema.iter().map(|v| v.name()).collect();
-    lvars.intersection(&rvars).map(|s| Var::new(*s)).collect()
+/// Join-key variables for the hash joins: the variables present in both
+/// sides' schemas that are bound (non-`Unbound`) in at least one build-side
+/// row, sorted by name (deterministic key order).
+///
+/// Keying on *bound* columns rather than the raw schema intersection fixes
+/// the #128 pathological probe: `row_join_key` returns `None` for any row
+/// whose key touches an `Unbound` slot, so a shared variable that is unbound
+/// in EVERY build row (an OPTIONAL-produced column, VALUES UNDEF, …) would
+/// send the entire build side to the `unkeyed` bucket that every probe row
+/// scans — O(|l|·|r|) with correct results. Such a variable carries zero
+/// selectivity; dropping it restores hashing on the remaining key vars.
+///
+/// Correctness is unaffected: `merge_rows`/`merge_rows_with` still check
+/// every shared variable per candidate pair, and an unbound variable is
+/// compatible with anything (SPARQL §18.3), so key selection only shapes the
+/// candidate buckets, never the match set. A *partially* bound variable
+/// stays in the key (its unbound rows go to `unkeyed`, which is semantically
+/// forced). An empty build side yields an empty key set: every row keys to
+/// `Some(vec![])` — one bucket, the cross-compatibility scan the semantics
+/// require.
+fn bound_join_vars(left_schema: &[Var], build: &Batch) -> Vec<Var> {
+    let lvars: std::collections::BTreeSet<&str> = left_schema.iter().map(|v| v.name()).collect();
+    let mut out: Vec<Var> = build
+        .schema
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| {
+            lvars.contains(v.name()) && build.rows.iter().any(|r| !matches!(r.0[*i], Slot::Unbound))
+        })
+        .map(|(_, v)| v.clone())
+        .collect();
+    out.sort_by(|a, b| a.name().cmp(b.name()));
+    out
 }
 
 /// Precompute, once per join, each `out_schema` column's source index in the
@@ -2402,5 +2426,78 @@ mod slot_differential {
             got, expected,
             "GROUP BY ?c ORDER BY ?c with COUNT(DISTINCT *): wrong counts or order"
         );
+    }
+}
+
+#[cfg(test)]
+mod join_key_tests {
+    use super::*;
+    use horndb_storage::TermId;
+
+    fn batch(schema: &[&str], rows: Vec<Vec<Slot>>) -> Batch {
+        Batch {
+            schema: schema.iter().map(|s| Var::new(*s)).collect(),
+            rows: rows.into_iter().map(Row).collect(),
+        }
+    }
+
+    fn vars(names: &[&str]) -> Vec<Var> {
+        names.iter().map(|n| Var::new(*n)).collect()
+    }
+
+    fn names(vs: &[Var]) -> Vec<&str> {
+        vs.iter().map(|v| v.name()).collect()
+    }
+
+    /// ?v is shared but unbound in EVERY build row → dropped from the key
+    /// (it carries zero selectivity and would unkey the whole build side);
+    /// ?w keys normally.
+    #[test]
+    fn all_unbound_shared_var_is_dropped_from_key() {
+        let build = batch(
+            &["v", "w", "b"],
+            vec![
+                vec![Slot::Unbound, Slot::Id(TermId(1)), Slot::Id(TermId(10))],
+                vec![Slot::Unbound, Slot::Id(TermId(2)), Slot::Id(TermId(20))],
+            ],
+        );
+        let jvars = bound_join_vars(&vars(&["v", "w"]), &build);
+        assert_eq!(names(&jvars), ["w"]);
+    }
+
+    /// ?v bound in one of two build rows → kept (its unbound row goes to the
+    /// unkeyed bucket, which SPARQL compatibility semantics force anyway).
+    #[test]
+    fn partially_bound_shared_var_stays_in_key() {
+        let build = batch(
+            &["v", "w"],
+            vec![
+                vec![Slot::Unbound, Slot::Id(TermId(1))],
+                vec![Slot::Id(TermId(7)), Slot::Id(TermId(2))],
+            ],
+        );
+        let jvars = bound_join_vars(&vars(&["v", "w"]), &build);
+        assert_eq!(names(&jvars), ["v", "w"]);
+    }
+
+    /// Non-shared bound vars never key; an empty build side yields an empty
+    /// key set (every row then keys to Some(vec![]) — one bucket).
+    #[test]
+    fn non_shared_and_empty_build_yield_expected_keys() {
+        let build = batch(&["b"], vec![vec![Slot::Id(TermId(1))]]);
+        assert!(bound_join_vars(&vars(&["v", "w"]), &build).is_empty());
+
+        let empty = batch(&["v"], vec![]);
+        assert!(bound_join_vars(&vars(&["v"]), &empty).is_empty());
+    }
+
+    /// Slot::Term counts as bound, same as Slot::Id.
+    #[test]
+    fn term_slots_count_as_bound() {
+        let build = batch(
+            &["v"],
+            vec![vec![Slot::Term(Term::Iri("http://ex/x".into()))]],
+        );
+        assert_eq!(names(&bound_join_vars(&vars(&["v"]), &build)), ["v"]);
     }
 }

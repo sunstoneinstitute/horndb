@@ -285,3 +285,42 @@ fn order_by_cross_chunk() {
     assert_eq!(r2, rbig, "OrderBy result changed at chunk size 2");
     assert_eq!(rbig.len(), 6, "OrderBy should yield all 6 rows");
 }
+
+// ---------------------------------------------------------------------------
+// Join: shared var unbound in every build-side row (#128 bound-key selection)
+// ---------------------------------------------------------------------------
+
+/// ?v is shared but UNDEF in every right (build) row while ?w is bound
+/// everywhere: the join must key on ?w alone and still honor SPARQL
+/// compatibility (an unbound ?v matches anything, so each left row pairs
+/// with its ?w partner). 2 rows, invariant across chunk sizes. This test is
+/// a semantics pin: it passes before AND after the bound-key change — the
+/// change is a complexity fix, not a result change.
+#[test]
+fn join_unbound_build_var_cross_chunk() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("w")],
+        rows: vec![
+            vec![some_iri("v1"), some_iri("w1")],
+            vec![some_iri("v2"), some_iri("w2")],
+        ],
+    };
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("w"), Var::new("b")],
+        rows: vec![
+            vec![None, some_iri("w1"), some_iri("b1")],
+            vec![None, some_iri("w2"), some_iri("b2")],
+        ],
+    };
+    let plan = PhysicalPlan::Join {
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join unbound build var");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 2, "each left row joins exactly its ?w partner");
+}
