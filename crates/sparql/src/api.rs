@@ -99,9 +99,11 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || planner::plan(&alg))?;
             let any = timed(Stage::Exec, || {
-                Runtime::new(exec)
-                    .run(&plan)
-                    .map(|mut it| it.next().is_some())
+                // Early exit: only the first operator chunk is pulled and
+                // decoded — `run` would drain the whole result set.
+                let rt = Runtime::new(exec);
+                let mut stream = rt.run_stream(&plan)?;
+                Ok(stream.next_chunk()?.is_some())
             })?;
             Ok(QueryAnswer::Boolean(any))
         }
