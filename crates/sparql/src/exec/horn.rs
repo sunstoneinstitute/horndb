@@ -154,8 +154,8 @@ pub fn load_with_reasoning(
     Ok(ReasonStats { loaded, asserted })
 }
 
-use crate::algebra::TriplePattern;
-use crate::exec::{Bindings, Executor, Store};
+use crate::algebra::{TriplePattern, Var};
+use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
 use horndb_storage::{Store as ColumnStore, TermId};
 use horndb_wcoj::cancel::CancelToken;
@@ -956,6 +956,148 @@ impl Executor for HornBackend {
         }
         Ok(Some(count))
     }
+
+    /// Per-group BGP solution counts without decoding terms or building rows:
+    /// hash the raw u64 key columns of the WCOJ batches. Same fallback cases
+    /// as `count_bgp` (diagonal repeats), plus: an all-ground BGP or a key
+    /// with no WCOJ column returns `Ok(None)` so the caller's scan-based
+    /// fallback supplies the (identical) semantics. Empty `patterns`/`keys`
+    /// are the caller's job (`GroupCountScanOp` routes no-key shapes through
+    /// `count_bgp`).
+    // keep in sync with scan_bgp_ids
+    fn count_bgp_grouped(
+        &self,
+        patterns: &[TriplePattern],
+        keys: &[Var],
+    ) -> Result<Option<Vec<GroupCount>>> {
+        if patterns.is_empty() || keys.is_empty() {
+            return Ok(None);
+        }
+
+        let snapshot = self.wcoj_snapshot();
+        let dict = self.store.dictionary();
+
+        // === VERBATIM copy from scan_bgp: pattern compilation ===
+        let mut var_index: HashMap<String, u8> = HashMap::new();
+        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
+        let mut wpatterns: Vec<WPattern> = Vec::new();
+        let mut ground: Vec<WTriple> = Vec::new();
+
+        for pattern in patterns {
+            let mut seen_here: HashSet<&str> = HashSet::new();
+            let mut slots = [WTerm::Var(WVar(0)); 3];
+            let mut all_bound = true;
+            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+            for (slot_no, term) in slot_terms.into_iter().enumerate() {
+                slots[slot_no] = match term {
+                    Term::Var(v) => {
+                        all_bound = false;
+                        let name = v.name();
+                        let effective = if seen_here.contains(name) {
+                            let alias = format!(" dup_{name}_{slot_no}");
+                            diagonal_filters.push((name.to_owned(), alias.clone()));
+                            alias
+                        } else {
+                            seen_here.insert(name);
+                            name.to_owned()
+                        };
+                        let idx = match var_index.get(&effective) {
+                            Some(&i) => i,
+                            None => {
+                                let next = var_index.len();
+                                if next > u8::MAX as usize {
+                                    return Err(SparqlError::Executor(
+                                        "BGP exceeds 256 distinct variables".into(),
+                                    ));
+                                }
+                                var_index.insert(effective, next as u8);
+                                next as u8
+                            }
+                        };
+                        WTerm::Var(WVar(idx))
+                    }
+                    constant => {
+                        let ox = algebra_to_oxrdf(constant)?;
+                        match dict.get(&ox) {
+                            Some(id) => WTerm::Bound(id.0),
+                            // Unknown constant: no stored triple can match —
+                            // zero groups (parity with the empty scan).
+                            None => return Ok(Some(Vec::new())),
+                        }
+                    }
+                };
+            }
+            if all_bound {
+                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
+                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
+            } else {
+                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+            }
+        }
+
+        if ground.iter().any(|t| !snapshot.contains(t)) {
+            return Ok(Some(Vec::new()));
+        }
+        // === END verbatim copy ===
+
+        // All patterns ground (unit relation) — no key columns exist here;
+        // let the scan-based fallback supply the Unbound-key semantics.
+        if wpatterns.is_empty() {
+            return Ok(None);
+        }
+        // A within-pattern repeated variable needs the per-row diagonal
+        // filter, which a key-column hash cannot apply. Fall back.
+        if !diagonal_filters.is_empty() {
+            return Ok(None);
+        }
+        // Resolve each key's WCOJ var index; a key the BGP does not bind has
+        // no column (the rewrite guards this; stay defensive).
+        let mut key_wvars: Vec<u8> = Vec::with_capacity(keys.len());
+        for k in keys {
+            match var_index.get(k.name()) {
+                Some(&i) => key_wvars.push(i),
+                None => return Ok(None),
+            }
+        }
+
+        let bgp = WBgp::new(wpatterns);
+        let mut counts: HashMap<Vec<u64>, usize> = HashMap::new();
+        for batch in WcojExecutor::for_bgp(
+            snapshot.as_ref(),
+            &bgp,
+            &Planner::default(),
+            CancelToken::new(),
+        ) {
+            let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
+            let arrow_schema = batch.schema();
+            let mut key_cols: Vec<&UInt64Array> = Vec::with_capacity(key_wvars.len());
+            for idx in &key_wvars {
+                let Some((col_idx, _)) = arrow_schema.column_with_name(&format!("v{idx}")) else {
+                    // Executor produced no column for a key var — fall back
+                    // wholesale rather than fabricate Unbound groups.
+                    return Ok(None);
+                };
+                let arr = batch
+                    .column(col_idx)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| {
+                        SparqlError::Executor(format!("wcoj batch column v{idx} is not UInt64"))
+                    })?;
+                key_cols.push(arr);
+            }
+            for r in 0..batch.num_rows() {
+                let key: Vec<u64> = key_cols.iter().map(|c| c.value(r)).collect();
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        Ok(Some(
+            counts
+                .into_iter()
+                .map(|(ids, n)| (ids.into_iter().map(|id| Slot::Id(TermId(id))).collect(), n))
+                .collect(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1158,5 +1300,94 @@ mod tests {
             0,
             "rebuilt snapshot must reflect the delete"
         );
+    }
+
+    #[test]
+    fn count_bgp_grouped_matches_scan_grouping() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::{Executor, KeyPart, Slot};
+        use std::collections::HashMap;
+        let mut b = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        // cat0: two works, cat1: one.
+        b.insert_triple(iri("w0"), iri("cat"), iri("cat0"));
+        b.insert_triple(iri("w1"), iri("cat"), iri("cat0"));
+        b.insert_triple(iri("w2"), iri("cat"), iri("cat1"));
+        let var = |n: &str| Term::Var(Var::new(n));
+        let patterns = vec![TriplePattern {
+            subject: var("s"),
+            predicate: iri("cat"),
+            object: var("cat"),
+        }];
+        let keys = [Var::new("cat")];
+
+        let fast = b
+            .count_bgp_grouped(&patterns, &keys)
+            .unwrap()
+            .expect("HornBackend must provide a fast grouped count");
+
+        // Oracle: group the id-rows scan_bgp_ids yields on the key column.
+        let batch = b.scan_bgp_ids(&patterns).unwrap();
+        let key_col = batch.col("cat").expect("?cat column");
+        let mut want: HashMap<KeyPart, usize> = HashMap::new();
+        for r in &batch.rows {
+            *want.entry(r.0[key_col].key_part()).or_insert(0) += 1;
+        }
+        assert_eq!(fast.len(), want.len(), "one entry per group: {fast:?}");
+        for (key_slots, n) in &fast {
+            assert_eq!(key_slots.len(), 1);
+            assert!(
+                matches!(key_slots[0], Slot::Id(_)),
+                "keys keep scan provenance (Slot::Id): {key_slots:?}"
+            );
+            assert_eq!(
+                want.get(&key_slots[0].key_part()),
+                Some(n),
+                "count mismatch for {key_slots:?}"
+            );
+        }
+
+        // A constant the dictionary has never seen: zero groups (matches the
+        // empty scan), not None.
+        let missing = vec![TriplePattern {
+            subject: var("s"),
+            predicate: iri("nope"),
+            object: var("cat"),
+        }];
+        assert_eq!(
+            b.count_bgp_grouped(&missing, &keys).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn count_bgp_grouped_falls_back_on_diagonal_and_unbound_key() {
+        use crate::algebra::TriplePattern;
+        use crate::exec::Executor;
+        let mut b = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        b.insert_triple(iri("x"), iri("p"), iri("x"));
+        let var = |n: &str| Term::Var(Var::new(n));
+        // A var repeated within one pattern needs the per-row diagonal
+        // filter, which a key-column hash cannot apply: fall back (None).
+        let diag = vec![TriplePattern {
+            subject: var("v"),
+            predicate: iri("p"),
+            object: var("v"),
+        }];
+        assert!(b
+            .count_bgp_grouped(&diag, &[Var::new("v")])
+            .unwrap()
+            .is_none());
+        // A key the BGP does not bind has no WCOJ column: fall back (None).
+        let plain = vec![TriplePattern {
+            subject: var("s"),
+            predicate: iri("p"),
+            object: var("o"),
+        }];
+        assert!(b
+            .count_bgp_grouped(&plain, &[Var::new("z")])
+            .unwrap()
+            .is_none());
     }
 }
