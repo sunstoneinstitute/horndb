@@ -29,7 +29,7 @@
 | `docs/metrics.md` | `stage_duration_seconds` semantics note (same commit as the emit-site change) |
 | `INTEGRATION-NOTES.md` | record the new public seams |
 
-Do **not** touch `TASKS.md`, `BENCHMARKS.md`, `docs/architecture.md`, or `docs/index.md` — the integrating session syncs those (root `CLAUDE.md` doc-sync rule) when this branch merges.
+Do **not** touch `TASKS.md`, `docs/benchmarks.md`, `docs/architecture.md`, or `docs/index.md` — the integrating session syncs those (root `CLAUDE.md` doc-sync rule) when this branch merges.
 
 ---
 
@@ -1526,11 +1526,11 @@ Repeat the identical procedure on `main` (same data file, same query). Expected:
 
 - [ ] **Step 5: SPB no-regression on hornbench**
 
-SPB aggregation results are small — this increment targets large-SELECT memory, not SPB throughput — but the streaming path adds one `spawn_blocking` dispatch and one channel hop per SELECT, so verify no regression: run the SPB-256 comparison exactly as documented in `BENCHMARKS.md` / the `nightly-benchmarks` skill on hornbench, branch vs same-day main. Expected: `aggregation-qps` and `editorial-qps` within noise of the ~30.8 baseline.
+SPB aggregation results are small — this increment targets large-SELECT memory, not SPB throughput — but the streaming path adds one `spawn_blocking` dispatch and one channel hop per SELECT, so verify no regression: run the SPB-256 comparison exactly as documented in `docs/benchmarks.md` / the `nightly-benchmarks` skill on hornbench, branch vs same-day main. Expected: `aggregation-qps` and `editorial-qps` within noise of the ~30.8 baseline.
 
 - [ ] **Step 6: Hand off the numbers**
 
-Report the RSS pair and the SPB qps numbers (with commit hashes and host env) back to the integrating session. Do **not** edit `BENCHMARKS.md`, `TASKS.md`, `docs/architecture.md`, or `docs/index.md` from this branch — the integrating session syncs those in the merge commit per the root `CLAUDE.md` doc-sync rule.
+Report the RSS pair and the SPB qps numbers (with commit hashes and host env) back to the integrating session. Do **not** edit `docs/benchmarks.md`, `TASKS.md`, `docs/architecture.md`, or `docs/index.md` from this branch — the integrating session syncs those in the merge commit per the root `CLAUDE.md` doc-sync rule.
 
 ---
 

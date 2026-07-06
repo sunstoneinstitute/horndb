@@ -1492,7 +1492,7 @@ Expected: completes; timings in the same ballpark as before this branch (Q1-Q5 h
 
 - [ ] **Step 4: Official benchmark on hornbench (record-keeping note)**
 
-Per root `CLAUDE.md`, any recorded numbers must come from the `hornbench` host: `ssh hornbench`, repo at `~/src/horndb`, `git fetch` and check out this branch's commit, then run the SPB-256 suite there (or wait for the nightly on the merged commit). Expected outcome: **net-neutral aggregation-qps** (the SPB mix has small probe sides and no all-unbound shared join vars). Only update `BENCHMARKS.md` if the recorded number actually moves; otherwise leave it untouched.
+Per root `CLAUDE.md`, any recorded numbers must come from the `hornbench` host: `ssh hornbench`, repo at `~/src/horndb`, `git fetch` and check out this branch's commit, then run the SPB-256 suite there (or wait for the nightly on the merged commit). Expected outcome: **net-neutral aggregation-qps** (the SPB mix has small probe sides and no all-unbound shared join vars). Only update `docs/benchmarks.md` if the recorded number actually moves; otherwise leave it untouched.
 
 - [ ] **Step 5: Docs sync (same commit)**
 

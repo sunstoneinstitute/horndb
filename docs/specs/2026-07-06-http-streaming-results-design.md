@@ -274,7 +274,7 @@ mid-stream sources are per-chunk `decode_term` failures and per-chunk
   was a #143 non-goal and still is — `scan_bgp_ids` returns a whole `Batch`
   of compact u64 slots).
 - **No-regression:** SPB-256 `aggregation-qps` and `editorial-qps` on
-  hornbench must hold (~30.8 / GraphDB ~153 baseline, BENCHMARKS.md).
+  hornbench must hold (~30.8 / GraphDB ~153 baseline, docs/benchmarks.md).
   SPB results are small (aggregation answers are a handful of rows), so this
   increment targets **large SELECT memory**, not SPB throughput — say so when
   recording. The per-request cost added is one `spawn_blocking` dispatch and

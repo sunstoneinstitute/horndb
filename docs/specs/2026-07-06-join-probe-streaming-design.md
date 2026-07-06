@@ -276,7 +276,7 @@ iff no candidate survives `merge_rows` + the inner FILTER) are chunk-independent
    `compute_join`.
 4. Streaming `LeftJoinOp`; delete `compute_left_join`.
 5. Gates + hornbench + doc sync (`TASKS.md` deferred items 1 and 4,
-   `docs/architecture.md`, `BENCHMARKS.md` if numbers move).
+   `docs/architecture.md`, `docs/benchmarks.md` if numbers move).
 
 ## Risks
 

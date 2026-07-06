@@ -250,4 +250,4 @@ accordingly: "GROUP BY: non-empty keys" and "Two aggregates" (both in
 * No metrics surface changes (`crates/metrics/` untouched).
 * Benchmarks: `agg_profile` locally is a smoke check only; official
   aggregation-qps moves are measured by the SPB-256 nightly on hornbench and
-  recorded in `BENCHMARKS.md` by the executing session (per root `CLAUDE.md`).
+  recorded in `docs/benchmarks.md` by the executing session (per root `CLAUDE.md`).

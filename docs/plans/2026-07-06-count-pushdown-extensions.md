@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 1.90.0 workspace, `horndb-sparql` crate only (`horndb-wcoj`/`horndb-storage` consumed read-only through existing APIs), `cargo nextest` for tests.
 
-**Doc-sync note for executors:** `TASKS.md`, `docs/architecture.md`, `BENCHMARKS.md`, and `docs/index.md` are synced by the coordinating session — do NOT edit them from this plan. This plan touches only `crates/sparql/` (plus `crates/sparql/INTEGRATION-NOTES.md` in the final task). Reference only issue `#128` in commit messages; no other issue numbers exist for this work.
+**Doc-sync note for executors:** `TASKS.md`, `docs/architecture.md`, `docs/benchmarks.md`, and `docs/index.md` are synced by the coordinating session — do NOT edit them from this plan. This plan touches only `crates/sparql/` (plus `crates/sparql/INTEGRATION-NOTES.md` in the final task). Reference only issue `#128` in commit messages; no other issue numbers exist for this work.
 
 **Commit-message rule (from user CLAUDE.md):** never `git commit -m "…"` with double quotes around a message containing backticks — use the single-quoted-HEREDOC form shown in each commit step. Never add `Co-Authored-By` or similar trailers.
 
@@ -1482,7 +1482,7 @@ Expected: PASS, 0 failures (required for the full SPARQL pass — the HTTP serve
 - [ ] **Step 4: agg_profile smoke check (local only, NOT recorded)**
 
 Run: `cargo run -p horndb-sparql --release --example agg_profile -- 100000`
-Expected: completes without error; Q2 ("GROUP BY cat COUNT") and Q3 ("join type+cat GROUP BY") report substantially higher qps than before this plan (Q1 is unchanged — it was already pushed down; Q4/Q5 are the deferred SUM / COUNT-DISTINCT shapes and stay put). Do **not** record these numbers anywhere: official aggregation-qps comes from the SPB-256 nightly on the hornbench host, and `BENCHMARKS.md` is updated by the coordinating session.
+Expected: completes without error; Q2 ("GROUP BY cat COUNT") and Q3 ("join type+cat GROUP BY") report substantially higher qps than before this plan (Q1 is unchanged — it was already pushed down; Q4/Q5 are the deferred SUM / COUNT-DISTINCT shapes and stay put). Do **not** record these numbers anywhere: official aggregation-qps comes from the SPB-256 nightly on the hornbench host, and `docs/benchmarks.md` is updated by the coordinating session.
 
 - [ ] **Step 5: Commit**
 
@@ -1507,4 +1507,4 @@ EOF
 - `cargo nextest run -p horndb-sparql --features server` — green.
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
 - `cargo fmt --all -- --check` — clean.
-- `agg_profile` local run — smoke only (no recorded numbers). Official aggregation-qps is measured by the SPB-256 nightly on hornbench and recorded in `BENCHMARKS.md` by the coordinating session, together with the `TASKS.md` / `docs/architecture.md` sync.
+- `agg_profile` local run — smoke only (no recorded numbers). Official aggregation-qps is measured by the SPB-256 nightly on hornbench and recorded in `docs/benchmarks.md` by the coordinating session, together with the `TASKS.md` / `docs/architecture.md` sync.
