@@ -58,7 +58,7 @@
 //! * **`PathClosure`** — the `edge` keeps its full natural output (the synthetic
 //!   `?pp_src`/`?pp_dst` endpoints the BFS needs); we never prune inside it.
 
-use crate::algebra::{AggFunc, Expr, Term, TriplePattern, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
 use crate::exec::runtime::{agg_inner_exprs, referenced_vars};
 use crate::plan::PhysicalPlan;
@@ -66,9 +66,9 @@ use std::collections::HashSet;
 
 /// Rewrite `plan` into a result-equivalent plan. Two passes run in order:
 ///
-/// 1. [`push_aggregates`] — turn a `COUNT(*)`/`COUNT(?v)` over a bare `BgpScan`
-///    into a [`PhysicalPlan::CountScan`], answering the count without
-///    materializing rows (#144).
+/// 1. [`push_aggregates`] — lower count-only `Group`s over a (possibly
+///    equality-filtered) bare `BgpScan` to count leaves, answering them
+///    without materializing rows (#144 + the 2026-07-06 extensions).
 /// 2. column pruning ([`prune`]) — drop interior columns no ancestor needs.
 ///
 /// Both are result-invariant; `Runtime::run` must yield byte-identical
@@ -82,23 +82,9 @@ pub fn rewrite(plan: &PhysicalPlan) -> Result<PhysicalPlan> {
     Ok(prune(&plan, &demanded))
 }
 
-/// Recognize the narrow `COUNT`-over-BGP shape and rewrite it to a
-/// [`PhysicalPlan::CountScan`]; recurse into every other node unchanged.
-///
-/// The matched shape is EXACTLY:
-/// `Group { inner: BgpScan { patterns }, keys, aggregates }` where
-/// * `keys.is_empty()` (implicit grouping — no `GROUP BY`), AND
-/// * `aggregates.len() == 1`, AND
-/// * the single aggregate has `distinct == false` and is either
-///   * `COUNT(*)` (`AggFunc::CountStar`), or
-///   * `COUNT(?v)` (`AggFunc::Count(Expr::Term(Term::Var(v)))`) where `?v` is
-///     one of the BGP's output variables.
-///
-/// The `?v ∈ BGP vars` guard is what makes `COUNT(?v)` equivalent to the
-/// solution count: a BGP binds every one of its variables in every solution,
-/// so `COUNT(?v)` over a bound BGP var equals `COUNT(*)`. A `COUNT(?z)` over a
-/// var the BGP does not produce would count 0, so it is deliberately NOT
-/// rewritten and stays a `Group`.
+/// Recognize count-only aggregation shapes over a — possibly
+/// equality-filtered — bare `BgpScan` and lower them to count leaves via
+/// [`lower_count_group`]; recurse into every other node unchanged.
 fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
     use PhysicalPlan::*;
     match plan {
@@ -106,48 +92,171 @@ fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
             inner,
             keys,
             aggregates,
-        } if keys.is_empty() && aggregates.len() == 1 => {
-            // Only a bare BgpScan inner qualifies.
-            if let BgpScan { patterns } = *inner {
-                let agg = &aggregates[0];
-                let count_over_bgp = !agg.distinct
-                    && match &agg.func {
-                        AggFunc::CountStar => true,
-                        AggFunc::Count(e) => match &**e {
-                            Expr::Term(Term::Var(v)) => {
-                                let bgp_vars: HashSet<String> = output_vars(&BgpScan {
-                                    patterns: patterns.clone(),
-                                })
-                                .into_iter()
-                                .collect();
-                                bgp_vars.contains(v.name())
-                            }
-                            _ => false,
-                        },
-                        _ => false,
-                    };
-                if count_over_bgp {
-                    return CountScan {
-                        patterns,
-                        out_var: agg.out.clone(),
-                    };
-                }
-                // Not the count shape: rebuild the Group unchanged.
-                return Group {
-                    inner: Box::new(BgpScan { patterns }),
-                    keys,
-                    aggregates,
-                };
+        } => {
+            if let Some(lowered) = lower_count_group(&inner, &keys, &aggregates) {
+                return lowered;
             }
-            // Inner is not a bare BgpScan: recurse into it, keep the Group.
             Group {
                 inner: Box::new(push_aggregates(*inner)),
                 keys,
                 aggregates,
             }
         }
-        // Everything else: recurse into children unchanged.
         other => map_children(other, push_aggregates),
+    }
+}
+
+/// `Some(lowered)` when `Group { inner, keys, aggregates }` is a count-only
+/// shape over a bare — or equality-filtered — `BgpScan`; `None` otherwise
+/// (the caller keeps the `Group` and recurses into its child).
+///
+/// Lowered here: `keys == []` + a single plain count → [`PhysicalPlan::CountScan`]
+/// (the shape landed with #144), now also reachable through an inlinable
+/// `FILTER`. Grouped / multi-count lowering to `GroupCountScan` is the next
+/// task of this plan and currently returns `None`.
+fn lower_count_group(
+    inner: &PhysicalPlan,
+    keys: &[Var],
+    aggregates: &[Aggregate],
+) -> Option<PhysicalPlan> {
+    use PhysicalPlan::*;
+    // 1. Peel the child: a bare scan, or Filter(scan) whose expression is an
+    //    inlinable conjunction of `?v = <const>` equalities.
+    let (patterns, subst): (&Vec<TriplePattern>, Vec<(String, Term)>) = match inner {
+        BgpScan { patterns } => (patterns, Vec::new()),
+        Filter { expr, inner: f } => {
+            let BgpScan { patterns } = &**f else {
+                return None;
+            };
+            let mut subst = Vec::new();
+            if !eq_conjuncts(expr, &mut subst) {
+                return None;
+            }
+            (patterns, subst)
+        }
+        _ => return None,
+    };
+
+    // 2. Vars bound in every solution of the PRE-substitution BGP. Group
+    //    keys, `COUNT(?v)` inner vars, and substituted filter vars must all
+    //    come from this set. (An equality-substituted var stays bound in
+    //    every surviving solution, so counting it still counts every row —
+    //    which is why the check runs against the pre-substitution vars.)
+    let bgp_vars: HashSet<String> = {
+        let mut names = Vec::new();
+        for p in patterns {
+            collect_pattern_vars(p, &mut names);
+        }
+        names.into_iter().collect()
+    };
+
+    // 3. Every aggregate must be a plain count of the group size.
+    if aggregates.is_empty() || !aggregates.iter().all(|a| is_plain_count(a, &bgp_vars)) {
+        return None;
+    }
+    // 4. Keys must be BGP-bound (an unbound key groups everything under
+    //    Unbound — the streaming Group handles that rare shape) and never
+    //    substituted away (the substituted column vanishes from the scan).
+    if !keys.iter().all(|k| bgp_vars.contains(k.name())) {
+        return None;
+    }
+    if subst
+        .iter()
+        .any(|(v, _)| keys.iter().any(|k| k.name() == v))
+    {
+        return None;
+    }
+    // 5. A substituted var the BGP does not bind means the filter drops
+    //    EVERY row (engine Eq on unbound is false) while substitution would
+    //    be a no-op — bail.
+    if !subst.iter().all(|(v, _)| bgp_vars.contains(v.as_str())) {
+        return None;
+    }
+
+    let patterns: Vec<TriplePattern> = patterns
+        .iter()
+        .map(|p| substitute_pattern(p, &subst))
+        .collect();
+
+    // 6. Lower. The landed single implicit-group count keeps CountScan.
+    if keys.is_empty() && aggregates.len() == 1 {
+        return Some(CountScan {
+            patterns,
+            out_var: aggregates[0].out.clone(),
+        });
+    }
+    // Grouped / multi-count lowering (GroupCountScan) lands in the next task.
+    None
+}
+
+/// True iff `agg` is a plain (non-DISTINCT) count whose value equals the
+/// group size over a BGP binding `bgp_vars` in every solution: `COUNT(*)`,
+/// or `COUNT(?v)` where the BGP binds `?v`. (A `COUNT(?z)` over a var the
+/// BGP does not produce counts 0, so it is deliberately NOT covered.)
+fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
+    !agg.distinct
+        && match &agg.func {
+            AggFunc::CountStar => true,
+            AggFunc::Count(e) => {
+                matches!(&**e, Expr::Term(Term::Var(v)) if bgp_vars.contains(v.name()))
+            }
+            _ => false,
+        }
+}
+
+/// Decompose `expr` as a conjunction of `?v = <const>` / `<const> = ?v`
+/// equalities, appending `(var name, constant)` pairs to `out`. Returns
+/// `false` (inlining bails) when any conjunct is not such an equality, a
+/// variable repeats across conjuncts (possibly unsatisfiable), or a constant
+/// is not an IRI/literal. `sameTerm` lowers to `Expr::Eq` in translate.rs,
+/// so it is covered.
+///
+/// Result-invariance rests on engine `Expr::Eq` being structural `Term`
+/// equality over oxrdf-normalized forms, which coincides with the dictionary
+/// term identity BGP constants match by — full argument and the coupling
+/// note about future value-equality semantics in
+/// docs/specs/SPEC-21-count-pushdown-extensions.md.
+fn eq_conjuncts(expr: &Expr, out: &mut Vec<(String, Term)>) -> bool {
+    match expr {
+        Expr::And(a, b) => eq_conjuncts(a, out) && eq_conjuncts(b, out),
+        Expr::Eq(a, b) => {
+            let (v, c) = match (&**a, &**b) {
+                (Expr::Term(Term::Var(v)), Expr::Term(c)) => (v, c),
+                (Expr::Term(c), Expr::Term(Term::Var(v))) => (v, c),
+                _ => return false,
+            };
+            if !matches!(c, Term::Iri(_) | Term::Literal(_)) {
+                return false;
+            }
+            if out.iter().any(|(name, _)| name == v.name()) {
+                return false;
+            }
+            out.push((v.name().to_owned(), c.clone()));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Replace substituted variables by their constants in one pattern,
+/// recursing into RDF 1.2 triple-term sub-patterns.
+fn substitute_pattern(p: &TriplePattern, subst: &[(String, Term)]) -> TriplePattern {
+    TriplePattern {
+        subject: substitute_term(&p.subject, subst),
+        predicate: substitute_term(&p.predicate, subst),
+        object: substitute_term(&p.object, subst),
+    }
+}
+
+fn substitute_term(t: &Term, subst: &[(String, Term)]) -> Term {
+    match t {
+        Term::Var(v) => subst
+            .iter()
+            .find(|(name, _)| name == v.name())
+            .map(|(_, c)| c.clone())
+            .unwrap_or_else(|| t.clone()),
+        Term::Triple(tp) => Term::Triple(Box::new(substitute_pattern(tp, subst))),
+        other => other.clone(),
     }
 }
 
@@ -846,8 +955,6 @@ mod tests {
             "SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { ?s <http://ex/name> ?o }",
             // GROUP BY: non-empty keys.
             "SELECT ?c (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?c } GROUP BY ?c",
-            // Inner is Filter(BGP), not a bare BgpScan.
-            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/age> ?o FILTER(?o > \"20\") }",
             // Two aggregates.
             "SELECT (COUNT(*) AS ?n) (COUNT(?o) AS ?m) WHERE { ?s <http://ex/name> ?o }",
             // COUNT over a var the BGP does not bind: must count 0, not solutions.
@@ -989,6 +1096,129 @@ mod tests {
         assert!(
             out.is_empty(),
             "keyed grouping of nothing has no groups: {out:?}"
+        );
+    }
+
+    // ---- equality-filter inlining (#128 count-pushdown extensions) ----
+
+    #[test]
+    fn eq_filter_variants_push_down_and_count() {
+        let horn = fixture();
+        for (q, want) in [
+            // Literal constant: names Alice ×2 (a and d).
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") }",
+                2,
+            ),
+            // IRI constant: only a knows b.
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/knows> ?o FILTER(?o = <http://ex/b>) }",
+                1,
+            ),
+            // Reversed operand order.
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/knows> ?o FILTER(<http://ex/b> = ?o) }",
+                1,
+            ),
+            // sameTerm lowers to Expr::Eq (translate.rs), so it inlines too.
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/knows> ?o FILTER(sameTerm(?o, <http://ex/b>)) }",
+                1,
+            ),
+            // Conjunction over two distinct vars.
+            (
+                "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o FILTER(?p = <http://ex/name> && ?o = \"Alice\") }",
+                2,
+            ),
+            // COUNT(?s): counting a var the substitution does not touch.
+            (
+                "SELECT (COUNT(?s) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") }",
+                2,
+            ),
+            // COUNT(?o): counting the substituted var itself — every
+            // surviving row has it bound, so the count is the row count.
+            (
+                "SELECT (COUNT(?o) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\") }",
+                2,
+            ),
+        ] {
+            let plan = plan_select(q);
+            let rewritten = rewrite(&plan).unwrap();
+            assert!(
+                has_count_scan(&rewritten),
+                "equality-filtered count must push down:\n{q}\ngot {rewritten:#?}"
+            );
+            let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+            assert_eq!(
+                single_count(&with),
+                format!("{:?}", crate::exec::runtime::integer_literal(want)),
+                "wrong count for:\n{q}"
+            );
+            let without = run_raw(&horn, &plan);
+            assert_eq!(canon(with), canon(without), "parity broke for:\n{q}");
+        }
+    }
+
+    #[test]
+    fn eq_filter_guards_keep_group() {
+        let horn = fixture();
+        let cases = [
+            // Var the BGP does not bind: the filter drops EVERY row (engine
+            // Eq on unbound is false) while substitution would be a no-op.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?z = <http://ex/b>) }",
+            // Same var equated twice: possibly unsatisfiable; we don't reason
+            // about constant-vs-constant.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\" && ?o = \"Bob\") }",
+            // Disjunction is not a conjunction of equalities.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o = \"Alice\" || ?o = \"Bob\") }",
+            // Var-to-var equality has no constant to substitute.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/knows> ?o FILTER(?s = ?o) }",
+            // Negated equality is not an equality.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/name> ?o FILTER(?o != \"Alice\") }",
+            // Range comparison: not expressible as a pattern constant.
+            "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/age> ?o FILTER(?o > \"20\") }",
+        ];
+        for q in cases {
+            let plan = plan_select(q);
+            let rewritten = rewrite(&plan).unwrap();
+            assert!(
+                !has_count_scan(&rewritten),
+                "inlining guard failed — this must stay a Group:\n{q}\ngot {rewritten:#?}"
+            );
+            let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+            let without = run_raw(&horn, &plan);
+            assert_eq!(canon(with), canon(without), "result parity broke for:\n{q}");
+        }
+    }
+
+    /// Engine `=` is TERM equality (runtime.rs eval_expr, Expr::Eq arm) and
+    /// BGP constant matching is dictionary term identity — value-equal but
+    /// term-distinct literals ("42" vs "042") match on neither path, so the
+    /// inlining is exact. If Expr::Eq ever gains numeric VALUE semantics,
+    /// this test fails and the literal-constant case of the inlining must be
+    /// restricted to IRIs (see the 2026-07-06 design spec coupling note).
+    #[test]
+    fn eq_filter_literal_term_identity_pin() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let int = |s: &str| {
+            Term::Literal(format!(
+                "\"{s}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+            ))
+        };
+        horn.insert_triple(iri("a"), iri("v"), int("42"));
+        horn.insert_triple(iri("b"), iri("v"), int("042")); // value-equal, term-distinct
+        let q = "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://ex/v> ?o \
+                 FILTER(?o = \"42\"^^<http://www.w3.org/2001/XMLSchema#integer>) }";
+        let plan = plan_select(q);
+        assert!(has_count_scan(&rewrite(&plan).unwrap()));
+        let with: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        let without = run_raw(&horn, &plan);
+        assert_eq!(canon(with.clone()), canon(without));
+        assert_eq!(
+            single_count(&with),
+            format!("{:?}", crate::exec::runtime::integer_literal(1)),
+            "term-identity equality must count only the exact term"
         );
     }
 
