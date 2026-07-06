@@ -41,6 +41,26 @@ fn scan_columns_never_emit_term() {
     assert_eq!(op.may_emit_term(), vec![false; 2]);
 }
 
+/// A scan over an adapter backend (MemStore has no dictionary; the default
+/// `scan_bgp_ids` goes via `Batch::from_bindings`) yields only Slot::Term
+/// rows, so the claim must be all-true — mirror of
+/// `scan_columns_never_emit_term`, pinning that ScanOp's provenance is
+/// computed from the actual batch rather than assumed Id-only.
+#[test]
+fn mem_store_scan_columns_may_emit_term() {
+    use crate::exec::mem::MemStore;
+    let mut mem = MemStore::default();
+    mem.insert((
+        "http://ex/s".into(),
+        "http://ex/p".into(),
+        "http://ex/o".into(),
+    ));
+    let rt = Runtime::new(&mem);
+    let op = rt.build(&scan_plan()).unwrap();
+    assert_eq!(op.schema().len(), 2);
+    assert_eq!(op.may_emit_term(), vec![true; 2]);
+}
+
 /// VALUES cells are Slot::Term (or Unbound): every column may emit Term.
 #[test]
 fn values_columns_may_emit_term() {
