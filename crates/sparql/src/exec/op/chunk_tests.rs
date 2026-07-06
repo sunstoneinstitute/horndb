@@ -405,3 +405,109 @@ fn distinct_over_streamed_join_mixed_provenance() {
     let big = run_sorted(&horn, &plan, 4096);
     assert_eq!(big.len(), 1, "both probe rows bind the same logical ?v=v1");
 }
+
+// ---------------------------------------------------------------------------
+// LeftJoin: probe-side streaming (#128)
+// ---------------------------------------------------------------------------
+
+/// Mixed-provenance regression for the streamed LeftJoin, mirroring
+/// distinct_over_streamed_join_mixed_provenance: UNDEF-first VALUES probe
+/// (Term provenance) against a BGP build (Id provenance), DISTINCT ?v must
+/// see ONE solution at every chunk size. Goes RED if the force_term_columns
+/// call is dropped from probe_left_join_chunk.
+#[test]
+fn distinct_over_streamed_left_join_mixed_provenance() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v")],
+        rows: vec![vec![None], vec![some_iri("v1")]],
+    };
+    let right = PhysicalPlan::BgpScan {
+        patterns: vec![TriplePattern {
+            subject: Term::Var(Var::new("v")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::LeftJoin {
+                left: Box::new(left),
+                right: Box::new(right),
+                expr: None,
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "LeftJoin mixed provenance");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 1, "both probe rows bind the same logical ?v=v1");
+}
+
+/// OPTIONAL over an empty build side: every probe row must stream through
+/// with the build-only var unbound (the empty-build early-exit is an inner
+/// Join fast path ONLY — LeftJoin must not take it).
+#[test]
+fn left_join_empty_optional_cross_chunk() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: ["a", "b", "c"].iter().map(|s| vec![some_iri(s)]).collect(),
+    };
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("x"), Var::new("y")],
+        rows: vec![],
+    };
+    let plan = PhysicalPlan::LeftJoin {
+        left: Box::new(left),
+        right: Box::new(right),
+        expr: None,
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "LeftJoin empty OPTIONAL");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 3, "all probe rows survive with ?y unbound");
+}
+
+/// Pins the build-actual-Term trigger of `forced_term` (the sibling test
+/// `distinct_over_streamed_join_mixed_provenance` pins the probe-claim
+/// trigger): here the probe side (BGP scan) is Slot::Id provenance and the
+/// build side (VALUES) actually holds Slot::Term rows. DISTINCT ?v must see
+/// exactly one solution at every chunk size.
+#[test]
+fn distinct_over_streamed_join_build_term_trigger() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+
+    let left = PhysicalPlan::BgpScan {
+        patterns: vec![TriplePattern {
+            subject: Term::Var(Var::new("v")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }],
+    };
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("z")],
+        rows: vec![vec![some_iri("v1"), some_iri("z1")]],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join build-term trigger");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 1, "single logical ?v=v1 solution");
+}

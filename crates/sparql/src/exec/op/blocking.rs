@@ -206,14 +206,21 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
     }
 }
 
-/// Left-outer hash join (OPTIONAL). First cut: drains both children, runs the
-/// whole-batch `compute_left_join`, then emits the result via `ChunkedBatch`.
+/// Left-outer hash join (OPTIONAL), probe-side streaming (#128): drains the
+/// build side (right, the OPTIONAL pattern) into a `JoinState` on the first
+/// `next()`, then streams the required (left) side chunk-by-chunk.
+/// Matched/unmatched is decided per probe row against the complete build
+/// state, so OPTIONAL semantics are chunk-independent. Unlike `JoinOp`, an
+/// empty build side does NOT end the stream — every probe row is emitted
+/// with build-only columns `Unbound`.
 pub struct LeftJoinOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
     left: Box<dyn Op + 'r>,
     right: Box<dyn Op + 'r>,
     expr: Option<Expr>,
-    buffer: Option<ChunkedBatch>,
+    state: Option<JoinState>,
+    pending: Option<ChunkedBatch>,
+    done: bool,
     schema: Vec<Var>,
 }
 
@@ -230,7 +237,9 @@ impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
             left,
             right,
             expr,
-            buffer: None,
+            state: None,
+            pending: None,
+            done: false,
             schema,
         }
     }
@@ -244,14 +253,48 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
         merged_term_columns(&self.schema, self.left.as_ref(), self.right.as_ref())
     }
     fn next(&mut self) -> Result<Option<Batch>> {
-        if self.buffer.is_none() {
-            let l = drain(&mut self.left)?;
-            let r = drain(&mut self.right)?;
-            self.buffer = Some(ChunkedBatch::new(
-                self.rt.compute_left_join(l, r, &self.expr)?,
-            ));
+        loop {
+            // 1. Serve buffered fan-out from the previous probe chunk.
+            if let Some(buf) = self.pending.as_mut() {
+                if let Some(chunk) = buf.next_chunk() {
+                    return Ok(Some(chunk));
+                }
+                self.pending = None;
+            }
+            if self.done {
+                return Ok(None);
+            }
+            // 2. First call: drain the build side and index it. An empty
+            //    build side still streams (probe rows get Unbound fills).
+            if self.state.is_none() {
+                let build = drain(&mut self.right)?;
+                let left_may_term = self.left.may_emit_term();
+                self.state = Some(self.rt.build_join_state(
+                    self.left.schema(),
+                    &left_may_term,
+                    build,
+                )?);
+            }
+            // 3. Stream the probe side, one chunk per iteration.
+            match self.left.next()? {
+                None => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Some(chunk) => {
+                    let st = self.state.as_ref().expect("join state built above");
+                    let rows = self
+                        .rt
+                        .probe_left_join_chunk(st, &chunk, self.expr.as_ref())?;
+                    if !rows.is_empty() {
+                        self.pending = Some(ChunkedBatch::new(Batch {
+                            schema: self.schema.clone(),
+                            rows,
+                        }));
+                    }
+                }
+            }
         }
-        Ok(self.buffer.as_mut().unwrap().next_chunk())
     }
 }
 
@@ -444,7 +487,7 @@ impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
 mod tests {
     use super::super::source::ValuesOp;
     use super::super::{Op, TEST_BATCH_ROWS};
-    use super::JoinOp;
+    use super::{JoinOp, LeftJoinOp};
     use crate::algebra::{Term, Var};
     use crate::error::Result;
     use crate::exec::horn::HornBackend;
@@ -513,6 +556,46 @@ mod tests {
             total += b.rows.len();
         }
         assert_eq!(total, 4, "all probe rows must still join");
+        TEST_BATCH_ROWS.with(|c| c.set(4096));
+    }
+
+    /// Same probe-pull discipline for LeftJoin: first `next()` drains the
+    /// build side, pulls ONE probe chunk, emits. Right side matches only
+    /// a0/a1; a2/a3 must still come out with ?b unbound. RED against the
+    /// drain-both implementation (5 pulls at chunk size 1).
+    #[test]
+    fn left_join_streams_probe_side() {
+        TEST_BATCH_ROWS.with(|c| c.set(1));
+        let horn = HornBackend::new();
+        let rt = Runtime::new(&horn);
+
+        let left_rows: Vec<Vec<Option<Term>>> =
+            (0u8..4).map(|i| vec![some_iri(&format!("a{i}"))]).collect();
+        let right_rows: Vec<Vec<Option<Term>>> = (0u8..2)
+            .map(|i| vec![some_iri(&format!("a{i}")), some_iri(&format!("b{i}"))])
+            .collect();
+
+        let pulls = Rc::new(Cell::new(0));
+        let left = CountingOp {
+            inner: Box::new(ValuesOp::new(&[Var::new("a")], &left_rows)),
+            pulls: Rc::clone(&pulls),
+        };
+        let right = ValuesOp::new(&[Var::new("a"), Var::new("b")], &right_rows);
+        let mut lj = LeftJoinOp::new(&rt, Box::new(left), Box::new(right), None);
+
+        let first = lj.next().unwrap().expect("left join must produce output");
+        assert!(!first.rows.is_empty(), "no empty chunks");
+        assert_eq!(
+            pulls.get(),
+            1,
+            "first next() must pull exactly ONE probe chunk, not drain the probe side"
+        );
+
+        let mut total = first.rows.len();
+        while let Some(b) = lj.next().unwrap() {
+            total += b.rows.len();
+        }
+        assert_eq!(total, 4, "matched AND unmatched probe rows must come out");
         TEST_BATCH_ROWS.with(|c| c.set(4096));
     }
 }
