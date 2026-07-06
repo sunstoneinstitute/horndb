@@ -134,8 +134,11 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
 const STREAM_CHANNEL_CHUNKS: usize = 8;
 
 /// Mirror `api::timed(Stage::Exec, …)` for the streaming path: observe the
-/// stage duration (here: time to first chunk — the full drain is visible in
-/// `request_duration_seconds`) and bump `query_errors` on error.
+/// stage duration (here: time to first chunk) and bump `query_errors` on
+/// error. Note `request_duration_seconds` also stops at response headers —
+/// roughly the same instant — so no duration metric covers the full body
+/// drain; only `response_bytes` (via `CountingBody`) reflects delivered
+/// bytes.
 fn record_exec(start: Instant, err: bool) {
     let m = horndb_metrics::metrics();
     let label = StageLabel { stage: Stage::Exec };
