@@ -1,8 +1,14 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Probe-side streaming Join/LeftJoin + bound-key join-variable selection — design"
+---
+
 # Join probe-side streaming + bound-key join-variable selection — design
 
 **Date:** 2026-07-06
 **Issues:** deferred items 1 and 4 of [#128](https://github.com/sunstoneinstitute/horndb/issues/128) (see `TASKS.md` "Remaining / deferred work").
-**Status:** design — implementation plan: `docs/plans/2026-07-06-join-probe-streaming.md`.
+**Status:** design — implementation plan: `docs/plans/PLAN-20-01-join-probe-streaming.md`.
 
 ## Problem
 
@@ -12,7 +18,7 @@ Two deferred defects live in the same join code (`crates/sparql/src/exec/op/bloc
 - **Joins are not streaming.** `JoinOp`/`LeftJoinOp` (blocking.rs:114-172) drain
   **both** children fully before emitting their first output tuple, then hand the
   whole-batch `compute_join`/`compute_left_join` result out via `ChunkedBatch`.
-  The #143 design (`docs/specs/2026-06-30-streaming-runtime-pushdown-design.md` §2)
+  The #143 design (`docs/specs/SPEC-19-streaming-runtime-pushdown.md` §2)
   intended: build a hash table from the build side on first `next()`, then stream
   the probe side chunk-by-chunk. The eager first cut was kept because the SPB query
   mix never exercises a large probe side under a join — but it blocks full

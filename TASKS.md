@@ -93,21 +93,21 @@ Closed tasks are listed in [Done](#done-for-traceability).
   1. Probe-side streaming for `Join`/`LeftJoin` — joins currently drain both children
      before emitting any output tuple (does not arise in the SPB mix but blocks full
      end-to-end streaming) — **planned together with item 4**:
-     `docs/specs/2026-07-06-join-probe-streaming-design.md` +
-     `docs/plans/2026-07-06-join-probe-streaming.md`.
+     `docs/specs/SPEC-20-join-probe-streaming.md` +
+     `docs/plans/PLAN-20-01-join-probe-streaming.md`.
   2. Filter-aware / grouped / multi-aggregate count pushdown (only
      COUNT-over-full-BGP is pushed down today) — **planned**:
-     `docs/specs/2026-07-06-count-pushdown-extensions-design.md` (covers
+     `docs/specs/SPEC-21-count-pushdown-extensions.md` (covers
      equality-filter inlining, grouped COUNT via an additive
      `Executor::count_bgp_grouped` seam, multi-aggregate all-plain-counts; defers
      mixed COUNT+SUM, COUNT(DISTINCT), non-equality filters, with reasons) +
-     `docs/plans/2026-07-06-count-pushdown-extensions.md`.
+     `docs/plans/PLAN-21-01-count-pushdown-extensions.md`.
   3. Streaming results out to the HTTP layer — `Runtime::run` still collects a
      `Vec<Bindings>` before serializing — **planned**:
-     `docs/specs/2026-07-06-http-streaming-results-design.md` (new
+     `docs/specs/SPEC-22-http-streaming-results.md` (new
      `Runtime::run_stream`/`BindingsStream`, all four SELECT formats stream via
      `spawn_blocking` + bounded-channel body, first chunk pre-buffered for clean
-     early 400s) + `docs/plans/2026-07-06-http-streaming-results.md`.
+     early 400s) + `docs/plans/PLAN-22-01-http-streaming-results.md`.
   4. `batch_join_vars` intersects child *schemas*, not *bound* keys (native
      `LeftJoin`); a shared var unbound in every right row degrades the probe
      toward O(|l|·|r|) — correct but potentially slow on a pathological workload

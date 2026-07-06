@@ -1,14 +1,20 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Probe-side streaming Join/LeftJoin + bound-key join-variable selection"
+---
+
 # Join Probe-Side Streaming + Bound-Key Selection Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the native SPARQL `Join`/`LeftJoin` operators stream their probe (left) side instead of draining both children, and key their hash index on the build side's *actually-bound* columns instead of the schema intersection — deferred items 1 and 4 of [#128](https://github.com/sunstoneinstitute/horndb/issues/128).
 
-**Architecture:** Both joins drain only the build side (right child) on first `next()` into a `JoinState` (owned batch + index of row *indices* + bound-key jvars + merge plan + forced-decode column set), then pull probe chunks and emit per chunk through a `pending` carry buffer. A new required `Op::may_emit_term` static-provenance method lets the join decide, before its first emission, which output columns must be decoded `Slot::Id → Slot::Term` so the stream-wide no-Id∧Term-mix invariant (which cross-chunk `DISTINCT`/`GROUP BY` keying relies on) survives without whole-output `normalize_columns`. Design rationale: `docs/specs/2026-07-06-join-probe-streaming-design.md`.
+**Architecture:** Both joins drain only the build side (right child) on first `next()` into a `JoinState` (owned batch + index of row *indices* + bound-key jvars + merge plan + forced-decode column set), then pull probe chunks and emit per chunk through a `pending` carry buffer. A new required `Op::may_emit_term` static-provenance method lets the join decide, before its first emission, which output columns must be decoded `Slot::Id → Slot::Term` so the stream-wide no-Id∧Term-mix invariant (which cross-chunk `DISTINCT`/`GROUP BY` keying relies on) survives without whole-output `normalize_columns`. Design rationale: `docs/specs/SPEC-20-join-probe-streaming.md`.
 
 **Tech Stack:** Rust 1.90 workspace, crate `horndb-sparql` (`crates/sparql/`), `cargo nextest` as the runner.
 
-**Read first:** `docs/specs/2026-07-06-join-probe-streaming-design.md` (the design this plan implements), `docs/specs/2026-06-30-streaming-runtime-pushdown-design.md` §2 (the operator model), `crates/sparql/CLAUDE.md`.
+**Read first:** `docs/specs/SPEC-20-join-probe-streaming.md` (the design this plan implements), `docs/specs/SPEC-19-streaming-runtime-pushdown.md` §2 (the operator model), `crates/sparql/CLAUDE.md`.
 
 **Environment notes:**
 
@@ -1524,8 +1530,8 @@ with:
   the probe toward O(|l|·|r|)); a new required `Op::may_emit_term` provenance
   method + forced-term columns preserve the stream-wide no-Id∧Term-mix invariant
   without whole-output normalization. Design:
-  `docs/specs/2026-07-06-join-probe-streaming-design.md`; plan:
-  `docs/plans/2026-07-06-join-probe-streaming.md`.
+  `docs/specs/SPEC-20-join-probe-streaming.md`; plan:
+  `docs/plans/PLAN-20-01-join-probe-streaming.md`.
 
   **Remaining / deferred work:**
   1. Filter-aware / grouped / multi-aggregate count pushdown (deferred; only
@@ -1536,7 +1542,7 @@ with:
 
 In `docs/architecture.md` §9, update the streaming-runtime status text: where it describes the pull-based operator tree, note that `Join`/`LeftJoin` are now probe-side streaming (build side drained, probe side chunked) and that join keys are bound-column selected; keep the row's Status as **implemented**. Mirror the change to the #128 GitHub issue per the `TASKS.md` header procedure.
 
-In `docs/index.md`, ensure `docs/specs/2026-07-06-join-probe-streaming-design.md` (purpose: streaming joins + bound-key selection design, read before touching `exec/op/blocking.rs` join code) and `docs/plans/2026-07-06-join-probe-streaming.md` (its implementation plan) are each listed with one line, per `docs/CLAUDE.md`. They may already be there from the plan-authoring branch — if so, skip.
+In `docs/index.md`, ensure `docs/specs/SPEC-20-join-probe-streaming.md` (purpose: streaming joins + bound-key selection design, read before touching `exec/op/blocking.rs` join code) and `docs/plans/PLAN-20-01-join-probe-streaming.md` (its implementation plan) are each listed with one line, per `docs/CLAUDE.md`. They may already be there from the plan-authoring branch — if so, skip.
 
 - [ ] **Step 6: Commit**
 

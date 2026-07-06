@@ -1,9 +1,15 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Count-pushdown extensions: equality-filter inlining, grouped COUNT, multi-count — design"
+---
+
 # Count-pushdown extensions — filter-aware, grouped, multi-count (design)
 
 **Date:** 2026-07-06
 **Issue:** [#128](https://github.com/sunstoneinstitute/horndb/issues/128) (SPARQL aggregation runtime; remaining-work item 2: "filter-aware / grouped / multi-aggregate count pushdown").
-**Builds on:** `docs/specs/2026-06-30-streaming-runtime-pushdown-design.md` §3(b) — the landed `CountScan` + `Executor::count_bgp` first cut.
-**Status:** design — implementation plan at `docs/plans/2026-07-06-count-pushdown-extensions.md`.
+**Builds on:** `docs/specs/SPEC-19-streaming-runtime-pushdown.md` §3(b) — the landed `CountScan` + `Executor::count_bgp` first cut.
+**Status:** design — implementation plan at `docs/plans/PLAN-21-01-count-pushdown-extensions.md`.
 
 ## Problem
 

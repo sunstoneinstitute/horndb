@@ -1,9 +1,15 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Streaming SELECT results end-to-end to the HTTP layer — design"
+---
+
 # HTTP streaming results — design
 
 **Date:** 2026-07-06
 **Issue:** [#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 3 ("stream results out to the HTTP layer").
-**Status:** design — implementation plan at `docs/plans/2026-07-06-http-streaming-results.md`.
-**Predecessor:** `docs/specs/2026-06-30-streaming-runtime-pushdown-design.md`, whose Non-goals explicitly deferred exactly this increment.
+**Status:** design — implementation plan at `docs/plans/PLAN-22-01-http-streaming-results.md`.
+**Predecessor:** `docs/specs/SPEC-19-streaming-runtime-pushdown.md`, whose Non-goals explicitly deferred exactly this increment.
 
 ## Problem
 

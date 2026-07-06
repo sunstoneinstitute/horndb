@@ -37,6 +37,9 @@ SPEC-00..12 above are the standing subsystem contracts. Point/design specs — n
 | [SPEC-17](SPEC-17-metrics.md) | Metrics & observability (Phase 1: metrics) | cross-cutting (`crates/metrics/`) | Specified |
 | [SPEC-18](SPEC-18-spb-driver-report.md) | SPB-256: record the full driver report | SPEC-01 (harness trend DB) | Approved |
 | [SPEC-19](SPEC-19-streaming-runtime-pushdown.md) | Streaming SPARQL runtime + projection/aggregate pushdown | SPEC-07 ([#143](https://github.com/sunstoneinstitute/horndb/issues/143), [#144](https://github.com/sunstoneinstitute/horndb/issues/144)) | Approved |
+| [SPEC-20](SPEC-20-join-probe-streaming.md) | Probe-side streaming Join/LeftJoin + bound-key join-variable selection | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining items 1+4) | Draft |
+| [SPEC-21](SPEC-21-count-pushdown-extensions.md) | Count-pushdown extensions — equality-filter inlining, grouped COUNT, multi-count | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 2) | Draft |
+| [SPEC-22](SPEC-22-http-streaming-results.md) | Streaming SELECT results end-to-end to the HTTP layer | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 3) | Draft |
 
 ## Reading order
 

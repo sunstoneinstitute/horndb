@@ -1,10 +1,16 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Count-pushdown extensions: equality-filter inlining, grouped COUNT, multi-count"
+---
+
 # Count-Pushdown Extensions Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the SPARQL planner's count pushdown (#128) so equality-filtered, grouped, and multi-count aggregation shapes avoid materializing solution rows.
 
-**Architecture:** Three additive pieces on top of the landed `CountScan`/`count_bgp` pushdown: (1) an equality-filter inlining pre-step in `plan/pushdown.rs` that substitutes `FILTER(?v = <const>)` constants into the BGP patterns under count-only `Group`s; (2) a new `PhysicalPlan::GroupCountScan` leaf + `Executor::count_bgp_grouped` seam method (default `None`) whose `HornBackend` implementation hashes raw u64 WCOJ key columns without building rows; (3) a `GroupCountScanOp` operator that emits per-group counts in the same decoded-lexical key order as the streaming `eval_group_native` (order is observable under LIMIT). Design rationale, scope line, and deferrals: `docs/specs/2026-07-06-count-pushdown-extensions-design.md`.
+**Architecture:** Three additive pieces on top of the landed `CountScan`/`count_bgp` pushdown: (1) an equality-filter inlining pre-step in `plan/pushdown.rs` that substitutes `FILTER(?v = <const>)` constants into the BGP patterns under count-only `Group`s; (2) a new `PhysicalPlan::GroupCountScan` leaf + `Executor::count_bgp_grouped` seam method (default `None`) whose `HornBackend` implementation hashes raw u64 WCOJ key columns without building rows; (3) a `GroupCountScanOp` operator that emits per-group counts in the same decoded-lexical key order as the streaming `eval_group_native` (order is observable under LIMIT). Design rationale, scope line, and deferrals: `docs/specs/SPEC-21-count-pushdown-extensions.md`.
 
 **Tech Stack:** Rust 1.90.0 workspace, `horndb-sparql` crate only (`horndb-wcoj`/`horndb-storage` consumed read-only through existing APIs), `cargo nextest` for tests.
 
@@ -497,7 +503,7 @@ eval_group_native (observable under LIMIT). No rewrite produces the node
 yet; hand-built-plan tests pin fallback semantics, implicit-group zeros,
 and keyed-empty-input behavior.
 
-Design: docs/specs/2026-07-06-count-pushdown-extensions-design.md
+Design: docs/specs/SPEC-21-count-pushdown-extensions.md
 EOF
 )"
 ```
@@ -810,7 +816,7 @@ fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
 /// equality over oxrdf-normalized forms, which coincides with the dictionary
 /// term identity BGP constants match by — full argument and the coupling
 /// note about future value-equality semantics in
-/// docs/specs/2026-07-06-count-pushdown-extensions-design.md.
+/// docs/specs/SPEC-21-count-pushdown-extensions.md.
 fn eq_conjuncts(expr: &Expr, out: &mut Vec<(String, Term)>) -> bool {
     match expr {
         Expr::And(a, b) => eq_conjuncts(a, out) && eq_conjuncts(b, out),
@@ -892,7 +898,7 @@ which coincides with the dictionary term identity BGP constants match by
 (pinned by eq_filter_literal_term_identity_pin). Guards: conjuncts must be
 Var=Const over distinct BGP-bound vars, never a GROUP BY key.
 
-Design: docs/specs/2026-07-06-count-pushdown-extensions-design.md
+Design: docs/specs/SPEC-21-count-pushdown-extensions.md
 EOF
 )"
 ```
@@ -1118,7 +1124,7 @@ Group for DISTINCT counts, mixed count+value aggregates, unbound keys/count
 vars, and key-substituting filters. Parity battery asserts full Vec
 equality (order matters under LIMIT) against the unrewritten runtime.
 
-Design: docs/specs/2026-07-06-count-pushdown-extensions-design.md
+Design: docs/specs/SPEC-21-count-pushdown-extensions.md
 EOF
 )"
 ```
@@ -1460,7 +1466,7 @@ rows for them:
 
 Deferred with reasons (mixed count+value aggregates, `COUNT(DISTINCT …)`,
 non-equality filters, partial inlining, zero-aggregate `GROUP BY`):
-`docs/specs/2026-07-06-count-pushdown-extensions-design.md`.
+`docs/specs/SPEC-21-count-pushdown-extensions.md`.
 ```
 
 - [ ] **Step 2: Format and lint**
@@ -1493,7 +1499,7 @@ docs(sparql): record the count-pushdown seam contract in INTEGRATION-NOTES (#128
 
 Covers CountScan/count_bgp, the equality-filter inlining invariant, and
 GroupCountScan/count_bgp_grouped ordering + fallback semantics; points at
-docs/specs/2026-07-06-count-pushdown-extensions-design.md for the deferral
+docs/specs/SPEC-21-count-pushdown-extensions.md for the deferral
 rationale.
 EOF
 )"

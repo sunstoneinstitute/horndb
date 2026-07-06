@@ -1,10 +1,16 @@
+---
+status: draft
+date: 2026-07-06
+scope: "Streaming SELECT results end-to-end to the HTTP layer"
+---
+
 # HTTP Streaming Results Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stream SELECT results end-to-end — operator chunk → per-chunk decode → per-chunk serialization → chunked HTTP frames — so `Runtime::run`'s full `Vec<Bindings>` and the fully-serialized body `String` are never built for HTTP queries ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 3).
 
-**Architecture:** A new `Runtime::run_stream` returns a `BindingsStream` that pulls one operator `Batch` at a time and decodes it at the boundary; `run` collects it, so no existing consumer changes. The four SELECT serializers gain incremental header/chunk/footer forms behind a `SelectSerializer` trait. The `/query` handler runs execution+decode+serialization inside `tokio::task::spawn_blocking` (the operator tree and the `RwLockReadGuard` are `!Send` — they must stay on one thread) and ships serialized `Bytes` over a bounded mpsc channel into a hand-rolled `http_body::Body`. The first chunk is pre-buffered before headers so early errors are still a clean HTTP 400; mid-stream errors abort the chunked body (protocol-level-detectable truncation). Full design rationale: `docs/specs/2026-07-06-http-streaming-results-design.md`.
+**Architecture:** A new `Runtime::run_stream` returns a `BindingsStream` that pulls one operator `Batch` at a time and decodes it at the boundary; `run` collects it, so no existing consumer changes. The four SELECT serializers gain incremental header/chunk/footer forms behind a `SelectSerializer` trait. The `/query` handler runs execution+decode+serialization inside `tokio::task::spawn_blocking` (the operator tree and the `RwLockReadGuard` are `!Send` — they must stay on one thread) and ships serialized `Bytes` over a bounded mpsc channel into a hand-rolled `http_body::Body`. The first chunk is pre-buffered before headers so early errors are still a clean HTTP 400; mid-stream errors abort the chunked body (protocol-level-detectable truncation). Full design rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
 
 **Tech Stack:** Rust 1.90, axum 0.8, tokio (`spawn_blocking`, `sync::mpsc`), http-body 1, bytes — all already `server`-feature deps of `crates/sparql`. **No new dependencies.**
 
@@ -789,7 +795,7 @@ Create `crates/sparql/src/server/stream_body.rs` with the tests first (the type 
 ```rust
 //! Streaming response body fed by a bounded channel from the blocking
 //! serializer thread (see `server/query.rs::stream_select`). Design:
-//! `docs/specs/2026-07-06-http-streaming-results-design.md`.
+//! `docs/specs/SPEC-22-http-streaming-results.md`.
 
 #[cfg(test)]
 mod tests {
@@ -1488,7 +1494,7 @@ Append to `crates/sparql/INTEGRATION-NOTES.md`:
 - CONSTRUCT/DESCRIBE streaming deferred (#TODO); UPDATE must stay
   materialized (SPARQL 1.1 §3.1.3 pre-update snapshot semantics).
 
-Full rationale: `docs/specs/2026-07-06-http-streaming-results-design.md`.
+Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
 ```
 
 - [ ] **Step 3: Commit**
