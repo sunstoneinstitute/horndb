@@ -134,6 +134,21 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 - Executed plans (`docs/plans/PLAN-*.md` with `status: executed`) are historical implementation logs; treat them as commit-message-grade context, not as a source of truth for current behaviour.
 - `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (TASKS.md LOW).
 
+## Codebase knowledge graph (graphify, optional)
+
+If `graphify-out/graph.json` exists, an AST-derived knowledge graph of this
+workspace is available. For "where/how does X connect to Y" navigation questions,
+prefer a scoped graph query over broad grep/read:
+
+- `graphify query "<question>"` — scoped subgraph for a codebase question.
+- `graphify path "<A>" "<B>"` — relationship between two symbols.
+- `graphify explain "<concept>"` — a node and its neighbours.
+- After changing code, `graphify update .` refreshes the graph (AST-only, no API cost).
+
+The graph is **AST-only** (structural). It is not committed — rebuild locally with
+`graphify update .`. Absent the file, ignore this section. See
+`.claude/skills/graphify/SKILL.md` for the full workflow.
+
 ## Where deeper guidance lives
 
 **`AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it** (this directory and

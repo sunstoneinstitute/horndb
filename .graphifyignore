@@ -1,0 +1,23 @@
+# graphify ignore — .gitignore-style. .gitignore is also respected automatically.
+# Goal: keep the knowledge graph focused on HornDB's own code + design docs,
+# not vendored third-party source or bulk RDF test fixtures.
+
+# Build output (already gitignored, listed for clarity)
+target/
+
+# Vendored SuiteSparse:GraphBLAS C submodule — huge, third-party, not our code
+crates/closure/vendor/GraphBLAS/
+
+# Local multi-agent worktree pool
+.claude/worktrees/
+
+# Bulk RDF data / conformance fixtures — data, not code; adds graph noise
+*.ttl
+*.nt
+*.nq
+*.rdf
+*.n3
+*.trig
+
+# graphify's own output
+graphify-out/

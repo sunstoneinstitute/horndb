@@ -25,3 +25,6 @@ __pycache__
 
 # Internal RDFox comparison results — must never be committed (DeWitt clause).
 /scripts/bench/results/
+
+# graphify local knowledge graph — AST-derived, rebuild with `graphify update .`
+/graphify-out/
