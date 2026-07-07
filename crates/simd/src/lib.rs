@@ -83,6 +83,17 @@ pub use merge::merge;
 pub use cpu::Kernel;
 pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa, Source};
 
+/// The host's human-readable CPU identity for startup logging — the CPU brand
+/// string where the arch exposes one (x86_64 via CPUID, Apple Silicon via
+/// sysctl), else a `"<vendor> family <f> model <m>"` fallback, or `None` on an
+/// unidentifiable arch (e.g. aarch64 Linux). Independent of the kernel table:
+/// a host with no table row still reports which CPU it is, so a `source=calibrated`
+/// selection can be tied back to the hardware that produced it. Pairs with
+/// [`calibration_report`], [`configured_max_isa`], and [`configured_autotune`].
+pub fn cpu_identity() -> Option<String> {
+    cpu::identity()
+}
+
 /// Eagerly calibrate every primitive's kernel, paying the (small) startup
 /// calibration cost up front instead of lazily on first use. Hosts that want
 /// deterministic first-call latency call this once at startup; otherwise each

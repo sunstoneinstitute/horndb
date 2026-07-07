@@ -169,6 +169,10 @@ fn record_simd_calibration() {
     use horndb_metrics::labels::{SimdIsa, SimdKernel, SimdSource};
 
     horndb_simd::init();
+    match horndb_simd::cpu_identity() {
+        Some(cpu) => eprintln!("serve: SIMD host CPU — {cpu}"),
+        None => eprintln!("serve: SIMD host CPU — unidentified (calibration-only)"),
+    }
     let metrics = horndb_metrics::metrics();
     for (kernel, isa, source) in horndb_simd::calibration_report() {
         let simd_kernel = match kernel {

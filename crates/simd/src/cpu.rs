@@ -12,18 +12,54 @@
 //! *every* kernel to scalar, but the shape supports future per-kernel SIMD
 //! entries without a signature change.
 //!
-//! On non-x86_64 hosts there is no accessible CPUID, so [`detect`] returns
-//! `None` and every primitive falls through to calibration.
+//! ## Host identity across arches
+//!
+//! [`detect`] returns a [`CpuKey`] on the two arches we can identify cheaply:
+//! **x86_64** via CPUID (Intel + AMD, any OS — so a Linux EPYC box gets a real
+//! identity even without a table row), and **aarch64 macOS** (Apple Silicon)
+//! via `sysctlbyname` (`hw.cpufamily`/`hw.cpusubfamily`). Everywhere else
+//! (e.g. aarch64 Linux) there is no cheap identity and it returns `None`,
+//! falling through to calibration. [`identity`] additionally exposes the
+//! human-readable brand string (CPUID leaves `0x8000_0002..4` on x86, the
+//! `machdep.cpu.brand_string` sysctl on Apple) for startup logging. A table hit
+//! still requires a per-`(cpu, kernel)` row; today Apple has none, so Apple
+//! hosts get an identity but still calibrate.
+//!
+//! This crate stays dependency-free: the macOS path calls `sysctlbyname`
+//! through a raw `extern "C"` declaration (it lives in libSystem, linked by
+//! default), not via a `libc`/`sysctl` crate.
 
 use crate::dispatch::Isa;
 use std::sync::OnceLock;
 
-/// CPU vendor, decoded from the CPUID leaf-0 vendor string.
+/// CPU vendor. `Intel`/`Amd`/`Other` are decoded from the x86 CPUID leaf-0
+/// vendor string; `Apple` is assigned on aarch64 macOS (Apple Silicon), which
+/// is identified via sysctl rather than CPUID.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Vendor {
     Intel,
     Amd,
+    Apple,
     Other,
+}
+
+impl Vendor {
+    /// Stable, human-readable vendor name for the identity-fallback string.
+    #[cfg_attr(
+        not(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", target_os = "macos")
+        )),
+        allow(dead_code)
+    )]
+    fn name(self) -> &'static str {
+        match self {
+            Vendor::Intel => "Intel",
+            Vendor::Amd => "AMD",
+            Vendor::Apple => "Apple",
+            Vendor::Other => "unknown-vendor",
+        }
+    }
 }
 
 /// A host CPU identity: vendor plus the CPUID display family/model (the
@@ -126,10 +162,163 @@ fn detect_uncached() -> Option<CpuKey> {
     })
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn detect_uncached() -> Option<CpuKey> {
-    // No accessible CPUID (e.g. aarch64): fall through to calibration.
+    // Apple Silicon has no userspace CPUID; its stable identity is the
+    // `hw.cpufamily` hash (per chip generation) plus `hw.cpusubfamily`. Map
+    // them onto the same `(vendor, family, model)` shape the table keys on, so a
+    // future measured Apple row slots in exactly like the x86 rows.
+    let family = sysctl_u32("hw.cpufamily")?;
+    let model = sysctl_u32("hw.cpusubfamily").unwrap_or(0);
+    Some(CpuKey {
+        vendor: Vendor::Apple,
+        family,
+        model,
+    })
+}
+
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", target_os = "macos")
+)))]
+fn detect_uncached() -> Option<CpuKey> {
+    // No cheap identity here (e.g. aarch64 Linux): fall through to calibration.
     None
+}
+
+/// The host's human-readable CPU identity — the brand string where available
+/// (CPUID leaves `0x8000_0002..4` on x86, `machdep.cpu.brand_string` on Apple),
+/// else a `"<vendor> family <f> model <m>"` fallback synthesised from
+/// [`detect`]. `None` only when the host is unidentifiable on this arch (e.g.
+/// aarch64 Linux). Surfaced by [`crate::cpu_identity`] for startup logging so a
+/// host that fell through to calibration still reports *which* CPU it is.
+pub(crate) fn identity() -> Option<String> {
+    if let Some(brand) = brand_string() {
+        let brand = brand.trim();
+        if !brand.is_empty() {
+            return Some(brand.to_string());
+        }
+    }
+    detect().map(|c| format!("{} family {} model {}", c.vendor.name(), c.family, c.model))
+}
+
+/// Trim an x86 CPUID brand string: cut at the first NUL, then strip the
+/// space-padding CPUID applies. Pure and testable without CPUID.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn parse_brand_bytes(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).trim().to_string()
+}
+
+/// The raw CPU brand string, or `None` on an arch without one.
+#[cfg(target_arch = "x86_64")]
+fn brand_string() -> Option<String> {
+    use std::arch::x86_64::__cpuid;
+    // Safety: CPUID is baseline on x86_64; these reads have no preconditions.
+    let max_ext = unsafe { __cpuid(0x8000_0000) }.eax;
+    if max_ext < 0x8000_0004 {
+        return None; // brand-string leaves unsupported (vanishingly rare)
+    }
+    let mut bytes = [0u8; 48];
+    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004]
+        .iter()
+        .enumerate()
+    {
+        let r = unsafe { __cpuid(*leaf) };
+        let off = i * 16;
+        bytes[off..off + 4].copy_from_slice(&r.eax.to_le_bytes());
+        bytes[off + 4..off + 8].copy_from_slice(&r.ebx.to_le_bytes());
+        bytes[off + 8..off + 12].copy_from_slice(&r.ecx.to_le_bytes());
+        bytes[off + 12..off + 16].copy_from_slice(&r.edx.to_le_bytes());
+    }
+    Some(parse_brand_bytes(&bytes))
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn brand_string() -> Option<String> {
+    sysctl_string("machdep.cpu.brand_string")
+}
+
+#[cfg(not(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", target_os = "macos")
+)))]
+fn brand_string() -> Option<String> {
+    None
+}
+
+// --- macOS sysctl (raw FFI, no `libc` dependency) --------------------------
+
+// `sysctlbyname` from libSystem (linked by default on macOS). Reads a named
+// MIB into a caller buffer; a null `oldp` with a `&mut len` asks for the size.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+extern "C" {
+    fn sysctlbyname(
+        name: *const std::os::raw::c_char,
+        oldp: *mut std::os::raw::c_void,
+        oldlenp: *mut usize,
+        newp: *mut std::os::raw::c_void,
+        newlen: usize,
+    ) -> std::os::raw::c_int;
+}
+
+/// Read a string-typed sysctl by name (e.g. `machdep.cpu.brand_string`).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn sysctl_string(name: &str) -> Option<String> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    // First call with a null buffer reports the byte length (incl. trailing NUL).
+    let mut len: usize = 0;
+    let rc = unsafe {
+        sysctlbyname(
+            cname.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    let rc = unsafe {
+        sysctlbyname(
+            cname.as_ptr(),
+            buf.as_mut_ptr() as *mut std::os::raw::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    buf.truncate(len);
+    if buf.last() == Some(&0) {
+        buf.pop(); // drop the C trailing NUL
+    }
+    String::from_utf8(buf).ok()
+}
+
+/// Read a 32-bit integer sysctl by name (e.g. `hw.cpufamily`).
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn sysctl_u32(name: &str) -> Option<u32> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut val: u32 = 0;
+    let mut len: usize = std::mem::size_of::<u32>();
+    let rc = unsafe {
+        sysctlbyname(
+            cname.as_ptr(),
+            &mut val as *mut u32 as *mut std::os::raw::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || len != std::mem::size_of::<u32>() {
+        return None;
+    }
+    Some(val)
 }
 
 /// The authoritative kernel choice for a known host CPU, or `None` for an
@@ -269,6 +458,42 @@ mod tests {
             model: 42,
         };
         assert_eq!(table_pick(other_intel, Kernel::Intersect), None);
+    }
+
+    #[test]
+    fn parse_brand_bytes_trims_nul_and_padding() {
+        // CPUID space-pads and NUL-terminates; both must be stripped.
+        let mut b = *b"   AMD Ryzen 7 7700 8-Core Processor\0\0\0\0\0\0\0\0\0\0\0\0";
+        assert_eq!(parse_brand_bytes(&b), "AMD Ryzen 7 7700 8-Core Processor");
+        // No NUL at all: still trims the padding.
+        b[36] = b' ';
+        let full = b"Intel(R) Xeon(R) Gold 5412U             ";
+        assert_eq!(parse_brand_bytes(full), "Intel(R) Xeon(R) Gold 5412U");
+        // Empty / all-NUL yields empty (identity() then falls back to the key).
+        assert_eq!(parse_brand_bytes(&[0u8; 48]), "");
+    }
+
+    #[test]
+    fn identity_is_stable_and_nonempty_where_detectable() {
+        // On x86_64 and Apple Silicon the host is identifiable, so identity() is
+        // Some and non-empty; elsewhere (e.g. aarch64 Linux) None is acceptable.
+        let id = identity();
+        if let Some(s) = &id {
+            assert!(!s.is_empty(), "identity must not be an empty string");
+        }
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", target_os = "macos")
+        ))]
+        assert!(id.is_some(), "x86_64 / Apple hosts must be identifiable");
+    }
+
+    #[test]
+    fn vendor_names_are_stable() {
+        assert_eq!(Vendor::Intel.name(), "Intel");
+        assert_eq!(Vendor::Amd.name(), "AMD");
+        assert_eq!(Vendor::Apple.name(), "Apple");
+        assert_eq!(Vendor::Other.name(), "unknown-vendor");
     }
 
     #[test]

@@ -28,6 +28,65 @@ Before claiming any x86 SIMD kernel correct:
 - Boundary values (`0`, `u64::MAX`, empty/one-element slices) are the usual
   killers — add them as explicit differential cases, not just proptest-random.
 
+## Apple Silicon / aarch64 notes (M-series)
+
+Measured on this dev host (Apple M4, macOS): the intuitive "M4 is ARMv9 → use
+SVE2 / wider vectors" is **false for this workload**, so don't spend effort there.
+
+- **No usable wide SIMD — and the ARMv9-implies-SVE assumption is wrong here.**
+  M4 has **no non-streaming SVE/SVE2**: `sysctl hw.optional.arm.FEAT_SVE`/
+  `FEAT_SVE2` → *unknown oid*, and Rust's own runtime check returns
+  `sve=false, sve2=false` (only `neon=true`). Apple ships **SME**
+  (`FEAT_SME`/`FEAT_SME2`, SVL 512-bit), which *does* bring the SVE instruction
+  set — **but only inside Streaming SVE mode** (`SMSTART` → `PSTATE.SM=1`), a
+  shared per-cluster *matrix* coprocessor (the AMX successor, built for
+  GEMM/outer-products) with a real mode-switch cost that disables normal NEON/FP
+  while active. Wrong unit for control-flow-heavy, memory-bound integer set-ops.
+  It's also **unreachable from stable Rust**: SVE/SME intrinsics are nightly-only
+  and even `is_aarch64_feature_detected!("sme")` fails to compile on stable
+  (`E0658`, `stdarch_aarch64_feature_detection`) — the workspace is pinned to
+  1.90. So NEON stays **128-bit = 2×u64** (the `W = 2` the kernels already use)
+  and there is no wider-vector lever on stable. SVE would add the gather +
+  `compact` that NEON lacks, but the SPB loser (`lower_bound`) is
+  seek/memory-bound, where width doesn't help — so even a hypothetical
+  SME-streaming kernel is a research spike, not an optimization.
+- **P/E heterogeneity breaks one-shot calibration.** `calibrate.rs` times each
+  kernel **once** on whatever core the thread lands on. M4 is 4 P-cores + 6
+  E-cores with very different throughput/cache, and macOS QoS migrates threads
+  across the P/E boundary, so a P-core-calibrated pick can be wrong on an E-core.
+  x86 server parts (homogeneous cores) don't have this failure mode. Prefer a
+  measured table row (below) over trusting calibration on Apple.
+- **`gather` and set-compaction have no M4 fix.** `gather` is correctly scalar
+  on aarch64 (NEON has no gather; SVE `ld1d`-gather is unavailable). The AVX-512
+  `compressstoreu` compaction in `intersect` has no NEON equivalent (SVE
+  `compact` is unavailable). These are dead ends on M4 — don't re-investigate.
+- **NEON kernels are lane-extract-heavy.** The intersect/filter kernels do
+  `vgetq_lane_u64` → GPR → per-lane branch per element (a SIMD→GPR cross-domain
+  move + unpredictable branch Apple's wide cores punish). A bitmask-via-`addv` +
+  2–4× unroll would fit the M4 P-core's wide NEON issue, but at `W = 2` the
+  payoff is marginal and it fights the "SIMD is net-harmful here" finding — only
+  pursue behind a bench that shows the primitive on the SPB hot path.
+
+Note the framing: the bench/prod hosts are x86 Linux (hornbench Zen4, hel01 SPR);
+the M4 is a **dev laptop** and CI is x86, so M-series kernel work would speed only
+the laptop while adding a code path CI can't exercise (the false-green trap above).
+
+## Host identity (`cpu_identity()`, `cpu.rs`)
+
+`cpu::detect()` now returns a [`CpuKey`] on **aarch64 macOS** too (Apple Silicon,
+via `sysctlbyname` on `hw.cpufamily`/`hw.cpusubfamily`), not just x86_64 CPUID.
+`horndb_simd::cpu_identity()` exposes the human-readable brand string — CPUID
+leaves `0x8000_0002..4` on x86 (so a Linux **AMD EPYC** box reports its real part
+even with no table row), `machdep.cpu.brand_string` on Apple ("Apple M4") — with a
+`"<vendor> family <f> model <m>"` fallback. `serve` logs it at startup. The crate
+stays dependency-free: the macOS path calls `sysctlbyname` through a raw
+`extern "C"` decl (libSystem, linked by default), not a `libc`/`sysctl` crate.
+
+**Identity ≠ table row.** Apple hosts get an identity but still **calibrate**
+(no `table_pick` arm — we have no SPB-256 measurement on an Apple host yet, and
+the bench rule says record on hornbench). Adding an Apple row needs the same
+measure-then-pin procedure as the x86 rows below.
+
 ## Kernel selection: known-CPU table first, representative calibration second
 
 **SIMD is net-harmful for the real workload on every host we've measured.** A
