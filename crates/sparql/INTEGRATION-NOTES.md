@@ -379,6 +379,7 @@ Review follow-ups (non-blocking, from the branch's code reviews):
   size-based fast path (serialize inline when the first chunk is also
   the last) is the obvious lever. Implemented: single-chunk results now
   reply as a plain sized body (oneshot first-reply; the chunk-2 peek
-  keeps the mid-stream abort contract).
+  keeps the mid-stream abort contract). Measured after: 36.12 qps
+  (b0a701b) vs main's 36.2-36.4 nightly cluster - recovered to noise.
 
 Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
