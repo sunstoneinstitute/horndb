@@ -1,5 +1,5 @@
 ---
-status: draft
+status: implemented
 date: 2026-07-06
 scope: "Probe-side streaming Join/LeftJoin + bound-key join-variable selection — design"
 ---
@@ -31,7 +31,7 @@ Two deferred defects live in the same join code (`crates/sparql/src/exec/op/bloc
   must scan. A shared variable that is unbound in **every** build-side row (e.g. an
   OPTIONAL-produced column, or `VALUES` with `UNDEF`) therefore unkeys the *entire*
   build side and degrades the hash probe toward O(|l|·|r|). Results stay correct
-  (`merge_rows` re-checks compatibility pair-wise); only the complexity collapses.
+  (`merge_rows_with` re-checks compatibility pair-wise); only the complexity collapses.
 
 ## Non-goals
 
@@ -129,8 +129,8 @@ Fast path: an **inner** `Join` whose build side drained empty ends the stream
 without pulling the probe side at all (`LeftJoin` must still stream the left
 side through, emitting all-Unbound right columns).
 
-`compute_join`, `compute_left_join`, `batch_join_vars`, `merge_all`, and
-`probe_into_slots` are deleted; `merge_rows`/`merge_rows_with`/`row_join_key`/
+`compute_join`, `compute_left_join`, `batch_join_vars`, `merge_all`,
+`merge_rows`, and `probe_into_slots` are deleted; `merge_rows_with`/`row_join_key`/
 `build_merge_plan`/`union_schema` are reused unchanged (modulo index-based
 candidate lists).
 
@@ -241,7 +241,7 @@ Two invariants make both changes result-preserving:
 
 `LeftJoin` additionally: matched/unmatched is decided per probe row against the
 full build state, so OPTIONAL semantics (emit left row with unbound right vars
-iff no candidate survives `merge_rows` + the inner FILTER) are chunk-independent.
+iff no candidate survives `merge_rows_with` + the inner FILTER) are chunk-independent.
 
 ## Testing & gates
 
@@ -277,7 +277,7 @@ iff no candidate survives `merge_rows` + the inner FILTER) are chunk-independent
 
 1. `bound_join_vars` + wire into the existing eager joins (defect fix lands
    independent of streaming).
-2. `Op::may_emit_term` on all 13 operators (infrastructure, no behavior change).
+2. `Op::may_emit_term` on all 14 operator impls (infrastructure, no behavior change).
 3. Streaming `JoinOp`: `JoinState` + probe helpers + forced columns; delete
    `compute_join`.
 4. Streaming `LeftJoinOp`; delete `compute_left_join`.

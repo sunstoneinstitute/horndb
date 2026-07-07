@@ -5,9 +5,10 @@
 //! state (DistinctOp's seen-set, SliceOp's counters, ChunkedBatch tails
 //! from every blocking op, etc.).
 
-use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, Var};
+use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 use crate::exec::horn::HornBackend;
 use crate::exec::runtime::Runtime;
+use crate::exec::Store;
 use crate::plan::PhysicalPlan;
 
 // ---------------------------------------------------------------------------
@@ -284,4 +285,249 @@ fn order_by_cross_chunk() {
     assert_eq!(r1, rbig, "OrderBy result changed at chunk size 1");
     assert_eq!(r2, rbig, "OrderBy result changed at chunk size 2");
     assert_eq!(rbig.len(), 6, "OrderBy should yield all 6 rows");
+}
+
+// ---------------------------------------------------------------------------
+// Join: shared var unbound in every build-side row (#128 bound-key selection)
+// ---------------------------------------------------------------------------
+
+/// ?v is shared but UNDEF in every right (build) row while ?w is bound
+/// everywhere: the join must key on ?w alone and still honor SPARQL
+/// compatibility (an unbound ?v matches anything, so each left row pairs
+/// with its ?w partner). 2 rows, invariant across chunk sizes. This test is
+/// a semantics pin: it passes before AND after the bound-key change — the
+/// change is a complexity fix, not a result change.
+#[test]
+fn join_unbound_build_var_cross_chunk() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("w")],
+        rows: vec![
+            vec![some_iri("v1"), some_iri("w1")],
+            vec![some_iri("v2"), some_iri("w2")],
+        ],
+    };
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("w"), Var::new("b")],
+        rows: vec![
+            vec![None, some_iri("w1"), some_iri("b1")],
+            vec![None, some_iri("w2"), some_iri("b2")],
+        ],
+    };
+    let plan = PhysicalPlan::Join {
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join unbound build var");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 2, "each left row joins exactly its ?w partner");
+}
+
+// ---------------------------------------------------------------------------
+// Join: probe-side streaming (#128)
+// ---------------------------------------------------------------------------
+
+/// Each probe row matches 4 build rows: at chunk size 1/2 the merged output
+/// of ONE probe chunk exceeds the chunk size, exercising the pending-buffer
+/// carry inside the streaming JoinOp.
+#[test]
+fn join_fanout_exceeds_chunk_size() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("a")],
+        rows: (0u8..3).map(|i| vec![some_iri(&format!("a{i}"))]).collect(),
+    };
+    let mut right_rows: Vec<Vec<Option<Term>>> = Vec::new();
+    for i in 0u8..3 {
+        for j in 0u8..4 {
+            right_rows.push(vec![
+                some_iri(&format!("a{i}")),
+                some_iri(&format!("b{i}{j}")),
+            ]);
+        }
+    }
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("a"), Var::new("b")],
+        rows: right_rows,
+    };
+    let plan = PhysicalPlan::Join {
+        left: Box::new(left),
+        right: Box::new(right),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join fan-out");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 12, "3 probe rows x 4 matches");
+}
+
+/// Mixed-provenance regression for the streamed Join (design doc §3): the
+/// probe side (VALUES, Term provenance) has an UNDEF ?v row FIRST; the build
+/// side (BGP scan) binds ?v as Slot::Id. At chunk size 1 the UNDEF probe row
+/// merges the build side's Id(v1) into the output stream before any probe
+/// Term(v1) appears — per-chunk normalize_columns would leave chunk 1 as Id
+/// and chunk 2 as Term, and the cross-chunk DISTINCT seen-set would count
+/// one logical ?v twice. The forced-term column set keeps the whole stream
+/// Term-homogeneous. Goes RED if the force_term_columns call is dropped
+/// from probe_join_chunk.
+#[test]
+fn distinct_over_streamed_join_mixed_provenance() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v")],
+        rows: vec![vec![None], vec![some_iri("v1")]],
+    };
+    let right = PhysicalPlan::BgpScan {
+        patterns: vec![TriplePattern {
+            subject: Term::Var(Var::new("v")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join mixed provenance");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 1, "both probe rows bind the same logical ?v=v1");
+}
+
+// ---------------------------------------------------------------------------
+// LeftJoin: probe-side streaming (#128)
+// ---------------------------------------------------------------------------
+
+/// Mixed-provenance regression for the streamed LeftJoin, mirroring
+/// distinct_over_streamed_join_mixed_provenance: UNDEF-first VALUES probe
+/// (Term provenance) against a BGP build (Id provenance), DISTINCT ?v must
+/// see ONE solution at every chunk size. Goes RED if the force_term_columns
+/// call is dropped from probe_left_join_chunk.
+#[test]
+fn distinct_over_streamed_left_join_mixed_provenance() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("v1"), iri("p"), iri("o1"));
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("v")],
+        rows: vec![vec![None], vec![some_iri("v1")]],
+    };
+    let right = PhysicalPlan::BgpScan {
+        patterns: vec![TriplePattern {
+            subject: Term::Var(Var::new("v")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::LeftJoin {
+                left: Box::new(left),
+                right: Box::new(right),
+                expr: None,
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "LeftJoin mixed provenance");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 1, "both probe rows bind the same logical ?v=v1");
+}
+
+/// OPTIONAL over an empty build side: every probe row must stream through
+/// with the build-only var unbound (the empty-build early-exit is an inner
+/// Join fast path ONLY — LeftJoin must not take it).
+#[test]
+fn left_join_empty_optional_cross_chunk() {
+    let horn = HornBackend::new();
+
+    let left = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: ["a", "b", "c"].iter().map(|s| vec![some_iri(s)]).collect(),
+    };
+    let right = PhysicalPlan::Values {
+        vars: vec![Var::new("x"), Var::new("y")],
+        rows: vec![],
+    };
+    let plan = PhysicalPlan::LeftJoin {
+        left: Box::new(left),
+        right: Box::new(right),
+        expr: None,
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "LeftJoin empty OPTIONAL");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(big.len(), 3, "all probe rows survive with ?y unbound");
+}
+
+/// Pins the build-actual-Term trigger of `forced_term` (the sibling test
+/// `distinct_over_streamed_join_mixed_provenance` pins the probe-claim
+/// trigger). The probe side is a LeftJoin of Values [?x] over a BGP scan
+/// binding ?v, so its `may_emit_term` claim for ?v is FALSE (the Values
+/// child lacks ?v; the scan side is all-Id) — only the drained build data
+/// (VALUES actually holding Slot::Term) forces the decode. Probe row ?x=a
+/// matches the scan and carries ?v=Id(v1); probe row ?x=b leaves ?v Unbound,
+/// keys as None, probes ALL build rows and takes the build's Term(v1) in the
+/// merge. Without the forced decode the output stream mixes Id(v1) and
+/// Term(v1) in ?v and cross-chunk DISTINCT counts one logical value twice.
+/// Goes RED if the build-side `.any(Slot::Term)` arm is dropped from
+/// `build_join_state`.
+#[test]
+fn distinct_over_streamed_join_build_term_trigger() {
+    let mut horn = HornBackend::new();
+    horn.insert_triple(iri("a"), iri("q"), iri("v1"));
+
+    // Probe: (?x=a, ?v=Id(v1)) and (?x=b, ?v=Unbound).
+    let probe = PhysicalPlan::LeftJoin {
+        left: Box::new(PhysicalPlan::Values {
+            vars: vec![Var::new("x")],
+            rows: vec![vec![some_iri("a")], vec![some_iri("b")]],
+        }),
+        right: Box::new(PhysicalPlan::BgpScan {
+            patterns: vec![TriplePattern {
+                subject: Term::Var(Var::new("x")),
+                predicate: iri("q"),
+                object: Term::Var(Var::new("v")),
+            }],
+        }),
+        expr: None,
+    };
+    // Build: actual Slot::Term rows for ?v.
+    let build = PhysicalPlan::Values {
+        vars: vec![Var::new("v"), Var::new("z")],
+        rows: vec![vec![some_iri("v1"), some_iri("z1")]],
+    };
+    let plan = PhysicalPlan::Distinct {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("v")],
+            inner: Box::new(PhysicalPlan::Join {
+                left: Box::new(probe),
+                right: Box::new(build),
+            }),
+        }),
+    };
+
+    assert_chunk_invariant!(&horn, &plan, "Join build-term trigger");
+
+    let big = run_sorted(&horn, &plan, 4096);
+    assert_eq!(
+        big.len(),
+        1,
+        "both merged rows carry the same logical ?v=v1"
+    );
 }

@@ -10,12 +10,26 @@ use crate::exec::{Batch, Executor, Row, Slot};
 /// op only re-chunks it so parents pull incrementally.
 pub struct ScanOp {
     inner: ChunkedBatch,
+    /// Per-column `may_emit_term` claim, computed from the materialized scan
+    /// batch before it is wrapped for chunked iteration.
+    term_columns: Vec<bool>,
 }
 
 impl ScanOp {
     pub fn new(batch: Batch) -> Self {
+        // Compute the per-column provenance claim from the actual rows:
+        // column c may emit Term iff some row holds a Slot::Term there.
+        let mut term_columns = vec![false; batch.schema.len()];
+        for row in &batch.rows {
+            for (c, slot) in row.0.iter().enumerate() {
+                if matches!(slot, Slot::Term(_)) {
+                    term_columns[c] = true;
+                }
+            }
+        }
         Self {
             inner: ChunkedBatch::new(batch),
+            term_columns,
         }
     }
 }
@@ -23,6 +37,14 @@ impl ScanOp {
 impl Op for ScanOp {
     fn schema(&self) -> &[Var] {
         self.inner.schema()
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Computed from the materialized scan batch: exact for any Executor —
+        // dictionary-backed scans are all Slot::Id (all-false), adapter
+        // backends (default `scan_bgp_ids` via `Batch::from_bindings`) are
+        // all Slot::Term.
+        self.term_columns.clone()
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
@@ -66,6 +88,11 @@ impl CountScanOp {
 impl Op for CountScanOp {
     fn schema(&self) -> &[Var] {
         &self.schema
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        // The count is a computed xsd:integer literal (Slot::Term).
+        vec![true; self.schema.len()]
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
@@ -115,6 +142,11 @@ impl ValuesOp {
 impl Op for ValuesOp {
     fn schema(&self) -> &[Var] {
         self.inner.schema()
+    }
+
+    fn may_emit_term(&self) -> Vec<bool> {
+        // VALUES cells are Slot::Term (or Slot::Unbound for UNDEF).
+        vec![true; self.inner.schema().len()]
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
