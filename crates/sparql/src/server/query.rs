@@ -23,7 +23,7 @@ use horndb_metrics::labels::{Stage, StageLabel};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Deserialize)]
 pub struct QueryParams {
@@ -161,6 +161,14 @@ fn bump_exec_error() {
         .inc();
 }
 
+/// First reply from the blocking executor: either the whole document
+/// (result fit in one chunk — reply as a plain sized body) or the
+/// pre-buffered head of a multi-chunk stream.
+enum FirstReply {
+    Complete(String),
+    Streaming(Bytes),
+}
+
 /// Execute + decode + serialize a SELECT on a blocking thread, streaming
 /// serialized `Bytes` chunks to the response body over a bounded channel.
 ///
@@ -169,6 +177,12 @@ fn bump_exec_error() {
 /// through the guard) are `!Send`. The first chunk is decoded BEFORE any
 /// bytes are emitted, so build/scan/first-decode errors return a clean 400;
 /// after that, an error aborts the chunked body (see `ChannelBody`).
+///
+/// Fast path: when the result fits in a single operator chunk (including
+/// the empty result), the whole document is returned as a plain sized body
+/// (Content-Length, one frame) instead of a chunked channel body. The
+/// chunk-2 peek that detects this happens before headers commit, so a clean
+/// first chunk still commits a 200 even if the peek errors.
 ///
 /// Trade-off (accepted, see the 2026-07-06 design spec): the read lock is
 /// held until the client drains the response, so a slow download blocks
@@ -181,7 +195,8 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     plan: PhysicalPlan,
     fmt: ResultFormat,
 ) -> axum::response::Response {
-    let (tx, mut rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
+    let (tx, rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
+    let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
     let store = Arc::clone(&state.store);
 
     tokio::task::spawn_blocking(move || {
@@ -194,7 +209,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             Ok(s) => s,
             Err(e) => {
                 record_exec(start, true);
-                let _ = tx.blocking_send(Err(e));
+                let _ = first_tx.send(Err(e));
                 return;
             }
         };
@@ -203,7 +218,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             Ok(r) => r,
             Err(e) => {
                 record_exec(start, true);
-                let _ = tx.blocking_send(Err(e));
+                let _ = first_tx.send(Err(e));
                 return;
             }
         };
@@ -213,14 +228,46 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         match first_rows {
             Some(rows) => head.push_str(&ser.chunk(&vars, &rows)),
             None => {
-                // Empty result: one frame carrying the whole document.
+                // Empty result: a sized body carrying the whole document.
                 head.push_str(&ser.footer());
-                let _ = tx.blocking_send(Ok(Bytes::from(head)));
+                let _ = first_tx.send(Ok(FirstReply::Complete(head)));
                 return;
             }
         }
-        if tx.blocking_send(Ok(Bytes::from(head))).is_err() {
+        // Peek chunk 2: if the first chunk was the last, reply with the
+        // complete document as a sized body (fast path — no channel body).
+        let second_rows = match stream.next_chunk() {
+            Ok(r) => r,
+            Err(e) => {
+                // Chunk 1 was clean, so headers must still commit (200)
+                // and the error must abort the body mid-stream — exactly
+                // the pre-fast-path contract (see ChannelBody).
+                let _ = first_tx.send(Ok(FirstReply::Streaming(Bytes::from(head))));
+                bump_exec_error();
+                let _ = tx.blocking_send(Err(e));
+                return;
+            }
+        };
+        let rows2 = match second_rows {
+            Some(rows) => rows,
+            None => {
+                head.push_str(&ser.footer());
+                let _ = first_tx.send(Ok(FirstReply::Complete(head)));
+                return;
+            }
+        };
+        // Multi-chunk: commit the streaming path, then forward chunk 2.
+        if first_tx
+            .send(Ok(FirstReply::Streaming(Bytes::from(head))))
+            .is_err()
+        {
             return; // client disconnected — release the read lock
+        }
+        if tx
+            .blocking_send(Ok(Bytes::from(ser.chunk(&vars, &rows2))))
+            .is_err()
+        {
+            return; // client disconnected
         }
         loop {
             match stream.next_chunk() {
@@ -244,15 +291,20 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         }
     });
 
-    match rx.recv().await {
-        Some(Ok(first)) => {
+    match first_rx.await {
+        // Whole result fit in one chunk: plain sized body, same shape as
+        // `run_materialized`'s Solutions arm.
+        Ok(Ok(FirstReply::Complete(body))) => {
+            (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
+        }
+        Ok(Ok(FirstReply::Streaming(first))) => {
             let body = axum::body::Body::new(ChannelBody::new(first, rx));
             (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
         }
         // Errors before any byte was emitted are still a clean 400 —
         // parity with the materialized path's error handling.
-        Some(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        None => (
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "result stream ended before producing output".to_string(),
         )

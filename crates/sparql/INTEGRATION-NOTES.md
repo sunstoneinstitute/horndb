@@ -377,6 +377,8 @@ Review follow-ups (non-blocking, from the branch's code reviews):
   36.2-36.4, GraphDB control flat): the per-query `spawn_blocking` +
   channel hop is measurable on small results. If that 3% matters, a
   size-based fast path (serialize inline when the first chunk is also
-  the last) is the obvious lever.
+  the last) is the obvious lever. Implemented: single-chunk results now
+  reply as a plain sized body (oneshot first-reply; the chunk-2 peek
+  keeps the mid-stream abort contract).
 
 Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.

@@ -386,6 +386,63 @@ async fn large_select_streams_in_multiple_chunks() {
     assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 5000);
 }
 
+/// A SELECT whose whole result fits in the first operator chunk must come
+/// back as a plain sized body (Content-Length, one data frame) — the
+/// streaming machinery (chunked body, channel) is skipped so small results
+/// pay no per-query overhead vs the materialized path.
+#[tokio::test]
+async fn small_select_replies_with_sized_single_frame_body() {
+    use http_body::Body as _;
+
+    let mut s = MemStore::default();
+    for i in 0..3 {
+        s.insert_triple(
+            iri(&format!("http://ex/s{i}")),
+            iri("http://ex/p"),
+            iri(&format!("http://ex/o{i}")),
+        );
+    }
+    let state = AppState {
+        store: Arc::new(RwLock::new(s)),
+    };
+    let app = build_router(state);
+
+    let req = Request::builder()
+        .uri("/query?query=SELECT%20%3Fs%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let content_length: Option<u64> = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok());
+
+    let mut body = resp.into_body();
+    let mut frames = 0usize;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        let frame = frame.expect("clean body");
+        if let Ok(data) = frame.into_data() {
+            frames += 1;
+            buf.extend_from_slice(&data);
+        }
+    }
+    assert_eq!(frames, 1, "single-chunk result must be one sized frame");
+    assert_eq!(
+        content_length,
+        Some(buf.len() as u64),
+        "single-chunk result must carry Content-Length"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+    assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 3);
+}
+
 mod streaming_error_semantics {
     use super::*;
     use horndb_sparql::algebra::{TriplePattern, Var};
