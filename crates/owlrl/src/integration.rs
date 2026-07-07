@@ -260,6 +260,42 @@ impl Engine {
             }
         };
         let mut stats = materialize_once(&mut state.store);
+        // Value-space intersection narrowing of `rdfs:range` declarations
+        // (WebOnt-I5.8-008/009-pe, #160): a property declared with two or
+        // more range datatypes whose value spaces intersect into something
+        // narrower than any single declared range gets that narrower range
+        // asserted too. Runs AFTER the first fixpoint (not before) so it also
+        // sees ranges *inferred* during materialization by `scm-rng1`
+        // (broadening — never changes the intersection) / `scm-rng2`
+        // (sub-property range inheritance — can put a genuinely new, distinct
+        // range on a property that had only one asserted), not just the
+        // asserted ones. See `datatype_ranges.rs` for the value-space model,
+        // the "supersets only ⇒ sound" invariant, and why post-materialize is
+        // required for the compositional case. If it asserted anything,
+        // re-run the fixpoint once so `scm-rng1`/`prp-rng` propagate the
+        // narrower range. Borrow `dict`/`next_id` disjointly from `store` in
+        // their own block so the intern closure's mutable borrow of `state`
+        // ends before `materialize_once(&mut state.store)` is called.
+        let added_ranges = {
+            let LoadState {
+                dict,
+                next_id,
+                store,
+                ..
+            } = &mut state;
+            crate::datatype_ranges::derive_range_intersections(store, &self.vocab, |iri| {
+                if let Some(&t) = dict.get(iri) {
+                    return t;
+                }
+                let t = TermId(*next_id);
+                *next_id += 1;
+                dict.insert(iri.to_string(), t);
+                t
+            })
+        };
+        if added_ranges {
+            stats = materialize_once(&mut state.store);
+        }
         // dt-not-type over *derived* datatype memberships: materialization may
         // have typed a literal as a narrower datatype via prp-rng / prp-dom
         // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒

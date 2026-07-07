@@ -41,6 +41,7 @@
 
 pub mod backend;
 pub mod datatype_literals;
+pub mod datatype_ranges;
 pub mod datatypes;
 pub mod delta;
 pub mod engine;

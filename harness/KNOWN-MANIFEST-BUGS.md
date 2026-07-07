@@ -20,11 +20,12 @@ deferred. The OWL 2 RL rule names follow the W3C
 
 ## Summary (2026-06-01 survey, post `task-34-dt-datatype-rules`)
 
-18 of the 115 synthesised entries fail today (down from 22 → 19 after the
+16 of the 115 synthesised entries fail today (down from 22 → 19 after the
 #34 datatype-subsumption + `scm-eqc-rev` batch flipped 3 cases green —
 `I5.8-006-pe`, `I5.8-011-pe`, `equivalentClass-003-pe` — then → 18 after
-#40's `dt-diff` flipped `New-Feature-Keys-006-incons` green; see the note
-below). The RL-reachable remainder is tracked in
+#40's `dt-diff` flipped `New-Feature-Keys-006-incons` green, then → 16 after
+#160's value-space intersection narrowing flipped `I5.8-008-pe`/`I5.8-009-pe`
+green; see the notes below). The RL-reachable remainder is tracked in
 [#160](https://github.com/sunstoneinstitute/horndb/issues/160). They fall into
 the following buckets, grouped by the missing capability — not by a
 single rule name — because the residue is mostly tests that need
@@ -34,7 +35,6 @@ Stage-1 engine intentionally defers:
 
 | Missing capability | Cases blocked |
 |---|---|
-| Datatype value-space *intersection* narrowing (`I5.8-008/009-pe`) — genuine interval reasoning, deferred (issue #4) | 2 |
 | Fresh-bnode generation of `owl:complementOf` partner classes (`DisjointClasses-001/003-pe`, `ObjectQCR-002-pe`) | 3 |
 | `differentFrom`/`AllDifferent` entailment from disjoint properties (`DisjointObjectProperties-001/002-pe`, `DisjointDataProperties-002-pe`) — not an OWL 2 RL rule; `prp-pdw`/`prp-adp` only derive `owl:Nothing` on a *shared* `(u, w)` pair | 3 |
 | Annotation-property / `equivalentClass` substitution (`equivalentClass-008-Direct-pe`, `I4.6-003/005-Direct-pe`, `I5.26-010-pe`) | 4 |
@@ -43,7 +43,7 @@ Stage-1 engine intentionally defers:
 | `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
 | `owl:imports` external resolution (`imports-011-pe`) | 1 |
 
-Total: **18 cases**.
+Total: **16 cases**.
 
 > **2026-06-18 — literal-value datatype rules implemented (`dt-eq`/`dt-diff`/`dt-not-type`, issue #40).**
 > `New-Feature-Keys-006-incons` flips green and moves into `selected.toml`'s
@@ -134,21 +134,26 @@ the `scm-eqc-rev` rule (class analogue of `scm-eqp-rev`: two-way
 
 ## Cases, grouped by missing capability
 
-### Datatype value-space intersection (`I5.8-008/009-pe`)
+### ~~Datatype value-space intersection (`I5.8-008/009-pe`)~~ — RESOLVED (2026-07-07, `#160`)
 
-`dt-type1` and the `dt-type2` XSD subsumption lattice are now implemented
-(`task-34-dt-datatype-rules`), so the *subsumption* cases `I5.8-006-pe`
-and `I5.8-011-pe` are green. The two remaining `WebOnt-I5.8-*-pe` cases
-are **not** subsumption — they require value-space *intersection*
-narrowing, i.e. genuine interval/value-space reasoning the lattice alone
-cannot express:
+`dt-type1` and the `dt-type2` XSD subsumption lattice implemented the
+*subsumption* cases `I5.8-006-pe` and `I5.8-011-pe` (`task-34-dt-datatype-rules`).
+The two `WebOnt-I5.8-*-pe` cases below are **not** subsumption — they require
+value-space *intersection* narrowing, genuine interval reasoning the lattice
+alone cannot express:
 
-- `#WebOnt-I5.8-008-pe` — `short ∩ unsignedInt ⊆ unsignedShort`.
+- `#WebOnt-I5.8-008-pe` — `short ∩ unsignedInt = [0, 32767] ⊆ unsignedShort`.
 - `#WebOnt-I5.8-009-pe` — `nonNegativeInteger ∩ nonPositiveInteger =
   {0} ⊆ short`.
 
-These are deferred (tracked under issue #4); they need a value-space
-intersection solver rather than the static subsumption lattice.
+Both are now **green** and listed in `selected.toml`. A load-time pass
+(`crates/owlrl/src/datatype_ranges.rs`, wired from `integration.rs`) models each
+XSD numeric-tower datatype's value space as an integer interval, intersects the
+value spaces of a property's ≥2 declared `rdfs:range` datatypes, and asserts
+`rdfs:range T` for every datatype `T` whose value space is a **superset** of that
+intersection (supersets only ⇒ no false `dt-not-type` inconsistency). Opaque
+datatypes (`xsd:string`/`boolean`/`dateTime`/user IRIs) disqualify a property.
+`scm-rng1` then propagates the derived narrower range through the fixpoint.
 
 ### Fresh-bnode generation of `owl:complementOf` partner classes
 
