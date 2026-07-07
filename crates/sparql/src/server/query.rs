@@ -3,17 +3,27 @@
 //!   * POST `application/sparql-query` raw,
 //!   * POST `application/x-www-form-urlencoded` with `query=`.
 
+use super::stream_body::ChannelBody;
 use super::AppState;
-use crate::api::{execute_query, QueryAnswer};
+use crate::api::{execute_query, plan_select, QueryAnswer};
+use crate::error::SparqlError;
+use crate::exec::runtime::Runtime;
 use crate::exec::FullBackend;
+use crate::plan::PhysicalPlan;
 use crate::results::{
-    csv::write_select_csv, json::write_ask_json, json::write_select_json, tsv::write_select_tsv,
-    xml::write_ask_xml, xml::write_select_xml, ResultFormat,
+    csv::write_select_csv, json::write_ask_json, json::write_select_json, select_serializer,
+    tsv::write_select_tsv, xml::write_ask_xml, xml::write_select_xml, ResultFormat,
 };
+use crate::SparqlConfig;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use bytes::Bytes;
+use horndb_metrics::labels::{Stage, StageLabel};
 use serde::Deserialize;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Deserialize)]
 pub struct QueryParams {
@@ -102,6 +112,214 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     q: &str,
     headers: &HeaderMap,
 ) -> axum::response::Response {
+    let accept = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let fmt = ResultFormat::from_accept(accept);
+
+    // Plain SELECTs stream; everything else (ASK / CONSTRUCT / DESCRIBE /
+    // EXPLAIN) keeps the materialized path — their results are small.
+    // Planning needs no store access, so it runs here on the async thread.
+    match plan_select(q, &SparqlConfig::default()) {
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Ok(Some((vars, plan))) => stream_select(state, vars, plan, fmt).await,
+        Ok(None) => run_materialized(state, q, fmt).await,
+    }
+}
+
+/// Serialized chunks buffered between the blocking serializer thread and
+/// the async body. Bounded: a slow client exerts backpressure on the
+/// executor instead of buffering the whole result.
+const STREAM_CHANNEL_CHUNKS: usize = 8;
+
+/// Mirror `api::timed(Stage::Exec, …)` for the streaming path: observe the
+/// stage duration (here: time to first chunk) and bump `query_errors` on
+/// error. Note `request_duration_seconds` also stops at response headers —
+/// roughly the same instant — so no duration metric covers the full body
+/// drain; only `response_bytes` (via `CountingBody`) reflects delivered
+/// bytes.
+fn record_exec(start: Instant, err: bool) {
+    let m = horndb_metrics::metrics();
+    let label = StageLabel { stage: Stage::Exec };
+    m.sparql
+        .stage_duration_seconds
+        .get_or_create(&label)
+        .observe(start.elapsed().as_secs_f64());
+    if err {
+        m.sparql.query_errors.get_or_create(&label).inc();
+    }
+}
+
+/// Bump `query_errors{stage=exec}` for an error after the exec stage was
+/// already observed (mid-stream failure).
+fn bump_exec_error() {
+    horndb_metrics::metrics()
+        .sparql
+        .query_errors
+        .get_or_create(&StageLabel { stage: Stage::Exec })
+        .inc();
+}
+
+/// First reply from the blocking executor: either the whole document
+/// (result fit in one chunk — reply as a plain sized body) or the
+/// pre-buffered head of a multi-chunk stream.
+enum FirstReply {
+    Complete(String),
+    Streaming(Bytes),
+}
+
+/// Execute + decode + serialize a SELECT on a blocking thread, streaming
+/// serialized `Bytes` chunks to the response body over a bounded channel.
+///
+/// Everything store-touching stays on the one blocking thread: the
+/// `RwLockReadGuard` and the operator tree (`Box<dyn Op>`, which borrows
+/// through the guard) are `!Send`. The first chunk is decoded BEFORE any
+/// bytes are emitted, so build/scan/first-decode errors return a clean 400;
+/// after that, an error aborts the chunked body (see `ChannelBody`).
+///
+/// Fast path: when the result fits in a single operator chunk (including
+/// the empty result), the whole document is returned as a plain sized body
+/// (Content-Length, one frame) instead of a chunked channel body. The
+/// chunk-2 peek that detects this happens before headers commit, so a clean
+/// first chunk still commits a 200 even if the peek errors.
+///
+/// Trade-off (accepted, see the 2026-07-06 design spec): the read lock is
+/// held until the client drains the response, so a slow download blocks
+/// writers (not readers). SPEC-02 MVCC removes this; the bounded channel
+/// plus the send-failure-on-disconnect path bound the damage a dead client
+/// can do.
+async fn stream_select<B: FullBackend + Send + Sync + 'static>(
+    state: AppState<B>,
+    vars: Vec<String>,
+    plan: PhysicalPlan,
+    fmt: ResultFormat,
+) -> axum::response::Response {
+    let (tx, rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
+    let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
+    let store = Arc::clone(&state.store);
+
+    tokio::task::spawn_blocking(move || {
+        let store = store.read().unwrap();
+        let rt = Runtime::new(&*store);
+        let mut ser = select_serializer(fmt);
+        let start = Instant::now();
+
+        let mut stream = match rt.run_stream(&plan) {
+            Ok(s) => s,
+            Err(e) => {
+                record_exec(start, true);
+                let _ = first_tx.send(Err(e));
+                return;
+            }
+        };
+        // Pre-buffer chunk 1 so its errors surface before headers commit.
+        let first_rows = match stream.next_chunk() {
+            Ok(r) => r,
+            Err(e) => {
+                record_exec(start, true);
+                let _ = first_tx.send(Err(e));
+                return;
+            }
+        };
+        record_exec(start, false);
+
+        let mut head = ser.header(&vars);
+        match first_rows {
+            Some(rows) => head.push_str(&ser.chunk(&vars, &rows)),
+            None => {
+                // Empty result: a sized body carrying the whole document.
+                head.push_str(&ser.footer());
+                let _ = first_tx.send(Ok(FirstReply::Complete(head)));
+                return;
+            }
+        }
+        // Peek chunk 2: if the first chunk was the last, reply with the
+        // complete document as a sized body (fast path — no channel body).
+        let second_rows = match stream.next_chunk() {
+            Ok(r) => r,
+            Err(e) => {
+                // Chunk 1 was clean, so headers must still commit (200)
+                // and the error must abort the body mid-stream — exactly
+                // the pre-fast-path contract (see ChannelBody).
+                let _ = first_tx.send(Ok(FirstReply::Streaming(Bytes::from(head))));
+                bump_exec_error();
+                let _ = tx.blocking_send(Err(e));
+                return;
+            }
+        };
+        let rows2 = match second_rows {
+            Some(rows) => rows,
+            None => {
+                head.push_str(&ser.footer());
+                let _ = first_tx.send(Ok(FirstReply::Complete(head)));
+                return;
+            }
+        };
+        // Multi-chunk: commit the streaming path, then forward chunk 2.
+        if first_tx
+            .send(Ok(FirstReply::Streaming(Bytes::from(head))))
+            .is_err()
+        {
+            return; // client disconnected — release the read lock
+        }
+        if tx
+            .blocking_send(Ok(Bytes::from(ser.chunk(&vars, &rows2))))
+            .is_err()
+        {
+            return; // client disconnected
+        }
+        loop {
+            match stream.next_chunk() {
+                Ok(Some(rows)) => {
+                    let bytes = Bytes::from(ser.chunk(&vars, &rows));
+                    if tx.blocking_send(Ok(bytes)).is_err() {
+                        return; // client disconnected
+                    }
+                }
+                Ok(None) => {
+                    let _ = tx.blocking_send(Ok(Bytes::from(ser.footer())));
+                    return;
+                }
+                Err(e) => {
+                    // Headers are committed: abort the body (see ChannelBody).
+                    bump_exec_error();
+                    let _ = tx.blocking_send(Err(e));
+                    return;
+                }
+            }
+        }
+    });
+
+    match first_rx.await {
+        // Whole result fit in one chunk: plain sized body, same shape as
+        // `run_materialized`'s Solutions arm.
+        Ok(Ok(FirstReply::Complete(body))) => {
+            (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
+        }
+        Ok(Ok(FirstReply::Streaming(first))) => {
+            let body = axum::body::Body::new(ChannelBody::new(first, rx));
+            (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
+        }
+        // Errors before any byte was emitted are still a clean 400 —
+        // parity with the materialized path's error handling.
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "result stream ended before producing output".to_string(),
+        )
+            .into_response(),
+    }
+}
+
+/// Materialized path for non-SELECT forms (and the pre-streaming behavior):
+/// execute fully, then serialize in one shot. Body identical to the old
+/// `run` except `fmt` is passed in.
+async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
+    state: AppState<B>,
+    q: &str,
+    fmt: ResultFormat,
+) -> axum::response::Response {
     // Scope the read guard to the execution only; results are
     // materialised into `ans`, so serialization below holds no lock and
     // never blocks a concurrent writer.
@@ -115,14 +333,10 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
         }
     };
 
-    let accept = headers
-        .get("accept")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let fmt = ResultFormat::from_accept(accept);
-
     match ans {
         QueryAnswer::Solutions { vars, rows } => {
+            // Unreachable for plain SELECTs (they take stream_select), but
+            // kept for defense in depth — behavior is identical.
             let body = match fmt {
                 ResultFormat::Json => write_select_json(&vars, &rows),
                 ResultFormat::Xml => write_select_xml(&vars, &rows),

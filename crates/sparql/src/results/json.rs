@@ -4,27 +4,53 @@
 use crate::algebra::Term;
 use crate::exec::runtime::literal_parts;
 use crate::exec::Bindings;
+use crate::results::SelectSerializer;
 use serde_json::{json, Map, Value};
 
-pub fn write_select_json(vars: &[String], rows: &[Bindings]) -> String {
-    let bindings: Vec<Value> = rows
-        .iter()
-        .map(|row| {
+/// Incremental SPARQL-JSON SELECT serializer. The only cross-chunk state is
+/// the comma placement between binding objects.
+#[derive(Default)]
+pub struct JsonSelectSerializer {
+    any_rows: bool,
+}
+
+impl SelectSerializer for JsonSelectSerializer {
+    fn header(&mut self, vars: &[String]) -> String {
+        format!(
+            "{{\"head\":{{\"vars\":{}}},\"results\":{{\"bindings\":[",
+            serde_json::to_string(vars).expect("a Vec<String> always serializes")
+        )
+    }
+
+    fn chunk(&mut self, vars: &[String], rows: &[Bindings]) -> String {
+        let mut out = String::new();
+        for row in rows {
+            if self.any_rows {
+                out.push(',');
+            }
+            self.any_rows = true;
             let mut obj = Map::new();
             for v in vars {
                 if let Some(t) = row.get(v) {
                     obj.insert(v.clone(), term_to_json(t));
                 }
             }
-            Value::Object(obj)
-        })
-        .collect();
+            out.push_str(&Value::Object(obj).to_string());
+        }
+        out
+    }
 
-    json!({
-        "head": { "vars": vars },
-        "results": { "bindings": bindings }
-    })
-    .to_string()
+    fn footer(&mut self) -> String {
+        "]}}".to_string()
+    }
+}
+
+pub fn write_select_json(vars: &[String], rows: &[Bindings]) -> String {
+    let mut ser = JsonSelectSerializer::default();
+    let mut out = ser.header(vars);
+    out.push_str(&ser.chunk(vars, rows));
+    out.push_str(&ser.footer());
+    out
 }
 
 pub fn write_ask_json(answer: bool) -> String {

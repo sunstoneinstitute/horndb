@@ -6,6 +6,7 @@ use crate::exec::FullBackend;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use std::sync::Arc;
 
 pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
@@ -28,8 +29,23 @@ pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
         body
     };
 
-    let mut store = state.store.write().unwrap();
-    match execute_update(&update, &mut *store) {
+    // Streamed SELECTs (`/query`) hold the store read lock for
+    // client-controlled durations (until the client drains the body), so
+    // `write()` can block for a long time. Never block a tokio runtime
+    // worker on it: park the lock wait AND the update execution on the
+    // blocking pool. Otherwise one stalled streaming client plus N
+    // concurrent updates (N = worker threads) wedges every runtime worker
+    // in `write()`, nothing polls connections, the streamed body never
+    // drains, and the read lock never releases — deadlock.
+    let store = Arc::clone(&state.store);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut store = store.write().unwrap();
+        execute_update(&update, &mut *store)
+    })
+    .await
+    .expect("update task panicked");
+
+    match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }

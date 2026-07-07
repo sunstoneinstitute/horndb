@@ -531,3 +531,95 @@ fn distinct_over_streamed_join_build_term_trigger() {
         "both merged rows carry the same logical ?v=v1"
     );
 }
+
+// ---------------------------------------------------------------------------
+// run_stream: chunked boundary decode (#128 HTTP streaming increment)
+// ---------------------------------------------------------------------------
+
+/// 7 VALUES rows at chunk size 3 → chunks of 3/3/1; concatenation must equal
+/// `run`'s output, chunks must respect batch_rows() and never be empty.
+#[test]
+fn run_stream_chunks_match_run() {
+    let horn = HornBackend::new();
+    let plan = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: (0u8..7).map(|i| vec![some_iri(&format!("v{i}"))]).collect(),
+    };
+
+    super::TEST_BATCH_ROWS.with(|c| c.set(3));
+    let rt = Runtime::new(&horn);
+    let mut stream = rt.run_stream(&plan).unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next_chunk().unwrap() {
+        assert!(!chunk.is_empty(), "no empty chunks mid-stream");
+        assert!(chunk.len() <= 3, "chunk exceeds batch_rows()");
+        chunks.push(chunk);
+    }
+    assert!(
+        chunks.len() >= 3,
+        "7 rows at chunk size 3 must span >=3 chunks"
+    );
+    let streamed: Vec<String> = chunks.concat().iter().map(|b| format!("{b:?}")).collect();
+    let collected: Vec<String> = rt.run(&plan).unwrap().map(|b| format!("{b:?}")).collect();
+    super::TEST_BATCH_ROWS.with(|c| c.set(4096));
+    assert_eq!(streamed, collected);
+}
+
+/// The row-at-a-time Iterator view must yield the same rows as `run`.
+#[test]
+fn run_stream_iterator_matches_run() {
+    let horn = HornBackend::new();
+    let plan = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: (0u8..7).map(|i| vec![some_iri(&format!("v{i}"))]).collect(),
+    };
+
+    super::TEST_BATCH_ROWS.with(|c| c.set(2));
+    let rt = Runtime::new(&horn);
+    let stream = rt.run_stream(&plan).unwrap();
+    let via_iter: Vec<String> = stream.map(|r| format!("{:?}", r.unwrap())).collect();
+    let via_run: Vec<String> = rt.run(&plan).unwrap().map(|b| format!("{b:?}")).collect();
+    super::TEST_BATCH_ROWS.with(|c| c.set(4096));
+    assert_eq!(via_iter, via_run);
+}
+
+/// Mixing the two access styles must lose or reorder nothing: pull 2 rows via
+/// `Iterator::next` (leaving 1 row of the first 3-row chunk buffered), then
+/// drain the rest via `next_chunk`. The first drained chunk must be exactly
+/// the buffered row, and [2 iterator rows] ++ [drained rows] == `run`'s output.
+#[test]
+fn run_stream_mixed_iterator_then_chunks_matches_run() {
+    let horn = HornBackend::new();
+    let plan = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: (0u8..7).map(|i| vec![some_iri(&format!("v{i}"))]).collect(),
+    };
+
+    super::TEST_BATCH_ROWS.with(|c| c.set(3));
+    let rt = Runtime::new(&horn);
+    let mut stream = rt.run_stream(&plan).unwrap();
+
+    // 2 rows via the Iterator view: pulls the first 3-row chunk, buffers 1.
+    let mut rows: Vec<String> = Vec::new();
+    for _ in 0..2 {
+        rows.push(format!("{:?}", stream.next().unwrap().unwrap()));
+    }
+
+    // Drain the rest via next_chunk; the first drained chunk is the 1
+    // buffered row left over from the first 3-row chunk.
+    let mut first_drained_len = None;
+    while let Some(chunk) = stream.next_chunk().unwrap() {
+        assert!(!chunk.is_empty(), "no empty chunks mid-stream");
+        first_drained_len.get_or_insert(chunk.len());
+        rows.extend(chunk.iter().map(|b| format!("{b:?}")));
+    }
+    assert_eq!(
+        first_drained_len,
+        Some(1),
+        "first next_chunk after 2 Iterator rows must return the 1 buffered row"
+    );
+
+    let via_run: Vec<String> = rt.run(&plan).unwrap().map(|b| format!("{b:?}")).collect();
+    super::TEST_BATCH_ROWS.with(|c| c.set(4096));
+    assert_eq!(rows, via_run, "mixed access lost or reordered rows");
+}

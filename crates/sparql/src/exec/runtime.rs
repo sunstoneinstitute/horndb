@@ -30,13 +30,33 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Execute the plan and return all solution mappings.
     pub fn run(&self, plan: &PhysicalPlan) -> Result<std::vec::IntoIter<Bindings>> {
-        let plan = crate::plan::pushdown::rewrite(plan)?;
-        let mut op = self.build(&plan)?;
+        let mut stream = self.run_stream(plan)?;
         let mut out = Vec::new();
-        while let Some(batch) = op.next()? {
-            out.extend(batch.to_bindings(|id| self.exec.decode_term(id))?);
+        while let Some(chunk) = stream.next_chunk()? {
+            out.extend(chunk);
         }
         Ok(out.into_iter())
+    }
+
+    /// Execute the plan as a stream of decoded row chunks (#128 HTTP
+    /// streaming): applies the pushdown rewrite, builds the operator tree,
+    /// and hands back a lazy handle. `run` collects this; the HTTP layer
+    /// serializes chunk-by-chunk without ever holding the full result.
+    ///
+    /// The stream borrows the `Runtime` (operators hold `&Runtime`
+    /// internally), so keep the runtime binding alive:
+    /// `let rt = Runtime::new(exec); let mut s = rt.run_stream(&plan)?;`
+    pub fn run_stream<'r>(&'r self, plan: &PhysicalPlan) -> Result<BindingsStream<'r, E>>
+    where
+        E: 'r,
+    {
+        let plan = crate::plan::pushdown::rewrite(plan)?;
+        let op = self.build(&plan)?;
+        Ok(BindingsStream {
+            exec: self.exec,
+            op,
+            buf: Vec::new().into_iter(),
+        })
     }
 
     /// Execute the plan WITHOUT the column-pruning rewrite. Used only in tests
@@ -759,6 +779,51 @@ fn bound_join_vars(left_schema: &[Var], build: &Batch) -> Vec<Var> {
         .collect();
     out.sort_by(|a, b| a.name().cmp(b.name()));
     out
+}
+
+/// Streaming query handle returned by [`Runtime::run_stream`]: pulls one
+/// operator `Batch` at a time and decodes `Slot::Id → Term` at the boundary,
+/// chunk-by-chunk instead of all-at-once.
+pub struct BindingsStream<'r, E: Executor + ?Sized> {
+    exec: &'r E,
+    op: Box<dyn crate::exec::op::Op + 'r>,
+    /// Rows pulled by `next_chunk` but not yet handed out by the row-wise
+    /// `Iterator` view. `next_chunk` drains this first, so mixing the two
+    /// access styles never loses or reorders rows.
+    buf: std::vec::IntoIter<Bindings>,
+}
+
+impl<'r, E: Executor + ?Sized> BindingsStream<'r, E> {
+    /// Decoded rows of the next operator chunk (≤ `batch_rows()` rows), or
+    /// `None` at end of stream. Chunks are never empty (`Op` invariant:
+    /// operators never yield `Some(empty)` mid-stream).
+    pub fn next_chunk(&mut self) -> Result<Option<Vec<Bindings>>> {
+        let buffered: Vec<Bindings> = self.buf.by_ref().collect();
+        if !buffered.is_empty() {
+            return Ok(Some(buffered));
+        }
+        match self.op.next()? {
+            Some(batch) => Ok(Some(batch.to_bindings(|id| self.exec.decode_term(id))?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Row-at-a-time convenience view (ASK, library callers).
+impl<'r, E: Executor + ?Sized> Iterator for BindingsStream<'r, E> {
+    type Item = Result<Bindings>;
+    fn next(&mut self) -> Option<Result<Bindings>> {
+        loop {
+            if let Some(b) = self.buf.next() {
+                return Some(Ok(b));
+            }
+            match self.next_chunk() {
+                Ok(Some(rows)) => self.buf = rows.into_iter(),
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
 }
 
 /// Precompute, once per join, each `out_schema` column's source index in the

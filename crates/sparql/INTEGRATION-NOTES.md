@@ -335,3 +335,51 @@ The `/query` handler serves the rendering as `text/plain` (text) or
 not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
 `tests/parser_basic.rs`, the `plan::explain` unit tests, and the
 `/query` EXPLAIN server tests in `tests/server_http.rs`.
+
+## HTTP streaming results (#128, 2026-07-06)
+
+- `Runtime::run_stream` returns a `BindingsStream` (chunked decode at the
+  boundary); `run` collects it — signature unchanged. `api::plan_select`
+  is the planning-only SELECT entry the streaming handler uses.
+- The `/query` handler streams plain SELECTs: exec+decode+serialize run in
+  `spawn_blocking` (the store read guard and the `Op` tree are `!Send`),
+  serialized `Bytes` cross to a `ChannelBody` over a bounded mpsc.
+- Error contract: first chunk is pre-buffered → early errors are HTTP 400;
+  mid-stream errors abort the chunked body (no terminator) — clients detect
+  truncation at the protocol level. No format can express a trailing error.
+- The read lock is now held until the client drains a streamed SELECT
+  (writers wait; readers don't). Accepted until SPEC-02 MVCC. Corollary
+  fixed in the same branch: `/update` takes its write lock inside
+  `spawn_blocking` — blocking a runtime worker on `write()` while a slow
+  reader drains could otherwise wedge the whole server.
+- CONSTRUCT/DESCRIBE streaming deferred (#TODO); UPDATE must stay
+  materialized (SPARQL 1.1 §3.1.3 pre-update snapshot semantics).
+
+Review follow-ups (non-blocking, from the branch's code reviews):
+
+- A panic (not `SparqlError`) in the blocking serializer closure drops `tx`
+  without an `Err`, so the client sees a *cleanly terminated* truncated
+  document (undetectable for CSV/TSV) and the panic is swallowed with the
+  dropped `JoinHandle`. A drop-guard that sends `Err` on unwind would fix
+  both.
+- No ceiling on concurrent streamed SELECTs: each holds a blocking-pool
+  thread (default cap 512) for the full drain; slow clients can exhaust
+  the pool and queue new SELECTs indefinitely (no timeouts anywhere in
+  Stage 1). SPEC-22 hardening list.
+- `api::plan_select` duplicates `execute_query_with`'s Select-arm
+  translate→plan sequence. Nothing diverges today (the pushdown rewrite
+  lives inside `run_stream`/`build`), but if a rewrite step is ever added
+  between translate and plan, extract a shared helper first.
+- Measured on hornbench (2026-07-06, AMD Ryzen 7 7700, b94ba14 vs main):
+  full-scan 5M-triple SELECT peak RSS 4.8 GiB vs 37.2 GiB (-87%, the
+  query no longer adds to the load-time peak) and 4.9x faster drain --
+  but LDBC SPB-256 aggregation-qps paid ~3% (35.4/34.9 vs main's
+  36.2-36.4, GraphDB control flat): the per-query `spawn_blocking` +
+  channel hop is measurable on small results. If that 3% matters, a
+  size-based fast path (serialize inline when the first chunk is also
+  the last) is the obvious lever. Implemented: single-chunk results now
+  reply as a plain sized body (oneshot first-reply; the chunk-2 peek
+  keeps the mid-stream abort contract). Measured after: 36.12 qps
+  (b0a701b) vs main's 36.2-36.4 nightly cluster - recovered to noise.
+
+Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.

@@ -99,9 +99,11 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || planner::plan(&alg))?;
             let any = timed(Stage::Exec, || {
-                Runtime::new(exec)
-                    .run(&plan)
-                    .map(|mut it| it.next().is_some())
+                // Early exit: only the first operator chunk is pulled and
+                // decoded — `run` would drain the whole result set.
+                let rt = Runtime::new(exec);
+                let mut stream = rt.run_stream(&plan)?;
+                Ok(stream.next_chunk()?.is_some())
             })?;
             Ok(QueryAnswer::Boolean(any))
         }
@@ -154,6 +156,36 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             Ok(QueryAnswer::Explanation { text, json })
         }
     }
+}
+
+/// Parse → translate → plan a query for streaming execution, without
+/// running it. Returns `Some((projected_vars, plan))` for a plain SELECT;
+/// `None` for every other form (ASK / CONSTRUCT / DESCRIBE / EXPLAIN),
+/// which the caller answers via [`execute_query`]. Records the same
+/// Parse/Translate/Plan stage metrics as `execute_query`;
+/// `query_total{kind=select}` is bumped only on the `Some` path so the
+/// fallback keeps per-kind counts exact (a non-SELECT query costs one
+/// extra `parse` stage observation from the routing double-parse — noted
+/// in `docs/metrics.md`).
+pub fn plan_select(
+    query: &str,
+    cfg: &SparqlConfig,
+) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan)>> {
+    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    let ParsedQuery::Select { inner } = parsed else {
+        return Ok(None);
+    };
+    horndb_metrics::metrics()
+        .sparql
+        .query_total
+        .get_or_create(&QueryKindLabel {
+            kind: QueryKind::Select,
+        })
+        .inc();
+    let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+    let vars = projected_vars(&alg);
+    let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+    Ok(Some((vars, plan)))
 }
 
 /// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,
