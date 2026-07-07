@@ -27,6 +27,13 @@ env:
   # installed on the runner. start-graphdb-free.sh downloads this version if
   # the runner does not already have it unpacked.
   GRAPHDB_VERSION: "10.8.14"
+  # Third A/B leg: Oxigraph (Rust SPARQL store, no reasoner) serving the same
+  # flat closure as HornDB/GraphDB. Pinned to the branch, not the runner;
+  # start-oxigraph.sh downloads this release binary if absent (cached). The
+  # heavy one-time load into the persisted store is a runner precondition —
+  # see bootstrap-oxigraph-spb.sh.
+  OXIGRAPH_VERSION: "0.5.9"
+  OXIGRAPH_BIND: "127.0.0.1:7878"
 
 jobs:
   spb-256:
@@ -116,6 +123,44 @@ jobs:
       - name: stop GraphDB engine
         if: always()
         run: pkill -f 'graphdb' 2>/dev/null || true
+
+      - name: start Oxigraph engine
+        id: start_oxigraph
+        # Third A/B leg, mirroring the GraphDB one: bring the branch-pinned
+        # Oxigraph up serving the same flat closure (loaded once by
+        # bootstrap-oxigraph-spb.sh into the persisted store), then run the
+        # driver. Runs only after both prior legs have stopped so it never
+        # competes with them for RAM / OS page cache. continue-on-error keeps
+        # the prior contract: an Oxigraph problem (e.g. store not yet
+        # bootstrapped on the runner) skips this leg rather than failing the
+        # nightly.
+        continue-on-error: true
+        run: ./crates/harness/scripts/start-oxigraph.sh
+
+      - name: SPB-256 against Oxigraph
+        if: steps.start_oxigraph.outcome == 'success'
+        env:
+          SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
+          SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
+        run: |
+          set -euo pipefail
+          # start-oxigraph.sh already waited for readiness, but re-probe for
+          # symmetry with the GraphDB leg; skip rather than fail if it dropped.
+          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$OXIGRAPH_BIND/query" 60; then
+            echo "::warning::Oxigraph not reachable at http://$OXIGRAPH_BIND/query — skipping A/B leg"
+            exit 0
+          fi
+          ./crates/harness/scripts/run-oxigraph-spb-256.sh
+
+      - name: stop Oxigraph engine
+        if: always()
+        # start-oxigraph.sh records the server PID (the binary is a versioned
+        # name like `oxigraph-0.5.9`, so a `pkill -f 'oxigraph serve'` pattern
+        # would miss it); a precise kill is safer on the shared bench runner.
+        run: |
+          if [ -f /tmp/oxigraph-engine.pid ]; then
+            kill "$(cat /tmp/oxigraph-engine.pid)" 2>/dev/null || true
+          fi
 
       - name: publish benchmark summary
         if: always()
