@@ -18,6 +18,7 @@ const XSD_UNSIGNED_INT: &str = "http://www.w3.org/2001/XMLSchema#unsignedInt";
 const XSD_UNSIGNED_SHORT: &str = "http://www.w3.org/2001/XMLSchema#unsignedShort";
 const XSD_NON_NEGATIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonNegativeInteger";
 const XSD_NON_POSITIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#nonPositiveInteger";
+const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 
 /// A `p rdfs:range D` (or any other named-node/named-node) triple.
 fn nq(s: &str, p: &str, o: &str) -> Quad {
@@ -73,6 +74,33 @@ fn webont_i58_009_nonneg_and_nonpos_entail_short() {
     assert!(
         engine.entails(&conclusion).unwrap(),
         "nonNegativeInteger ∩ nonPositiveInteger should entail rdfs:range xsd:short"
+    );
+    assert!(engine.is_consistent().unwrap());
+}
+
+/// Compositional case (codex review finding, #160): the second `rdfs:range`
+/// on `:p` is only *entailed* via `scm-rng2` from a range declared on a
+/// super-property `:q` — it is not present in the asserted data at all. The
+/// intersection pass must run **after** materialization to see it:
+/// `:q rdfs:range xsd:short`, `:p rdfs:subPropertyOf :q`, `:p rdfs:range
+/// xsd:unsignedInt` ⟹ `scm-rng2` derives `:p rdfs:range xsd:short`, which
+/// combined with the asserted `:p rdfs:range xsd:unsignedInt` narrows to
+/// `[0, 32767] ⊆ xsd:unsignedShort`.
+#[test]
+fn compositional_range_via_subproperty_entails_unsigned_short() {
+    let mut engine = Engine::new();
+    let premise = dataset(&[
+        nq("http://ex/q", RDFS_RANGE, XSD_SHORT),
+        nq("http://ex/p", RDFS_SUB_PROPERTY_OF, "http://ex/q"),
+        nq("http://ex/p", RDFS_RANGE, XSD_UNSIGNED_INT),
+    ]);
+    engine.load(&premise).unwrap();
+
+    let conclusion = dataset(&[nq("http://ex/p", RDFS_RANGE, XSD_UNSIGNED_SHORT)]);
+    assert!(
+        engine.entails(&conclusion).unwrap(),
+        "scm-rng2-inferred xsd:short on :p, combined with asserted xsd:unsignedInt, \
+         should entail rdfs:range xsd:unsignedShort"
     );
     assert!(engine.is_consistent().unwrap());
 }

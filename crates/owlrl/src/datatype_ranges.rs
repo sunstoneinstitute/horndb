@@ -52,6 +52,15 @@
 //! lone datatype against itself is a no-op intersection and would only add
 //! noise. Requiring at least two distinct declared range datatypes also
 //! keeps this pass from ever firing on ordinary single-range ontologies.
+//!
+//! ## When this runs
+//!
+//! [`derive_range_intersections`] runs **after** the first materialization
+//! fixpoint (`Engine::load`, `crates/owlrl/src/integration.rs`), not before
+//! it — see that function's doc for why a second, distinct range can appear
+//! on a property only through `scm-rng2` (sub-property range inheritance)
+//! during the fixpoint, which a pre-materialize pass would never observe
+//! (#160).
 
 use crate::store::{MemStore, TripleStore};
 use crate::types::{TermId, Triple};
@@ -179,8 +188,9 @@ fn intersect(members: &[&str]) -> Option<Interval> {
 
 /// Derive narrowed `rdfs:range` declarations from value-space intersection.
 ///
-/// For every property `p` with **two or more** distinct asserted `p
-/// rdfs:range <D>` datatypes, all of which are known numeric-tower
+/// For every property `p` with **two or more** distinct `p rdfs:range <D>`
+/// datatypes present in the store (asserted or, run post-materialize as
+/// documented below, inferred), all of which are known numeric-tower
 /// datatypes or `xsd:decimal` (a single opaque/unknown datatype among `p`'s
 /// declared ranges disqualifies `p` entirely — see the module doc), compute
 /// the intersection of their value spaces and assert `p rdfs:range <T>` for
@@ -195,14 +205,36 @@ fn intersect(members: &[&str]) -> Option<Interval> {
 /// IRI behind a `rdfs:range` object `TermId` without needing read access to
 /// the caller's dictionary.
 ///
-/// Must run **after** the range data is loaded and **before**
-/// materialization, so `scm-rng1` / `prp-rng` propagate the derived ranges
-/// during the fixpoint.
+/// Must run **after** the fixpoint (the first `materialize_once`), not
+/// before, so it composes with ranges *inferred* during materialization —
+/// not just the ones asserted in the input. `scm-rng2` (`?p2 rdfs:range ?c` +
+/// `?p1 rdfs:subPropertyOf ?p2` ⟹ `?p1 rdfs:range ?c`) can put a second,
+/// distinct range on a property that had only one asserted, which is exactly
+/// the ≥2-ranges trigger condition this pass looks for (#160). Concretely:
+/// `:q rdfs:range xsd:short` + `:p rdfs:subPropertyOf :q` + `:p rdfs:range
+/// xsd:unsignedInt` (asserted) — `scm-rng2` derives `:p rdfs:range xsd:short`,
+/// and only post-materialize does this pass see both ranges on `:p` and
+/// narrow to `xsd:unsignedShort`.
+///
+/// Running post-fixpoint does not weaken the two direct W3C cases: `scm-rng1`
+/// only ever *broadens* a range to a value-space superset (see the module
+/// doc), so every `scm-rng1`-inferred range is redundant for narrowing
+/// purposes — the intersection computed over asserted-plus-inferred ranges
+/// equals the intersection computed over the asserted ranges alone. What
+/// changes is that this pass now also observes ranges inferred onto a
+/// *different* property via `scm-rng2`, which a pre-materialize pass could
+/// never see.
+///
+/// Returns `true` iff at least one new `rdfs:range` triple was asserted, so
+/// the caller can re-run the fixpoint once to propagate it (`scm-rng1`
+/// broadening the narrowed range further, `prp-rng` re-typing instances)
+/// exactly like the sibling `validate_derived_datatype_memberships` pass in
+/// `integration.rs`.
 pub fn derive_range_intersections(
     store: &mut MemStore,
     vocab: &Vocabulary,
     mut intern: impl FnMut(&str) -> TermId,
-) {
+) -> bool {
     // TermId -> local XSD name, for every datatype this pass understands.
     let mut known: FxHashMap<TermId, &'static str> = FxHashMap::default();
     for &(name, _) in NUMERIC_INTERVALS {
@@ -218,6 +250,7 @@ pub fn derive_range_intersections(
         by_property.entry(t.s).or_default().insert(t.o);
     }
 
+    let mut added = false;
     for (prop, ranges) in by_property {
         if ranges.len() < 2 {
             continue;
@@ -254,29 +287,33 @@ pub fn derive_range_intersections(
 
         for &(target, iv) in NUMERIC_INTERVALS {
             if is_superset(iv, intersection) {
-                assert_range(store, vocab, &mut intern, prop, target);
+                added |= assert_range(store, vocab, &mut intern, prop, target);
             }
         }
         // xsd:decimal is always a superset of a bounded integer
         // intersection (we only reach here when `has_integer_member` was
         // true, i.e. the intersection is genuinely integer-shaped).
-        assert_range(store, vocab, &mut intern, prop, DECIMAL);
+        added |= assert_range(store, vocab, &mut intern, prop, DECIMAL);
     }
+    added
 }
 
 /// Assert `prop rdfs:range <XSD local>` as a base fact iff not already
-/// present.
+/// present. Returns `true` iff the triple was newly inserted.
 fn assert_range(
     store: &mut MemStore,
     vocab: &Vocabulary,
     intern: &mut impl FnMut(&str) -> TermId,
     prop: TermId,
     local: &str,
-) {
+) -> bool {
     let target = intern(&format!("{XSD}{local}"));
     let triple = Triple::new(prop, vocab.rdfs_range, target);
-    if !store.contains(&triple) {
+    if store.contains(&triple) {
+        false
+    } else {
         store.assert(triple);
+        true
     }
 }
 
