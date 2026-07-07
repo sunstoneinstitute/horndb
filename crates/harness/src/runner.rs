@@ -95,7 +95,8 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             premise,
             conclusion,
         } => {
-            let p = load_dataset_for(premise)?;
+            let mut p = load_dataset_for(premise)?;
+            crate::rdf::resolve_imports(&mut p, premise)?;
             let c = load_dataset_for(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
@@ -111,7 +112,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             premise,
             conclusion,
         } => {
-            let p = load_turtle_dataset(premise)?;
+            let p = crate::rdf::load_premise(premise)?;
             let c = load_turtle_dataset(conclusion)?;
             engine.load(&p)?;
             if engine.entails(&c)? {
@@ -124,7 +125,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             }
         }
         TestKind::Consistency { premise } => {
-            let p = load_turtle_dataset(premise)?;
+            let p = crate::rdf::load_premise(premise)?;
             engine.load(&p)?;
             if engine.is_consistent()? {
                 (Status::Passed, None)
@@ -136,7 +137,7 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
             }
         }
         TestKind::Inconsistency { premise } => {
-            let p = load_turtle_dataset(premise)?;
+            let p = crate::rdf::load_premise(premise)?;
             engine.load(&p)?;
             if !engine.is_consistent()? {
                 (Status::Passed, None)

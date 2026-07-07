@@ -1,0 +1,12 @@
+# Hermetic `owl:imports` catalog for the owl2-w3c-rl fixtures.
+#
+# Maps each import IRI a premise may reference to a locally-mirrored Turtle
+# fixture in this directory. The harness (`rdf.rs::expand_imports`) loads this
+# file if present and resolves every `owl:imports <IRI>` in a premise through
+# it, merging the target's triples transitively. An `owl:imports` with no
+# entry here is a hard error — a missing mirror fails loud, never a silent red.
+#
+# Paths are relative to this directory. Add a line when a new W3C case brings a
+# supporting ontology.
+[imports]
+"http://www.w3.org/2002/03owlt/imports/support011-A" = "WebOnt-imports-011.support011-A.ttl"
