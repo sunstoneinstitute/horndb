@@ -2141,6 +2141,7 @@ mod slot_differential {
             PhysicalPlan::PathClosure { edge, .. } => contains_inner_join(edge),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
+            | PhysicalPlan::GroupCountScan { .. }
             | PhysicalPlan::Values { .. } => false,
         }
     }
