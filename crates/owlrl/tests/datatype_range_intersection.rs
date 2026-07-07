@@ -127,6 +127,36 @@ fn single_range_does_not_spuriously_narrow() {
     );
 }
 
+/// Guard (regression): a single asserted range in the *unsigned* chain must
+/// not trigger cross-branch narrowing just because `scm-rng1` broadened it
+/// post-materialization. `xsd:unsignedShort` broadens to `unsignedInt`,
+/// `unsignedLong`, `nonNegativeInteger`, `integer`, `decimal` — all one
+/// chain (one minimal element) — so the intersection pass must stay silent
+/// and NOT derive the cross-branch signed types `xsd:int`/`xsd:long`, which
+/// `scm-rng1` never gives for `unsignedShort`.
+#[test]
+fn single_unsigned_range_does_not_derive_cross_branch() {
+    let mut engine = Engine::new();
+    let premise = dataset(&[nq("http://ex/p", RDFS_RANGE, XSD_UNSIGNED_SHORT)]);
+    engine.load(&premise).unwrap();
+
+    // scm-rng1 broadening up the unsigned chain still holds.
+    let broadened = dataset(&[nq("http://ex/p", RDFS_RANGE, XSD_UNSIGNED_INT)]);
+    assert!(
+        engine.entails(&broadened).unwrap(),
+        "scm-rng1 should broaden xsd:unsignedShort up to xsd:unsignedInt"
+    );
+    // But no cross-branch signed range is entailed for a single unsigned range.
+    for bogus in [XSD_INT, XSD_SHORT, XSD_BYTE] {
+        let conclusion = dataset(&[nq("http://ex/p", RDFS_RANGE, bogus)]);
+        assert!(
+            !engine.entails(&conclusion).unwrap(),
+            "a lone xsd:unsignedShort range must not derive cross-branch {bogus}"
+        );
+    }
+    assert!(engine.is_consistent().unwrap());
+}
+
 /// Guard: a property whose declared ranges include an opaque datatype
 /// (`xsd:string`) derives nothing from this pass, even though the other
 /// declared range (`xsd:int`) is numeric.

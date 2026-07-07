@@ -45,13 +45,22 @@
 //! the true intersection, so it never rules out a value that was legal
 //! before.
 //!
-//! ## Why ≥2 declared ranges
+//! ## Why ≥2 *independent* ranges
 //!
-//! A property with a single declared range is left entirely to `scm-rng1`
+//! A property with a single effective range is left entirely to `scm-rng1`
 //! (which already broadens it correctly along the lattice); comparing a
 //! lone datatype against itself is a no-op intersection and would only add
-//! noise. Requiring at least two distinct declared range datatypes also
-//! keeps this pass from ever firing on ordinary single-range ontologies.
+//! noise. Because this pass runs **post-materialization** (see below), a
+//! single asserted range has by then been broadened by `scm-rng1` into its
+//! whole supertype chain — so the gate cannot be a raw range *count*. It is
+//! instead the count of **minimal** intervals under value-space subset
+//! ordering (`minimal_interval_count`): a subsumption chain collapses to one
+//! minimal element, and only ≥2 pairwise subset-incomparable constraints —
+//! genuinely cross-branch ranges like `short` + `unsignedInt`, or a
+//! `scm-rng2`-inherited range meeting an asserted one — trigger narrowing.
+//! This keeps the pass from firing (and forcing a re-materialization) on
+//! ordinary single-range properties whose only "extra" ranges are `scm-rng1`
+//! supertypes.
 //!
 //! ## When this runs
 //!
@@ -186,6 +195,39 @@ fn intersect(members: &[&str]) -> Option<Interval> {
     Some(Interval::new(lo, hi))
 }
 
+/// Count the distinct **minimal** intervals — under value-space subset
+/// ordering — among `names` (numeric-tower local names; [`DECIMAL`] is a
+/// universal superset and never minimal, so it is ignored).
+///
+/// Run post-materialization, a property's range set is polluted by
+/// `scm-rng1` *broadening*: a single asserted `xsd:unsignedShort` becomes
+/// `{unsignedShort, unsignedInt, unsignedLong, nonNegativeInteger, integer,
+/// decimal}` — all on one subsumption chain. A raw `ranges.len() >= 2` gate
+/// would treat that as a multi-range property and derive spurious cross-branch
+/// ranges. Collapsing each subsumption chain to its smallest (minimal) member
+/// restores the true trigger: value-space *intersection* narrowing only
+/// applies when ≥2 **independent** (pairwise subset-incomparable) range
+/// constraints must be reconciled. An interval is minimal iff no *other*
+/// distinct interval in the set is a subset of it.
+fn minimal_interval_count(names: &[&str]) -> usize {
+    let mut ivs: Vec<Interval> = Vec::new();
+    for &name in names {
+        if name == DECIMAL {
+            continue;
+        }
+        if let Some(&(_, iv)) = NUMERIC_INTERVALS.iter().find(|(n, _)| *n == name) {
+            if !ivs.contains(&iv) {
+                ivs.push(iv);
+            }
+        }
+    }
+    // `is_superset(a, b)` ⟺ `b ⊆ a`, so `a` is non-minimal iff some other
+    // distinct interval `b` is a subset of it.
+    ivs.iter()
+        .filter(|&&a| !ivs.iter().any(|&b| b != a && is_superset(a, b)))
+        .count()
+}
+
 /// Derive narrowed `rdfs:range` declarations from value-space intersection.
 ///
 /// For every property `p` with **two or more** distinct `p rdfs:range <D>`
@@ -270,6 +312,14 @@ pub fn derive_range_intersections(
             }
         }
         if opaque {
+            continue;
+        }
+
+        // Gate on *independent* ranges, not raw count: a single asserted
+        // range broadened by `scm-rng1` into its supertype chain has one
+        // minimal element and must be left to `scm-rng1`. Only ≥2
+        // subset-incomparable constraints trigger intersection narrowing.
+        if minimal_interval_count(&names) < 2 {
             continue;
         }
 
@@ -401,6 +451,42 @@ mod tests {
         // just short's own interval.
         let i = intersect(&["short", DECIMAL]).unwrap();
         assert_eq!(i, interval_of("short"));
+    }
+
+    #[test]
+    fn minimal_count_collapses_scm_rng1_chains() {
+        // A single asserted range broadened by scm-rng1 into its supertype
+        // chain has ONE minimal element — must not trigger the pass.
+        assert_eq!(
+            minimal_interval_count(&["unsignedShort", "unsignedInt", "unsignedLong", "integer"]),
+            1
+        );
+        assert_eq!(
+            minimal_interval_count(&["short", "int", "long", "integer", DECIMAL]),
+            1
+        );
+        // decimal alongside one integer type is still a single chain.
+        assert_eq!(minimal_interval_count(&["short", DECIMAL]), 1);
+        // Genuinely independent (subset-incomparable) constraints count.
+        assert_eq!(minimal_interval_count(&["short", "unsignedInt"]), 2);
+        assert_eq!(
+            minimal_interval_count(&["nonNegativeInteger", "nonPositiveInteger"]),
+            2
+        );
+        // The full post-materialize 008 set still has exactly 2 minimal.
+        assert_eq!(
+            minimal_interval_count(&[
+                "short",
+                "unsignedInt",
+                "int",
+                "long",
+                "integer",
+                "unsignedLong",
+                "nonNegativeInteger",
+                DECIMAL,
+            ]),
+            2
+        );
     }
 
     #[test]
