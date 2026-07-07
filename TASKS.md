@@ -32,6 +32,17 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 ## Index
 
+**Stage-2 investment epics** (opened 2026-07-07 — deferred → `to-spec`; each is a `needs-decomposition` epic, spec'd then broken into leaf issues; details in [Stage-2 investment epics](#stage-2-investment-epics) and `docs/architecture.md`):
+
+- [ ] **CRITICAL** · _Completeness_ — **EPIC E1**: SPEC-23 unified query+reasoning IR (single IR; optimizer framework ships first) ([#185](https://github.com/sunstoneinstitute/horndb/issues/185))
+- [ ] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186))
+- [ ] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187))
+- [ ] **MEDIUM** · _Completeness_ — **EPIC E4**: SPEC-04 rule completeness Stage-2 (proof persistence, full dt-*, list/QCR rules, user-defined rules) ([#188](https://github.com/sunstoneinstitute/horndb/issues/188))
+- [ ] **MEDIUM** · _Completeness_ — **EPIC E5**: SPEC-07 SPARQL surface completeness Stage-2 (GSP, named-graph scoping, remote LOAD, XML, DESCRIBE) ([#189](https://github.com/sunstoneinstitute/horndb/issues/189))
+- [ ] **MEDIUM** · _Completeness_ — **EPIC E6**: SPEC-08 ML integration Stage-2 (FAISS candidate gen, NL→SPARQL) ([#190](https://github.com/sunstoneinstitute/horndb/issues/190))
+- [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
+- [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
+
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **`per_tuple` measured on hornbench (2026-06-30): ~67 ns/tuple, unchanged by the intersect (criterion A/B “no change”) — NF1 ≤2.5 ns not met; bottleneck is the depth-1 narrow-run leapfrog + Arrow materialization, not the intersect.** **hornbench numbers recorded (2026-07-07, Ryzen 7 7700, node-0-pinned):** `dict_decode` scalar 14.74 µs vs AVX2 14.54 µs → **~1.01×, RED** (load/store-bound; NF4 ≥4× is a compute target the memory-bound loop can't reach — SIMD not the lever); `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad (33.1 GB/s full-socket) → GREEN** (SPEC-02 acceptance #4 met). **Remaining:** close NF1 `per_tuple` (depth-1 / materialization path — not SIMD); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
@@ -45,6 +56,53 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
 
 Closed tasks are listed in [Done](#done-for-traceability).
+
+## Stage-2 investment epics
+
+Opened 2026-07-07. These pull previously-**deferred** work into **`to-spec`**: each
+has a `needs-decomposition` GitHub epic and is queued to be specified, then broken
+into leaf issues via the `to-issues` skill (leaf issues are *not* pre-created). They
+mirror the [Stage-2 investment epics](docs/architecture.md#stage-2-investment-epics)
+table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
+
+- [ ] **EPIC E1 — SPEC-23 unified query + reasoning IR (single IR).** _CRITICAL · Completeness._
+  ([#185](https://github.com/sunstoneinstitute/horndb/issues/185)) The flagship, spec'd
+  first. A single logical IR expressing query **and** reasoning so the optimizer jointly
+  decides join order, reasoning strategy (materialize/rewrite/delegate), and demand-driven
+  partial closure. The **optimizer framework ships first** (logical IR, pass registry,
+  `Stats` seam, cost-based ordering); reasoning then enters the same IR, pulling in
+  magic-sets/backward-chaining (SPEC-03
+  F4/F5), SPARQL backward mode (SPEC-07), reasoning-as-rewrite + a reasoning/materialization
+  catalog seam, the cost-based WCOJ planner, and property-path→GraphBLAS choice. Stub:
+  `docs/specs/SPEC-23-unified-ir.md`. **DoD:** write + approve SPEC-23, then decompose.
+- [ ] **EPIC E2 — SPEC-06 incremental maintenance completeness.** _HIGH · Completeness._
+  ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)) Fully delta-incremental
+  retraction (no affected-region recompute), MVCC backing of `Circuit::snapshot`, change-feed
+  reconciliation, WAL/backpressure/cost-model. Successor to Stage-1 epic #6.
+- [ ] **EPIC E3 — SPEC-02 storage Stage-2.** _HIGH · Completeness._
+  ([#187](https://github.com/sunstoneinstitute/horndb/issues/187)) Per-tuple MVCC, persistent
+  on-disk dictionary, cold/CXL tiering seam, named-graph snapshots, WAL, deferred acceptance
+  benches (hornbench). Successor to Stage-1 epic #3.
+- [ ] **EPIC E4 — SPEC-04 rule completeness Stage-2.** _MEDIUM · Completeness._
+  ([#188](https://github.com/sunstoneinstitute/horndb/issues/188)) Proof persistence, datatype
+  value-space + full `dt-*` tower, list-walking `cls-int*/uni*`, qualified max-cardinality,
+  user-defined rules, owlrl Z-set wiring. Successor to Stage-1 epic #4. (Perf hotspots #133/#134
+  stay separate.)
+- [ ] **EPIC E5 — SPEC-07 SPARQL surface completeness Stage-2.** _MEDIUM · Completeness._
+  ([#189](https://github.com/sunstoneinstitute/horndb/issues/189)) Graph Store Protocol +
+  named-graph scoping, remote LOAD, XML results, recursive DESCRIBE, streaming CONSTRUCT/DESCRIBE.
+  Successor to Stage-1 epic #7. (Streaming/agg remainder → #128; python graph-scoping → #119.)
+- [ ] **EPIC E6 — SPEC-08 ML integration Stage-2.** _MEDIUM · Completeness._
+  ([#190](https://github.com/sunstoneinstitute/horndb/issues/190)) FAISS-backed candidate
+  generator, NL→SPARQL endpoint wired into `serve`. Successor to Stage-1 epic #8. (PlanAdvisor
+  validation loop lives in E1.)
+- [ ] **EPIC E7 — RDF 1.2 Stage-2.** _MEDIUM · Conformance._
+  ([#191](https://github.com/sunstoneinstitute/horndb/issues/191)) Turtle/TriG/N-Quads/JSON-LD
+  parse+serialize, RDF 1.2 semantics suites, per-edge mapping annotation (SPEC-11). (SSSOM core
+  build → #130.)
+- [ ] **EPIC E8 — SPEC-17 observability Stage-2: OTel traces & logs.** _LOW · Operational._
+  ([#192](https://github.com/sunstoneinstitute/horndb/issues/192)) OpenTelemetry traces and logs
+  — the phase after Prometheus metrics (#148).
 
 ## HIGH — Performance
 
