@@ -13,17 +13,21 @@ and the **Status** fields here say what exists *today*.
 
 ## How to read this document
 
-Every architectural part carries a **Status** field with one of four values:
+Every architectural part carries a **Status** field with one of five values:
 
 | Status | Meaning |
 |---|---|
 | **implemented** | Code exists and is exercised by tests and/or the conformance harness at Stage-1 level. |
 | **specified** | A SPEC (and usually a plan) describes it, but there is no code yet. |
 | **planned** | A concrete follow-up exists in `TASKS.md` to build or finish it. |
+| **to-spec** | Committed for the current investment round: a `needs-decomposition` epic issue exists and it is queued to be spec'd, but no SPEC is written yet. |
 | **deferred** | Intentionally out of scope for now — a later roadmap stage, or indefinitely. |
 
-A part can move only forward: specified → planned → implemented. "deferred"
-is orthogonal — it marks a scope decision, not a progress point.
+A part can move only forward: to-spec → specified → planned → implemented. Once an
+epic's SPEC is written it leaves **to-spec** and its parts become **specified**.
+"deferred" is orthogonal — it marks a scope decision, not a progress point; work is
+pulled out of **deferred** into **to-spec** when we commit to specifying it (see
+[Stage-2 investment epics](#stage-2-investment-epics)).
 
 > **Maintenance:** the Status fields here and the checkboxes in `TASKS.md`
 > are two views of the same reality and must be kept in sync. See
@@ -45,9 +49,9 @@ Six bets define the project. Their current state:
 
 | # | Bet | Status | Notes |
 |---|---|---|---|
-| 1 | Hybrid execution (materialize the closure subset, backward-chain the rest with magic sets) | **partially implemented** | Forward materialization (SPEC-04) and GraphBLAS closure (SPEC-05) ship. Magic-sets / backward-chaining (SPEC-03 F4/F5, SPEC-07 backward mode) is **deferred**. |
+| 1 | Hybrid execution (materialize the closure subset, backward-chain the rest with magic sets) | **partially implemented** | Forward materialization (SPEC-04) and GraphBLAS closure (SPEC-05) ship. Magic-sets / backward-chaining (SPEC-03 F4/F5, SPEC-07 backward mode) is now **to-spec** under the unified-IR epic E1 ([#185](https://github.com/sunstoneinstitute/horndb/issues/185), `SPEC-24`). |
 | 2 | Unified-memory hardware as a first-class target (HBM/DDR5/CXL/NVMe) | **specified / deferred** | Tier API scaffolding exists in SPEC-02; GPU/CXL/NVMe specialization is SPEC-09, Stage 3. |
-| 3 | DBSP-style incremental maintenance (Z-set deltas) | **partially implemented** | Insertion Z-set machinery ships (SPEC-06); **rule-path retraction across joins** works via recompute-and-diff on retraction-containing ticks (SPEC-06 F6, [#45](https://github.com/sunstoneinstitute/horndb/issues/45)), and **closure-path retraction** withdraws `ClosureInferred` rows whose base support is retracted ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)). A fully delta-incremental retraction path (no affected-region recompute) remains **deferred**. |
+| 3 | DBSP-style incremental maintenance (Z-set deltas) | **partially implemented** | Insertion Z-set machinery ships (SPEC-06); **rule-path retraction across joins** works via recompute-and-diff on retraction-containing ticks (SPEC-06 F6, [#45](https://github.com/sunstoneinstitute/horndb/issues/45)), and **closure-path retraction** withdraws `ClosureInferred` rows whose base support is retracted ([#5](https://github.com/sunstoneinstitute/horndb/issues/5)). A fully delta-incremental retraction path (no affected-region recompute) is now **to-spec** under epic E2 ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)). |
 | 4 | GraphBLAS for the closure subset | **implemented** | SuiteSparse:GraphBLAS backend ships (SPEC-05). |
 | 5 | Soufflé-style ahead-of-time rule compilation (no interpreter) | **implemented** | `build.rs` codegen from `rules.toml` (SPEC-04). |
 | 6 | Provenance / correctability as a hard requirement | **partially implemented** | Stage-1 ships per-triple `Provenance` and proof trees (SPEC-04 F4: `MemStore::proof_tree` / `Engine::proof`); production proof *persistence* (compressed side-table) is **planned**. |
@@ -178,8 +182,8 @@ Triejoin with a binary-hash fallback.
 | Cancellation (≤100 ms) | **implemented** | `cancel.rs`. |
 | Correctness vs binary-join (differential fuzzer) | **implemented** | Repeated-pattern over-production bug fixed; fuzzer cases 16 → 256, `#[ignore]` removed. |
 | 4-cycle ≥10× WCOJ-over-binary-join gate (acceptance #2) | **implemented** | Met in [#1](https://github.com/sunstoneinstitute/horndb/issues/1) by re-pointing `benches/four_cycle.rs` at the *canonical* WCOJ win case — a skewed ~10⁶-edge graph (`SyntheticGraph::skewed_four_cycle`: high-out-degree hubs + a thin, dedicated closure) instead of the old uniform low-degree graph, which never forces the intermediate-result blow-up WCOJ exists to avoid. Correctness pinned by `tests/skewed_four_cycle.rs` against an independent brute-force count. Measured ~34×; numbers in `docs/benchmarks.md`. |
-| Magic-sets / demand transformation (F4) | **deferred** | `wcoj/src/lib.rs`: "Magic sets and SLG tabling are deferred." |
-| SLG-resolution tabling (F5) | **deferred** | As above. Blocks SPEC-07 backward-chained mode. |
+| Magic-sets / demand transformation (F4) | **to-spec** | Pulled into the unified-IR epic E1 ([#185](https://github.com/sunstoneinstitute/horndb/issues/185), `SPEC-24`). `wcoj/src/lib.rs` still stubs it. |
+| SLG-resolution tabling (F5) | **to-spec** | E1 ([#185](https://github.com/sunstoneinstitute/horndb/issues/185)). Blocks SPEC-07 backward-chained mode. |
 | GPU WCOJ kernels | **deferred** | SPEC-09, Stage 3. |
 
 ---
@@ -292,7 +296,7 @@ HTTP server (`server` feature, on by default).
 | Non-recursive property paths (`/`, `^`, `\|`, `?`, `!`) | **implemented** | `translate.rs::translate_path` lowers them at translation time: `/`(Seq) and `^`(Inverse) expand into triple patterns; `\|`(Alternative) and `?`(ZeroOrOne) lower to `Union` (zero-length `?` binds endpoints without enumerating the graph — two distinct unbound endpoints are rejected as out of Stage-1 scope); `!`(NegatedPropertySet) lowers to a wildcard-predicate BGP under a `NOT IN` filter. A WHERE-pattern blank node (incl. the one spargebra mints when it flattens a sequence) is now treated as a non-distinguished join variable (`match_term`), which also fixes latent `/`-sequence joins across algebra boundaries. Covered by `tests/exec_property_paths.rs` and conformance fixtures `path-{alt,neg,opt}-001` (both backends). ([#49](https://github.com/sunstoneinstitute/horndb/issues/49)) |
 | Kleene-star property paths (`*`, `+`) | **implemented** | `translate.rs::translate_closure_path` lowers `+`/`*` to the `Algebra::PathClosure` node (the inner one-step path is expanded over the hidden endpoint vars `?pp_src`/`?pp_dst`, so `(p\|q)+`, `^p+`, `(p/q)+` all work); `runtime.rs::eval_path_closure` materialises the edge relation, takes its transitive closure by BFS to a fixpoint (cycle-safe), and for `*` adds the reflexive pairs over the touched node set, then binds/filters against the query endpoints. Covered by `tests/exec_property_paths.rs` and conformance fixtures `path-{plus,star}-001` (both backends; `path-star-001` is the acceptance-#7 `subClassOf*` shape). **Deferred:** routing a materialised single-predicate closure through the SPEC-05 GraphBLAS backend + selectivity-based planner choice (F3 fast path — correctness ships now, acceleration later); strict full-graph node-set semantics for `*`'s zero-length match over nodes untouched by the path. ([#50](https://github.com/sunstoneinstitute/horndb/issues/50)) |
 | Graph-management Update (`LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY`) + multi-op updates | **implemented (Stage-1 default-graph)** | `update.rs`: parser now admits graph-management verbs and multi-operation sequences (`parser::ParsedUpdate::GraphManagement`); the executor walks the op list. Under the default-graph-only model: `CLEAR`/`DROP DEFAULT`/`ALL` clear the store (`Store::clear_all`, added to the seam — `MemStore` resets, `HornBackend` tombstones every live key); `LOAD <file:…> [INTO GRAPH …]` reads a `file:` source via `oxttl` (`.nt`/`.ttl`/`.nq`/`.trig`, default Turtle) and merges it into the default graph; `CREATE`, a named `CLEAR`/`DROP`/`LOAD INTO` target, and a named `ADD`/`MOVE`/`COPY` operand are errors unless `SILENT` (then no-ops). `ADD`/`MOVE`/`COPY` are spargebra-desugared to `Drop` + `DeleteInsert`; the same-graph identity case desugars to zero operations (valid no-op). Tests: `tests/update_graph_mgmt.rs` (both backends), `tests/server_http.rs` (`/update` CLEAR + LOAD). **Deferred:** true named-graph scoping (→ GSP [#54](https://github.com/sunstoneinstitute/horndb/issues/54)) and remote (`http(s):`) LOAD (no HTTP client dep). ([#52](https://github.com/sunstoneinstitute/horndb/issues/52)) |
-| Backward-chained entailment mode (F4 second mode) | **deferred** | Depends on SPEC-03 magic-sets/tabling (deferred). |
+| Backward-chained entailment mode (F4 second mode) | **to-spec** | Part of the unified-IR epic E1 ([#185](https://github.com/sunstoneinstitute/horndb/issues/185), `SPEC-24`); depends on SPEC-03 magic-sets/tabling landing there. |
 | `EXPLAIN` pragma (F9) | **implemented** | `parser.rs` recognises a leading non-standard `EXPLAIN` / `EXPLAIN JSON` pragma (case-insensitive, whitespace-delimited so `?explainme` is not mistaken for it), strips it, and wraps the inner query as `ParsedQuery::Explain`. `api::execute_query` translates + plans the wrapped query **without executing it** and renders via `plan::explain` (`QueryAnswer::Explanation`): an indented operator tree (or JSON object tree) carrying a header `mode:` line (the entailment-regime execution mode — `materialized` today, labelled "backward-chaining not yet available" pending [#55](https://github.com/sunstoneinstitute/horndb/issues/55)) and per-node `~N rows` cardinality estimates. Estimates come from `Executor::cardinality_estimate` (new trait method, default `None`; `MemStore` returns the leading-pattern index size, `HornBackend` the live triple count as an upper bound) combined by textbook per-operator rules. The `/query` handler serves the rendering as `text/plain` or `application/json` by pragma. Satisfies acceptance #5 (EXPLAIN on `subClassOf+` shows mode + cardinality). Covered by `tests/explain_pragma.rs`, `tests/parser_basic.rs`, `tests/server_http.rs`, and `plan::explain` unit tests. **Deferred:** "chosen indexes" display (no cost-based index chooser yet — the plan is a 1:1 lowering) and the real materialized-vs-backward mode selection (with [#55](https://github.com/sunstoneinstitute/horndb/issues/55)). ([#53](https://github.com/sunstoneinstitute/horndb/issues/53)) |
 | Graph Store Protocol | **deferred** | Stage-2. Direct REST access to *named* graphs, but the store is default-graph-only — named graphs are unrepresentable until SPEC-02 grows a quad-aware seam. Blocked on that storage work, not on the frontend. ([#54](https://github.com/sunstoneinstitute/horndb/issues/54), closed) |
 | Streaming result serialization (F6 — currently buffers) | **planned** | The per-node buffering is gone (#143 streaming runtime), but `Runtime::run` still collects a full `Vec<Bindings>` and the serializers buffer the whole body. Planned 2026-07-06: `docs/specs/SPEC-22-http-streaming-results.md` + `docs/plans/PLAN-22-01-http-streaming-results.md` — `Runtime::run_stream` + incremental serializers + chunked HTTP bodies for all four SELECT formats. ([#56](https://github.com/sunstoneinstitute/horndb/issues/56), closed; tracked under [#128](https://github.com/sunstoneinstitute/horndb/issues/128)) |
@@ -437,6 +441,41 @@ HIGH *Performance* task in `TASKS.md`.
 
 ## 15. Cross-cutting concerns
 
+### Query optimization vs. reasoning-strategy selection
+**Status: optimizer framework specified (SPEC-23, draft); reasoning-strategy
+selection out of scope by construction.** Two concerns that are easy to
+conflate live in different places:
+
+- **The query optimizer** (the SPEC-23 framework over the SPEC-03 WCOJ and
+  SPEC-07 SPARQL planners) is a *join/variable-ordering cost engine*: logical
+  IR, pass registry, `Stats` seam, cost-based ordering — all over a graph that
+  has **already been reasoned**. It does not choose reasoning strategies.
+- **Reasoning-strategy selection** — a compiled OWL-RL rule vs. the GraphBLAS
+  closure resolver, expanding an SSSOM crosswalk, resolving a SKOS
+  `broader`/`narrower` hierarchy — is **not a query-time decision today**. It
+  happens *upstream of the optimizer*, at materialization / rule-compile time,
+  so it is **absent from SPEC-23 by design** and is not in the physical plan:
+  - OWL-RL/closure routing is fixed in `crates/owlrl/rules.toml`
+    (`delegate = "closure"` → GraphBLAS, SPEC-05; else compiled rule firing,
+    SPEC-04) and the closure is **materialized ahead of the query**.
+  - SSSOM crosswalking is materialized as base triples plus a resident
+    crosswalk index/spine (SPEC-11) precisely so it is "cheap by construction,
+    not a per-query burden"; queries hit the already-closed graph.
+- **When it *would* enter the optimizer:** only once hybrid backward-chaining
+  lands (magic sets / demand transformation, SPEC-03 F4/F5, now **to-spec** — E1), when
+  a query can answer without full materialization and a genuine "materialize
+  vs. rewrite vs. delegate-to-resolver" choice appears. That choice is
+  **logical, not physical**: a rewrite pass in the SPEC-23 pass registry
+  (before `JoinPlanning`), fed by a *reasoning/materialization catalog* seam
+  **parallel to `Stats`** (what is already closed + resolver cost), and realized
+  physically via the existing `PathClosure` node (`Algebra::l`) or a
+  closure-scan operator. The prior art SPEC-23 surveys (Oxigraph `sparopt`,
+  DuckDB, ClickHouse) are all **non-reasoning** engines, so none of them informs
+  this layer — it is HornDB-specific.
+- **Now committed (`to-spec`).** This is the flagship of the Stage-2 push: the
+  **single unified query+reasoning IR** epic E1 ([#185](https://github.com/sunstoneinstitute/horndb/issues/185),
+  `SPEC-24`, which subsumes SPEC-23). See [Stage-2 investment epics](#stage-2-investment-epics).
+
 ### Provenance / correctability
 **Status: partially implemented.** Stage-1 ships per-triple `Provenance`
 (`owlrl/src/provenance.rs`) and an ML-derived-fact provenance hook
@@ -540,6 +579,31 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 | **Stage 1** — Feasibility prototype | SPEC-02/03/04 slices + SPEC-05/06/07 slices, ≥50-case W3C OWL 2 RL subset green | **implemented** (with open gaps tracked in `TASKS.md`) |
 | **Stage 2** — MVP | Full SPEC-02..07, full W3C OWL 2 RL + SPARQL 1.1 entailment suites, ORE 2015, LDBC SPB SF3, RDF 1.2 priority | **planned / specified** |
 | **Stage 3** — Hardware specialization | SPEC-09: GPU/CXL/NVMe/multi-node | **deferred** |
+
+### Stage-2 investment epics
+
+The Stage-2 push (opened 2026-07-07) pulls the previously-**deferred** work into
+**to-spec**: each cluster below has a `needs-decomposition` epic issue and is
+queued to be specified, then decomposed into leaf issues via the `to-issues`
+skill. The flagship is the **single unified query+reasoning IR** (E1) — see §15
+"Query optimization vs. reasoning-strategy selection" for why it comes first.
+Individual subsystem rows above keep their fine-grained deferred sub-notes; those
+are now rolled up under the named epic here.
+
+| Epic | Scope | Priority | Issue |
+|---|---|---|---|
+| **E1** Unified query + reasoning IR (single IR; `SPEC-24`) | magic-sets/backward-chaining (SPEC-03 F4/F5), SPARQL backward mode (SPEC-07), SPEC-23 optimizer later phases, reasoning-as-rewrite + reasoning/materialization catalog seam, cost-based WCOJ planner, property-path→GraphBLAS choice | **critical** | [#185](https://github.com/sunstoneinstitute/horndb/issues/185) |
+| **E2** SPEC-06 incremental maintenance completeness | fully delta-incremental retraction, MVCC backing, feed reconciliation, WAL/backpressure/cost-model | **high** | [#186](https://github.com/sunstoneinstitute/horndb/issues/186) |
+| **E3** SPEC-02 storage Stage-2 | per-tuple MVCC, persistent dictionary, cold/CXL tiering seam, named-graph snapshots, WAL, deferred acceptance benches | **high** | [#187](https://github.com/sunstoneinstitute/horndb/issues/187) |
+| **E4** SPEC-04 rule completeness Stage-2 | proof persistence, datatype value-space + full `dt-*`, list/QCR rules, user-defined rules, owlrl Z-set wiring | **medium** | [#188](https://github.com/sunstoneinstitute/horndb/issues/188) |
+| **E5** SPEC-07 SPARQL surface completeness Stage-2 | GSP + named-graph scoping, remote LOAD, XML results, recursive DESCRIBE, streaming CONSTRUCT/DESCRIBE | **medium** | [#189](https://github.com/sunstoneinstitute/horndb/issues/189) |
+| **E6** SPEC-08 ML integration Stage-2 | FAISS candidate generator, NL→SPARQL endpoint | **medium** | [#190](https://github.com/sunstoneinstitute/horndb/issues/190) |
+| **E7** RDF 1.2 Stage-2 | Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites, per-edge mapping annotation | **medium** | [#191](https://github.com/sunstoneinstitute/horndb/issues/191) |
+| **E8** SPEC-17 observability Stage-2 | OpenTelemetry traces & logs | **low** | [#192](https://github.com/sunstoneinstitute/horndb/issues/192) |
+
+Already-open Stage-2 tracking (not re-filed): SIMD remainder → [#132](https://github.com/sunstoneinstitute/horndb/issues/132); SSSOM mappings core → [#130](https://github.com/sunstoneinstitute/horndb/issues/130); OWL 2 RL conformance gap → [#160](https://github.com/sunstoneinstitute/horndb/issues/160); LDBC SPB scale → [#125](https://github.com/sunstoneinstitute/horndb/issues/125); Python graph-scoping → [#119](https://github.com/sunstoneinstitute/horndb/issues/119).
+
+**Stays deferred (Stage-3 / indefinite), no epic:** all of SPEC-09 (GPU closure/WCOJ, CXL, NVMe, multi-node distributed DBSP, custom silicon); `SERVICE` federation, GeoSPARQL, full-text search; LAGraph adoption and valued-closure Fork B / PreJIT (revisit on a real use case); Windows Python support.
 
 ---
 
