@@ -39,7 +39,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
-- [ ] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
+- [v] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160)) — _wip: 6e1eb056@Stigs-MacBook-Pro.local · task-160-dt-value-space-intersection · 2026-07-07T15:02:32Z_
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
