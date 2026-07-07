@@ -64,6 +64,9 @@ pub struct MemStore {
     vocab: Vocabulary,
     /// predicate → set of (subject, object)
     by_pred: FxHashMap<TermId, FxHashSet<(TermId, TermId)>>,
+    /// predicate → object → set of subjects. Mirrors `by_pred`; lets
+    /// `probe(None, p, Some(o))` return O(|extent|) instead of O(|partition|).
+    obj_index: FxHashMap<TermId, FxHashMap<TermId, FxHashSet<TermId>>>,
     /// proofs for inferred triples (asserted triples have no entry)
     proofs: FxHashMap<Triple, Provenance>,
     /// inferred set (subset of by_pred entries)
@@ -79,6 +82,7 @@ impl MemStore {
         Self {
             vocab,
             by_pred: FxHashMap::default(),
+            obj_index: FxHashMap::default(),
             proofs: FxHashMap::default(),
             inferred: FxHashSet::default(),
             card_restrictions: Vec::new(),
@@ -86,9 +90,39 @@ impl MemStore {
         }
     }
 
+    /// Add `t.s` to the object index bucket for (t.p, t.o).
+    fn index_insert(&mut self, t: Triple) {
+        self.obj_index
+            .entry(t.p)
+            .or_default()
+            .entry(t.o)
+            .or_default()
+            .insert(t.s);
+    }
+
+    /// Remove `t.s` from the object index, pruning empty inner sets and empty
+    /// predicate maps so no empty shells accumulate.
+    fn index_remove(&mut self, t: Triple) {
+        if let Some(by_obj) = self.obj_index.get_mut(&t.p) {
+            if let Some(subjects) = by_obj.get_mut(&t.o) {
+                subjects.remove(&t.s);
+                if subjects.is_empty() {
+                    by_obj.remove(&t.o);
+                }
+            }
+            if by_obj.is_empty() {
+                self.obj_index.remove(&t.p);
+            }
+        }
+    }
+
     /// Insert an asserted (base) triple. Returns true iff fresh.
     pub fn assert(&mut self, t: Triple) -> bool {
-        self.by_pred.entry(t.p).or_default().insert((t.s, t.o))
+        let fresh = self.by_pred.entry(t.p).or_default().insert((t.s, t.o));
+        if fresh {
+            self.index_insert(t);
+        }
+        fresh
     }
 
     pub fn assert_all<I: IntoIterator<Item = Triple>>(&mut self, ts: I) {
@@ -168,6 +202,12 @@ impl TripleStore for MemStore {
     }
 
     fn probe(&self, s: Option<TermId>, p: TermId, o: Option<TermId>) -> TripleIter<'_> {
+        if let (None, Some(oo)) = (s, o) {
+            return match self.obj_index.get(&p).and_then(|by_obj| by_obj.get(&oo)) {
+                Some(subjects) => Box::new(subjects.iter().map(move |&ss| Triple::new(ss, p, oo))),
+                None => Box::new(std::iter::empty()),
+            };
+        }
         match self.by_pred.get(&p) {
             Some(set) => {
                 let iter = set.iter().filter_map(move |&(ss, oo)| {
@@ -199,6 +239,7 @@ impl TripleStore for MemStore {
     fn insert_inferred(&mut self, t: Triple, prov: Provenance) -> bool {
         let fresh = self.by_pred.entry(t.p).or_default().insert((t.s, t.o));
         if fresh {
+            self.index_insert(t);
             self.inferred.insert(t);
             self.proofs.insert(t, prov);
         }
@@ -215,6 +256,7 @@ impl TripleStore for MemStore {
                     self.by_pred.remove(&t.p);
                 }
             }
+            self.index_remove(t);
         }
         self.proofs.clear();
     }
@@ -327,6 +369,108 @@ mod tests {
         s.clear_inferred();
         assert!(s.contains(&t(1, 2, 3)));
         assert!(!s.contains(&t(4, 5, 6)));
+    }
+
+    #[test]
+    fn probe_object_bound_returns_mix_of_asserted_and_inferred() {
+        let mut s = store();
+        s.assert(t(1, 2, 3));
+        s.insert_inferred(
+            t(4, 2, 3),
+            Provenance {
+                rule_id: "r",
+                premises: smallvec![],
+            },
+        );
+        s.assert(t(5, 2, 9)); // different object, must not show up
+        let mut got: Vec<_> = s
+            .probe(None, TermId(2), Some(TermId(3)))
+            .map(|tr| tr.s)
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![TermId(1), TermId(4)]);
+    }
+
+    #[test]
+    fn clear_inferred_prunes_obj_index_but_keeps_asserted_subject() {
+        let mut s = store();
+        // asserted and inferred triples share the same (p, o).
+        s.assert(t(1, 2, 3));
+        s.insert_inferred(
+            t(4, 2, 3),
+            Provenance {
+                rule_id: "r",
+                premises: smallvec![],
+            },
+        );
+        let mut got: Vec<_> = s
+            .probe(None, TermId(2), Some(TermId(3)))
+            .map(|tr| tr.s)
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![TermId(1), TermId(4)]);
+
+        s.clear_inferred();
+
+        let got: Vec<_> = s
+            .probe(None, TermId(2), Some(TermId(3)))
+            .map(|tr| tr.s)
+            .collect();
+        assert_eq!(got, vec![TermId(1)]);
+    }
+
+    #[test]
+    fn clear_inferred_removes_only_fully_inferred_object_bucket() {
+        let mut s = store();
+        // (p, o) bucket has only inferred subjects; after clear it must vanish
+        // entirely (empty inner set / empty predicate map pruned), not linger
+        // as an empty shell.
+        s.insert_inferred(
+            t(1, 2, 3),
+            Provenance {
+                rule_id: "r",
+                premises: smallvec![],
+            },
+        );
+        s.insert_inferred(
+            t(4, 2, 3),
+            Provenance {
+                rule_id: "r",
+                premises: smallvec![],
+            },
+        );
+        s.clear_inferred();
+        let got: Vec<_> = s.probe(None, TermId(2), Some(TermId(3))).collect();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn duplicate_object_multiple_subjects_survive_partial_removal() {
+        let mut s = store();
+        s.assert(t(1, 2, 3));
+        s.assert(t(5, 2, 3));
+        s.insert_inferred(
+            t(9, 2, 3),
+            Provenance {
+                rule_id: "r",
+                premises: smallvec![],
+            },
+        );
+        let mut got: Vec<_> = s
+            .probe(None, TermId(2), Some(TermId(3)))
+            .map(|tr| tr.s)
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![TermId(1), TermId(5), TermId(9)]);
+
+        s.clear_inferred();
+
+        let mut got: Vec<_> = s
+            .probe(None, TermId(2), Some(TermId(3)))
+            .map(|tr| tr.s)
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![TermId(1), TermId(5)]);
     }
 
     #[test]
