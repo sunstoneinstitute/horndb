@@ -34,7 +34,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 **Stage-2 investment epics** (opened 2026-07-07 — deferred → `to-spec`; each is a `needs-decomposition` epic, spec'd then broken into leaf issues; details in [Stage-2 investment epics](#stage-2-investment-epics) and `docs/architecture.md`):
 
-- [ ] **CRITICAL** · _Completeness_ — **EPIC E1**: SPEC-24 unified query+reasoning IR (single IR; subsumes SPEC-23) ([#185](https://github.com/sunstoneinstitute/horndb/issues/185))
+- [ ] **CRITICAL** · _Completeness_ — **EPIC E1**: SPEC-23 unified query+reasoning IR (single IR; optimizer framework ships first) ([#185](https://github.com/sunstoneinstitute/horndb/issues/185))
 - [ ] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186))
 - [ ] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E4**: SPEC-04 rule completeness Stage-2 (proof persistence, full dt-*, list/QCR rules, user-defined rules) ([#188](https://github.com/sunstoneinstitute/horndb/issues/188))
@@ -65,14 +65,16 @@ into leaf issues via the `to-issues` skill (leaf issues are *not* pre-created). 
 mirror the [Stage-2 investment epics](docs/architecture.md#stage-2-investment-epics)
 table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
-- [ ] **EPIC E1 — SPEC-24 unified query + reasoning IR (single IR).** _CRITICAL · Completeness._
+- [ ] **EPIC E1 — SPEC-23 unified query + reasoning IR (single IR).** _CRITICAL · Completeness._
   ([#185](https://github.com/sunstoneinstitute/horndb/issues/185)) The flagship, spec'd
   first. A single logical IR expressing query **and** reasoning so the optimizer jointly
   decides join order, reasoning strategy (materialize/rewrite/delegate), and demand-driven
-  partial closure. **Subsumes SPEC-23**; pulls in magic-sets/backward-chaining (SPEC-03
+  partial closure. The **optimizer framework ships first** (logical IR, pass registry,
+  `Stats` seam, cost-based ordering); reasoning then enters the same IR, pulling in
+  magic-sets/backward-chaining (SPEC-03
   F4/F5), SPARQL backward mode (SPEC-07), reasoning-as-rewrite + a reasoning/materialization
   catalog seam, the cost-based WCOJ planner, and property-path→GraphBLAS choice. Stub:
-  `docs/specs/SPEC-24-unified-ir.md`. **DoD:** write + approve SPEC-24, then decompose.
+  `docs/specs/SPEC-23-unified-ir.md`. **DoD:** write + approve SPEC-23, then decompose.
 - [ ] **EPIC E2 — SPEC-06 incremental maintenance completeness.** _HIGH · Completeness._
   ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)) Fully delta-incremental
   retraction (no affected-region recompute), MVCC backing of `Circuit::snapshot`, change-feed

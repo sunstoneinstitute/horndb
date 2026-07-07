@@ -1,13 +1,24 @@
 ---
 status: draft
 date: 2026-07-06
-scope: "query optimizer framework — logical IR, pass registry, statistics seam, and cost-based ordering across the WCOJ + SPARQL planners; refines SPEC-03 (F2/F6) and SPEC-07"
+scope: "a single logical IR expressing query AND reasoning — logical IR, pass registry, statistics seam, cost-based ordering, and (later) reasoning-as-rewrite + magic-sets/backward-chaining — across the WCOJ + SPARQL planners; refines SPEC-03 (F2/F4/F5/F6) and SPEC-07"
 ---
 
-# Query optimizer framework — design
+# Unified query + reasoning IR (incl. optimizer framework) — design
 
-**Refines:** SPEC-03 (WCOJ query engine, F2/F6) and SPEC-07 (SPARQL frontend); consumes SPEC-08 F2 (`PlanAdvisor`) and the not-yet-built SPEC-02 statistics surface.
-**Issues:** #TODO (optimizer framework epic).
+**One-line thesis:** one logical IR carries both the query and the reasoning, so
+the optimizer can decide join order **and** reasoning strategy
+(materialize / rewrite / delegate) on a single comparable cost scale. The
+optimizer framework (§5.1–5.7) is the foundation that ships first; reasoning
+enters the same IR as (later) rewrite passes and delegate nodes (§5.8).
+
+**Refines / subsumes:** SPEC-03 (WCOJ query engine — F2/F6 now, F4 magic-sets and
+F5 SLG tabling later) and SPEC-07 (SPARQL frontend — including its backward-chained
+entailment mode); consumes SPEC-04/05/11 (the reasoning subsystems) as delegate
+targets and SPEC-08 F2 (`PlanAdvisor`) and the not-yet-built SPEC-02 statistics
+surface. This spec absorbs what was briefly split out as "SPEC-24"; there is one
+unified-IR spec, not two.
+**Epic:** [#185](https://github.com/sunstoneinstitute/horndb/issues/185).
 
 ## Problem
 
@@ -312,6 +323,47 @@ Unchanged contract (SPEC-08 F2): `JoinPlanning` may construct a `SubplanShape` a
 `Stats`-backed estimate and discarded past tolerance or the 1 ms p99 budget. The framework
 gives ML a real symbolic baseline to advise *against*, which today's stub cannot.
 
+### 5.8 Reasoning in the IR — the unifying bet (later phases)
+
+HornDB today **materializes the full OWL 2 RL closure up front** (the canonical,
+PTIME-tractable way to serve OWL 2 RL) and runs SPARQL as pure pattern matching
+over the closed graph. Reasoning-strategy selection — compiled OWL-RL rule vs.
+GraphBLAS closure resolver (SPEC-05 `delegate = "closure"`), SSSOM crosswalk
+expansion, SKOS hierarchy resolution — is fixed at rule-compile / materialization
+time, *upstream* of this optimizer (see `docs/architecture.md` §15). That leaves
+joint optimizations on the table. Once demand-driven backward-chaining exists, a
+query can answer without full materialization, and the engine faces a real
+per-subgoal choice: **materialize vs. rewrite vs. delegate-to-resolver**.
+
+The unifying claim of this spec is that this choice belongs in the *same* IR as
+join ordering, because **reasoning is query rewriting**: applying a subclass rule
+rewrites `?x a :C` into a UNION over subclasses; a transitive rule rewrites a
+pattern into a recursive/fixpoint one. So reasoning enters the §5.1 logical IR as
+**first-class rewrite passes + delegate nodes** — *not* as generic recursive
+patterns a cost model grinds on:
+
+- **Rewrite passes** (new `PassId`s in the §5.2 registry, running before
+  `JoinPlanning`) expand/substitute patterns from the TBox; the optimizer then
+  pushes filters through the expansion, orders joins across base + inferred
+  patterns, and materializes only the closure slice the query reaches.
+- **Delegate nodes** — heavy transitive closure hands off to the specialized
+  GraphBLAS operator (SPEC-05) via a `ClosureScan` / the existing `PathClosure`
+  (`Algebra::l`) node that the optimizer *chooses* but does not try to out-plan
+  with join reordering. This is the hybrid (ADR-0005): materialize/delegate the
+  closure subset, rewrite/backward-chain the rest.
+- **Reasoning/materialization catalog seam**, parallel to §5.3's `Stats`: what is
+  already closed + the cost of each resolver, so materialize-vs-rewrite-vs-delegate
+  is cost-based on the §5.5 additive scale.
+- **Machinery:** magic-sets / demand transformation (SPEC-03 F4) + SLG tabling
+  (F5) generate the query-driven rewrites; SPARQL backward-chained entailment mode
+  (SPEC-07) is the surface.
+
+**Prior-art blind spot:** the three systems surveyed above (Oxigraph `sparopt`,
+DuckDB, ClickHouse) are all *non-reasoning* engines, so none of them informs this
+layer — it is HornDB-specific and has no borrow-from-X answer. The hard open
+problem is cost/cardinality/termination for recursive fixpoints in a model that
+otherwise assumes non-recursive AGM/hash costing (§8).
+
 ## 6. Phasing
 
 Each phase is independently shippable and harness-gated; the framework (5.1–5.2) lands
@@ -331,8 +383,15 @@ first so everything else has a home.
 4. **Cost-based `JoinPlanning`.** Bimodal ordering (WCOJ variable-order + AGM bound;
    hash DP/greedy), cost-driven WCOJ-vs-hash, late build-side pass. Retires
    `wcoj_cutover == 4` as a hard rule.
-5. **Later:** sketches (quantile/count-min) behind `Stats`; runtime filters; ML
-   `PlanAdvisor` validation loop.
+5. **Later (optimizer):** sketches (quantile/count-min) behind `Stats`; runtime
+   filters (§5.6); ML `PlanAdvisor` validation loop (§5.7).
+6. **Reasoning in the IR (§5.8).** Reasoning-as-rewrite passes + the
+   reasoning/materialization catalog seam; cost-based
+   materialize-vs-rewrite-vs-delegate; property-path closure routed through the
+   SPEC-05 GraphBLAS backend by selectivity (SPEC-07 F3 fast path).
+7. **Backward-chaining.** Magic-sets / demand transformation (SPEC-03 F4) + SLG
+   tabling (F5); SPARQL backward-chained entailment mode (SPEC-07). This is where
+   the "hybrid forward/backward" core bet (ADR-0005) becomes real.
 
 ## 7. Acceptance criteria
 
@@ -366,6 +425,11 @@ first so everything else has a home.
   for a BGP lives in `horndb-wcoj`; the surrounding algebra ordering lives in
   `horndb-sparql`. The exact API between them (does `wcoj` see the `Stats` seam directly,
   or only a digested per-pattern estimate?) needs pinning in the implementation plan.
+- **Recursive-fixpoint costing (§5.8).** The optimizer's cost model assumes
+  non-recursive AGM/hash costing; reasoning rewrites introduce recursion
+  (transitive closure, rule fixpoints). How do cost, cardinality, and termination
+  for a fixpoint node fit the same additive scale — and how much must simply be
+  delegated (opaque) to the closure operator rather than costed? Blocks phases 6–7.
 - **Verify-before-cite version facts.** ClickHouse version/figure claims (25.9 join
   reordering, ~26.4 auto-stats, TPC-H speedups) and DuckDB's exact greedy threshold are
   search-snippet-level in the source briefs — confirm against primary docs before any of
