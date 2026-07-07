@@ -45,7 +45,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **`per_tuple` measured on hornbench (2026-06-30): ~67 ns/tuple, unchanged by the intersect (criterion A/B “no change”) — NF1 ≤2.5 ns not met; bottleneck is the depth-1 narrow-run leapfrog + Arrow materialization, not the intersect.** **hornbench numbers recorded (2026-07-07, Ryzen 7 7700, node-0-pinned):** `dict_decode` scalar 14.74 µs vs AVX2 14.54 µs → **~1.01×, RED** (load/store-bound; NF4 ≥4× is a compute target the memory-bound loop can't reach — SIMD not the lever); `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad (33.1 GB/s full-socket) → GREEN** (SPEC-02 acceptance #4 met). **Remaining:** close NF1 `per_tuple` (depth-1 / materialization path — not SIMD); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
-- [ ] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
+- [x] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
@@ -229,17 +229,21 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   and may be descoped; the `cax-sco` partition-filter scan is out of scope (superseded
   by #133). See `docs/specs/SPEC-12-simd.md`, `docs/architecture.md` §14, `docs/benchmarks.md`.
 
-- [ ] **SPEC-04: within-partition object index on `MemStore`.**
+- [x] **SPEC-04: within-partition object index on `MemStore`.**
   ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
-  Add `obj_index` (predicate → object → subjects) alongside `by_pred`, maintained in
-  `assert`/`insert_inferred`/`clear_inferred`, so `probe(None, p, Some(o))` returns
-  O(|extent|) instead of scanning the whole partition. **`TripleStore` trait unchanged**
-  — no codegen/`FireFn`/engine change, just `MemStore` internals — so this is the
-  low-risk, independently-shippable half. Turns the compiled `cax-sco` inner loop (and
-  the F5 list-rule probes) from O(N) to O(|extent(c1)|). Ship **first**.
-  Spec: `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #1). Gate:
-  `compiled_rules_ms` drop on the owlrl materialize A/B LUBM-shaped row + resident-set
-  delta recorded in `docs/benchmarks.md`; all differential gates stay green.
+  Added `obj_index` (predicate → object → subjects) alongside `by_pred`, maintained in
+  `assert`/`insert_inferred`/`clear_inferred` via `index_insert`/`index_remove` helpers,
+  so `probe(None, p, Some(o))` returns O(|extent|) instead of scanning the whole
+  partition. **`TripleStore` trait unchanged** — no codegen/`FireFn`/engine change, just
+  `MemStore` internals — the low-risk, independently-shippable half. Turns the compiled
+  `cax-sco` inner loop (and the F5 list-rule probes) from O(N) to O(|extent(c1)|).
+  Spec: `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #1).
+  **Measured (hornbench, 2026-07-07, taxonomy d=12 / 40 k inst, graphblas):**
+  `compiled_rules_ms` ~296 → ~246 ms (**−17%**), `reason_ms` ~607 → ~555 ms, RSS
+  532 → 547 MiB (+2.8%), closure bit-identical (480,372 inferred); all differential
+  gates green (`closure_backend_differential`, `rdf_type_skew_differential`, 177 unit
+  tests). See `docs/benchmarks.md` (owlrl object index A/B row). The remaining
+  cross-round re-derivation (~4×) is fix #2 (semi-naïve, [#134](https://github.com/sunstoneinstitute/horndb/issues/134)).
 
 - [ ] **SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules.**
   ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
