@@ -39,6 +39,12 @@ use std::sync::OnceLock;
 pub(crate) enum Vendor {
     Intel,
     Amd,
+    // Constructed only on aarch64 macOS (`detect_uncached`); dead elsewhere
+    // (x86_64 CI, non-macOS aarch64), so guard against `-D dead-code`.
+    #[cfg_attr(
+        not(all(target_arch = "aarch64", target_os = "macos")),
+        allow(dead_code)
+    )]
     Apple,
     Other,
 }
