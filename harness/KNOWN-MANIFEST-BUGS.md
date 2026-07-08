@@ -20,13 +20,15 @@ deferred. The OWL 2 RL rule names follow the W3C
 
 ## Summary (2026-06-01 survey, post `task-34-dt-datatype-rules`)
 
-16 of the 115 synthesised entries fail today (down from 22 → 19 after the
+15 of the 115 synthesised entries fail today (down from 22 → 19 after the
 #34 datatype-subsumption + `scm-eqc-rev` batch flipped 3 cases green —
 `I5.8-006-pe`, `I5.8-011-pe`, `equivalentClass-003-pe` — then → 18 after
 #40's `dt-diff` flipped `New-Feature-Keys-006-incons` green, then → 16 after
 #160's value-space intersection narrowing flipped `I5.8-008-pe`/`I5.8-009-pe`
-green; see the notes below). The RL-reachable remainder is tracked in
-[#160](https://github.com/sunstoneinstitute/horndb/issues/160). They fall into
+green, then → 15 after #160's hermetic `owl:imports` resolution flipped
+`imports-011-pe` green; see the notes below). With both RL-reachable halves of
+[#160](https://github.com/sunstoneinstitute/horndb/issues/160) landed, the
+remaining 15 are all intentional Stage-1 non-goals. They fall into
 the following buckets, grouped by the missing capability — not by a
 single rule name — because the residue is mostly tests that need
 *combinations* of features (datatype value-space intersection,
@@ -41,9 +43,8 @@ Stage-1 engine intentionally defers:
 | `prp-fp`/`prp-ifp` propagation into `differentFrom` (`fp/ifp-differentFrom-pe`) and `differentFrom` symmetry (`differentFrom-001-pe`) | 3 |
 | Self-chain → `owl:TransitiveProperty` meta-rule (`chain2trans1-pe`) — not in W3C OWL 2 RL | 1 |
 | `cls-uni`/`cls-int` requiring engine to *generate* fresh blank-node list classes (`I5.5-005-pe`) | 1 |
-| `owl:imports` external resolution (`imports-011-pe`) | 1 |
 
-Total: **16 cases**.
+Total: **15 cases**.
 
 > **2026-06-18 — literal-value datatype rules implemented (`dt-eq`/`dt-diff`/`dt-not-type`, issue #40).**
 > `New-Feature-Keys-006-incons` flips green and moves into `selected.toml`'s
@@ -248,10 +249,16 @@ SPEC-04).
 - `#WebOnt-I5.5-005-pe` — equivalentClass derivation over a
   generated `owl:unionOf`.
 
-### `owl:imports` external resolution
-
-- `#WebOnt-imports-011-pe` — premise references an imported ontology
-  that the Stage-1 loader does not fetch.
+> **2026-07-07 — hermetic `owl:imports` resolution (issue #160).**
+> `imports-011-pe` flips green and moves into `selected.toml`'s
+> `[suites.owl2-w3c-rl]` block. The harness resolves a premise's
+> `owl:imports <IRI>` against a checked-in catalog
+> (`crates/harness/tests/fixtures/owl2-w3c-rl/imports-catalog.toml`) that maps
+> each import IRI to a mirrored Turtle fixture, merging the imported ontology's
+> triples (transitively) before the engine loads the premise — no network, so
+> the suite stays offline/deterministic. See `crates/harness/src/rdf.rs`
+> (`load_premise`/`expand_imports`). Adding a new imported case = drop the
+> support ontology in the fixtures dir + one catalog line.
 
 ## Maintenance
 

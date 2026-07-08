@@ -115,11 +115,11 @@ two engines: `--engine stub` (plumbing) and `--engine owlrl` (real, needs
 
 | Component | Status | Notes |
 |---|---|---|
-| W3C OWL 2 RL test-case runner (manifest parse, classify pass/fail/skip) | **implemented** | `runner.rs`, `manifest.rs`, `testcase.rs`. Suite keys: `owl2`, `owl2-w3c-rl`. |
+| W3C OWL 2 RL test-case runner (manifest parse, classify pass/fail/skip) | **implemented** | `runner.rs`, `manifest.rs`, `testcase.rs`. Suite keys: `owl2`, `owl2-w3c-rl`. Premises resolve `owl:imports` hermetically via a per-directory catalog (`rdf.rs` `load_premise`/`expand_imports`) — no network. |
 | SPARQL 1.1 test runner | **implemented** | Suite key `sparql11`; path-based `[sparql_query]` consumed by `crates/sparql/tests/w3c_suite.rs`. |
 | W3C RDF 1.2 N-Triples *syntax* suite | **implemented** | Suite key `rdf12-n-triples`; 4 positive + 6 negative cases via `oxttl::NTriplesParser`, no reasoner. |
 | W3C SPARQL 1.1 *syntax* suite (query + update) | **implemented** | Suite key `sparql11-syntax` ([#110](https://github.com/sunstoneinstitute/horndb/issues/110), epic #10); `mf:*SyntaxTest11` types graded by `spargebra` (same parser as SPEC-07) via `TestKind::SparqlSyntax{Positive,Negative}`. 10 positive + 5 negative (5 update-form) curated checked-in cases under `tests/fixtures/sparql11-syntax/`; relative IRIs resolve against the action-file IRI; sub-ms, no network, no reasoner. |
-| W3C OWL 2 RL test-suite ingestion pipeline | **implemented** | `owl2_rl_extract.rs` + `harness extract-owl2-rl`; 115 W3C cases → 99 green in `[suites.owl2-w3c-rl]`, 16 reds tracked in `harness/KNOWN-MANIFEST-BUGS.md` ([#160](https://github.com/sunstoneinstitute/horndb/issues/160) tracks the RL-reachable remainder — datatype value-space intersection landed, `owl:imports` external resolution remains). |
+| W3C OWL 2 RL test-suite ingestion pipeline | **implemented** | `owl2_rl_extract.rs` + `harness extract-owl2-rl`; 115 W3C cases → 100 green in `[suites.owl2-w3c-rl]`, 15 reds tracked in `harness/KNOWN-MANIFEST-BUGS.md`. [#160](https://github.com/sunstoneinstitute/horndb/issues/160)'s RL-reachable remainder is now fully closed — datatype value-space intersection **and** hermetic `owl:imports` resolution both landed; the 15 residual reds are intentional Stage-1 non-goals (OWL 2 DL entailments / fresh-bnode TGD generation). |
 | Versioned selection manifest (`harness/selected.toml`) | **implemented** | Single canonical file at workspace root (manifest `[suites.*]` + `[sparql_query]`). |
 | Result DB (SQLite) + trend reports (`harness report`) | **implemented** | `db.rs`, `report.rs`; state in `target/harness.sqlite`, JUnit at `target/junit.xml`. |
 | Stub-engine smoke target | **implemented** | `stub.rs` (F12). |

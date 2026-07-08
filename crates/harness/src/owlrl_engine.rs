@@ -37,14 +37,14 @@ impl Reasoner for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{GraphName, NamedNode, Quad, Subject};
+    use oxrdf::{GraphName, NamedNode, NamedOrBlankNode, Quad};
 
     const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 
     fn nq(s: &str, p: &str, o: &str) -> Quad {
         Quad::new(
-            Subject::NamedNode(NamedNode::new(s).unwrap()),
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
             NamedNode::new(p).unwrap(),
             NamedNode::new(o).unwrap(),
             GraphName::DefaultGraph,

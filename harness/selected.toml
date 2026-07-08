@@ -197,6 +197,7 @@ include = [
     "#WebOnt-equivalentProperty-003-cons",
     "#WebOnt-equivalentProperty-003-pe",
     "#WebOnt-imports-011-cons",
+    "#WebOnt-imports-011-pe",
     "#WebOnt-miscellaneous-303-cons",
     "#WebOnt-sameAs-001-cons",
     "#WebOnt-sameAs-001-pe",

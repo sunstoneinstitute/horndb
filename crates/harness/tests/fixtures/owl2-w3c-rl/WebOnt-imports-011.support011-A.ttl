@@ -1,0 +1,18 @@
+# Turtle translation of https://www.w3.org/2002/03owlt/imports/support011-A
+# (the W3C `support011-A.rdf` ontology imported by WebOnt-imports-011.premise.ttl).
+#
+# Hand-mirrored for hermetic import resolution: the harness resolves the
+# premise's `owl:imports <…/support011-A>` to this local file (via
+# `imports-catalog.toml`) so the suite runs offline. The OWL 2 RL extractor
+# only writes `<id>.premise.ttl` / `<id>.conclusion.ttl`, so it never
+# clobbers this file — keep it checked in.
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+<http://www.w3.org/2002/03owlt/imports/support011-A> a owl:Ontology .
+
+<http://www.w3.org/2002/03owlt/imports/support011-A#Man>
+    a owl:Class ;
+    rdfs:subClassOf <http://www.w3.org/2002/03owlt/imports/support011-A#Mortal> .
+
+<http://www.w3.org/2002/03owlt/imports/support011-A#Mortal> a owl:Class .

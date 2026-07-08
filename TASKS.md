@@ -50,7 +50,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
-- [ ] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → higher) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
+- [x] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → 100/115) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
@@ -359,21 +359,19 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## MEDIUM — Conformance
 
-- [ ] **Close the RL-reachable OWL 2 RL conformance gap.**
+- [x] **Close the RL-reachable OWL 2 RL conformance gap.**
   ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
-  The W3C `owl2-w3c-rl` subset is **97 of 115 green** (`harness/selected.toml`);
-  the 18 reds are documented in `harness/KNOWN-MANIFEST-BUGS.md`. Most are
-  intentionally out of OWL 2 RL scope (OWL 2 DL entailments / fresh-bnode TGD
-  generation — explicit SPEC-04 non-goals) and stay excluded by design. This
-  task tracks only the **RL-reachable remainder**, currently unowned after #4
-  closed: (1) datatype value-space *intersection* narrowing —
-  `WebOnt-I5.8-008-pe` (`short ∩ unsignedInt ⊆ unsignedShort`),
-  `WebOnt-I5.8-009-pe` (`nonNegativeInteger ∩ nonPositiveInteger = {0} ⊆ short`)
-  — needs a value-space intersection solver beyond the static `dt-type2`
-  subsumption lattice; (2) `owl:imports` external resolution —
-  `WebOnt-imports-011-pe`, the loader does not fetch imported ontologies. When a
-  case goes green, move its id from `KNOWN-MANIFEST-BUGS.md` into `selected.toml`
-  and bump the counts in `docs/architecture.md` in the same commit.
+  The W3C `owl2-w3c-rl` subset is now **100 of 115 green** (`harness/selected.toml`);
+  the 15 remaining reds are documented in `harness/KNOWN-MANIFEST-BUGS.md` and are
+  all intentional OWL 2 RL non-goals (OWL 2 DL entailments / fresh-bnode TGD
+  generation — explicit SPEC-04 non-goals). Both halves of the RL-reachable
+  remainder landed: (1) datatype value-space *intersection* narrowing —
+  `WebOnt-I5.8-008-pe`, `WebOnt-I5.8-009-pe` — via `crates/owlrl/src/datatype_ranges.rs`
+  (PR #195); (2) hermetic `owl:imports` resolution — `WebOnt-imports-011-pe` — the
+  harness resolves a premise's `owl:imports <IRI>` against a checked-in catalog
+  (`crates/harness/tests/fixtures/owl2-w3c-rl/imports-catalog.toml`) mapping the IRI
+  to a mirrored Turtle fixture, merged (transitively) before load (`crates/harness/src/rdf.rs`
+  `load_premise`/`expand_imports`) — no network.
 
 ## LOW — Operational
 
