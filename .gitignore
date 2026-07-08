@@ -27,4 +27,5 @@ __pycache__
 /scripts/bench/results/
 
 # graphify local knowledge graph — AST-derived, rebuild with `graphify update .`
-/graphify-out/
+# Un-anchored so per-crate graphs (e.g. crates/sparql/graphify-out/) are ignored too.
+graphify-out/
