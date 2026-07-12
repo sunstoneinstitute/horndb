@@ -9,8 +9,8 @@ These rules apply to every file in `docs/specs/` (except `README.md`, the index)
    *all* specs: standing subsystem contracts and narrower point/design specs
    alike (the frontmatter `scope:` line is what tells them apart, not the
    filename). Research notes and landscape surveys with no design or
-   acceptance criteria are not specs — put those under `docs/` (e.g.
-   `../landscape.md`) and link them from `../index.md`.
+   acceptance criteria are not specs — put those under `docs/research/` (e.g.
+   `../research/landscape.md`) and link them from `../index.md`.
 
 ## Frontmatter
 
