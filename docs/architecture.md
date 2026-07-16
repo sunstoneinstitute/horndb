@@ -562,8 +562,11 @@ implemented via a `CountingBody` `http_body::Body` wrapper wired into the existi
 `record_request` middleware — tallies data-frame bytes and observes once on
 end-of-stream (exact, robust to streaming; not a `Content-Length` guess). Replaces
 the permanently-zero series removed in Slice 1 (commit `d2cace9`). **Phase-2
-fan-out is now complete** — no remaining Phase-2 fan-out items. **Deferred to a
-later phase:** OTel traces and logs.
+fan-out is now complete** — no remaining Phase-2 fan-out items. Issue
+[#148](https://github.com/sunstoneinstitute/horndb/issues/148) is closed. **Deferred:**
+real HBM/CXL tier byte accounting, tracked under **EPIC E3** storage tiering
+([#187](https://github.com/sunstoneinstitute/horndb/issues/187)); OTel traces and logs,
+tracked under **EPIC E8** ([#192](https://github.com/sunstoneinstitute/horndb/issues/192)).
 Design: `docs/specs/SPEC-17-metrics.md`.
 
 ### Build & CI split

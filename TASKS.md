@@ -58,7 +58,6 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
-- [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
 - [ ] **MEDIUM** · _Operational_ — SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling — on-disk format with E3 #187 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
@@ -409,59 +408,6 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   before either side builds); removes the O(n) first-acquire presence rebuild;
   makes mid-tick point reads expressible. Spec §S6. Gate: SPEC-24 acceptance #6.
 
-## HIGH — Operational
-
-- [ ] **Observability metrics (Phase 1): prometheus-client + `/metrics` scrape.**
-  ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
-  **Phase-1 Slice 1 landed** (design: `docs/specs/SPEC-17-metrics.md`;
-  plan: `docs/plans/PLAN-17-01-metrics-phase1-slice1.md`). New foundational
-  `horndb-metrics` crate: `prometheus-client` with typed `#[derive(EncodeLabelSet)]`
-  labels (no strings), a process-global `OnceLock` registry, and free accessors —
-  hot-path updates are direct atomic ops on cached handles; quantities that are
-  expensive to compute (triple/dictionary/tier sizes) are pulled at scrape time via a
-  `Collector`, never maintained continuously. **Slice 1 instruments:** the SPARQL HTTP
-  layer (request count/latency/status via middleware + per-stage
-  parse/translate/plan/exec timing + query-kind/error counters), the closure backend
-  (`ClosureMetrics` → mxm/total/iterations/nnz histograms), and storage sizes; exposed
-  at `GET /metrics` (OpenMetrics text, behind the `server` feature). OTel interop is
-  off-box — a collector scrapes `/metrics`; no in-process OTLP push.
-
-  **Phase-2 Slice 1 landed** (plan: `docs/plans/PLAN-17-02-metrics-phase2-slice1-owlrl.md`):
-  owlrl fan-out — `OwlrlMetrics` subsystem with per-rule fire counts, per-rule + per-phase
-  latency histograms, `owlrl_triples_inferred_total`, `owlrl_rounds_total`, dirty-predicate
-  prune counters; closure `input_nnz` observed alongside `output_nnz`; `MemTier` enum wired
-  to `storage_tier_bytes_estimated` (`tier` label, `"unknown"` until full HBM/CXL
-  accounting lands). Overhead micro-bench added (`crates/metrics/benches/overhead.rs`).
-
-  **Phase-2 Slice 2 landed** (plan: `docs/plans/PLAN-17-03-metrics-phase2-slice2-incremental.md`):
-  incremental fan-out — `IncrementalMetrics` subsystem: tick-duration histogram,
-  asserted/derived-merged counters, closure-withdraw/promote counters,
-  fixpoint-rounds histogram; change-feed subscriber gauge maintained at subscribe +
-  publish-reap.
-
-  **Phase-2 Slice 3 landed** (plan: `docs/plans/PLAN-17-04-metrics-phase2-slice3-ml.md`):
-  ml fan-out — `MlMetrics` subsystem (behind `horndb-ml`'s `server` feature):
-  `horndb_ml_nl_query_total{result}` counter; `horndb_ml_prompt_tokens_total`,
-  `horndb_ml_completion_tokens_total`, `horndb_ml_estimated_usd_total` counters
-  (from `CostJson`); `horndb_ml_translate_duration_seconds`,
-  `horndb_ml_execute_duration_seconds`, `horndb_ml_audit_query_duration_seconds`
-  histograms; `horndb-metrics` is an optional dep of `horndb-ml` gated on `server`.
-
-  **Phase-2 Slice 4 landed** (plan: `docs/plans/PLAN-17-05-metrics-phase2-slice4-wcoj.md`):
-  wcoj fan-out — `WcojMetrics` subsystem: `horndb_wcoj_seeks_per_query`,
-  `horndb_wcoj_iterations_per_query`, `horndb_wcoj_peak_iterators` histograms,
-  all observed exactly once per query in `impl Drop for BatchIter`; inner loop
-  does plain `u64` field increments only (NO per-seek timing — §5.3 compliant).
-
-  **Phase-2 Slice 5 landed** (plan: `docs/plans/PLAN-17-06-metrics-phase2-slice5-sparql-bytes.md`):
-  sparql-bytes fan-out — `horndb_sparql_request_bytes_total{endpoint}` and
-  `horndb_sparql_response_bytes_total{endpoint}` counters via a `CountingBody`
-  `http_body::Body` wrapper wired into the existing `record_request` middleware
-  (exact data-frame byte count on end-of-stream; not a `Content-Length` guess).
-
-  **Phase-2 fan-out is complete** — all subsystems instrumented; no remaining Phase-2 fan-out items.
-  **Deferred to a later phase:** OpenTelemetry traces and logs.
-
 ## MEDIUM — Performance
 
 - [ ] **LDBC SPB nightly: scale to true SF=0.256 + editorial agents.**
@@ -595,6 +541,7 @@ Completed tasks; issues closed, links kept.
 - [x] **MEDIUM** · _Performance_ — Closure valued-reasoning readiness metrics ([#11](https://github.com/sunstoneinstitute/horndb/issues/11))
 - [x] **MEDIUM** · _Performance_ — Valued-closure / custom-semiring acceleration ([#12](https://github.com/sunstoneinstitute/horndb/issues/12))
 - [x] **MEDIUM** · _Tooling_ — Speed up integration test runs (parallelize and/or consolidate test targets) ([#108](https://github.com/sunstoneinstitute/horndb/issues/108))
+- [x] **HIGH** · _Operational_ — Observability metrics (Phase 1): `horndb-metrics` crate (`prometheus-client`, typed labels) + `GET /metrics`, instrumenting SPARQL HTTP, closure, storage, owlrl, incremental, ml, wcoj, and SPARQL request/response bytes ([#148](https://github.com/sunstoneinstitute/horndb/issues/148)) — real HBM/CXL tier byte accounting deferred to storage tiering, tracked under **EPIC E3** ([#187](https://github.com/sunstoneinstitute/horndb/issues/187)); OTel traces/logs deferred to **EPIC E8** ([#192](https://github.com/sunstoneinstitute/horndb/issues/192)).
 - [x] **LOW** · _Operational_ — GraphDB Free A/B reference: per-run bring-up (supersedes systemd unit) ([#126](https://github.com/sunstoneinstitute/horndb/issues/126))
 - [x] **LOW** · _Tooling_ — tasks.sh portability on macOS (flock / gawk match / GNU date) ([#78](https://github.com/sunstoneinstitute/horndb/issues/78))
 - [x] **LOW** · _Tooling_ — Vendored SuiteSparse:GraphBLAS as a git submodule (`v10.3.0`, static, OpenMP, checked-in bindings); supersedes the runner-install task.
