@@ -495,5 +495,5 @@ AoS `partition_point`. **Re-measure `four_cycle` before touching the seek path.*
 
 - Veldhuizen, *Leapfrog Triejoin: A Worst-Case Optimal Join Algorithm*, ICDT 2014.
 - `docs/specs/SPEC-03-*.md` — the subsystem contract and acceptance criteria.
-- `docs/maplib.md` — comparison with maplib's SPARQL-on-Polars execution model.
+- `docs/research/maplib.md` — comparison with maplib's SPARQL-on-Polars execution model.
 </content>

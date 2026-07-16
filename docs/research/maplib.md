@@ -174,13 +174,13 @@ Two observations worth carrying into SPEC-03/SPEC-05 work:
 
 ## What to read next
 
-- [`specs/SPEC-03-query-engine.md`](specs/SPEC-03-query-engine.md) — the leapfrog
+- [`specs/SPEC-03-query-engine.md`](../specs/SPEC-03-query-engine.md) — the leapfrog
   triejoin executor and planner.
-- [`specs/SPEC-05-closure-backend.md`](specs/SPEC-05-closure-backend.md) — the
+- [`specs/SPEC-05-closure-backend.md`](../specs/SPEC-05-closure-backend.md) — the
   GraphBLAS closure backend.
 - [`landscape.md`](landscape.md)
   — the broader competitive landscape for provenance + symbolic reasoning.
-- [`rdflib.md`](rdflib.md) — the other related-systems comparison (Python-side).
+- [`rdflib.md`](../rdflib.md) — the other related-systems comparison (Python-side).
 
 ## Sources
 

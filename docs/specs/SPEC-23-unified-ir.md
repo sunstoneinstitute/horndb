@@ -63,8 +63,10 @@ and orderings land against it in phases (§6).
   rule.
 - **Histogram-driven estimation in v1.** DuckDB's published result ("Join Order
   Optimization with (Almost) No Statistics") is that base cardinalities + per-column
-  distinct counts (NDV) get competitive orders without histograms. We adopt NDV +
-  counts first; quantile/count-min sketches are a later phase (§6) behind the same seam.
+  distinct counts (NDV — number of distinct values) get competitive orders without
+  histograms. We adopt NDV + counts as the baseline tier and Characteristic Sets (§5.4)
+  as the first upgrade; quantile/count-min sketches are a later phase (§6) behind the
+  same seam.
 - **Changing WCOJ row production or the storage physical layout.** The optimizer emits
   a plan; it does not touch `executor/wcoj.rs`'s `BatchIter` or SPEC-02 partitions.
 - **A new statistics maintenance subsystem in this spec.** We define the *provider seam*
@@ -78,7 +80,11 @@ and orderings land against it in phases (§6).
 ## Prior art (what we borrow, what we reject)
 
 Three engineering briefs were commissioned (Oxigraph `sparopt`, DuckDB, ClickHouse
-Analyzer); full source references are in the per-system notes below. Distilled:
+Analyzer); full source references are in the per-system notes below. A second research
+round surveyed the RDF-native and WCOJ-literature state of the art — Characteristic Sets,
+pessimistic degree bounds, sampling, and the Graphflow/Freitag/Free Join hybrid-planning
+line — in [`../research/optimizer-sota.md`](../research/optimizer-sota.md); its algorithm
+calls are folded into §5.3–§5.5 below. Distilled:
 
 ### Oxigraph `sparopt` — the RDF-native prior art (already a transitive dep)
 
@@ -181,6 +187,12 @@ Analyzer); full source references are in the per-system notes below. Distilled:
    the two and cost them on one comparable scale.
 5. **Typed, individually toggleable passes with post-pass validation** — invaluable for
    bisecting plan regressions against the conformance harness.
+6. **The three surveyed systems are general-SQL / non-reasoning engines; the closer prior
+   art is the graph-engine line.** A SPARQL BGP is a subgraph-match problem (each triple
+   pattern is a hyperedge over its `{s,p,o}` variables), so the subgraph-matching
+   optimizers (Graphflow, EmptyHeaded, Freitag's WCOJ-in-a-real-optimizer work) and the
+   RDF-native estimators (Characteristic Sets) transplant more directly than DuckDB's or
+   ClickHouse's machinery — see `../research/optimizer-sota.md`.
 
 ## Design
 
@@ -243,66 +255,126 @@ with the `LeftJoin`/`Minus` asymmetry) → `ProjectionPushdown` (bind only neede
 — high value in a columnar dictionary store; overlaps existing `plan/pushdown.rs`) →
 `JoinPlanning` (§5.5).
 
-### 5.3 Statistics provider seam
+### 5.3 Statistics provider seam — layered
 
 A read-only trait the optimizer consults, implemented over SPEC-02 storage (and stubbed
-otherwise). NDV + counts only in v1 (DuckDB's minimal set), sketches later behind the
-same trait:
+otherwise). The seam is **layered and cost-tiered** (survey: `../research/optimizer-sota.md`
+Part A): each tier can be populated on its own, the estimator uses the best tier available
+and degrades gracefully, and new techniques slot in without changing the seam. Tier 0
+(counts + NDV, DuckDB's minimal set) is the baseline, not the destination:
 
 ```rust
 trait Stats {
+    // Tier 0 — counts + NDV
     fn total_triples(&self) -> u64;
     fn predicate_count(&self, p: TermId) -> u64;          // |{ t : t.p == p }|
     fn ndv(&self, p: TermId, pos: Position) -> u64;       // distinct S or O for predicate p
+
+    // Tier 1 — Characteristic Sets, the RDF-native star-join structure (§5.4)
+    fn characteristic_sets(&self) -> &CharacteristicSetIndex;  // count(C), occurrences(C,p)
+
+    // Tier 2 — per-predicate, per-role degree info for pessimistic (upper-bound) estimation
+    fn max_degree(&self, p: TermId, role: Role) -> u64;
+    fn degree_sequence(&self, p: TermId, role: Role) -> Option<DegreeSummary>;  // later
+
+    // Tier 3 — sampling hook (Wander-Join-style index walk); a fallback, not the default
+    fn sample_join(&self, patterns: &[TriplePattern]) -> Option<(f64, f64)>;   // (est, ci)
+
     // later phases, same seam: quantile/min-max (range preds), count-min (=const selectivity)
 }
 ```
 
 RDF is *better* positioned than SQL here: the predicate is usually bound, so per-predicate
 counts and per-position NDV are cheap and accurate straight from the columnar partitions.
-Distinct counts are maintainable as HLL over dictionary IDs. **Who populates these under
-the SPEC-06 delta model is a dependency, not designed here** — but the seam is defined so
-`Cardinality`/`UniformEstimator` become one `Stats` impl (the zero-stats fallback) among
-several. The ClickHouse lesson stands: a stats feature nobody maintains is dead weight —
-gate the stats-backed estimator on it actually being populated, keep the fallback default
-until it wins on the harness.
+Distinct counts are maintainable as HyperLogLog (HLL) sketches over dictionary IDs.
 
-### 5.4 Cardinality estimator
+Two sharp edges from the survey. The Characteristic Sets index is batch-computed (a scan
+grouped by subject) and **not naturally incremental** — one triple insert or delete can
+move a subject between characteristic sets — so its maintenance under the SPEC-06 delta
+model must be designed alongside the seam, not after (§8). And on heterogeneous,
+schema-free graphs the number of distinct sets can explode; cap memory by keeping the
+top-K most frequent sets and folding the rare-set tail into a residual bucket.
 
-Replace `_est`-ignoring with a real estimator over the `Stats` seam. Per-pattern base
-cardinality from `predicate_count`/`ndv` (falling back to the `sparopt` static shape
-table when a pattern's predicate is unbound). Join output via DuckDB's denominator model
-— `∏ base / denominator`, denominator per shared variable ≈ `max(ndv)` over the patterns
-binding it — **with**:
+**Who populates these under the SPEC-06 delta model is a dependency, not designed here** —
+but the seam is defined so `Cardinality`/`UniformEstimator` become one `Stats` impl (the
+zero-stats fallback) among several. The ClickHouse lesson stands: a stats feature nobody
+maintains is dead weight — gate the stats-backed estimator on it actually being populated,
+keep the fallback default until it wins on the harness.
 
-- **transitive-equality-class tracking** (a variable shared across ≥3 patterns — the RDF
-  star/chain norm — is divided once, not per pair), and
-- the **PK/FK-style cap**: an `owl:sameAs` / functional-property / key join never exceeds
-  the smaller input. RDF makes this essential (sameAs closures otherwise explode).
+### 5.4 Cardinality estimator — Characteristic-Sets-first, with an upper bound
+
+Replace `_est`-ignoring with a real estimator over the `Stats` seam, chosen per query
+shape (survey: Part A; task breakdown in PLAN-23-03). Estimators return an
+**`(estimate, upper_bound)` pair**, not a bare number: Leis et al. (VLDB 2015) show that
+catastrophic *under*-estimates are what wreck plans, so §5.5 can prefer the bound where
+robustness matters and the point estimate where tightness matters.
+
+- **Star joins (shared subject — the RDF common case) → Characteristic Sets** (Neumann &
+  Moerkotte, ICDE 2011). For each distinct predicate-set `C` store `count(C)` and
+  per-predicate `occurrences(C,p)`; summing over the sets that contain the query's
+  predicates captures **predicate correlation** — the hard part of RDF estimation — for
+  free. This is the concrete replacement for `UniformEstimator`'s independence model.
+- **General shapes → DuckDB's denominator model as the Tier-0 baseline.** Per-pattern base
+  cardinality from `predicate_count`/`ndv` (falling back to the `sparopt` static shape
+  table when a pattern's predicate is unbound). Join output `∏ base / denominator`,
+  denominator per shared variable ≈ `max(ndv)` over the patterns binding it — **with**
+  **transitive-equality-class tracking** (a variable shared across ≥3 patterns — the RDF
+  star/chain norm — is divided once, not per pair) and the **PK/FK-style cap**: an
+  `owl:sameAs` / functional-property / key join never exceeds the smaller input. RDF makes
+  this essential (sameAs closures otherwise explode).
+- **Upper bound (always available) → degree-based bound sketch** (Cai/Balazinska/Suciu,
+  SIGMOD 2019) from Tier-2 `max_degree`: never under-estimates, and speaks the executor's
+  AGM language. Full degree-sequence tightening (SafeBound/LpBound) is a later phase
+  behind the same tier.
+- **Cold or non-star shapes → `sample_join`** (Wander Join, SIGMOD 2016): the empirically
+  strongest accuracy backstop on real graphs (G-CARE benchmark, SIGMOD 2020), kept off the
+  default path because of its per-query cost and variance.
+- **Learned estimators: out of scope.** Not production-ready for a continuously-updating
+  store (Wang et al., PVLDB 2021); the trait admits one later as just another impl.
 
 Estimates memoized by variable/pattern bitset (DuckDB's `relation_set_2_cardinality`),
 and surfaced through the existing `EXPLAIN` `~N rows` rendering.
 
-### 5.5 Ordering — the one cost-based stage (bimodal)
+### 5.5 Ordering — the one cost-based stage (structural hybrid + unified cost)
 
-`JoinPlanning` is the only pass that searches. It produces a `JoinSpec` per BGP and
-chooses the physical shape, costed on one additive, cardinality-dominated scale
-(`cost = card(result) + cost(children)`), extended to be **hybrid-aware**:
+`JoinPlanning` is the only pass that searches. It produces a `JoinSpec` per BGP in three
+layers (survey: Part B; task breakdown in PLAN-23-04):
 
-- **WCOJ sub-plan** → the plan object is a **variable elimination order**, not a binary
-  tree. Ordering heuristic: most-constrained-variable / smallest-NDV-first (retargeting
-  `sparopt`'s greedy connected seed-and-grow from "pick next pattern" to "pick next
-  variable"), seeded by the current descending-degree tie-break. Cost estimated by an
-  **AGM / fractional-edge-cover bound**, *not* a product of pairwise selectivities.
-- **Binary-hash sub-plan** (the `≤ cutover` / low-arity case, and non-BGP algebra joins)
-  → DuckDB-style: DP over the connected query (sub)graph for small relation counts,
-  **greedy operator ordering past an explicit threshold + work budget**. Hash build-side
-  chosen in a *late* pass (DuckDB's `BuildProbeSideOptimizer`), keeping the ordering
-  search state small.
-- **The WCOJ-vs-hash choice becomes part of costing**, replacing the fixed
-  `wcoj_cutover == 4` — on unified memory the trie-materialization vs hash-table
-  trade-off is memory-bandwidth-bound, so the cost model must carry a materialization
-  term, not assume DuckDB's CPU-bound pairwise model.
+- **Structural routing first (Freitag et al., VLDB 2020).** Build the BGP's
+  variable-connection graph and decompose it: **acyclic tree parts → binary hash joins**,
+  **cyclic cores → leapfrog triejoin**, with the multi-way WCOJ nodes embedded inside an
+  otherwise-binary plan. This replaces the fixed `wcoj_cutover == 4`, which gets both
+  directions wrong: a 6-pattern acyclic star should stay binary, a 3-pattern triangle
+  should go WCOJ. It requires `ExecutionPlan` to represent **per-subplan mode** — today it
+  picks one mode for the whole BGP — a prerequisite refactor. HornDB's runtime already
+  builds the hash-trie on demand, exactly Freitag's model.
+- **One additive cost model: binary-join cost + i-cost (Mhedhbi & Salihoglu / Graphflow,
+  VLDB 2019).** A WCOJ multi-way-intersection step is charged **i-cost** — the total size
+  of the runs read and intersected to extend the match by one variable; a binary step pays
+  the usual build+probe. Both sit on the additive, cardinality-dominated scale
+  (`cost = card(result) + cost(children)`), so the WCOJ-vs-hash choice is a genuine cost
+  comparison, not a heuristic. On unified memory the model carries a **materialization
+  term**: trie build vs hash-table build is memory-bandwidth-bound, not DuckDB's CPU-bound
+  pairwise model.
+- **Search: DP over connected subsets, greedy fallback.** Dynamic programming over
+  *connected* subsets of BGP variables, choosing per step between a binary join and a WCOJ
+  extension; past an explicit relation-count threshold + work budget (DuckDB's dual guard),
+  fall back to greedy operator ordering. Hash build-side is chosen in a *late* pass
+  (DuckDB's `BuildProbeSideOptimizer`), keeping the search state small. Non-BGP algebra
+  joins use the same DP/greedy machinery.
+
+**Variable order within a WCOJ core:** any order is worst-case optimal, so ordering is a
+constant-factor cost problem, not a correctness one. Greedy
+smallest-estimated-intersection first, min-degree fallback when estimates are absent,
+seeded by the current descending-degree tie-break. The **AGM / fractional-edge-cover
+bound** is computed per candidate core (a tiny linear program — microseconds at arity ≤ 3)
+as an **upper-bound guard and tie-breaker**, not as the primary cost.
+
+**Design for, don't build:** Free Join (SIGMOD 2023) unifies binary-hash and WCOJ into one
+structure with a per-relation granularity knob (Generalized Hash Trie + column-oriented
+lazy tries); keep the `JoinSpec` IR from foreclosing that continuum (no hard binary
+switch). Whole-query GHD decomposition (EmptyHeaded) and adaptive runtime reordering
+(ADOPT) are later items, gated on measured evidence (§6 phase 5).
 
 This stage is where `Planner::choose` and `ExecutionPlan::for_bgp` in `horndb-wcoj` grow
 their real bodies; the SPARQL `JoinPlanning` pass calls into that WCOJ planner for the
@@ -376,15 +448,18 @@ first so everything else has a home.
 2. **Heuristic rewrite passes.** Filter pull-up/push-down, projection pushdown,
    `Equal→SameTerm`. Always-beneficial; no statistics. Guarded by the slot-differential
    suite + conformance harness.
-3. **Statistics seam + NDV/counts estimator.** `Stats` trait over SPEC-02, real
-   `Cardinality`, memoization, `EXPLAIN` wired to it. `UniformEstimator` demoted to
-   fallback. (Depends on SPEC-02 exposing counts/NDV — coordinate with SPEC-06 for
-   maintenance under deltas.)
-4. **Cost-based `JoinPlanning`.** Bimodal ordering (WCOJ variable-order + AGM bound;
-   hash DP/greedy), cost-driven WCOJ-vs-hash, late build-side pass. Retires
-   `wcoj_cutover == 4` as a hard rule.
-5. **Later (optimizer):** sketches (quantile/count-min) behind `Stats`; runtime
-   filters (§5.6); ML `PlanAdvisor` validation loop (§5.7).
+3. **Statistics seam + estimator.** The layered `Stats` trait over SPEC-02 (counts/NDV,
+   Characteristic Sets, degree bounds, sampling hook), the Characteristic-Sets-first
+   estimator returning `(estimate, upper_bound)`, memoization, `EXPLAIN` wired to it.
+   `UniformEstimator` demoted to fallback. (Depends on SPEC-02 exposing the statistics
+   surface — coordinate with SPEC-06 for maintenance under deltas; see §8.)
+4. **Cost-based `JoinPlanning`.** Structural cyclic-core hybrid + the i-cost/binary-cost
+   connected-subset DP with greedy fallback, AGM guard, per-subplan `ExecutionPlan`,
+   late build-side pass. Retires `wcoj_cutover == 4` as a hard rule.
+5. **Later (optimizer):** sketches (quantile/count-min) and degree-sequence bound
+   tightening (SafeBound/LpBound) behind `Stats`; runtime filters (§5.6); ML
+   `PlanAdvisor` validation loop (§5.7); the evidence-gated Free Join / COLT execution
+   upgrade and adaptive reordering (§5.5 "design for, don't build").
 6. **Reasoning in the IR (§5.8).** Reasoning-as-rewrite passes + the
    reasoning/materialization catalog seam; cost-based
    materialize-vs-rewrite-vs-delegate; property-path closure routed through the
@@ -403,7 +478,10 @@ first so everything else has a home.
    after each pass. A regression can be bisected to a single `PassId`.
 3. **Estimator accuracy (phase 3).** On the conformance subset, `EXPLAIN` cardinality
    estimates are within an order of magnitude of measured row counts on ≥ X% of nodes
-   (threshold TBD from a baseline run) — strictly better than `UniformEstimator`.
+   (threshold TBD from a baseline run) — strictly better than `UniformEstimator`, with
+   the Characteristic-Sets estimator beating the Tier-0 denominator model on star shapes
+   specifically. The reported `upper_bound` is never below the measured row count on the
+   tested shapes (the degree-bound guarantee).
 4. **Ordering win (phase 4).** On the SPEC-03 acceptance shapes (the 4-cycle and the
    WatDiv/LUBM subset) the cost-based planner matches or beats the descending-degree /
    fixed-cutover heuristic on the harness, with **zero** result-set changes vs the WCOJ
@@ -416,11 +494,14 @@ first so everything else has a home.
 ## 8. Open questions / uncertainties
 
 - **SPEC-02 statistics ownership.** This spec defines the `Stats` seam but not its
-  maintenance. Does SPEC-02 grow per-predicate counts/NDV as first-class, and does SPEC-06
-  update them incrementally under deltas, or is there a periodic recompute? Blocks phase 3.
+  maintenance. Does SPEC-02 grow per-predicate counts/NDV, the characteristic-set index,
+  and per-predicate degree summaries as first-class, and does SPEC-06 update them
+  incrementally under deltas, or is there a periodic recompute? The characteristic-set
+  index is the hardest sub-question — it is not naturally incremental (§5.3). Blocks
+  phase 3.
 - **AGM cost calibration.** The fractional-edge-cover bound gives an upper bound, not an
-  expected size; how loose is it in practice on HornDB workloads, and does it need a
-  learned/empirical correction to be comparable with the hash-tree cost on one scale?
+  expected size; how loose is it in practice on HornDB workloads, and does it need an
+  empirical correction to sit on one scale with the i-cost/binary-cost terms?
 - **Where the WCOJ planner ends and the SPARQL planner begins.** `JoinSpec` production
   for a BGP lives in `horndb-wcoj`; the surrounding algebra ordering lives in
   `horndb-sparql`. The exact API between them (does `wcoj` see the `Stats` seam directly,
@@ -433,7 +514,10 @@ first so everything else has a home.
 - **Verify-before-cite version facts.** ClickHouse version/figure claims (25.9 join
   reordering, ~26.4 auto-stats, TPC-H speedups) and DuckDB's exact greedy threshold are
   search-snippet-level in the source briefs — confirm against primary docs before any of
-  them appear in user-facing material or a benchmark writeup.
+  them appear in user-facing material or a benchmark writeup. The same rule covers the
+  survey's paper-reconstructed formulas (the Characteristic Sets estimate, i-cost
+  constants, the LpBound LP — the ⚠ marks in `../research/optimizer-sota.md`): verify
+  against the primary PDFs before they are written into code.
 
 ## Sources
 
@@ -445,3 +529,7 @@ Oxigraph `lib/sparopt/src/{optimizer,algebra,type_inference,lib}.rs`; DuckDB
 Academic lineage: Veldhuizen (Leapfrog Triejoin, ICDT'14); Moerkotte & Neumann (DPccp
 VLDB'06, DPhyp SIGMOD'08); Leis et al. ("How Good Are Query Optimizers, Really?" VLDB'15);
 Ebergen ("Join Order Optimization with (Almost) No Statistics", DuckDB MSc thesis).
+The second-round survey (`../research/optimizer-sota.md`, 2026-07-06/07) carries the full
+citation list for the RDF-native estimation and WCOJ/hybrid-planning literature folded
+into §5.3–§5.5 (Characteristic Sets, SumRDF, bound sketch / SafeBound / LpBound, Wander
+Join, G-CARE, Graphflow, Freitag, Free Join, EmptyHeaded, ADOPT).
