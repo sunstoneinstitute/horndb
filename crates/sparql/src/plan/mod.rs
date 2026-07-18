@@ -3,6 +3,7 @@
 
 pub mod explain;
 pub mod logical;
+pub mod lower;
 pub mod planner;
 pub mod pushdown;
 pub mod types;
