@@ -41,6 +41,7 @@ SPEC-00..12 above are the standing subsystem contracts. Point/design specs — n
 | [SPEC-21](SPEC-21-count-pushdown-extensions.md) | Count-pushdown extensions — equality-filter inlining, grouped COUNT, multi-count | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 2) | Draft |
 | [SPEC-22](SPEC-22-http-streaming-results.md) | Streaming SELECT results end-to-end to the HTTP layer | SPEC-19 ([#128](https://github.com/sunstoneinstitute/horndb/issues/128) remaining item 3) | Draft |
 | [SPEC-23](SPEC-23-unified-ir.md) | **Unified query + reasoning IR (single IR)** — optimizer framework (logical IR, pass registry, `Stats` seam, cost-based ordering) that ships first, plus reasoning-as-rewrite + magic-sets/backward-chaining later. Stage-2 flagship epic [#185](https://github.com/sunstoneinstitute/horndb/issues/185), decomposed into leaf issues [#201](https://github.com/sunstoneinstitute/horndb/issues/201)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207) | SPEC-03 (F2/F4/F5/F6) + SPEC-07 | Approved |
+| [SPEC-24](SPEC-24-incremental-stage2.md) | **SPEC-06 Stage 2 — incremental maintenance completeness** — delta-incremental retraction on the rule and closure paths (incremental distinct + operator traces), change-feed net-delta + bounded backpressure, engine wiring, DeltaLog WAL, MVCC backing of snapshots, bilinear-join runtime. Stage-2 epic [#186](https://github.com/sunstoneinstitute/horndb/issues/186) | SPEC-06 (+ SPEC-02/E3, SPEC-04/E4 coordination) | Approved |
 
 ## Reading order
 

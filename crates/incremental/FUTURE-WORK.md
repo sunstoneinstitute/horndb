@@ -4,6 +4,13 @@ Stage 1 of SPEC-06 deliberately ships a narrow slice. This file
 catalogues what is **out** of Stage 1, in priority order for Stage 2,
 with the SPEC-06 requirement ID and the trigger for promotion.
 
+> **Stage 2 is now specified.** `docs/specs/SPEC-24-incremental-stage2.md`
+> (epic [#186](https://github.com/sunstoneinstitute/horndb/issues/186))
+> turns this catalog into requirements S1–S8 with acceptance criteria,
+> decomposed into phase sub-issues
+> [#210](https://github.com/sunstoneinstitute/horndb/issues/210)–[#217](https://github.com/sunstoneinstitute/horndb/issues/217).
+> For planning, the spec wins; this file stays as the per-item detail log.
+
 ## Stage 2 (next milestone)
 
 ### F6 — Correct retraction across joins — DELIVERED (rule path)
