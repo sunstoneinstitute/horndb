@@ -88,8 +88,12 @@ pub enum ParsedUpdate {
 pub fn parse_query(input: &str) -> Result<ParsedQuery> {
     // Non-standard leading `EXPLAIN` pragma (SPEC-07 F9). spargebra does
     // not know this keyword, so we strip it before parsing and wrap the
-    // result. `EXPLAIN` must lead the request (it precedes any PREFIX/BASE
-    // prologue), matching the convention of other engines' EXPLAIN.
+    // result. `EXPLAIN` precedes any PREFIX/BASE prologue, matching the
+    // convention of other engines' EXPLAIN — but `PRAGMA` directives
+    // (SPEC-23 §7.2) come earlier still: callers strip them via
+    // `strip_plan_pragmas` BEFORE this function, so a pragma-carrying
+    // request is `PRAGMA ... EXPLAIN ... SELECT ...`, never
+    // `EXPLAIN PRAGMA ...`.
     if let Some((rest, json)) = strip_explain_pragma(input) {
         let inner = parse_query(rest)?;
         return Ok(ParsedQuery::Explain {
@@ -137,8 +141,10 @@ fn strip_explain_pragma(input: &str) -> Option<(&str, bool)> {
 /// Like [`strip_explain_pragma`], pragmas must lead the request (before any
 /// PREFIX/BASE prologue and before `EXPLAIN`) so spargebra never sees them.
 /// `<id>` is a [`PassId`] kebab name (e.g. `coalesce-bgp`); an unknown id is a
-/// parse error. Matching is case-insensitive on the `PRAGMA` keyword.
-pub fn strip_plan_pragmas(input: &str) -> Result<(String, HashSet<PassId>)> {
+/// parse error. Matching is case-insensitive on the `PRAGMA` keyword. The
+/// returned query text borrows from `input` (no copy on the pragma-free
+/// fast path).
+pub fn strip_plan_pragmas(input: &str) -> Result<(&str, HashSet<PassId>)> {
     let mut rest = input;
     let mut disabled = HashSet::new();
     loop {
@@ -159,7 +165,7 @@ pub fn strip_plan_pragmas(input: &str) -> Result<(String, HashSet<PassId>)> {
         disabled.insert(id);
         rest = tail;
     }
-    Ok((rest.to_owned(), disabled))
+    Ok((rest, disabled))
 }
 
 /// If `s` starts with `kw` (ASCII-case-insensitive) followed by ASCII

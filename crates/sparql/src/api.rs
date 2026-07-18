@@ -78,16 +78,13 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     exec: &E,
     cfg: &SparqlConfig,
 ) -> Result<QueryAnswer> {
-    let (query, ctx) = {
-        let (body, disabled) = strip_plan_pragmas(query)?;
-        (
-            body,
-            PlanCtx {
-                disabled_passes: disabled,
-            },
-        )
-    };
-    let parsed = timed(Stage::Parse, || parse_query(&query))?;
+    // Pragma stripping is part of the Parse stage: a malformed pragma is a
+    // parse-class failure and must land in query_errors{stage=parse} like
+    // any other parse error.
+    let (parsed, ctx) = timed(Stage::Parse, || {
+        let (body, disabled_passes) = strip_plan_pragmas(query)?;
+        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+    })?;
     horndb_metrics::metrics()
         .sparql
         .query_total
@@ -181,7 +178,14 @@ pub fn plan_select(
     query: &str,
     cfg: &SparqlConfig,
 ) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan)>> {
-    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    // Strip plan pragmas here too: the HTTP /query handler routes EVERY
+    // request through this function first, so without stripping a
+    // pragma-carrying query of any form would die as a spargebra parse
+    // error before the materialized fallback (which strips) could run.
+    let (parsed, ctx) = timed(Stage::Parse, || {
+        let (body, disabled_passes) = strip_plan_pragmas(query)?;
+        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+    })?;
     let ParsedQuery::Select { inner } = parsed else {
         return Ok(None);
     };
@@ -194,7 +198,7 @@ pub fn plan_select(
         .inc();
     let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
     let vars = projected_vars(&alg);
-    let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+    let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
     Ok(Some((vars, plan)))
 }
 

@@ -121,8 +121,14 @@ impl LogicalPlan {
     }
 }
 
-/// True iff `expr` is the constant boolean `true` in any of its canonical
-/// spargebra-printed literal forms.
+/// True iff `expr` is the constant boolean `true` in either of the crate's
+/// two literal encodings: the quoted typed form is what the parser path
+/// produces (oxrdf `Literal::to_string`, via `translate.rs`); the bare
+/// `true` form is the internal runtime convention (`runtime.rs::bool_lit`,
+/// used in binding values) that a future constant-folding pass may emit.
+/// Misses are safe — an unfolded constant-true filter is just a no-op
+/// operator — but keep this in sync with `runtime.rs`'s boolean parsing if
+/// either encoding changes.
 fn is_constant_true(expr: &Expr) -> bool {
     matches!(
         expr,

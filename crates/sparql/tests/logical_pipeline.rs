@@ -157,12 +157,12 @@ fn coalesced_bgp_is_result_equivalent_to_nested_join() {
     };
 
     // Coalesced (CoalesceBgp on) vs nested (CoalesceBgp disabled).
-    let coalesced = lower_physical(&run_passes(
+    let coalesced = lower_physical(run_passes(
         lower_algebra(&join_alg),
         &standard_passes(),
         &PlanCtx::default(),
     ));
-    let nested = lower_physical(&run_passes(
+    let nested = lower_physical(run_passes(
         lower_algebra(&join_alg),
         &standard_passes(),
         &PlanCtx {
@@ -246,5 +246,120 @@ mod pragma {
             QueryAnswer::Solutions { rows, .. } => assert_eq!(rows.len(), 1),
             other => panic!("expected Solutions, got {other:?}"),
         }
+    }
+}
+
+/// The one real-query shape where `CoalesceBgp` fires today: HornDB's
+/// Stage-1 `GRAPH` lowering (merged-graph semantics — `GRAPH <g> { P }`
+/// lowers to `P`) produces `Algebra::Join(Bgp, Bgp)` when a query mixes
+/// top-level triples with a `GRAPH` block. The pipeline coalesces that into
+/// one flat `BgpScan` (SPEC-23 §5.1: widest pattern set for the WCOJ
+/// planner). This test pins the coalesced shape AND proves the results are
+/// unchanged versus the pass disabled — including the disjoint-variable
+/// (cross-product) case, where the flat scan must still equal the nested
+/// join.
+#[test]
+fn graph_adjacent_bgps_coalesce_and_stay_result_equivalent() {
+    let mut horn = HornBackend::new();
+    let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+    horn.insert_triple(iri("a"), iri("p"), iri("b"));
+    horn.insert_triple(iri("c"), iri("p"), iri("d"));
+    horn.insert_triple(iri("x"), iri("q"), iri("y"));
+    horn.insert_triple(iri("z"), iri("q"), iri("w"));
+
+    // Disjoint variables across the two groups → a genuine cross product.
+    let q = "SELECT * WHERE { ?s <http://ex/p> ?o . GRAPH <http://ex/g> { ?a <http://ex/q> ?b } }";
+    let alg = algebra_of(q);
+
+    let coalesced = planner::plan(&alg).expect("plan");
+    let nested = planner::plan_with_ctx(
+        &alg,
+        &horndb_sparql::plan::pass::PlanCtx {
+            disabled_passes: HashSet::from([PassId::CoalesceBgp]),
+        },
+    )
+    .expect("plan");
+
+    // Shape: coalesced plan carries one flat 2-pattern scan; disabled plan
+    // keeps the nested Join the old lowering emitted.
+    fn find_bgp_sizes(p: &PhysicalPlan, out: &mut Vec<usize>) -> bool {
+        match p {
+            PhysicalPlan::BgpScan { patterns } => {
+                out.push(patterns.len());
+                false
+            }
+            PhysicalPlan::Join { left, right } => {
+                find_bgp_sizes(left, out);
+                find_bgp_sizes(right, out);
+                true
+            }
+            PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::Filter { inner, .. } => find_bgp_sizes(inner, out),
+            _ => false,
+        }
+    }
+    let mut sizes = Vec::new();
+    find_bgp_sizes(&coalesced, &mut sizes);
+    assert_eq!(
+        sizes,
+        vec![2],
+        "coalesced plan must hold one flat 2-pattern scan"
+    );
+    let mut nested_sizes = Vec::new();
+    find_bgp_sizes(&nested, &mut nested_sizes);
+    assert_eq!(nested_sizes, vec![1, 1], "disabled plan keeps two scans");
+
+    // Results: identical multisets (4-row cross product on this data).
+    let canon = |rows: Vec<Bindings>| -> Vec<String> {
+        let mut v: Vec<String> = rows
+            .into_iter()
+            .map(|b| {
+                b.vars()
+                    .map(|(k, t)| format!("{k}={t:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\u{1}")
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let a: Vec<Bindings> = Runtime::new(&horn).run(&coalesced).unwrap().collect();
+    let b: Vec<Bindings> = Runtime::new(&horn).run(&nested).unwrap().collect();
+    assert_eq!(a.len(), 4, "2x2 cross product expected");
+    assert_eq!(
+        canon(a),
+        canon(b),
+        "coalescing changed GRAPH-adjacent results"
+    );
+}
+
+mod plan_select_pragmas {
+    use horndb_sparql::api::plan_select;
+    use horndb_sparql::SparqlConfig;
+
+    /// The HTTP /query handler routes every request through plan_select
+    /// first — a pragma-carrying SELECT must plan (not 400 as a spargebra
+    /// parse error), and a pragma-carrying non-SELECT must return Ok(None)
+    /// so the handler falls back to the materialized path.
+    #[test]
+    fn pragma_select_plans_on_the_streaming_path() {
+        let out = plan_select(
+            "PRAGMA disable-pass=coalesce-bgp SELECT * WHERE { ?s ?p ?o }",
+            &SparqlConfig::default(),
+        )
+        .expect("pragma SELECT must parse on the streaming path");
+        assert!(out.is_some(), "SELECT must yield a streaming plan");
+    }
+
+    #[test]
+    fn pragma_ask_falls_back_to_materialized() {
+        let out = plan_select(
+            "PRAGMA disable-pass=coalesce-bgp ASK { ?s ?p ?o }",
+            &SparqlConfig::default(),
+        )
+        .expect("pragma ASK must not be a parse error");
+        assert!(out.is_none(), "non-SELECT falls back (Ok(None))");
     }
 }

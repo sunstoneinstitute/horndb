@@ -30,6 +30,19 @@ pub enum PassId {
 }
 
 impl PassId {
+    /// Every variant, in pipeline order. The single list `from_str` and the
+    /// round-trip test iterate — adding a variant without extending this
+    /// array is caught by the (compiler-forced) `as_str` match plus the
+    /// `pass_id_round_trips_through_str` length assertion.
+    pub const ALL: [PassId; 6] = [
+        PassId::CoalesceBgp,
+        PassId::Normalize,
+        PassId::FilterPullup,
+        PassId::FilterPushdown,
+        PassId::ProjectionPushdown,
+        PassId::JoinPlanning,
+    ];
+
     /// Stable lowercase-kebab name used by the query pragma and diagnostics.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -46,15 +59,11 @@ impl PassId {
 impl FromStr for PassId {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
-        match s {
-            "coalesce-bgp" => Ok(PassId::CoalesceBgp),
-            "normalize" => Ok(PassId::Normalize),
-            "filter-pullup" => Ok(PassId::FilterPullup),
-            "filter-pushdown" => Ok(PassId::FilterPushdown),
-            "projection-pushdown" => Ok(PassId::ProjectionPushdown),
-            "join-planning" => Ok(PassId::JoinPlanning),
-            other => Err(format!("unknown pass id `{other}`")),
-        }
+        PassId::ALL
+            .iter()
+            .copied()
+            .find(|id| id.as_str() == s)
+            .ok_or_else(|| format!("unknown pass id `{s}`"))
     }
 }
 
@@ -103,21 +112,28 @@ pub fn assert_pass_order(passes: &[Box<dyn LogicalPass>]) {
 
 /// Run `passes` in order, skipping any in `ctx.disabled_passes`. In debug
 /// builds the IR is validated after each pass: a pass must not *introduce*
-/// dangling variable references the input plan did not already have.
+/// dangling variable references its own input did not already have.
 ///
 /// The check is differential, not absolute, because legal SPARQL may
 /// reference variables its pattern never binds — `FILTER(?z = <iri>)` with
 /// unbound `?z` just drops every row, and `SELECT ?z` over a pattern that
 /// never binds `?z` projects it unbound. Those dangling references arrive
 /// from the parser and must survive; only *new* ones (a pass corrupting the
-/// IR) are a bug.
+/// IR) are a bug. Two details make the attribution exact:
+///
+/// * The baseline is a **multiset** (tag → count), so a corrupt node whose
+///   tag collides with a legal dangling ref elsewhere still raises the count
+///   and is caught.
+/// * The baseline **rolls forward** to each pass's own input, so a ref a
+///   pass legally removes cannot be "spent" later by a different buggy pass
+///   — a regression always bisects to the one `PassId` that introduced it.
 pub fn run_passes(
     mut plan: LogicalPlan,
     passes: &[Box<dyn LogicalPass>],
     ctx: &PlanCtx,
 ) -> LogicalPlan {
     #[cfg(debug_assertions)]
-    let baseline = dangling_refs(&plan);
+    let mut baseline = dangling_refs(&plan);
     for p in passes {
         if ctx.disabled_passes.contains(&p.id()) {
             continue;
@@ -126,78 +142,135 @@ pub fn run_passes(
         #[cfg(debug_assertions)]
         {
             let now = dangling_refs(&plan);
-            let fresh: Vec<&String> = now.difference(&baseline).collect();
+            let fresh: Vec<&String> = now
+                .iter()
+                .filter(|(tag, n)| baseline.get(*tag).copied().unwrap_or(0) < **n)
+                .map(|(tag, _)| tag)
+                .collect();
             assert!(
                 fresh.is_empty(),
                 "IR invalid after pass {:?}: new dangling variable refs {fresh:?}",
                 p.id()
             );
+            baseline = now;
         }
     }
     plan
 }
 
-/// Structural check backing the post-pass validation: collect every variable
-/// a node *references* (Project list, Filter expression vars) that is not
-/// produced by the subtree below it, tagged with the referencing node kind.
-/// `infer` runs on each referencing node's child, so a `Project` that hides a
-/// deeper binding is respected.
+/// Structural check backing the post-pass validation: count every variable a
+/// node *references* (Project list; Filter / LeftJoin-ON / Extend / OrderBy /
+/// aggregate-input expressions) that is not produced by the subtree(s) below
+/// it, keyed by `NodeKind:?var`. `infer` runs on each referencing node's
+/// children, so a `Project` that hides a deeper binding is respected.
 #[cfg(debug_assertions)]
-pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeSet<String> {
+pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeMap<String, usize> {
+    use crate::algebra::{AggFunc, Expr};
     use crate::exec::runtime::referenced_vars;
-    use std::collections::{BTreeSet, HashSet as Set};
+    use std::collections::{BTreeMap, HashSet as Set};
 
-    fn walk(node: &LogicalPlan, out: &mut BTreeSet<String>) {
+    fn produced(node: &LogicalPlan) -> Set<String> {
+        infer(node).vars().map(|v| v.name().to_owned()).collect()
+    }
+
+    fn note_expr(
+        kind: &str,
+        expr: &Expr,
+        inner_vars: &Set<String>,
+        out: &mut BTreeMap<String, usize>,
+    ) {
+        let mut refs: Set<String> = Set::new();
+        referenced_vars(expr, &mut refs);
+        for r in &refs {
+            if !inner_vars.contains(r) {
+                *out.entry(format!("{kind}:?{r}")).or_insert(0) += 1;
+            }
+        }
+    }
+
+    fn walk(node: &LogicalPlan, out: &mut BTreeMap<String, usize>) {
         match node {
             LogicalPlan::Project { vars, inner } => {
-                let inner_vars: Set<String> =
-                    infer(inner).vars().map(|v| v.name().to_owned()).collect();
+                let inner_vars = produced(inner);
                 for v in vars {
                     if !inner_vars.contains(v.name()) {
-                        out.insert(format!("Project:?{}", v.name()));
+                        *out.entry(format!("Project:?{}", v.name())).or_insert(0) += 1;
                     }
                 }
                 walk(inner, out);
             }
             LogicalPlan::Filter { expr, inner } => {
-                let mut refs: Set<String> = Set::new();
-                referenced_vars(expr, &mut refs);
-                let inner_vars: Set<String> =
-                    infer(inner).vars().map(|v| v.name().to_owned()).collect();
-                for r in &refs {
-                    if !inner_vars.contains(r) {
-                        out.insert(format!("Filter:?{r}"));
+                note_expr("Filter", expr, &produced(inner), out);
+                walk(inner, out);
+            }
+            LogicalPlan::LeftJoin { left, right, expr } => {
+                // The ON expression sees both sides' bindings.
+                if let Some(e) = expr {
+                    let mut vars = produced(left);
+                    vars.extend(produced(right));
+                    note_expr("LeftJoin", e, &vars, out);
+                }
+                walk(left, out);
+                walk(right, out);
+            }
+            LogicalPlan::Extend { inner, expr, .. } => {
+                note_expr("Extend", expr, &produced(inner), out);
+                walk(inner, out);
+            }
+            LogicalPlan::OrderBy { inner, keys } => {
+                let inner_vars = produced(inner);
+                for (e, _) in keys {
+                    note_expr("OrderBy", e, &inner_vars, out);
+                }
+                walk(inner, out);
+            }
+            LogicalPlan::Group {
+                inner, aggregates, ..
+            } => {
+                let inner_vars = produced(inner);
+                for a in aggregates {
+                    match &a.func {
+                        AggFunc::CountStar => {}
+                        AggFunc::Count(e)
+                        | AggFunc::Sum(e)
+                        | AggFunc::Min(e)
+                        | AggFunc::Max(e)
+                        | AggFunc::Avg(e)
+                        | AggFunc::Sample(e)
+                        | AggFunc::GroupConcat { expr: e, .. } => {
+                            note_expr("Group", e, &inner_vars, out);
+                        }
                     }
                 }
                 walk(inner, out);
             }
             // Structural recursion into every child; leaf nodes are trivially ok.
-            LogicalPlan::Join { left, right }
-            | LogicalPlan::LeftJoin { left, right, .. }
-            | LogicalPlan::Union { left, right } => {
+            LogicalPlan::Join { left, right } | LogicalPlan::Union { left, right } => {
                 walk(left, out);
                 walk(right, out);
             }
-            LogicalPlan::Distinct { inner }
-            | LogicalPlan::Slice { inner, .. }
-            | LogicalPlan::OrderBy { inner, .. }
-            | LogicalPlan::Extend { inner, .. }
-            | LogicalPlan::Group { inner, .. } => walk(inner, out),
+            LogicalPlan::Distinct { inner } | LogicalPlan::Slice { inner, .. } => walk(inner, out),
             LogicalPlan::PathClosure { edge, .. } => walk(edge, out),
             LogicalPlan::Bgp { .. } | LogicalPlan::Values { .. } => {}
         }
     }
-    let mut out = BTreeSet::new();
+    let mut out = BTreeMap::new();
     walk(plan, &mut out);
     out
 }
 
-/// `CoalesceBgp` (SPEC-23 §5.2): fold contiguous `Join(Bgp, Bgp)` into one
-/// flat `Bgp`, bottom-up, via the [`LogicalPlan::join`] smart constructor.
-/// Idempotent. On today's corpus this never fires — spargebra already merges
-/// adjacent triple patterns into one `Algebra::Bgp` — so it is a no-op that
-/// preserves every existing plan (the Phase-1 gate). It becomes load-bearing
-/// once passes below it (Phase 2) split and recombine BGPs.
+/// `CoalesceBgp` (SPEC-23 §5.1/§5.2): fold contiguous `Join(Bgp, Bgp)` into
+/// one flat `Bgp`, bottom-up, via the [`LogicalPlan::join`] smart
+/// constructor, so the WCOJ planner sees the widest possible pattern set.
+/// Idempotent, and result-invariant (a natural join over the merged pattern
+/// set — proven in `tests/logical_pipeline.rs`).
+///
+/// When it fires today: spargebra already merges *adjacent triple patterns*
+/// into one `Algebra::Bgp`, but HornDB's Stage-1 `GRAPH` lowering
+/// (`translate.rs` — `GRAPH <g> { P }` lowers to `P` under merged-graph
+/// semantics) produces `Join(Bgp, Bgp)` whenever a query mixes top-level
+/// triples with a `GRAPH` block. Those plans coalesce to one flat `BgpScan`;
+/// everything else is untouched (the Phase-1 golden gate).
 pub struct CoalesceBgp;
 
 impl LogicalPass for CoalesceBgp {
@@ -404,15 +477,36 @@ mod tests {
 
     #[test]
     fn pass_id_round_trips_through_str() {
-        for id in [
-            PassId::CoalesceBgp,
-            PassId::Normalize,
-            PassId::FilterPullup,
-            PassId::FilterPushdown,
-            PassId::ProjectionPushdown,
-            PassId::JoinPlanning,
-        ] {
+        for id in PassId::ALL {
             assert_eq!(id.as_str().parse::<PassId>().unwrap(), id);
         }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "new dangling")]
+    fn duplicate_tag_corruption_is_caught() {
+        use crate::algebra::Expr;
+        // The input already has a LEGAL dangling Filter over ?z. A pass that
+        // adds a SECOND dangling Filter over the same ?z produces the same
+        // tag string — only the multiset count exposes the corruption.
+        struct DuplicateCorruptor;
+        impl LogicalPass for DuplicateCorruptor {
+            fn id(&self) -> PassId {
+                PassId::Normalize
+            }
+            fn run(&self, plan: LogicalPlan, _ctx: &PlanCtx) -> LogicalPlan {
+                LogicalPlan::Filter {
+                    expr: Expr::Bound(Var::new("z")),
+                    inner: Box::new(plan),
+                }
+            }
+        }
+        let legal = LogicalPlan::Filter {
+            expr: Expr::Bound(Var::new("z")),
+            inner: Box::new(bgp(vec![pat("s", "http://ex/p", "o")])),
+        };
+        let passes: Vec<Box<dyn LogicalPass>> = vec![Box::new(DuplicateCorruptor)];
+        run_passes(legal, &passes, &PlanCtx::default());
     }
 }

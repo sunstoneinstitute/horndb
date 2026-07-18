@@ -447,7 +447,7 @@ HIGH *Performance* task in `TASKS.md`.
 ## 15. Cross-cutting concerns
 
 ### Query optimization vs. reasoning-strategy selection
-**Status: in progress — Phase 1 (optimizer framework scaffolding) is
+**Status: partially implemented — Phase 1 (optimizer framework scaffolding) is
 implemented ([#201](https://github.com/sunstoneinstitute/horndb/issues/201)):
 `crates/sparql/src/plan/{logical,types,pass,lower}.rs` ship the logical IR
 (flat n-ary `Bgp`), the binding/type lattice, and the typed/ordered/

@@ -1,12 +1,16 @@
 //! Algebra → PhysicalPlan, via the logical IR + pass pipeline (SPEC-23 §5).
 //!
 //! Phase 1 wires `Algebra → LogicalPlan → run_passes → PhysicalPlan`. The
-//! pipeline is deliberately behavior-preserving: the only registered pass,
-//! `CoalesceBgp`, does not fire on spargebra-produced algebra (which already
-//! merges adjacent triple patterns into one BGP), so the emitted plan is
-//! structurally identical to the pre-refactor 1:1 lowering. Cost-based
-//! ordering and the heuristic rewrite passes land in later phases behind the
-//! same registry.
+//! only registered pass is `CoalesceBgp` (SPEC-23 §5.1): it folds
+//! `Join(Bgp, Bgp)` into one flat BGP. spargebra already merges adjacent
+//! triple patterns, so on most queries the pass is a no-op and the emitted
+//! plan is structurally identical to the pre-refactor 1:1 lowering (the
+//! golden-plan gate). The exception is the Stage-1 `GRAPH` lowering
+//! (merged-graph semantics): a query mixing top-level triples with a
+//! `GRAPH` block produces `Join(Bgp, Bgp)`, which now coalesces into one
+//! flat `BgpScan` — result-invariant, and disable-able via
+//! `PRAGMA disable-pass=coalesce-bgp`. Cost-based ordering and the
+//! heuristic rewrite passes land in later phases behind the same registry.
 
 use crate::algebra::Algebra;
 use crate::error::Result;
@@ -25,7 +29,7 @@ pub fn plan(alg: &Algebra) -> Result<PhysicalPlan> {
 pub fn plan_with_ctx(alg: &Algebra, ctx: &PlanCtx) -> Result<PhysicalPlan> {
     let logical = lower_algebra(alg);
     let optimized = run_passes(logical, &standard_passes(), ctx);
-    Ok(lower_physical(&optimized))
+    Ok(lower_physical(optimized))
 }
 
 #[cfg(test)]

@@ -92,66 +92,64 @@ pub fn lower_algebra(alg: &Algebra) -> LogicalPlan {
 }
 
 /// `LogicalPlan → PhysicalPlan`. A flat `Bgp` lowers to `BgpScan` (the WCOJ
-/// executor runs the whole pattern set as one natural join).
-pub fn lower_physical(plan: &LogicalPlan) -> PhysicalPlan {
+/// executor runs the whole pattern set as one natural join). Takes the plan
+/// by value: the pipeline hands over an owned `LogicalPlan`, so the fields
+/// move instead of deep-cloning a second time (the algebra→logical lowering
+/// already cloned once).
+pub fn lower_physical(plan: LogicalPlan) -> PhysicalPlan {
     match plan {
-        LogicalPlan::Bgp { patterns } => PhysicalPlan::BgpScan {
-            patterns: patterns.clone(),
-        },
+        LogicalPlan::Bgp { patterns } => PhysicalPlan::BgpScan { patterns },
         LogicalPlan::Join { left, right } => PhysicalPlan::Join {
-            left: Box::new(lower_physical(left)),
-            right: Box::new(lower_physical(right)),
+            left: Box::new(lower_physical(*left)),
+            right: Box::new(lower_physical(*right)),
         },
         LogicalPlan::LeftJoin { left, right, expr } => PhysicalPlan::LeftJoin {
-            left: Box::new(lower_physical(left)),
-            right: Box::new(lower_physical(right)),
-            expr: expr.clone(),
+            left: Box::new(lower_physical(*left)),
+            right: Box::new(lower_physical(*right)),
+            expr,
         },
         LogicalPlan::Filter { expr, inner } => PhysicalPlan::Filter {
-            expr: expr.clone(),
-            inner: Box::new(lower_physical(inner)),
+            expr,
+            inner: Box::new(lower_physical(*inner)),
         },
         LogicalPlan::Union { left, right } => PhysicalPlan::Union {
-            left: Box::new(lower_physical(left)),
-            right: Box::new(lower_physical(right)),
+            left: Box::new(lower_physical(*left)),
+            right: Box::new(lower_physical(*right)),
         },
         LogicalPlan::Project { vars, inner } => PhysicalPlan::Project {
-            vars: vars.clone(),
-            inner: Box::new(lower_physical(inner)),
+            vars,
+            inner: Box::new(lower_physical(*inner)),
         },
         LogicalPlan::Distinct { inner } => PhysicalPlan::Distinct {
-            inner: Box::new(lower_physical(inner)),
+            inner: Box::new(lower_physical(*inner)),
         },
         LogicalPlan::Slice {
             inner,
             start,
             length,
         } => PhysicalPlan::Slice {
-            inner: Box::new(lower_physical(inner)),
-            start: *start,
-            length: *length,
+            inner: Box::new(lower_physical(*inner)),
+            start,
+            length,
         },
         LogicalPlan::OrderBy { inner, keys } => PhysicalPlan::OrderBy {
-            inner: Box::new(lower_physical(inner)),
-            keys: keys.clone(),
+            inner: Box::new(lower_physical(*inner)),
+            keys,
         },
         LogicalPlan::Extend { inner, var, expr } => PhysicalPlan::Extend {
-            inner: Box::new(lower_physical(inner)),
-            var: var.clone(),
-            expr: expr.clone(),
+            inner: Box::new(lower_physical(*inner)),
+            var,
+            expr,
         },
-        LogicalPlan::Values { vars, rows } => PhysicalPlan::Values {
-            vars: vars.clone(),
-            rows: rows.clone(),
-        },
+        LogicalPlan::Values { vars, rows } => PhysicalPlan::Values { vars, rows },
         LogicalPlan::Group {
             inner,
             keys,
             aggregates,
         } => PhysicalPlan::Group {
-            inner: Box::new(lower_physical(inner)),
-            keys: keys.clone(),
-            aggregates: aggregates.clone(),
+            inner: Box::new(lower_physical(*inner)),
+            keys,
+            aggregates,
         },
         LogicalPlan::PathClosure {
             subject,
@@ -159,10 +157,10 @@ pub fn lower_physical(plan: &LogicalPlan) -> PhysicalPlan {
             edge,
             reflexive,
         } => PhysicalPlan::PathClosure {
-            subject: subject.clone(),
-            object: object.clone(),
-            edge: Box::new(lower_physical(edge)),
-            reflexive: *reflexive,
+            subject,
+            object,
+            edge: Box::new(lower_physical(*edge)),
+            reflexive,
         },
     }
 }
@@ -185,7 +183,7 @@ mod tests {
         let alg = Algebra::Bgp {
             patterns: vec![pat("s", "http://ex/p", "o")],
         };
-        let phys = lower_physical(&lower_algebra(&alg));
+        let phys = lower_physical(lower_algebra(&alg));
         assert_eq!(
             phys,
             PhysicalPlan::BgpScan {
@@ -210,6 +208,6 @@ mod tests {
             matches!(log, LogicalPlan::Join { .. }),
             "naive lowering keeps the Join; got {log:?}"
         );
-        assert!(matches!(lower_physical(&log), PhysicalPlan::Join { .. }));
+        assert!(matches!(lower_physical(log), PhysicalPlan::Join { .. }));
     }
 }

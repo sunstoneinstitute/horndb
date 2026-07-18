@@ -45,11 +45,20 @@ impl TypeMask {
     pub fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
-    /// Intersect the *type* bits (both branches agree) while a variable stays
-    /// bound iff it is bound on either side — matching a join, where a shared
-    /// var is produced by both patterns.
+    /// Join semantics for a shared variable: bound iff bound on either side,
+    /// and the type set is the intersection **plus each side's types when the
+    /// other side may be unbound** — SPARQL join compatibility lets an unbound
+    /// var adopt the other side's value, so those cross-terms must survive
+    /// (dropping them would let a Phase-2 pass fold e.g. `isLiteral(?x)` to a
+    /// wrong constant).
     pub fn intersect(self, other: Self) -> Self {
-        let types = self.0 & other.0 & Self::ANY;
+        let mut types = self.0 & other.0 & Self::ANY;
+        if other.0 & Self::UNDEF != 0 {
+            types |= self.0 & Self::ANY;
+        }
+        if self.0 & Self::UNDEF != 0 {
+            types |= other.0 & Self::ANY;
+        }
         let undef = (self.0 & other.0) & Self::UNDEF;
         Self(types | undef)
     }
@@ -121,9 +130,8 @@ pub fn infer(plan: &LogicalPlan) -> VarTypes {
         }
         // Join: shared vars intersect; each side's own vars pass through.
         Join { left, right } => {
-            let l = infer(left);
             let r = infer(right);
-            let mut out = l.clone();
+            let mut out = infer(left);
             for (v, rm) in r.0 {
                 match out.0.get(&v).copied() {
                     Some(lm) => {
@@ -138,9 +146,8 @@ pub fn infer(plan: &LogicalPlan) -> VarTypes {
         }
         // LeftJoin: left as-is; right-only vars become optional (UNDEF).
         LeftJoin { left, right, .. } => {
-            let l = infer(left);
             let r = infer(right);
-            let mut out = l.clone();
+            let mut out = infer(left);
             for (v, rm) in r.0 {
                 match out.0.get(&v).copied() {
                     Some(lm) => {
@@ -158,21 +165,21 @@ pub fn infer(plan: &LogicalPlan) -> VarTypes {
             let l = infer(left);
             let r = infer(right);
             let mut out = VarTypes::default();
-            for (v, m) in l.0.iter() {
-                let mask = if r.0.contains_key(v) {
-                    *m
+            for (v, m) in l.0 {
+                let mask = if r.0.contains_key(&v) {
+                    m
                 } else {
                     m.with_undef()
                 };
-                out.0.insert(v.clone(), mask);
+                out.0.insert(v, mask);
             }
-            for (v, m) in r.0.iter() {
-                match out.0.get(v).copied() {
+            for (v, m) in r.0 {
+                match out.0.get(&v).copied() {
                     Some(existing) => {
-                        out.0.insert(v.clone(), existing.union(*m));
+                        out.0.insert(v, existing.union(m));
                     }
                     None => {
-                        out.0.insert(v.clone(), m.with_undef());
+                        out.0.insert(v, m.with_undef());
                     }
                 }
             }
@@ -228,23 +235,37 @@ pub fn infer(plan: &LogicalPlan) -> VarTypes {
                     .unwrap_or_else(|| TypeMask::from_bits(TypeMask::UNDEF | TypeMask::ANY));
                 out.0.insert(k.clone(), mask);
             }
-            // Aggregate outputs are bound literals (numbers / group_concat).
+            // Aggregate output kind depends on the function. COUNT always
+            // yields a bound integer literal. SUM/AVG/GROUP_CONCAT yield a
+            // literal but may error (non-numeric input) → optional literal.
+            // MIN/MAX/SAMPLE return one of the *input* terms (any kind) and
+            // are unbound over an empty/erroring group → optional any.
             for a in aggregates {
-                out.0
-                    .insert(a.out.clone(), TypeMask::from_bits(TypeMask::LITERAL));
+                use crate::algebra::AggFunc::*;
+                let mask = match &a.func {
+                    CountStar | Count(_) => TypeMask::from_bits(TypeMask::LITERAL),
+                    Sum(_) | Avg(_) | GroupConcat { .. } => {
+                        TypeMask::from_bits(TypeMask::UNDEF | TypeMask::LITERAL)
+                    }
+                    Min(_) | Max(_) | Sample(_) => {
+                        TypeMask::from_bits(TypeMask::UNDEF | TypeMask::ANY)
+                    }
+                };
+                out.0.insert(a.out.clone(), mask);
             }
             out
         }
+        // Endpoint values come from whatever terms appear in the edge
+        // relation — with inverse steps (`^p+`) even the source column can
+        // hold literals, so both endpoints get the full bound mask (sound
+        // over-approximation; tightening needs edge-shape analysis).
         PathClosure {
             subject, object, ..
         } => {
             let mut out = VarTypes::default();
             for t in [subject, object] {
                 if let Term::Var(v) = t {
-                    out.insert_union(
-                        v.clone(),
-                        TypeMask::from_bits(TypeMask::NAMED_NODE | TypeMask::BLANK_NODE),
-                    );
+                    out.insert_union(v.clone(), TypeMask::from_bits(TypeMask::ANY));
                 }
             }
             out
@@ -341,6 +362,76 @@ mod tests {
             vt.get(&Var::new("o")).unwrap().bits() & TypeMask::LITERAL,
             0
         );
+    }
+
+    #[test]
+    fn join_with_optional_side_keeps_cross_type_terms() {
+        // If ?x may be UNDEF on the left (e.g. it came from an OPTIONAL),
+        // a join row can adopt the right side's value — so the right side's
+        // type bits must survive the intersection.
+        let left =
+            TypeMask::from_bits(TypeMask::UNDEF | TypeMask::NAMED_NODE | TypeMask::BLANK_NODE);
+        let right = TypeMask::from_bits(TypeMask::LITERAL);
+        let joined = left.intersect(right);
+        assert!(joined.is_bound(), "bound on one side → bound after join");
+        assert_ne!(
+            joined.bits() & TypeMask::LITERAL,
+            0,
+            "right side's LITERAL must survive: left may be unbound"
+        );
+        // Both definitely bound → plain intersection (no cross-terms).
+        let strict = TypeMask::from_bits(TypeMask::NAMED_NODE | TypeMask::LITERAL)
+            .intersect(TypeMask::from_bits(TypeMask::NAMED_NODE));
+        assert_eq!(strict.bits(), TypeMask::NAMED_NODE);
+    }
+
+    #[test]
+    fn aggregate_output_masks_depend_on_function() {
+        use crate::algebra::{AggFunc, Aggregate};
+        let inner = bgp(vec![pat("s", "p", "o")]);
+        let agg = |func: AggFunc, name: &str| Aggregate {
+            out: Var::new(name),
+            func,
+            distinct: false,
+        };
+        let vt = infer(&LogicalPlan::Group {
+            inner: Box::new(inner),
+            keys: vec![],
+            aggregates: vec![
+                agg(AggFunc::CountStar, "c"),
+                agg(
+                    AggFunc::Sum(Box::new(Expr::Term(Term::Var(Var::new("o"))))),
+                    "sum",
+                ),
+                agg(
+                    AggFunc::Sample(Box::new(Expr::Term(Term::Var(Var::new("s"))))),
+                    "sample",
+                ),
+            ],
+        });
+        // COUNT: always a bound literal.
+        assert!(vt.get(&Var::new("c")).unwrap().is_bound());
+        // SUM: literal but may error → optional.
+        assert!(!vt.get(&Var::new("sum")).unwrap().is_bound());
+        // SAMPLE: returns an input term — may be an IRI, may be unbound.
+        let sample = vt.get(&Var::new("sample")).unwrap();
+        assert!(!sample.is_bound());
+        assert_ne!(sample.bits() & TypeMask::NAMED_NODE, 0);
+    }
+
+    #[test]
+    fn path_closure_endpoints_may_bind_literals() {
+        // `:a <p>+ ?y` with data `:a :p "lit"` binds ?y to a literal — the
+        // endpoint mask must not exclude LITERAL.
+        let vt = infer(&LogicalPlan::PathClosure {
+            subject: Term::Iri("http://ex/a".into()),
+            object: Term::Var(Var::new("y")),
+            edge: Box::new(bgp(vec![pat("pp_src", "http://ex/p", "pp_dst")])),
+            reflexive: false,
+        });
+        let y = vt.get(&Var::new("y")).unwrap();
+        assert!(y.is_bound());
+        assert_ne!(y.bits() & TypeMask::LITERAL, 0);
     }
 
     #[test]
