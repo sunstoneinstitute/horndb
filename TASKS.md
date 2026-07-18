@@ -72,7 +72,7 @@ into leaf issues via the `to-issues` skill (leaf issues are *not* pre-created). 
 mirror the [Stage-2 investment epics](docs/architecture.md#stage-2-investment-epics)
 table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
-- [ ] **EPIC E1 — SPEC-23 unified query + reasoning IR (single IR).** _CRITICAL · Completeness._
+- [x] **EPIC E1 — SPEC-23 unified query + reasoning IR (single IR).** _CRITICAL · Completeness._
   ([#185](https://github.com/sunstoneinstitute/horndb/issues/185)) The flagship, spec'd
   first. A single logical IR expressing query **and** reasoning so the optimizer jointly
   decides join order, reasoning strategy (materialize/rewrite/delegate), and demand-driven
