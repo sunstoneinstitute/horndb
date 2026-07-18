@@ -49,6 +49,10 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
+- [ ] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
+- [ ] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
+- [ ] **HIGH** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
+- [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **`per_tuple` measured on hornbench (2026-06-30): ~67 ns/tuple, unchanged by the intersect (criterion A/B “no change”) — NF1 ≤2.5 ns not met; bottleneck is the depth-1 narrow-run leapfrog + Arrow materialization, not the intersect.** **hornbench numbers recorded (2026-07-07, Ryzen 7 7700, node-0-pinned):** `dict_decode` scalar 14.74 µs vs AVX2 14.54 µs → **~1.01×, RED** (load/store-bound; NF4 ≥4× is a compute target the memory-bound loop can't reach — SIMD not the lever); `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad (33.1 GB/s full-socket) → GREEN** (SPEC-02 acceptance #4 met). **Remaining:** close NF1 `per_tuple` (depth-1 / materialization path — not SIMD); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [x] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
@@ -56,10 +60,14 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Operational_ — Observability metrics (Phase 1): prometheus-client + `/metrics` scrape; Slice 1 (SPARQL HTTP + closure + storage) landed, fan-out remaining ([#148](https://github.com/sunstoneinstitute/horndb/issues/148))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
+- [ ] **MEDIUM** · _Operational_ — SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling — on-disk format with E3 #187 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
+- [ ] **MEDIUM** · _Performance_ — SPEC-24 S7: bilinear-join runtime (per-predicate leaves, cost model, hash/sort-merge kernels) — after #203 ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
 - [x] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → 100/115) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
 - [ ] **LOW** · _Performance_ — SPEC-23 Phase 5: later optimizer work (stats sketches, runtime filters/SIP, ML `PlanAdvisor` loop) — after #203/#204 ([#205](https://github.com/sunstoneinstitute/horndb/issues/205))
+- [ ] **LOW** · _Completeness_ — SPEC-24 S8: intra-tick closure↔rule joint fixpoint + non-transitive closure shapes ([#217](https://github.com/sunstoneinstitute/horndb/issues/217))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
 
 Closed tasks are listed in [Done](#done-for-traceability).
@@ -84,10 +92,13 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/specs/SPEC-23-unified-ir.md`. **DoD:** write + approve SPEC-23, then decompose.
   **Done 2026-07-18** (PR [#208](https://github.com/sunstoneinstitute/horndb/pull/208)): SPEC-23 approved; decomposed into
   leaf issues [#201](https://github.com/sunstoneinstitute/horndb/issues/201)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207) — tracked as the SPEC-23 phase tasks in this file (Phase 1 [#201](https://github.com/sunstoneinstitute/horndb/issues/201) first).
-- [ ] **EPIC E2 — SPEC-06 incremental maintenance completeness.** _HIGH · Completeness._
+- [x] **EPIC E2 — SPEC-06 incremental maintenance completeness.** _HIGH · Completeness._
   ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)) Fully delta-incremental
   retraction (no affected-region recompute), MVCC backing of `Circuit::snapshot`, change-feed
   reconciliation, WAL/backpressure/cost-model. Successor to Stage-1 epic #6.
+  **Done 2026-07-18** (PR [#218](https://github.com/sunstoneinstitute/horndb/pull/218)): `SPEC-24` approved; decomposed into
+  leaf issues [#209](https://github.com/sunstoneinstitute/horndb/issues/209)–[#217](https://github.com/sunstoneinstitute/horndb/issues/217) — tracked as the SPEC-24 phase tasks in this file (S1 [#210](https://github.com/sunstoneinstitute/horndb/issues/210)
+  and S3 [#212](https://github.com/sunstoneinstitute/horndb/issues/212) are unblocked first).
 - [ ] **EPIC E3 — SPEC-02 storage Stage-2.** _HIGH · Completeness._
   ([#187](https://github.com/sunstoneinstitute/horndb/issues/187)) Per-tuple MVCC, persistent
   on-disk dictionary, cold/CXL tiering seam, named-graph snapshots, WAL, deferred acceptance
@@ -363,6 +374,41 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/plans/PLAN-23-07-backward-chaining.md`. Gate: backward answers
   result-identical to the materialized closure on the OWL 2 RL subset.
 
+- [ ] **SPEC-24 S1: delta-incremental rule retraction.** ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
+  The core DBSP bet of epic E2 (#186, closed → decomposed): thread negative
+  multiplicities through the bilinear operators end-to-end, with an incremental
+  `distinct` at the fixpoint boundary (per-derived-row cumulative-weight trace)
+  so cyclic recursion converges; per-plan integrated input traces (`z⁻¹` state);
+  `rule_attr` maintained incrementally; `recompute_rule_closure` demoted to
+  differential oracle; the two `tick()` regimes collapse into one path.
+  Spec: `docs/specs/SPEC-24-incremental-stage2.md` §S1. Plan: `PLAN-24-MM`
+  when picked up. Gates: SPEC-24 acceptance #1 (retraction cost ∝ affected
+  consequences, ≥10× over the recompute path on small-delta ticks; extended
+  differential suite green; `insert_throughput` bench no regression).
+
+- [ ] **SPEC-24 S2: delta-incremental closure retraction + exact seeded retraction.** ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
+  Output-sensitive deletion on the SPEC-05 boundary (replace per-edge
+  affected-region base-reachability recompute in `delete_transitive_edges` with
+  a maintained support structure; keep a per-predicate recompute fallback), and
+  a `seed_base_edges` variant closing the seeded-support under-withdraw
+  conservatism. Spec §S2. Gates: SPEC-24 acceptance #2 (differential proptests
+  green; seeded-base retraction exact).
+
+- [ ] **SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers.** ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
+  `horndb-incremental` has no consumers in the workspace; SPEC-06 acceptance
+  #1–#2 are unrunnable end-to-end. Lower SPARQL Update ops to
+  `assert_triple`/`retract_triple` + `tick()`; readers via `Snapshot`; rule
+  registration stays a seam (owlrl wiring is E4 #188; persistence is E3 #187).
+  Prefer after S3 (#212) so feed semantics settle before subscribers exist.
+  Spec §S4. Gate: SPEC-24 acceptance #4 (harness-exercised `DELETE DATA`
+  withdraws consequences, visible via query + change feed).
+
+- [ ] **SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility.** ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
+  **Blocked on E3 (#187)** per-tuple visibility + storage delete path. Bind the
+  circuit `LogicalTime` to the storage tier version (design agreed with E3
+  before either side builds); removes the O(n) first-acquire presence rebuild;
+  makes mid-tick point reads expressible. Spec §S6. Gate: SPEC-24 acceptance #6.
+
 ## HIGH — Operational
 
 - [ ] **Observability metrics (Phase 1): prometheus-client + `/metrics` scrape.**
@@ -432,6 +478,24 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   trend metric to `editorial-qps`. See `docs/benchmarks.md` and the SPB nightly row
   in `docs/architecture.md`.
 
+- [ ] **SPEC-24 S7: bilinear-join runtime.** ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
+  Per-predicate leaf extents for `NaryPlan` (today every leaf scans the whole
+  base — also a prerequisite for S1's operator traces), cost-based join-tree
+  decomposition over the SPEC-23 `Stats` seam (after #203), hash/sort-merge
+  `BilinearRule` kernels replacing the O(n²) nested-loop references (codegen
+  with E4 #188). Spec §S7.
+
+## MEDIUM — Completeness
+
+- [ ] **SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure.** ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
+  Tick-local accumulation keyed `(triple, kind)`; publish only non-zero nets in
+  deterministic order; `derived_merged` counts net records (the mixed-tick
+  withdraw+re-add transient disappears — the pinned test flips to asserting its
+  absence). Bounded `subscribe()` variant with a lag policy (`Block` /
+  `DisconnectSlow`, default the latter) + drop counter metric (docs/metrics.md
+  row in the same commit). Land **before** S4 (#213) creates real subscribers.
+  Spec §S3. Gate: SPEC-24 acceptance #3.
+
 ## MEDIUM — Conformance
 
 - [x] **Close the RL-reachable OWL 2 RL conformance gap.**
@@ -447,6 +511,25 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   (`crates/harness/tests/fixtures/owl2-w3c-rl/imports-catalog.toml`) mapping the IRI
   to a mirrored Turtle fixture, merged (transitively) before load (`crates/harness/src/rdf.rs`
   `load_premise`/`expand_imports`) — no network.
+
+## MEDIUM — Operational
+
+- [ ] **SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling.** ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
+  Durable sequenced append behind the existing append/`drain()` shape
+  (configurable fsync policy), drain paired with truncation at checkpoint,
+  replay-to-identical-state recovery + crash tests; implement the SPEC-06 F8
+  cadence (1 min / 100K deltas) as a real scheduler driving `Checkpoint::merge`.
+  On-disk format is E3's (#187); can land against a file-backed stub. Spec §S5.
+  Gate: SPEC-24 acceptance #5 (kill-and-replay bit-identical modulo timestamps).
+
+## LOW — Completeness
+
+- [ ] **SPEC-24 S8: intra-tick closure↔rule joint fixpoint + non-transitive closure shapes.** ([#217](https://github.com/sunstoneinstitute/horndb/issues/217))
+  Iterate the closure and rule passes to a joint fixpoint so a tick's outcome is
+  ordering-independent (closure→rule feedback in pure insertion ticks,
+  rule→closure feedback in-tick), with ordering-independence property tests;
+  extend `ClosureRule` beyond `TransitiveClosureRule` to the other SPEC-05
+  shapes. Completeness tail of epic E2. Spec §S8.
 
 ## LOW — Performance
 
