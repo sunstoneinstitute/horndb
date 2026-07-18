@@ -20,8 +20,15 @@ like any other; do not hand-bump pins outside that flow unless patching an urgen
 ## CI overview
 
 `workflows/ci.yml` mirrors the local fmt + clippy + workspace build plus a
-conformance run with the real engine. `workflows/nightly.yml` runs LDBC SPB-256 on a
-self-hosted runner.
+conformance run with the real engine, split into two parallel jobs so linting is
+not on the test critical path: `lint` (fmt + workspace clippy + ml server-feature
+clippy) and `test-conformance` (nextest, doctests, harness build, real-engine
+conformance run). The test job compiles with `RUSTFLAGS=-D warnings`, so plain
+rustc warnings still fail it even without clippy. Both jobs run every build
+script, so both carry the vendored-GraphBLAS cache (same key — first run after a
+submodule bump builds it twice, then both hit). If branch protection lists
+required checks, it must name **both** jobs. `workflows/nightly.yml` runs LDBC
+SPB-256 on a self-hosted runner.
 
 ### CI gate (who may run the build)
 

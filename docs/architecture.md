@@ -554,8 +554,10 @@ Design: `docs/specs/SPEC-17-metrics.md`.
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
 runs workspace `clippy -D warnings` + `cargo build`. CI mirrors this plus a
-real-engine conformance run. The closure crate needs SuiteSparse:GraphBLAS
-locally (being moved to a vendored submodule — §7).
+real-engine conformance run, with fmt + clippy in a `lint` job that runs in
+parallel with the `test-conformance` job (lint off the test critical path).
+The closure crate needs SuiteSparse:GraphBLAS locally (being moved to a
+vendored submodule — §7).
 
 ### Integration-test runner (cargo nextest)
 **Status: implemented.** The workspace builds ~90 separate `crates/*/tests/*.rs`
