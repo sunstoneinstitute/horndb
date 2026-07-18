@@ -11,8 +11,12 @@
 # This is the one-time (heavy) provisioning step, sibling to
 # bootstrap-graphdb-free-spb.sh: it downloads the pinned Oxigraph release
 # binary (cached across runs) and bulk-loads the closure into a persisted
-# RocksDB store directory. It is idempotent — re-running wipes and reloads the
-# store. The per-run start-oxigraph.sh only re-opens the already-loaded store.
+# RocksDB store directory. It then builds a second store from a copy of the
+# first and runs `oxigraph optimize` on it — the nightly runs both as separate
+# A/B legs (labels `oxigraph` / `oxigraph-optimized`), so the as-loaded and
+# optimized configurations each keep their own trend series. It is idempotent —
+# re-running wipes and rebuilds both stores. The per-run start-oxigraph.sh only
+# re-opens an already-loaded store.
 #
 # The nightly does NOT depend on Oxigraph staying up afterwards:
 # start-oxigraph.sh serves the same persisted store per run and the workflow
@@ -26,9 +30,10 @@ set -euo pipefail
 
 VER="${OXIGRAPH_VERSION:-0.5.9}"
 OX_BASE="${OXIGRAPH_HOME_BASE:-$HOME/oxigraph}"
-# Persisted RocksDB store the per-run server re-opens. Outside the ephemeral
-# Actions checkout so it survives `git clean -ffdx` between nightly runs.
+# Persisted RocksDB stores the per-run server re-opens. Outside the ephemeral
+# Actions checkout so they survive `git clean -ffdx` between nightly runs.
 STORE="${OXIGRAPH_STORE:-$OX_BASE/spb-store}"
+STORE_OPT="${OXIGRAPH_STORE_OPTIMIZED:-$OX_BASE/spb-store-optimized}"
 # Flat N-Triples closure both engines serve. Same file HornDB's
 # start-engine.sh loads, so the A/B compares identical corpora.
 DATASET="${DATASET:?set DATASET to the flat .nt closure to load}"
@@ -58,3 +63,13 @@ mkdir -p "$STORE"
 echo "bootstrap-oxigraph: loading $DATASET into $STORE…" >&2
 "$BIN" load --location "$STORE" --file "$DATASET"
 echo "bootstrap-oxigraph: load complete." >&2
+
+# Optimized sibling store for the fourth A/B leg: same triples, then
+# `oxigraph optimize` (compacts the RocksDB store for read-heavy serving).
+# Built from a copy so the as-loaded store above stays untouched and its
+# trend series stays comparable.
+echo "bootstrap-oxigraph: building optimized copy at $STORE_OPT…" >&2
+rm -rf "$STORE_OPT"
+cp -a "$STORE" "$STORE_OPT"
+"$BIN" optimize --location "$STORE_OPT"
+echo "bootstrap-oxigraph: optimize complete." >&2

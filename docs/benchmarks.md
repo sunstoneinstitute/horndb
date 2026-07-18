@@ -37,7 +37,7 @@ Sapphire Rapids), serves as the Intel counterpoint for ISA-sensitive work.
 | **RDFox** (Samsung / Oxford) | Materialization throughput leader. Pure forward-chaining. SPB-256 A/B driver: `../crates/harness/scripts/run-rdfox-spb-256.sh` (requires a benchmarking license — see DeWitt note below). | ISWC 2015 paper: **6.1 M triples/sec** materialization on SPARC T5-8 (128 cores, 4 TB RAM). RDFox's own statement: pure-materialization gives up **100–1000×** on backward chaining. |
 | **GraphDB Enterprise** (Graphwise) | SPARQL throughput leader. Java/RDF4J derived. | LDBC SPB published baseline: expansion ratio **1:3.2** on SPB-256 OWL 2 RL run. |
 | **GraphDB Free** | Open competitor accessible without procurement. | Our differential A/B reference for nightly LDBC SPB-256 (`../crates/harness/scripts/bootstrap-graphdb-free-spb.sh`). |
-| **Oxigraph** (Rust, RocksDB) | Closest architectural peer: Rust SPARQL 1.1 store, no reasoner — serves the same flat closure as HornDB. MIT/Apache-2.0, so numbers publish freely (no DeWitt clause). | Nightly LDBC SPB-256 A/B reference (`../crates/harness/scripts/bootstrap-oxigraph-spb.sh`); pinned via `OXIGRAPH_VERSION` in `nightly.yml`. |
+| **Oxigraph** (Rust, RocksDB) | Closest architectural peer: Rust SPARQL 1.1 store, no reasoner — serves the same flat closure as HornDB. MIT/Apache-2.0, so numbers publish freely (no DeWitt clause). | Nightly LDBC SPB-256 A/B reference, two legs: as-loaded (`oxigraph`) and `oxigraph optimize`d store (`oxigraph-optimized`); both built by `../crates/harness/scripts/bootstrap-oxigraph-spb.sh`, pinned via `OXIGRAPH_VERSION` in `nightly.yml`. |
 | **Inferray** | Transitivity-closure speed record on commodity hardware. | **21.3 M triples/sec** closure on a single Intel desktop; **142×** vs RDFox and **590×** vs GraphDB/OWLIM on transitivity-chain. |
 | **Apache Jena (+ WCOJ extension)** | WCOJ reference point. | Hogan et al. ISWC '19: **1–2 orders of magnitude** speedup over baseline Jena on WatDiv shapes. |
 | **DuckDB** | Per-tuple-overhead reference. | Published baseline ~**2 ns/tuple** for simpler operators. |
@@ -304,10 +304,14 @@ numbers should not be compared to the target column above.
 prepared flat closure, no reasoning), drives the SPB aggregation query mix
 against `/query` + `/update`, and records the **full driver report** into the
 trend DB (per-query counts/latencies, editorial breakdown, totals — queryable
-via `harness report --suite ldbc-spb-256 --metric <name>`). The A/B reference
-is **GraphDB Free 10.8.14** (licence-free; 11.x requires a licence), brought
-up per run so neither engine competes for RAM during the other's measurement;
-no licence restriction on publishing GraphDB Free numbers.
+via `harness report --suite ldbc-spb-256 --metric <name>`). The A/B references
+are **GraphDB Free 10.8.14** (licence-free; 11.x requires a licence; no licence
+restriction on publishing its numbers) and **Oxigraph 0.5.9**, the latter run as
+two legs — the store as bulk-loaded (label `oxigraph`) and an `oxigraph
+optimize`d copy (label `oxigraph-optimized`) — so both configurations keep their
+own trend series. Each engine is brought up per run so none competes for RAM
+during another's measurement. The trend DB keeps a 90-day rolling window
+(`harness prune --keep-days 90` in the nightly).
 
 Current scale is *feasible scale* — the 512 k-triple materialized SPB closure,
 aggregation-only (`editorialAgents=0`, headline metric `aggregation-qps`).
