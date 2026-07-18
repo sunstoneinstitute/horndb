@@ -6,11 +6,12 @@ description: Pick the next open task from TASKS.md, claim it with a [v] in the m
 
 You are running the `/next-task` workflow. A script claims the single
 highest-priority open task from `TASKS.md` and hands you a ready worktree;
-you build the task, open a PR, get it **reviewed by codex** and address the
-feedback, then **merge** and only then close the task/issue. Operate in
-**fully-autonomous** mode: do not stop for confirmation between phases unless
-the bootstrap fails, codex is unavailable, the review→fix loop fails to
-converge, the merge is blocked, or you genuinely cannot proceed safely.
+you build the task, open a PR, get it **reviewed by codex** (if codex is
+available in the environment — see Phase 6) and address the feedback, then
+**merge** and only then close the task/issue. Operate in **fully-autonomous**
+mode: do not stop for confirmation between phases unless the bootstrap fails,
+the review→fix loop fails to converge, the merge is blocked, or you genuinely
+cannot proceed safely.
 
 Honour the project's global rules throughout:
 
@@ -197,8 +198,10 @@ not the end. Continue straight into Phase 6.
 ## Phase 6 — Review the PR with codex
 
 Get an independent, cross-model review from **codex** (a different model family
-than the one that wrote the code — that independence is the value). Run from the
-worktree, on the feature branch, reviewing the branch diff against `main`:
+than the one that wrote the code — that independence is the value), **if codex
+is available** (`command -v codex`); otherwise see the availability bullet
+below. Run from the worktree, on the feature branch, reviewing the branch diff
+against `main`:
 
 ```bash
 cd ".worktrees/<branch>"
@@ -214,9 +217,12 @@ Notes and fallbacks:
   and pass the prompt as the positional arg (reviews the working tree /
   staged changes), or use `--commit <sha>`. For the branch-vs-`main` diff used
   here, take the default instructions (no prompt).
-- If codex is not authenticated (`codex login` required) or not installed,
-  **stop and tell the user** — do not silently skip the review or substitute a
-  self-review. The review phase is mandatory.
+- **codex is used only if it is available.** If codex is not installed or not
+  authenticated (`codex login` required) in the current environment, skip
+  Phases 6–7: do a careful self-review of the diff instead, note in the PR and
+  in the Phase-9 report that the codex review was skipped (and why), and
+  continue to Phase 8. Do not block the merge on codex availability, and do
+  not try to install or authenticate it yourself.
 - Capture the findings verbatim (the `tee` file) so Phase 7 can work through
   them and Phase 9 can summarise them.
 
@@ -292,7 +298,7 @@ all PR checks/CI are green **and** the branch is mergeable:
 ## Abandoning a claim (if you must stop after claiming)
 
 If the bootstrap claimed a task but you hit a hard stop — Phase-3 gate stays
-red and is out of scope, codex unavailable, review won't converge, merge
+red and is out of scope, review won't converge, merge
 blocked you can't unblock — **release the claim before stopping** so it does
 not become a stale `[v]` blocking the next agent. One command (unclaims,
 removes the worktree + branch, renames the cmux tab):
@@ -313,7 +319,9 @@ Summarise to the user:
 - Whether it was treated as an epic (and the sub-issues created, if so).
 - The claim commit on `main`, the worktree path, and the branch.
 - Verification results (the real command outcomes).
-- The PR URL, the **codex review** outcome, and what was changed in response
+- The PR URL, the **codex review** outcome (or that codex was unavailable and
+  the review was skipped, with a self-review done instead), and what was
+  changed in response
   (including any findings you defensibly declined, with the reason).
 - The **merge** result and confirmation the issue is closed / task `[x]` on
   `main` (or, for an epic, that the parent stays `[v]` with N increments left).
