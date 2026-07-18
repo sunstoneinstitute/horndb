@@ -558,8 +558,11 @@ Design: `docs/specs/SPEC-17-metrics.md`.
 ### Build & CI split
 **Status: implemented.** Pre-commit runs `cargo fmt --check` only; pre-push
 runs workspace `clippy -D warnings` + `cargo build`. CI mirrors this plus a
-real-engine conformance run, with fmt + clippy in a `lint` job that runs in
-parallel with the `test-conformance` job (lint off the test critical path).
+real-engine conformance run, split into three parallel build jobs — `lint`
+(fmt + clippy), `tests` (nextest + doctests), and `conformance` (harness under
+the cheap-to-compile `conformance` cargo profile + real-engine run) — so no
+compile pipeline waits behind another. Docs-only PRs skip the build via the
+gate job; the cargo cache is saved only from `main` (see `.github/AGENTS.md`).
 The closure crate needs SuiteSparse:GraphBLAS locally (being moved to a
 vendored submodule — §7).
 
