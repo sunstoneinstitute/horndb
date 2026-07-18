@@ -24,10 +24,11 @@ struct Cli {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
     /// SQLite result DB. Precedence: `--db` > `$HARNESS_DB` >
-    /// `target/harness.sqlite`. The DB is append-only across runs, so point
+    /// `target/harness.sqlite`. Runs append to the DB, so point
     /// `$HARNESS_DB` at a path that persists between invocations (e.g. the
     /// nightly bench runner uses a path outside the ephemeral checkout) to
-    /// accumulate a trend series rather than starting fresh each run.
+    /// accumulate a trend series rather than starting fresh each run. The
+    /// `prune` subcommand bounds that accumulation to a retention window.
     #[arg(long)]
     db: Option<PathBuf>,
     /// Engine to dispatch against. Stage 0 only supports `stub`.
@@ -120,6 +121,15 @@ enum Cmd {
         /// (e.g. "horndb" vs "graphdb-free").
         #[arg(long)]
         label: String,
+    },
+    /// Delete trend-DB runs (and their outcomes/metrics) older than the
+    /// retention window, then VACUUM. The nightly runs this so the
+    /// cumulative DB holds a bounded rolling window instead of growing
+    /// forever.
+    Prune {
+        /// Retention window in days; runs started earlier are deleted.
+        #[arg(long, default_value_t = 90)]
+        keep_days: u32,
     },
 }
 
@@ -315,6 +325,14 @@ fn real_main() -> Result<ExitCode> {
                 result.editorial_ops_per_sec,
                 result.aggregation_queries_per_sec,
                 result.run_duration_seconds
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Prune { keep_days } => {
+            let stats = db.prune_older_than(keep_days)?;
+            println!(
+                "prune: keep_days={keep_days} deleted runs={} outcomes={} metrics={}",
+                stats.runs, stats.outcomes, stats.metrics
             );
             Ok(ExitCode::SUCCESS)
         }

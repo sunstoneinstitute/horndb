@@ -19,7 +19,8 @@
 #   OXIGRAPH_VERSION    release to run (default 0.5.9); must match the pin in
 #                       the nightly workflow env and in bootstrap-oxigraph-spb.sh
 #   OXIGRAPH_HOME_BASE  base dir holding the binary + store (default $HOME/oxigraph)
-#   OXIGRAPH_STORE      persisted RocksDB store to serve (default $OXIGRAPH_HOME_BASE/spb-store)
+#   OXIGRAPH_STORE      persisted RocksDB store to serve (default $OXIGRAPH_HOME_BASE/spb-store;
+#                       the optimized leg points this at spb-store-optimized)
 #   OXIGRAPH_BIND       listen address (default 127.0.0.1:7878)
 set -euo pipefail
 

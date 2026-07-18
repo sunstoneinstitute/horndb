@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Same SPB-256 driver, pointed at a local Oxigraph instance, as a third A/B
-# reference engine for the nightly. Sister to run-graphdb-free-spb-256.sh — the
-# harness's spb-run subcommand is engine-agnostic, so the only thing that
-# changes per-competitor is the endpoint URL and the --label.
+# Same SPB-256 driver, pointed at a local Oxigraph instance — used by both
+# Oxigraph A/B legs of the nightly (as-loaded and optimized store). Sister to
+# run-graphdb-free-spb-256.sh — the harness's spb-run subcommand is
+# engine-agnostic, so the only thing that changes per-competitor is the
+# endpoint URL and the --label.
 #
 # Oxigraph exposes SPARQL 1.1 Query at /query and Update at /update on its bind
 # address (default 127.0.0.1:7878), so both endpoints share one port.
@@ -12,6 +13,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 
 BIND="${OXIGRAPH_BIND:-127.0.0.1:7878}"
+# Trend label (the `dataset` column). The optimized-store leg overrides this
+# with `oxigraph-optimized` so the two configurations chart as separate series.
+LABEL="${OXIGRAPH_LABEL:-oxigraph}"
 ENDPOINT="${OXIGRAPH_ENDPOINT:-http://${BIND}/query}"
 UPDATE_ENDPOINT="${OXIGRAPH_UPDATE_ENDPOINT:-http://${BIND}/update}"
 JAR="${SPB_DRIVER_JAR:-$ROOT/crates/harness/data/ldbc-spb/spb-driver.jar}"
@@ -29,4 +33,4 @@ cargo run -p horndb-harness --bin harness --release --features real-engine -- \
     --endpoint "$ENDPOINT" \
     --endpoint-update "$UPDATE_ENDPOINT" \
     --duration "$DURATION" \
-    --label "oxigraph"
+    --label "$LABEL"

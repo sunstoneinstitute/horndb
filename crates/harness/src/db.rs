@@ -174,6 +174,36 @@ impl Db {
         Ok(rows)
     }
 
+    /// Delete every run whose `started_at` is older than `days` days, along
+    /// with its `outcomes` and `metrics` rows, then `VACUUM` so the file
+    /// shrinks (the nightly uploads the whole DB as an artifact). Child rows
+    /// are deleted explicitly because rusqlite does not enable
+    /// `PRAGMA foreign_keys`, so the schema's `ON DELETE CASCADE` never fires.
+    /// The comparison is a string compare, which is correct because every
+    /// writer stores UTC RFC3339 with a `Z` suffix (lexicographic ==
+    /// chronological for that fixed format).
+    pub fn prune_older_than(&self, days: u32) -> Result<PruneStats> {
+        let cutoff = (OffsetDateTime::now_utc() - time::Duration::days(i64::from(days)))
+            .format(&time::format_description::well_known::Rfc3339)?;
+        let metrics = self.conn.execute(
+            "DELETE FROM metrics WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < ?1)",
+            params![cutoff],
+        )?;
+        let outcomes = self.conn.execute(
+            "DELETE FROM outcomes WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < ?1)",
+            params![cutoff],
+        )?;
+        let runs = self
+            .conn
+            .execute("DELETE FROM runs WHERE started_at < ?1", params![cutoff])?;
+        self.conn.execute_batch("VACUUM;")?;
+        Ok(PruneStats {
+            runs,
+            outcomes,
+            metrics,
+        })
+    }
+
     /// Returns `(dataset, commit_sha, timestamp_rfc3339, metric_value)` rows
     /// for the given suite/metric, joined to `runs` for the commit and
     /// ordered oldest-first (chronological — convenient for charting). The
@@ -203,6 +233,14 @@ impl Db {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+/// Row counts deleted by [`Db::prune_older_than`].
+#[derive(Debug, Clone, Copy)]
+pub struct PruneStats {
+    pub runs: usize,
+    pub outcomes: usize,
+    pub metrics: usize,
 }
 
 fn new_run_id(commit_sha: &str, reasoner_name: &str) -> String {
@@ -252,6 +290,41 @@ mod tests {
         db.record_outcome(&run, &outcome("c", Status::Skipped))
             .unwrap();
         assert_eq!(db.outcomes_for(&run).unwrap(), 3);
+    }
+
+    #[test]
+    fn prune_drops_only_runs_older_than_window() {
+        let db = Db::open_in_memory().unwrap();
+        let old_run = db.start_run("deadbeef", "fp", "horndb").unwrap();
+        db.record_outcome(&old_run, &outcome("a", Status::Passed))
+            .unwrap();
+        db.record_metric(&old_run, "ldbc-spb-256", Some("horndb"), "qps", 1.0, "qps")
+            .unwrap();
+        // Backdate the first run past the window; the second stays current.
+        db.conn
+            .execute(
+                "UPDATE runs SET started_at = '2000-01-01T00:00:00Z' WHERE run_id = ?1",
+                params![old_run],
+            )
+            .unwrap();
+        let fresh_run = db.start_run("cafebabe", "fp", "horndb").unwrap();
+        db.record_metric(
+            &fresh_run,
+            "ldbc-spb-256",
+            Some("horndb"),
+            "qps",
+            2.0,
+            "qps",
+        )
+        .unwrap();
+
+        let stats = db.prune_older_than(90).unwrap();
+        assert_eq!(stats.runs, 1);
+        assert_eq!(stats.outcomes, 1);
+        assert_eq!(stats.metrics, 1);
+        let remaining = db.metric_series("ldbc-spb-256", "qps").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, fresh_run);
     }
 
     #[test]

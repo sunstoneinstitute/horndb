@@ -14,24 +14,26 @@ on:
 # The runner executes as user `bench`, so the job can read these paths.
 env:
   SPB_ASSETS: /home/bench/src/horndb/crates/harness/data/ldbc-spb/dist
-  # Append-only trend DB on the runner's persistent disk, OUTSIDE the
+  # Cumulative trend DB on the runner's persistent disk, OUTSIDE the
   # ephemeral Actions checkout (which `git clean -ffdx` + rust-cache wipe
-  # each run). All harness invocations below — both engine legs and the
+  # each run). All harness invocations below — the engine legs and the
   # report — read $HARNESS_DB by default, so each nightly appends its rows
-  # to the accumulated series instead of starting from an empty DB. The
-  # uploaded artifact is therefore the full cumulative history, not a
-  # single run's two points.
+  # to the accumulated series instead of starting from an empty DB. A prune
+  # step below keeps a 90-day rolling window, so the uploaded artifact is
+  # the retained history, not a single run's points.
   HARNESS_DB: /home/bench/horndb-bench/harness.sqlite
   HORNDB_BIND: 127.0.0.1:3840
   # Pin the GraphDB A/B reference version to the branch, not whatever is
   # installed on the runner. start-graphdb-free.sh downloads this version if
   # the runner does not already have it unpacked.
   GRAPHDB_VERSION: "10.8.14"
-  # Third A/B leg: Oxigraph (Rust SPARQL store, no reasoner) serving the same
-  # flat closure as HornDB/GraphDB. Pinned to the branch, not the runner;
-  # start-oxigraph.sh downloads this release binary if absent (cached). The
-  # heavy one-time load into the persisted store is a runner precondition —
-  # see bootstrap-oxigraph-spb.sh.
+  # Third + fourth A/B legs: Oxigraph (Rust SPARQL store, no reasoner)
+  # serving the same flat closure as HornDB/GraphDB — once from the store
+  # as bulk-loaded, once from an `oxigraph optimize`d copy, recorded as
+  # separate trend series (`oxigraph` / `oxigraph-optimized`). Pinned to the
+  # branch, not the runner; start-oxigraph.sh downloads this release binary
+  # if absent (cached). The heavy one-time load of both persisted stores is
+  # a runner precondition — see bootstrap-oxigraph-spb.sh.
   OXIGRAPH_VERSION: "0.5.9"
   OXIGRAPH_BIND: "127.0.0.1:7878"
 
@@ -161,6 +163,41 @@ jobs:
           if [ -f /tmp/oxigraph-engine.pid ]; then
             kill "$(cat /tmp/oxigraph-engine.pid)" 2>/dev/null || true
           fi
+
+      - name: start Oxigraph engine (optimized store)
+        id: start_oxigraph_optimized
+        # Fourth A/B leg: the same Oxigraph binary serving the `oxigraph
+        # optimize`d copy of the store (built once by
+        # bootstrap-oxigraph-spb.sh). Its own leg and label so the optimized
+        # and as-loaded configurations chart as separate trend series.
+        continue-on-error: true
+        run: OXIGRAPH_STORE="$HOME/oxigraph/spb-store-optimized" ./crates/harness/scripts/start-oxigraph.sh
+
+      - name: SPB-256 against Oxigraph (optimized store)
+        if: steps.start_oxigraph_optimized.outcome == 'success'
+        env:
+          SPB_DRIVER_JAR: ${{ env.SPB_ASSETS }}/semantic_publishing_benchmark-basic-standard.jar
+          SPB_SCENARIO: ${{ env.SPB_ASSETS }}/spb-nightly.properties
+        run: |
+          set -euo pipefail
+          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$OXIGRAPH_BIND/query" 60; then
+            echo "::warning::Oxigraph (optimized) not reachable at http://$OXIGRAPH_BIND/query — skipping A/B leg"
+            exit 0
+          fi
+          OXIGRAPH_LABEL=oxigraph-optimized ./crates/harness/scripts/run-oxigraph-spb-256.sh
+
+      - name: stop Oxigraph engine (optimized store)
+        if: always()
+        run: |
+          if [ -f /tmp/oxigraph-engine.pid ]; then
+            kill "$(cat /tmp/oxigraph-engine.pid)" 2>/dev/null || true
+          fi
+
+      - name: prune trend DB to 90 days
+        if: always()
+        # Keep the cumulative DB (and the uploaded artifact) to a 90-day
+        # rolling window; prune VACUUMs, so the file also shrinks.
+        run: ./target/release/harness prune --keep-days 90
 
       - name: publish benchmark summary
         if: always()

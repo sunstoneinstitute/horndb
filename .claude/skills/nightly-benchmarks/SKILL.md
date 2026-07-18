@@ -8,16 +8,17 @@ description: Work with HornDB's nightly LDBC SPB-256 benchmark — find runs, gr
 The `nightly` workflow (`.github/workflows/nightly.yml`) runs LDBC SPB-256 at 03:00 UTC
 on the self-hosted `hornbench` runner. It serves the flat materialized closure
 `spb-256.nt` (no reasoning) over SPARQL/HTTP and drives it with the LDBC SPB driver,
-once against **HornDB**, once against **GraphDB Free**, and once against **Oxigraph**
-(the A/B reference legs). The three legs run sequentially — each engine is up only for
-its own leg, so it never competes with the others for RAM / OS page cache. Trigger
-ad-hoc with `gh workflow run nightly.yml`.
+once against **HornDB**, once against **GraphDB Free**, and twice against **Oxigraph**
+— from the store as bulk-loaded and from an `oxigraph optimize`d copy (the A/B
+reference legs). The four legs run sequentially — each engine is up only for its own
+leg, so it never competes with the others for RAM / OS page cache. Trigger ad-hoc with
+`gh workflow run nightly.yml`.
 
 ## Metrics recorded (suite `ldbc-spb-256`)
 
 Each leg records the **full SPB driver report** into the `metrics` table, keyed by
-engine label in the `dataset` column (`horndb`, `graphdb-free`, `oxigraph`; `rdfox` if
-that leg is run). The parser is `crates/harness/src/ldbc_spb.rs` (it scrapes the
+engine label in the `dataset` column (`horndb`, `graphdb-free`, `oxigraph`,
+`oxigraph-optimized`; `rdfox` if that leg is run). The parser is `crates/harness/src/ldbc_spb.rs` (it scrapes the
 driver's final cumulative block + header).
 
 **Headline (always present)** — the stable reporting contract; `harness report
@@ -54,13 +55,14 @@ the count-only subset. `<N>` is the aggregation query-type id (`q1`, `q2`, …):
 > present but zero; they become meaningful once editorial agents are enabled
 > ([#125](https://github.com/sunstoneinstitute/horndb/issues/125)).
 
-## The trend DB is append-only
+## The trend DB keeps a 90-day rolling window
 
 The cumulative sqlite lives **on hornbench, outside the ephemeral checkout**, at
 `$HARNESS_DB = /home/bench/horndb-bench/harness.sqlite`. Every harness invocation
-(both engine legs + the report) reads `$HARNESS_DB` by default, so each night appends
-its rows. Path precedence in the binary: `--db` > `$HARNESS_DB` > `target/harness.sqlite`.
-The per-run artifact `harness-<run_id>` is a snapshot of that full cumulative DB.
+(the engine legs + the report) reads `$HARNESS_DB` by default, so each night appends
+its rows; a `harness prune --keep-days 90` step then drops runs older than 90 days.
+Path precedence in the binary: `--db` > `$HARNESS_DB` > `target/harness.sqlite`.
+The per-run artifact `harness-<run_id>` is a snapshot of that retained window.
 
 > If you ever see only the latest run's points in the trend, the append chain is broken
 > — check that `$HARNESS_DB` is set in the job env and points at the persistent path.
@@ -109,8 +111,10 @@ sqlite3 /tmp/harness.sqlite "
 - GraphDB / Oxigraph versions are pinned via `GRAPHDB_VERSION` / `OXIGRAPH_VERSION` in
   the workflow, not the runner's install; the per-run `start-*.sh` downloads the pinned
   build if absent (cached across runs).
-- **Oxigraph precondition:** the persisted RocksDB store must be loaded once on the
-  runner before the first leg — `DATASET=$SPB_ASSETS/spb-256.nt
-  crates/harness/scripts/bootstrap-oxigraph-spb.sh`. Until then the leg self-skips
-  (`start-oxigraph.sh` exits non-zero, `continue-on-error` swallows it) and no
-  `oxigraph` rows appear in the trend. Same one-time-bootstrap model as GraphDB.
+- **Oxigraph precondition:** the persisted RocksDB stores (`spb-store` and the
+  `oxigraph optimize`d `spb-store-optimized`) must be built once on the runner before
+  the first leg — `DATASET=$SPB_ASSETS/spb-256.nt
+  crates/harness/scripts/bootstrap-oxigraph-spb.sh` builds both. Until then each
+  Oxigraph leg self-skips (`start-oxigraph.sh` exits non-zero, `continue-on-error`
+  swallows it) and no `oxigraph`/`oxigraph-optimized` rows appear in the trend. Same
+  one-time-bootstrap model as GraphDB.
