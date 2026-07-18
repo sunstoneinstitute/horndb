@@ -447,9 +447,15 @@ HIGH *Performance* task in `TASKS.md`.
 ## 15. Cross-cutting concerns
 
 ### Query optimization vs. reasoning-strategy selection
-**Status: planned (SPEC-23 approved, decomposed into leaf issues
-[#201](https://github.com/sunstoneinstitute/horndb/issues/201)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207));
-the phase tasks are tracked in `TASKS.md`; reasoning-strategy selection stays out of the optimizer until phase 6.** Two concerns that are easy to
+**Status: in progress — Phase 1 (optimizer framework scaffolding) is
+implemented ([#201](https://github.com/sunstoneinstitute/horndb/issues/201)):
+`crates/sparql/src/plan/{logical,types,pass,lower}.rs` ship the logical IR
+(flat n-ary `Bgp`), the binding/type lattice, and the typed/ordered/
+individually-disable-able pass registry (`CoalesceBgp` is the one registered
+pass), with `planner::plan` routed through the pipeline behind golden-plan
+tests and a `PRAGMA disable-pass=<id>` query pragma for bisection. Later
+phases ([#202](https://github.com/sunstoneinstitute/horndb/issues/202)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207))
+stay planned in `TASKS.md`; reasoning-strategy selection stays out of the optimizer until phase 6.** Two concerns that are easy to
 conflate live in different places:
 
 - **The query optimizer** (the SPEC-23 framework over the SPEC-03 WCOJ and

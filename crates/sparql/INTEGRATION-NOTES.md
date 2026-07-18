@@ -414,3 +414,30 @@ instead.
 Deferred with reasons (mixed count+value aggregates, `COUNT(DISTINCT …)`,
 non-equality filters, partial inlining, zero-aggregate `GROUP BY`):
 `docs/specs/SPEC-21-count-pushdown-extensions.md`.
+
+## SPEC-23 Phase 1 — logical IR + pass pipeline (#201)
+
+`planner::plan` now runs `Algebra → LogicalPlan → run_passes → PhysicalPlan`
+(`plan/{logical,types,pass,lower}.rs`). Decisions worth knowing before you
+extend it:
+
+- **Lowering is deliberately naive.** `lower_algebra` is a 1:1 image of the
+  algebra; all transformation happens in registered passes so a plan change
+  bisects to one `PassId`. Do not fold rewrites into the lowering.
+- **Post-pass debug validation is differential, not absolute.** Legal SPARQL
+  may reference variables its pattern never binds (`FILTER(?z = <iri>)` with
+  unbound `?z` drops rows; `SELECT ?z` projects it unbound), so
+  `pass::dangling_refs` is compared before/after each pass — a pass may not
+  *introduce* new dangling refs, but parser-supplied ones survive.
+- **Pragma boundary:** `PRAGMA disable-pass=<id>` is stripped in
+  `api::execute_query_with` only. The streaming SELECT path (`plan_select`,
+  used by the HTTP `/query` streaming handler) does not accept pragmas yet —
+  a small, self-contained follow-up if pragma-driven bisection is ever
+  needed over HTTP streaming.
+- **`standard_passes()` allocates + asserts ordering on every `plan` call.**
+  Cheap today (one pass), but if `stage_duration_seconds{stage=plan}` ever
+  regresses, hoist it into a `OnceLock`.
+- The `PhysicalPlan`-level `plan/pushdown.rs` rewrite (runs inside
+  `Runtime::run_stream`) is untouched; porting it onto the pass registry is
+  Phase-2 territory (`projection-pushdown` / `join-planning` `PassId`s are
+  reserved for it).
