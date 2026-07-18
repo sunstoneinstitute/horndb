@@ -43,7 +43,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
-- [v] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201)) — _wip: 812aadd0@vm · task-201-spec-23-phase-1-optimizer-framework-scaf · 2026-07-18T18:54:36Z_
+- [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
@@ -126,7 +126,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## CRITICAL — Completeness
 
-- [v] **SPEC-23 Phase 1: optimizer framework scaffolding.** ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
+- [x] **SPEC-23 Phase 1: optimizer framework scaffolding.** ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
   The foundation of epic E1 (#185, closed → decomposed) — logical IR with a flat
   n-ary `Bgp` + coalescing, binding/type lattice, smart constructors, typed
   individually-toggleable pass registry with declared ordering constraints and
