@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-07
 scope: "Phase-1 optimizer-framework scaffolding: logical IR, binding/type lattice, smart constructors, pass registry + driver, and a no-behavior-change wiring of planner::plan onto it"
 ---

@@ -2,8 +2,12 @@
 //! executes against an [`crate::exec::Executor`].
 
 pub mod explain;
+pub mod logical;
+pub mod lower;
+pub mod pass;
 pub mod planner;
 pub mod pushdown;
+pub mod types;
 
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 

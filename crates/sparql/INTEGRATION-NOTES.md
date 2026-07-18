@@ -414,3 +414,48 @@ instead.
 Deferred with reasons (mixed count+value aggregates, `COUNT(DISTINCT …)`,
 non-equality filters, partial inlining, zero-aggregate `GROUP BY`):
 `docs/specs/SPEC-21-count-pushdown-extensions.md`.
+
+## SPEC-23 Phase 1 — logical IR + pass pipeline (#201)
+
+`planner::plan` now runs `Algebra → LogicalPlan → run_passes → PhysicalPlan`
+(`plan/{logical,types,pass,lower}.rs`). Decisions worth knowing before you
+extend it:
+
+- **Lowering is deliberately naive.** `lower_algebra` is a 1:1 image of the
+  algebra; all transformation happens in registered passes so a plan change
+  bisects to one `PassId`. Do not fold rewrites into the lowering.
+  (`lower_physical` takes the plan by value and moves the field vectors —
+  the pipeline's only deep copy is the one `lower_algebra` makes.)
+- **`CoalesceBgp` is NOT a universal no-op on real queries.** spargebra
+  merges adjacent triple patterns, but the Stage-1 `GRAPH` lowering
+  (merged-graph semantics: `GRAPH <g> { P }` lowers to `P`) produces
+  `Algebra::Join(Bgp, Bgp)` whenever a query mixes top-level triples with a
+  `GRAPH` block — those plans now coalesce into one flat `BgpScan`
+  (SPEC-23 §5.1, result-invariant, pinned by
+  `graph_adjacent_bgps_coalesce_and_stay_result_equivalent`). Every other
+  query keeps its pre-pipeline plan byte-for-byte (the golden battery).
+- **Post-pass debug validation is differential, not absolute.** Legal SPARQL
+  may reference variables its pattern never binds (`FILTER(?z = <iri>)` with
+  unbound `?z` drops rows; `SELECT ?z` projects it unbound), so
+  `pass::dangling_refs` (a multiset of `NodeKind:?var` tags covering
+  Project lists and Filter / LeftJoin-ON / Extend / OrderBy /
+  aggregate-input expressions) is compared against each pass's own input —
+  a pass may not *increase* any tag's count, but parser-supplied dangling
+  refs survive. The baseline rolls forward per pass so a regression always
+  attributes to the single `PassId` that introduced it.
+- **Pragma boundary:** `PRAGMA disable-pass=<id>` is stripped in both
+  `api::execute_query_with` and `api::plan_select`. The latter matters
+  because the HTTP `/query` handler routes every request through
+  `plan_select` first — without stripping there, any pragma-carrying query
+  (all forms, not just SELECT) would 400 as a raw spargebra parse error
+  before the materialized fallback could see it. Stripping happens inside
+  the `Stage::Parse` timed envelope, so malformed pragmas count in
+  `query_errors{stage=parse}` like any other parse failure. Pragmas come
+  before `EXPLAIN`: `PRAGMA ... EXPLAIN SELECT ...`.
+- **`standard_passes()` allocates + asserts ordering on every `plan` call.**
+  Cheap today (one pass), but if `stage_duration_seconds{stage=plan}` ever
+  regresses, hoist it into a `OnceLock`.
+- The `PhysicalPlan`-level `plan/pushdown.rs` rewrite (runs inside
+  `Runtime::run_stream`) is untouched; porting it onto the pass registry is
+  Phase-2 territory (`projection-pushdown` / `join-planning` `PassId`s are
+  reserved for it).

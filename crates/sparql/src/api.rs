@@ -7,8 +7,9 @@ use crate::algebra::translate::translate_query_with;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
 use crate::exec::{Bindings, Executor, FullBackend};
-use crate::parser::{parse_query, parse_update, ParsedQuery};
+use crate::parser::{parse_query, parse_update, strip_plan_pragmas, ParsedQuery};
 use crate::plan::explain::{explain, ExecutionMode, ExplainFormat};
+use crate::plan::pass::PlanCtx;
 use crate::plan::planner;
 use crate::update::apply_update_with;
 use crate::SparqlConfig;
@@ -77,7 +78,13 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     exec: &E,
     cfg: &SparqlConfig,
 ) -> Result<QueryAnswer> {
-    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    // Pragma stripping is part of the Parse stage: a malformed pragma is a
+    // parse-class failure and must land in query_errors{stage=parse} like
+    // any other parse error.
+    let (parsed, ctx) = timed(Stage::Parse, || {
+        let (body, disabled_passes) = strip_plan_pragmas(query)?;
+        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+    })?;
     horndb_metrics::metrics()
         .sparql
         .query_total
@@ -89,7 +96,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         ParsedQuery::Select { inner } => {
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let vars = projected_vars(&alg);
-            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
@@ -97,7 +104,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         }
         ParsedQuery::Ask { inner } => {
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
             let any = timed(Stage::Exec, || {
                 // Early exit: only the first operator chunk is pulled and
                 // decoded — `run` would drain the whole result set.
@@ -109,7 +116,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         }
         ParsedQuery::Construct { inner } => {
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
@@ -132,7 +139,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             // described even when the WHERE matches nothing.
             let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let seeds = explicit_describe_iris(&alg);
-            let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
@@ -146,7 +153,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             // always `Materialized` today (the renderer labels that).
             // `plan_of` fuses translate + plan and EXPLAIN never executes, so
             // record a single `Plan` stage (no `Exec`).
-            let plan = timed(Stage::Plan, || plan_of(&inner, cfg))?;
+            let plan = timed(Stage::Plan, || plan_of(&inner, cfg, &ctx))?;
             let format = if json {
                 ExplainFormat::Json
             } else {
@@ -171,7 +178,14 @@ pub fn plan_select(
     query: &str,
     cfg: &SparqlConfig,
 ) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan)>> {
-    let parsed = timed(Stage::Parse, || parse_query(query))?;
+    // Strip plan pragmas here too: the HTTP /query handler routes EVERY
+    // request through this function first, so without stripping a
+    // pragma-carrying query of any form would die as a spargebra parse
+    // error before the materialized fallback (which strips) could run.
+    let (parsed, ctx) = timed(Stage::Parse, || {
+        let (body, disabled_passes) = strip_plan_pragmas(query)?;
+        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+    })?;
     let ParsedQuery::Select { inner } = parsed else {
         return Ok(None);
     };
@@ -184,14 +198,18 @@ pub fn plan_select(
         .inc();
     let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
     let vars = projected_vars(&alg);
-    let plan = timed(Stage::Plan, || planner::plan(&alg))?;
+    let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
     Ok(Some((vars, plan)))
 }
 
 /// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,
 /// without executing it. Shared by the `EXPLAIN` path. Nested `EXPLAIN`
 /// (`EXPLAIN EXPLAIN …`) is rejected — it is not meaningful.
-fn plan_of(parsed: &ParsedQuery, cfg: &SparqlConfig) -> Result<crate::plan::PhysicalPlan> {
+fn plan_of(
+    parsed: &ParsedQuery,
+    cfg: &SparqlConfig,
+    ctx: &PlanCtx,
+) -> Result<crate::plan::PhysicalPlan> {
     let inner = match parsed {
         ParsedQuery::Select { inner }
         | ParsedQuery::Ask { inner }
@@ -204,7 +222,7 @@ fn plan_of(parsed: &ParsedQuery, cfg: &SparqlConfig) -> Result<crate::plan::Phys
         }
     };
     let alg = translate_query_with(inner, cfg)?;
-    planner::plan(&alg)
+    planner::plan_with_ctx(&alg, ctx)
 }
 
 pub fn execute_update<B: FullBackend>(update: &str, store: &mut B) -> Result<()> {
