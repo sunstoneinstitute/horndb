@@ -1,8 +1,30 @@
 # Task-tracking scripts
 
-Two backends for the `/next-task` task list, with the **same subcommand
-surface** (`claim` / `complete` / `unclaim` / `claims` / `reap`) so the workflow
-barely changes between them.
+Three scripts. `next-task.sh` is the deterministic bootstrap for the
+`/next-task` workflow; beneath it sit two interchangeable backends for the
+task list itself, with the **same subcommand surface** (`claim` / `complete` /
+`unclaim` / `claims` / `reap`) so the workflow barely changes between them.
+
+## `next-task.sh` — scripted bootstrap for `/next-task`
+
+Collapses the workflow's preflight → select → claim → worktree phases into one
+non-AI command, so an agent running `/next-task` spends its first tool call
+getting a claimed task and a ready worktree instead of shepherding a dozen
+shell commands (and never has to read `TASKS.md` itself):
+
+```bash
+.claude/scripts/next-task.sh select    # read-only: ranked open candidates
+.claude/scripts/next-task.sh start     # preflight, orphan report, claim (race-
+                                       # retrying), worktree + fixups, context dump
+.claude/scripts/next-task.sh abandon --issue N --branch BR --reason R   # bail-out
+```
+
+Selection is pure text processing over `TASKS.md`'s `## Index` (open `[ ]`
+items, CRITICAL → HIGH → MEDIUM → LOW, then file order; the trailing
+`([#N](…))` link identifies the task). Claiming delegates to `tasks.sh`, so
+all locking/anti-collision semantics below apply unchanged; a lost race (exit
+9) automatically retries the next candidate. Regression tests:
+`.claude/scripts/test-next-task.sh` (sandboxed, never touches the real repo).
 
 | | `tasks.sh` (A — **live**) | `tasks-github.sh` (B — **prototype**) |
 |---|---|---|
@@ -72,7 +94,8 @@ Evaluate it (read-only, safe):
 
 ## Adopting B
 
-If chosen: rewire `/next-task` Phase 3/11 to call `tasks-github.sh`, run
+If chosen: rewire `next-task.sh`'s claim path and `/next-task`'s close phase to
+call `tasks-github.sh`, run
 `render` once to replace `TASKS.md` with the generated view (add a CI check or
 hook that re-renders), and retire the `[v]` markers. Until then, A stays the
 source of truth and B is evaluation-only.
