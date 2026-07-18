@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 date: 2026-07-06
 scope: "a single logical IR expressing query AND reasoning — logical IR, pass registry, statistics seam, cost-based ordering, and (later) reasoning-as-rewrite + magic-sets/backward-chaining — across the WCOJ + SPARQL planners; refines SPEC-03 (F2/F4/F5/F6) and SPEC-07"
 ---
@@ -18,7 +18,15 @@ entailment mode); consumes SPEC-04/05/11 (the reasoning subsystems) as delegate
 targets and SPEC-08 F2 (`PlanAdvisor`) and the not-yet-built SPEC-02 statistics
 surface. This spec absorbs what was briefly split out as "SPEC-24"; there is one
 unified-IR spec, not two.
-**Epic:** [#185](https://github.com/sunstoneinstitute/horndb/issues/185).
+**Epic:** [#185](https://github.com/sunstoneinstitute/horndb/issues/185) —
+decomposed 2026-07-18 into one leaf issue per §6 phase:
+[#201](https://github.com/sunstoneinstitute/horndb/issues/201) (phase 1),
+[#202](https://github.com/sunstoneinstitute/horndb/issues/202) (2),
+[#203](https://github.com/sunstoneinstitute/horndb/issues/203) (3),
+[#204](https://github.com/sunstoneinstitute/horndb/issues/204) (4),
+[#205](https://github.com/sunstoneinstitute/horndb/issues/205) (5),
+[#206](https://github.com/sunstoneinstitute/horndb/issues/206) (6),
+[#207](https://github.com/sunstoneinstitute/horndb/issues/207) (7).
 
 ## Problem
 
@@ -522,7 +530,8 @@ first so everything else has a home.
 ## Sources
 
 Per-system engineering briefs (commissioned 2026-07-06) with exact source URLs are
-preserved in the git history of this change / the epic issue #TODO. Primary sources read:
+preserved in the git history of this change / the epic issue
+[#185](https://github.com/sunstoneinstitute/horndb/issues/185). Primary sources read:
 Oxigraph `lib/sparopt/src/{optimizer,algebra,type_inference,lib}.rs`; DuckDB
 `src/optimizer/{optimizer.cpp,join_order/*}`; ClickHouse
 `src/Analyzer/QueryTreePassManager.cpp` and `src/Processors/QueryPlan/Optimizations/*`.
