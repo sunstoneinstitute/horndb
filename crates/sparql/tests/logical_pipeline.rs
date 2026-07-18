@@ -189,3 +189,62 @@ fn coalesced_bgp_is_result_equivalent_to_nested_join() {
     let b: Vec<Bindings> = Runtime::new(&horn).run(&nested).unwrap().collect();
     assert_eq!(canon(a), canon(b), "coalescing changed the result set");
 }
+
+mod pragma {
+    use horndb_sparql::api::{execute_query, QueryAnswer};
+    use horndb_sparql::exec::mem::MemStore;
+    use horndb_sparql::parser::strip_plan_pragmas;
+    use horndb_sparql::plan::pass::PassId;
+
+    #[test]
+    fn strips_one_disable_pass_pragma() {
+        let (rest, disabled) =
+            strip_plan_pragmas("PRAGMA disable-pass=coalesce-bgp SELECT * WHERE { ?s ?p ?o }")
+                .expect("pragma parses");
+        assert!(rest.trim_start().starts_with("SELECT"));
+        assert!(disabled.contains(&PassId::CoalesceBgp));
+    }
+
+    #[test]
+    fn strips_multiple_pragmas() {
+        let (rest, disabled) = strip_plan_pragmas(
+            "PRAGMA disable-pass=coalesce-bgp PRAGMA disable-pass=join-planning ASK { ?s ?p ?o }",
+        )
+        .expect("pragmas parse");
+        assert!(rest.trim_start().starts_with("ASK"));
+        assert!(disabled.contains(&PassId::CoalesceBgp));
+        assert!(disabled.contains(&PassId::JoinPlanning));
+    }
+
+    #[test]
+    fn no_pragma_is_identity() {
+        let (rest, disabled) =
+            strip_plan_pragmas("SELECT * WHERE { ?s ?p ?o }").expect("no pragma");
+        assert_eq!(rest, "SELECT * WHERE { ?s ?p ?o }");
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn unknown_pass_id_is_an_error() {
+        assert!(
+            strip_plan_pragmas("PRAGMA disable-pass=nope SELECT * WHERE { ?s ?p ?o }").is_err()
+        );
+    }
+
+    /// End-to-end: a pragma-carrying query still runs and returns results
+    /// (the pragma is consumed, not passed to spargebra).
+    #[test]
+    fn pragma_query_executes_and_returns_results() {
+        let mut s = MemStore::default();
+        s.insert(("a".into(), "p".into(), "b".into()));
+        let ans = execute_query(
+            "PRAGMA disable-pass=coalesce-bgp SELECT * WHERE { ?s ?p ?o }",
+            &s,
+        )
+        .expect("pragma query runs");
+        match ans {
+            QueryAnswer::Solutions { rows, .. } => assert_eq!(rows.len(), 1),
+            other => panic!("expected Solutions, got {other:?}"),
+        }
+    }
+}

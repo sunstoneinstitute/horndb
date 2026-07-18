@@ -8,7 +8,9 @@
 //! API shape.
 
 use crate::error::{Result, SparqlError};
+use crate::plan::pass::PassId;
 use spargebra::{Query, SparqlParser, Update};
+use std::collections::HashSet;
 
 /// A successfully parsed SPARQL query, classified by query form.
 ///
@@ -127,6 +129,37 @@ fn strip_explain_pragma(input: &str) -> Option<(&str, bool)> {
     } else {
         Some((rest, false))
     }
+}
+
+/// Strip any leading `PRAGMA disable-pass=<id>` directives (SPEC-23 §7.2),
+/// returning the remaining query text and the set of disabled passes.
+///
+/// Like [`strip_explain_pragma`], pragmas must lead the request (before any
+/// PREFIX/BASE prologue and before `EXPLAIN`) so spargebra never sees them.
+/// `<id>` is a [`PassId`] kebab name (e.g. `coalesce-bgp`); an unknown id is a
+/// parse error. Matching is case-insensitive on the `PRAGMA` keyword.
+pub fn strip_plan_pragmas(input: &str) -> Result<(String, HashSet<PassId>)> {
+    let mut rest = input;
+    let mut disabled = HashSet::new();
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(after_pragma) = strip_keyword_ci(trimmed, "PRAGMA") else {
+            break;
+        };
+        // Expect `disable-pass=<id>` as the next whitespace-delimited token.
+        let token = after_pragma.trim_start();
+        let end = token
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(token.len());
+        let (directive, tail) = token.split_at(end);
+        let id_str = directive.strip_prefix("disable-pass=").ok_or_else(|| {
+            SparqlError::Parse(format!("unrecognized PRAGMA directive `{directive}`"))
+        })?;
+        let id = id_str.parse::<PassId>().map_err(SparqlError::Parse)?;
+        disabled.insert(id);
+        rest = tail;
+    }
+    Ok((rest.to_owned(), disabled))
 }
 
 /// If `s` starts with `kw` (ASCII-case-insensitive) followed by ASCII
