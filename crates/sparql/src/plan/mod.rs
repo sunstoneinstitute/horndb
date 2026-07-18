@@ -2,6 +2,7 @@
 //! executes against an [`crate::exec::Executor`].
 
 pub mod explain;
+pub mod logical;
 pub mod planner;
 pub mod pushdown;
 
