@@ -35,7 +35,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 **Stage-2 investment epics** (opened 2026-07-07 — deferred → `to-spec`; each is a `needs-decomposition` epic, spec'd then broken into leaf issues; details in [Stage-2 investment epics](#stage-2-investment-epics) and `docs/architecture.md`):
 
 - [x] **CRITICAL** · _Completeness_ — **EPIC E1**: SPEC-23 unified query+reasoning IR (single IR; optimizer framework ships first) ([#185](https://github.com/sunstoneinstitute/horndb/issues/185))
-- [v] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)) — _wip: ca12764f@vm · task-186-epic-e2-spec-06-incremental-maintenance · 2026-07-18T18:28:29Z_
+- [x] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186))
 - [ ] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E4**: SPEC-04 rule completeness Stage-2 (proof persistence, full dt-*, list/QCR rules, user-defined rules) ([#188](https://github.com/sunstoneinstitute/horndb/issues/188))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E5**: SPEC-07 SPARQL surface completeness Stage-2 (GSP, named-graph scoping, remote LOAD, XML, DESCRIBE) ([#189](https://github.com/sunstoneinstitute/horndb/issues/189))
