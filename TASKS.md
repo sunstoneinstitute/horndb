@@ -43,6 +43,12 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
+- [ ] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
+- [ ] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
+- [ ] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
+- [ ] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
+- [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
+- [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
 - [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **`per_tuple` measured on hornbench (2026-06-30): ~67 ns/tuple, unchanged by the intersect (criterion A/B “no change”) — NF1 ≤2.5 ns not met; bottleneck is the depth-1 narrow-run leapfrog + Arrow materialization, not the intersect.** **hornbench numbers recorded (2026-07-07, Ryzen 7 7700, node-0-pinned):** `dict_decode` scalar 14.74 µs vs AVX2 14.54 µs → **~1.01×, RED** (load/store-bound; NF4 ≥4× is a compute target the memory-bound loop can't reach — SIMD not the lever); `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad (33.1 GB/s full-socket) → GREEN** (SPEC-02 acceptance #4 met). **Remaining:** close NF1 `per_tuple` (depth-1 / materialization path — not SIMD); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [x] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
@@ -53,6 +59,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → 100/115) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
 - [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
+- [ ] **LOW** · _Performance_ — SPEC-23 Phase 5: later optimizer work (stats sketches, runtime filters/SIP, ML `PlanAdvisor` loop) — after #203/#204 ([#205](https://github.com/sunstoneinstitute/horndb/issues/205))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
 
 Closed tasks are listed in [Done](#done-for-traceability).
@@ -75,6 +82,8 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   F4/F5), SPARQL backward mode (SPEC-07), reasoning-as-rewrite + a reasoning/materialization
   catalog seam, the cost-based WCOJ planner, and property-path→GraphBLAS choice. Stub:
   `docs/specs/SPEC-23-unified-ir.md`. **DoD:** write + approve SPEC-23, then decompose.
+  **Done 2026-07-18** (PR [#208](https://github.com/sunstoneinstitute/horndb/pull/208)): SPEC-23 approved; decomposed into
+  leaf issues [#201](https://github.com/sunstoneinstitute/horndb/issues/201)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207) — tracked as the SPEC-23 phase tasks in this file (Phase 1 [#201](https://github.com/sunstoneinstitute/horndb/issues/201) first).
 - [ ] **EPIC E2 — SPEC-06 incremental maintenance completeness.** _HIGH · Completeness._
   ([#186](https://github.com/sunstoneinstitute/horndb/issues/186)) Fully delta-incremental
   retraction (no affected-region recompute), MVCC backing of `Circuit::snapshot`, change-feed
@@ -103,6 +112,19 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 - [ ] **EPIC E8 — SPEC-17 observability Stage-2: OTel traces & logs.** _LOW · Operational._
   ([#192](https://github.com/sunstoneinstitute/horndb/issues/192)) OpenTelemetry traces and logs
   — the phase after Prometheus metrics (#148).
+
+## CRITICAL — Completeness
+
+- [ ] **SPEC-23 Phase 1: optimizer framework scaffolding.** ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
+  The foundation of epic E1 (#185, closed → decomposed) — logical IR with a flat
+  n-ary `Bgp` + coalescing, binding/type lattice, smart constructors, typed
+  individually-toggleable pass registry with declared ordering constraints and
+  debug-build validation; `planner::plan` wired through the pipeline with **no
+  behavior change** (golden-plan tests), existing `plan/pushdown.rs` heuristics
+  ported onto it. Spec: `docs/specs/SPEC-23-unified-ir.md` §5.1–5.2. Plan:
+  `docs/plans/PLAN-23-01-optimizer-framework-scaffolding.md`. Gates: SPEC-23
+  acceptance #1–#2 (conformance subset + WCOJ differential fuzzer stay green;
+  regressions bisectable to a single `PassId`). Blocks all later phases.
 
 ## HIGH — Performance
 
@@ -270,6 +292,30 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #2). Gate: round/inner-loop
   work counters drop, reason-time falls.
 
+- [ ] **SPEC-23 Phase 2: heuristic rewrite passes.** ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
+  `Normalize` (`Equal→SameTerm`, constant folding), `FilterPullup` →
+  `FilterPushdown` (lattice-gated legality, `LeftJoin`/`Minus` asymmetry),
+  `ProjectionPushdown` — always-beneficial, no statistics, each individually
+  disable-able. **Depends on #201.** Spec §5.2; plan
+  `docs/plans/PLAN-23-02-heuristic-rewrite-passes.md`. Gate: slot-differential
+  suite + conformance subset green with passes on and each pass off.
+
+- [ ] **SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets estimator.** ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
+  Read-only tiered `Stats` trait over SPEC-02 (counts/NDV → Characteristic Sets →
+  degree bounds → sampling hook); estimator returns `(estimate, upper_bound)`;
+  memoized; wired into `EXPLAIN`; `UniformEstimator` demoted to fallback.
+  **Depends on #201**; carries the SPEC-23 §8 stats-ownership open question
+  (coordinate with SPEC-02/06). Spec §5.3–5.4; plan
+  `docs/plans/PLAN-23-03-statistics-seam-estimator.md`. Gate: acceptance #3.
+
+- [ ] **SPEC-23 Phase 4: cost-based `JoinPlanning`.** ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
+  Structural cyclic-core hybrid (acyclic → binary hash, cyclic cores → WCOJ;
+  per-subplan `ExecutionPlan` mode) + one additive i-cost/binary-cost model +
+  connected-subset DP with greedy fallback and AGM guard; retires the fixed
+  `wcoj_cutover == 4`. **Depends on #201–#203.** Spec §5.5; plan
+  `docs/plans/PLAN-23-04-cost-based-join-planning.md`. Gates: acceptance #4–#5
+  (zero result-set changes vs the WCOJ differential oracle).
+
 ## HIGH — Completeness
 
 - [ ] **SPEC-11 SSSOM mappings + compact crosswalk index.**
@@ -300,6 +346,22 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   materialization-on-inference is follow-up. Still outstanding (keeps this box
   unchecked): the *serving slice* — F5 (compact crosswalk index) and F6 (crosswalk
   spine), plus GraphBLAS-backend T1 parity. Tracked as a separate serving-slice plan.
+
+- [ ] **SPEC-23 Phase 6: reasoning in the IR.** ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
+  Reasoning enters the logical IR as first-class rewrite passes (TBox expansion
+  before `JoinPlanning`) + delegate nodes (`ClosureScan`/`PathClosure` → SPEC-05
+  GraphBLAS), with a reasoning/materialization catalog seam parallel to `Stats`
+  so materialize-vs-rewrite-vs-delegate is cost-based; property-path closure
+  routed through GraphBLAS by selectivity (SPEC-07 F3 fast path). **Depends on
+  #201–#204**; carries the §8 recursive-fixpoint-costing open question. Spec
+  §5.8; plan `docs/plans/PLAN-23-06-reasoning-in-the-ir.md`.
+
+- [ ] **SPEC-23 Phase 7: backward-chaining.** ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
+  Magic-sets / demand transformation (SPEC-03 F4) + SLG tabling (F5) + SPARQL
+  backward-chained entailment mode (SPEC-07) — the ADR-0005 hybrid
+  forward/backward bet becomes real. **Depends on #206.** Plan
+  `docs/plans/PLAN-23-07-backward-chaining.md`. Gate: backward answers
+  result-identical to the materialized closure on the OWL 2 RL subset.
 
 ## HIGH — Operational
 
@@ -385,6 +447,16 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   (`crates/harness/tests/fixtures/owl2-w3c-rl/imports-catalog.toml`) mapping the IRI
   to a mirrored Turtle fixture, merged (transitively) before load (`crates/harness/src/rdf.rs`
   `load_premise`/`expand_imports`) — no network.
+
+## LOW — Performance
+
+- [ ] **SPEC-23 Phase 5: later optimizer work.** ([#205](https://github.com/sunstoneinstitute/horndb/issues/205))
+  Evidence-gated follow-ons behind the phase-1–4 seams: quantile/count-min
+  sketches + degree-sequence bound tightening behind `Stats`, runtime filters /
+  sideways information passing, the ML `PlanAdvisor` validation loop (SPEC-08
+  F2, acceptance #6), Free Join / COLT and adaptive-reordering evaluations.
+  **After #203/#204**; each item lands only with a measured harness win. Spec
+  §5.6–5.7; plan `docs/plans/PLAN-23-05-optimizer-later-sketches-runtime-filters-ml.md`.
 
 ## LOW — Operational
 
