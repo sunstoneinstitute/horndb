@@ -108,7 +108,7 @@ Harness state is persisted to `target/harness.sqlite`. Fetched corpora go under 
 
 ## CI
 
-- `.github/workflows/ci.yml` — per-PR: fmt, clippy, full workspace tests, SPARQL server tests, and a real-engine conformance run with JUnit publishing.
+- `.github/workflows/ci.yml` — per-PR: fmt + clippy (parallel `lint` job), full workspace tests, SPARQL server tests, and a real-engine conformance run with JUnit publishing (`test-conformance` job).
 - `.github/workflows/nightly.yml` — self-hosted runner: LDBC SPB-256 against both HornDB and GraphDB Free.
 
 ## Roadmap
