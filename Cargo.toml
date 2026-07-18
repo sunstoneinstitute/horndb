@@ -105,3 +105,18 @@ debug = 1
 
 [profile.bench]
 inherits = "release"
+
+# CI-only profile for the conformance harness (`cargo build --profile
+# conformance`, used by .github/workflows/ci.yml). The Stage-1 conformance
+# subset runs in seconds, so it does not need the bench-grade release profile
+# above — thin LTO + codegen-units=1 + debug info across the ~500-crate
+# harness dependency tree (oxigraph/rocksdb included) is what made the CI
+# harness build take ~10 minutes. Light optimization keeps the run fast while
+# compiling several times quicker. Never use this profile for numbers that go
+# into docs/benchmarks.md.
+[profile.conformance]
+inherits = "release"
+opt-level = 1
+lto = false
+codegen-units = 16
+debug = 0

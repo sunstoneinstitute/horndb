@@ -20,15 +20,30 @@ like any other; do not hand-bump pins outside that flow unless patching an urgen
 ## CI overview
 
 `workflows/ci.yml` mirrors the local fmt + clippy + workspace build plus a
-conformance run with the real engine, split into two parallel jobs so linting is
-not on the test critical path: `lint` (fmt + workspace clippy + ml server-feature
-clippy) and `test-conformance` (nextest, doctests, harness build, real-engine
-conformance run). The test job compiles with `RUSTFLAGS=-D warnings`, so plain
-rustc warnings still fail it even without clippy. Both jobs run every build
-script, so both carry the vendored-GraphBLAS cache (same key — first run after a
-submodule bump builds it twice, then both hit). If branch protection lists
-required checks, it must name **both** jobs. `workflows/nightly.yml` runs LDBC
+conformance run with the real engine, split into three parallel build jobs so no
+compile pipeline waits behind another: `lint` (fmt + workspace clippy + ml
+server-feature clippy), `tests` (nextest, doctests), and `conformance` (harness
+built once with `--features real-engine` under the `conformance` cargo profile —
+release-like but cheaply optimized, see root `Cargo.toml` — then the real-engine
+conformance run + junit report). The tests job compiles with
+`RUSTFLAGS=-D warnings`, so plain rustc warnings still fail it even without
+clippy. All three run every build script, so all three carry the
+vendored-GraphBLAS cache (same key — first run after a submodule bump builds it
+in each job, then all hit). If branch protection lists required checks, it must
+name **all** jobs (`lint`, `tests`, `conformance`, `python-rdflib-compat`); jobs
+skipped by the gate count as satisfied. `workflows/nightly.yml` runs LDBC
 SPB-256 on a self-hosted runner.
+
+Two cost controls, added after cache analysis (2026-07): a workflow-level
+`concurrency` group cancels a PR's superseded runs (pushes to `main` are never
+cancelled — a merge burst folds into GitHub's single queued run), and the cargo
+cache (`cache-save-if` on the toolchain action) is **saved only from `main`**.
+PR runs restore `main`'s cache but do not write their own: per-ref saves
+(~1.3 GB per job) were evicting everything out of the repo's 10 GB Actions
+cache quota within the hour, so every run compiled from cold. Consequence: a
+cold cache on a PR means `main` has not run CI since the cache key last moved
+(lockfile / toolchain / runner-image change) — fix it by letting the next
+`main` push repopulate, not by re-enabling PR saves.
 
 ### CI gate (who may run the build)
 
@@ -40,6 +55,13 @@ builds only when its author is a code owner (read from `.github/CODEOWNERS` at t
 cannot self-authorise. `ci.yml` therefore also listens for the `labeled` PR event so
 adding the label re-triggers the run. Only simple `@user` code owners are resolved
 (the repo uses `* @stigsb`); `@org/team` owners would need a membership lookup.
+
+The gate also skips the build for **docs-only PRs**: when every changed file is
+markdown (`*.md`) or under `docs/`, nothing the build jobs verify can have
+changed, so `build=false` and the ~35 runner-minutes are saved. The
+`can-be-tested` label overrides this — apply it to force a full build on a
+docs-only PR. Pushes to `main` always build regardless of content, both to
+validate `main` itself and because only `main` runs save the cargo cache.
 
 ### Version bump + tag
 
