@@ -34,6 +34,18 @@ impl VecTripleSource {
         let spo = &self.sorted[&Ordering::Spo];
         spo.binary_search(&(t.s, t.p, t.o)).is_ok()
     }
+
+    /// The snapshot's triples sorted in `ord`, or `None` if that ordering is
+    /// unavailable. Read-only view used by `SnapshotStats` to compute statistics
+    /// by a single linear scan.
+    ///
+    /// Each tuple is stored in `ord`'s axis order — the same `Triple::by_ordering`
+    /// layout `from_triples` fills `sorted` with. So `.0/.1/.2` are `ord`'s
+    /// `(level0, level1, level2)`: for `Pso` that is `(predicate, subject, object)`;
+    /// for `Pos` it is `(predicate, object, subject)`.
+    pub fn sorted_rows(&self, ord: Ordering) -> Option<&[(TermId, TermId, TermId)]> {
+        self.sorted.get(&ord).map(Vec::as_slice)
+    }
 }
 
 impl TripleSource for VecTripleSource {
