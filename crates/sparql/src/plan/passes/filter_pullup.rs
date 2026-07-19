@@ -222,6 +222,36 @@ mod tests {
         );
     }
 
+    /// A single arm's `Filter` carries two conjuncts that disagree: one
+    /// references a var this arm binds (hoists above the `Join`), the other
+    /// references a var bound only on the OTHER arm (must stay behind as a
+    /// residual `Filter` on this arm). Exercises `split_arm`'s partition
+    /// within one conjunct set, not just across two single-conjunct arms.
+    #[test]
+    fn hoists_bound_conjunct_leaves_residual_on_same_arm() {
+        let left = LogicalPlan::Filter {
+            expr: Expr::And(Box::new(pred("a")), Box::new(pred("b"))),
+            inner: Box::new(bgp("a")),
+        };
+        let plan = LogicalPlan::Join {
+            left: Box::new(left),
+            right: Box::new(bgp("b")),
+        };
+        let out = FilterPullup.run(plan, &ctx());
+        let LogicalPlan::Filter { expr, inner } = out else {
+            panic!("expected the hoisted conjunct above the Join, got {out:?}")
+        };
+        assert_eq!(expr, pred("a"), "only the arm-bound conjunct hoists");
+        let LogicalPlan::Join { left, right } = *inner else {
+            panic!("expected Join under the hoisted Filter, got {inner:?}")
+        };
+        assert!(
+            matches!(&*left, LogicalPlan::Filter { expr, .. } if *expr == pred("b")),
+            "the other-arm conjunct must stay as a residual Filter on the left arm; got {left:?}"
+        );
+        assert!(matches!(*right, LogicalPlan::Bgp { .. }));
+    }
+
     #[test]
     fn id_and_ordering() {
         assert_eq!(FilterPullup.id(), PassId::FilterPullup);
