@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: executed
 date: 2026-07-07
 scope: "Phase 3: a layered read-only Stats seam + a Characteristic-Sets / degree-bound cardinality estimator (NDV+counts baseline), computed recompute-from-snapshot, wired into EXPLAIN, demoting UniformEstimator to fallback"
 ---
