@@ -10,8 +10,10 @@
 //! Phase 1 registered exactly one pass, [`CoalesceBgp`]. Phase 2 adds
 //! [`crate::plan::passes::Normalize`] (constant folding + `Eq`→`SameTerm`
 //! strength reduction), [`crate::plan::passes::FilterPullup`] (hoist
-//! filters above inner joins), and [`crate::plan::passes::FilterPushdown`]
-//! (sink conjuncts to their deepest legal subtree); the remaining `PassId`
+//! filters above inner joins), [`crate::plan::passes::FilterPushdown`]
+//! (sink conjuncts to their deepest legal subtree), and
+//! [`crate::plan::passes::ProjectionPushdown`] (thread a demanded-variable
+//! set top-down, inserting restricting `Project`s); the remaining `PassId`
 //! variants exist so the rest of Phase 2+ slots in without an enum change
 //! and so a pragma can name them.
 
@@ -96,6 +98,7 @@ pub fn standard_passes() -> Vec<Box<dyn LogicalPass>> {
         Box::new(crate::plan::passes::Normalize),
         Box::new(crate::plan::passes::FilterPullup),
         Box::new(crate::plan::passes::FilterPushdown),
+        Box::new(crate::plan::passes::ProjectionPushdown),
     ];
     assert_pass_order(&passes);
     passes
