@@ -78,8 +78,17 @@ The pre-commit configuration is split intentionally — keep this split when add
 First pre-push after a fresh checkout (or `cargo clean`) takes several minutes: the
 harness pulls in `oxrocksdb-sys` (a ~700 MB artifact) transitively via `oxigraph`.
 Subsequent pushes reuse the cache. Vendored GraphBLAS is already shared across
-worktrees automatically; to also share the rocksdb build, point `CARGO_TARGET_DIR`
-at a shared path.
+worktrees automatically. To also share the rocksdb build (and everything else)
+across worktrees, use [sccache](https://github.com/mozilla/sccache) rather than
+pointing `CARGO_TARGET_DIR` at one shared path — a shared target dir has no
+built-in eviction and grows unbounded (every distinct crate/feature/rustc-flags
+combination adds new content-hashed artifacts under `deps/` that are never
+pruned). sccache caches at the compiler-invocation level with a size-bounded,
+LRU-evicted cache, so worktrees keep separate `target/` dirs but still share
+compiled objects. Config: `~/.cargo/config.toml` with `build.rustc-wrapper =
+"sccache"` and `build.incremental = false` (sccache can't cache incremental
+artifacts, so leaving incremental on defeats the cache), plus
+`SCCACHE_CACHE_SIZE` in your shell profile to bound cache size.
 
 Day-to-day commands:
 
