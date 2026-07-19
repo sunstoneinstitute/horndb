@@ -9,10 +9,11 @@
 //!
 //! Phase 1 registered exactly one pass, [`CoalesceBgp`]. Phase 2 adds
 //! [`crate::plan::passes::Normalize`] (constant folding + `Eq`→`SameTerm`
-//! strength reduction) and [`crate::plan::passes::FilterPullup`] (hoist
-//! filters above inner joins); the remaining `PassId` variants exist so the
-//! rest of Phase 2+ slots in without an enum change and so a pragma can name
-//! them.
+//! strength reduction), [`crate::plan::passes::FilterPullup`] (hoist
+//! filters above inner joins), and [`crate::plan::passes::FilterPushdown`]
+//! (sink conjuncts to their deepest legal subtree); the remaining `PassId`
+//! variants exist so the rest of Phase 2+ slots in without an enum change
+//! and so a pragma can name them.
 
 use crate::plan::logical::LogicalPlan;
 #[cfg(debug_assertions)]
@@ -94,6 +95,7 @@ pub fn standard_passes() -> Vec<Box<dyn LogicalPass>> {
         Box::new(CoalesceBgp),
         Box::new(crate::plan::passes::Normalize),
         Box::new(crate::plan::passes::FilterPullup),
+        Box::new(crate::plan::passes::FilterPushdown),
     ];
     assert_pass_order(&passes);
     passes

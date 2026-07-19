@@ -1,6 +1,6 @@
 //! Shared helpers for the heuristic logical-plan passes (SPEC-23 §5.2):
-//! [`normalize`], [`filter_pullup`], and the filter-pushdown / projection-
-//! pushdown passes that land in later Phase-2 tasks.
+//! [`normalize`], [`filter_pullup`], [`filter_pushdown`], and the
+//! projection-pushdown pass that lands in a later Phase-2 task.
 //!
 //! These operate on [`LogicalPlan`] — the same shapes `pass.rs`'s
 //! `dangling_refs` and `pushdown.rs`'s physical-plan helpers already walk,
@@ -8,8 +8,10 @@
 //! `BgpScan`/`CountScan`/`GroupCountScan` split at this layer yet).
 
 pub mod filter_pullup;
+pub mod filter_pushdown;
 pub mod normalize;
 pub use filter_pullup::FilterPullup;
+pub use filter_pushdown::FilterPushdown;
 pub use normalize::Normalize;
 
 use crate::algebra::{Expr, Term, TriplePattern, Var};
