@@ -296,6 +296,28 @@ impl Circuit {
         1
     }
 
+    /// Materialize a rule-owned derived row: add it to `derived_base`, record
+    /// its attribution, and publish the positive `RuleInferred`. Returns 1 so
+    /// callers fold it into their merged-row count. Callers own any surrounding
+    /// presence-delta bookkeeping (it differs per call site).
+    fn materialize_rule_row(&mut self, t: TripleId, rid: RuleId) -> usize {
+        self.derived_base.add(t, 1);
+        self.rule_attr.insert(t, rid);
+        self.emit_derived(t, 1, DerivationKind::RuleInferred(rid))
+    }
+
+    /// Withdraw a materialized derived row: zero its `derived_base` entry (if
+    /// any) and publish the negative delta under `kind`. Returns 1 so callers
+    /// fold it into their merged-row count. Callers own any surrounding
+    /// `closure_support`/`rule_attr` and presence-delta bookkeeping.
+    fn withdraw_derived_row(&mut self, t: TripleId, kind: DerivationKind) -> usize {
+        let cur = self.derived_base.get(&t);
+        if cur != 0 {
+            self.derived_base.add(t, -cur);
+        }
+        self.emit_derived(t, -1, kind)
+    }
+
     /// One rule-fixpoint round: feed `round_delta` through every plan's
     /// stateful delta operator against the frozen PRE-round extent (the
     /// "old-old" delta convention), then fold `round_delta` into the extent.
@@ -378,9 +400,7 @@ impl Circuit {
                     let rid = self
                         .first_attr_rule(&t)
                         .expect("positive total weight implies a positive per-rule weight");
-                    self.derived_base.add(t, 1);
-                    self.rule_attr.insert(t, rid);
-                    merged_rows += self.emit_derived(t, 1, DerivationKind::RuleInferred(rid));
+                    merged_rows += self.materialize_rule_row(t, rid);
                     self.note_presence_change(t, &mut next_delta);
                 }
             }
@@ -412,15 +432,15 @@ impl Circuit {
         let mut r1_seed: Zset<TripleId> = Zset::new();
         let mut r2_seed: Zset<TripleId> = Zset::new();
         let mut candidates: BTreeSet<TripleId> = BTreeSet::new();
-        // Pre-tick weight total of every touched row, for the net transitions.
-        let mut pre_total: BTreeMap<TripleId, i64> = BTreeMap::new();
+        // Every row touched by R1/R2 (a weight moved), for the net transitions.
+        // Only the key set matters — the pre-tick totals themselves are unused.
+        let mut touched: BTreeSet<TripleId> = BTreeSet::new();
         for (t, m) in init_delta.iter() {
             if m < 0 {
                 r1_seed.add(*t, m);
-                let w = self.total_weight(t);
-                if w > 0 {
+                if self.total_weight(t) > 0 {
                     candidates.insert(*t);
-                    pre_total.insert(*t, w);
+                    touched.insert(*t);
                 }
             } else {
                 r2_seed.add(*t, m);
@@ -440,7 +460,7 @@ impl Circuit {
             let mut next_delta: Zset<TripleId> = Zset::new();
             for (t, deltas) in merged {
                 let (old_total, new_total) = self.apply_weight_deltas(t, &deltas);
-                pre_total.entry(t).or_insert(old_total);
+                touched.insert(t);
                 debug_assert!(
                     new_total <= old_total,
                     "overdelete round increased a weight for {t:?}"
@@ -485,7 +505,7 @@ impl Circuit {
             let mut next_delta: Zset<TripleId> = Zset::new();
             for (t, deltas) in merged {
                 let (old_total, new_total) = self.apply_weight_deltas(t, &deltas);
-                pre_total.entry(t).or_insert(old_total);
+                touched.insert(t);
                 debug_assert!(
                     new_total >= old_total,
                     "re-derive round decreased a weight for {t:?}"
@@ -505,7 +525,7 @@ impl Circuit {
         // ---- Net distinct transitions (PLAN-24-01 "Distinct transitions
         // (net, after R2)"), publish once, in key order. `rule_attr` was not
         // touched by R1/R2, so it still reflects the pre-tick attribution.
-        for (t, _old_total) in pre_total {
+        for t in touched {
             let new_total = self.total_weight(&t);
             let was_attr = self.rule_attr.contains_key(&t);
             let covered = self.asserted_base.get(&t) > 0 || self.closure_support.contains(&t);
@@ -535,9 +555,7 @@ impl Circuit {
                         0,
                         "un-attributed, non-closure row must not be in derived_base"
                     );
-                    self.derived_base.add(t, 1);
-                    self.rule_attr.insert(t, rid);
-                    merged_rows += self.emit_derived(t, 1, DerivationKind::RuleInferred(rid));
+                    merged_rows += self.materialize_rule_row(t, rid);
                 }
             } else if was_attr {
                 let rid = self.rule_attr.remove(&t).expect("checked contains_key");
@@ -549,11 +567,7 @@ impl Circuit {
                     // asserted (derive-then-assert case) keeps its presence
                     // via `asserted_base`; a dead candidate is already out of
                     // the extent.
-                    let cur = self.derived_base.get(&t);
-                    if cur != 0 {
-                        self.derived_base.add(t, -cur);
-                    }
-                    merged_rows += self.emit_derived(t, -1, DerivationKind::RuleInferred(rid));
+                    merged_rows += self.withdraw_derived_row(t, DerivationKind::RuleInferred(rid));
                 }
             }
             // else: record-only weights or a dead un-materialized row —
@@ -813,11 +827,7 @@ impl Circuit {
                 if self.rule_attr.contains_key(&triple) {
                     continue;
                 }
-                let cur = self.derived_base.get(&triple);
-                if cur != 0 {
-                    self.derived_base.add(triple, -cur);
-                }
-                merged += self.emit_derived(triple, -1, DerivationKind::ClosureInferred);
+                merged += self.withdraw_derived_row(triple, DerivationKind::ClosureInferred);
                 self.note_presence_change(triple, init_delta);
             }
 
@@ -970,12 +980,8 @@ impl Circuit {
                 if self.closure_support.contains(triple) {
                     continue;
                 }
-                let cur = self.derived_base.get(triple);
-                if cur != 0 {
-                    self.derived_base.add(*triple, -cur);
-                }
                 derived_merged +=
-                    self.emit_derived(*triple, -1, DerivationKind::RuleInferred(*old_rid));
+                    self.withdraw_derived_row(*triple, DerivationKind::RuleInferred(*old_rid));
             }
         }
         self.rule_attr = new_rule;
