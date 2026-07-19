@@ -233,7 +233,10 @@ stops being latent:
   last checkpoint. The on-disk format and per-predicate-partition layout
   belong to SPEC-02 Stage 2 (E3); this spec owns the log *contract* (ordering,
   atomicity of a tick's batch, replay-to-identical-state) and the crash tests
-  that pin it.
+  that pin it. **Settled — ADR-0018:** one physical log (the SPEC-25 S3 WAL)
+  with typed records; this contract is a thin layer over it (`Input` records
+  durable on append; `TickCommit` marks the drained range at its commit
+  version; recovery re-submits inputs past the last tick marker).
 - **Checkpoint scheduling.** Implement the F8 cadence (configurable; default
   1 min / 100K deltas, whichever first) as an actual scheduler driving
   `Checkpoint::merge` + WAL truncation, replacing today's
@@ -249,9 +252,10 @@ it:
   `logical_time()` as an inclusive as-of token; pinned immutably across
   concurrent writes; cheap to clone.
 - **Version reconciliation.** The circuit's `LogicalTime` and storage's
-  whole-tier `TierSnapshot.version: u64` are independent counters today; the
-  binding maps one onto the other (one shared monotonic clock, or a persisted
-  mapping) so that "snapshot at t" means the same thing in both layers.
+  whole-tier `TierSnapshot.version: u64` are independent counters today.
+  **Settled — ADR-0018:** the storage commit version is the shared clock; a
+  tick commits as one storage batch and adopts its commit version, so
+  "snapshot at t" means the same thing in both layers with no mapping.
 - **What this buys.** The O(|asserted| + |derived|) first-acquire presence
   rebuild disappears — visibility becomes a per-tuple predicate evaluated at
   scan time in storage — and point queries against partially applied in-flight
@@ -384,8 +388,8 @@ independent but lowest urgency.
 - **E3 sequencing.** S5/S6 consume storage deliverables that do not exist
   yet (per-tuple visibility, delete path, WAL format). If E3 slips, S5 can
   still land the log contract against a file-backed stub; S6 cannot — it
-  stays blocked. The version-reconciliation design (one clock vs. a mapping)
-  should be agreed with E3 before either side builds.
+  stays blocked. The version-reconciliation design is agreed — **ADR-0018**
+  (storage commit version as the shared clock, single typed WAL).
 - **Tick regime unification could regress insertion latency.** Collapsing the
   two `tick()` regimes (S1) must not slow the insertion-only fast path that
   meets NF1/NF2 today; the criterion benches (`insert_throughput`) gate the
