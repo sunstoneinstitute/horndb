@@ -20,7 +20,9 @@ Honour the project's global rules throughout:
 - **Keep the docs in sync** per `CLAUDE.md` → "Keep the docs in sync" and
   "Keep GitHub issues in sync with `TASKS.md`": `TASKS.md`, its index,
   `docs/architecture.md` **Status**, and the matching GitHub issue all move
-  together, in the same commit/PR.
+  together within the same task — with the sanctioned split that `TASKS.md`
+  transitions are locked commits on `main`, never on the feature branch
+  (see "Coordination" below and Phase 4).
 - **Verify before claiming done** per
   `superpowers:verification-before-completion` — run the real commands, read
   the real output.
@@ -164,7 +166,8 @@ code:
 > **Docs-sync note.** `CLAUDE.md` asks for `TASKS.md` and `docs/architecture.md`
 > to move in the same commit. Under `/next-task` they intentionally split:
 > `architecture.md` rides the PR, the TASKS.md checkbox flip is a separate
-> locked commit on `main` (Phase 8). This is the one sanctioned exception; the
+> locked commit on `main` (Phase 8). This is the sanctioned exception documented
+> in `AGENTS.md` → "Keep the docs in sync" → *Feature-branch exception*; the
 > two still converge on `main` within the same task.
 
 Commit message should describe the work; reference the issue.
@@ -181,7 +184,12 @@ git push -u origin "<branch>"
 
 Open the PR with base `main`. The body must include **`Closes #<N>`** (for an
 epic increment, `Closes #<sub-issue>` and reference the parent `#<N>`) so the
-merge auto-closes the tracking issue. Prefer the project's `new-pr` skill if
+merge auto-closes the tracking issue. If the PR updates `docs/architecture.md`
+(or otherwise changes task state), also add one line pre-empting the docs-sync
+finding, e.g.: *"`TASKS.md` intentionally not touched — it is lock-serialized
+on `main`; the checkbox flip lands as a locked commit right after this merges
+(sanctioned feature-branch exception, see `AGENTS.md` → Keep the docs in
+sync)."* Prefer the project's `new-pr` skill if
 available, otherwise:
 
 ```bash
@@ -234,6 +242,14 @@ Work through codex's review **with engineering rigor, not deference** — use th
 - **Verify it against the code first.** codex can be wrong or miss context.
   If you disagree, say why (you will record the justification in the report)
   rather than applying a change you believe is incorrect.
+- **Known expected finding:** codex may flag that `TASKS.md` was not updated
+  alongside `docs/architecture.md`. That is the sanctioned feature-branch
+  exception (`AGENTS.md` → "Keep the docs in sync"), not a real defect —
+  decline it, citing the exception. Do not "fix" it by committing `TASKS.md`
+  on the branch.
+- **Record each declined finding as a PR comment** (`gh pr comment`) with the
+  one-line rationale, so the decision is visible on the PR, not just in the
+  session report.
 - **Fix the real ones in the worktree**, with atomic commits, and **push**.
   For non-trivial fixes, prefer `superpowers:subagent-driven-development`;
   trivial one-liners may be applied directly.
