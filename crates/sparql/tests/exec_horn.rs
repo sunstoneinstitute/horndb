@@ -293,7 +293,6 @@ fn materialized_closure_is_queryable() {
     }
 }
 
-#[cfg(feature = "reasoner")]
 /// Graph with known per-predicate counts, for the stats-backed estimator:
 /// - `p1`: 5 triples (s1..s5 each once) — a fan-out-1 predicate.
 /// - `p2`: 3 triples (s1..s3 each once).
@@ -369,6 +368,7 @@ fn cardinality_empty_bgp_is_join_identity() {
     assert_eq!(st.cardinality_estimate(&[]), Some(1));
 }
 
+#[cfg(feature = "reasoner")]
 #[test]
 fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {
     use oxrdf::{Dataset, GraphName, Literal, NamedNode, NamedOrBlankNode, Quad};
