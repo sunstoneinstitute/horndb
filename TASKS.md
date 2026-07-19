@@ -49,7 +49,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
-- [ ] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
+- [v] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210)) — _wip: 2d1783e3@Stigs-MacBook-Pro.local · task-210-spec-24-s1-delta-incremental-rule-retrac · 2026-07-19T19:55:22Z_
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
@@ -382,7 +382,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/plans/PLAN-23-07-backward-chaining.md`. Gate: backward answers
   result-identical to the materialized closure on the OWL 2 RL subset.
 
-- [ ] **SPEC-24 S1: delta-incremental rule retraction.** ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
+- [v] **SPEC-24 S1: delta-incremental rule retraction.** ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
   The core DBSP bet of epic E2 (#186, closed → decomposed): thread negative
   multiplicities through the bilinear operators end-to-end, with an incremental
   `distinct` at the fixpoint boundary (per-derived-row cumulative-weight trace)
