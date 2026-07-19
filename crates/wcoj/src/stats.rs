@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::ids::{Ordering, TermId};
 use crate::pattern::{Term, TriplePattern, Var};
 use crate::source::vec_source::VecTripleSource;
-use crate::source::TripleSource;
 
 /// Which side of a triple a per-predicate statistic is keyed on. The predicate
 /// is always bound in per-predicate stats, so only subject and object vary.
@@ -203,7 +202,14 @@ impl SnapshotStats {
     /// counts are read. Tier 2 reuses the `Pso`/`Pos` runs to find each
     /// predicate's largest single-node fan-out.
     pub fn from_source(src: &VecTripleSource) -> Self {
-        let total = src.total_triples() as u64;
+        // Count the deduplicated indexed rows, not `src.total_triples()` (the
+        // pre-dedup input length). Self-consistency: `total` must equal the rows
+        // the executor can produce and the sum of the exact per-predicate counts,
+        // so duplicate input triples never inflate unbound-predicate estimates.
+        let total = src
+            .sorted_rows(Ordering::Spo)
+            .map(|r| r.len() as u64)
+            .unwrap_or(0);
 
         let mut predicate_count: HashMap<TermId, u64> = HashMap::new();
         let mut ndv_subject: HashMap<TermId, u64> = HashMap::new();
@@ -727,6 +733,22 @@ mod tests {
             .find(|s| s.predicates == vec![10])
             .expect("{10} set present");
         assert_eq!(just_10.count, 2);
+    }
+
+    #[test]
+    fn total_counts_deduplicated_triples() {
+        // `from_triples` dedups its sorted indexes, so `total` must reflect the
+        // DISTINCT triple count, not the inflated pre-dedup input length. Here the
+        // input repeats (1,10,100), so 4 rows in → 3 distinct rows.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 100), // duplicate of the first
+            Triple::new(2, 10, 101),
+            Triple::new(3, 20, 200),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let stats = SnapshotStats::from_source(&src);
+        assert_eq!(stats.total_triples(), 3);
     }
 
     #[test]

@@ -263,6 +263,12 @@ impl HornBackend {
 
     fn invalidate(&mut self) {
         *self.snapshot.get_mut().expect("snapshot lock poisoned") = None;
+        // Clear the stats cache too: releases the obsolete snapshot's Arc (all six
+        // sorted indexes) immediately rather than pinning it until the next estimate.
+        *self
+            .stats_cache
+            .get_mut()
+            .expect("stats_cache lock poisoned") = None;
     }
 
     /// Insert one oxrdf triple. Returns true if it was new (i.e. live count increased).
