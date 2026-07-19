@@ -8,12 +8,14 @@ pub mod batch;
 pub mod cancel;
 pub mod cardinality;
 pub mod error;
+pub mod estimator;
 pub mod executor;
 pub mod ids;
 pub mod pattern;
 pub mod plan;
 pub mod planner;
 pub mod source;
+pub mod stats;
 pub mod trie;
 
 pub use error::WcojError;

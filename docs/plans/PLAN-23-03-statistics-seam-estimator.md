@@ -1,7 +1,7 @@
 ---
-status: draft
+status: executed
 date: 2026-07-07
-scope: "Phase 3: a layered read-only Stats seam over SPEC-02 + a Characteristic-Sets / degree-bound cardinality estimator (NDV+counts baseline), wired into EXPLAIN, demoting UniformEstimator to fallback"
+scope: "Phase 3: a layered read-only Stats seam + a Characteristic-Sets / degree-bound cardinality estimator (NDV+counts baseline), computed recompute-from-snapshot, wired into EXPLAIN, demoting UniformEstimator to fallback"
 ---
 
 # Statistics Seam + Cardinality Estimator Implementation Plan
@@ -11,16 +11,29 @@ scope: "Phase 3: a layered read-only Stats seam over SPEC-02 + a Characteristic-
 **Epic:** [#185](https://github.com/sunstoneinstitute/horndb/issues/185).
 **SotA (state-of-the-art) reference:** [`docs/research/optimizer-sota.md`](../research/optimizer-sota.md) Part A — read it before task 1; it is the "why these algorithms" behind every choice here.
 
-> ⚠️ **BLOCKED — not ready to execute.**
+> ✅ **UNBLOCKED via recompute-from-snapshot (SPEC-23 §8 #1 provisional resolution).**
 >
-> This is a **design + task outline**, not an executable TDD (test-driven development) plan. Writing exact Rust against the not-yet-existent statistics surface would be fiction that rots. Do not expand into full TDD steps until the blockers below clear. The *algorithm* choices below are firm (SotA-grounded); the *code* is not.
+> **Resolution of the ownership question (§8 #1), provisional, for review with SPEC-02/SPEC-06:**
+> the `Stats` impl reads a **read-only, computed-from-the-pinned-snapshot** summary. Statistics
+> (per-predicate counts, per-position NDV, the Characteristic-Sets index, per-role max-degree)
+> are computed by **scanning the snapshot the query executor already materializes**, cached per
+> snapshot, and **recomputed when the snapshot changes** — no incremental maintenance under
+> SPEC-06 deltas. This sidesteps the CS-is-not-incremental problem (the hard sub-question):
+> a recompute is always coherent because it reads one immutable snapshot. Incremental
+> maintenance stays a future SPEC-06 coordination item; recompute-from-snapshot is the
+> conservative default that unblocks the estimator now.
 >
-> **Blocking dependencies:**
-> - **SPEC-02 statistics surface is incomplete.** What exists today in `crates/storage/src/store.rs`: `triple_count()` (~L55), `stats() -> TierStats` (~L59), and `top_predicates(n) -> Vec<(Term,u64)>` (~L131). So **per-predicate counts are partially unblocked**; there is **no NDV (number of distinct values), no per-position selectivity, no characteristic-set index, and no degree summary** — those are the gap this phase depends on.
-> - **SPEC-06 delta maintenance.** Characteristic Sets are **not naturally incremental** (§"Tier 1" below) — the hard part. Whoever populates the summary must keep it coherent under DBSP Z-set deltas, or accept periodic recompute. Undesigned here.
-> - **SPEC-23 §8 open question #1 "SPEC-02 statistics ownership" BLOCKS this phase** — until it is resolved (does SPEC-02 grow these summaries as first-class, maintained incrementally under SPEC-06 deltas, or via periodic recompute?), the `Stats` impl has no source of truth.
+> **Where the stats are computed — deviation from "in `horndb-storage`".** The crate
+> dependency direction is `storage → wcoj`, so `horndb-storage` **cannot** implement a `Stats`
+> trait defined in `horndb-wcoj`. Therefore the seam, the stat data types, and the
+> recompute-from-snapshot impl all live in **`horndb-wcoj`**, computed from the
+> `TripleSource` snapshot (`VecTripleSource`, the materialized view the executor already builds
+> via `wcoj_snapshot()`). This keeps everything in wcoj's `TermId` space and makes the stats
+> **consistent by construction** with the measured `count_bgp` numbers the accuracy gate
+> compares against. `horndb-storage` is unchanged.
 >
-> This plan may still be *drafted* against the layered `Stats` trait shape (§5.3) so the seam is ready the day SPEC-02 lands.
+> The *algorithm* choices below are firm (SotA-grounded). The executable task plan is at the
+> end of this document (**"Executable task plan"**).
 
 **Goal:** Replace the `_est`-ignoring coarse estimator with a real RDF-native cardinality
 estimator over a **layered** read-only `Stats` seam on SPEC-02 storage, surfaced through the
@@ -176,3 +189,212 @@ disconnected `Executor::cardinality_estimate` path).
   (the degree-bound guarantee).
 - `UniformEstimator` remains available as the zero-stats fallback and is only demoted (not
   deleted) once the stats-backed estimator is proven at least as good on the harness.
+
+**Locked baseline (Task 8 gate).** The accuracy gate lives in-crate as
+`crates/wcoj/src/estimator.rs` (`mod accuracy_gate::accuracy_gate_spec23_acceptance_3`).
+It runs a 6-shape suite over a synthetic graph with predicate correlation, grading the
+stats estimator against the ground-truth oracle (`brute_force_count`). The graph has two
+regimes: a **regular** correlated part (implicit types A/B, uniform fan-out — CS is exact
+there) and a **skewed** part (Type C: hub subjects with large, positively correlated
+`{p5,p6}` fan-out, plus p5-noise and an unrelated total-inflating blob) that exercises CS's
+mean-based approximation. Measured within-an-order-of-magnitude fraction = **1.0** (shapes
+1–5 exact; the skewed star lands 296 vs true 1217 — approximate but still within 10×);
+**0.8 is the locked threshold** carried forward from this baseline. The gate also asserts:
+stats mean |log-ratio| error (0.2356) strictly below uniform's (3.9308); CS star error
+(0.3534) ≤ denominator error (1.1636), strictly lower on the correlated star; on the
+**skewed** star CS error (1.4138) is > 0 (proving the approximate regime is tested) and
+strictly below both uniform (2.0658) and denominator (2.1697); and `upper_bound ≥ measured`
+on every shape.
+
+---
+
+## Executable task plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`.
+> Execute task-by-task; each task is TDD (red → green → commit). Types/signatures below are
+> firm; fill bodies via TDD. Everything lives in **`horndb-wcoj`** except EXPLAIN wiring
+> (`horndb-sparql`) and the accuracy check (`horndb-harness`). `horndb-storage` is untouched.
+
+**Goal:** A layered read-only `Stats` seam + a Characteristic-Sets/degree-bound cardinality
+estimator, computed recompute-from-snapshot from the wcoj `TripleSource`, wired into `EXPLAIN`,
+with `UniformEstimator` demoted to the zero-stats fallback and an accuracy gate proving the new
+estimator strictly better than uniform (CS beats the Tier-0 denominator model on star shapes;
+`upper_bound` never below measured).
+
+**Key types (all in `crates/wcoj/src/stats.rs`, `TermId = u64`):**
+
+```rust
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position { Subject, Object }   // predicate is always bound in per-predicate stats
+pub type Role = Position;               // degree role; same axis
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Estimate { pub estimate: u64, pub upper_bound: u64 }
+
+/// One characteristic set: the exact predicate-set of some group of subjects.
+pub struct CharacteristicSet {
+    pub predicates: Vec<TermId>,          // sorted, distinct — the set key
+    pub count: u64,                       // #subjects with exactly this predicate-set
+    pub occurrences: Vec<(TermId, u64)>,  // sorted by pred: total objects for that pred across the count subjects
+}
+
+/// Top-K frequent sets + a residual bucket folding the rare-set tail.
+pub struct CharacteristicSetIndex {
+    pub sets: Vec<CharacteristicSet>,     // top-K by count, descending
+    pub residual_subjects: u64,           // #subjects in the folded tail
+    pub residual_pred_occ: Vec<(TermId, u64)>, // pred -> object occurrences within the tail
+    // predicate -> indices into `sets` that contain it (superset-lookup accelerator)
+    pub by_predicate: std::collections::HashMap<TermId, Vec<usize>>,
+}
+
+pub struct DegreeSummary; // Tier-2 design-for stub (SafeBound/LpBound is PLAN-23-05)
+
+pub trait Stats: Send + Sync {
+    fn total_triples(&self) -> u64;
+    fn predicate_count(&self, p: TermId) -> u64;
+    fn ndv(&self, p: TermId, pos: Position) -> u64;
+    fn characteristic_sets(&self) -> &CharacteristicSetIndex;
+    fn max_degree(&self, p: TermId, role: Role) -> u64;
+    fn degree_sequence(&self, _p: TermId, _role: Role) -> Option<DegreeSummary> { None }
+    fn sample_join(&self, _patterns: &[TriplePattern]) -> Option<(f64, f64)> { None }
+}
+```
+
+### Task 1 — `Stats` trait, data types, `ZeroStats` fallback
+
+**Files:** Create `crates/wcoj/src/stats.rs`; modify `crates/wcoj/src/lib.rs` (add `pub mod stats;`).
+
+- [ ] Write failing unit test `zero_stats_is_conservative`: a `ZeroStats::new(total)` returns
+  `total_triples()==total`, `predicate_count(p)` a conservative non-zero (documented: `total`),
+  `ndv(p,pos)==1` (most-conservative denominator → never divides output down spuriously),
+  `characteristic_sets().sets` empty, `max_degree(..)==total` (loosest bound). Run: `cargo test -p horndb-wcoj zero_stats_is_conservative` → FAIL (no `stats` module).
+- [ ] Implement the types above + `ZeroStats { total, empty_index: CharacteristicSetIndex }`.
+  `CharacteristicSetIndex::empty()` helper. `Estimate`, `Position`, `Role`.
+- [ ] Green + `cargo fmt --all` + commit: `feat(wcoj): layered Stats seam + ZeroStats fallback`.
+
+### Task 2 — expose the snapshot rows + `SnapshotStats` Tier 0 (counts + NDV)
+
+**Files:** modify `crates/wcoj/src/source/vec_source.rs` (add `pub fn sorted_rows(&self, ord: Ordering) -> Option<&[(TermId, TermId, TermId)]>`); modify `crates/wcoj/src/stats.rs`.
+
+- [ ] Test `snapshot_stats_tier0`: build a `VecTripleSource` from a small known triple set
+  (e.g. preds p1 on 3 subjects with 2 distinct objects each; p2 on 1 subject). Assert
+  `predicate_count(p1)==6`, `ndv(p1, Subject)==3`, `ndv(p1, Object)==2`, `total_triples()`.
+  Run → FAIL.
+- [ ] Add `VecTripleSource::sorted_rows`. Implement `SnapshotStats::from_source(&dyn TripleSource)`
+  (or `from_vec_source(&VecTripleSource)`): scan `Pso` slice for per-predicate counts + distinct
+  subjects (NDV Subject), `Pos` slice for distinct objects (NDV Object). Store in `HashMap<TermId,…>`.
+  Exact distinct counts over the sorted slice (adjacent-dedupe — no HLL needed at snapshot scale;
+  note HLL as the future incremental path). Cache computed index in the struct.
+- [ ] Green + fmt + commit: `feat(wcoj): SnapshotStats Tier 0 counts+NDV from the pinned snapshot`.
+
+### Task 3 — `SnapshotStats` Tier 1 (Characteristic-Sets index) + Tier 2 (max_degree)
+
+**Files:** modify `crates/wcoj/src/stats.rs`.
+
+- [ ] Test `characteristic_sets_grouping`: from a graph where subjects s1,s2 have predicate-set
+  {p1,p2} and s3 has {p1}, assert the index has a set `{p1,p2}` with `count==2` and one `{p1}`
+  with `count==1`; `occurrences` sums objects correctly; `by_predicate[p1]` lists both set indices.
+  Test `max_degree_basic`: `max_degree(p1, Subject)` == max #objects any single subject has on p1.
+  Run → FAIL.
+- [ ] Implement CS build: scan `Spo` slice grouped by subject; for each subject collect its
+  distinct predicate-set + per-pred object counts; aggregate identical predicate-sets. Keep top-K
+  (const `CS_TOP_K: usize = 1024`) by count; fold the rest into `residual_*`. Build `by_predicate`.
+  Implement `max_degree` from a per-(pred,role) max computed in the same scans.
+- [ ] Green + fmt + commit: `feat(wcoj): SnapshotStats Tier 1 characteristic sets + Tier 2 max_degree`.
+
+### Task 4 — `StatsEstimator`: per-pattern base + denominator join model (equality classes + PK/FK cap)
+
+**Files:** Create `crates/wcoj/src/estimator.rs`; modify `crates/wcoj/src/lib.rs`.
+
+`StatsEstimator<'a, S: Stats>` holds `&'a S` + a memo `HashMap<u64 /*pattern bitset*/, Estimate>`.
+
+- Per-pattern base card (`estimate_pattern`): predicate bound → `predicate_count(p)` scaled by
+  bound S/O via `1/ndv(p,pos)` per bound endpoint (so `?s p o` ≈ `predicate_count/ndv(p,Object)`,
+  `s p o` ≈ `max(1, predicate_count/(ndv_s*ndv_o))`); predicate unbound → the `sparopt` 8-entry
+  static shape table by which of S/P/O are bound (document the constants inline).
+- Join output (denominator model): `∏ base / denom`. For each variable shared across patterns,
+  `denom_var ≈ max(ndv over the patterns binding it)`; a variable shared across ≥3 patterns is
+  divided **once** (transitive equality class), not per pair. PK/FK cap: the joined estimate for
+  patterns sharing a var never exceeds the smaller participating base (protects `owl:sameAs` /
+  functional-property joins). Memoize by pattern-index bitset.
+
+- [ ] Test `estimate_pattern_matches_counts` (single bound-predicate pattern ≈ predicate_count),
+  `denominator_join_shrinks` (2-pattern star estimate ≤ product, ≥ larger base), `pkfk_cap`
+  (a sameAs-shaped join capped at the smaller input), `memoized` (same bitset → cached). Run → FAIL.
+- [ ] Implement. Green + fmt + commit: `feat(wcoj): StatsEstimator base + denominator join model`.
+
+### Task 5 — CS star-join estimator + degree upper bound → `(estimate, upper_bound)`
+
+**Files:** modify `crates/wcoj/src/estimator.rs`.
+
+- Star detection: a BGP sub-group of patterns sharing one subject variable with bound predicates.
+  Route to CS: for query predicate set `P` on `?s`,
+  `est ≈ Σ_{C : P ⊆ C.predicates} C.count · Π_{p∈P} (occ(C,p)/C.count)` (+ residual-bucket term).
+  ⚠ **Verify this formula against Neumann & Moerkotte ICDE'11 before coding** (§5.4 note; the
+  survey's reconstruction carries a ⚠). Non-star groups keep the task-4 denominator estimate.
+- Upper bound (always set): degree-based — `Π max_degree(p, role)` over the star's bound
+  predicates, capped at `total_triples()`; for the denominator path, the product of per-pattern
+  bases capped likewise. `estimate` ≤ `upper_bound` must hold; `upper_bound` ≥ any achievable size.
+
+- [ ] Test `cs_beats_denominator_on_star`: on a synthetic graph with correlated predicates
+  (implicit "type" — subjects that have p1 always have p2), the CS star estimate is closer to the
+  true `count_bgp` than the denominator estimate. Test `upper_bound_never_below_measured`: over a
+  set of shapes, `upper_bound >= measured` always. Run → FAIL.
+- [ ] Implement (verify the CS formula first; record the check in the commit body). Green + fmt +
+  commit: `feat(wcoj): characteristic-sets star estimator + degree upper bound`.
+
+### Task 6 — Tier-3 `sample_join` hook (stub, off the default path)
+
+**Files:** modify `crates/wcoj/src/stats.rs`.
+
+- [ ] Keep `sample_join` as the trait default returning `None` for `ZeroStats`; for `SnapshotStats`
+  provide a **documented light Wander-Join-style** walk **behind a `cfg`/opt-in flag returning
+  `None` by default** (the plan: hook now, not on the default path). Add a `#[ignore]`-free unit
+  test asserting it returns `None` unless explicitly enabled, so the hook is covered but inert.
+- [ ] Green + fmt + commit: `feat(wcoj): sample_join Tier-3 hook (inert by default)`.
+
+### Task 7 — wire the estimator into EXPLAIN (unify the cardinality surface)
+
+**Files:** modify `crates/sparql/src/exec/horn.rs` (`cardinality_estimate`), `crates/sparql/src/plan/explain.rs`, and golden EXPLAIN snapshots under `crates/sparql/` (update in this task).
+
+- [ ] In `horn.rs::cardinality_estimate`, build a `SnapshotStats` from `self.wcoj_snapshot()`,
+  translate the sparql `TriplePattern`s to wcoj patterns (reuse the existing translation in
+  `count_bgp`/`scan_bgp_ids`), run `StatsEstimator::estimate_bgp`, and return the **point
+  estimate** (`Estimate.estimate`) as `Some(usize)`. Gate: if the snapshot is empty or stats are
+  degenerate, fall back to the old coarse bound (keep `UniformEstimator` semantics reachable).
+- [ ] Keep the `~N rows` rendering; optionally append `(≤U)` upper bound in the EXPLAIN text if the
+  golden format allows — otherwise leave rendering untouched to minimise snapshot churn.
+- [ ] Update golden snapshots. Run `cargo test -p horndb-sparql` and (if server touched)
+  `cargo test -p horndb-sparql --features server`. Green + fmt + commit:
+  `feat(sparql): EXPLAIN uses the stats-backed cardinality estimator`.
+
+### Task 8 — accuracy gate on the conformance subset (harness) + baseline threshold
+
+**Files:** add a test under `crates/harness/tests/` (e.g. `cardinality_accuracy.rs`) or a harness
+subcommand; consult `crates/harness/CLAUDE.md` for suite wiring.
+
+- [ ] For each BGP-bearing query in the conformance subset, compute measured rows via the existing
+  count path and both estimates (uniform vs stats). Assert, as the gate: (a) the stats estimator's
+  aggregate |log-ratio| error is **strictly less** than uniform's; (b) on star-shaped queries the
+  CS estimate's error < the denominator estimate's error; (c) `upper_bound >= measured` on every
+  tested node. Record the measured threshold X% (within-an-order-of-magnitude fraction) in the test
+  and in `docs/benchmarks.md`/this plan's acceptance section. Run the harness locally (production
+  crates) to confirm green.
+- [ ] Green + fmt + commit: `test(harness): EXPLAIN cardinality accuracy gate (stats > uniform)`.
+
+### Task 9 — docs sync + plan close-out
+
+**Files:** `docs/architecture.md` (flip the SPEC-23 phase-3 / statistics-seam row to
+**implemented**), `docs/specs/SPEC-23-unified-ir.md` (§8 #1: note the provisional
+recompute-from-snapshot resolution + pointer here), this plan (`status: executed`), and
+`docs/index.md` if a new doc was added. **Do not touch `TASKS.md`** (lock-serialized on `main`).
+
+- [ ] Update docs; `cargo fmt --all`; commit: `docs: SPEC-23 phase-3 stats seam implemented; §8 #1 resolved (recompute-from-snapshot)`.
+
+## Acceptance mapping (SPEC-23 §7.3 / acceptance #3)
+
+- *within an order of magnitude, ≥ X% of nodes, strictly better than `UniformEstimator`* → Task 8 (a).
+- *CS beats the Tier-0 denominator model on star shapes* → Task 5 test + Task 8 (b).
+- *`upper_bound` never below measured* → Task 5 test + Task 8 (c).
+- *`UniformEstimator` demoted, not deleted; fallback default until proven* → Task 1 (`ZeroStats`),
+  Task 7 gate/fallback, `UniformEstimator` retained in `cardinality.rs`.

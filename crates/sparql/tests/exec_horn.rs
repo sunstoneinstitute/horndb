@@ -293,6 +293,139 @@ fn materialized_closure_is_queryable() {
     }
 }
 
+/// Graph with known per-predicate counts, for the stats-backed estimator:
+/// - `p1`: 5 triples (s1..s5 each once) — a fan-out-1 predicate.
+/// - `p2`: 3 triples (s1..s3 each once).
+/// - `p3`: 2 triples (s1, s2).
+///
+/// Total live triples = 10.
+fn stats_store() -> HornBackend {
+    let mut st = HornBackend::new();
+    for i in 1..=5 {
+        st.insert_triple(iri(&format!("s{i}")), iri("p1"), iri(&format!("o{i}")));
+    }
+    for i in 1..=3 {
+        st.insert_triple(iri(&format!("s{i}")), iri("p2"), iri(&format!("c{i}")));
+    }
+    for i in 1..=2 {
+        st.insert_triple(iri(&format!("s{i}")), iri("p3"), iri(&format!("d{i}")));
+    }
+    st
+}
+
+#[test]
+fn cardinality_single_pattern_equals_predicate_count() {
+    let st = stats_store();
+    // `?s <p1> ?o` matches exactly the p1 triples: the estimator returns the
+    // predicate count (5), NOT the old coarse `self.len()` bound (10).
+    let patterns = vec![pat(var("s"), iri("p1"), var("o"))];
+    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    assert_eq!(true_count, 5, "sanity: p1 has 5 triples");
+    assert_eq!(
+        st.cardinality_estimate(&patterns),
+        Some(5),
+        "single-pattern estimate must equal the predicate count, not total triples"
+    );
+}
+
+#[test]
+fn cardinality_two_pattern_star_is_cs_estimate() {
+    let st = stats_store();
+    // Subject-star: subjects carrying both p1 and p2 → s1,s2,s3 → 3 rows.
+    let patterns = vec![
+        pat(var("s"), iri("p1"), var("o1")),
+        pat(var("s"), iri("p2"), var("o2")),
+    ];
+    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    assert_eq!(true_count, 3, "sanity: 3 subjects share p1 and p2");
+
+    let est = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    // Characteristic-Sets point estimate: within an order of magnitude of the
+    // true join size, and NOT the old coarse `self.len()` (10) upper bound.
+    assert_ne!(
+        est, 10,
+        "must not fall back to the coarse live-triple count"
+    );
+    assert!(
+        (1..=30).contains(&est),
+        "star estimate {est} should be within an order of magnitude of true count 3"
+    );
+}
+
+#[test]
+fn cardinality_unknown_constant_is_zero() {
+    let st = stats_store();
+    // A predicate the dictionary has never seen: the BGP can match nothing.
+    let patterns = vec![pat(var("s"), iri("never-inserted"), var("o"))];
+    assert_eq!(st.cardinality_estimate(&patterns), Some(0));
+}
+
+#[test]
+fn cardinality_empty_bgp_is_join_identity() {
+    let st = stats_store();
+    assert_eq!(st.cardinality_estimate(&[]), Some(1));
+}
+
+/// The `SnapshotStats` cache behind `cardinality_estimate` must not go stale:
+/// it is keyed on the snapshot's `Arc` identity, and any write rebuilds the
+/// snapshot into a fresh `Arc`. Two calls with no write in between must return
+/// the same number (cache hit); a write in between must change the estimate to
+/// reflect the new data (cache correctly invalidated, not stale).
+#[test]
+fn cardinality_stats_cache_invalidates_on_write() {
+    let mut st = stats_store();
+    let patterns = vec![pat(var("s"), iri("p1"), var("o"))];
+
+    // Baseline: p1 has 5 triples; the estimate equals the predicate count.
+    let before = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(before, 5, "sanity: p1 starts at 5 triples");
+
+    // Cache-hit path: a second call with NO write returns the same number.
+    let again = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(
+        again, before,
+        "no-write repeat must return the cached estimate"
+    );
+
+    // Mutate the store: add 5 more distinct p1 triples (subjects s6..s10),
+    // rebuilding the snapshot into a fresh `Arc`.
+    for i in 6..=10 {
+        st.insert_triple(iri(&format!("s{i}")), iri("p1"), iri(&format!("o{i}")));
+    }
+
+    // The estimate must reflect the new data, not the stale (5) figure — proof
+    // the stats cache invalidated with the snapshot.
+    let after = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    assert_eq!(true_count, 10, "sanity: p1 now has 10 triples");
+    assert_eq!(
+        after, 10,
+        "estimate must reflect the post-write data, not the stale pre-write value"
+    );
+    assert!(
+        after > before,
+        "estimate must increase after inserting more matching triples"
+    );
+
+    // Retraction path: delete one p1 triple; the estimate must drop again.
+    st.delete_triple(&iri("s10"), &iri("p1"), &iri("o10"));
+    let after_delete = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(
+        after_delete, 9,
+        "estimate must reflect the retraction, not the stale post-insert value"
+    );
+}
+
 #[cfg(feature = "reasoner")]
 #[test]
 fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {

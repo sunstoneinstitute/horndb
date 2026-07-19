@@ -6,7 +6,7 @@ use crate::ids::{Ordering, TermId};
 pub struct Var(pub u8);
 
 /// One slot of a triple pattern.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Term {
     Bound(TermId),
     Var(Var),
@@ -27,7 +27,7 @@ impl Term {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TriplePattern {
     pub s: Term,
     pub p: Term,

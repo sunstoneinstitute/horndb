@@ -159,11 +159,14 @@ use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
 use horndb_storage::{Store as ColumnStore, TermId};
 use horndb_wcoj::cancel::CancelToken;
+use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
 use horndb_wcoj::ids::Triple as WTriple;
 use horndb_wcoj::pattern::{Bgp as WBgp, Term as WTerm, TriplePattern as WPattern, Var as WVar};
 use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::source::TripleSource;
+use horndb_wcoj::stats::SnapshotStats;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -205,6 +208,13 @@ pub struct HornBackend {
     live: u64,
     /// Lazily-built WCOJ source. `None` after any mutation.
     snapshot: Mutex<Option<Arc<VecTripleSource>>>,
+    /// Cached statistics summary derived from a specific snapshot, used by
+    /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
+    /// stats were built from alongside the stats themselves. The cache
+    /// self-invalidates: any write rebuilds the snapshot into a fresh `Arc`
+    /// (see `invalidate` + `wcoj_snapshot`), so a stale entry never passes the
+    /// `Arc::ptr_eq` identity check against the current snapshot.
+    stats_cache: Mutex<Option<(Arc<VecTripleSource>, Arc<SnapshotStats>)>>,
 }
 
 impl Default for HornBackend {
@@ -221,6 +231,7 @@ impl HornBackend {
             tombstones: HashSet::new(),
             live: 0,
             snapshot: Mutex::new(None),
+            stats_cache: Mutex::new(None),
         }
     }
 
@@ -252,6 +263,12 @@ impl HornBackend {
 
     fn invalidate(&mut self) {
         *self.snapshot.get_mut().expect("snapshot lock poisoned") = None;
+        // Clear the stats cache too: releases the obsolete snapshot's Arc (all six
+        // sorted indexes) immediately rather than pinning it until the next estimate.
+        *self
+            .stats_cache
+            .get_mut()
+            .expect("stats_cache lock poisoned") = None;
     }
 
     /// Insert one oxrdf triple. Returns true if it was new (i.e. live count increased).
@@ -465,6 +482,85 @@ impl HornBackend {
         let built = Arc::new(VecTripleSource::from_triples(triples));
         *guard = Some(Arc::clone(&built));
         built
+    }
+
+    /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
+    /// against the snapshot's `Arc` identity. Reuses the cached stats when they
+    /// were built from the same snapshot `Arc`; otherwise rebuilds (a full
+    /// snapshot scan) and replaces the cache. Correct across writes with no
+    /// explicit invalidation: any mutation rebuilds the snapshot into a new
+    /// `Arc`, which fails `Arc::ptr_eq` against the cached one.
+    fn snapshot_stats(&self, snapshot: &Arc<VecTripleSource>) -> Arc<SnapshotStats> {
+        let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
+        if let Some((cached_snap, cached_stats)) = guard.as_ref() {
+            if Arc::ptr_eq(cached_snap, snapshot) {
+                return Arc::clone(cached_stats);
+            }
+        }
+        let stats = Arc::new(SnapshotStats::from_source(snapshot.as_ref()));
+        *guard = Some((Arc::clone(snapshot), Arc::clone(&stats)));
+        stats
+    }
+
+    /// Translate sparql `TriplePattern`s to WCOJ patterns for cardinality
+    /// estimation.
+    ///
+    /// Simpler than `scan_bgp`'s translation: the estimator needs only each slot
+    /// as a bound id or a per-name variable index. It needs no diagonal-alias
+    /// handling (a variable repeated within one pattern just reuses that
+    /// pattern's index — it is not "shared across patterns"), and no
+    /// ground/non-ground split.
+    ///
+    /// Variable indices are assigned per distinct variable NAME across the BGP,
+    /// in first-appearance order.
+    ///
+    /// Returns `Ok(wpatterns)`, or `Err(estimate)` to short-circuit:
+    /// * `Err(0)` — a constant is unknown to the dictionary (or not
+    ///   representable), so the BGP can match nothing.
+    /// * `Err(self.len())` — the BGP has more than 256 distinct variables,
+    ///   beyond the `WVar` (`u8`) index space; fall back to the coarse count.
+    fn estimate_wpatterns(
+        &self,
+        patterns: &[TriplePattern],
+    ) -> std::result::Result<Vec<WPattern>, usize> {
+        let dict = self.store.dictionary();
+        // SPARQL variable name -> WCOJ var index, first-appearance order.
+        let mut var_index: HashMap<String, u8> = HashMap::new();
+        let mut wpatterns: Vec<WPattern> = Vec::with_capacity(patterns.len());
+        for pattern in patterns {
+            let mut slots = [WTerm::Var(WVar(0)); 3];
+            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+            for (slot_no, term) in slot_terms.into_iter().enumerate() {
+                slots[slot_no] = match term {
+                    Term::Var(v) => {
+                        let name = v.name();
+                        let idx = match var_index.get(name) {
+                            Some(&i) => i,
+                            None => {
+                                let next = var_index.len();
+                                if next > u8::MAX as usize {
+                                    return Err(usize::try_from(self.len()).unwrap_or(usize::MAX));
+                                }
+                                var_index.insert(name.to_owned(), next as u8);
+                                next as u8
+                            }
+                        };
+                        WTerm::Var(WVar(idx))
+                    }
+                    constant => {
+                        // Unrepresentable constants (variables can't occur here;
+                        // RDF 1.2 triple terms aren't stored) match nothing.
+                        let ox = algebra_to_oxrdf(constant).map_err(|_| 0usize)?;
+                        match dict.get(&ox) {
+                            Some(id) => WTerm::Bound(id.0),
+                            None => return Err(0),
+                        }
+                    }
+                };
+            }
+            wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+        }
+        Ok(wpatterns)
     }
 }
 
@@ -836,18 +932,41 @@ impl Executor for HornBackend {
         Ok(Batch { schema, rows })
     }
 
+    /// Stats-backed point estimate of a BGP's output size, used by `EXPLAIN`.
+    ///
+    /// Returns the layered estimator's point estimate over recompute-from-snapshot
+    /// statistics ([`SnapshotStats`] + [`StatsEstimator`]), replacing the old
+    /// coarse live-triple-count upper bound. Special cases: the empty BGP is the
+    /// join identity (`1`); an empty store or a constant unknown to the
+    /// dictionary yields `0`; a BGP beyond the WVar index space falls back to the
+    /// coarse live count.
     fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {
         // The empty BGP is the join identity: one row.
         if patterns.is_empty() {
             return Some(1);
         }
-        // Stage-1 estimate: the live triple count is a sound upper bound
-        // on any single BGP's output. There is no per-pattern statistic
-        // exposed at this seam yet (SPEC-02's dictionary store will carry
-        // index histograms), so `EXPLAIN` reports this coarse bound rather
-        // than a precise per-pattern count. Saturating cast keeps it
-        // within `usize` on 32-bit targets.
-        Some(usize::try_from(self.len()).unwrap_or(usize::MAX))
+        let snapshot = self.wcoj_snapshot();
+        // Empty store: no pattern can match.
+        if snapshot.total_triples() == 0 {
+            return Some(0);
+        }
+        let wpatterns = match self.estimate_wpatterns(patterns) {
+            Ok(w) => w,
+            // A short-circuit estimate the translation already resolved
+            // (0 for an unknown constant, or the coarse live count as a
+            // fallback when the BGP exceeds the WVar index space).
+            Err(short_circuit) => return Some(short_circuit),
+        };
+        // Recompute-from-snapshot statistics (SPEC-23 Phase 3), fed to the
+        // layered estimator. Building `SnapshotStats` scans the whole snapshot,
+        // so cache it keyed on the snapshot's `Arc` identity: an `EXPLAIN` with
+        // many BgpScan/GroupCountScan nodes calls this once per node, and every
+        // node shares one snapshot. The cache self-invalidates because a write
+        // rebuilds the snapshot into a new `Arc` that fails the `ptr_eq` check.
+        let stats = self.snapshot_stats(&snapshot);
+        let est = StatsEstimator::new(stats.as_ref());
+        let e = est.estimate_bgp(&wpatterns);
+        Some(usize::try_from(e.estimate).unwrap_or(usize::MAX))
     }
 
     /// Count BGP solutions without decoding terms or materializing rows.
@@ -1104,7 +1223,6 @@ impl Executor for HornBackend {
 mod tests {
     use super::*;
     use crate::algebra::Var;
-    use horndb_wcoj::source::TripleSource;
 
     #[test]
     fn insert_and_delete_round_trip() {

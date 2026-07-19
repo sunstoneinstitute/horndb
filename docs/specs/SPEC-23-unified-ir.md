@@ -505,8 +505,18 @@ first so everything else has a home.
   maintenance. Does SPEC-02 grow per-predicate counts/NDV, the characteristic-set index,
   and per-predicate degree summaries as first-class, and does SPEC-06 update them
   incrementally under deltas, or is there a periodic recompute? The characteristic-set
-  index is the hardest sub-question — it is not naturally incremental (§5.3). Blocks
-  phase 3.
+  index is the hardest sub-question — it is not naturally incremental (§5.3).
+  **Resolved provisionally (phase 3, [#203](https://github.com/sunstoneinstitute/horndb/issues/203)):**
+  **recompute-from-snapshot.** Phase 3 computes all four tiers read-only by scanning the
+  pinned query snapshot (`SnapshotStats::from_source` over the `VecTripleSource` the
+  executor already materializes), cached per snapshot and recomputed when it changes — no
+  incremental maintenance under SPEC-06 deltas. This sidesteps the CS-is-not-incremental
+  problem (a recompute always reads one immutable snapshot, so it is coherent by
+  construction). Because the crate dependency direction is `storage → wcoj`, the seam,
+  data types, and impl live in `horndb-wcoj`, not `horndb-storage`. **Still open:**
+  whether SPEC-02 should own these summaries as first-class and whether SPEC-06 should
+  maintain them incrementally (vs. keeping recompute-from-snapshot) — a future SPEC-02/06
+  coordination item, no longer blocking. See `PLAN-23-03`.
 - **AGM cost calibration.** The fractional-edge-cover bound gives an upper bound, not an
   expected size; how loose is it in practice on HornDB workloads, and does it need an
   empirical correction to sit on one scale with the i-cost/binary-cost terms?
