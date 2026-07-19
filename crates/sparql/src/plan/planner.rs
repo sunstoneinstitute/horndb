@@ -9,10 +9,10 @@
 //! (merged-graph semantics): a query mixing top-level triples with a
 //! `GRAPH` block produces `Join(Bgp, Bgp)`, which now coalesces into one
 //! flat `BgpScan` — result-invariant, and disable-able via
-//! `PRAGMA disable-pass=coalesce-bgp`. Phase 2 adds `Normalize` (constant
-//! folding + `Eq`→`SameTerm` strength reduction, see `plan::passes`).
-//! Cost-based ordering and the remaining heuristic rewrite passes land in
-//! later Phase-2 tasks behind the same registry.
+//! `PRAGMA disable-pass=coalesce-bgp`. Phase 2 adds the four heuristic
+//! rewrite passes (`Normalize`, `FilterPullup`, `FilterPushdown`,
+//! `ProjectionPushdown`, see `plan::passes`). Cost-based ordering lands in
+//! a later phase behind the same registry.
 
 use crate::algebra::Algebra;
 use crate::error::Result;
