@@ -192,13 +192,19 @@ disconnected `Executor::cardinality_estimate` path).
 
 **Locked baseline (Task 8 gate).** The accuracy gate lives in-crate as
 `crates/wcoj/src/estimator.rs` (`mod accuracy_gate::accuracy_gate_spec23_acceptance_3`).
-It runs a representative shape suite over a synthetic graph with predicate correlation
-(implicit types A/B) and grades the stats estimator against the ground-truth oracle
-(`brute_force_count`). Measured within-an-order-of-magnitude fraction = **1.0** (all five
-shape estimates exact on this regular correlated graph); **0.8 is the locked threshold**
-carried forward from this baseline. The gate also asserts: stats mean |log-ratio| error
-(0.0000) strictly below uniform's (1.2876); CS star error (0.0000) ≤ denominator error
-(0.8283), strictly lower on the correlated star; and `upper_bound ≥ measured` on every shape.
+It runs a 6-shape suite over a synthetic graph with predicate correlation, grading the
+stats estimator against the ground-truth oracle (`brute_force_count`). The graph has two
+regimes: a **regular** correlated part (implicit types A/B, uniform fan-out — CS is exact
+there) and a **skewed** part (Type C: hub subjects with large, positively correlated
+`{p5,p6}` fan-out, plus p5-noise and an unrelated total-inflating blob) that exercises CS's
+mean-based approximation. Measured within-an-order-of-magnitude fraction = **1.0** (shapes
+1–5 exact; the skewed star lands 296 vs true 1217 — approximate but still within 10×);
+**0.8 is the locked threshold** carried forward from this baseline. The gate also asserts:
+stats mean |log-ratio| error (0.2356) strictly below uniform's (3.9308); CS star error
+(0.3534) ≤ denominator error (1.1636), strictly lower on the correlated star; on the
+**skewed** star CS error (1.4138) is > 0 (proving the approximate regime is tested) and
+strictly below both uniform (2.0658) and denominator (2.1697); and `upper_bound ≥ measured`
+on every shape.
 
 ---
 

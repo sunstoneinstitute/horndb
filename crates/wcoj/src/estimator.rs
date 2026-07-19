@@ -789,17 +789,38 @@ mod tests {
     /// by the type-B subjects, which the per-predicate independence product cannot
     /// discount. The Characteristic-Sets estimator reads the exact `{p1,p2,p3}` /
     /// `{p1,p4}` sets and is unaffected.
+    ///
+    /// **Skewed regime** (Type C/D/E). The A/B graph is regular (uniform fan-out),
+    /// so CS is *exact* there — which alone cannot tell a correct estimator from
+    /// one that only happens to be exact on uniform fan-out. To exercise CS's
+    /// mean-based *approximation*, the graph also carries a skewed, positively
+    /// correlated star population:
+    /// - **Type C** — subjects `200..=219` on `{p5, p6}` with highly variable
+    ///   fan-out: 3 "hub" subjects have 20 objects on each of `p5` and `p6`; the
+    ///   other 17 have 1 each. `p5` and `p6` fan-outs move together (correlation),
+    ///   so the true star count is dominated by the hubs and the mean-based CS
+    ///   formula `count · mean(p5) · mean(p6)` under-estimates it (`err > 0`).
+    /// - **Type D** — 50 subjects with only `p5`: global noise that inflates
+    ///   `predicate_count(p5)` / `ndv(p5,Subject)` but not the `{p5,p6}` set, so it
+    ///   hurts the denominator model while CS ignores it.
+    /// - **Type E** — a blob on an unrelated predicate `p7` that inflates
+    ///   `total_triples`, so the total-based `UniformEstimator` over-estimates the
+    ///   `p5`/`p6` star while the per-predicate CS/denominator stats stay untouched.
     #[cfg(test)]
     mod accuracy_gate {
         use super::*;
         use crate::cardinality::{Cardinality, UniformEstimator};
 
-        // Predicate ids. p1 is shared across both types; p2/p3 are Type-A only;
-        // p4 is Type-B only.
+        // Predicate ids. p1 is shared across A/B; p2/p3 are Type-A only; p4 is
+        // Type-B only. p5/p6 are the skewed correlated star (Type C); p7 is the
+        // unrelated total-inflating blob (Type E).
         const P1: u64 = 1000;
         const P2: u64 = 1001;
         const P3: u64 = 1002;
         const P4: u64 = 1003;
+        const P5: u64 = 1004;
+        const P6: u64 = 1005;
+        const P7: u64 = 1006;
 
         /// The representative correlated graph documented on the module.
         fn representative_graph() -> Vec<Triple> {
@@ -819,6 +840,27 @@ mod tests {
                 t.push(Triple::new(s, P1, 2000 + 2 * s + 1));
                 t.push(Triple::new(s, P4, 5000 + 2 * s));
                 t.push(Triple::new(s, P4, 5000 + 2 * s + 1));
+            }
+            // Type C: subjects 200..=219 with a highly skewed, correlated {p5,p6}.
+            // Hubs 200..=202 carry 20 objects on each of p5 and p6; the other 17
+            // subjects carry 1 each. Disjoint high object ranges avoid collision.
+            for s in 200..=219u64 {
+                let fan = if s <= 202 { 20 } else { 1 };
+                for i in 0..fan {
+                    t.push(Triple::new(s, P5, 6_000_000 + s * 1000 + i));
+                    t.push(Triple::new(s, P6, 7_000_000 + s * 1000 + i));
+                }
+            }
+            // Type D: 50 subjects with ONLY p5 (global p5 noise).
+            for s in 300..=349u64 {
+                t.push(Triple::new(s, P5, 6_000_000 + s * 1000));
+            }
+            // Type E: unrelated p7 blob, 100 subjects × 12 objects, to inflate
+            // total_triples (hurts UniformEstimator; leaves CS/denom untouched).
+            for s in 400..=499u64 {
+                for i in 0..12 {
+                    t.push(Triple::new(s, P7, 8_000_000 + s * 1000 + i));
+                }
             }
             t
         }
@@ -895,6 +937,17 @@ mod tests {
                     pats: vec![TriplePattern::new(bound(1), bound(P1), var(1))],
                     is_star: false,
                 },
+                // (6) skewed correlated star — Type C, highly variable fan-out.
+                // Exercises CS's mean-based approximation (err > 0), where CS must
+                // still beat both uniform and the denominator model.
+                Shape {
+                    name: "6:skew-star p5.p6",
+                    pats: vec![
+                        TriplePattern::new(s, bound(P5), var(1)),
+                        TriplePattern::new(s, bound(P6), var(2)),
+                    ],
+                    is_star: true,
+                },
             ];
 
             eprintln!(
@@ -910,6 +963,10 @@ mod tests {
             // Correlated-star (shape 2) errors, for the strict CS-vs-denom check.
             let mut corr_full = f64::NAN;
             let mut corr_denom = f64::NAN;
+            // Skewed-star (shape 6) errors, for the approximation-regime checks.
+            let mut skew_cs = f64::NAN;
+            let mut skew_denom = f64::NAN;
+            let mut skew_uni = f64::NAN;
 
             for sh in &shapes {
                 let truth = brute_force_count(&triples, &sh.pats);
@@ -950,6 +1007,11 @@ mod tests {
                     corr_full = err(stats_est, truth);
                     corr_denom = err(denom, truth);
                 }
+                if sh.name.starts_with("6:") {
+                    skew_cs = err(stats_est, truth);
+                    skew_denom = err(denom, truth);
+                    skew_uni = err(uni_est, truth);
+                }
             }
 
             let n = shapes.len() as f64;
@@ -976,9 +1038,27 @@ mod tests {
                 "(b-strict) correlated-star full err {corr_full} !< denom err {corr_denom}"
             );
 
-            // Within-order-of-magnitude fraction. Measured 1.0 in this baseline
-            // run (all five stats estimates are exact on this regular correlated
-            // graph); 0.8 is the locked gate threshold from this baseline.
+            // Skewed-regime checks (shape 6). Here CS is genuinely approximate,
+            // so this proves the gate exercises the real (non-exact) regime and
+            // that CS still wins under approximation.
+            assert!(
+                skew_cs > 0.0,
+                "(skew) CS error {skew_cs} is not > 0 — the skewed star is not \
+                 exercising CS's approximation (graph too regular?)"
+            );
+            assert!(
+                skew_cs < skew_uni,
+                "(skew) CS error {skew_cs} !< uniform error {skew_uni}"
+            );
+            assert!(
+                skew_cs < skew_denom,
+                "(skew) CS error {skew_cs} !< denominator error {skew_denom}"
+            );
+
+            // Within-order-of-magnitude fraction across ALL shapes. Measured 1.0
+            // in this baseline run: shapes 1–5 are exact on the regular A/B graph,
+            // and the skewed star (6) — though CS is approximate there — still
+            // lands within 10× of truth. 0.8 is the locked gate threshold.
             let frac = within_om as f64 / n;
             assert!(
                 frac >= 0.8,
@@ -988,6 +1068,7 @@ mod tests {
             eprintln!(
                 "means: stats={stats_mean:.4} uniform={uni_mean:.4} | \
                  star: cs={cs_star_mean:.4} denom={denom_star_mean:.4} | \
+                 skew: cs={skew_cs:.4} denom={skew_denom:.4} uniform={skew_uni:.4} | \
                  within-1-OoM fraction={frac} (locked threshold 0.8; measured {frac})"
             );
         }
