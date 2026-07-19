@@ -49,12 +49,22 @@ pub trait BilinearRule: Send + Sync {
 /// rules with bodies spanning different predicate partitions.
 pub struct NaryPlan {
     joins: Vec<Box<dyn BilinearRule>>,
+    /// Integrated left-input intermediates for joins[1..] (z⁻¹ state).
+    /// None until the first stateful call (lazy cold-start from the base
+    /// passed to that call). state[i] is the left input of joins[i+1].
+    state: Option<Vec<Zset<TripleId>>>,
 }
 
 impl NaryPlan {
     pub fn new() -> Self {
-        Self { joins: Vec::new() }
+        Self {
+            joins: Vec::new(),
+            state: None,
+        }
     }
+    /// Must not be called after the plan's first `apply_delta_stateful`
+    /// round — the z⁻¹ `state` vector's length is fixed at first use and
+    /// adding a join afterward leaves it too short.
     pub fn push_join(&mut self, rule: Box<dyn BilinearRule>) {
         self.joins.push(rule);
     }
@@ -92,6 +102,59 @@ impl NaryPlan {
             int_delta = next_delta;
         }
         int_delta
+    }
+
+    /// Stateful delta eval (DBSP z⁻¹ construction): each level's left
+    /// input is an integrated intermediate held in `state`, updated in
+    /// place instead of recomputed via `apply_full` on every call. This
+    /// makes the per-tick cost proportional to the delta, not the extent.
+    ///
+    /// `base` must be the pre-delta extent at every call — same "old-old"
+    /// convention as `apply_delta`: `Δ(A⋈B) = ΔA⋈B_old + A_old⋈ΔB +
+    /// ΔA⋈ΔB`. The caller folds `delta` into its own extent only after
+    /// this call returns. On the first call (or after `reset_state`),
+    /// `state` is lazily rebuilt from `base` by the same left fold
+    /// `apply_full` uses.
+    pub fn apply_delta_stateful(
+        &mut self,
+        base: &Zset<TripleId>,
+        delta: &Zset<TripleId>,
+    ) -> Zset<TripleId> {
+        if self.joins.is_empty() {
+            return delta.clone();
+        }
+        if self.state.is_none() {
+            let mut intermediates = Vec::new();
+            if self.joins.len() > 1 {
+                let mut prev = self.joins[0].apply_full(base, base);
+                intermediates.push(prev.clone());
+                for rule in &self.joins[1..self.joins.len() - 1] {
+                    prev = rule.apply_full(&prev, base);
+                    intermediates.push(prev.clone());
+                }
+            }
+            self.state = Some(intermediates);
+        }
+        let state = self.state.as_mut().expect("initialized above");
+
+        // Level 0: both inputs are the shared base — no stored state.
+        let mut prev_delta = self.joins[0].apply_delta(base, base, delta, delta);
+        // Levels 1..: state[i] is the left input for joins[i + 1].
+        for (i, rule) in self.joins[1..].iter().enumerate() {
+            let next_delta = rule.apply_delta(&state[i], base, &prev_delta, delta);
+            // Fold this level's delta into its integrated intermediate
+            // AFTER use — the delta rule needs the pre-round value.
+            state[i].add_assign(&prev_delta);
+            prev_delta = next_delta;
+        }
+        prev_delta
+    }
+
+    /// Clears the integrated per-level state, forcing the next
+    /// `apply_delta_stateful` call to cold-start from its `base` argument.
+    /// Used after a full-recompute fallback tick invalidates the traces.
+    pub fn reset_state(&mut self) {
+        self.state = None;
     }
 }
 

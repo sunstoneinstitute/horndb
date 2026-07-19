@@ -139,11 +139,14 @@ criteria. They are the floor each subsystem must hit before it's "done."
 | Sustained insert throughput (warm LUBM-8000) | ≥**100K triples/sec** | NF2 / acceptance #2 |
 | Query-latency degradation under sustained write load | ≤**2×** no-write baseline | acceptance #2 |
 | Pending delta size between checkpoints | ≤**5%** of main store | NF3 |
+| Small-delta retraction: delta-incremental vs recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | ≥**10×** at N=256 | `benches/retraction_throughput.rs` — see *Measured* below |
 
 > **Stage 1 reality check:** NF1 and NF2 are *Stage-2 gates*. Stage-1 ships
 > only the criterion benchmark scaffold (`benches/insert_throughput.rs`) on a
 > synthetic 10K-triple fixture so regressions become visible as the real
-> engine lands. Retraction is deferred entirely — see
+> engine lands. Rule-path retraction is now delta-incremental (SPEC-24 S1,
+> [#210](https://github.com/sunstoneinstitute/horndb/issues/210)); the
+> remaining Stage-2 gaps are in
 > `../crates/incremental/FUTURE-WORK.md`.
 
 ### SPEC-07 — SPARQL 1.1 frontend (`horndb-sparql`)
@@ -228,6 +231,7 @@ Honest accounting. Updated when a bench moves.
 | `valued_readiness` — valued-reasoning readiness ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) | `horndb-closure` | instrument valued `(max,×)` closure to decide when custom-semiring/JIT work pays off | hornbench, 2026-06-18, weighted n-chain: valued `(max,×)` costs **~5.5×** boolean at N=500 growing to **~69×** at N=2,500 (the penalty is the scalar carrier itself — boolean's iso/bitmap closure parallelises, FP64 accumulation doesn't). Generic-kernel (UDF) penalty vs built-in FactoryKernel: **~1.0×**. | **GREEN — decision recorded:** built-in semirings suffice for a scalar carrier; PreJIT buys ≈0; custom semiring only for a structured carrier (Fork B, deferred) |
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)) | **HornDB 36.16 qps** (Zen4 hornbench, 2026-07-01, all-scalar SIMD table) vs **GraphDB Free ~153 qps** → **~4.2× gap**; Intel SPR hel01: 34.4 (don't compare qps across hosts — measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2; the step was bisected to the native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → 36.16 (SIMD known-CPU table replacing the net-harmful calibrated kernels). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Tracking [#128](https://github.com/sunstoneinstitute/horndb/issues/128)** — remaining levers: probe-side join streaming, filter-aware/multi-aggregate pushdown, HTTP result streaming |
+| `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
 ### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
 
@@ -284,7 +288,7 @@ numbers should not be compared to the target column above.
 
 | Bench | Crate | Notes |
 |---|---|---|
-| `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic 10K-triple fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. |
+| `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic 10K-triple fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. First hornbench numbers recorded in the SPEC-24 S1 row in *Measured* above (2026-07-20). |
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
 | `benches/sameas.rs` | `horndb-closure` | SPEC-05 `owl:sameAs` equivalence-class scaffold. |

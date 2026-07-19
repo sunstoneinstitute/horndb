@@ -15,6 +15,7 @@ pub struct IncrementalMetrics {
     pub closure_withdraw: Counter,
     pub closure_promote: Counter,
     pub fixpoint_rounds: Histogram,
+    pub distinct_trace_keys: Gauge,
     pub change_feed_subscribers: Gauge,
 }
 
@@ -34,6 +35,7 @@ impl IncrementalMetrics {
         let closure_withdraw = Counter::default();
         let closure_promote = Counter::default();
         let fixpoint_rounds = count_hist();
+        let distinct_trace_keys = Gauge::default();
         let change_feed_subscribers = Gauge::default();
 
         reg.register(
@@ -67,6 +69,11 @@ impl IncrementalMetrics {
             fixpoint_rounds.clone(),
         );
         reg.register(
+            "incremental_distinct_trace_keys",
+            "Rows in the per-rule weight trace (rule_weights) after the last tick",
+            distinct_trace_keys.clone(),
+        );
+        reg.register(
             "incremental_change_feed_subscribers",
             "Live change-feed subscribers",
             change_feed_subscribers.clone(),
@@ -79,6 +86,7 @@ impl IncrementalMetrics {
             closure_withdraw,
             closure_promote,
             fixpoint_rounds,
+            distinct_trace_keys,
             change_feed_subscribers,
         }
     }
@@ -95,6 +103,7 @@ mod tests {
         m.tick_duration_seconds.observe(0.001);
         m.asserted_merged.inc();
         m.fixpoint_rounds.observe(2.0);
+        m.distinct_trace_keys.set(3);
         m.change_feed_subscribers.set(1);
 
         let mut buf = String::new();
@@ -105,6 +114,10 @@ mod tests {
         );
         assert!(
             buf.contains("horndb_incremental_asserted_merged_total"),
+            "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_incremental_distinct_trace_keys"),
             "got:\n{buf}"
         );
         assert!(
