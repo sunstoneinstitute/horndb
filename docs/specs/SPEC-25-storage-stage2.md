@@ -102,9 +102,9 @@ Where it stops:
 - **Owning the circuit-side log semantics.** SPEC-24 S5 owns the DeltaLog
   *contract* (ordering, tick-batch atomicity, replay-to-identical-state) and
   its crash tests. This spec owns the on-disk *format and durability
-  machinery* the contract runs on. The layering question (one shared log or
-  two) is an open question below, to be settled jointly before either side
-  builds.
+  machinery* the contract runs on. The layering is settled — **ADR-0018**:
+  one physical log, owned here, with the SPEC-24 S5 contract as a thin
+  layer over it.
 - **Rule/reasoning semantics.** Which derived rows exist is SPEC-04/05/06
   territory; storage persists and versions whatever it is handed.
 
@@ -134,10 +134,10 @@ Give every tuple a lifetime, and give the store a way to end one.
   `Circuit::snapshot()` promises its readers today: `contains`, key-ordered
   iteration, `len`/`is_empty`, and an inclusive as-of token
   (`logical_time()`), pinned immutably across concurrent writes and cheap to
-  clone. The binding between the circuit's `LogicalTime` and the storage
-  commit version (one shared clock vs. a persisted mapping) is designed
-  jointly with E2 — SPEC-24 asks for exactly this agreement before either
-  side builds.
+  clone. The clock binding is **settled — ADR-0018**: the storage commit
+  version is the engine's logical clock, and one tick commits as exactly one
+  storage batch (base + derived + attribution, atomically, at one commit
+  version). No persisted tick↔version mapping exists.
 - **Compaction.** A background/explicit compaction pass reclaims tuples whose
   `end` precedes every pinned snapshot. Compaction never changes any pinned
   view's contents; write amplification stays inside the NF4 budget.
@@ -371,15 +371,16 @@ phases.
   better substrate, which is a bigger rewrite than "add two columns". S1's
   plan must bench both against the NF4 write-amplification budget before
   committing.
-- **One log or two.** Storage WAL (base facts) and the circuit's DeltaLog
-  (derived deltas) could be one shared sequenced log or two coordinated
-  ones. Replay semantics differ (storage replays stamps; the circuit replays
-  ticks). To be settled jointly with E2 before S3 or SPEC-24 S5 builds —
-  the same open question SPEC-24 records from its side.
-- **Version clock unification.** One shared monotonic clock between
-  `LogicalTime` and the storage commit version is simpler but couples commit
-  paths; a persisted mapping decouples them but must itself be crash-safe
-  (it lands in the WAL). Decided in S1 with E2.
+- **One log or two — settled (ADR-0018).** One physical log with typed
+  records (`Input` / `BaseBatch` / `TickCommit`) and two replay roles:
+  committed batches replay by value, inputs past the last tick marker replay
+  by re-tick. Exactly-once holds by construction. Still open inside that
+  decision, for the S3 plan: whether `TickCommit` value-logs the derived
+  delta (default: no — bounded re-tick beats OWL RL log amplification).
+- **Version clock unification — settled (ADR-0018).** The storage commit
+  version is the shared clock; one tick = one atomic storage batch. The
+  remaining S1 obligation is honoring that atomicity in whatever write
+  substrate S1 picks.
 - **Dictionary structure choice is workload-sensitive.** FST wins on prefix-
   heavy IRI corpora; SSTable-with-front-coding is simpler and mirrors the
   snapshot encoding. The multi-GB-at-10B-triples sizing means the loser may
