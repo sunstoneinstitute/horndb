@@ -123,20 +123,27 @@ fn push_one(c: Expr, node: LogicalPlan) -> Result<LogicalPlan, (Expr, LogicalPla
                 Err((c, LogicalPlan::LeftJoin { left, right, expr }))
             }
         }
-        // Transparent to scope: a conjunct sitting above a Project only
-        // references vars the Project still outputs, and every output var
-        // of a Project is by construction also bound by its inner — so the
-        // `legal` check against `inner` is never stricter than checking
-        // against `vars` would be. Safe to push through unconditionally
-        // once that check passes.
-        LogicalPlan::Project { vars, inner } => {
-            if legal(&inner) {
+        // A Project is a SCOPE boundary, not just a column restriction: a
+        // conjunct above it may legally reference a projected-away var —
+        // out of scope, so it evaluates unbound → error → row dropped.
+        // Pushing such a conjunct through would un-hide the var (the inner
+        // binds it) and change results. So legality is gated on the Project
+        // NODE's own visible output ([`bound_vars`] of the whole node —
+        // `infer` already hides inner bindings for Project), never on its
+        // inner. A conjunct that passes this gate references only projected
+        // vars, and every projected var is by construction bound by the
+        // inner, so descending via [`wrap`] is then safe.
+        node @ LogicalPlan::Project { .. } => {
+            if legal(&node) {
+                let LogicalPlan::Project { vars, inner } = node else {
+                    unreachable!("bound above as Project");
+                };
                 Ok(LogicalPlan::Project {
                     vars,
                     inner: Box::new(wrap(c, *inner)),
                 })
             } else {
-                Err((c, LogicalPlan::Project { vars, inner }))
+                Err((c, node))
             }
         }
         // The deepest possible sink: wrapping the leaf directly IS the
@@ -282,6 +289,54 @@ mod tests {
         assert!(
             matches!(*left, LogicalPlan::Filter { .. }),
             "mandatory-arm conjunct must push; got {left:?}"
+        );
+    }
+
+    /// A conjunct over a var the `Project` hides must stay ABOVE the
+    /// Project. `?y` is out of scope there — the filter evaluates unbound →
+    /// error → drops every row. Pushing it inside would un-hide `?y` and
+    /// change results (e.g. `SELECT ?x { { SELECT ?x { ?x :p ?y } }
+    /// FILTER(?y > 0) }` must return 0 rows, not the rows where the hidden
+    /// `?y` happens to be positive).
+    #[test]
+    fn never_pushes_through_project_scope_hiding() {
+        let plan = LogicalPlan::Filter {
+            expr: gt0("y"),
+            inner: Box::new(LogicalPlan::Project {
+                vars: vec![Var::new("x")],
+                inner: Box::new(scan("x", "p1", "y")),
+            }),
+        };
+        let out = FilterPushdown.run(plan, &ctx());
+        let LogicalPlan::Filter { inner, .. } = out else {
+            panic!("filter over a projected-away var must stay above the Project, got {out:?}")
+        };
+        assert!(
+            matches!(&*inner, LogicalPlan::Project { inner, .. }
+                if matches!(**inner, LogicalPlan::Bgp { .. })),
+            "Project's inner must stay unfiltered; got {inner:?}"
+        );
+    }
+
+    /// A conjunct over a var the `Project` keeps DOES push through, down to
+    /// the `Bgp` underneath.
+    #[test]
+    fn pushes_through_project_over_visible_var() {
+        let plan = LogicalPlan::Filter {
+            expr: gt0("x"),
+            inner: Box::new(LogicalPlan::Project {
+                vars: vec![Var::new("x")],
+                inner: Box::new(scan("x", "p1", "y")),
+            }),
+        };
+        let out = FilterPushdown.run(plan, &ctx());
+        let LogicalPlan::Project { inner, .. } = out else {
+            panic!("expected Project at root, got {out:?}")
+        };
+        assert!(
+            matches!(&*inner, LogicalPlan::Filter { inner, .. }
+                if matches!(**inner, LogicalPlan::Bgp { .. })),
+            "visible-var conjunct must push through onto the Bgp; got {inner:?}"
         );
     }
 
