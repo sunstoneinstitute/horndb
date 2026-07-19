@@ -60,6 +60,10 @@ use proptest::prelude::*;
 ///
 /// Returns true on equivalence; on failure, prints the offending triple
 /// and its multiplicity and returns false.
+///
+/// Caveat: the union construction below does not filter negative rows, so
+/// `asserted` must not carry over-retraction leftovers (m < 0). Callers
+/// with unguarded ops must project through `positive_presence` first.
 fn check_equivalence(asserted: &Zset<TripleId>, derived: &Zset<TripleId>) -> bool {
     let reference = full_rematerialize(asserted);
 
