@@ -119,8 +119,8 @@ const GOLDEN_QUERIES: &[&str] = &[
 /// (Normalize, FilterPullup, FilterPushdown, ProjectionPushdown)
 /// deliberately change plan *shapes*, so they are disabled here — this test
 /// pins lowering fidelity, not the rewrites. The rewrites' own guarantee
-/// (result invariance) is covered by the rewrite-invariance battery and the
-/// per-pass unit tests instead.
+/// (result invariance) will be covered by the rewrite-invariance battery
+/// (tests/rewrite_invariance.rs) and the per-pass unit tests instead.
 #[test]
 fn pipeline_reproduces_todays_physical_plans() {
     let ctx = horndb_sparql::plan::pass::PlanCtx {

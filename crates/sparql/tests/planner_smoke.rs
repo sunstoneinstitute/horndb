@@ -31,8 +31,8 @@ fn plans_project_over_bgp() {
     };
     let plan = planner::plan(&alg).expect("plan");
     // The root Project carries the query's projection; ProjectionPushdown
-    // (and the physical column pruner) may nest further restricting
-    // Projects below it, so walk through them to the scan.
+    // may nest further restricting Projects below it, so walk through them
+    // to the scan.
     let PhysicalPlan::Project { vars, inner } = plan else {
         panic!("expected Project root, got a non-Project plan")
     };

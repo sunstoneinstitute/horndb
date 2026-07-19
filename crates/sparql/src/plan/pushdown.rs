@@ -135,8 +135,9 @@ fn lower_count_group(
     }
 
     // 1. Peel the child: a bare scan, or Filter(scan) whose expression is an
-    //    inlinable conjunction of `?v = <const>` equalities — either optionally
-    //    behind a restricting Project that retains every var read below it.
+    //    inlinable conjunction of `?v = <const>` equalities — either of which
+    //    may sit behind a restricting Project that retains every var read
+    //    below it.
     let (patterns, subst): (&Vec<TriplePattern>, Vec<(String, Term)>) =
         match peel_restricting_project(inner, &required) {
             BgpScan { patterns } => (patterns, Vec::new()),

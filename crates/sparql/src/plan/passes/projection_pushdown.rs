@@ -33,23 +33,14 @@
 //!   vars)`, and the rebuilt operator is passed through [`restrict`]
 //!   afterward in case that widening leaves its output broader than the
 //!   parent asked for.
-//! * **`Union` arms may have different schemas.** SPARQL union rows keep
-//!   whatever bindings their own arm produced; a variable one arm never
-//!   binds is simply absent from that arm's rows (indistinguishable from
-//!   "present but unbound" once merged into the result). This pass recurses
-//!   into both arms with the *same* `demanded` set and never wraps the
-//!   `Union` node itself. That is sound even though the arms diverge:
-//!   [`restrict`] only ever keeps vars that are in the wrapped node's own
-//!   natural schema, so a demanded variable one arm never binds is simply
-//!   never a candidate to keep inside that arm — nothing is dropped that
-//!   wasn't already absent. And a restricting `Project` inserted *inside*
-//!   one arm can only remove variables *that arm itself* binds; if the
-//!   OTHER arm binds a same-named variable, dropping it from THIS arm's
-//!   rows changes nothing about that arm's own contribution to the union —
-//!   this arm never produced it in the first place, so its rows were always
-//!   missing that binding. There is no case where narrowing inside one arm
-//!   removes a variable an ancestor still needs from *that arm's own*
-//!   output.
+//! * **`Union` arms may have different schemas.** This pass recurses into
+//!   both arms with the *same* `demanded` set and never wraps the `Union`
+//!   node itself. Sound even though the arms diverge: [`restrict`] only
+//!   keeps vars in the wrapped node's own natural schema, so a demanded
+//!   variable an arm never binds is never a candidate inside that arm —
+//!   nothing is dropped that wasn't already absent. And a restricting
+//!   `Project` inserted inside one arm can only remove variables that arm
+//!   itself binds, which says nothing about the other arm's rows.
 //! * **`PathClosure`** stays conservative: the closure machinery
 //!   (transitive/BFS evaluation) reads the edge subplan's endpoint
 //!   variables in ways this pass does not model, so the edge is pruned
@@ -89,10 +80,10 @@ fn set_of(vars: &[Var]) -> HashSet<String> {
     vars.iter().map(|v| v.name().to_owned()).collect()
 }
 
-fn intersect(superset: &HashSet<String>, scope: &[Var]) -> HashSet<String> {
+fn intersect(demanded: &HashSet<String>, scope: &[Var]) -> HashSet<String> {
     scope
         .iter()
-        .filter(|v| superset.contains(v.name()))
+        .filter(|v| demanded.contains(v.name()))
         .map(|v| v.name().to_owned())
         .collect()
 }
@@ -145,17 +136,12 @@ fn prune(node: LogicalPlan, demanded: &HashSet<String>) -> LogicalPlan {
         // exactly `vars`, so its own var list — not the incoming
         // `demanded` — becomes the child's demand. This can nest a
         // restricting `Project` (from [`restrict`], further down) directly
-        // under this one when both narrow to the same var set — e.g.
-        // `Project([s], Bgp(s,p,o))` becomes `Project([s], Project([s],
-        // Bgp))`. That is deliberately not collapsed: it mirrors
-        // `plan::pushdown::prune`'s physical-plan `Project` arm (which
-        // nests the same way and is never collapsed either), and an
-        // attempt to unwrap it here is unsound in general — `inner` may
-        // instead be a genuine SPARQL subquery `Project` (a scope
-        // boundary) whose own `vars` are independent of `want` and may
-        // hide variables its child still binds; there is no way to tell
-        // the two cases apart once both have reached this `Project { .. }`
-        // shape, so this arm never special-cases the shape it just built.
+        // under this one. Deliberately not collapsed: `inner` may be a
+        // genuine SPARQL subquery `Project` (a scope boundary) whose own
+        // `vars` are independent of `want` and may hide variables its
+        // child still binds; there is no way to tell that apart from a
+        // restrict-inserted `Project` once both have this shape, so this
+        // arm never unwraps one.
         Project { vars, inner } => {
             let want = set_of(&vars);
             LogicalPlan::Project {
@@ -355,9 +341,7 @@ mod tests {
         fn distinct_child(p: &LogicalPlan) -> Option<&LogicalPlan> {
             match p {
                 LogicalPlan::Distinct { inner } => Some(inner),
-                LogicalPlan::Project { inner, .. } | LogicalPlan::Filter { inner, .. } => {
-                    distinct_child(inner)
-                }
+                LogicalPlan::Project { inner, .. } => distinct_child(inner),
                 _ => None,
             }
         }
