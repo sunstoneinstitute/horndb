@@ -766,4 +766,230 @@ mod tests {
             );
         }
     }
+
+    /// SPEC-23 acceptance #3 accuracy gate — an in-crate unit test that holds the
+    /// stats-backed estimator to the three claims of acceptance #3 on a
+    /// representative shape suite over a synthetic graph with realistic predicate
+    /// correlation (implicit types). It reuses the crate-internal ground-truth
+    /// oracle ([`brute_force_count`]) and the denominator-only path
+    /// ([`StatsEstimator::estimate_bgp_denominator_only`]).
+    ///
+    /// **Representative graph** (`representative_graph`):
+    /// - **Type A** — subjects `1..=20`, each with predicates `{p1, p2, p3}` and
+    ///   fan-outs `p1 → 2` objects, `p2 → 1`, `p3 → 3`. So every subject that has
+    ///   `p1` also has `p2` and `p3` — an implicit "type A" correlation the
+    ///   independence model cannot see.
+    /// - **Type B** — subjects `100..=109`, each with `{p1, p4}` and fan-outs
+    ///   `p1 → 2`, `p4 → 2`. `p1` is shared with A; `p4` is exclusive to B.
+    /// - Object value pools are disjoint per predicate, so per-position NDV is
+    ///   meaningful. Subject/predicate/object id ranges are chosen not to collide.
+    ///
+    /// The correlation makes the independence (uniform / denominator) model
+    /// measurably wrong: `predicate_count(p1)` and `ndv(p1,Subject)` are inflated
+    /// by the type-B subjects, which the per-predicate independence product cannot
+    /// discount. The Characteristic-Sets estimator reads the exact `{p1,p2,p3}` /
+    /// `{p1,p4}` sets and is unaffected.
+    #[cfg(test)]
+    mod accuracy_gate {
+        use super::*;
+        use crate::cardinality::{Cardinality, UniformEstimator};
+
+        // Predicate ids. p1 is shared across both types; p2/p3 are Type-A only;
+        // p4 is Type-B only.
+        const P1: u64 = 1000;
+        const P2: u64 = 1001;
+        const P3: u64 = 1002;
+        const P4: u64 = 1003;
+
+        /// The representative correlated graph documented on the module.
+        fn representative_graph() -> Vec<Triple> {
+            let mut t = Vec::new();
+            // Type A: subjects 1..=20 with {p1:2, p2:1, p3:3}.
+            for s in 1..=20u64 {
+                t.push(Triple::new(s, P1, 2000 + 2 * s));
+                t.push(Triple::new(s, P1, 2000 + 2 * s + 1));
+                t.push(Triple::new(s, P2, 3000 + s));
+                t.push(Triple::new(s, P3, 4000 + 3 * s));
+                t.push(Triple::new(s, P3, 4000 + 3 * s + 1));
+                t.push(Triple::new(s, P3, 4000 + 3 * s + 2));
+            }
+            // Type B: subjects 100..=109 with {p1:2, p4:2}.
+            for s in 100..=109u64 {
+                t.push(Triple::new(s, P1, 2000 + 2 * s));
+                t.push(Triple::new(s, P1, 2000 + 2 * s + 1));
+                t.push(Triple::new(s, P4, 5000 + 2 * s));
+                t.push(Triple::new(s, P4, 5000 + 2 * s + 1));
+            }
+            t
+        }
+
+        /// Log-ratio error: `|ln(max(est,1) / max(truth,1))|`. Symmetric in
+        /// over/under-estimation, so a 10× miss either way scores the same.
+        fn err(est: u64, truth: u64) -> f64 {
+            ((est.max(1) as f64) / (truth.max(1) as f64)).ln().abs()
+        }
+
+        /// Independence (uniform) BGP estimate: the product of the old
+        /// per-pattern [`UniformEstimator`] estimates — the pre-stats baseline.
+        fn uniform_bgp(u: &UniformEstimator, shape: &[TriplePattern]) -> u64 {
+            shape
+                .iter()
+                .map(|p| u.estimate(p) as u64)
+                .product::<u64>()
+                .max(1)
+        }
+
+        struct Shape {
+            name: &'static str,
+            pats: Vec<TriplePattern>,
+            is_star: bool,
+        }
+
+        #[test]
+        fn accuracy_gate_spec23_acceptance_3() {
+            let triples = representative_graph();
+            let stats = stats_of(triples.clone());
+            let est = StatsEstimator::new(&stats);
+            let src = VecTripleSource::from_triples(triples.clone());
+            let uni = UniformEstimator::from_source(&src);
+
+            let s = var(0);
+            let shapes = vec![
+                // (1) single pattern.
+                Shape {
+                    name: "1:single ?s p1 ?o",
+                    pats: vec![TriplePattern::new(s, bound(P1), var(1))],
+                    is_star: false,
+                },
+                // (2) correlated star — only Type A has both p1 and p2.
+                Shape {
+                    name: "2:corr-star p1.p2",
+                    pats: vec![
+                        TriplePattern::new(s, bound(P1), var(1)),
+                        TriplePattern::new(s, bound(P2), var(2)),
+                    ],
+                    is_star: true,
+                },
+                // (3) cross-type star — only Type B has both p1 and p4.
+                Shape {
+                    name: "3:cross-star p1.p4",
+                    pats: vec![
+                        TriplePattern::new(s, bound(P1), var(1)),
+                        TriplePattern::new(s, bound(P4), var(2)),
+                    ],
+                    is_star: true,
+                },
+                // (4) 3-pattern star — only Type A.
+                Shape {
+                    name: "4:3-star p1.p2.p3",
+                    pats: vec![
+                        TriplePattern::new(s, bound(P1), var(1)),
+                        TriplePattern::new(s, bound(P2), var(2)),
+                        TriplePattern::new(s, bound(P3), var(3)),
+                    ],
+                    is_star: true,
+                },
+                // (5) bound-subject pattern (subject 1 is Type A).
+                Shape {
+                    name: "5:bound-subj <1> p1 ?o",
+                    pats: vec![TriplePattern::new(bound(1), bound(P1), var(1))],
+                    is_star: false,
+                },
+            ];
+
+            eprintln!(
+                "{:<24} {:>6} {:>8} {:>6} {:>6} {:>8}",
+                "shape", "truth", "uniform", "denom", "stats", "upper"
+            );
+
+            let mut stats_err_sum = 0.0;
+            let mut uni_err_sum = 0.0;
+            let mut cs_star_err_sum = 0.0;
+            let mut denom_star_err_sum = 0.0;
+            let mut within_om = 0usize;
+            // Correlated-star (shape 2) errors, for the strict CS-vs-denom check.
+            let mut corr_full = f64::NAN;
+            let mut corr_denom = f64::NAN;
+
+            for sh in &shapes {
+                let truth = brute_force_count(&triples, &sh.pats);
+                let full = est.estimate_bgp(&sh.pats);
+                let stats_est = full.estimate;
+                let denom = est.estimate_bgp_denominator_only(&sh.pats);
+                let uni_est = uniform_bgp(&uni, &sh.pats);
+
+                eprintln!(
+                    "{:<24} {:>6} {:>8} {:>6} {:>6} {:>8}",
+                    sh.name, truth, uni_est, denom, stats_est, full.upper_bound
+                );
+
+                // (c) upper bound never below measured — every shape.
+                assert!(
+                    full.upper_bound >= truth,
+                    "(c) upper_bound {} < truth {} for {}",
+                    full.upper_bound,
+                    truth,
+                    sh.name
+                );
+
+                stats_err_sum += err(stats_est, truth);
+                uni_err_sum += err(uni_est, truth);
+
+                // Within an order of magnitude of truth (max/min <= 10).
+                let lo = stats_est.min(truth).max(1);
+                let hi = stats_est.max(truth).max(1);
+                if (hi as f64) / (lo as f64) <= 10.0 {
+                    within_om += 1;
+                }
+
+                if sh.is_star {
+                    cs_star_err_sum += err(stats_est, truth);
+                    denom_star_err_sum += err(denom, truth);
+                }
+                if sh.name.starts_with("2:") {
+                    corr_full = err(stats_est, truth);
+                    corr_denom = err(denom, truth);
+                }
+            }
+
+            let n = shapes.len() as f64;
+            let star_n = shapes.iter().filter(|s| s.is_star).count() as f64;
+            let stats_mean = stats_err_sum / n;
+            let uni_mean = uni_err_sum / n;
+            let cs_star_mean = cs_star_err_sum / star_n;
+            let denom_star_mean = denom_star_err_sum / star_n;
+
+            // (a) Strictly better than UniformEstimator (mean log-ratio error).
+            assert!(
+                stats_mean < uni_mean,
+                "(a) stats mean err {stats_mean} !< uniform mean err {uni_mean}"
+            );
+
+            // (b) CS beats the denominator model on star shapes (mean), and
+            // strictly on the correlated star (shape 2).
+            assert!(
+                cs_star_mean <= denom_star_mean,
+                "(b) CS star mean err {cs_star_mean} > denom star mean err {denom_star_mean}"
+            );
+            assert!(
+                corr_full < corr_denom,
+                "(b-strict) correlated-star full err {corr_full} !< denom err {corr_denom}"
+            );
+
+            // Within-order-of-magnitude fraction. Measured 1.0 in this baseline
+            // run (all five stats estimates are exact on this regular correlated
+            // graph); 0.8 is the locked gate threshold from this baseline.
+            let frac = within_om as f64 / n;
+            assert!(
+                frac >= 0.8,
+                "within-order-of-magnitude fraction {frac} < locked threshold 0.8"
+            );
+
+            eprintln!(
+                "means: stats={stats_mean:.4} uniform={uni_mean:.4} | \
+                 star: cs={cs_star_mean:.4} denom={denom_star_mean:.4} | \
+                 within-1-OoM fraction={frac} (locked threshold 0.8; measured {frac})"
+            );
+        }
+    }
 }

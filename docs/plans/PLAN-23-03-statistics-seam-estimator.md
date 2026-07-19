@@ -190,6 +190,16 @@ disconnected `Executor::cardinality_estimate` path).
 - `UniformEstimator` remains available as the zero-stats fallback and is only demoted (not
   deleted) once the stats-backed estimator is proven at least as good on the harness.
 
+**Locked baseline (Task 8 gate).** The accuracy gate lives in-crate as
+`crates/wcoj/src/estimator.rs` (`mod accuracy_gate::accuracy_gate_spec23_acceptance_3`).
+It runs a representative shape suite over a synthetic graph with predicate correlation
+(implicit types A/B) and grades the stats estimator against the ground-truth oracle
+(`brute_force_count`). Measured within-an-order-of-magnitude fraction = **1.0** (all five
+shape estimates exact on this regular correlated graph); **0.8 is the locked threshold**
+carried forward from this baseline. The gate also asserts: stats mean |log-ratio| error
+(0.0000) strictly below uniform's (1.2876); CS star error (0.0000) ≤ denominator error
+(0.8283), strictly lower on the correlated star; and `upper_bound ≥ measured` on every shape.
+
 ---
 
 ## Executable task plan
