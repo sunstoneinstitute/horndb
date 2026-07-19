@@ -211,13 +211,19 @@ fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
 /// equalities, appending `(var name, constant)` pairs to `out`. Returns
 /// `false` (inlining bails) when any conjunct is not such an equality, a
 /// variable repeats across conjuncts (possibly unsatisfiable), or a constant
-/// is not an IRI/literal. `sameTerm` lowers to `Expr::Eq` in translate.rs,
-/// so it is covered.
+/// is not an IRI/literal. `sameTerm` lowers to `Expr::Eq` in translate.rs, so
+/// user-written `sameTerm(...)` is covered without a separate arm; `Eq` and
+/// `SameTerm` are matched identically here because `plan::passes::normalize`
+/// (SPEC-23 §5.2) also *produces* `Expr::SameTerm` internally — it
+/// strength-reduces an `Eq` between two provably-IRI or provably-blank-node
+/// operands (never a literal) before this pass runs. Term-level inlining of
+/// a `SameTerm` against a constant is exactly equivalent to inlining an
+/// `Eq` against that same constant, so the two need only one code path.
 ///
-/// Result-invariance rests on engine `Expr::Eq` being structural `Term`
-/// equality over oxrdf-normalized forms, which coincides with the dictionary
-/// term identity BGP constants match by — full argument and the coupling
-/// note about future value-equality semantics in
+/// Result-invariance rests on engine `Expr::Eq`/`Expr::SameTerm` being
+/// structural `Term` equality over oxrdf-normalized forms, which coincides
+/// with the dictionary term identity BGP constants match by — full argument
+/// and the coupling note about future value-equality semantics in
 /// docs/specs/SPEC-21-count-pushdown-extensions.md.
 ///
 /// Constants are assumed to be in translate.rs's canonical oxrdf-printed form
@@ -225,7 +231,7 @@ fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
 fn eq_conjuncts(expr: &Expr, out: &mut Vec<(String, Term)>) -> bool {
     match expr {
         Expr::And(a, b) => eq_conjuncts(a, out) && eq_conjuncts(b, out),
-        Expr::Eq(a, b) => {
+        Expr::Eq(a, b) | Expr::SameTerm(a, b) => {
             let (v, c) = match (&**a, &**b) {
                 (Expr::Term(Term::Var(v)), Expr::Term(c)) => (v, c),
                 (Expr::Term(c), Expr::Term(Term::Var(v))) => (v, c),
