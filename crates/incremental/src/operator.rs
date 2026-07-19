@@ -62,6 +62,9 @@ impl NaryPlan {
             state: None,
         }
     }
+    /// Must not be called after the plan's first `apply_delta_stateful`
+    /// round — the z⁻¹ `state` vector's length is fixed at first use and
+    /// adding a join afterward leaves it too short.
     pub fn push_join(&mut self, rule: Box<dyn BilinearRule>) {
         self.joins.push(rule);
     }

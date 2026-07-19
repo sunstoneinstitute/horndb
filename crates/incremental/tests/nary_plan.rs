@@ -70,6 +70,19 @@ fn two_join_plan() -> NaryPlan {
     plan
 }
 
+/// Builds a fresh three-join left-deep plan (`PrpTrpOnP` chained three
+/// times), the shape `left_deep_three_way_chain` uses. Exercises the
+/// `state[1..]` level of `apply_delta_stateful` that `two_join_plan` (only
+/// `state[0]`) never reaches, and the cold-start inner fold in
+/// `apply_delta_stateful` that only iterates for `joins.len() > 2`.
+fn three_join_plan() -> NaryPlan {
+    let mut plan = NaryPlan::new();
+    plan.push_join(Box::new(PrpTrpOnP { id: 1 }));
+    plan.push_join(Box::new(PrpTrpOnP { id: 2 }));
+    plan.push_join(Box::new(PrpTrpOnP { id: 3 }));
+    plan
+}
+
 #[test]
 fn stateful_cold_start_matches_full() {
     let base = Zset::from_iter([((0, P, 1), 1), ((1, P, 2), 1), ((2, P, 3), 1)]);
@@ -155,6 +168,36 @@ proptest! {
             }
 
             let expected = two_join_plan().apply_delta(&running_base, &delta);
+            let actual = stateful_plan.apply_delta_stateful(&running_base, &delta);
+            prop_assert_eq!(actual, expected);
+
+            running_base.add_assign(&delta);
+        }
+    }
+
+    /// Same drill as `stateful_delta_matches_stateless_over_random_sequences`
+    /// but over `three_join_plan()`, so the level loop in
+    /// `apply_delta_stateful` runs for both `state[0]` and `state[1]` and
+    /// its cold-start inner fold actually iterates.
+    #[test]
+    fn stateful_three_join_matches_stateless_over_random_sequences(
+        batches in prop::collection::vec(small_batch(), 1..20)
+    ) {
+        let mut running_base: Zset<TripleId> = Zset::new();
+        let mut stateful_plan = three_join_plan();
+
+        for batch in batches {
+            let mut delta: Zset<TripleId> = Zset::new();
+            for (t, want_present) in batch {
+                let currently = running_base.get(&t) + delta.get(&t) > 0;
+                if want_present && !currently {
+                    delta.add(t, 1);
+                } else if !want_present && currently {
+                    delta.add(t, -1);
+                }
+            }
+
+            let expected = three_join_plan().apply_delta(&running_base, &delta);
             let actual = stateful_plan.apply_delta_stateful(&running_base, &delta);
             prop_assert_eq!(actual, expected);
 
