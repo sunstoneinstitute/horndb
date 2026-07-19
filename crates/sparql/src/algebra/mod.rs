@@ -61,6 +61,12 @@ pub struct TriplePattern {
 pub enum Expr {
     Term(Term),
     Eq(Box<Expr>, Box<Expr>),
+    /// Term equality (`sameTerm`) — the strength-reduced form of `Eq` for
+    /// operands the type lattice proves are the same non-literal kind
+    /// (`plan::passes::normalize`). Evaluated as structural `Term`
+    /// equality, identical to `Eq` today; the two diverge only once `Eq`
+    /// gains value-equality (numeric promotion) semantics.
+    SameTerm(Box<Expr>, Box<Expr>),
     Ne(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
