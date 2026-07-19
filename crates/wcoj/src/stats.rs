@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::ids::{Ordering, TermId};
-use crate::pattern::TriplePattern;
+use crate::pattern::{Term, TriplePattern, Var};
 use crate::source::vec_source::VecTripleSource;
 use crate::source::TripleSource;
 
@@ -169,7 +169,20 @@ pub struct SnapshotStats {
     /// Tier 2: predicate -> (max subject-role degree, max object-role degree).
     /// See [`SnapshotStats::max_degree`] for the exact role convention.
     max_degree: HashMap<TermId, (u64, u64)>,
+    /// `Spo`-sorted snapshot rows `(subject, predicate, object)`, retained so the
+    /// Tier-3 [`SnapshotStats::sample_join`] hook can draw index-walk samples.
+    /// This is a full copy of the graph, bounded by graph size — acceptable for
+    /// the recompute-from-snapshot design and only read when sampling is enabled.
+    sample_rows: Vec<(TermId, TermId, TermId)>,
+    /// Whether the Tier-3 sampling hook is active. `false` by default; flip it on
+    /// with [`SnapshotStats::with_sampling`].
+    sampling_enabled: bool,
 }
+
+/// Number of index-walk samples the Tier-3 hook draws. Small and fixed: this is a
+/// light approximation, not a full Wander Join, and the inner join-count scan is
+/// `O(sample_rows)` per sample.
+const SAMPLE_K: usize = 64;
 
 impl SnapshotStats {
     /// Compute all three statistics tiers by scanning the pinned snapshot once
@@ -240,6 +253,11 @@ impl SnapshotStats {
 
         let characteristic_sets = Self::build_characteristic_sets(src);
         let max_degree = Self::build_max_degree(src);
+        // Retain the Spo rows for the (default-off) Tier-3 sampling hook.
+        let sample_rows = src
+            .sorted_rows(Ordering::Spo)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
 
         Self {
             total,
@@ -248,7 +266,18 @@ impl SnapshotStats {
             ndv_object,
             characteristic_sets,
             max_degree,
+            sample_rows,
+            sampling_enabled: false,
         }
+    }
+
+    /// Enable or disable the Tier-3 Wander-Join-style sampling hook
+    /// ([`SnapshotStats::sample_join`]). Off by default: sampling carries a
+    /// per-query cost and variance, so it is a fallback, not the default
+    /// estimator path. Nothing in the estimator consumes this hook today.
+    pub fn with_sampling(mut self, enabled: bool) -> Self {
+        self.sampling_enabled = enabled;
+        self
     }
 
     /// Tier 1: build the characteristic-set index from the `Spo` ordering.
@@ -414,6 +443,147 @@ impl SnapshotStats {
 
         max_degree
     }
+
+    /// Deterministic seed for the sampling walk, mixed from the patterns' bound
+    /// term ids and variable positions. Same BGP → same seed → same estimate, so
+    /// the hook is reproducible and tests are stable. No `rand` crate, no clock.
+    fn sample_seed(patterns: &[TriplePattern]) -> u64 {
+        let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut mix = |v: u64| {
+            h ^= v.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+            h ^= h >> 33;
+        };
+        for pat in patterns {
+            for (slot, t) in [pat.s, pat.p, pat.o].into_iter().enumerate() {
+                match t {
+                    Term::Bound(id) => mix(id << 2 | slot as u64),
+                    Term::Var(Var(v)) => mix((v as u64) << 2 | slot as u64 | 0x8000_0000),
+                }
+            }
+        }
+        h
+    }
+
+    /// One step of a 64-bit linear congruential generator (LCG). Cheap,
+    /// deterministic, and good enough to spread index-walk samples.
+    fn lcg_next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
+    }
+
+    /// `true` if a snapshot row `(s, p, o)` matches the pattern's bound slots.
+    /// Variables (including repeated ones) are treated as wildcards — this is a
+    /// light hook, not exact matching.
+    fn row_matches(pat: &TriplePattern, row: (TermId, TermId, TermId)) -> bool {
+        let ok = |t: Term, v: TermId| match t {
+            Term::Bound(b) => b == v,
+            Term::Var(_) => true,
+        };
+        ok(pat.s, row.0) && ok(pat.p, row.1) && ok(pat.o, row.2)
+    }
+
+    /// Read a row slot by position (0=S, 1=P, 2=O).
+    fn slot(row: (TermId, TermId, TermId), pos: u8) -> TermId {
+        match pos {
+            0 => row.0,
+            1 => row.1,
+            _ => row.2,
+        }
+    }
+
+    /// Light index-walk estimate of a single pattern's match count. Draws
+    /// `SAMPLE_K` pseudo-random rows, measures the matching fraction, and scales
+    /// by the row count. Returns `(estimate, standard-error band)`.
+    fn sample_single(&self, pat: &TriplePattern) -> Option<(f64, f64)> {
+        let n = self.sample_rows.len();
+        if n == 0 {
+            return Some((0.0, 0.0));
+        }
+        let k = SAMPLE_K.min(n);
+        let mut state = Self::sample_seed(std::slice::from_ref(pat));
+        let mut hits = 0u64;
+        for _ in 0..k {
+            let idx = (Self::lcg_next(&mut state) >> 33) as usize % n;
+            if Self::row_matches(pat, self.sample_rows[idx]) {
+                hits += 1;
+            }
+        }
+        let p_hat = hits as f64 / k as f64;
+        let estimate = n as f64 * p_hat;
+        // Standard error of the estimated count from a proportion sample.
+        let se = (p_hat * (1.0 - p_hat) / k as f64).sqrt() * n as f64;
+        Some((estimate, se))
+    }
+
+    /// Light Wander-Join-style estimate for a two-pattern BGP joined on exactly
+    /// one shared variable. Samples `SAMPLE_K` rows as the first pattern's row;
+    /// for each match, counts the second pattern's rows sharing the join value,
+    /// then scales the mean by the row count. Returns `None` for shapes it does
+    /// not handle (no shared variable, or more than one). A full Wander Join is a
+    /// later phase.
+    fn sample_two(&self, p1: &TriplePattern, p2: &TriplePattern) -> Option<(f64, f64)> {
+        let n = self.sample_rows.len();
+        if n == 0 {
+            return Some((0.0, 0.0));
+        }
+        // Find the single shared join variable and its position in each pattern.
+        let vars1 = pattern_vars(p1);
+        let vars2 = pattern_vars(p2);
+        let shared: Vec<Var> = vars1
+            .iter()
+            .copied()
+            .filter(|v| vars2.contains(v))
+            .collect();
+        if shared.len() != 1 {
+            return None;
+        }
+        let jv = shared[0];
+        let pos1 = p1.position_of(jv)?;
+        let pos2 = p2.position_of(jv)?;
+
+        let k = SAMPLE_K.min(n);
+        let mut state = Self::sample_seed(&[*p1, *p2]);
+        let mut sum = 0f64;
+        let mut sum_sq = 0f64;
+        for _ in 0..k {
+            let idx = (Self::lcg_next(&mut state) >> 33) as usize % n;
+            let r1 = self.sample_rows[idx];
+            let contribution = if Self::row_matches(p1, r1) {
+                let join_val = Self::slot(r1, pos1);
+                // Count second-pattern rows matching on the join value.
+                self.sample_rows
+                    .iter()
+                    .filter(|&&r2| Self::row_matches(p2, r2) && Self::slot(r2, pos2) == join_val)
+                    .count() as f64
+            } else {
+                0.0
+            };
+            sum += contribution;
+            sum_sq += contribution * contribution;
+        }
+        let mean = sum / k as f64;
+        let estimate = n as f64 * mean;
+        // Standard error of the scaled mean (Horvitz-Thompson-style band).
+        let var = (sum_sq / k as f64 - mean * mean).max(0.0);
+        let se = (var / k as f64).sqrt() * n as f64;
+        Some((estimate, se))
+    }
+}
+
+/// Distinct variables of a pattern, in S, P, O order.
+fn pattern_vars(pat: &TriplePattern) -> Vec<Var> {
+    let mut out = Vec::new();
+    for t in [pat.s, pat.p, pat.o] {
+        if let Term::Var(v) = t {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
 }
 
 impl Stats for SnapshotStats {
@@ -456,12 +626,31 @@ impl Stats for SnapshotStats {
             None => self.total,
         }
     }
+
+    /// Tier-3 sampling hook. Inert by default (`sampling_enabled == false` →
+    /// `None`); this is the default path and nothing in the estimator consumes
+    /// it. When enabled via [`SnapshotStats::with_sampling`], returns a light,
+    /// deterministic Wander-Join-style `(estimate, confidence-band)` for a
+    /// single-pattern or single-join two-pattern BGP, and `None` for shapes it
+    /// does not handle. This is a hook, not the production sampler — a full
+    /// Wander Join is a later phase.
+    fn sample_join(&self, patterns: &[TriplePattern]) -> Option<(f64, f64)> {
+        if !self.sampling_enabled {
+            return None;
+        }
+        match patterns {
+            [p] => self.sample_single(p),
+            [p1, p2] => self.sample_two(p1, p2),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::Triple;
+    use crate::pattern::{Term, Var};
 
     #[test]
     fn zero_stats_is_conservative() {
@@ -638,6 +827,60 @@ mod tests {
         }
         assert_eq!(cs.by_predicate[&10], vec![0]);
         assert_eq!(cs.by_predicate[&20], vec![1]);
+    }
+
+    #[test]
+    fn sample_join_inert_by_default() {
+        // The Tier-3 sampling hook is OFF unless explicitly enabled, so
+        // `sample_join` returns `None` for any BGP on a plain `SnapshotStats`.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(2, 10, 101),
+            Triple::new(3, 10, 102),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let stats = SnapshotStats::from_source(&src);
+
+        // Single-pattern BGP: ?s <10> ?o
+        let single = vec![TriplePattern::new(
+            Term::Var(Var(0)),
+            Term::Bound(10),
+            Term::Var(Var(1)),
+        )];
+        assert!(stats.sample_join(&single).is_none());
+        // Empty and multi-pattern BGPs are inert too.
+        assert!(stats.sample_join(&[]).is_none());
+    }
+
+    #[test]
+    fn sample_join_enabled_returns_some() {
+        // p1 (=10): 3 subjects each with one object. p2 (=20): one triple.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(2, 10, 101),
+            Triple::new(3, 10, 102),
+            Triple::new(1, 20, 200),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let stats = SnapshotStats::from_source(&src).with_sampling(true);
+
+        // Single-pattern BGP the hook handles: ?s <10> ?o.
+        let single = vec![TriplePattern::new(
+            Term::Var(Var(0)),
+            Term::Bound(10),
+            Term::Var(Var(1)),
+        )];
+        let first = stats.sample_join(&single).expect("hook enabled → Some");
+        let (est, ci) = first;
+        assert!(
+            est >= 0.0 && est.is_finite(),
+            "estimate {est} finite & >= 0"
+        );
+        assert!(ci >= 0.0 && ci.is_finite(), "confidence {ci} finite & >= 0");
+
+        // Deterministic: a second call yields exactly the same value.
+        let second = stats.sample_join(&single).expect("hook enabled → Some");
+        assert_eq!(first, second);
     }
 
     #[test]
