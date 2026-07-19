@@ -1193,6 +1193,7 @@ dependencies = [
  "pin-project-lite",
  "pretty_assertions",
  "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sparesults",

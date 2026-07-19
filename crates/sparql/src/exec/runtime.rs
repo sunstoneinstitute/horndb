@@ -10,7 +10,8 @@ use crate::algebra::{
 use crate::error::{Result, SparqlError};
 use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, Slot};
 use crate::plan::PhysicalPlan;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashSet;
 
 pub struct Runtime<'a, E: Executor + ?Sized> {
     exec: &'a E,
@@ -262,7 +263,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             key_slots: Vec<Slot>,
             members: Vec<Row>,
         }
-        let mut groups: HashMap<Vec<KeyPart>, Grp> = HashMap::new();
+        let mut groups: FxHashMap<Vec<KeyPart>, Grp> = FxHashMap::default();
         for r in b.rows {
             let gkey: Vec<KeyPart> = key_idx
                 .iter()
@@ -355,7 +356,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     // same-value cells hash identically, giving the same
                     // deduplication as the old `HashSet<&Bindings>` path without
                     // any decode.
-                    let distinct: HashSet<Vec<KeyPart>> = members
+                    let distinct: FxHashSet<Vec<KeyPart>> = members
                         .iter()
                         .map(|r| r.0.iter().map(|s| s.key_part()).collect())
                         .collect();
@@ -481,27 +482,35 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         Ok(Some(Row(slots)))
     }
 
-    /// Build the native `LeftJoin` hash-index key for one slot row.
+    /// Build the hash-join index key for one slot row.
     ///
-    /// Provenance choice — **option (b): key on the DECODED lexical form of
-    /// each join variable.** A left BGP row keys `?x` as `Slot::Id(5)` while a
-    /// right row may key the same logical `?x` as `Slot::Term(...)`;
-    /// `Slot::key_part()` would map those to `KeyPart::Id(5)` vs
-    /// `KeyPart::Lex(...)` — *different* hash buckets — and a valid match would
-    /// be missed. Decoding the jvar columns on both sides makes the bucket key
-    /// provenance-independent, so equal values always collide in the same
-    /// bucket. Only the (few) jvar columns decode; every non-jvar column stays
+    /// Provenance choice — **canonicalize each join variable to its dictionary
+    /// id.** A left BGP row keys `?x` as `Slot::Id(5)` while a right row may key
+    /// the same logical `?x` as `Slot::Term(...)`. `Slot::key_part()` would map
+    /// those to `KeyPart::Id(5)` vs `KeyPart::Lex(...)` — *different* hash
+    /// buckets — and a valid match would be missed. So `Slot::Id` keys on its
+    /// raw id directly (no decode) and `Slot::Term` is encoded back to its id
+    /// via [`Executor::encode_term`] when the dictionary holds it,
+    /// `KeyPart::Lex` otherwise. Equal values then share a bucket regardless of
+    /// provenance: a stored value is `KeyPart::Id` on both sides; a value with
+    /// no stored id can only appear as a `Term` and keys `KeyPart::Lex` on both
+    /// sides. This replaces the previous decode-both-sides-to-string key, which
+    /// paid one `decode_term` + `String` alloc per jvar per build+probe row.
+    ///
+    /// Only the (few) jvar columns are keyed; every non-jvar column stays
     /// native `Slot::Id` and is normalized only if the merge genuinely mixes Id
     /// and Term.
     ///
     /// Returns `None` if any jvar is `Unbound` in this row (such a row can't be
-    /// keyed and takes the conservative `unkeyed` path).
+    /// keyed and takes the conservative `unkeyed` path). The `Result` wrapper is
+    /// kept for signature stability with the merge/probe call sites; keying no
+    /// longer decodes, so it never errors.
     fn row_join_key(
         &self,
         row: &Row,
         schema: &[Var],
         jvars: &[Var],
-    ) -> Result<Option<Vec<String>>> {
+    ) -> Result<Option<Vec<KeyPart>>> {
         let mut key = Vec::with_capacity(jvars.len());
         for jv in jvars {
             // jvars ⊆ schema by construction (bound_join_vars), so this is
@@ -511,8 +520,11 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             };
             match &row.0[i] {
                 Slot::Unbound => return Ok(None),
-                Slot::Id(id) => key.push(lex(&self.exec.decode_term(*id)?)),
-                Slot::Term(t) => key.push(lex(t)),
+                Slot::Id(id) => key.push(KeyPart::Id(id.0)),
+                Slot::Term(t) => key.push(match self.exec.encode_term(t) {
+                    Some(id) => KeyPart::Id(id.0),
+                    None => KeyPart::Lex(lex(t)),
+                }),
             }
         }
         Ok(Some(key))
@@ -532,9 +544,9 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         let jvars = bound_join_vars(left_schema, &build);
         let merge_plan = build_merge_plan(left_schema, &build.schema, &out_schema);
 
-        // Index the build rows by decoded join key (option (b) — see
+        // Index the build rows by canonicalized join key (see
         // `row_join_key`); rows with an unbound jvar fall to `unkeyed`.
-        let mut index: HashMap<Vec<String>, Vec<usize>> = HashMap::new();
+        let mut index: FxHashMap<Vec<KeyPart>, Vec<usize>> = FxHashMap::default();
         let mut unkeyed: Vec<usize> = Vec::new();
         for (i, row) in build.rows.iter().enumerate() {
             match self.row_join_key(row, &build.schema, &jvars)? {
@@ -736,7 +748,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 /// `build.rows` (not `&Row`) so the state can own the batch it indexes.
 pub(crate) struct JoinState {
     build: Batch,
-    index: HashMap<Vec<String>, Vec<usize>>,
+    index: FxHashMap<Vec<KeyPart>, Vec<usize>>,
     unkeyed: Vec<usize>,
     jvars: Vec<Var>,
     out_schema: Vec<Var>,
@@ -1333,7 +1345,7 @@ fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>>
                 // COUNT(DISTINCT *) — distinct whole solution rows. O(n) via a
                 // hash set (was an O(n^2) linear scan, #128); only the count is
                 // needed, so order is irrelevant here.
-                members.iter().collect::<HashSet<&Bindings>>().len()
+                members.iter().collect::<FxHashSet<&Bindings>>().len()
             } else {
                 members.len()
             };
@@ -1432,7 +1444,8 @@ fn numeric_term(x: f64) -> Term {
 /// O(n) via a hash set (was an O(n^2) linear scan — the SPB aggregation
 /// gap, #128).
 fn dedup_terms(vals: &mut Vec<Term>) {
-    let mut seen: HashSet<Term> = HashSet::with_capacity(vals.len());
+    let mut seen: FxHashSet<Term> =
+        FxHashSet::with_capacity_and_hasher(vals.len(), Default::default());
     vals.retain(|t| seen.insert(t.clone()));
 }
 
@@ -2243,6 +2256,44 @@ mod slot_differential {
             v,
             &Term::Iri("http://ex/v1".into()),
             "?v must be <http://ex/v1>"
+        );
+    }
+
+    /// Regression for the canonicalizing join key (#128 lever 3): a `Join`
+    /// whose two sides bind the join variable with DIFFERENT provenance — the
+    /// BGP scans `?v` as `Slot::Id`, the `VALUES` clause binds it as
+    /// `Slot::Term` — must still match on the shared value. The old key decoded
+    /// both sides to a lexical `String`, so provenance never leaked into the
+    /// bucket. `row_join_key` now keys `Slot::Id` on its raw id and encodes
+    /// `Slot::Term` back to its id via `encode_term`; drop that encode (key
+    /// `Term` as `KeyPart::Lex` while `Id` keys `KeyPart::Id`) and the two rows
+    /// land in different buckets — the join returns 0 rows instead of 1.
+    #[test]
+    fn join_key_canonicalizes_across_provenance() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s1"), iri("p"), iri("o1"));
+        horn.insert_triple(iri("s2"), iri("p"), iri("o2"));
+
+        // BGP `?v <p> ?o` → ?v is Slot::Id (native scan).
+        // VALUES ?v { <s1> } → ?v is Slot::Term. The Join keys ?v across the
+        // Id/Term provenance split; only <s1> may survive.
+        let q = "SELECT ?v WHERE { \
+            ?v <http://ex/p> ?o . \
+            VALUES ?v { <http://ex/s1> } }";
+        let plan = plan_select(q);
+
+        let got: Vec<Bindings> = Runtime::new(&horn).run(&plan).unwrap().collect();
+        assert_eq!(
+            got.len(),
+            1,
+            "cross-provenance join must match on ?v: got {} rows, want 1\nrows: {got:?}",
+            got.len()
+        );
+        assert_eq!(
+            got[0].get("v"),
+            Some(&Term::Iri("http://ex/s1".into())),
+            "?v must be <http://ex/s1>"
         );
     }
 

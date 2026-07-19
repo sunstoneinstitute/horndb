@@ -30,6 +30,9 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 # SPARQL REGEX/REPLACE builtins (`exec::runtime::compile_regex`).
 regex = { workspace = true }
+# FxHash for the runtime's hot hash tables (join index, GROUP BY, DISTINCT);
+# matches owlrl/closure. See `exec::runtime`.
+rustc-hash = "2"
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }

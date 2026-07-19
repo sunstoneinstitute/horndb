@@ -783,6 +783,15 @@ impl Executor for HornBackend {
         Ok(oxrdf_to_algebra(&ox))
     }
 
+    /// Non-interning dictionary lookup used to canonicalize join keys. A term
+    /// that does not convert to a storage term, or is absent from the
+    /// dictionary, returns `None` (the caller keys it lexically). Inline-int
+    /// literals always resolve (value-encoded, not dictionary-allocated).
+    fn encode_term(&self, term: &Term) -> Option<TermId> {
+        let ox = algebra_to_oxrdf(term).ok()?;
+        self.store.dictionary().get(&ox)
+    }
+
     /// Scan a BGP returning id-carrying slot rows without decoding TermId → String.
     /// The diagonal filter is applied inline by comparing raw ids; aliases are
     /// excluded from the output schema.
