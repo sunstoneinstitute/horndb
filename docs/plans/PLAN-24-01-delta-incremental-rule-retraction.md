@@ -56,20 +56,64 @@ Let `A(t) = asserted_base.get(t) > 0`, `C(t) = closure_support.contains(t)`,
    asserted/closure-covered records weights but no attr (matches the Stage-1
    "newly present" filter). `closure_support ⊆ derived_base` (unchanged).
 
-### Distinct transitions (processed once per row per round, in key order)
+### AMENDED 2026-07-19: deletion needs well-founded support (two-phase retraction)
 
-- `W: 0 → positive` and `¬A(t)` and `derived_base.get(t) == 0`:
-  **materialize** — `derived_base += 1`, `rule_attr[t] = first rule-id (BTreeMap
-  order) with positive weight`, publish `RuleInferred(rid) +1`, extent gains `t`
-  (cascades to the next round).
-- `W: 0 → positive`, otherwise (asserted- or closure-covered): record weights
-  only. No attr, no feed, no extent change.
-- `W: positive → 0`, `t ∈ rule_attr`: `rid = rule_attr.remove(t)`. If `C(t)`:
-  the closure still owns the row — rule ownership lapses silently (no feed, no
-  derived_base change). Else: zero the `derived_base` row, publish
-  `RuleInferred(rid) -1`; if `¬A(t)` the extent loses `t` (cascades).
-- `W: positive → 0`, `t ∉ rule_attr`: drop the weight entry; nothing else
-  (the row was asserted/closure-covered; its presence is unchanged).
+The first cut of this design used one flat set of distinct transitions for both
+signs: a row lives iff its cumulative one-step weight is positive. That is
+**unsound on cyclic recursion**: the weight counts one-step derivations over an
+extent that includes the row itself and rows it transitively supports, so it
+cannot distinguish well-founded from cyclic support (the classic Gupta–Mumick
+counting limitation). Minimal counterexample: with `3 SC 3` asserted, cax-sco
+derives `(5,TYPE,3)` *from itself* (`x TYPE c ∧ c SC c → x TYPE c`), so after
+retracting the asserted `(5,TYPE,3)` its weight stays 1 and the row wrongly
+survives; a mutual SC cycle shows the same without self-loops. Positive-side
+reasoning is unaffected (on insertion, every cascade step derives from rows
+genuinely present, so the least fixpoint is preserved).
+
+The deletion side is therefore **two-phase DRed-with-weights**, run inside the
+one unified fixpoint:
+
+- **R1 — overdelete cascade.** Seed with the tick's negative extent changes
+  (retracted base rows whose presence drops, closure withdrawals). Per round,
+  feed the negative delta through `apply_delta_stateful` as usual and fold the
+  raw weight decrements. Every row that **loses ≥ 1 one-step derivation** (a
+  negative raw contribution) becomes a *candidate*: provisionally remove it
+  from the extent (only rows not asserted-covered and not closure-covered are
+  removable) and cascade its removal in the next round. Rows never touched by
+  a decrement are untouchable — this is what keeps the cascade proportional to
+  the genuinely affected set.
+- **R2 — re-derive.** After R1 converges, weights are exact one-step counts
+  over the surviving extent, and every survivor is well-founded by induction.
+  Run the positive fixpoint seeded with (a) this tick's positive extent
+  changes and (b) every candidate whose weight over the surviving extent is
+  positive — such a candidate has support from survivors and is re-added
+  (extent `+1`), cascading normally. A candidate supported only through the
+  deleted/cyclic region ends R2 with weight 0 and stays dead. Cyclic-only
+  support can never re-add a row because R2 grows from well-founded rows only.
+- **Net publishing.** R1/R2 mutate extent/weights freely but buffer rule-row
+  materialization changes; after R2, compare each touched row's final state
+  against its pre-tick state and publish only the net `RuleInferred` events
+  (withdrawn = overdeleted and not re-added, with the closure-owned silent-
+  lapse rule below; added = newly materialized). An overdelete-then-re-add
+  therefore produces **no** feed transient.
+
+### Distinct transitions (net, after R2; processed per touched row, key order)
+
+- Newly rule-derivable (`W: 0 → positive` across the tick) and `¬A(t)` and
+  `derived_base.get(t) == 0`: **materialize** — `derived_base += 1`,
+  `rule_attr[t] = first rule-id (BTreeMap order) with positive weight`, publish
+  `RuleInferred(rid) +1`.
+- Newly rule-derivable, otherwise (asserted- or closure-covered): record
+  weights only. No attr, no feed, no extent change beyond what A/C already
+  give it.
+- No longer rule-derivable (`W: positive → 0` across the tick), `t ∈
+  rule_attr`: `rid = rule_attr.remove(t)`. If `C(t)`: the closure still owns
+  the row — rule ownership lapses silently (no feed, no derived_base change).
+  Else: zero the `derived_base` row, publish `RuleInferred(rid) -1`.
+- No longer rule-derivable, `t ∉ rule_attr`: drop the weight entry; nothing
+  else (the row was asserted/closure-covered; its presence is unchanged).
+- A candidate that was materialized pre-tick and is re-added by R2 keeps its
+  row; recompute its attr from the surviving weights (silent change is fine).
 - Drop `rule_weights` entries whose total reaches 0; prune zero per-rule
   entries.
 
@@ -78,12 +122,12 @@ Let `A(t) = asserted_base.get(t) > 0`, `C(t) = closure_support.contains(t)`,
 - `A: 0 → 1` — extent gains `t` unless already present via `derived_base`.
   (A row already rule-materialized keeps its derived row — same as the Stage-1
   insertion path.)
-- `A: 1 → 0` with `W(t) > 0` and `t ∉ rule_attr` and `¬C(t)`: the rule
-  derivations survive the asserted copy — materialize it now (`derived_base +=
-  1`, attr = first positive-weight rule, publish `RuleInferred +1`). Extent
-  membership is unchanged (was present via A, still present via the new derived
-  row). This mirrors the old recompute, where such a row re-appeared in the
-  post-retraction attribution map.
+- `A: 1 → 0` with `W(t) > 0` and `t ∉ rule_attr` and `¬C(t)`: do **not**
+  eagerly materialize (that was the unsound shortcut — the weight may be
+  cyclic-only). The row becomes an R1 candidate like any other; if R2 re-adds
+  it, the net publish materializes it (`derived_base += 1`, attr, `RuleInferred
+  +1`) — same observable outcome as the old recompute when support is
+  well-founded, and a correct withdrawal when it is not.
 - `A: 1 → 0` with `W(t) == 0`: extent loses `t` unless `derived_base` still has
   it (closure promote may re-add it moments later — the init-delta Zset add/
   cancel handles the net-zero case automatically).
@@ -102,12 +146,19 @@ tick():
      ordering the retraction regime already used; presence changes flow into
      init_delta so closure-derived edges feed rule bodies in the same tick,
      on every tick kind).
-  4. Rule fixpoint: rounds of
-       raw_p   = plan_p.apply_delta_stateful(extent /* pre-round */, round_delta)
-       extent += round_delta
-       weight updates + distinct transitions  → next_delta
-     until next_delta is empty. MAX_ROUNDS = 4096 with a panic (matches the
-     old recompute guard; never a silent break).
+  4. Rule fixpoint, two phases (see the AMENDED section above):
+       R1 overdelete: rounds over the negative deltas —
+         raw_p   = plan_p.apply_delta_stateful(extent /* pre-round */, round_delta)
+         extent += round_delta
+         weight decrements; rows losing ≥1 derivation → candidates →
+         provisional removals → next round
+       R2 re-derive: rounds over the positive deltas + re-addable candidates
+         (same call shape, positive sign), until empty.
+       Then the NET distinct transitions publish. MAX_ROUNDS = 4096 with a
+       panic per phase (matches the old recompute guard; never a silent
+       break). A tick with no negative deltas skips R1 entirely — the
+       insertion fast path is R2 alone with per-round publishing (no
+       buffering needed when nothing was overdeleted).
   5. Snapshot-cache invalidation + metrics (unchanged shape).
 ```
 
@@ -199,8 +250,10 @@ multiplicity-1, which is preserved):
    the ordering retraction ticks already used). Strictly more complete; part
    of S1's "one path" and narrows SPEC-24 S8 to rule→closure feedback.
 4. Feed intra-tick ordering: closure records now precede rule records on
-   insertion ticks; withdrawals interleave with additions round-by-round
-   instead of arriving in one post-recompute block.
+   insertion ticks; on retraction ticks rule events are published as one net
+   block after R2 (an overdeleted-then-re-added row produces no transient,
+   where the old recompute-diff could publish spurious withdraw/re-add
+   pairs).
 
 Tests that pin the old quirks get updated with a comment referencing this plan
 section. Tests asserting final stores, presence sets, or per-key feed nets must
@@ -426,7 +479,11 @@ pass unchanged.
   `rule_weights` key count, set at the end of every tick) following the
   existing incremental metrics pattern; add its row to `docs/metrics.md` in
   the same commit.
-- [ ] **Step 2:** Docs: flip the SPEC-24 S1 row in `docs/architecture.md`
+- [ ] **Step 2:** Docs: add a short precision note to SPEC-24 §S1 (the flat
+  cumulative-weight crossing rule is unsound under deletion on cyclic
+  recursion; deletion runs as an overdelete/re-derive two-phase fixpoint
+  driven by the same weight trace — pointer to this plan's AMENDED section);
+  flip the SPEC-24 S1 row in `docs/architecture.md`
   (planned → implemented); update `FUTURE-WORK.md` F6 "Still Stage 2"
   rule-path paragraph (delivered, pointer to this plan) leaving the
   closure-path S2 items; refresh `crates/incremental/AGENTS.md` status
