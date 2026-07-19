@@ -16,7 +16,9 @@
 
 mod fixtures;
 
-use fixtures::synthetic_rules::{CaxScoRule, TransitiveOn, R1_SCM_SCO, R3_CAX_SCO, SC, TYPE};
+use fixtures::synthetic_rules::{
+    CaxScoRule, TransitiveOn, R1_SCM_SCO, R2_SCM_SPO, R3_CAX_SCO, SC, TYPE,
+};
 use horndb_incremental::{Circuit, NaryPlan, TransitiveClosureRule};
 
 /// Closure-path retraction cascades into the rule consequence. Assert the SC
@@ -447,4 +449,222 @@ fn rule_owned_promotion_records_closure_support() {
         1,
         "(c,SC,e) MUST persist via closure_support after the rule support is gone"
     );
+}
+
+/// Cyclic self-support for the exact edge `(c,SC,e)`: the body consumes the
+/// rule's own head — `(c,SC,e) ∧ (c,LOOP,e) → (c,SC,e)`. Its weight is
+/// positive whenever the head itself sits in the extent and the loop trigger
+/// is present: pure cyclic support that can never bootstrap the row from
+/// scratch. Used to pin the dual-ownership orphan bug (codex P1): a row whose
+/// only remaining rule weight is this cycle must die when its closure support
+/// is retracted.
+struct SelfSupportOnLoop {
+    id: horndb_incremental::RuleId,
+    c: u64,
+    e: u64,
+}
+
+const LOOP: u64 = 300;
+
+impl horndb_incremental::BilinearRule for SelfSupportOnLoop {
+    fn id(&self) -> horndb_incremental::RuleId {
+        self.id
+    }
+    fn apply_full(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        let mut out = horndb_incremental::Zset::new();
+        if a.get(&(self.c, SC, self.e)) > 0 && a.get(&(self.c, LOOP, self.e)) > 0 {
+            out.add((self.c, SC, self.e), 1);
+        }
+        out
+    }
+    fn apply_delta(
+        &self,
+        a: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _b: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        da: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+        _db: &horndb_incremental::Zset<horndb_incremental::TripleId>,
+    ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
+        // Exact delta contract: F(post) − F(pre).
+        let mut post = a.clone();
+        post.add_assign(da);
+        let mut out = self.apply_full(&post, &post);
+        out.sub_assign(&self.apply_full(a, a));
+        out
+    }
+}
+
+/// Build the codex-P1 dual-ownership circuit and drive it to the state where
+/// `X = (C,SC,E)` is rule-owned (`rule_attr`) with ONLY cyclic rule weight
+/// left, while the closure chain `(C,SC,D),(D,SC,E)` entails it
+/// (`closure_support`). Constants: A=1, C=2, D=3, E=4.
+///
+/// Ticks: (1) marker + loop trigger + type — MarkerRule materializes X
+/// rule-owned; SelfSupportOnLoop adds the cyclic weight; GoalOnClosureEdge
+/// derives (A,GOAL,E) off X. (2) assert the chain — the closure entails X and
+/// records dual ownership. (3) retract the marker — X survives (closure
+/// covers it) but its only rule weight is now the cycle.
+fn dual_owned_cyclic_circuit() -> Circuit {
+    const A: u64 = 1;
+    const C: u64 = 2;
+    const D: u64 = 3;
+    const E: u64 = 4;
+
+    let mut circuit = Circuit::new();
+    circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(SC)));
+    let mut p1 = NaryPlan::new();
+    p1.push_join(Box::new(MarkerRule {
+        id: R1_SCM_SCO,
+        c: C,
+        e: E,
+    }));
+    circuit.add_plan(p1, R1_SCM_SCO);
+    let mut p2 = NaryPlan::new();
+    p2.push_join(Box::new(SelfSupportOnLoop {
+        id: R2_SCM_SPO,
+        c: C,
+        e: E,
+    }));
+    circuit.add_plan(p2, R2_SCM_SPO);
+    let mut p3 = NaryPlan::new();
+    p3.push_join(Box::new(GoalOnClosureEdge {
+        id: R3_CAX_SCO,
+        a: A,
+        c: C,
+        e: E,
+    }));
+    circuit.add_plan(p3, R3_CAX_SCO);
+
+    // Tick 1: external (well-founded) rule support + cyclic trigger + type.
+    circuit.assert_triple((C, MARK, E));
+    circuit.assert_triple((C, LOOP, E));
+    circuit.assert_triple((A, TYPE, C));
+    circuit.tick();
+    circuit.debug_validate();
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "MarkerRule materializes X rule-owned"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(A, GOAL, E)),
+        1,
+        "consequence (A,GOAL,E) derived off X"
+    );
+
+    // Tick 2: the closure chain also entails X → dual ownership.
+    circuit.assert_triple((C, SC, D));
+    circuit.assert_triple((D, SC, E));
+    circuit.tick();
+    circuit.debug_validate();
+    assert_eq!(circuit.derived_base().get(&(C, SC, E)), 1);
+
+    // Tick 3: retract the marker. X correctly survives — the closure still
+    // entails it — but its only remaining rule weight is the cycle.
+    circuit.retract_triple((C, MARK, E));
+    circuit.tick();
+    circuit.debug_validate();
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "X survives the marker retraction via closure support"
+    );
+    assert_eq!(circuit.derived_base().get(&(A, GOAL, E)), 1);
+    circuit
+}
+
+/// Codex P1 — a dual-owned row that loses its closure support must be
+/// re-checked by the rule fixpoint, not kept alive by cyclic-only rule weight.
+///
+/// After `dual_owned_cyclic_circuit` (X rule-owned, cyclic-only rule weight,
+/// closure-covered), retracting the chain edge `(D,SC,E)` removes the
+/// closure's entailment of X. The closure retract pass strips
+/// `closure_support` but X is `rule_attr`-owned, so nothing withdraws the
+/// row there — the fixpoint must be seeded to re-check it. X's remaining
+/// weight is purely cyclic (SelfSupportOnLoop consumes X itself), so the
+/// two-phase fixpoint must kill X AND its consequence (A,GOAL,E).
+#[test]
+fn dual_owned_row_dies_when_closure_support_later_retracted() {
+    const A: u64 = 1;
+    const C: u64 = 2;
+    const D: u64 = 3;
+    const E: u64 = 4;
+    let mut circuit = dual_owned_cyclic_circuit();
+
+    // Tick 4: retract the chain edge — closure entailment of X vanishes.
+    circuit.retract_triple((D, SC, E));
+    circuit.tick();
+    circuit.debug_validate();
+
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        0,
+        "X must die — marker gone, closure gone, remaining rule weight is cyclic-only"
+    );
+    assert_eq!(
+        circuit.derived_base().get(&(A, GOAL, E)),
+        0,
+        "the consequence of X must be withdrawn with it"
+    );
+    // Differential oracle: the well-founded recompute over the surviving
+    // asserted base derives nothing; derived_base must agree.
+    assert!(
+        circuit.oracle_rule_closure().is_empty(),
+        "oracle derives nothing from {{loop, type, (C,SC,D)}}"
+    );
+    assert!(
+        circuit.derived_base().iter().all(|(_, m)| m <= 0),
+        "no derived row survives; derived = {:?}",
+        circuit.derived_base().iter().collect::<Vec<_>>()
+    );
+}
+
+/// Mixed-tick variant: the SAME tick retracts the closure chain edge AND
+/// asserts a replacement path, so X stays closure-entailed throughout. The
+/// orphan reseed must NOT overdelete X (it is re-covered by the Phase-3
+/// insertion pass before the fixpoint runs), and X must produce no feed
+/// event. A later genuine loss of the replacement path must then kill X.
+#[test]
+fn mixed_tick_closure_reroute_keeps_dual_owned_row() {
+    const A: u64 = 1;
+    const C: u64 = 2;
+    const D: u64 = 3;
+    const E: u64 = 4;
+    const F: u64 = 6;
+    let mut circuit = dual_owned_cyclic_circuit();
+
+    // Mixed tick: retract (D,SC,E) AND assert the replacement path C->F->E.
+    let rx = circuit.subscribe();
+    circuit.retract_triple((D, SC, E));
+    circuit.assert_triple((C, SC, F));
+    circuit.assert_triple((F, SC, E));
+    circuit.tick();
+    circuit.debug_validate();
+
+    assert_eq!(
+        circuit.derived_base().get(&(C, SC, E)),
+        1,
+        "X survives — the replacement path keeps it closure-entailed"
+    );
+    assert_eq!(circuit.derived_base().get(&(A, GOAL, E)), 1);
+    // No derived feed transient for X: the withdraw was rule-owned (skipped)
+    // and the re-cover only records ownership on the already-present row.
+    while let Ok(rec) = rx.try_recv() {
+        assert!(
+            rec.triple != (C, SC, E),
+            "no feed event for the re-covered row; saw {rec:?}"
+        );
+    }
+
+    // Now genuinely remove the replacement path: X loses closure support with
+    // only cyclic rule weight left → X and its consequence die.
+    circuit.retract_triple((F, SC, E));
+    circuit.tick();
+    circuit.debug_validate();
+    assert_eq!(circuit.derived_base().get(&(C, SC, E)), 0);
+    assert_eq!(circuit.derived_base().get(&(A, GOAL, E)), 0);
+    assert!(circuit.oracle_rule_closure().is_empty());
 }

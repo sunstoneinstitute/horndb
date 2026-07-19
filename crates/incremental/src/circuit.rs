@@ -19,9 +19,14 @@
 //! `tick()` phases:
 //! 1. Drain asserted records into `asserted_base` (publishing each); apply
 //!    asserted-presence transitions into the pending extent delta.
-//! 2. Closure retract pass (retraction ticks only).
+//! 2. Closure retract pass (retraction ticks only). A withdrawn row that a
+//!    rule still owns (`rule_attr`) keeps its materialization but is
+//!    collected as an orphan.
 //! 3. Closure insertion pass — always before the rule fixpoint, so closure
-//!    edges feed rule bodies in the same tick on every tick kind.
+//!    edges feed rule bodies in the same tick on every tick kind. Then each
+//!    orphan still uncovered (no closure or asserted cover) is seeded -1
+//!    into the fixpoint delta: its remaining rule weight may be cyclic-only,
+//!    so R1/R2 must re-check it.
 //! 4. Rule fixpoint. Each round feeds the pending presence delta through
 //!    every plan's stateful delta operator against the frozen pre-round
 //!    extent, folds the delta into `extent`, and applies weight updates.
@@ -92,7 +97,9 @@ pub struct Circuit {
     /// The insertion closure pass only ever *adds* here; the closure
     /// **retraction** pass (F6) removes a row when its base support is gone,
     /// zeroing the matching `derived_base` row unless a rule still owns it
-    /// (`rule_attr`). The rule-fixpoint withdrawal never zeroes a
+    /// (`rule_attr`) — such orphans are reseeded into the rule fixpoint so
+    /// cyclic-only rule weight cannot keep them alive (codex P1).
+    /// The rule-fixpoint withdrawal never zeroes a
     /// `closure_support` row in `derived_base` (it skips them), so the
     /// invariant is preserved across ticks. The distinct transitions read
     /// this set to decide whether a row losing its rule weight keeps its
@@ -713,12 +720,14 @@ impl Circuit {
             }
 
             // ---- Phase 2: closure retract pass (retraction ticks only) ----
+            let mut closure_orphans: Vec<TripleId> = Vec::new();
             if has_retraction {
-                let (dm, wn, pn) = self
+                let (dm, wn, pn, orphans) = self
                     .run_closure_retract_pass(&asserted_delta_for_closure_retract, &mut init_delta);
                 derived_merged += dm;
                 withdraw_n = wn;
                 promote_n = pn;
+                closure_orphans = orphans;
             }
 
             // ---- Phase 3: closure insertion pass ----
@@ -727,6 +736,31 @@ impl Circuit {
             // divergence 3).
             derived_merged +=
                 self.run_closure_insertion_pass(&asserted_delta_for_closure, &mut init_delta);
+
+            // Orphan reseed (codex P1): a rule-owned row that lost its closure
+            // ownership in Phase 2 may be resting on cyclic-only rule weight,
+            // which a positive weight alone cannot distinguish from real
+            // support. Seed a -1 so the two-phase fixpoint re-checks it: R1
+            // overdeletes it (it has weight > 0 by invariant iii), R2 re-adds
+            // it iff well-founded support survives. Runs AFTER Phase 3 so a
+            // same-tick closure re-cover (replacement base path) skips the
+            // seed — the row stays covered and is never overdeleted.
+            for t in closure_orphans {
+                if self.closure_support.contains(&t)
+                    || self.asserted_base.get(&t) > 0
+                    || !self.rule_attr.contains_key(&t)
+                {
+                    continue;
+                }
+                // The row stayed present in `derived_base` through Phases 1-3
+                // (nothing withdraws a rule-owned row there), so no presence
+                // note was written for it: its `init_delta` entry is 0. The
+                // guard keeps the extent removal at exactly -1 even if that
+                // ever changes.
+                if init_delta.get(&t) == 0 {
+                    init_delta.add(t, -1);
+                }
+            }
 
             // ---- Phase 4: rule fixpoint (incremental distinct) ----
             //
@@ -790,15 +824,19 @@ impl Circuit {
     /// `closure_support`, and promote deleted-but-still-entailed asserted edges
     /// to materialized closure rows (P1). Every `derived_base` mutation notes
     /// its extent change into `init_delta`. Returns
-    /// `(derived_merged, withdraw_n, promote_n)`.
+    /// `(derived_merged, withdraw_n, promote_n, rule_owned_orphans)` — the
+    /// orphans are withdrawn rows whose materialization a rule still owns
+    /// (`rule_attr`); `tick()` reseeds the fixpoint for any that stay
+    /// uncovered after the insertion pass.
     fn run_closure_retract_pass(
         &mut self,
         retract_delta: &Zset<TripleId>,
         init_delta: &mut Zset<TripleId>,
-    ) -> (usize, u64, u64) {
+    ) -> (usize, u64, u64, Vec<TripleId>) {
         let mut merged = 0usize;
         let mut withdraw_n = 0u64;
         let mut promote_n = 0u64;
+        let mut rule_owned_orphans: Vec<TripleId> = Vec::new();
         // Take the plans out via `mem::take` to satisfy the borrow checker
         // (same pattern as the insertion closure pass).
         let mut closure_plans = std::mem::take(&mut self.closure_plans);
@@ -825,9 +863,13 @@ impl Circuit {
                     continue;
                 }
                 // If a rule still owns the row (positive weight in
-                // `rule_attr`), leave the materialization to the rule — the
-                // fixpoint withdraws it if its rule support also lapses.
+                // `rule_attr`), leave the materialization to the rule — but
+                // record the ORPHAN: its remaining rule weight may be
+                // cyclic-only self-support, so `tick()` must reseed the
+                // fixpoint to re-check it unless the row is re-covered by the
+                // insertion pass (codex P1).
                 if self.rule_attr.contains_key(&triple) {
+                    rule_owned_orphans.push(triple);
                     continue;
                 }
                 merged += self.withdraw_derived_row(triple, DerivationKind::ClosureInferred);
@@ -875,7 +917,7 @@ impl Circuit {
             }
         }
         self.closure_plans = closure_plans;
-        (merged, withdraw_n, promote_n)
+        (merged, withdraw_n, promote_n, rule_owned_orphans)
     }
 
     /// Run the closure INSERTION pass (SPEC-06 F5) over the positive-only
@@ -944,8 +986,11 @@ impl Circuit {
     ) -> (usize, usize, u64, u64) {
         // Presence-change notes are irrelevant here — the resync below
         // rebuilds the incremental state from scratch. Use a scratch delta.
+        // Rule-owned orphans are dropped too: the recompute seeds from
+        // `asserted ∪ closure_support` (already shrunk), so a row without
+        // well-founded support simply falls out of the diff.
         let mut scratch: Zset<TripleId> = Zset::new();
-        let (mut derived_merged, withdraw_n, promote_n) =
+        let (mut derived_merged, withdraw_n, promote_n, _orphans) =
             self.run_closure_retract_pass(retract_delta, &mut scratch);
 
         // Closure INSERTION pass BEFORE the rule recompute (Finding 2): the
