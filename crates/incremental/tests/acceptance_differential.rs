@@ -15,8 +15,16 @@
 //!   forward-only path with coarse- and fine-grained ticking.
 //! - `interleaved_insert_retract_*` interleaves insertions and
 //!   retractions per-op so retractions race with derivations.
+//! - `coarse_mixed_ticks_*`, `incremental_matches_recompute_fallback`
+//!   and `unguarded_ops_keep_invariants` are the SPEC-24 S1 gate
+//!   (PLAN-24-01 Task 4): coarse mixed batches per tick, an A/B run
+//!   against the recompute-fallback twin, and fully unguarded input
+//!   (duplicate asserts, over-retractions) — each tick followed by
+//!   `debug_validate()`.
 
 mod fixtures;
+
+use std::collections::BTreeSet;
 
 use fixtures::synthetic_rules::{build_plans, full_rematerialize, SC, SPO, TYPE};
 use horndb_incremental::{Circuit, TripleId, Zset};
@@ -119,6 +127,39 @@ fn small_random_ops() -> impl Strategy<Value = Vec<(TripleId, bool)>> {
     prop::collection::vec(op, 1..30)
 }
 
+/// Coarse-tick shape for the SPEC-24 S1 gate tests: 1–6 ticks, each fed
+/// a batch of 1–8 insert/retract ops (`bool` is `is_retract`).
+fn batched_random_ops() -> impl Strategy<Value = Vec<Vec<(TripleId, bool)>>> {
+    let pred = prop::sample::select(vec![SC, SPO, TYPE]);
+    let triple = (0u64..6, pred, 0u64..6).prop_map(|(s, p, o)| (s, p, o));
+    let op = (triple, any::<bool>());
+    prop::collection::vec(prop::collection::vec(op, 1..=8), 1..=6)
+}
+
+/// The union `asserted ∪ derived` as a *presence* key set (rows with
+/// positive multiplicity on either side). This is the A/B comparison
+/// surface: the incremental and fallback paths may park the same present
+/// triple on different sides (PLAN-24-01 "Expected behavioral
+/// divergences"), so raw `derived_base` key sets are not comparable —
+/// union presence is.
+fn union_presence(asserted: &Zset<TripleId>, derived: &Zset<TripleId>) -> BTreeSet<TripleId> {
+    asserted
+        .iter()
+        .filter(|(_, m)| *m > 0)
+        .map(|(t, _)| *t)
+        .chain(derived.iter().filter(|(_, m)| *m > 0).map(|(t, _)| *t))
+        .collect()
+}
+
+/// Positive-presence projection of a Z-set: every key with positive
+/// multiplicity, at multiplicity exactly 1. Used to turn a raw
+/// `asserted_base` that may hold duplicate-assert multiplicities (> 1)
+/// or over-retraction leftovers (< 0) into the presence set the store
+/// semantics are defined over.
+fn positive_presence(z: &Zset<TripleId>) -> Zset<TripleId> {
+    Zset::from_iter(z.iter().filter(|(_, m)| *m > 0).map(|(t, _)| (*t, 1)))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(40))]
 
@@ -213,6 +254,147 @@ proptest! {
                 1,
                 "model triple absent from circuit asserted_base: {:?}",
                 k
+            );
+        }
+    }
+
+    /// SPEC-24 S1 gate (a): coarse mixed ticks. Each tick sees a whole
+    /// batch of 1–8 ops (insert or presence-guarded retract) at once, so
+    /// a single tick mixes insertions and retractions — the case the
+    /// unified tick's two-phase (overdelete, re-derive) scheme must get
+    /// right. After every tick: `debug_validate()` (incremental-state
+    /// invariants) and `check_equivalence` (store ≡ full re-materialize).
+    #[test]
+    fn coarse_mixed_ticks_match_full_rematerialize(batches in batched_random_ops()) {
+        let mut circuit = Circuit::new();
+        for (plan, rid) in build_plans() {
+            circuit.add_plan(plan, rid);
+        }
+
+        // Net-asserted model; same presence guard as the interleaved
+        // test, but applied per-op *within* a batch so the batch itself
+        // stays well-formed (no duplicate insert, no over-retract).
+        let mut net: Zset<TripleId> = Zset::new();
+
+        for batch in &batches {
+            for (triple, is_retract) in batch {
+                if *is_retract {
+                    if net.get(triple) > 0 {
+                        net.add(*triple, -1);
+                        circuit.retract_triple(*triple);
+                    }
+                } else if net.get(triple) == 0 {
+                    net.add(*triple, 1);
+                    circuit.assert_triple(*triple);
+                }
+            }
+            // One coarse tick per batch. A batch whose ops were all
+            // guarded away yields an empty tick — that must be safe too.
+            circuit.tick();
+            circuit.debug_validate();
+            prop_assert!(
+                check_equivalence(circuit.asserted_base(), circuit.derived_base()),
+                "incremental store diverges from full re-materialization after a coarse mixed tick"
+            );
+        }
+    }
+
+    /// SPEC-24 S1 gate (b): A/B against the recompute-fallback twin. The
+    /// identical presence-guarded op sequence drives a `Circuit::new()`
+    /// and a `Circuit::new_with_recompute_fallback()`; after every tick
+    /// both must agree on union presence and hold every derived row at
+    /// multiplicity exactly 1. Raw `derived_base` key sets may legally
+    /// differ (PLAN-24-01 "Expected behavioral divergences": the two
+    /// paths can park a both-asserted-and-derivable triple on different
+    /// sides), so the comparison is union presence, never derived keys.
+    #[test]
+    fn incremental_matches_recompute_fallback(batches in batched_random_ops()) {
+        let mut inc = Circuit::new();
+        let mut fb = Circuit::new_with_recompute_fallback();
+        for (plan, rid) in build_plans() {
+            inc.add_plan(plan, rid);
+        }
+        for (plan, rid) in build_plans() {
+            fb.add_plan(plan, rid);
+        }
+
+        let mut net: Zset<TripleId> = Zset::new();
+
+        for batch in &batches {
+            for (triple, is_retract) in batch {
+                if *is_retract {
+                    if net.get(triple) > 0 {
+                        net.add(*triple, -1);
+                        inc.retract_triple(*triple);
+                        fb.retract_triple(*triple);
+                    }
+                } else if net.get(triple) == 0 {
+                    net.add(*triple, 1);
+                    inc.assert_triple(*triple);
+                    fb.assert_triple(*triple);
+                }
+            }
+            inc.tick();
+            fb.tick();
+            inc.debug_validate();
+            // The fallback resyncs its incremental state every retraction
+            // tick (`resync_incremental_state`), so its invariants must
+            // hold too.
+            fb.debug_validate();
+
+            for (k, m) in inc.derived_base().iter() {
+                prop_assert_eq!(m, 1, "incremental derived_base {:?} at multiplicity {}", k, m);
+            }
+            for (k, m) in fb.derived_base().iter() {
+                prop_assert_eq!(m, 1, "fallback derived_base {:?} at multiplicity {}", k, m);
+            }
+
+            let inc_presence = union_presence(inc.asserted_base(), inc.derived_base());
+            let fb_presence = union_presence(fb.asserted_base(), fb.derived_base());
+            prop_assert_eq!(
+                inc_presence,
+                fb_presence,
+                "incremental and recompute-fallback circuits diverge on union presence"
+            );
+        }
+    }
+
+    /// SPEC-24 S1 gate (c): fully unguarded ops — duplicate asserts and
+    /// over-retractions allowed — with coarse ticks. `asserted_base` may
+    /// then hold any multiplicity, including negative (over-retraction is
+    /// a no-op at the presence level but leaves a negative Z-set row), so
+    /// the reference is built from the *positive-presence projection* of
+    /// `asserted_base`. After every tick the invariants must still hold
+    /// (`debug_validate()`) and the union presence must equal
+    /// `full_rematerialize(presence(asserted))`.
+    #[test]
+    fn unguarded_ops_keep_invariants(batches in batched_random_ops()) {
+        let mut circuit = Circuit::new();
+        for (plan, rid) in build_plans() {
+            circuit.add_plan(plan, rid);
+        }
+
+        for batch in &batches {
+            for (triple, is_retract) in batch {
+                if *is_retract {
+                    circuit.retract_triple(*triple);
+                } else {
+                    circuit.assert_triple(*triple);
+                }
+            }
+            circuit.tick();
+            circuit.debug_validate();
+
+            // check_equivalence must see a presence set on the asserted
+            // side: the raw asserted_base can hold negative rows here,
+            // which its union construction would wrongly count as
+            // present. Its reference is then exactly
+            // full_rematerialize(presence(asserted)).
+            let asserted_presence = positive_presence(circuit.asserted_base());
+            prop_assert!(
+                check_equivalence(&asserted_presence, circuit.derived_base()),
+                "store diverges from full re-materialization of the asserted presence \
+                 projection under unguarded ops"
             );
         }
     }

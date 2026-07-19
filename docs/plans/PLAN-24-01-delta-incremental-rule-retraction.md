@@ -398,7 +398,7 @@ pass unchanged.
 **Files:**
 - Modify: `crates/incremental/tests/acceptance_differential.rs`
 
-- [ ] **Step 1:** Extend with three proptests (keep the existing three):
+- [x] **Step 1:** Extend with three proptests (keep the existing three):
   (a) `coarse_mixed_ticks_match_full_rematerialize`: batches of 1–8 random
   ops (insert or presence-guarded retract) per tick, 1–6 ticks; after each
   tick `debug_validate()` + `check_equivalence`.
@@ -413,10 +413,10 @@ pass unchanged.
   and the union presence equals `full_rematerialize(presence(asserted))`
   — build the reference from the positive-presence projection of
   `asserted_base`.
-- [ ] **Step 2:** Run — `cargo nextest run -p horndb-incremental
+- [x] **Step 2:** Run — `cargo nextest run -p horndb-incremental
   acceptance_differential`. Fix what falls out (this suite is the real gate;
   budget debugging time here).
-- [ ] **Step 3: Commit** — `test(incremental): extend differential suite —
+- [x] **Step 3: Commit** — `test(incremental): extend differential suite —
   coarse mixed ticks, fallback A/B, invariant validation (#210)`.
 
 ### Task 5: Closure-interplay reconciliation
