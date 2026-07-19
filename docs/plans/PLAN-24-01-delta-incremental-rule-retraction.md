@@ -319,13 +319,13 @@ pass unchanged.
 - Modify: `crates/incremental/src/circuit.rs`
 - Test: existing suite must pass; targeted new tests come in Task 3.
 
-- [ ] **Step 1: Add state** — `rule_weights`, `extent`, `recompute_fallback:
+- [x] **Step 1: Add state** — `rule_weights`, `extent`, `recompute_fallback:
   bool` fields; `new()` keeps `recompute_fallback = false`;
   `new_with_recompute_fallback()` added. Add `note_presence_change` (code in
   design section), `base_presence(&self, t) -> bool`, and small private
   helpers: `total_weight(&self, t) -> i64`, `first_attr_rule(&self, t) ->
   Option<RuleId>` (lowest `RuleId` with positive weight).
-- [ ] **Step 2: Restructure `tick()`** per the design's five phases. The
+- [x] **Step 2: Restructure `tick()`** per the design's five phases. The
   closure retract pass and closure insertion pass keep their existing logic
   but (a) the insertion pass always runs before the rule fixpoint, (b) every
   `derived_base`/`closure_support` mutation in both passes calls
@@ -338,7 +338,7 @@ pass unchanged.
   Vec<(RuleId, i64)>>`, process distinct transitions in key order building
   `next_delta`. `rounds_run` = fixpoint rounds; keep the existing metrics
   block and `TickReport` shape.
-- [ ] **Step 3: Fallback path** — when `recompute_fallback && has_retraction`,
+- [x] **Step 3: Fallback path** — when `recompute_fallback && has_retraction`,
   run the Stage-1 regime (the current retraction block, kept as a private
   method) then `resync_incremental_state()`: rebuild `extent` from base
   presence, rebuild `rule_weights` from each plan's `apply_full(&extent)`
@@ -350,14 +350,14 @@ pass unchanged.
   now zero and add entries for materialized derived rows the recompute added.
   (Simplest correct resync: after the old block ran, set `rule_attr` from the
   recompute result as today, then rebuild `extent` and `rule_weights`.)
-- [ ] **Step 4: Delete the old insertion-regime block** (the unified path
+- [x] **Step 4: Delete the old insertion-regime block** (the unified path
   replaces it); `recompute_rule_closure` stays. Update `circuit.rs` module docs
   (top comment) to describe the unified path; keep it short per repo style.
-- [ ] **Step 5: Full crate suite** — `cargo nextest run -p horndb-incremental`.
+- [x] **Step 5: Full crate suite** — `cargo nextest run -p horndb-incremental`.
   Existing tests that pin replaced transients (design section "Expected
   behavioral divergences") get updated **with a comment** citing this plan.
   Every store-state/final-presence assertion must pass unmodified.
-- [ ] **Step 6: Commit** — `feat(incremental): unified tick with incremental
+- [x] **Step 6: Commit** — `feat(incremental): unified tick with incremental
   distinct — delta-incremental rule retraction (SPEC-24 S1, #210)`.
 
 ### Task 3: Oracle + validator exposure, targeted transition tests

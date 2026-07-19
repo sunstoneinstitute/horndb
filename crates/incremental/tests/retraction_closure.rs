@@ -230,14 +230,17 @@ impl horndb_incremental::BilinearRule for GoalOnClosureEdge {
         da: &horndb_incremental::Zset<horndb_incremental::TripleId>,
         _db: &horndb_incremental::Zset<horndb_incremental::TripleId>,
     ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
-        // Presence-driven rule: recompute the head from the POST-DELTA base
-        // (base ∪ delta). The circuit's set-semantics "newly present" filter
-        // dedups, so re-emitting an already-present head is harmless. This makes
-        // the head fire whenever BOTH facts are present, regardless of which tick
-        // each arrived in.
+        // Exact delta of the presence-driven head: F(base ∪ delta) − F(base),
+        // i.e. +1 when the pair becomes jointly present, −1 when it stops.
+        // PLAN-24-01: the weight-trace circuit requires the documented delta
+        // contract; the previous version re-emitted an already-present head
+        // on every call (harmless under the Stage-1 "newly present" dedup,
+        // but a spurious weight increment for the incremental distinct).
         let mut post = a.clone();
         post.add_assign(da);
-        self.apply_full(&post, &post)
+        let mut out = self.apply_full(&post, &post);
+        out.sub_assign(&self.apply_full(a, a));
+        out
     }
 }
 
@@ -362,9 +365,16 @@ impl horndb_incremental::BilinearRule for MarkerRule {
         da: &horndb_incremental::Zset<horndb_incremental::TripleId>,
         _db: &horndb_incremental::Zset<horndb_incremental::TripleId>,
     ) -> horndb_incremental::Zset<horndb_incremental::TripleId> {
-        // Linear in `a`; delta is just the rule applied to the `a`-delta.
-        let _ = (a, b);
-        self.apply_full(da, da)
+        // Exact delta of the marker-presence head: F(base ∪ delta) − F(base).
+        // PLAN-24-01: the weight-trace circuit requires the documented delta
+        // contract; the previous version (`apply_full(da, da)`) filtered
+        // `m > 0`, so a marker RETRACTION produced no delta and left a stale
+        // positive weight in the trace.
+        let mut post = a.clone();
+        post.add_assign(da);
+        let mut out = self.apply_full(&post, b);
+        out.sub_assign(&self.apply_full(a, b));
+        out
     }
 }
 
