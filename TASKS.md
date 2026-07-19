@@ -36,7 +36,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 
 - [x] **CRITICAL** · _Completeness_ — **EPIC E1**: SPEC-23 unified query+reasoning IR (single IR; optimizer framework ships first) ([#185](https://github.com/sunstoneinstitute/horndb/issues/185))
 - [x] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186))
-- [ ] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187))
+- [v] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187)) — _wip: f62434fd@Stigs-MacBook-Pro.local · task-187-epic-e3-spec-02-storage-stage-2-per-tupl · 2026-07-19T12:37:26Z_
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E4**: SPEC-04 rule completeness Stage-2 (proof persistence, full dt-*, list/QCR rules, user-defined rules) ([#188](https://github.com/sunstoneinstitute/horndb/issues/188))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E5**: SPEC-07 SPARQL surface completeness Stage-2 (GSP, named-graph scoping, remote LOAD, XML, DESCRIBE) ([#189](https://github.com/sunstoneinstitute/horndb/issues/189))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E6**: SPEC-08 ML integration Stage-2 (FAISS candidate gen, NL→SPARQL) ([#190](https://github.com/sunstoneinstitute/horndb/issues/190))
