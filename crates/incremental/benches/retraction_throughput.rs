@@ -142,11 +142,15 @@ fn bench_retract(c: &mut Criterion) {
     let mut group = c.benchmark_group("retract_small_delta");
     // The recompute fallback re-derives the whole ~N² closure per retraction
     // tick with naïve O(|a|·|b|) reference joins; keep the sample count low
-    // so the full (non---quick) run stays tractable.
+    // so a full run (without `--quick`) stays tractable. Criterion will warn
+    // that its 5 s target time is too short for the slow points and overrun
+    // (~20 s/iter for recompute at N=256) — that is expected.
     group.sample_size(10);
     for &n in &[64u64, 128, 256] {
         // Interior small-delta cut edge — see the module doc for why this is
-        // position N−4, not the exact middle.
+        // position N−4, not the exact middle. N must be well above the cut
+        // offset so the cascade (~5N rows) stays small next to the ~N² closure.
+        assert!(n > 8, "cut position n-4 needs n > 8");
         let cut = (n - 4, SC, n - 3);
         for (name, fallback) in [("incremental", false), ("recompute_fallback", true)] {
             group.bench_with_input(BenchmarkId::new(name, n), &n, |b, &n| {
