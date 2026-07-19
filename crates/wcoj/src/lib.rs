@@ -14,6 +14,7 @@ pub mod pattern;
 pub mod plan;
 pub mod planner;
 pub mod source;
+pub mod stats;
 pub mod trie;
 
 pub use error::WcojError;
