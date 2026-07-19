@@ -18,7 +18,9 @@
 //! estimate arrive in Task 5.
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use crate::pattern::{TriplePattern, Var};
 use crate::stats::{Estimate, Position, Stats};
@@ -34,12 +36,24 @@ const UNBOUND_PRED_BOTH_DIVISOR: u64 = 1000;
 
 /// Cardinality estimator over a borrowed [`Stats`] source.
 ///
-/// Memoizes BGP estimates by the bitset of included pattern indices, so a
-/// repeated `estimate_bgp` over the same pattern set is O(1) after the first.
+/// Memoizes BGP estimates by a content hash of the ordered pattern slice, so a
+/// repeated `estimate_bgp` over the same patterns is O(1) after the first. The
+/// key is the patterns' content, not their count — one estimator can be reused
+/// across different BGPs (star sub-groups, EXPLAIN) without cross-BGP collision.
 pub struct StatsEstimator<'a, S: Stats> {
     stats: &'a S,
-    /// key = bitset of included pattern indices (bit `i` set for `patterns[i]`).
+    /// key = 64-bit hash of the ordered `[TriplePattern]` slice.
     memo: RefCell<HashMap<u64, Estimate>>,
+}
+
+/// Content hash of an ordered pattern slice, used as the memo key. Distinct
+/// pattern sets (different predicates, endpoints, or order) hash to distinct
+/// keys with overwhelming probability, so reusing one estimator across BGPs
+/// does not return a stale estimate.
+fn bgp_key(patterns: &[TriplePattern]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    patterns.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl<'a, S: Stats> StatsEstimator<'a, S> {
@@ -100,8 +114,8 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
     /// Otherwise: multiply per-pattern bases, divide once per shared variable
     /// (transitive equality class — a variable is one class no matter how many
     /// patterns carry it, so its denominator applies exactly once), then apply a
-    /// PK/FK cap for key-like shared variables. Result memoized by pattern-set
-    /// bitset.
+    /// PK/FK cap for key-like shared variables. Result memoized by a content
+    /// hash of the ordered pattern slice.
     pub fn estimate_bgp(&self, patterns: &[TriplePattern]) -> Estimate {
         match patterns.len() {
             0 => {
@@ -114,10 +128,9 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             _ => {}
         }
 
-        let n = patterns.len();
-        // Bitset of all included patterns. For the full-BGP call that is
-        // `(1<<n)-1`; guard the >= 64 case so the shift never overflows.
-        let key: u64 = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+        // Memo key = content hash of the ordered patterns, so different BGPs of
+        // the same length never collide.
+        let key = bgp_key(patterns);
         if let Some(cached) = self.memo.borrow().get(&key) {
             return *cached;
         }
@@ -157,6 +170,10 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             for &(idx, pos) in occs {
                 let d = match patterns[idx].p.as_bound() {
                     Some(pid) => self.stats.ndv(pid, pos),
+                    // Fallback proxy for an unbound predicate. Caveat: for a
+                    // both-endpoints-variable pattern the base is
+                    // `total_triples()`, so this denominator can over-shrink the
+                    // estimate. Acceptable — unbound predicates are rare.
                     None => bases[idx],
                 };
                 denom_v = denom_v.max(d);
@@ -345,5 +362,49 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(len_after_first, 1);
         assert_eq!(est.memo_len(), 1, "memo grew on identical repeat call");
+    }
+
+    #[test]
+    fn distinct_bgps_do_not_collide() {
+        // Two predicates with different counts so their single-shared-var joins
+        // have different true estimates:
+        //   pred 10: subjects {1,2} × objects {100,101,102} → 6 triples, ndv_s=2.
+        //   pred 20: subjects {1,2} × objects {200,201}     → 4 triples, ndv_s=2.
+        //   pred 30: subjects {1,2} × objects {300}         → 2 triples, ndv_s=2.
+        let stats = stats_of(vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(1, 10, 102),
+            Triple::new(2, 10, 100),
+            Triple::new(2, 10, 101),
+            Triple::new(2, 10, 102),
+            Triple::new(1, 20, 200),
+            Triple::new(1, 20, 201),
+            Triple::new(2, 20, 200),
+            Triple::new(2, 20, 201),
+            Triple::new(1, 30, 300),
+            Triple::new(2, 30, 300),
+        ]);
+        let est = StatsEstimator::new(&stats);
+
+        // Same length (2 patterns), same shape, different predicates → different
+        // true estimates. A count-only memo key would return the first for both.
+        let bgp_a = vec![
+            TriplePattern::new(var(0), bound(10), var(1)),
+            TriplePattern::new(var(0), bound(20), var(2)),
+        ];
+        let bgp_b = vec![
+            TriplePattern::new(var(0), bound(20), var(1)),
+            TriplePattern::new(var(0), bound(30), var(2)),
+        ];
+
+        let a = est.estimate_bgp(&bgp_a).estimate;
+        let b = est.estimate_bgp(&bgp_b).estimate;
+
+        // Each BGP keeps its own estimate; no cross-collision.
+        assert_ne!(a, b, "distinct BGPs collided on the memo key");
+        assert_eq!(a, est.estimate_bgp(&bgp_a).estimate);
+        assert_eq!(b, est.estimate_bgp(&bgp_b).estimate);
+        assert_eq!(est.memo_len(), 2, "two distinct BGPs must hold two entries");
     }
 }
