@@ -451,7 +451,7 @@ pass unchanged.
 - Modify: `crates/incremental/Cargo.toml` (add `[[bench]] name =
   "retraction_throughput" harness = false`)
 
-- [ ] **Step 1:** Bench design: build a warm circuit (SC-transitive plan from
+- [x] **Step 1:** Bench design: build a warm circuit (SC-transitive plan from
   a local copy of the bench bilinear; chain of N SC edges plus N TYPE facts
   fanned across the chain so the rule set has real consequences), then
   `b.iter` a steady-state small-delta cycle: retract one mid-chain edge,
@@ -460,12 +460,25 @@ pass unchanged.
   `retract_small_delta/recompute_fallback`
   (`Circuit::new_with_recompute_fallback()`). The ≥10× acceptance ratio is
   read off the criterion report (recompute vs incremental at the same N).
-- [ ] **Step 2:** Local smoke only (laptop): `cargo bench -p
+  AMENDED during execution: the cut is the interior edge at position N−4,
+  not the exact middle. In a bare chain a middle cut withdraws ~half the
+  closure — a bulk delta, not the small-delta steady state the gate
+  measures (and there the delta path is measurably no faster than
+  recompute). The N−4 edge still cascades real work through both rules
+  (~5N of ~N² rows) while keeping the delta small; rationale is in the
+  bench's module doc. A cax-sco bilinear joins the plan's TYPE facts so
+  they have real consequences (with SC-transitivity alone they are inert).
+- [x] **Step 2:** Local smoke only (laptop): `cargo bench -p
   horndb-incremental --bench retraction_throughput -- --quick` and `cargo
   bench -p horndb-incremental --bench insert_throughput -- --quick`; sanity
   that incremental ≥10× recompute at N=256 and insert numbers are within
   noise of `main`. The recorded numbers land from hornbench in Task 7.
-- [ ] **Step 3: Commit** — `bench(incremental): retraction small-delta A/B
+  Laptop `--quick` ratios (recompute ÷ incremental): 5.6× at N=64, 12.9×
+  at N=128, 20.9× at N=256 — gate holds at N=256. Insert bench vs `main`
+  (same machine, separate target dirs): branch is 1.6–3.9× *faster*
+  (15.7 µs / 2.90 ms / 36.5 ms vs main's 25.3 µs / 8.01 ms / 143 ms) —
+  no regression.
+- [x] **Step 3: Commit** — `bench(incremental): retraction small-delta A/B
   bench — incremental vs recompute fallback (#210)`.
 
 ### Task 7: Metrics + docs sync

@@ -19,3 +19,7 @@ criterion.workspace = true
 [[bench]]
 name = "insert_throughput"
 harness = false
+
+[[bench]]
+name = "retraction_throughput"
+harness = false
