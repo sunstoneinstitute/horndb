@@ -230,7 +230,7 @@ pass unchanged.
 - Modify: `crates/incremental/src/operator.rs`
 - Test: `crates/incremental/tests/nary_plan.rs` (extend)
 
-- [ ] **Step 1: Write the failing tests** — in `tests/nary_plan.rs`, add:
+- [x] **Step 1: Write the failing tests** — in `tests/nary_plan.rs`, add:
   (a) `stateful_delta_matches_stateless_over_random_sequences`: proptest
   driving 1–20 random `(triple, ±1)` delta batches (over a small id space,
   two-level plan built from the existing test bilinears) through both
@@ -246,18 +246,18 @@ pass unchanged.
   (c) `reset_state_reinitializes`: after some stateful calls, call
   `reset_state()`, continue from a different base; outputs still match the
   stateless reference.
-- [ ] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
+- [x] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
   horndb-incremental nary_plan` → compile error (`apply_delta_stateful`
   undefined).
-- [ ] **Step 3: Implement** — add `state: Option<Vec<Zset<TripleId>>>` to
+- [x] **Step 3: Implement** — add `state: Option<Vec<Zset<TripleId>>>` to
   `NaryPlan` (both constructors set `None`), `apply_delta_stateful` and
   `reset_state` per the design section. Lazy init: when `state` is `None`,
   build `intermediates[i]` by the same left fold `apply_full` uses, from the
   passed `base` (which is the pre-round extent). Keep `apply_delta`/`apply_full`
   byte-identical.
-- [ ] **Step 4: Run tests, verify pass** — `cargo nextest run -p
+- [x] **Step 4: Run tests, verify pass** — `cargo nextest run -p
   horndb-incremental nary_plan`.
-- [ ] **Step 5: Commit** — `feat(incremental): stateful NaryPlan with per-level
+- [x] **Step 5: Commit** — `feat(incremental): stateful NaryPlan with per-level
   integrated traces (SPEC-24 S1, #210)`.
 
 ### Task 2: Unified tick with weight-trace incremental distinct
