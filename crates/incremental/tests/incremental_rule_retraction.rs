@@ -105,8 +105,8 @@ fn mutual_sc_cycle_collapses_on_edge_retraction() {
     );
 }
 
-/// Retracting the asserted copy of a row that rules still WELL-FOUNDEDLY
-/// derive re-materializes it as rule-owned, publishing exactly one
+/// Retracting the asserted copy of a row that rules can still derive via
+/// well-founded support re-materializes it as rule-owned, publishing exactly one
 /// `RuleInferred +1` for it (net publishing — no transient), matching the
 /// Stage-1 recompute outcome.
 #[test]
@@ -301,6 +301,7 @@ fn reassert_round_trip_restores_store() {
     assert_eq!(events[0].mult, -1);
     assert_eq!(events[1].triple, (0, SC, 2));
     assert_eq!(events[1].mult, 1);
+    assert_oracle_matches_derived(&c);
 }
 
 /// Mixed single tick: retract one support AND insert an equivalent replacement
@@ -336,6 +337,7 @@ fn mixed_single_tick_support_swap_no_transient() {
             .all(|rec| rec.triple != (0, TYPE, 3)),
         "unaffected row must not churn the feed"
     );
+    assert_oracle_matches_derived(&c);
 }
 
 /// Duplicate asserts / over-retraction: multiplicity accounting at the
@@ -374,4 +376,5 @@ fn duplicate_asserts_and_over_retraction() {
     c.debug_validate();
     assert!(derived_keys(&c).is_empty());
     assert!(c.asserted_base().get(&(9, SC, 9)) <= 0);
+    assert_oracle_matches_derived(&c);
 }

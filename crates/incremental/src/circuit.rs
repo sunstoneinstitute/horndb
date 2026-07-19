@@ -959,6 +959,8 @@ impl Circuit {
         let old_rule: BTreeMap<TripleId, RuleId> = std::mem::take(&mut self.rule_attr);
 
         // Newly derivable rows → add + publish positive RuleInferred.
+        // Not `materialize_rule_row`: `rule_attr` was taken above and is
+        // bulk-reassigned below, so a per-row insert would be discarded.
         for (triple, rid) in &new_rule {
             if !old_rule.contains_key(triple) {
                 self.derived_base.add(*triple, 1);
