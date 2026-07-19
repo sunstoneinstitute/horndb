@@ -113,29 +113,53 @@ fn push_aggregates(plan: PhysicalPlan) -> PhysicalPlan {
 /// Lowered shapes: `keys == []` + a single plain count →
 /// [`PhysicalPlan::CountScan`] (landed with #144); any other combination of
 /// keys and ≥1 plain counts → [`PhysicalPlan::GroupCountScan`]. Both are
-/// reachable through an inlinable equality `FILTER`.
+/// reachable through an inlinable equality `FILTER`, and through one
+/// restricting `Project` inserted by the logical `ProjectionPushdown` pass
+/// (SPEC-23 §5.2) — see [`peel_restricting_project`] for where such a
+/// `Project` may sit and why peeling it is result-invariant.
 fn lower_count_group(
     inner: &PhysicalPlan,
     keys: &[Var],
     aggregates: &[Aggregate],
 ) -> Option<PhysicalPlan> {
     use PhysicalPlan::*;
-    // 1. Peel the child: a bare scan, or Filter(scan) whose expression is an
-    //    inlinable conjunction of `?v = <const>` equalities.
-    let (patterns, subst): (&Vec<TriplePattern>, Vec<(String, Term)>) = match inner {
-        BgpScan { patterns } => (patterns, Vec::new()),
-        Filter { expr, inner: f } => {
-            let BgpScan { patterns } = &**f else {
-                return None;
-            };
-            let mut subst = Vec::new();
-            if !eq_conjuncts(expr, &mut subst) {
-                return None;
-            }
-            (patterns, subst)
+    // Vars this lowering reads from the child: the group keys plus every
+    // aggregate's input vars — the same demand set `ProjectionPushdown`
+    // computed when it inserted a restricting Project here, which is why
+    // the two passes compose (the Project it built always retains these).
+    let mut required: HashSet<String> = keys.iter().map(|k| k.name().to_owned()).collect();
+    for a in aggregates {
+        for e in agg_inner_exprs(a) {
+            referenced_vars(e, &mut required);
         }
-        _ => return None,
-    };
+    }
+
+    // 1. Peel the child: a bare scan, or Filter(scan) whose expression is an
+    //    inlinable conjunction of `?v = <const>` equalities — either optionally
+    //    behind a restricting Project that retains every var read below it.
+    let (patterns, subst): (&Vec<TriplePattern>, Vec<(String, Term)>) =
+        match peel_restricting_project(inner, &required) {
+            BgpScan { patterns } => (patterns, Vec::new()),
+            Filter { expr, inner: f } => {
+                // Below the Filter, the retained set must also cover the
+                // filter expression's vars: a Project that dropped one the
+                // BGP binds would leave it unbound → the Filter drops every
+                // row, while substituting it into the pattern would count
+                // real matches. (ProjectionPushdown always retains them —
+                // it adds a Filter's expr vars to its child's demand.)
+                let mut f_required = required.clone();
+                referenced_vars(expr, &mut f_required);
+                let BgpScan { patterns } = peel_restricting_project(f, &f_required) else {
+                    return None;
+                };
+                let mut subst = Vec::new();
+                if !eq_conjuncts(expr, &mut subst) {
+                    return None;
+                }
+                (patterns, subst)
+            }
+            _ => return None,
+        };
 
     // 2. Vars bound in every solution of the PRE-substitution BGP. Group
     //    keys, `COUNT(?v)` inner vars, and substituted filter vars must all
@@ -190,6 +214,31 @@ fn lower_count_group(
         keys: keys.to_vec(),
         out_vars,
     })
+}
+
+/// Peel one restricting `Project` off `node`, provided it retains every
+/// var in `required` — otherwise return `node` unchanged. The logical
+/// `ProjectionPushdown` pass narrows the scan under a count-only `Group`
+/// (directly, or under the `Group`'s equality `Filter`), which would
+/// otherwise hide the `BgpScan` from [`lower_count_group`]'s pattern match.
+///
+/// Peeling is result-invariant: a SPARQL `Project` never changes row
+/// multiplicity (no dedup), so the count over the BGP's solution multiset
+/// is unchanged; and because the projection retains every var the caller
+/// reads (`required`), the lowered count node sees exactly the bindings it
+/// would have seen without the `Project`. A `Project` that does NOT retain
+/// `required` is left in place — the shape then falls back to the
+/// streaming `Group`, same as before the peel existed.
+fn peel_restricting_project<'a>(
+    node: &'a PhysicalPlan,
+    required: &HashSet<String>,
+) -> &'a PhysicalPlan {
+    if let PhysicalPlan::Project { vars, inner } = node {
+        if required.iter().all(|r| vars.iter().any(|v| v.name() == r)) {
+            return inner;
+        }
+    }
+    node
 }
 
 /// True iff `agg` is a plain (non-DISTINCT) count whose value equals the

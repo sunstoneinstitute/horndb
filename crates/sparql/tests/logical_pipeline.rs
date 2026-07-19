@@ -1,6 +1,7 @@
-//! SPEC-23 Phase-1 gate: the logical pipeline reproduces today's physical
-//! plans (no behavior change), coalescing a flat BGP is result-invariant, and
-//! passes are individually disable-able.
+//! SPEC-23 Phase-1 gate: the logical *lowering* reproduces today's physical
+//! plans (with the shape-changing Phase-2 rewrite passes disabled),
+//! coalescing a flat BGP is result-invariant, and passes are individually
+//! disable-able.
 
 use horndb_sparql::algebra::translate::translate_query_with;
 use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
@@ -113,14 +114,29 @@ const GOLDEN_QUERIES: &[&str] = &[
     "SELECT ?x ?y WHERE { ?x <http://ex/sco>+ ?y }",
 ];
 
+/// The Phase-1 golden gate: lowering Algebra → LogicalPlan → PhysicalPlan
+/// is 1:1 with the frozen [`reference_plan`]. The Phase-2 rewrite passes
+/// (Normalize, FilterPullup, FilterPushdown, ProjectionPushdown)
+/// deliberately change plan *shapes*, so they are disabled here — this test
+/// pins lowering fidelity, not the rewrites. The rewrites' own guarantee
+/// (result invariance) is covered by the rewrite-invariance battery and the
+/// per-pass unit tests instead.
 #[test]
 fn pipeline_reproduces_todays_physical_plans() {
+    let ctx = horndb_sparql::plan::pass::PlanCtx {
+        disabled_passes: HashSet::from([
+            PassId::Normalize,
+            PassId::FilterPullup,
+            PassId::FilterPushdown,
+            PassId::ProjectionPushdown,
+        ]),
+    };
     for q in GOLDEN_QUERIES {
         let alg = algebra_of(q);
         assert_eq!(
-            planner::plan(&alg).expect("plan"),
+            planner::plan_with_ctx(&alg, &ctx).expect("plan"),
             reference_plan(&alg),
-            "logical pipeline changed the physical plan for:\n{q}"
+            "logical lowering changed the physical plan for:\n{q}"
         );
     }
 }
