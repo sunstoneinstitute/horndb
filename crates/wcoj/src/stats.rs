@@ -262,11 +262,20 @@ impl SnapshotStats {
     /// mean objects-per-subject for `p` within the set, used by the star
     /// estimator.
     fn build_characteristic_sets(src: &VecTripleSource) -> CharacteristicSetIndex {
-        let rows = match src.sorted_rows(Ordering::Spo) {
-            Some(rows) => rows,
-            None => return CharacteristicSetIndex::empty(),
-        };
+        match src.sorted_rows(Ordering::Spo) {
+            Some(rows) => Self::build_characteristic_sets_with_k(rows, CS_TOP_K),
+            None => CharacteristicSetIndex::empty(),
+        }
+    }
 
+    /// Core of [`SnapshotStats::build_characteristic_sets`], parameterised by the
+    /// top-K cap so tests can exercise the residual-folding path with a small `k`.
+    /// `rows` must be the `Spo`-sorted snapshot rows `(subject, predicate,
+    /// object)`. The production path calls this with [`CS_TOP_K`].
+    fn build_characteristic_sets_with_k(
+        rows: &[(TermId, TermId, TermId)],
+        k: usize,
+    ) -> CharacteristicSetIndex {
         // key (sorted distinct predicates) -> (subject count, occurrences aligned
         // with the key's predicate order).
         let mut agg: HashMap<Vec<TermId>, (u64, Vec<u64>)> = HashMap::new();
@@ -319,7 +328,7 @@ impl SnapshotStats {
                 .then_with(|| a.predicates.cmp(&b.predicates))
         });
 
-        let retained = all.len().min(CS_TOP_K);
+        let retained = all.len().min(k);
         let tail = all.split_off(retained);
         let sets = all;
 
@@ -575,6 +584,60 @@ mod tests {
         let idx_with_20 = cs.by_predicate.get(&20).cloned().unwrap_or_default();
         assert_eq!(idx_with_20.len(), 1);
         assert!(cs.sets[idx_with_20[0]].predicates.contains(&20));
+    }
+
+    #[test]
+    fn characteristic_sets_residual_folding() {
+        // Four distinct predicate-sets with distinct subject counts:
+        //   {10}     — 4 subjects (s1..s4), 1 object each      → count 4
+        //   {20}     — 3 subjects (s5..s7), 1 object each      → count 3
+        //   {30}     — 2 subjects: s8 (2 objs on 30), s9 (1)   → count 2, occ(30)=3
+        //   {30,40}  — 1 subject s99: 1 obj on 30, 2 objs on 40 → count 1
+        // With k=2 the top two ({10},{20}) are retained; {30} and {30,40} fold.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(2, 10, 100),
+            Triple::new(3, 10, 100),
+            Triple::new(4, 10, 100),
+            Triple::new(5, 20, 200),
+            Triple::new(6, 20, 200),
+            Triple::new(7, 20, 200),
+            Triple::new(8, 30, 300),
+            Triple::new(8, 30, 301),
+            Triple::new(9, 30, 300),
+            Triple::new(99, 30, 300),
+            Triple::new(99, 40, 400),
+            Triple::new(99, 40, 401),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let rows = src.sorted_rows(Ordering::Spo).expect("Spo ordering");
+        let cs = SnapshotStats::build_characteristic_sets_with_k(rows, 2);
+
+        // Exactly the two highest-count sets are retained, most-frequent first.
+        assert_eq!(cs.sets.len(), 2);
+        assert_eq!(cs.sets[0].predicates, vec![10]);
+        assert_eq!(cs.sets[0].count, 4);
+        assert_eq!(cs.sets[1].predicates, vec![20]);
+        assert_eq!(cs.sets[1].count, 3);
+
+        // Residual folds {30} (count 2) and {30,40} (count 1) → 3 subjects.
+        assert_eq!(cs.residual_subjects, 3);
+        // Per-predicate occurrences summed across folded sets, sorted by predicate:
+        //   pred 30 = 3 (from {30}) + 1 (from {30,40}) = 4; pred 40 = 2.
+        assert_eq!(cs.residual_pred_occ, vec![(30, 4), (40, 2)]);
+
+        // by_predicate references only retained set indices (0..2) and only the
+        // retained predicates (10, 20); folded predicates 30/40 are absent.
+        let mut keys: Vec<TermId> = cs.by_predicate.keys().copied().collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec![10, 20]);
+        for idxs in cs.by_predicate.values() {
+            for &i in idxs {
+                assert!(i < cs.sets.len(), "index {i} out of retained range");
+            }
+        }
+        assert_eq!(cs.by_predicate[&10], vec![0]);
+        assert_eq!(cs.by_predicate[&20], vec![1]);
     }
 
     #[test]
