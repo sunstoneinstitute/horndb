@@ -370,8 +370,12 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
                         let m = occ as f64 / subjects;
                         factor *= match obj {
                             Term::Var(_) => m,
+                            // A fixed object matches at most once per subject, so
+                            // this is a probability capped at 1.0 — matching the
+                            // per-set path above (not `.min(m)`, which could exceed
+                            // 1 when the mean multiplicity `m` outruns the object NDV).
                             Term::Bound(_) => {
-                                (m / self.stats.ndv(p, Position::Object) as f64).min(m)
+                                (m / self.stats.ndv(p, Position::Object) as f64).min(1.0)
                             }
                         };
                     }
