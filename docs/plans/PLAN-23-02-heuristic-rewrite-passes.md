@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-07
 scope: "SPEC-23 Phase 2 — the four always-beneficial heuristic rewrite passes (Normalize, FilterPullup, FilterPushdown, ProjectionPushdown) registered into the Phase-1 logical pass pipeline, each individually disable-able and guarded by a result-invariance (slot-differential) suite"
 ---
