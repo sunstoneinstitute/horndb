@@ -11,15 +11,8 @@
 //! sink: wrapping it directly is itself the one-level descent from the
 //! caller's `Filter`, so a conjunct legal anywhere always finds a home.
 //!
-//! Conjuncts that end up at the same tree position — because a `Filter`
-//! already sits there (a `FilterPullup` residual, or one this pass just
-//! created for a sibling conjunct) — merge into that `Filter`'s conjunction
-//! rather than nesting a second `Filter` around it. Two nested `Filter`s
-//! and one `Filter` over their AND are exactly equivalent, so merging is
-//! never a new legality question — but it matters for shape: physical
-//! passes downstream (`plan/pushdown.rs`'s count-pushdown) pattern-match
-//! `Filter { expr, inner: BgpScan }` exactly one layer deep and miss a
-//! needlessly nested pair.
+//! Conjuncts that land at the same tree position merge into one `Filter`
+//! instead of nesting — rationale at [`push_one`]'s `Filter` arm.
 
 use crate::algebra::Expr;
 use crate::exec::runtime::referenced_vars;
@@ -86,10 +79,17 @@ fn push_filter(expr: Expr, inner: LogicalPlan) -> LogicalPlan {
 /// somewhere at or below `node` (via [`wrap`]'s recursion) and `node` was
 /// rebuilt around it; `Err` returns `c` and `node` unchanged because `node`
 /// is not a safe sink target (or none of its children bind `c`'s variables).
+///
+/// Legality re-runs [`bound_vars`] (a full lattice `infer`) on the candidate
+/// arm at every descent level — accepted cost at planning time, on
+/// planning-sized trees.
 fn push_one(c: Expr, node: LogicalPlan) -> Result<LogicalPlan, (Expr, LogicalPlan)> {
     let mut refs = HashSet::new();
     referenced_vars(&c, &mut refs);
-    let legal = |arm: &LogicalPlan| refs.iter().all(|v| bound_vars(arm).contains(v));
+    let legal = |arm: &LogicalPlan| {
+        let bound = bound_vars(arm);
+        refs.iter().all(|v| bound.contains(v))
+    };
 
     match node {
         LogicalPlan::Join { left, right } => {
@@ -290,6 +290,59 @@ mod tests {
             matches!(*left, LogicalPlan::Filter { .. }),
             "mandatory-arm conjunct must push; got {left:?}"
         );
+    }
+
+    /// A conjunct spanning BOTH Join arms (`?x` left-only, `?y` right-only)
+    /// has no single-arm home — it stays as a residual Filter above the Join.
+    #[test]
+    fn cross_arm_conjunct_stays_above_join() {
+        let join = LogicalPlan::Join {
+            left: Box::new(scan("a", "p1", "x")),
+            right: Box::new(scan("a", "p2", "y")),
+        };
+        let plan = LogicalPlan::Filter {
+            expr: Expr::Gt(
+                Box::new(Expr::Term(var("x"))),
+                Box::new(Expr::Term(var("y"))),
+            ),
+            inner: Box::new(join),
+        };
+        let out = FilterPushdown.run(plan, &ctx());
+        let LogicalPlan::Filter { inner, .. } = out else {
+            panic!("cross-arm conjunct must stay above the Join, got {out:?}")
+        };
+        let LogicalPlan::Join { left, right } = *inner else {
+            panic!("expected Join under the residual Filter, got {inner:?}")
+        };
+        assert!(matches!(*left, LogicalPlan::Bgp { .. }), "got {left:?}");
+        assert!(matches!(*right, LogicalPlan::Bgp { .. }), "got {right:?}");
+    }
+
+    /// Two conjuncts over the same left-arm var: the first push wraps a
+    /// Filter around the left arm's Bgp; the second must merge into that
+    /// Filter mid-tree (the join-arm path, not the Filter-at-root case
+    /// `merges_conjuncts_landing_on_the_same_sink` covers).
+    #[test]
+    fn merges_into_filter_placed_on_a_join_arm() {
+        let join = LogicalPlan::Join {
+            left: Box::new(scan("a", "p1", "x")),
+            right: Box::new(scan("a", "p2", "y")),
+        };
+        let plan = LogicalPlan::Filter {
+            expr: Expr::And(Box::new(gt0("x")), Box::new(gt0("a"))),
+            inner: Box::new(join),
+        };
+        let out = FilterPushdown.run(plan, &ctx());
+        let LogicalPlan::Join { left, .. } = out else {
+            panic!("both conjuncts must sink; expected Join at root, got {out:?}")
+        };
+        let LogicalPlan::Filter { expr, inner } = *left else {
+            panic!("expected one merged Filter on the left arm, got {left:?}")
+        };
+        assert!(matches!(*inner, LogicalPlan::Bgp { .. }));
+        let mut parts = Vec::new();
+        crate::plan::passes::conjuncts(expr, &mut parts);
+        assert_eq!(parts.len(), 2, "conjuncts must merge, not nest");
     }
 
     /// A conjunct over a var the `Project` hides must stay ABOVE the

@@ -118,8 +118,8 @@ pub(crate) fn conjoin(mut parts: Vec<Expr>) -> Option<Expr> {
 }
 
 /// The names of every variable `node` provably binds (`TypeMask::is_bound`)
-/// — the legality test [`filter_pullup`] (and later filter-pushdown) reads
-/// to decide whether a predicate can move past a subtree without changing
+/// — the legality test [`filter_pullup`] and [`filter_pushdown`] read to
+/// decide whether a predicate can move past a subtree without changing
 /// which rows survive.
 pub(crate) fn bound_vars(node: &LogicalPlan) -> HashSet<String> {
     let types = infer(node);
