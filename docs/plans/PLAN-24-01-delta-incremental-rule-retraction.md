@@ -366,7 +366,7 @@ pass unchanged.
 - Modify: `crates/incremental/src/circuit.rs`
 - Create: `crates/incremental/tests/incremental_rule_retraction.rs`
 
-- [ ] **Step 1:** Add `#[doc(hidden)] pub fn oracle_rule_closure(&self) ->
+- [x] **Step 1:** Add `#[doc(hidden)] pub fn oracle_rule_closure(&self) ->
   BTreeMap<TripleId, RuleId>` (wraps `recompute_rule_closure().0`) and
   `#[doc(hidden)] pub fn debug_validate(&self)` (panics with a descriptive
   message on any invariant violation; checks: extent ≡ presence(asserted ∪
@@ -375,7 +375,7 @@ pass unchanged.
   `NaryPlan::apply_full` which is `&self`; `rule_attr` keys have positive
   weight, positive `derived_base` row, and attributed rule has positive
   weight; `closure_support ⊆ derived_base` keys).
-- [ ] **Step 2: Targeted tests** (`tests/incremental_rule_retraction.rs`,
+- [x] **Step 2: Targeted tests** (`tests/incremental_rule_retraction.rs`,
   using `fixtures::synthetic_rules`): chain retraction cascade (SC chain
   a⊑b⊑c⊑d, retract middle edge, assert exact surviving closure), cyclic SC
   (a⊑b, b⊑a plus c: the divergence-trap case — insert, tick, retract one
@@ -388,9 +388,9 @@ pass unchanged.
   feed record), duplicate asserts / over-retraction (multiplicity ≥ 2 and
   negative asserted rows behave per presence boundary). Call
   `debug_validate()` after every tick in every test.
-- [ ] **Step 3:** Run — `cargo nextest run -p horndb-incremental
+- [x] **Step 3:** Run — `cargo nextest run -p horndb-incremental
   incremental_rule_retraction`.
-- [ ] **Step 4: Commit** — `test(incremental): transition + divergence-trap
+- [x] **Step 4: Commit** — `test(incremental): transition + divergence-trap
   coverage for incremental retraction (#210)`.
 
 ### Task 4: Extended differential suite (the acceptance gate)

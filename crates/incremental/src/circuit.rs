@@ -1093,4 +1093,113 @@ impl Circuit {
 
         (attr, rounds)
     }
+
+    /// Differential-testing oracle: the Stage-1 from-scratch rule closure over
+    /// the current base, returning the rule that first derived each
+    /// rule-derived row (the attribution map; the round count is dropped).
+    /// O(store). Exposed for integration tests only — the production path
+    /// never calls it.
+    #[doc(hidden)]
+    pub fn oracle_rule_closure(&self) -> BTreeMap<TripleId, RuleId> {
+        self.recompute_rule_closure().0
+    }
+
+    /// Brute-force check of the incremental-state invariants (differential-test
+    /// harness). Panics with a message naming the violated invariant and the
+    /// offending triple on failure. O(store) — call after a tick in tests, not
+    /// on the production path.
+    ///
+    /// The invariants (PLAN-24-01 "Circuit state invariants"):
+    /// (i) `extent` ≡ base presence, every extent entry at multiplicity 1;
+    /// (ii) `rule_weights` equals the exact per-rule one-step derivation counts
+    /// over the final extent (recomputed via each plan's stateless
+    /// `apply_full`); (iii) every `rule_attr` key has positive total weight, a
+    /// positive `derived_base` row, and the attributed rule has positive weight
+    /// for it; (iv) `closure_support ⊆ derived_base` keys.
+    #[doc(hidden)]
+    pub fn debug_validate(&self) {
+        // (i) extent ≡ presence. Zset prunes zero entries, so every extent
+        // entry is nonzero; the design pins each present row at multiplicity 1.
+        for (t, m) in self.extent.iter() {
+            assert_eq!(
+                m, 1,
+                "invariant (i) extent multiplicity: {t:?} has extent multiplicity {m}, expected 1"
+            );
+            assert!(
+                self.base_presence(t),
+                "invariant (i) extent ⊆ presence: {t:?} in extent but absent from both bases"
+            );
+        }
+        for (t, m) in self.asserted_base.iter() {
+            if m > 0 {
+                assert!(
+                    self.extent.get(t) > 0,
+                    "invariant (i) presence ⊆ extent: asserted {t:?} not in extent"
+                );
+            }
+        }
+        for (t, m) in self.derived_base.iter() {
+            if m > 0 {
+                assert!(
+                    self.extent.get(t) > 0,
+                    "invariant (i) presence ⊆ extent: derived {t:?} not in extent"
+                );
+            }
+        }
+
+        // (ii) weights exact. Recompute per-rule one-step derivation counts
+        // over the final extent via each plan's stateless `apply_full` (`&self`
+        // — it never disturbs any plan state) and compare to `rule_weights`
+        // exactly. Missing == 0; no zero entries are stored on either side.
+        let mut expected: BTreeMap<TripleId, BTreeMap<RuleId, i64>> = BTreeMap::new();
+        for (plan, rid) in &self.plans {
+            let full = plan.apply_full(&self.extent);
+            for (t, m) in full.iter() {
+                if m != 0 {
+                    *expected.entry(*t).or_default().entry(*rid).or_insert(0) += m;
+                }
+            }
+        }
+        expected.retain(|_, per_rule| {
+            per_rule.retain(|_, w| *w != 0);
+            !per_rule.is_empty()
+        });
+        assert!(
+            expected == self.rule_weights,
+            "invariant (ii) weights exact: rule_weights disagrees with recomputed one-step \
+             counts.\n  expected: {expected:?}\n  actual:   {:?}",
+            self.rule_weights
+        );
+
+        // (iii) attribution.
+        for (t, rid) in &self.rule_attr {
+            assert!(
+                self.total_weight(t) > 0,
+                "invariant (iii) attribution: rule_attr {t:?} has non-positive total weight"
+            );
+            assert!(
+                self.derived_base.get(t) > 0,
+                "invariant (iii) attribution: rule_attr {t:?} not materialized in derived_base"
+            );
+            let w = self
+                .rule_weights
+                .get(t)
+                .and_then(|per_rule| per_rule.get(rid))
+                .copied()
+                .unwrap_or(0);
+            assert!(
+                w > 0,
+                "invariant (iii) attribution: rule {rid} attributed to {t:?} but its weight is {w}"
+            );
+        }
+
+        // (iv) closure_support ⊆ derived_base keys.
+        for t in &self.closure_support {
+            assert!(
+                self.derived_base.get(t) > 0,
+                "invariant (iv) closure_support ⊆ derived_base: {t:?} in closure_support but \
+                 absent from derived_base"
+            );
+        }
+    }
 }
