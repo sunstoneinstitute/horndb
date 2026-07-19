@@ -171,8 +171,9 @@ pub struct SnapshotStats {
     max_degree: HashMap<TermId, (u64, u64)>,
     /// `Spo`-sorted snapshot rows `(subject, predicate, object)`, retained so the
     /// Tier-3 [`SnapshotStats::sample_join`] hook can draw index-walk samples.
-    /// This is a full copy of the graph, bounded by graph size — acceptable for
-    /// the recompute-from-snapshot design and only read when sampling is enabled.
+    /// This is a full copy of the graph. It is populated **only** when sampling is
+    /// turned on (see [`SnapshotStats::with_sampling`]); the default path keeps it
+    /// empty so building `SnapshotStats` allocates no per-graph copy.
     sample_rows: Vec<(TermId, TermId, TermId)>,
     /// Whether the Tier-3 sampling hook is active. `false` by default; flip it on
     /// with [`SnapshotStats::with_sampling`].
@@ -253,12 +254,9 @@ impl SnapshotStats {
 
         let characteristic_sets = Self::build_characteristic_sets(src);
         let max_degree = Self::build_max_degree(src);
-        // Retain the Spo rows for the (default-off) Tier-3 sampling hook.
-        let sample_rows = src
-            .sorted_rows(Ordering::Spo)
-            .map(<[_]>::to_vec)
-            .unwrap_or_default();
 
+        // Default path: retain NO rows. The Tier-3 sampling hook is off, so the
+        // per-graph copy is only made when `with_sampling(src, true)` turns it on.
         Self {
             total,
             predicate_count,
@@ -266,7 +264,7 @@ impl SnapshotStats {
             ndv_object,
             characteristic_sets,
             max_degree,
-            sample_rows,
+            sample_rows: Vec::new(),
             sampling_enabled: false,
         }
     }
@@ -275,8 +273,19 @@ impl SnapshotStats {
     /// ([`SnapshotStats::sample_join`]). Off by default: sampling carries a
     /// per-query cost and variance, so it is a fallback, not the default
     /// estimator path. Nothing in the estimator consumes this hook today.
-    pub fn with_sampling(mut self, enabled: bool) -> Self {
+    ///
+    /// The full copy of the `Spo` snapshot rows the hook samples is made **only
+    /// when `enabled` is true** — the default (sampling-off) path allocates no
+    /// per-graph copy. Passing `enabled = false` clears any retained rows.
+    pub fn with_sampling(mut self, src: &VecTripleSource, enabled: bool) -> Self {
         self.sampling_enabled = enabled;
+        self.sample_rows = if enabled {
+            src.sorted_rows(Ordering::Spo)
+                .map(<[_]>::to_vec)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         self
     }
 
@@ -850,6 +859,8 @@ mod tests {
         assert!(stats.sample_join(&single).is_none());
         // Empty and multi-pattern BGPs are inert too.
         assert!(stats.sample_join(&[]).is_none());
+        // Default path retains no per-graph copy.
+        assert!(stats.sample_rows.is_empty());
     }
 
     #[test]
@@ -862,7 +873,7 @@ mod tests {
             Triple::new(1, 20, 200),
         ];
         let src = VecTripleSource::from_triples(triples);
-        let stats = SnapshotStats::from_source(&src).with_sampling(true);
+        let stats = SnapshotStats::from_source(&src).with_sampling(&src, true);
 
         // Single-pattern BGP the hook handles: ?s <10> ?o.
         let single = vec![TriplePattern::new(
