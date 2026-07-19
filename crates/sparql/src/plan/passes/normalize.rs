@@ -1,6 +1,6 @@
-//! `Normalize` (SPEC-23 §5.2): boolean-connective simplification + constant
-//! filter folding + `Eq -> SameTerm` strength reduction. Single-shot,
-//! statistics-free, result-invariant.
+//! `Normalize` (SPEC-23 §5.2): constant folding through boolean connectives
+//! and `Eq -> SameTerm` strength reduction. Single-shot, statistics-free,
+//! result-invariant.
 
 use crate::algebra::{Expr, Term};
 use crate::plan::logical::LogicalPlan;
@@ -168,9 +168,7 @@ mod tests {
         Term::Var(Var::new(n))
     }
     fn ctx() -> PlanCtx {
-        PlanCtx {
-            disabled_passes: Default::default(),
-        }
+        PlanCtx::default()
     }
 
     /// A predicate-position variable is provably a NamedNode, so
@@ -283,6 +281,81 @@ mod tests {
         };
         assert!(rows.is_empty());
         assert_eq!(vars, vec![Var::new("s"), Var::new("p"), Var::new("o")]);
+    }
+
+    /// A constant-true conjunct is dropped even when it is mixed with a
+    /// non-constant conjunct: only the non-constant one survives, as a
+    /// single (not `And`-wrapped) expression.
+    #[test]
+    fn drops_constant_true_conjunct_keeps_non_constant_sibling() {
+        let bgp = LogicalPlan::Bgp {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("http://ex/age".into()),
+                object: var("age"),
+            }],
+        };
+        let t = Expr::Eq(
+            Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
+            Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
+        );
+        let non_const = Expr::Gt(
+            Box::new(Expr::Term(var("age"))),
+            Box::new(Expr::Term(Term::Literal("\"0\"".into()))),
+        );
+        let plan = LogicalPlan::Filter {
+            expr: Expr::And(Box::new(t), Box::new(non_const.clone())),
+            inner: Box::new(bgp),
+        };
+        let out = Normalize.run(plan, &ctx());
+        let LogicalPlan::Filter { expr, .. } = out else {
+            panic!("expected the non-constant conjunct to survive as a Filter, got {out:?}")
+        };
+        assert_eq!(
+            expr, non_const,
+            "the constant-true conjunct must vanish, leaving only the non-constant one"
+        );
+    }
+
+    /// `reduce_expr` recurses through `Or`/`Not`, not just a top-level `Eq`:
+    /// an `Eq` nested inside either connective still strength-reduces to
+    /// `SameTerm` when the lattice proves it.
+    #[test]
+    fn reduces_eq_nested_inside_or_and_not() {
+        let bgp = LogicalPlan::Bgp {
+            patterns: vec![TriplePattern {
+                subject: var("s"),
+                predicate: var("p"),
+                object: var("o"),
+            }],
+        };
+        let eq_a = Expr::Eq(
+            Box::new(Expr::Term(var("p"))),
+            Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
+        );
+        let eq_b = Expr::Eq(
+            Box::new(Expr::Term(var("p"))),
+            Box::new(Expr::Term(Term::Iri("http://ex/b".into()))),
+        );
+        let expr = Expr::Not(Box::new(Expr::Or(Box::new(eq_a), Box::new(eq_b))));
+        let plan = LogicalPlan::Filter {
+            expr,
+            inner: Box::new(bgp),
+        };
+        let out = Normalize.run(plan, &ctx());
+        let LogicalPlan::Filter { expr, .. } = out else {
+            panic!("expected Filter, got {out:?}")
+        };
+        let Expr::Not(inner) = expr else {
+            panic!("expected top-level Not, got {expr:?}")
+        };
+        let Expr::Or(l, r) = *inner else {
+            panic!("expected Or under Not, got {inner:?}")
+        };
+        assert!(
+            matches!(*l, Expr::SameTerm(..)) && matches!(*r, Expr::SameTerm(..)),
+            "both Eq operands of the nested Or must reduce to SameTerm; got {l:?}, {r:?}"
+        );
     }
 
     #[test]

@@ -266,9 +266,8 @@ fn is_plain_count(agg: &Aggregate, bgp_vars: &HashSet<String>) -> bool {
 /// `SameTerm` are matched identically here because `plan::passes::normalize`
 /// (SPEC-23 §5.2) also *produces* `Expr::SameTerm` internally — it
 /// strength-reduces an `Eq` between two provably-IRI or provably-blank-node
-/// operands (never a literal) before this pass runs. Term-level inlining of
-/// a `SameTerm` against a constant is exactly equivalent to inlining an
-/// `Eq` against that same constant, so the two need only one code path.
+/// operands (never a literal) before this pass runs, so inlining either
+/// against a constant needs only one code path.
 ///
 /// Result-invariance rests on engine `Expr::Eq`/`Expr::SameTerm` being
 /// structural `Term` equality over oxrdf-normalized forms, which coincides
