@@ -157,6 +157,16 @@ Design consequences:
   insertion-only fast path may remain as an optimization but no longer as a
   semantic fork.
 
+**Precision note (implementation).** The flat cumulative-weight crossing rule
+sketched above is unsound under deletion on cyclic recursion: a derived row
+can support itself through a cycle, so its cumulative weight stays positive
+after its real (base-grounded) support is gone, and the row is never
+retracted. The implementation therefore runs deletion as a two-phase
+overdelete / re-derive fixpoint (DRed-style: first delete everything the
+retracted rows could have contributed to, then re-derive what still has
+alternative support), driven by the same one-step weight trace. See
+`PLAN-24-01`, AMENDED section.
+
 ### S2. Delta-incremental closure retraction + exact seeded retraction
 
 The closure path gets the same treatment on the SPEC-05 boundary:

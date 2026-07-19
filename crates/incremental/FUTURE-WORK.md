@@ -32,11 +32,16 @@ with the SPEC-06 requirement ID and the trigger for promotion.
 - **Closure-path retraction — DELIVERED (2026-06-18, #5)**: see the F5
   entry below. A `ClosureInferred` row whose base support is retracted is
   now withdrawn.
-- **Still Stage 2**: a *fully delta-incremental* retraction path —
-  the current path recomputes the whole rule closure on every
-  retraction-containing tick rather than threading negative
-  multiplicities through each bilinear (the DBSP correctness theorem,
-  McSherry/Ryzhyk/Tannen PVLDB 2023 §3); closure-path retraction likewise
+- **Delta-incremental rule path — DELIVERED (2026-07-20, #210,
+  `PLAN-24-01`)**: `Circuit::tick` runs one unified incremental fixpoint.
+  A tick with retractions runs a two-phase overdelete / re-derive
+  (DRed-style) pass driven by per-row per-rule one-step weight traces
+  (`rule_weights`) with an incremental distinct; net rule events are
+  published per tick. The Stage-1 recompute survives only as a config-gated
+  fallback (`Circuit::new_with_recompute_fallback()`) and as the
+  differential-test oracle. See
+  `docs/plans/PLAN-24-01-delta-incremental-rule-retraction.md`.
+- **Still Stage 2 (SPEC-24 S2, #211)**: closure-path retraction still
   recomputes base-reachability over the affected source region per
   retracted edge rather than threading negative deltas end-to-end.
 

@@ -774,6 +774,9 @@ impl Circuit {
             m.incremental.closure_withdraw.inc_by(withdraw_n);
             m.incremental.closure_promote.inc_by(promote_n);
             m.incremental.fixpoint_rounds.observe(rounds_run as f64);
+            m.incremental
+                .distinct_trace_keys
+                .set(self.rule_weights.len() as i64);
         }
         TickReport {
             asserted_merged,

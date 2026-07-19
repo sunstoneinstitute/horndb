@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: executed
 date: 2026-07-19
 scope: "SPEC-24 S1 — delta-incremental rule retraction: incremental distinct via a per-row derivation-weight trace, per-plan integrated operator traces, one unified tick() path, recompute demoted to oracle + config-gated fallback"
 ---
@@ -488,11 +488,11 @@ pass unchanged.
 - Modify: `docs/architecture.md`, `crates/incremental/FUTURE-WORK.md`,
   `crates/incremental/AGENTS.md`, `docs/benchmarks.md`, this plan (status)
 
-- [ ] **Step 1:** Add gauge `horndb_incremental_distinct_trace_keys` (current
+- [x] **Step 1:** Add gauge `horndb_incremental_distinct_trace_keys` (current
   `rule_weights` key count, set at the end of every tick) following the
   existing incremental metrics pattern; add its row to `docs/metrics.md` in
   the same commit.
-- [ ] **Step 2:** Docs: add a short precision note to SPEC-24 §S1 (the flat
+- [x] **Step 2:** Docs: add a short precision note to SPEC-24 §S1 (the flat
   cumulative-weight crossing rule is unsound under deletion on cyclic
   recursion; deletion runs as an overdelete/re-derive two-phase fixpoint
   driven by the same weight trace — pointer to this plan's AMENDED section);
@@ -503,10 +503,10 @@ pass unchanged.
   sentence; run benches on hornbench (`ssh hornbench`, repo at `~/src/horndb`,
   rsync the branch) and record retraction A/B + insert_throughput rows in
   `docs/benchmarks.md` with env note; flip this plan to `status: executed`.
-- [ ] **Step 3:** Full verification (Phase 3 of /next-task): `cargo fmt --all`,
+- [x] **Step 3:** Full verification (Phase 3 of /next-task): `cargo fmt --all`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo nextest run
   --workspace`.
-- [ ] **Step 4: Commit** — `docs(incremental): S1 delta-incremental retraction
+- [x] **Step 4: Commit** — `docs(incremental): S1 delta-incremental retraction
   — metrics row, architecture/benchmarks sync (#210)`.
 
 ---
