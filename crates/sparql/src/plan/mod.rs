@@ -5,6 +5,7 @@ pub mod explain;
 pub mod logical;
 pub mod lower;
 pub mod pass;
+pub mod passes;
 pub mod planner;
 pub mod pushdown;
 pub mod types;

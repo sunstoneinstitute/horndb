@@ -7,9 +7,15 @@
 //! * Debug builds re-infer the lattice and structurally **validate** the IR
 //!   after every pass, so a plan regression bisects to one `PassId`.
 //!
-//! Phase 1 registers exactly one pass, [`CoalesceBgp`]. The other `PassId`
-//! variants exist so Phase-2+ passes slot in without an enum change and so a
-//! pragma can name them.
+//! Phase 1 registered exactly one pass, [`CoalesceBgp`]. Phase 2 adds
+//! [`crate::plan::passes::Normalize`] (constant folding + `Eq`→`SameTerm`
+//! strength reduction), [`crate::plan::passes::FilterPullup`] (hoist
+//! filters above inner joins), [`crate::plan::passes::FilterPushdown`]
+//! (sink conjuncts to their deepest legal subtree), and
+//! [`crate::plan::passes::ProjectionPushdown`] (thread a demanded-variable
+//! set top-down, inserting restricting `Project`s); the remaining `PassId`
+//! variants exist so the rest of Phase 2+ slots in without an enum change
+//! and so a pragma can name them.
 
 use crate::plan::logical::LogicalPlan;
 #[cfg(debug_assertions)]
@@ -85,9 +91,15 @@ pub trait LogicalPass {
     }
 }
 
-/// The Phase-1 pipeline. Source order == run order.
+/// The pipeline. Source order == run order.
 pub fn standard_passes() -> Vec<Box<dyn LogicalPass>> {
-    let passes: Vec<Box<dyn LogicalPass>> = vec![Box::new(CoalesceBgp)];
+    let passes: Vec<Box<dyn LogicalPass>> = vec![
+        Box::new(CoalesceBgp),
+        Box::new(crate::plan::passes::Normalize),
+        Box::new(crate::plan::passes::FilterPullup),
+        Box::new(crate::plan::passes::FilterPushdown),
+        Box::new(crate::plan::passes::ProjectionPushdown),
+    ];
     assert_pass_order(&passes);
     passes
 }

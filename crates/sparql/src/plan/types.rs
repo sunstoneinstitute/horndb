@@ -66,6 +66,17 @@ impl TypeMask {
     pub fn with_undef(self) -> Self {
         Self(self.0 | Self::UNDEF)
     }
+    /// True iff the variable is provably bound to exactly a `NamedNode`
+    /// (IRI) — bound, and no other kind bit set. Used by `Normalize` to
+    /// prove an `Eq` is safe to reduce to `SameTerm` (term-equality and
+    /// value-equality coincide on IRIs).
+    pub fn is_named_node(&self) -> bool {
+        self.is_bound() && self.0 & Self::ANY == Self::NAMED_NODE
+    }
+    /// True iff the variable is provably bound to exactly a `BlankNode`.
+    pub fn is_blank_node(&self) -> bool {
+        self.is_bound() && self.0 & Self::ANY == Self::BLANK_NODE
+    }
 }
 
 /// Inferred [`TypeMask`] per variable produced by a plan.
@@ -432,6 +443,29 @@ mod tests {
         let y = vt.get(&Var::new("y")).unwrap();
         assert!(y.is_bound());
         assert_ne!(y.bits() & TypeMask::LITERAL, 0);
+    }
+
+    #[test]
+    fn is_named_node_and_is_blank_node_accessors() {
+        // Predicate-position mask: NAMED_NODE only, bound.
+        let predicate = predicate_mask();
+        assert!(predicate.is_named_node());
+        assert!(!predicate.is_blank_node());
+
+        // Object-position mask: ANY (all kinds) — neither accessor applies.
+        let object = object_mask();
+        assert!(!object.is_named_node());
+        assert!(!object.is_blank_node());
+
+        // A mask that is exactly BLANK_NODE and bound.
+        let blank = TypeMask::from_bits(TypeMask::BLANK_NODE);
+        assert!(blank.is_blank_node());
+        assert!(!blank.is_named_node());
+
+        // Optional (UNDEF set) narrows to NAMED_NODE-or-unbound — not
+        // provably a NamedNode.
+        let optional_named = predicate_mask().with_undef();
+        assert!(!optional_named.is_named_node());
     }
 
     #[test]

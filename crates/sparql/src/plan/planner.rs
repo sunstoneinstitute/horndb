@@ -1,7 +1,7 @@
 //! Algebra → PhysicalPlan, via the logical IR + pass pipeline (SPEC-23 §5).
 //!
-//! Phase 1 wires `Algebra → LogicalPlan → run_passes → PhysicalPlan`. The
-//! only registered pass is `CoalesceBgp` (SPEC-23 §5.1): it folds
+//! Wires `Algebra → LogicalPlan → run_passes → PhysicalPlan`. Phase 1
+//! registered one pass, `CoalesceBgp` (SPEC-23 §5.1): it folds
 //! `Join(Bgp, Bgp)` into one flat BGP. spargebra already merges adjacent
 //! triple patterns, so on most queries the pass is a no-op and the emitted
 //! plan is structurally identical to the pre-refactor 1:1 lowering (the
@@ -9,8 +9,10 @@
 //! (merged-graph semantics): a query mixing top-level triples with a
 //! `GRAPH` block produces `Join(Bgp, Bgp)`, which now coalesces into one
 //! flat `BgpScan` — result-invariant, and disable-able via
-//! `PRAGMA disable-pass=coalesce-bgp`. Cost-based ordering and the
-//! heuristic rewrite passes land in later phases behind the same registry.
+//! `PRAGMA disable-pass=coalesce-bgp`. Phase 2 adds the four heuristic
+//! rewrite passes (`Normalize`, `FilterPullup`, `FilterPushdown`,
+//! `ProjectionPushdown`, see `plan::passes`). Cost-based ordering lands in
+//! a later phase behind the same registry.
 
 use crate::algebra::Algebra;
 use crate::error::Result;

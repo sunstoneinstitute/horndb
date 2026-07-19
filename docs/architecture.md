@@ -448,14 +448,19 @@ HIGH *Performance* task in `TASKS.md`.
 ## 15. Cross-cutting concerns
 
 ### Query optimization vs. reasoning-strategy selection
-**Status: partially implemented — Phase 1 (optimizer framework scaffolding) is
-implemented ([#201](https://github.com/sunstoneinstitute/horndb/issues/201)):
+**Status: partially implemented — Phases 1–2 are implemented. Phase 1
+(optimizer framework scaffolding, [#201](https://github.com/sunstoneinstitute/horndb/issues/201)):
 `crates/sparql/src/plan/{logical,types,pass,lower}.rs` ship the logical IR
 (flat n-ary `Bgp`), the binding/type lattice, and the typed/ordered/
-individually-disable-able pass registry (`CoalesceBgp` is the one registered
-pass), with `planner::plan` routed through the pipeline behind golden-plan
-tests and a `PRAGMA disable-pass=<id>` query pragma for bisection. Later
-phases ([#202](https://github.com/sunstoneinstitute/horndb/issues/202)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207))
+individually-disable-able pass registry, with `planner::plan` routed through
+the pipeline behind golden-plan tests and a `PRAGMA disable-pass=<id>` query
+pragma for bisection. Phase 2 (heuristic rewrite passes, [#202](https://github.com/sunstoneinstitute/horndb/issues/202)):
+`crates/sparql/src/plan/passes/` registers `Normalize` (constant folding +
+lattice-gated `Eq`→`SameTerm`), `FilterPullup`, `FilterPushdown`
+(`LeftJoin`-asymmetry- and `Project`-scope-aware), and `ProjectionPushdown`
+after `CoalesceBgp`, guarded by the slot-differential battery
+(`crates/sparql/tests/rewrite_invariance.rs`: full pipeline vs each pass
+singly disabled). Later phases ([#203](https://github.com/sunstoneinstitute/horndb/issues/203)–[#207](https://github.com/sunstoneinstitute/horndb/issues/207))
 stay planned in `TASKS.md`; reasoning-strategy selection stays out of the optimizer until phase 6.** Two concerns that are easy to
 conflate live in different places:
 

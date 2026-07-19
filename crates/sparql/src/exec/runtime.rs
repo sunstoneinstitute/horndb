@@ -984,6 +984,7 @@ pub(crate) fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
             out.insert(v.name().to_owned());
         }
         Expr::Eq(a, b)
+        | Expr::SameTerm(a, b)
         | Expr::Ne(a, b)
         | Expr::Lt(a, b)
         | Expr::Gt(a, b)
@@ -1479,6 +1480,9 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
     };
     Ok(match e {
         Expr::Eq(a, c) => eval_expr_to_term(a, b)? == eval_expr_to_term(c, b)?,
+        // Identical to `Eq` today (structural `Term` equality) — see the
+        // doc comment on `Expr::SameTerm`.
+        Expr::SameTerm(a, c) => eval_expr_to_term(a, b)? == eval_expr_to_term(c, b)?,
         Expr::Ne(a, c) => eval_expr_to_term(a, b)? != eval_expr_to_term(c, b)?,
         Expr::Lt(a, c) => cmp(a, c)? == Some(Ordering::Less),
         Expr::Gt(a, c) => cmp(a, c)? == Some(Ordering::Greater),
@@ -1585,6 +1589,7 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         // Boolean-typed expressions return a typed literal (lexical
         // form "true"/"false"); good enough for Stage 1 BIND tests.
         Expr::Eq(_, _)
+        | Expr::SameTerm(_, _)
         | Expr::Ne(_, _)
         | Expr::Lt(_, _)
         | Expr::Gt(_, _)
@@ -2525,5 +2530,58 @@ mod join_key_tests {
             vec![vec![Slot::Term(Term::Iri("http://ex/x".into()))]],
         );
         assert_eq!(names(&bound_join_vars(&vars(&["v"]), &build)), ["v"]);
+    }
+}
+
+#[cfg(test)]
+mod sameterm_tests {
+    use super::*;
+    use crate::algebra::{Expr, Term, Var};
+
+    fn bound(name: &str, t: Term) -> Bindings {
+        let mut b = Bindings::new();
+        b.set(name, t);
+        b
+    }
+
+    /// `SameTerm(?x, <iri>)` evaluates exactly like `Eq(?x, <iri>)` today:
+    /// structural term equality. This is the invariant that makes the
+    /// Normalize Eq->SameTerm reduction result-preserving.
+    #[test]
+    fn sameterm_matches_eq_term_semantics() {
+        let iri = Term::Iri("http://ex/a".into());
+        let b_hit = bound("x", iri.clone());
+        let b_miss = bound("x", Term::Iri("http://ex/b".into()));
+        let x = || Box::new(Expr::Term(Term::Var(Var::new("x"))));
+        let c = || Box::new(Expr::Term(iri.clone()));
+
+        let same = Expr::SameTerm(x(), c());
+        let eq = Expr::Eq(x(), c());
+        assert_eq!(
+            eval_expr(&same, &b_hit).unwrap(),
+            eval_expr(&eq, &b_hit).unwrap()
+        );
+        assert_eq!(
+            eval_expr(&same, &b_miss).unwrap(),
+            eval_expr(&eq, &b_miss).unwrap()
+        );
+        assert!(eval_expr(&same, &b_hit).unwrap());
+        assert!(!eval_expr(&same, &b_miss).unwrap());
+    }
+
+    /// `referenced_vars` must descend into `SameTerm` (else FilterPushdown
+    /// would mis-scope a SameTerm conjunct).
+    #[test]
+    fn sameterm_referenced_vars() {
+        let e = Expr::SameTerm(
+            Box::new(Expr::Term(Term::Var(Var::new("p")))),
+            Box::new(Expr::Term(Term::Var(Var::new("q")))),
+        );
+        let mut vars = std::collections::HashSet::new();
+        referenced_vars(&e, &mut vars);
+        assert_eq!(
+            vars,
+            ["p".to_string(), "q".to_string()].into_iter().collect()
+        );
     }
 }

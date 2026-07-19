@@ -459,3 +459,37 @@ extend it:
   `Runtime::run_stream`) is untouched; porting it onto the pass registry is
   Phase-2 territory (`projection-pushdown` / `join-planning` `PassId`s are
   reserved for it).
+
+## Heuristic rewrite passes (SPEC-23 Phase 2, #185, 2026-07-19)
+
+- Four `LogicalPass`es registered after `CoalesceBgp` in
+  `plan::pass::standard_passes`, source order: `Normalize` →
+  `FilterPullup` → `FilterPushdown` → `ProjectionPushdown`. Each declares
+  `must_follow` and is disable-able via `PlanCtx.disabled_passes`
+  (`PRAGMA disable-pass=<kebab-name>`).
+- `Normalize` reduces `Eq → SameTerm` only where the type lattice proves
+  both operands the same non-literal kind (IRI/blank), plus structural
+  constant folding of variable-free filter conjuncts through boolean
+  connectives (`And`/`Or`/`Not`). It never touches `?v = <const-literal>`;
+  the physical count-pushdown equality inlining (`plan::pushdown::eq_conjuncts`)
+  now matches `SameTerm` alongside `Eq`.
+- New `Expr::SameTerm` node: structural term equality, identical to `Eq`
+  today; diverges only if `Eq` gains value-equality (numeric promotion).
+- `FilterPullup` hoists conjuncts above inner `Join`s only, gated on the
+  conjunct's vars being provably bound in its own arm (unbound-var filter
+  is error→false; hoisting could flip it). Residuals stay on their arm.
+- `FilterPushdown` sinks conjuncts to the deepest binding subtree; never
+  into a `LeftJoin`'s optional arm; never past a `Project`'s scope
+  boundary (projected-away vars stay hidden); conjuncts landing on the
+  same sink merge into one `Filter` (keeps the count-pushdown one-layer
+  pattern match).
+- `ProjectionPushdown` is the logical mirror of `plan::pushdown::prune`;
+  both run in Phase 2. `lower_count_group` peels a restricting `Project`
+  (under `Group` and under its `Filter`) when it retains every var the
+  count path reads, so the COUNT fast path composes with the narrowing.
+  Retiring the physical `prune` is deferred to Phase 4.
+- Guard: `tests/rewrite_invariance.rs` — full pipeline vs each pass singly
+  disabled; a regression bisects to one `PassId`.
+
+Full rationale: `docs/specs/SPEC-23-unified-ir.md` §5.2 (pass registry), §6
+phase 2 (heuristic rewrite passes), §7 (acceptance criteria).
