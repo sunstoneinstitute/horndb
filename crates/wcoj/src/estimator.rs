@@ -128,10 +128,26 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
         upper.max(1)
     }
 
+    /// A pattern is *structurally empty* when its predicate is bound but has no
+    /// triples in the stats (`predicate_count(pid) == 0`) — e.g. every triple on
+    /// that predicate was retracted while the predicate id stays known. Such a
+    /// pattern matches exactly zero rows, so any join containing it is empty.
+    fn is_structurally_empty(&self, pat: &TriplePattern) -> bool {
+        matches!(pat.p.as_bound(), Some(pid) if self.stats.predicate_count(pid) == 0)
+    }
+
     /// Estimate for a single pattern. The expected size is the per-pattern base
     /// (a mean fan-out); the upper bound is the per-pattern maximum. `max >=
     /// mean`, so `estimate <= upper_bound` holds; the `min` clamps it regardless.
     pub fn estimate_pattern(&self, pat: &TriplePattern) -> Estimate {
+        // A bound predicate with zero triples is exactly empty — preserve the
+        // genuine zero rather than letting the floor-at-1 logic round it up to 1.
+        if self.is_structurally_empty(pat) {
+            return Estimate {
+                estimate: 0,
+                upper_bound: 0,
+            };
+        }
         let base = self.pattern_base(pat);
         let upper_bound = self.pattern_upper(pat);
         Estimate {
@@ -143,7 +159,8 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
     /// Estimate the output size of a BGP.
     ///
     /// Empty → join identity `(1, 1)`. Single → [`Self::estimate_pattern`].
-    /// Otherwise:
+    /// Any structurally empty pattern (bound predicate with zero triples) →
+    /// `(0, 0)`: a join with an empty relation is empty. Otherwise:
     /// - `upper_bound` is the cross product of the per-pattern maxima
     ///   ([`Self::pattern_upper`]). The join keeps only tuples each pattern can
     ///   match, so it never exceeds their product — a sound bound.
@@ -165,6 +182,16 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             }
             1 => return self.estimate_pattern(&patterns[0]),
             _ => {}
+        }
+
+        // If any pattern is structurally empty (bound predicate with zero
+        // triples), the join is empty. Return the genuine zero before the
+        // floor-at-1 logic in the base/product path can round it up to (1, 1).
+        if patterns.iter().any(|p| self.is_structurally_empty(p)) {
+            return Estimate {
+                estimate: 0,
+                upper_bound: 0,
+            };
         }
 
         // Memo key = content hash of the ordered patterns, so different BGPs of
@@ -391,10 +418,20 @@ fn residual_occ(index: &CharacteristicSetIndex, p: TermId) -> Option<u64> {
 }
 
 /// Detect a pure subject-star: >= 2 patterns, all with the same subject variable,
-/// every predicate bound. Returns the star's distinct predicates (sorted) paired
-/// with each predicate's object term (first occurrence kept if a predicate
-/// repeats — the repeated star collapses to its distinct predicates). `None` if
-/// the BGP is not a pure star.
+/// every predicate bound, and every predicate distinct. Returns the star's
+/// predicates (sorted) paired with each predicate's object term. `None` if the
+/// BGP is not a pure star.
+///
+/// A **repeated predicate** in the star (e.g. `?s p ?o1 . ?s p ?o2`) is a
+/// conjunction of two edges on the same predicate, not one edge. The
+/// Characteristic-Sets multiplicity formula keys on the *distinct* predicate set,
+/// so collapsing the repeat to a single predicate would estimate one edge
+/// (~`predicate_count(p)`) instead of the conjunction (≈ `Σ_s deg(s,p)²`) — a
+/// large under-count. Such stars deliberately return `None` and route to the
+/// denominator model in [`StatsEstimator::estimate_bgp`], which handles them
+/// correctly: each `?s p ?o_i` pattern contributes `base = predicate_count(p)`,
+/// the shared subject variable divides once by `ndv(p,Subject)`, and the
+/// `pattern_upper` cross-product stays a sound upper bound.
 fn detect_pure_star(patterns: &[TriplePattern]) -> Option<Vec<(TermId, Term)>> {
     if patterns.len() < 2 {
         return None;
@@ -406,9 +443,11 @@ fn detect_pure_star(patterns: &[TriplePattern]) -> Option<Vec<(TermId, Term)>> {
             return None;
         }
         let pid = pat.p.as_bound()?;
-        if !preds.iter().any(|(p, _)| *p == pid) {
-            preds.push((pid, pat.o));
+        // Any repeated predicate disqualifies the pure-star routing (see above).
+        if preds.iter().any(|(p, _)| *p == pid) {
+            return None;
         }
+        preds.push((pid, pat.o));
     }
     preds.sort_by_key(|(p, _)| *p);
     Some(preds)
@@ -765,6 +804,91 @@ mod tests {
                 "upper_bound {upper} below measured {truth} for shape {shape:?}"
             );
         }
+    }
+
+    #[test]
+    fn repeated_predicate_star_not_collapsed() {
+        // Subject 1 has 3 objects on pred 10; subject 2 has 1. So the star
+        // `?s 10 ?o1 . ?s 10 ?o2` counts Σ_s deg(s,10)² = 9 + 1 = 10, while
+        // predicate_count(10) = Σ_s deg = 4. The two differ, so an estimate that
+        // collapsed the repeated predicate to one edge (~predicate_count) is
+        // visibly wrong.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(1, 10, 102),
+            Triple::new(2, 10, 200),
+        ];
+        let stats = stats_of(triples.clone());
+        let est = StatsEstimator::new(&stats);
+
+        let bgp = vec![
+            TriplePattern::new(var(0), bound(10), var(1)),
+            TriplePattern::new(var(0), bound(10), var(2)),
+        ];
+
+        let truth = brute_force_count(&triples, &bgp);
+        assert_eq!(truth, 10, "Σ deg² sanity");
+        let pred_count = stats.predicate_count(10);
+        assert_eq!(pred_count, 4);
+
+        let full = est.estimate_bgp(&bgp);
+
+        // (a) Not the collapsed single-edge estimate (~predicate_count).
+        assert!(
+            full.estimate > pred_count,
+            "estimate {} did not exceed collapsed single-edge count {pred_count}",
+            full.estimate
+        );
+        // (b) Upper bound is sound.
+        assert!(
+            full.upper_bound >= truth,
+            "upper_bound {} below true {truth}",
+            full.upper_bound
+        );
+        // Repeated-predicate star is routed away from the CS collapse.
+        assert!(
+            detect_pure_star(&bgp).is_none(),
+            "repeated-predicate star must not be detected as a pure star"
+        );
+    }
+
+    #[test]
+    fn zero_count_predicate_is_exact_zero() {
+        // Graph has predicates 10 and 20; predicate 99 is absent (zero triples),
+        // modelling a predicate whose triples were all retracted but whose id
+        // stays known.
+        let stats = stats_of(vec![
+            Triple::new(1, 10, 100),
+            Triple::new(2, 10, 101),
+            Triple::new(1, 20, 200),
+        ]);
+        let est = StatsEstimator::new(&stats);
+        assert_eq!(stats.predicate_count(99), 0, "predicate 99 must be absent");
+
+        // Single pattern on the absent predicate → exact zero, not the (1,1) floor.
+        let single = vec![TriplePattern::new(var(0), bound(99), var(1))];
+        assert_eq!(
+            est.estimate_bgp(&single),
+            Estimate {
+                estimate: 0,
+                upper_bound: 0
+            }
+        );
+
+        // 2-pattern BGP mixing the absent predicate with a present one → still
+        // (0,0): a join with an empty relation is empty.
+        let mixed = vec![
+            TriplePattern::new(var(0), bound(10), var(1)),
+            TriplePattern::new(var(0), bound(99), var(2)),
+        ];
+        assert_eq!(
+            est.estimate_bgp(&mixed),
+            Estimate {
+                estimate: 0,
+                upper_bound: 0
+            }
+        );
     }
 
     /// SPEC-23 acceptance #3 accuracy gate — an in-crate unit test that holds the
