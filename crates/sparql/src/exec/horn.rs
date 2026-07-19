@@ -208,6 +208,13 @@ pub struct HornBackend {
     live: u64,
     /// Lazily-built WCOJ source. `None` after any mutation.
     snapshot: Mutex<Option<Arc<VecTripleSource>>>,
+    /// Cached statistics summary derived from a specific snapshot, used by
+    /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
+    /// stats were built from alongside the stats themselves. The cache
+    /// self-invalidates: any write rebuilds the snapshot into a fresh `Arc`
+    /// (see `invalidate` + `wcoj_snapshot`), so a stale entry never passes the
+    /// `Arc::ptr_eq` identity check against the current snapshot.
+    stats_cache: Mutex<Option<(Arc<VecTripleSource>, Arc<SnapshotStats>)>>,
 }
 
 impl Default for HornBackend {
@@ -224,6 +231,7 @@ impl HornBackend {
             tombstones: HashSet::new(),
             live: 0,
             snapshot: Mutex::new(None),
+            stats_cache: Mutex::new(None),
         }
     }
 
@@ -468,6 +476,24 @@ impl HornBackend {
         let built = Arc::new(VecTripleSource::from_triples(triples));
         *guard = Some(Arc::clone(&built));
         built
+    }
+
+    /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
+    /// against the snapshot's `Arc` identity. Reuses the cached stats when they
+    /// were built from the same snapshot `Arc`; otherwise rebuilds (a full
+    /// snapshot scan) and replaces the cache. Correct across writes with no
+    /// explicit invalidation: any mutation rebuilds the snapshot into a new
+    /// `Arc`, which fails `Arc::ptr_eq` against the cached one.
+    fn snapshot_stats(&self, snapshot: &Arc<VecTripleSource>) -> Arc<SnapshotStats> {
+        let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
+        if let Some((cached_snap, cached_stats)) = guard.as_ref() {
+            if Arc::ptr_eq(cached_snap, snapshot) {
+                return Arc::clone(cached_stats);
+            }
+        }
+        let stats = Arc::new(SnapshotStats::from_source(snapshot.as_ref()));
+        *guard = Some((Arc::clone(snapshot), Arc::clone(&stats)));
+        stats
     }
 
     /// Translate sparql `TriplePattern`s to WCOJ patterns for cardinality
@@ -926,10 +952,13 @@ impl Executor for HornBackend {
             Err(short_circuit) => return Some(short_circuit),
         };
         // Recompute-from-snapshot statistics (SPEC-23 Phase 3), fed to the
-        // layered estimator. Cheap relative to the query itself and keeps the
-        // estimate consistent with the exact snapshot the scan runs over.
-        let stats = SnapshotStats::from_source(snapshot.as_ref());
-        let est = StatsEstimator::new(&stats);
+        // layered estimator. Building `SnapshotStats` scans the whole snapshot,
+        // so cache it keyed on the snapshot's `Arc` identity: an `EXPLAIN` with
+        // many BgpScan/GroupCountScan nodes calls this once per node, and every
+        // node shares one snapshot. The cache self-invalidates because a write
+        // rebuilds the snapshot into a new `Arc` that fails the `ptr_eq` check.
+        let stats = self.snapshot_stats(&snapshot);
+        let est = StatsEstimator::new(stats.as_ref());
         let e = est.estimate_bgp(&wpatterns);
         Some(usize::try_from(e.estimate).unwrap_or(usize::MAX))
     }

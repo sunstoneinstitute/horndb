@@ -368,6 +368,64 @@ fn cardinality_empty_bgp_is_join_identity() {
     assert_eq!(st.cardinality_estimate(&[]), Some(1));
 }
 
+/// The `SnapshotStats` cache behind `cardinality_estimate` must not go stale:
+/// it is keyed on the snapshot's `Arc` identity, and any write rebuilds the
+/// snapshot into a fresh `Arc`. Two calls with no write in between must return
+/// the same number (cache hit); a write in between must change the estimate to
+/// reflect the new data (cache correctly invalidated, not stale).
+#[test]
+fn cardinality_stats_cache_invalidates_on_write() {
+    let mut st = stats_store();
+    let patterns = vec![pat(var("s"), iri("p1"), var("o"))];
+
+    // Baseline: p1 has 5 triples; the estimate equals the predicate count.
+    let before = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(before, 5, "sanity: p1 starts at 5 triples");
+
+    // Cache-hit path: a second call with NO write returns the same number.
+    let again = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(
+        again, before,
+        "no-write repeat must return the cached estimate"
+    );
+
+    // Mutate the store: add 5 more distinct p1 triples (subjects s6..s10),
+    // rebuilding the snapshot into a fresh `Arc`.
+    for i in 6..=10 {
+        st.insert_triple(iri(&format!("s{i}")), iri("p1"), iri(&format!("o{i}")));
+    }
+
+    // The estimate must reflect the new data, not the stale (5) figure — proof
+    // the stats cache invalidated with the snapshot.
+    let after = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    assert_eq!(true_count, 10, "sanity: p1 now has 10 triples");
+    assert_eq!(
+        after, 10,
+        "estimate must reflect the post-write data, not the stale pre-write value"
+    );
+    assert!(
+        after > before,
+        "estimate must increase after inserting more matching triples"
+    );
+
+    // Retraction path: delete one p1 triple; the estimate must drop again.
+    st.delete_triple(&iri("s10"), &iri("p1"), &iri("o10"));
+    let after_delete = st
+        .cardinality_estimate(&patterns)
+        .expect("estimate present");
+    assert_eq!(
+        after_delete, 9,
+        "estimate must reflect the retraction, not the stale post-insert value"
+    );
+}
+
 #[cfg(feature = "reasoner")]
 #[test]
 fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {
