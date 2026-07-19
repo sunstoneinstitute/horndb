@@ -31,7 +31,15 @@ pub struct Estimate {
     pub upper_bound: u64,
 }
 
+/// Cap on how many characteristic sets are kept exactly. Real RDF graphs have a
+/// heavy-tailed set distribution — a handful of frequent predicate-sets and a
+/// long tail of rare ones. Keeping the top-`CS_TOP_K` by subject count bounds
+/// memory; the tail folds into an aggregate residual bucket. `1024` is a
+/// data-driven default, tunable later.
+pub const CS_TOP_K: usize = 1024;
+
 /// One characteristic set: the exact predicate-set shared by a group of subjects.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacteristicSet {
     /// Sorted, distinct predicates — the set key.
     pub predicates: Vec<TermId>,
@@ -44,6 +52,7 @@ pub struct CharacteristicSet {
 
 /// Top-K frequent characteristic sets plus a residual bucket that folds the
 /// rare-set tail into aggregate counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacteristicSetIndex {
     /// Top-K sets by `count`, descending.
     pub sets: Vec<CharacteristicSet>,
@@ -137,11 +146,11 @@ impl Stats for ZeroStats {
 }
 
 /// Statistics computed by scanning an immutable [`VecTripleSource`] snapshot
-/// once ("recompute-from-snapshot"). This task ships **Tier 0** only: exact
-/// per-predicate triple counts and per-position number-of-distinct-values (NDV).
-///
-/// Tiers 1/2 — characteristic sets and per-predicate `max_degree` — are Task 3.
-/// The struct is shaped so those fields drop in next to the Tier-0 maps.
+/// once ("recompute-from-snapshot"). Covers all three tiers:
+/// - **Tier 0** — exact per-predicate triple counts and per-position
+///   number-of-distinct-values (NDV).
+/// - **Tier 1** — the characteristic-set index (top-K predicate-sets + residual).
+/// - **Tier 2** — per-(predicate, role) `max_degree`.
 ///
 /// Exact distinct counts come from an adjacent-dedup over the already-sorted
 /// snapshot rows: correct and cheap at snapshot scale, no HyperLogLog needed.
@@ -155,19 +164,30 @@ pub struct SnapshotStats {
     ndv_subject: HashMap<TermId, u64>,
     /// Predicate -> distinct objects for that predicate.
     ndv_object: HashMap<TermId, u64>,
-    /// Empty for now; Task 3 (Tier 1) fills this from the snapshot.
+    /// Tier 1: top-K characteristic sets + residual bucket.
     characteristic_sets: CharacteristicSetIndex,
+    /// Tier 2: predicate -> (max subject-role degree, max object-role degree).
+    /// See [`SnapshotStats::max_degree`] for the exact role convention.
+    max_degree: HashMap<TermId, (u64, u64)>,
 }
 
 impl SnapshotStats {
-    /// Compute Tier-0 statistics by scanning the pinned snapshot once.
+    /// Compute all three statistics tiers by scanning the pinned snapshot once
+    /// per ordering.
     ///
-    /// Uses the `Pso` ordering (rows sorted `(predicate, subject, object)`) for
-    /// counts and subject-NDV, and the `Pos` ordering (`(predicate, object,
-    /// subject)`) for object-NDV. In both, the predicate is the major axis, so
-    /// per-predicate rows form one contiguous run. Distinct subjects/objects are
-    /// counted by adjacent-dedup within each run (sorted rows → a value is
-    /// distinct exactly when it differs from the previous row's value).
+    /// Tier 0 uses the `Pso` ordering (rows sorted `(predicate, subject,
+    /// object)`) for counts and subject-NDV, and the `Pos` ordering
+    /// (`(predicate, object, subject)`) for object-NDV. In both, the predicate is
+    /// the major axis, so per-predicate rows form one contiguous run. Distinct
+    /// subjects/objects are counted by adjacent-dedup within each run (sorted rows
+    /// → a value is distinct exactly when it differs from the previous row's
+    /// value).
+    ///
+    /// Tier 1 scans the `Spo` ordering (`(subject, predicate, object)`); each
+    /// subject's triples form one contiguous run, from which the subject's
+    /// distinct-predicate set (its characteristic set) and per-predicate object
+    /// counts are read. Tier 2 reuses the `Pso`/`Pos` runs to find each
+    /// predicate's largest single-node fan-out.
     pub fn from_source(src: &VecTripleSource) -> Self {
         let total = src.total_triples() as u64;
 
@@ -218,13 +238,172 @@ impl SnapshotStats {
             }
         }
 
+        let characteristic_sets = Self::build_characteristic_sets(src);
+        let max_degree = Self::build_max_degree(src);
+
         Self {
             total,
             predicate_count,
             ndv_subject,
             ndv_object,
-            characteristic_sets: CharacteristicSetIndex::empty(),
+            characteristic_sets,
+            max_degree,
         }
+    }
+
+    /// Tier 1: build the characteristic-set index from the `Spo` ordering.
+    ///
+    /// Rows are `(subject, predicate, object)` sorted, so all triples of one
+    /// subject are contiguous, and within that its predicates are contiguous and
+    /// sorted. For each subject we read its distinct-predicate set (the "key")
+    /// and, per predicate, how many objects it has. Subjects with the same key
+    /// are aggregated: `count` = number of such subjects; `occurrences[p]` = sum
+    /// of their per-subject object counts on `p`. `occurrences[p] / count` is the
+    /// mean objects-per-subject for `p` within the set, used by the star
+    /// estimator.
+    fn build_characteristic_sets(src: &VecTripleSource) -> CharacteristicSetIndex {
+        let rows = match src.sorted_rows(Ordering::Spo) {
+            Some(rows) => rows,
+            None => return CharacteristicSetIndex::empty(),
+        };
+
+        // key (sorted distinct predicates) -> (subject count, occurrences aligned
+        // with the key's predicate order).
+        let mut agg: HashMap<Vec<TermId>, (u64, Vec<u64>)> = HashMap::new();
+
+        let mut i = 0;
+        while i < rows.len() {
+            let s = rows[i].0;
+            // Walk this subject's run, collecting (predicate, object-count) in the
+            // sorted predicate order the Spo scan yields.
+            let mut preds: Vec<TermId> = Vec::new();
+            let mut obj_counts: Vec<u64> = Vec::new();
+            while i < rows.len() && rows[i].0 == s {
+                let p = rows[i].1;
+                let mut objs = 0u64;
+                while i < rows.len() && rows[i].0 == s && rows[i].1 == p {
+                    // Triples are unique, so each row on (s, p) is a distinct object.
+                    objs += 1;
+                    i += 1;
+                }
+                preds.push(p);
+                obj_counts.push(objs);
+            }
+
+            let entry = agg
+                .entry(preds)
+                .or_insert_with(|| (0, vec![0; obj_counts.len()]));
+            entry.0 += 1;
+            for (slot, add) in entry.1.iter_mut().zip(obj_counts.iter()) {
+                *slot += *add;
+            }
+        }
+
+        // Materialise every aggregated set, then keep the top-K by subject count
+        // and fold the rest into the residual bucket.
+        let mut all: Vec<CharacteristicSet> = agg
+            .into_iter()
+            .map(|(predicates, (count, sums))| {
+                let occurrences = predicates.iter().copied().zip(sums).collect();
+                CharacteristicSet {
+                    predicates,
+                    count,
+                    occurrences,
+                }
+            })
+            .collect();
+        // Descending by count; ties broken by predicate-set for a stable order.
+        all.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.predicates.cmp(&b.predicates))
+        });
+
+        let retained = all.len().min(CS_TOP_K);
+        let tail = all.split_off(retained);
+        let sets = all;
+
+        let mut residual_subjects = 0u64;
+        let mut residual: HashMap<TermId, u64> = HashMap::new();
+        for cs in tail {
+            residual_subjects += cs.count;
+            for (p, occ) in cs.occurrences {
+                *residual.entry(p).or_insert(0) += occ;
+            }
+        }
+        let mut residual_pred_occ: Vec<(TermId, u64)> = residual.into_iter().collect();
+        residual_pred_occ.sort_unstable_by_key(|(p, _)| *p);
+
+        // Index only the retained sets: predicate -> indices of sets containing it.
+        let mut by_predicate: HashMap<TermId, Vec<usize>> = HashMap::new();
+        for (idx, cs) in sets.iter().enumerate() {
+            for &p in &cs.predicates {
+                by_predicate.entry(p).or_default().push(idx);
+            }
+        }
+
+        CharacteristicSetIndex {
+            sets,
+            residual_subjects,
+            residual_pred_occ,
+            by_predicate,
+        }
+    }
+
+    /// Tier 2: per-predicate maximum single-node fan-out on each role.
+    ///
+    /// Role convention (easy to get backwards): the *Subject* role degree is
+    /// keyed by subject and counts that subject's distinct objects — the largest
+    /// object fan-out of any one subject on `p`. It is read from the `Pso`
+    /// ordering `(predicate, subject, object)`. The *Object* role degree is keyed
+    /// by object and counts distinct subjects — the largest subject fan-out of
+    /// any one object on `p` — read from the `Pos` ordering `(predicate, object,
+    /// subject)`. Within a `(predicate, key)` group the third axis is sorted, so
+    /// distinct values are counted by adjacent-dedup.
+    fn build_max_degree(src: &VecTripleSource) -> HashMap<TermId, (u64, u64)> {
+        let mut max_degree: HashMap<TermId, (u64, u64)> = HashMap::new();
+
+        // Pso: max object fan-out per subject → the Subject-role degree (.0).
+        if let Some(rows) = src.sorted_rows(Ordering::Pso) {
+            let mut i = 0;
+            while i < rows.len() {
+                let p = rows[i].0;
+                let mut max_fanout = 0u64;
+                while i < rows.len() && rows[i].0 == p {
+                    let s = rows[i].1;
+                    // Distinct objects for this (p, s): rows are unique so each
+                    // row is a distinct object.
+                    let mut fanout = 0u64;
+                    while i < rows.len() && rows[i].0 == p && rows[i].1 == s {
+                        fanout += 1;
+                        i += 1;
+                    }
+                    max_fanout = max_fanout.max(fanout);
+                }
+                max_degree.entry(p).or_insert((0, 0)).0 = max_fanout;
+            }
+        }
+
+        // Pos: max subject fan-out per object → the Object-role degree (.1).
+        if let Some(rows) = src.sorted_rows(Ordering::Pos) {
+            let mut i = 0;
+            while i < rows.len() {
+                let p = rows[i].0;
+                let mut max_fanout = 0u64;
+                while i < rows.len() && rows[i].0 == p {
+                    let o = rows[i].1;
+                    let mut fanout = 0u64;
+                    while i < rows.len() && rows[i].0 == p && rows[i].1 == o {
+                        fanout += 1;
+                        i += 1;
+                    }
+                    max_fanout = max_fanout.max(fanout);
+                }
+                max_degree.entry(p).or_insert((0, 0)).1 = max_fanout;
+            }
+        }
+
+        max_degree
     }
 }
 
@@ -255,9 +434,18 @@ impl Stats for SnapshotStats {
         &self.characteristic_sets
     }
 
-    /// Tier 2, Task 3. Until then, the loosest bound: the whole graph.
-    fn max_degree(&self, _p: TermId, _role: Role) -> u64 {
-        self.total
+    /// Tier 2: largest single-node fan-out for predicate `p` on `role`. The
+    /// Subject role returns the max distinct-object count of any one subject; the
+    /// Object role returns the max distinct-subject count of any one object. An
+    /// unknown predicate falls back to the conservative whole-graph bound.
+    fn max_degree(&self, p: TermId, role: Role) -> u64 {
+        match self.max_degree.get(&p) {
+            Some((subj, obj)) => match role {
+                Role::Subject => *subj,
+                Role::Object => *obj,
+            },
+            None => self.total,
+        }
     }
 }
 
@@ -322,7 +510,97 @@ mod tests {
         assert_eq!(stats.ndv(999, Position::Subject), 1);
         assert_eq!(stats.ndv(999, Position::Object), 1);
 
-        // Tier-1 field is empty until Task 3.
-        assert!(stats.characteristic_sets().sets.is_empty());
+        // Tier-1 index is now populated (Task 3): subjects 2 and 3 have the set
+        // {10}, subject 1 has {10, 20}.
+        let cs = stats.characteristic_sets();
+        assert_eq!(cs.sets.len(), 2);
+        let just_10 = cs
+            .sets
+            .iter()
+            .find(|s| s.predicates == vec![10])
+            .expect("{10} set present");
+        assert_eq!(just_10.count, 2);
+    }
+
+    #[test]
+    fn characteristic_sets_grouping() {
+        // s1: predicates {10,20} — (10->100),(10->101),(20->200)
+        // s2: predicates {10,20} — (10->102),(20->201)
+        // s3: predicates {10}     — (10->103)
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(1, 20, 200),
+            Triple::new(2, 10, 102),
+            Triple::new(2, 20, 201),
+            Triple::new(3, 10, 103),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let stats = SnapshotStats::from_source(&src);
+        let cs = stats.characteristic_sets();
+
+        // Two distinct sets, none folded into the residual (< CS_TOP_K).
+        assert_eq!(cs.sets.len(), 2);
+        assert_eq!(cs.residual_subjects, 0);
+        assert!(cs.residual_pred_occ.is_empty());
+
+        let two = cs
+            .sets
+            .iter()
+            .find(|s| s.predicates == vec![10, 20])
+            .expect("{10,20} set present");
+        assert_eq!(two.count, 2);
+        // occurrences: pred 10 = s1(2) + s2(1) = 3; pred 20 = s1(1) + s2(1) = 2.
+        assert_eq!(two.occurrences, vec![(10, 3), (20, 2)]);
+
+        let one = cs
+            .sets
+            .iter()
+            .find(|s| s.predicates == vec![10])
+            .expect("{10} set present");
+        assert_eq!(one.count, 1);
+        assert_eq!(one.occurrences, vec![(10, 1)]);
+
+        // by_predicate[10] lists BOTH sets that contain predicate 10.
+        let mut idx_with_10 = cs.by_predicate.get(&10).cloned().unwrap_or_default();
+        idx_with_10.sort_unstable();
+        let mut expected: Vec<usize> = (0..cs.sets.len())
+            .filter(|&i| cs.sets[i].predicates.contains(&10))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(idx_with_10, expected);
+        assert_eq!(idx_with_10.len(), 2);
+
+        // by_predicate[20] lists only the {10,20} set.
+        let idx_with_20 = cs.by_predicate.get(&20).cloned().unwrap_or_default();
+        assert_eq!(idx_with_20.len(), 1);
+        assert!(cs.sets[idx_with_20[0]].predicates.contains(&20));
+    }
+
+    #[test]
+    fn max_degree_basic() {
+        // Same base graph, plus a shared object 900 on pred 30 from s1 and s2.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(1, 20, 200),
+            Triple::new(2, 10, 102),
+            Triple::new(2, 20, 201),
+            Triple::new(3, 10, 103),
+            Triple::new(1, 30, 900),
+            Triple::new(2, 30, 900),
+        ];
+        let src = VecTripleSource::from_triples(triples);
+        let stats = SnapshotStats::from_source(&src);
+
+        // Subject role = object fan-out per subject: s1 has {100,101} on pred 10.
+        assert_eq!(stats.max_degree(10, Role::Subject), 2);
+        // Object role = subject fan-out per object: object 900 on pred 30 has {s1,s2}.
+        assert_eq!(stats.max_degree(30, Role::Object), 2);
+        // Object 900's subject fan-out (2) dominates the subject fan-out on pred 30
+        // (each subject has one object) — sanity-check the roles are not swapped.
+        assert_eq!(stats.max_degree(30, Role::Subject), 1);
+        // Unknown predicate falls back to the conservative whole-graph bound.
+        assert_eq!(stats.max_degree(999, Role::Subject), stats.total_triples());
     }
 }
