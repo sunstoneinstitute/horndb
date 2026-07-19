@@ -236,17 +236,30 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             .fold(1u64, |acc, &b| acc.saturating_mul(b))
             .max(1);
 
-        // Where each variable appears at a subject/object position. Predicate-
-        // position variables are ignored for the denominator: a shared predicate
-        // variable does not join two rows on a shared *value* the way an S/O
-        // variable does, so it contributes no denominator here.
-        let mut var_occ: HashMap<Var, Vec<(usize, Position)>> = HashMap::new();
+        // Where each variable appears. `Some(pos)` is a subject/object position;
+        // `None` marks a predicate position. A predicate-position variable shared
+        // across patterns is also an equality constraint (the two rows must agree
+        // on the same predicate value), so it too contributes a denominator — the
+        // number of distinct predicates. Occurrences of one variable across
+        // predicate and subject/object positions form a single equality class, so
+        // they are grouped under the same key and divided once (using the max of
+        // the applicable denominators).
+        let mut var_occ: HashMap<Var, Vec<(usize, Option<Position>)>> = HashMap::new();
         for (idx, pat) in patterns.iter().enumerate() {
             if let Some(v) = pat.s.as_var() {
-                var_occ.entry(v).or_default().push((idx, Position::Subject));
+                var_occ
+                    .entry(v)
+                    .or_default()
+                    .push((idx, Some(Position::Subject)));
+            }
+            if let Some(v) = pat.p.as_var() {
+                var_occ.entry(v).or_default().push((idx, None));
             }
             if let Some(v) = pat.o.as_var() {
-                var_occ.entry(v).or_default().push((idx, Position::Object));
+                var_occ
+                    .entry(v)
+                    .or_default()
+                    .push((idx, Some(Position::Object)));
             }
         }
 
@@ -257,18 +270,22 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             if distinct_patterns.len() < 2 {
                 continue;
             }
-            // denom_v = max distinct-count over the binding patterns. A bound
-            // predicate uses its per-position ndv; an unbound predicate falls
-            // back to that pattern's base as a distinct-count proxy.
+            // denom_v = max distinct-count over the binding positions. A
+            // subject/object position on a bound predicate uses its per-position
+            // ndv (unbound → that pattern's base as a proxy); a predicate position
+            // uses the graph's distinct-predicate count.
             let mut denom_v = 1u64;
             for &(idx, pos) in occs {
-                let d = match patterns[idx].p.as_bound() {
-                    Some(pid) => self.stats.ndv(pid, pos),
-                    // Fallback proxy for an unbound predicate. Caveat: for a
-                    // both-endpoints-variable pattern the base is
-                    // `total_triples()`, so this denominator can over-shrink the
-                    // estimate. Acceptable — unbound predicates are rare.
-                    None => bases[idx],
+                let d = match pos {
+                    None => self.stats.distinct_predicates(),
+                    Some(pos) => match patterns[idx].p.as_bound() {
+                        Some(pid) => self.stats.ndv(pid, pos),
+                        // Fallback proxy for an unbound predicate. Caveat: for a
+                        // both-endpoints-variable pattern the base is
+                        // `total_triples()`, so this denominator can over-shrink
+                        // the estimate. Acceptable — unbound predicates are rare.
+                        None => bases[idx],
+                    },
                 };
                 denom_v = denom_v.max(d);
             }
@@ -286,12 +303,15 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
             if distinct_patterns.len() < 2 {
                 continue;
             }
-            let key_like = occs
-                .iter()
-                .any(|&(idx, pos)| match patterns[idx].p.as_bound() {
+            let key_like = occs.iter().any(|&(idx, pos)| match pos {
+                // Only a subject/object position can be key-like (a distinct value
+                // of the variable in every row of its predicate).
+                Some(pos) => match patterns[idx].p.as_bound() {
                     Some(pid) => self.stats.ndv(pid, pos) == self.stats.predicate_count(pid),
                     None => false,
-                });
+                },
+                None => false,
+            });
             if key_like {
                 if let Some(min_base) = distinct_patterns.iter().map(|&i| bases[i]).min() {
                     estimate = estimate.min(min_base);
@@ -418,9 +438,23 @@ fn residual_occ(index: &CharacteristicSetIndex, p: TermId) -> Option<u64> {
 }
 
 /// Detect a pure subject-star: >= 2 patterns, all with the same subject variable,
-/// every predicate bound, and every predicate distinct. Returns the star's
-/// predicates (sorted) paired with each predicate's object term. `None` if the
-/// BGP is not a pure star.
+/// every predicate bound, every predicate distinct, and **independent objects**.
+/// Returns the star's predicates (sorted) paired with each predicate's object
+/// term. `None` if the BGP is not such a pure star.
+///
+/// **Independent objects.** The Characteristic-Sets multiplicity formula
+/// multiplies each predicate's object multiplicity *independently*. That is only
+/// valid when the object of each pattern varies freely of the others. A shared
+/// object variable imposes an equality (the same value must appear on two
+/// predicates), and the subject variable recurring in an object position is a
+/// self-join — neither is independent. CS would then multiply as if free and can
+/// return a large positive estimate when the true answer is tiny (the objects
+/// must coincide). So a pattern's object must be either a bound constant, or a
+/// variable that (a) is not the star's subject and (b) is unique to its pattern.
+/// If any object variable repeats across patterns, equals the subject, or the
+/// subject appears in an object position, this returns `None` and the BGP routes
+/// to the denominator model in [`StatsEstimator::estimate_bgp`], which models the
+/// extra equality join.
 ///
 /// A **repeated predicate** in the star (e.g. `?s p ?o1 . ?s p ?o2`) is a
 /// conjunction of two edges on the same predicate, not one edge. The
@@ -428,16 +462,19 @@ fn residual_occ(index: &CharacteristicSetIndex, p: TermId) -> Option<u64> {
 /// so collapsing the repeat to a single predicate would estimate one edge
 /// (~`predicate_count(p)`) instead of the conjunction (≈ `Σ_s deg(s,p)²`) — a
 /// large under-count. Such stars deliberately return `None` and route to the
-/// denominator model in [`StatsEstimator::estimate_bgp`], which handles them
-/// correctly: each `?s p ?o_i` pattern contributes `base = predicate_count(p)`,
-/// the shared subject variable divides once by `ndv(p,Subject)`, and the
-/// `pattern_upper` cross-product stays a sound upper bound.
+/// denominator model, which handles them correctly: each `?s p ?o_i` pattern
+/// contributes `base = predicate_count(p)`, the shared subject variable divides
+/// once by `ndv(p,Subject)`, and the `pattern_upper` cross-product stays a sound
+/// upper bound.
 fn detect_pure_star(patterns: &[TriplePattern]) -> Option<Vec<(TermId, Term)>> {
     if patterns.len() < 2 {
         return None;
     }
     let subj = patterns[0].s.as_var()?;
     let mut preds: Vec<(TermId, Term)> = Vec::new();
+    // Object variables already claimed by an earlier pattern — each must be
+    // unique to its pattern for the independent-objects requirement.
+    let mut object_vars: HashSet<Var> = HashSet::new();
     for pat in patterns {
         if pat.s.as_var() != Some(subj) {
             return None;
@@ -446,6 +483,16 @@ fn detect_pure_star(patterns: &[TriplePattern]) -> Option<Vec<(TermId, Term)>> {
         // Any repeated predicate disqualifies the pure-star routing (see above).
         if preds.iter().any(|(p, _)| *p == pid) {
             return None;
+        }
+        // Independent-objects check: a variable object must not be the subject
+        // (self-join) and must not repeat across patterns (equality join).
+        if let Some(ov) = pat.o.as_var() {
+            if ov == subj {
+                return None;
+            }
+            if !object_vars.insert(ov) {
+                return None;
+            }
         }
         preds.push((pid, pat.o));
     }
@@ -850,6 +897,94 @@ mod tests {
         assert!(
             detect_pure_star(&bgp).is_none(),
             "repeated-predicate star must not be detected as a pure star"
+        );
+    }
+
+    #[test]
+    fn cs_rejects_shared_object_star() {
+        // BGP `?s 10 ?o . ?s 20 ?o` shares the OBJECT variable ?o, so the same
+        // object value must appear on both predicates for a subject. The
+        // Characteristic-Sets formula multiplies each predicate's object
+        // multiplicity independently, which ignores that equality and can
+        // over-estimate wildly. Here the two object pools are disjoint, so the
+        // true join is 0 — CS would still return a positive count.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(2, 10, 100),
+            Triple::new(1, 20, 200),
+            Triple::new(1, 20, 201),
+            Triple::new(2, 20, 201),
+        ];
+        let stats = stats_of(triples.clone());
+        let est = StatsEstimator::new(&stats);
+
+        // Var(1) is the shared object variable in both patterns.
+        let bgp = vec![
+            TriplePattern::new(var(0), bound(10), var(1)),
+            TriplePattern::new(var(0), bound(20), var(1)),
+        ];
+
+        // (Y) A shared-object star is NOT a pure star — must route to the
+        // denominator model, which handles the extra equality join.
+        assert!(
+            detect_pure_star(&bgp).is_none(),
+            "shared-object star must not be detected as a pure star"
+        );
+
+        let full = est.estimate_bgp(&bgp);
+        let denom = est.estimate_bgp_denominator_only(&bgp);
+        assert_eq!(
+            full.estimate,
+            denom.clamp(1, full.upper_bound),
+            "shared-object star did not route to the denominator model"
+        );
+
+        // Upper bound stays sound (the disjoint object pools make truth = 0).
+        let truth = brute_force_count(&triples, &bgp);
+        assert_eq!(truth, 0, "disjoint object pools → empty join");
+        assert!(
+            full.upper_bound >= truth,
+            "upper_bound {} below true {truth}",
+            full.upper_bound
+        );
+    }
+
+    #[test]
+    fn shared_predicate_variable_divides() {
+        // BGP `?s ?p ?o . ?x ?p ?y` shares only the PREDICATE variable ?p, with
+        // distinct subject/object variables. SPARQL requires the two ?p bindings
+        // to be equal, so the estimate must divide the product by the number of
+        // distinct predicates — not estimate the full cross product.
+        let triples = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(2, 10, 101),
+            Triple::new(1, 20, 200),
+            Triple::new(2, 20, 201),
+            Triple::new(3, 30, 300),
+        ];
+        let stats = stats_of(triples.clone());
+        let est = StatsEstimator::new(&stats);
+
+        let bgp = vec![
+            TriplePattern::new(var(0), var(1), var(2)),
+            TriplePattern::new(var(3), var(1), var(4)),
+        ];
+
+        let base = est.estimate_pattern(&bgp[0]).estimate;
+        let full = est.estimate_bgp(&bgp);
+        assert!(
+            full.estimate < base * base,
+            "shared ?p contributed no denominator: {} !< {}",
+            full.estimate,
+            base * base
+        );
+
+        let truth = brute_force_count(&triples, &bgp);
+        assert!(
+            full.upper_bound >= truth,
+            "upper_bound {} below true {truth}",
+            full.upper_bound
         );
     }
 

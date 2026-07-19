@@ -85,6 +85,13 @@ pub trait Stats: Send + Sync {
     fn total_triples(&self) -> u64;
     /// Number of triples with predicate `p`.
     fn predicate_count(&self, p: TermId) -> u64;
+    /// Number of distinct predicates in the graph (floored at 1). Used as the
+    /// equality-class denominator for a predicate-position variable shared across
+    /// patterns. Defaults to the conservative `1` (no spurious shrink); real
+    /// stats override it.
+    fn distinct_predicates(&self) -> u64 {
+        1
+    }
     /// Number of distinct values on side `pos` for predicate `p`.
     fn ndv(&self, p: TermId, pos: Position) -> u64;
     /// The characteristic-set index.
@@ -157,6 +164,9 @@ impl Stats for ZeroStats {
 /// are not re-scanned.)
 pub struct SnapshotStats {
     total: u64,
+    /// Number of distinct predicates in the graph (floored at 1). Computed once
+    /// from the `predicate_count` key set.
+    distinct_predicates: u64,
     /// Predicate -> number of triples with that predicate.
     predicate_count: HashMap<TermId, u64>,
     /// Predicate -> distinct subjects for that predicate.
@@ -263,8 +273,13 @@ impl SnapshotStats {
 
         // Default path: retain NO rows. The Tier-3 sampling hook is off, so the
         // per-graph copy is only made when `with_sampling(src, true)` turns it on.
+        // Distinct predicates = number of per-predicate count entries, floored
+        // at 1 so it is always a safe denominator.
+        let distinct_predicates = (predicate_count.len() as u64).max(1);
+
         Self {
             total,
+            distinct_predicates,
             predicate_count,
             ndv_subject,
             ndv_object,
@@ -611,6 +626,10 @@ impl Stats for SnapshotStats {
     /// is a safe fallback, not an estimator denominator.)
     fn predicate_count(&self, p: TermId) -> u64 {
         self.predicate_count.get(&p).copied().unwrap_or(0)
+    }
+
+    fn distinct_predicates(&self) -> u64 {
+        self.distinct_predicates
     }
 
     /// Exact distinct-value count for a known predicate/position. Absent → `1`,
