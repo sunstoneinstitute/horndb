@@ -428,20 +428,20 @@ pass unchanged.
   `tests/change_feed.rs`, `tests/metrics.rs`, `tests/snapshot.rs`,
   `tests/circuit_tick.rs`, `tests/retraction.rs`
 
-- [ ] **Step 1:** Run the full crate suite: `cargo nextest run -p
+- [x] **Step 1:** Run the full crate suite: `cargo nextest run -p
   horndb-incremental`. For each failure, classify: (i) real bug in the new
   path → fix the code; (ii) test pins a replaced transient/ordering per the
   design's divergence list → update the test with a comment citing
   `PLAN-24-01` and the divergence number. Do not weaken any store-state or
   net-per-key assertion.
-- [ ] **Step 2:** Verify the two documented mixed-tick closure pins:
+- [x] **Step 2:** Verify the two documented mixed-tick closure pins:
   `mixed_tick_replacement_path_final_state_correct` (final state must stay
   correct; the transient may remain — net-delta feed is S3, not this task)
   and `mixed_tick_insert_replacement_path_keeps_rule_consequence`.
-- [ ] **Step 3:** Full workspace check: `cargo nextest run` (production
+- [x] **Step 3:** Full workspace check: `cargo nextest run` (production
   crates) — no cross-crate regressions expected (no crate depends on
   incremental; this is a sanity pass).
-- [ ] **Step 4: Commit** — `test(incremental): reconcile closure-interplay
+- [x] **Step 4: Commit** — `test(incremental): reconcile closure-interplay
   suites with the unified tick (#210)`.
 
 ### Task 6: Retraction bench + insertion-regression guard

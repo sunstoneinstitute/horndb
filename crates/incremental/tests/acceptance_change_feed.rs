@@ -45,7 +45,7 @@ fn no_gaps_no_duplicates_under_sustained_inserts() {
 
     // Asserted records: exactly one per assert_triple call. Some may
     // be "noop" (insert of already-present triple, which still
-    // publishes — Stage 1 publishes every log append).
+    // publishes — the tick's drain phase publishes every log append).
     let asserted: Vec<_> = all
         .iter()
         .filter(|r| matches!(r.kind, DerivationKind::Asserted))
@@ -73,8 +73,8 @@ fn no_gaps_no_duplicates_under_sustained_inserts() {
     for rec in all.iter() {
         if let DerivationKind::RuleInferred(_) = rec.kind {
             // Either the row is present in derived_base, or a later
-            // retraction publish (mult = -1) cancelled it. Stage 1
-            // is insertion-only so the second case shouldn't occur;
+            // retraction publish (mult = -1) cancelled it. This suite
+            // is insertion-only, so the second case cannot occur;
             // assert presence.
             assert!(
                 circuit.derived_base().get(&rec.triple) > 0,

@@ -1,13 +1,13 @@
 //! SPEC-06 F6 — closure-path retraction through the `Circuit`, and its
-//! interaction with the rule recompute.
+//! interaction with the rule fixpoint.
 //!
 //! On a retraction tick the closure plans run their retraction pass
-//! (`apply_retract_delta`) BEFORE the rule recompute, withdrawing exactly the
+//! (`apply_retract_delta`) BEFORE the rule fixpoint, withdrawing exactly the
 //! `ClosureInferred` rows whose base support is gone and shrinking
-//! `closure_support`. The rule recompute then seeds from
-//! `asserted_base ∪ closure_support` — the already-shrunk support — so a rule
-//! consequence that depended on a now-withdrawn closure edge is withdrawn with
-//! it, and one that still has support survives.
+//! `closure_support`. The unified tick (PLAN-24-01) feeds those presence
+//! changes into the incremental R1/R2 rule fixpoint — so a rule consequence
+//! that depended on a now-withdrawn closure edge is withdrawn with it, and
+//! one that still has support survives.
 //!
 //! Closure withdrawal respects rule ownership (the dual of the original
 //! Finding-2 logic): a row that is ALSO rule-derived keeps its materialization
@@ -193,7 +193,7 @@ fn stale_rule_consequence_on_retracted_asserted_edge_is_withdrawn() {
 /// A rule whose body matches the SPECIFIC closure edge `(c,SC,e)` and emits a
 /// fresh-predicate head `(a,GOAL,e)` that cannot feed back into any rule. The
 /// consequence is therefore derivable ONLY when the closure edge `(c,SC,e)` is
-/// present in the recompute seed (via `closure_support`); the base SC edges
+/// present in the extent rules join against (owned via `closure_support`); the base SC edges
 /// `(c,SC,d),(c,SC,x),(x,SC,e)` do NOT let the rule reconstruct it, because
 /// there is no transitive SC rule registered — only the closure plan closes SC.
 struct GoalOnClosureEdge {
@@ -258,11 +258,12 @@ impl horndb_incremental::BilinearRule for GoalOnClosureEdge {
 /// Post-tick the base SC closure still entails (c,SC,e) [via c->x->e], so the
 /// rule consequence (a,GOAL,e) must SURVIVE.
 ///
-/// The fix runs the positive closure-insertion pass BEFORE the rule recompute on
-/// mixed ticks, so the recompute's `closure_support` seed already contains the
-/// re-derived (c,SC,e). Without it, the retraction pass withdrew (c,SC,e), the
-/// recompute (seeing a closure_support without it) withdrew (a,GOAL,e), and the
-/// late insertion pass re-added (c,SC,e) only AFTER rules had run.
+/// The closure insertion pass runs BEFORE the rule fixpoint — on every tick
+/// kind under the unified tick (PLAN-24-01, divergence 3) — so the extent the
+/// rules join against already contains the re-derived (c,SC,e). Without that
+/// ordering, the retraction pass withdrew (c,SC,e), the Stage-1 recompute
+/// withdrew (a,GOAL,e), and the late insertion pass re-added (c,SC,e) only
+/// AFTER rules had run.
 #[test]
 fn mixed_tick_insert_replacement_path_keeps_rule_consequence() {
     const A: u64 = 1;
@@ -282,11 +283,11 @@ fn mixed_tick_insert_replacement_path_keeps_rule_consequence() {
     }));
     circuit.add_plan(plan, R3_CAX_SCO);
 
-    // Tick 1: the closure chain only — closure derives (c,SC,e). (We assert
-    // (a,TYPE,c) in a SEPARATE tick because the closure insertion pass runs
-    // after the rule forward pass within one tick, so a rule consequence off a
-    // closure edge is only derivable once the closure edge already exists — the
-    // documented within-tick closure→rule insertion limitation.)
+    // Tick 1: the closure chain only — closure derives (c,SC,e). (Separate
+    // ticks are no longer required: the unified tick runs the closure
+    // insertion pass before the rule fixpoint on every tick kind (PLAN-24-01,
+    // divergence 3), so a rule can fire off a same-tick closure edge. Kept
+    // split to stage the scenario explicitly.)
     circuit.assert_triple((C, SC, D));
     circuit.assert_triple((D, SC, E));
     circuit.tick();
@@ -349,8 +350,8 @@ impl horndb_incremental::BilinearRule for MarkerRule {
         let mut out = horndb_incremental::Zset::new();
         // Unary trigger expressed as a bilinear self-join: emit (c,SC,e) once
         // per present marker (c,MARK,e). We scan only `a` and ignore `b` so the
-        // head's multiplicity tracks marker presence (set-semantics filter in
-        // the recompute collapses it to 1).
+        // head's multiplicity tracks marker presence (the circuit's
+        // set-semantics distinct collapses it to 1).
         for ((xs, xp, xo), m) in a.iter() {
             if *xp == MARK && *xs == self.c && *xo == self.e && m > 0 {
                 out.add((self.c, SC, self.e), 1);

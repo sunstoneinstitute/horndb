@@ -287,15 +287,17 @@ fn over_retract_then_reassert_to_zero_does_not_rederive_closure() {
 /// Finding 2 — DOCUMENT-AND-PIN (cosmetic change-feed precision, final state
 /// already correct). A single MIXED tick that retracts one support path AND
 /// inserts a replacement path for the SAME closure edge produces a transient
-/// `ClosureInferred -1` then `+1` on the change feed (the deletion pass zeroes
-/// the edge, then the insertion pass — running before the rule recompute, from
-/// the round-2 fix — re-adds it), and `derived_merged` counts both. This is NOT
-/// a final-state bug: `derived_base` is correct.
+/// `ClosureInferred -1` then `+1` on the change feed (the closure retract pass
+/// zeroes the edge, then the closure insertion pass — running before the rule
+/// fixpoint — re-adds it), and `derived_merged` counts both. The unified tick
+/// (PLAN-24-01) nets only RULE events; closure passes still publish directly,
+/// so this transient may remain until the SPEC-24 S3 net-delta feed. This is
+/// NOT a final-state bug: `derived_base` is correct.
 ///
 /// This test PINS the correct FINAL state. It deliberately does NOT assert on
-/// the transient feed records (that net-delta reconciliation is a documented
-/// Stage-2 follow-up — see `FUTURE-WORK.md`). A fresh subscriber that reads only
-/// final state sees the right answer.
+/// the transient feed records (that net-delta reconciliation is SPEC-24 S3 —
+/// see `FUTURE-WORK.md`). A fresh subscriber that reads only final state sees
+/// the right answer.
 ///
 /// Setup: `c=1, d=2, e=3, x=4`, all over predicate `P`. The closure edge under
 /// test is `(c,P,e)`. Path 1 is `c->d->e` (edges `(1,2),(2,3)`); the replacement
