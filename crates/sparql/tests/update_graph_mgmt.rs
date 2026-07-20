@@ -80,7 +80,7 @@ fn clear_all_and_drop_all_empty_horn() {
 
 fn clear_after_insert_then_reinsert<B: FullBackend + Default>() {
     // Re-inserting after a CLEAR must resurrect the triple (covers the
-    // HornBackend tombstone path used by clear_all).
+    // HornBackend native-retraction path used by clear_all, SPEC-25 S1).
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     run("CLEAR DEFAULT", &mut store).unwrap();
     assert_eq!(count_all(&store), 0);

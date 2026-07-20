@@ -157,7 +157,7 @@ pub fn load_with_reasoning(
 use crate::algebra::{TriplePattern, Var};
 use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
-use horndb_storage::{Store as ColumnStore, TermId};
+use horndb_storage::{Store as ColumnStore, TermId, DEFAULT_GRAPH};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -186,8 +186,11 @@ pub struct HornStorageStats {
 /// * Reads: Leapfrog Triejoin over a lazily-built [`VecTripleSource`]
 ///   snapshot (all six orderings, rebuilt after any mutation — a
 ///   documented Stage-1 cost; see INTEGRATION-NOTES.md).
-/// * Writes: storage is insertion-only at Stage 1, so `DELETE DATA`
-///   maintains a tombstone overlay applied at snapshot-build time.
+/// * Writes: `DELETE DATA` and `CLEAR`/`DROP` retract through
+///   `horndb_storage::Store`'s native per-tuple MVCC delete path
+///   (SPEC-25 S1) — a retracted tuple's `end` stamp is set, and every
+///   store read (`scan_all_term_ids`, `triple_count`, …) is already
+///   visibility-filtered, so `HornBackend` needs no overlay.
 ///
 /// RDF term identity is preserved: canonical-form `xsd:integer`
 /// literals (e.g. `"42"`) use the dictionary's inline-int fast path,
@@ -197,15 +200,12 @@ pub struct HornStorageStats {
 /// SPARQL BGP semantics require.
 pub struct HornBackend {
     store: ColumnStore,
-    /// Mirror of every `(s, p, o)` TermId key ever physically written to
-    /// `store` (updated after each successful `insert_triples`; never
-    /// shrinks — storage is insertion-only). Enables O(1) membership
-    /// tests without re-scanning the storage columns.
-    stored_keys: HashSet<(u64, u64, u64)>,
-    /// Raw `(s, p, o)` TermId payloads currently deleted.
-    tombstones: HashSet<(u64, u64, u64)>,
-    /// Live triple count (storage's count minus active tombstones).
-    live: u64,
+    /// Mirror of every `(s, p, o)` TermId key currently LIVE in `store`
+    /// (inserted on insert, removed on retract). Gives O(1) membership
+    /// tests for `INSERT DATA` idempotency and `DELETE DATA` no-op
+    /// detection, avoiding storage's O(partition-size)
+    /// `StoreSnapshot::contains` on the bulk-load hot path.
+    live_keys: HashSet<(u64, u64, u64)>,
     /// Lazily-built WCOJ source. `None` after any mutation.
     snapshot: Mutex<Option<Arc<VecTripleSource>>>,
     /// Cached statistics summary derived from a specific snapshot, used by
@@ -227,29 +227,28 @@ impl HornBackend {
     pub fn new() -> Self {
         Self {
             store: ColumnStore::in_memory(),
-            stored_keys: HashSet::new(),
-            tombstones: HashSet::new(),
-            live: 0,
+            live_keys: HashSet::new(),
             snapshot: Mutex::new(None),
             stats_cache: Mutex::new(None),
         }
     }
 
-    /// Live triple count.
+    /// Live triple count. `store.triple_count()` is already visibility-filtered
+    /// (SPEC-25 S1) and whole-tier, which equals the default-graph count here
+    /// because `HornBackend` never writes a named graph.
     pub fn len(&self) -> u64 {
-        self.live
+        self.store.triple_count()
     }
 
     /// Cheap point-in-time size stats for scrape-time metrics: live triple
     /// count plus the tier's already-tracked graph/predicate/byte estimates and
     /// the dictionary term count. Bounded by the number of distinct
-    /// predicates/graphs — never an O(triples) traversal. `triples` reflects
-    /// the live count (storage is insertion-only, so the tier's own triple
-    /// count would include tombstoned rows).
+    /// predicates/graphs — never an O(triples) traversal. `tier.triples` is
+    /// visibility-filtered by the tier itself, so no adjustment is needed here.
     pub fn storage_stats(&self) -> HornStorageStats {
         let tier = self.store.stats();
         HornStorageStats {
-            triples: self.live,
+            triples: tier.triples,
             graphs: tier.graphs,
             predicates: tier.predicates,
             dictionary_terms: self.store.dictionary().len() as u64,
@@ -258,7 +257,7 @@ impl HornBackend {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.live == 0
+        self.store.triple_count() == 0
     }
 
     fn invalidate(&mut self) {
@@ -279,39 +278,31 @@ impl HornBackend {
         o: &oxrdf::Term,
     ) -> Result<bool> {
         let key = self.intern_key(s, p, o)?;
-        let existed = self.is_in_storage(key);
-        let was_tombstoned = self.tombstones.remove(&key);
-        if !existed {
-            self.store
-                .insert_triples(&[(s.clone(), p.clone(), o.clone())])
-                .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
-            self.stored_keys.insert(key);
+        if self.live_keys.contains(&key) {
+            return Ok(false); // SPARQL INSERT DATA is idempotent on an already-live triple
         }
-        let newly_live = !existed || was_tombstoned;
-        if newly_live {
-            self.live += 1;
-            self.invalidate();
-        }
-        Ok(newly_live)
+        self.store
+            .insert_triples(&[(s.clone(), p.clone(), o.clone())])
+            .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
+        self.live_keys.insert(key);
+        self.invalidate();
+        Ok(true)
     }
 
     /// Bulk-insert oxrdf triples in one storage batch. Returns the number of
-    /// newly-live triples. Same dedupe/tombstone semantics as `insert_oxrdf`;
-    /// the columnar tier rebuilds each predicate partition at most once, and the
+    /// newly-live triples. Same idempotency semantics as `insert_oxrdf`; the
+    /// columnar tier rebuilds each predicate partition at most once, and the
     /// snapshot is invalidated once at the end.
     ///
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
     ///
-    /// * Phase 1 (read-only): intern all terms, build the `to_store` batch and
-    ///   record which keys are new or tombstone-resurrected. Any intern failure
-    ///   skips that triple.
-    /// * Phase 2 (write): call `store.insert_triples` once, then apply the
-    ///   bookkeeping mutations (stored_keys, tombstones, live count) only on
-    ///   success. Propagates storage errors.
-    /// * Phase 3: invalidate the snapshot iff any triple became newly live
-    ///   (covers the tombstone-resurrection-only case where `to_store` is
-    ///   empty but the live set changed).
+    /// * Phase 1 (read-only): intern all terms and drop any triple already
+    ///   live (via `live_keys`, an O(1) check) or repeated within this batch.
+    ///   Any intern failure skips that triple.
+    /// * Phase 2 (write): call `store.insert_triples` once for the surviving
+    ///   entries, then mark them live only on success. Propagates storage
+    ///   errors.
     pub fn insert_oxrdf_batch(
         &mut self,
         triples: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)>,
@@ -320,13 +311,12 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 1 (read-only): intern and classify each triple.
-        // `intra_batch` deduplicates within the batch itself.
+        // Phase 1 (read-only): intern and drop already-live/intra-batch-duplicate
+        // triples. `intra_batch` deduplicates within the batch itself in O(1)
+        // per triple.
         struct Entry {
             key: (u64, u64, u64),
             ox: (oxrdf::Term, oxrdf::Term, oxrdf::Term),
-            is_new_to_storage: bool,
-            was_tombstoned: bool,
         }
         let mut entries: Vec<Entry> = Vec::with_capacity(triples.len());
         let mut intra_batch: HashSet<(u64, u64, u64)> = HashSet::new();
@@ -338,56 +328,33 @@ impl HornBackend {
                     _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
                 };
                 let key = (si, pi, oi);
-                if !intra_batch.insert(key) {
-                    // Duplicate within this batch; first occurrence wins.
-                    continue;
+                if self.live_keys.contains(&key) {
+                    continue; // already live — no-op
                 }
-                let is_new_to_storage = !self.is_in_storage(key);
-                let was_tombstoned = self.tombstones.contains(&key);
-                entries.push(Entry {
-                    key,
-                    ox: (s, p, o),
-                    is_new_to_storage,
-                    was_tombstoned,
-                });
+                if !intra_batch.insert(key) {
+                    continue; // duplicate within this batch; first occurrence wins
+                }
+                entries.push(Entry { key, ox: (s, p, o) });
             }
         }
 
-        // Collect triples that need to go to storage (never written before).
-        let to_store: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> = entries
-            .iter()
-            .filter(|e| e.is_new_to_storage)
-            .map(|e| e.ox.clone())
-            .collect();
+        if entries.is_empty() {
+            return Ok(0);
+        }
 
         // Phase 2 (write): storage insert first, then bookkeeping.
-        if !to_store.is_empty() {
-            self.store
-                .insert_triples(&to_store)
-                .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
-        }
+        let to_store: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> =
+            entries.iter().map(|e| e.ox.clone()).collect();
+        self.store
+            .insert_triples(&to_store)
+            .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
 
-        // Bookkeeping (only reached if storage insert succeeded).
-        let mut newly_live: u64 = 0;
         for e in &entries {
-            if e.is_new_to_storage {
-                self.stored_keys.insert(e.key);
-            }
-            if e.was_tombstoned {
-                self.tombstones.remove(&e.key);
-            }
-            if e.is_new_to_storage || e.was_tombstoned {
-                self.live += 1;
-                newly_live += 1;
-            }
+            self.live_keys.insert(e.key);
         }
+        self.invalidate();
 
-        // Phase 3: invalidate iff anything became live (covers resurrection).
-        if newly_live > 0 {
-            self.invalidate();
-        }
-
-        Ok(newly_live)
+        Ok(entries.len() as u64)
     }
 
     /// Bulk-insert algebra triples in one pass — O(n) cost versus O(n²) for
@@ -444,23 +411,17 @@ impl HornBackend {
         ))
     }
 
-    /// True iff the triple is physically present in the insertion-only storage
-    /// layer, whether live or tombstoned.
-    fn is_in_storage(&self, key: (u64, u64, u64)) -> bool {
-        self.stored_keys.contains(&key)
-    }
-
     /// Materialize every live triple as oxrdf terms, for export /
-    /// serialization (the load path is insertion-only and the server never
-    /// dumps, so this is the read-back seam). Tombstoned triples are skipped;
-    /// any triple whose TermIds no longer resolve in the dictionary is
-    /// silently dropped (cannot happen for an insertion-only dictionary).
+    /// serialization (the server never dumps outside tests, so this is the
+    /// read-back seam). `store.scan_all_term_ids()` is already
+    /// visibility-filtered (SPEC-25 S1); any triple whose TermIds no longer
+    /// resolve in the dictionary is silently dropped (cannot happen for an
+    /// append-only dictionary).
     pub fn iter_oxrdf(&self) -> Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> {
         let dict = self.store.dictionary();
         self.store
             .scan_all_term_ids()
             .into_iter()
-            .filter(|(s, p, o)| !self.tombstones.contains(&(s.0, p.0, o.0)))
             .filter_map(|(s, p, o)| Some((dict.lookup(s)?, dict.lookup(p)?, dict.lookup(o)?)))
             .collect()
     }
@@ -475,9 +436,7 @@ impl HornBackend {
             .store
             .scan_all_term_ids()
             .into_iter()
-            .map(|(s, p, o)| (s.0, p.0, o.0))
-            .filter(|k| !self.tombstones.contains(k))
-            .map(|(s, p, o)| WTriple::new(s, p, o))
+            .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
             .collect();
         let built = Arc::new(VecTripleSource::from_triples(triples));
         *guard = Some(Arc::clone(&built));
@@ -586,30 +545,39 @@ impl Store for HornBackend {
         ) else {
             return;
         };
-        let d = self.store.dictionary();
-        // Non-interning lookups: a term the dictionary has never seen
-        // cannot participate in any stored triple.
-        let (Some(s), Some(p), Some(o)) = (d.get(&s), d.get(&p), d.get(&o)) else {
-            return;
+        let key = {
+            let d = self.store.dictionary();
+            // Non-interning lookups: a term the dictionary has never seen
+            // cannot participate in any stored triple.
+            let (Some(sid), Some(pid), Some(oid)) = (d.get(&s), d.get(&p), d.get(&o)) else {
+                return;
+            };
+            (sid.0, pid.0, oid.0)
         };
-        let key = (s.0, p.0, o.0);
-        if !self.tombstones.contains(&key) && self.is_in_storage(key) {
-            self.tombstones.insert(key);
-            self.live -= 1;
-            self.invalidate();
+        if !self.live_keys.remove(&key) {
+            return; // not currently live — no-op (unknown or already deleted)
         }
+        // Retract through native storage (SPEC-25 S1): stamps the matching
+        // live row's `end`, the tuple stays physically present as history.
+        let _ = self.store.retract_triples(&[(s, p, o)]);
+        self.invalidate();
     }
     fn clear_all(&mut self) {
-        if self.live == 0 {
+        if self.live_keys.is_empty() {
             return;
         }
-        // Insertion-only storage: tombstone every physically-written key.
-        // `stored_keys` never shrinks, so cloning it into `tombstones`
-        // hides all live rows from `wcoj_snapshot` without touching the
-        // columns. Re-inserting a triple later clears its tombstone via
-        // `insert_oxrdf`/`insert_oxrdf_batch`, resurrecting it as usual.
-        self.tombstones = self.stored_keys.clone();
-        self.live = 0;
+        // Retract every currently-live default-graph triple through the
+        // native storage delete path. Re-inserting a triple afterward goes
+        // through `insert_oxrdf`/`insert_oxrdf_batch` as usual, which stamps
+        // a fresh live row (resurrection).
+        let quads: Vec<_> = self
+            .store
+            .snapshot()
+            .iter_all_term_ids()
+            .map(|(s, p, o)| (DEFAULT_GRAPH, s, p, o))
+            .collect();
+        let _ = self.store.tier().retract_quad_batch(&quads);
+        self.live_keys.clear();
         self.invalidate();
     }
 }

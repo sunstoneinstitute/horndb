@@ -78,14 +78,20 @@ spellings (`"042"`, `"+42"`) keep distinct dictionary identities and
 round-trip their exact lexical form. BGP matching is therefore
 term-based (lexical form + datatype), as SPARQL semantics require.
 
-### Tombstone deletes over insertion-only storage
+### Native delete path (SPEC-25 S1)
 
-`horndb-storage` is insertion-only at Stage 1. `DELETE DATA` is
-implemented by a `tombstones: HashSet<(u64, u64, u64)>` overlay in
-`HornBackend`. The overlay is applied when building the WCOJ snapshot:
-tombstoned triples are filtered out before the sorted `VecTripleSource`
-is constructed. A `stored_keys` mirror of every physically written key
-gives O(1) membership tests without re-scanning the storage columns.
+`horndb-storage` gives every stored tuple a `[begin, end)` visibility
+lifetime on the tier commit clock (SPEC-25 S1). `DELETE DATA` and
+`CLEAR`/`DROP` retract through `Store::retract_triples` /
+`Tier::retract_quad_batch`, which stamp the matching live row's `end`;
+the row stays physically present as history until compaction. Every
+store read (`scan_all_term_ids`, `triple_count`, …) is already
+visibility-filtered, so `HornBackend` applies no overlay when building
+the WCOJ snapshot. `HornBackend` keeps a `live_keys:
+HashSet<(u64, u64, u64)>` mirror of currently-live triples — not for
+visibility filtering, but to give `INSERT DATA` idempotency and
+`DELETE DATA` no-op detection an O(1) check, avoiding storage's
+O(partition-size) `StoreSnapshot::contains` on the bulk-load hot path.
 
 ### Lazily-rebuilt VecTripleSource snapshot
 
@@ -107,14 +113,14 @@ per-predicate partition rebuild in `horndb-storage` on each call, giving
 O(n²) cost for a bulk load. `insert_oxrdf_batch` addresses this with a
 read-compute / write-commit split:
 
-1. Phase 1 (read-only): intern all terms; classify each triple as
-   new-to-storage or tombstone-resurrection; collect the storage batch.
-   Intern failures skip the triple (lenient for bulk loads — the
-   single-triple `insert_oxrdf` propagates intern errors instead).
-2. Phase 2 (write): call `store.insert_triples` once for the whole
-   batch, rebuilding each predicate partition at most once.
-3. Phase 3: invalidate the WCOJ snapshot once iff any triple became
-   newly live.
+1. Phase 1 (read-only): intern all terms; drop any triple already live
+   (an O(1) `live_keys` check) or repeated within the batch; collect the
+   storage batch. Intern failures skip the triple (lenient for bulk
+   loads — the single-triple `insert_oxrdf` propagates intern errors
+   instead).
+2. Phase 2 (write): call `store.insert_triples` once for the surviving
+   entries, rebuilding each predicate partition at most once, then mark
+   them live and invalidate the WCOJ snapshot only on success.
 
 `load_lexical_triples` and `insert_algebra_triples_bulk` both delegate
 to `insert_oxrdf_batch`. The `serve` binary uses it for the initial load.
@@ -238,10 +244,10 @@ and a **no-op** when `SILENT`. Concretely:
   multi-op data updates.)
 - **`CLEAR`/`DROP DEFAULT`/`ALL`** clear the store via the new
   `Store::clear_all` seam method. `MemStore::clear_all` resets its vector and
-  indexes; `HornBackend::clear_all` tombstones every physically-written key
-  (storage is insertion-only, so it mirrors the `delete_triple` tombstone path)
-  and zeroes the live count. Re-inserting a cleared triple resurrects it via
-  the existing tombstone-clearing insert path.
+  indexes; `HornBackend::clear_all` retracts every currently-live default-graph
+  triple through `Tier::retract_quad_batch` (SPEC-25 S1) and clears its
+  `live_keys` mirror. Re-inserting a cleared triple resurrects it via the
+  normal insert path (storage stamps a fresh live row).
 - **`CLEAR`/`DROP GRAPH <iri>` / `NAMED`** address a graph that does not exist:
   error unless `SILENT`.
 - **`CREATE GRAPH <iri>`** cannot create a named graph: error unless `SILENT`.
