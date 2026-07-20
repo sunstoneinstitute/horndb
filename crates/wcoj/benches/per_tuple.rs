@@ -70,5 +70,49 @@ fn bench_per_tuple(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_per_tuple);
+/// EXPERIMENT: high-fan-out marginal-cost variant. Few subjects, each with a
+/// large object overlap, so one leaf descent drains many tuples and the SIMD
+/// intersect arms. time/tuple ≈ the marginal inner-loop cost NF1 targets.
+fn build_source_wide(subjects: u64, objects: u64) -> (VecTripleSource, usize) {
+    let mut triples = Vec::new();
+    for s in 0..subjects {
+        for o in 0..objects {
+            triples.push(Triple::new(s, 100, o));
+            if o % 2 == 0 {
+                triples.push(Triple::new(s, 101, o));
+            }
+        }
+    }
+    let expected_out = (subjects as usize) * ((objects / 2) as usize);
+    (VecTripleSource::from_triples(triples), expected_out)
+}
+
+fn bench_per_tuple_wide(c: &mut Criterion) {
+    let (source, expected_out) = build_source_wide(4, 100_000);
+    let bgp = Bgp::new(vec![
+        TriplePattern::new(Term::Var(Var(0)), Term::Bound(100), Term::Var(Var(1))),
+        TriplePattern::new(Term::Var(Var(0)), Term::Bound(101), Term::Var(Var(1))),
+    ]);
+    let plan = ExecutionPlan {
+        kind: PlanKind::Wcoj,
+        var_order: vec![Var(0), Var(1)],
+    };
+    let mut group = c.benchmark_group("per_tuple");
+    group.throughput(Throughput::Elements(expected_out as u64));
+    group.measurement_time(Duration::from_secs(5));
+    group.bench_function("wide_4x100k", |b| {
+        b.iter(|| {
+            let exec = WcojExecutor::new(&source, &bgp, &plan, CancelToken::new());
+            let mut count = 0usize;
+            for batch in exec.into_iter() {
+                count += batch.unwrap().num_rows();
+            }
+            assert_eq!(count, expected_out);
+            std::hint::black_box(count)
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_per_tuple, bench_per_tuple_wide);
 criterion_main!(benches);
