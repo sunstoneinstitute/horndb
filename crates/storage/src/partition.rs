@@ -28,6 +28,8 @@ pub const DEFAULT_HOT_THRESHOLD: usize = 1_000_000;
 struct ObjectMajor {
     objects: Arc<UInt64Array>,
     subjects: Arc<UInt64Array>,
+    begin: Arc<UInt64Array>,
+    end: Arc<UInt64Array>,
 }
 
 pub struct PredicatePartition {
@@ -137,30 +139,58 @@ impl PredicatePartition {
             .count()
     }
 
-    /// Ordered access to the partition's `(subject, object)` rows for any of the
-    /// six trie orderings (SPEC-02 F4).
-    ///
-    /// Returns [`OrderedColumns`], which holds cheap `Arc` clones of the
-    /// underlying Arrow columns and therefore outlives any lock a tier holds
-    /// while calling this method. For object-major orderings on a cold
-    /// predicate the layout is materialised on the first call and cached; the
-    /// materialisation runs once even under concurrent requests
-    /// ([`OnceLock`] resolves the race).
+    /// Latest-live ordered access (all rows not yet retracted). Convenience for
+    /// call sites that always read the newest committed state. See
+    /// [`Self::ordered_at`] for the version-aware form and the general
+    /// documentation of this access pattern (SPEC-02 F4).
     pub fn ordered(&self, ord: Ordering) -> OrderedColumns {
-        match ord.axis() {
-            PartitionAxis::SubjectMajor => OrderedColumns {
-                axis: PartitionAxis::SubjectMajor,
-                level0: self.subjects.clone(),
-                level1: self.objects.clone(),
-            },
+        self.ordered_at(ord, u64::MAX - 1)
+    }
+
+    /// Ordered access to rows visible at `at`, in any of the six orderings.
+    /// Zero-copy when the partition is insert-only (raw columns shared by
+    /// `Arc`); otherwise the visible subset is materialized once for this call.
+    pub fn ordered_at(&self, ord: Ordering, at: CommitVersion) -> OrderedColumns {
+        let (level0, level1, begin, end, axis) = match ord.axis() {
+            PartitionAxis::SubjectMajor => (
+                self.subjects.clone(),
+                self.objects.clone(),
+                self.begin.clone(),
+                self.end.clone(),
+                PartitionAxis::SubjectMajor,
+            ),
             PartitionAxis::ObjectMajor => {
                 let om = self.object_major.get_or_init(|| self.build_object_major());
-                OrderedColumns {
-                    axis: PartitionAxis::ObjectMajor,
-                    level0: om.objects.clone(),
-                    level1: om.subjects.clone(),
-                }
+                (
+                    om.objects.clone(),
+                    om.subjects.clone(),
+                    om.begin.clone(),
+                    om.end.clone(),
+                    PartitionAxis::ObjectMajor,
+                )
             }
+        };
+        if !self.has_retractions {
+            return OrderedColumns {
+                axis,
+                level0,
+                level1,
+            };
+        }
+        // Materialize the visible subset, preserving sort order.
+        let n = level0.len();
+        let mut l0 = Vec::with_capacity(n);
+        let mut l1 = Vec::with_capacity(n);
+        for i in 0..n {
+            if visible(begin.value(i), end.value(i), at) {
+                l0.push(level0.value(i));
+                l1.push(level1.value(i));
+            }
+        }
+        OrderedColumns {
+            axis,
+            level0: Arc::new(UInt64Array::from(l0)),
+            level1: Arc::new(UInt64Array::from(l1)),
         }
     }
 
@@ -203,13 +233,19 @@ impl PredicatePartition {
         });
         let mut o_col = Vec::with_capacity(n);
         let mut s_col = Vec::with_capacity(n);
+        let mut b_col = Vec::with_capacity(n);
+        let mut e_col = Vec::with_capacity(n);
         for &i in &idx {
             o_col.push(self.objects.value(i));
             s_col.push(self.subjects.value(i));
+            b_col.push(self.begin.value(i));
+            e_col.push(self.end.value(i));
         }
         ObjectMajor {
             objects: Arc::new(UInt64Array::from(o_col)),
             subjects: Arc::new(UInt64Array::from(s_col)),
+            begin: Arc::new(UInt64Array::from(b_col)),
+            end: Arc::new(UInt64Array::from(e_col)),
         }
     }
 
@@ -437,5 +473,28 @@ mod tests {
         let mut dead = PartitionBuilder::default();
         dead.append_stamped(TermId(1), TermId(10), 1, 2);
         assert!(dead.build().has_retractions(), "one dead row");
+    }
+
+    #[test]
+    fn ordered_at_filters_both_axes() {
+        use crate::ordering::Ordering;
+        use crate::visibility::UNSET_END;
+        let mut b = PartitionBuilder::default();
+        b.append_stamped(TermId(1), TermId(10), 1, UNSET_END);
+        b.append_stamped(TermId(2), TermId(20), 1, 3); // retracted at v3
+        let part = b.build();
+
+        // Object-major (Pos) at v3 must also drop the retracted row.
+        let cols = part.ordered_at(Ordering::Pos, 3);
+        let rows: Vec<_> = cols.subject_object().collect();
+        assert_eq!(rows, vec![(TermId(1), TermId(10))]);
+
+        // At v2 both rows present, object-major sorted by (object, subject).
+        let cols2 = part.ordered_at(Ordering::Pos, 2);
+        let rows2: Vec<_> = cols2.subject_object().collect();
+        assert_eq!(
+            rows2,
+            vec![(TermId(1), TermId(10)), (TermId(2), TermId(20))]
+        );
     }
 }
