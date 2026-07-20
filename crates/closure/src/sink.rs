@@ -266,6 +266,21 @@ impl IncrementalClosureBackend {
         self.predicates.insert(p, PredicateState { map, closure });
     }
 
+    /// Seed predicate `p`'s retained closure from its **true asserted base**
+    /// edges (not an already-closed extent), computing the closure at seed time.
+    /// Unlike [`Self::seed_transitive_closure`] — which seeds a closed extent as
+    /// a conservative base and can under-withdraw when a seeded edge is retracted
+    /// — this records the genuine base, so retracting any seeded edge is
+    /// **exact** (SPEC-24 S2). Costs one closure computation at seed; use the
+    /// closed-extent seed only when the true base is unavailable. Replaces any
+    /// existing state for `p`; writes nothing to a sink.
+    pub fn seed_base_edges(&mut self, p: PredicateId, base_edges: &[(DictId, DictId)]) {
+        let mut map = DenseIdMap::with_capacity(base_edges.len() * 2);
+        let dense = map.intern_edges(base_edges);
+        let closure = IncrementalTransitiveClosure::from_base_edges(dense);
+        self.predicates.insert(p, PredicateState { map, closure });
+    }
+
     /// Insert `new_edges` into predicate `p`'s transitive closure and write the
     /// newly inferred triples to `sink`. Returns the number of triples the sink
     /// reports written. Edges already implied by the existing closure produce
@@ -521,5 +536,47 @@ mod tests {
             vec![(s, o)],
             "only the seeded (1,2) remains after retracting the inserted (2,1)"
         );
+    }
+
+    /// Exact warm-store seed: seeding the TRUE asserted base (not the closed extent)
+    /// makes retracting a seeded edge exact, not conservative. Seed base {(1,2),(2,3)}
+    /// (closes 1->3); retract the seeded (2,3): withdraws (1,3) and (2,3) exactly.
+    #[test]
+    fn seed_base_edges_retracts_exactly() {
+        let p = PredicateId(9);
+        let mut backend = IncrementalClosureBackend::new();
+        backend.seed_base_edges(p, &[(DictId(1), DictId(2)), (DictId(2), DictId(3))]);
+        let out = backend
+            .delete_transitive_edges(p, &[(DictId(2), DictId(3))])
+            .expect("delete");
+        assert_eq!(
+            sorted(out.withdrawn),
+            vec![(1, 3), (2, 3)],
+            "base-seeded retraction is exact: (1,3) and (2,3) withdraw"
+        );
+        assert!(out.survived.is_empty());
+    }
+
+    /// The closed-extent seed is conservative: seeding the CLOSED extent
+    /// {(1,2),(2,3),(1,3)} and retracting the seeded (2,3) leaves (1,3) reachable
+    /// via the redundant seeded (1,3), so it does NOT withdraw (1,3) — the exact
+    /// base seed above does. This pins the documented behavioural difference.
+    #[test]
+    fn seed_closed_edges_under_withdraws_vs_base_seed() {
+        let p = PredicateId(9);
+        let mut backend = IncrementalClosureBackend::new();
+        backend.seed_transitive_closure(
+            p,
+            &[
+                (DictId(1), DictId(2)),
+                (DictId(2), DictId(3)),
+                (DictId(1), DictId(3)),
+            ],
+        );
+        let out = backend
+            .delete_transitive_edges(p, &[(DictId(2), DictId(3))])
+            .expect("delete");
+        // (1,3) survives via the seeded direct (1,3): conservative, not exact.
+        assert_eq!(sorted(out.withdrawn), vec![(2, 3)]);
     }
 }
