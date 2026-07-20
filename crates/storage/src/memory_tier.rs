@@ -66,6 +66,21 @@ impl TierSnapshot {
             .map(|part| part.ordered(ord))
     }
 
+    /// Ordered access to a partition, filtered to rows visible at `self.version`
+    /// (SPEC-25 S1) — the version-aware counterpart to [`Self::ordered_predicate`],
+    /// which always reads "latest live" regardless of the pinned version.
+    pub fn ordered_predicate_at(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|part| part.ordered_at(ord, self.version))
+    }
+
     pub fn predicates(&self, graph: GraphId) -> Vec<TermId> {
         self.graphs
             .get(&graph)
@@ -478,6 +493,18 @@ impl MemoryTier {
         ord: crate::ordering::Ordering,
     ) -> Option<crate::partition::OrderedColumns> {
         self.snapshot().ordered_predicate(graph, predicate, ord)
+    }
+
+    /// Ordered access to a predicate partition in the current snapshot,
+    /// filtered to rows visible at that snapshot's version (SPEC-25 S1). See
+    /// [`TierSnapshot::ordered_predicate_at`].
+    pub fn ordered_predicate_at(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        self.snapshot().ordered_predicate_at(graph, predicate, ord)
     }
 
     /// The top-`n` predicates in `graph` by triple count in the current
