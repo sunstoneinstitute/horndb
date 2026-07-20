@@ -116,7 +116,7 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           submodules: recursive
@@ -163,7 +163,7 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           submodules: recursive
@@ -179,7 +179,7 @@ jobs:
       # (task #108). install-action fetches a prebuilt binary, so the rustc-1.90
       # pin does not constrain the nextest version (that limit is for building
       # nextest from source, not running it).
-      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+      - uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
         with:
           tool: cargo-nextest
 
@@ -233,7 +233,7 @@ jobs:
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-D warnings"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           submodules: recursive
@@ -295,7 +295,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           submodules: recursive
@@ -306,7 +306,7 @@ jobs:
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
