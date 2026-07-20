@@ -47,6 +47,19 @@ pub struct DeleteOutcome {
     pub survived: Vec<(u64, u64)>,
 }
 
+/// Which decremental algorithm `delete_edge` uses.
+///
+/// `SupportCounting` (default) is output-sensitive: a deletion costs
+/// O(closure delta + inspected frontier). `Recompute` is the original
+/// affected-region full-reachability recompute, retained per SPEC-24 S2 as a
+/// per-predicate fallback and as the differential-test oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeleteStrategy {
+    #[default]
+    SupportCounting,
+    Recompute,
+}
+
 /// Strict transitive closure over dense `u64` indices, maintained incrementally
 /// under edge insertion and retraction. "Strict" = no implicit identity; a
 /// self-loop `(x,x)` appears only when `x` lies on a cycle, matching
@@ -79,6 +92,11 @@ pub struct IncrementalTransitiveClosure {
     /// base predecessors in O(in-degree) without scanning the whole base.
     bwd_base: FxHashMap<u64, FxHashSet<u64>>,
     nnz: usize,
+    strategy: DeleteStrategy,
+    /// Pairs inspected by the most recent `delete_edge` (seeded + support
+    /// evaluations). Deterministic proxy for deletion cost; drives the
+    /// output-sensitivity test. Reset at the start of each `delete_edge`.
+    last_delete_probes: usize,
 }
 
 impl IncrementalTransitiveClosure {
@@ -162,6 +180,16 @@ impl IncrementalTransitiveClosure {
             .get(&node)
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Select the decremental algorithm (default `SupportCounting`).
+    pub fn set_delete_strategy(&mut self, strategy: DeleteStrategy) {
+        self.strategy = strategy;
+    }
+
+    /// Pairs inspected by the most recent `delete_edge` call.
+    pub fn last_delete_probes(&self) -> usize {
+        self.last_delete_probes
     }
 
     /// Number of edges (`nnz`) currently in the closure.
@@ -294,6 +322,15 @@ impl IncrementalTransitiveClosure {
         reached
     }
 
+    /// Add the closed pair `(x, y)` to `fwd`/`bwd` and increment `nnz`.
+    /// No-op if the pair is already present.
+    fn add_closed(&mut self, x: u64, y: u64) {
+        if self.fwd.entry(x).or_default().insert(y) {
+            self.bwd.entry(y).or_default().insert(x);
+            self.nnz += 1;
+        }
+    }
+
     /// Drop the closed pair `(x, y)` from `fwd`/`bwd` and decrement `nnz`.
     /// No-op if the pair is not present.
     fn drop_closed(&mut self, x: u64, y: u64) {
@@ -310,7 +347,31 @@ impl IncrementalTransitiveClosure {
         }
     }
 
-    /// Retract one asserted base edge `(s, o)` and return the retraction
+    /// Remove `(s, o)` from `base` and `bwd_base`. Returns whether it was an
+    /// asserted base edge. Shared by both deletion strategies.
+    fn remove_base_edge(&mut self, s: u64, o: u64) -> bool {
+        let was_base = self
+            .base
+            .get_mut(&s)
+            .map(|set| set.remove(&o))
+            .unwrap_or(false);
+        if !was_base {
+            return false;
+        }
+        if self.base.get(&s).is_some_and(|set| set.is_empty()) {
+            self.base.remove(&s);
+        }
+        if let Some(set) = self.bwd_base.get_mut(&o) {
+            set.remove(&s);
+            if set.is_empty() {
+                self.bwd_base.remove(&o);
+            }
+        }
+        true
+    }
+
+    /// The recompute fallback ([`DeleteStrategy::Recompute`]). Retract one
+    /// asserted base edge `(s, o)` and return the retraction
     /// [`DeleteOutcome`]: the **withdrawn** closure pairs (positive `(x, y)`
     /// tuples the caller negates) and any **survivor** — the just-deleted base
     /// edge `(s, o)` that is STILL closed-reachable over the remaining base.
@@ -337,26 +398,10 @@ impl IncrementalTransitiveClosure {
     ///     closed set (i.e. it was NOT withdrawn) — `o` is still reachable from
     ///     `s` over another base path. Report it so the SPEC-06 layer can
     ///     promote it to a materialized derived row (BUG P1).
-    pub fn delete_edge(&mut self, s: u64, o: u64) -> DeleteOutcome {
+    fn delete_edge_recompute(&mut self, s: u64, o: u64) -> DeleteOutcome {
         // 1. Remove from base; bail if it was not an asserted edge.
-        let was_base = self
-            .base
-            .get_mut(&s)
-            .map(|set| set.remove(&o))
-            .unwrap_or(false);
-        if !was_base {
+        if !self.remove_base_edge(s, o) {
             return DeleteOutcome::default();
-        }
-        if self.base.get(&s).is_some_and(|set| set.is_empty()) {
-            self.base.remove(&s);
-        }
-        if was_base {
-            if let Some(set) = self.bwd_base.get_mut(&o) {
-                set.remove(&s);
-                if set.is_empty() {
-                    self.bwd_base.remove(&o);
-                }
-            }
         }
 
         // 2. Affected sources X = closed-bwd[s] ∪ {s}; targets Y = closed-fwd[o] ∪ {o}.
@@ -414,6 +459,118 @@ impl IncrementalTransitiveClosure {
         }
     }
 
+    /// Number of base out-edges of `x` that witness reaching `y`
+    /// (`z == y` or `closed(z, y)`). `closed(x, y) ⟺ support(x, y) ≥ 1`.
+    /// O(base out-degree of `x`).
+    fn support(&self, x: u64, y: u64) -> usize {
+        match self.base.get(&x) {
+            Some(outs) => outs
+                .iter()
+                .filter(|&&z| z == y || self.fwd.get(&z).is_some_and(|s| s.contains(&y)))
+                .count(),
+            None => 0,
+        }
+    }
+
+    /// Output-sensitive decremental deletion (see PLAN-24-02). Removes `(s, o)`
+    /// from the base, then over-deletes and re-derives only the pairs that could
+    /// have used `o` as a first hop from `s`. Cost is proportional to that
+    /// affected region, not the whole store.
+    ///
+    /// Two phases, because a single-pass "recheck support and keep" is unsound on
+    /// cycles: two stale pairs can mutually witness each other (each cites the
+    /// other's still-present closed entry) so neither is ever withdrawn.
+    ///
+    ///  1. **Over-delete.** Cascade backward along `bwd_base` from `(s, y)` for
+    ///     every `y ∈ {o} ∪ closed-fwd[o]`, dropping every closed pair that
+    ///     *could* have used the deleted edge (`x` reaches `s` and `o` reaches
+    ///     `y`). This clears all stale witnesses first.
+    ///  2. **Re-derive.** Re-add each over-deleted pair that still has support
+    ///     against the survivors (and pairs already re-added) — a least-fixpoint
+    ///     worklist. Pairs left dropped are the genuine withdrawals.
+    fn delete_edge_support_counting(&mut self, s: u64, o: u64) -> DeleteOutcome {
+        if !self.remove_base_edge(s, o) {
+            return DeleteOutcome::default();
+        }
+
+        // Columns that could have used the deleted first hop o: y in
+        // {o} ∪ closed-fwd[o] (pre-delete reachability from o).
+        let mut targets: FxHashSet<u64> = self.fwd.get(&o).cloned().unwrap_or_default();
+        targets.insert(o);
+
+        // Phase 1 — over-delete the potentially-affected region.
+        let mut affected: FxHashSet<(u64, u64)> = FxHashSet::default();
+        let mut over: Vec<(u64, u64)> = Vec::new();
+        let mut queue: Vec<(u64, u64)> = targets.iter().map(|&y| (s, y)).collect();
+        while let Some((x, y)) = queue.pop() {
+            if !affected.insert((x, y)) {
+                continue; // already visited
+            }
+            if !self.fwd.get(&x).is_some_and(|set| set.contains(&y)) {
+                continue; // not closed — nothing to remove or cascade through
+            }
+            self.last_delete_probes += 1;
+            over.push((x, y));
+            self.drop_closed(x, y);
+            if let Some(preds) = self.bwd_base.get(&x) {
+                for &w in preds {
+                    queue.push((w, y));
+                }
+            }
+        }
+
+        // Phase 2 — re-derive pairs that still have support. Seed with every
+        // over-deleted pair; re-adding one enables its base predecessors.
+        let mut queue2: Vec<(u64, u64)> = over.clone();
+        while let Some((x, y)) = queue2.pop() {
+            if self.fwd.get(&x).is_some_and(|set| set.contains(&y)) {
+                continue; // already re-added
+            }
+            self.last_delete_probes += 1;
+            if self.support(x, y) >= 1 {
+                self.add_closed(x, y);
+                if let Some(preds) = self.bwd_base.get(&x) {
+                    for &w in preds {
+                        queue2.push((w, y));
+                    }
+                }
+            }
+        }
+
+        // Withdrawn: over-deleted pairs that were not re-derived.
+        let withdrawn: Vec<(u64, u64)> = over
+            .into_iter()
+            .filter(|&(x, y)| !self.fwd.get(&x).is_some_and(|set| set.contains(&y)))
+            .collect();
+
+        // Survivor: the deleted edge (s, o) is still closed iff another base
+        // path s ⇒ o remains.
+        let survived = if self.fwd.get(&s).is_some_and(|set| set.contains(&o)) {
+            vec![(s, o)]
+        } else {
+            Vec::new()
+        };
+
+        DeleteOutcome {
+            withdrawn,
+            survived,
+        }
+    }
+
+    /// Retract one asserted base edge `(s, o)` and return the [`DeleteOutcome`].
+    /// Dispatches on the instance's [`DeleteStrategy`] (default
+    /// `SupportCounting`, output-sensitive). See `delete_edge_support_counting`
+    /// and `delete_edge_recompute`. Both maintain
+    /// `closed == transitive_closure(base)` and produce identical results
+    /// (verified by `tests/retraction_strategies_differential.rs`).
+    pub fn delete_edge(&mut self, s: u64, o: u64) -> DeleteOutcome {
+        self.last_delete_probes = 0;
+        match self.strategy {
+            DeleteStrategy::SupportCounting => self.delete_edge_support_counting(s, o),
+            DeleteStrategy::Recompute => self.delete_edge_recompute(s, o),
+        }
+    }
+
     /// Retract many base edges (folded one at a time so each deletion observes
     /// the prior removals) and return the combined retraction outcome
     /// (withdrawn pairs + surviving deleted edges).
@@ -461,6 +618,21 @@ mod tests {
         let mut preds = c.base_predecessors(2);
         preds.sort_unstable();
         assert_eq!(preds, vec![1, 3]);
+    }
+
+    #[test]
+    fn support_counting_matches_recompute_on_diamond() {
+        for strat in [DeleteStrategy::SupportCounting, DeleteStrategy::Recompute] {
+            let mut c =
+                IncrementalTransitiveClosure::from_base_edges([(1, 2), (1, 3), (2, 4), (3, 4)]);
+            c.set_delete_strategy(strat);
+            let out = c.delete_edge(2, 4);
+            assert_eq!(out.withdrawn, vec![(2, 4)], "strategy {:?}", strat);
+            assert!(out.survived.is_empty(), "strategy {:?}", strat);
+            let expected: std::collections::BTreeSet<(u64, u64)> =
+                [(1, 2), (1, 3), (1, 4), (3, 4)].into_iter().collect();
+            assert_eq!(edge_set(&c), expected, "strategy {:?}", strat);
+        }
     }
 
     #[test]
