@@ -143,7 +143,7 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 - Common deps go in the root `[workspace.dependencies]` and are referenced with `dep.workspace = true` from each crate. Add new shared deps there, not per-crate.
 - Each subsystem crate has an `INTEGRATION-NOTES.md` (sometimes also `FUTURE-WORK.md` or `STAGE1-ACCEPTANCE.md`). Read these before changing the public API of a crate — they record decisions that aren't in the specs.
 - Executed plans (`docs/plans/PLAN-*.md` with `status: executed`) are historical implementation logs; treat them as commit-message-grade context, not as a source of truth for current behaviour.
-- `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (TASKS.md LOW).
+- `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (#13, closed not-planned; rocksdb duplication is the driver).
 
 ## Codebase knowledge graph (graphify, optional)
 
