@@ -4,8 +4,9 @@ use crate::error::Result;
 use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 use crate::term::{GraphId, TermId};
 use crate::tier::{Tier, TierStats};
+use crate::visibility::UNSET_END;
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// One graph's predicate partitions. Immutable once built; copy-on-write
@@ -80,7 +81,7 @@ impl TierSnapshot {
         self.graphs
             .values()
             .flat_map(|g| g.partitions.values())
-            .map(|p| p.len() as u64)
+            .map(|p| p.len_at(self.version) as u64)
             .sum()
     }
 
@@ -93,7 +94,7 @@ impl TierSnapshot {
             .map(|gs| {
                 gs.partitions
                     .iter()
-                    .map(|(p, part)| (*p, part.len() as u64))
+                    .map(|(p, part)| (*p, part.len_at(self.version) as u64))
                     .collect()
             })
             .unwrap_or_default();
@@ -182,34 +183,49 @@ impl Tier for MemoryTier {
         if quads.is_empty() {
             return Ok(());
         }
-        // Group incoming pairs by graph, then predicate, into builders.
-        let mut by_graph: HashMap<GraphId, HashMap<TermId, PartitionBuilder>> = HashMap::new();
+        // Group incoming pairs by graph, then predicate.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, Vec<(TermId, TermId)>>> = HashMap::new();
         for &(g, s, p, o) in quads {
             by_graph
                 .entry(g)
                 .or_default()
                 .entry(p)
                 .or_default()
-                .append(s, o);
+                .push((s, o));
         }
 
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
         let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
 
         // Copy-on-write: clone the top-level graph map (Arc clones of untouched
         // graphs), then rebuild only the affected graphs' partition maps.
         let mut graphs = cur.graphs.clone();
-        for (g, pred_builders) in by_graph {
+        for (g, pred_rows) in by_graph {
             let mut new_partitions = graphs
                 .get(&g)
                 .map(|gs| gs.partitions.clone())
                 .unwrap_or_default();
-            for (p, mut builder) in pred_builders {
+            for (p, rows) in pred_rows {
+                let mut builder = PartitionBuilder::default();
+                // Carry existing rows forward WITH their visibility stamps
+                // (history preserved) — reading indexed columns, not `scan()`,
+                // which would silently drop retraction stamps.
                 if let Some(existing) = new_partitions.get(&p) {
-                    for (s, o) in existing.scan() {
-                        builder.append(s, o);
+                    let n = existing.len();
+                    for i in 0..n {
+                        builder.append_stamped(
+                            TermId(existing.subjects().value(i)),
+                            TermId(existing.objects().value(i)),
+                            existing.begins().value(i),
+                            existing.ends().value(i),
+                        );
                     }
+                }
+                // New rows: live from this version.
+                for (s, o) in rows {
+                    builder.append_stamped(s, o, new_version, UNSET_END);
                 }
                 new_partitions.insert(
                     p,
@@ -225,11 +241,80 @@ impl Tier for MemoryTier {
         }
 
         let next = Arc::new(TierSnapshot {
-            version: cur.version + 1,
+            version: new_version,
             graphs,
         });
         *self.current.write() = next;
         Ok(())
+    }
+
+    fn retract_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<usize> {
+        if quads.is_empty() {
+            return Ok(0);
+        }
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
+
+        // Group targets by graph, then predicate, as a set of (s, o) to end.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> = HashMap::new();
+        for &(g, s, p, o) in quads {
+            by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .insert((s.0, o.0));
+        }
+
+        let mut retracted = 0usize;
+        let mut graphs = cur.graphs.clone();
+        for (g, pred_targets) in by_graph {
+            let Some(gs) = graphs.get(&g) else {
+                continue;
+            };
+            let mut new_partitions = gs.partitions.clone();
+            for (p, targets) in pred_targets {
+                let Some(existing) = new_partitions.get(&p) else {
+                    continue;
+                };
+                let mut builder = PartitionBuilder::default();
+                let n = existing.len();
+                for i in 0..n {
+                    let s = existing.subjects().value(i);
+                    let o = existing.objects().value(i);
+                    let begin = existing.begins().value(i);
+                    let mut end = existing.ends().value(i);
+                    // End the single live row matching a target.
+                    if end == UNSET_END && targets.contains(&(s, o)) {
+                        end = new_version;
+                        retracted += 1;
+                    }
+                    builder.append_stamped(TermId(s), TermId(o), begin, end);
+                }
+                new_partitions.insert(
+                    p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+            }
+            graphs.insert(
+                g,
+                Arc::new(GraphStore {
+                    partitions: new_partitions,
+                }),
+            );
+        }
+
+        // Only bump the clock / swap if something changed, so a fully-absent
+        // retraction batch is a true no-op (no dead version created).
+        if retracted > 0 {
+            let next = Arc::new(TierSnapshot {
+                version: new_version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
+        Ok(retracted)
     }
 
     fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
@@ -375,5 +460,52 @@ mod tests {
             .unwrap();
         assert_eq!(g1_pairs, vec![(id(1), id(2))]);
         assert_eq!(g2_pairs, vec![(id(1), id(3))]);
+    }
+
+    #[test]
+    fn retract_hides_from_later_snapshot_only() {
+        let tier = MemoryTier::new();
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        let before = tier.snapshot(); // version 1, sees the tuple
+        let n = tier
+            .retract_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        assert_eq!(n, 1, "one tuple retracted");
+        let after = tier.snapshot(); // version 2, tuple gone
+
+        assert_eq!(
+            before.triple_count(),
+            1,
+            "snapshot pinned before delete still sees it"
+        );
+        assert_eq!(after.triple_count(), 0, "snapshot after delete does not");
+    }
+
+    #[test]
+    fn retract_absent_is_counted_noop() {
+        let tier = MemoryTier::new();
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        // Retract a tuple that was never inserted.
+        let n = tier
+            .retract_quad_batch(&[(DEFAULT_GRAPH, id(9), id(100), id(9))])
+            .unwrap();
+        assert_eq!(n, 0, "absent retraction retracts nothing");
+        assert_eq!(tier.snapshot().triple_count(), 1);
+    }
+
+    #[test]
+    fn reinsert_after_retract_is_live_again() {
+        let tier = MemoryTier::new();
+        let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q]).unwrap();
+        tier.retract_quad_batch(&[q]).unwrap();
+        tier.insert_quad_batch(&[q]).unwrap();
+        assert_eq!(
+            tier.snapshot().triple_count(),
+            1,
+            "tuple live after re-insert"
+        );
     }
 }
