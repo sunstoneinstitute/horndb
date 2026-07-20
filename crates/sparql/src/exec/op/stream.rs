@@ -5,7 +5,7 @@ use crate::algebra::{Expr, Var};
 use crate::error::Result;
 use crate::exec::runtime::Runtime;
 use crate::exec::{Batch, Executor, KeyPart};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 /// Streams its child, evaluating `expr` and binding the result to `var` (BIND).
 /// Never drops rows — an unbound expr result leaves the slot as `Slot::Unbound`.
@@ -221,7 +221,7 @@ impl<'r, E: Executor + ?Sized> Op for FilterOp<'r, E> {
 /// chunk that turns out to be all duplicates (never yields an empty chunk).
 pub struct DistinctOp<'r> {
     child: Box<dyn Op + 'r>,
-    seen: HashSet<Vec<KeyPart>>,
+    seen: FxHashSet<Vec<KeyPart>>,
     schema: Vec<Var>,
 }
 
@@ -230,7 +230,7 @@ impl<'r> DistinctOp<'r> {
         let schema = child.schema().to_vec();
         Self {
             child,
-            seen: HashSet::new(),
+            seen: FxHashSet::default(),
             schema,
         }
     }

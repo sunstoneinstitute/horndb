@@ -99,6 +99,21 @@ pub trait Executor {
         )))
     }
 
+    /// Look up a term's dictionary id without interning (the inverse of
+    /// [`decode_term`]). `None` means the backend has no dictionary, or the
+    /// term is simply not stored (so no `Slot::Id` can carry its value).
+    ///
+    /// Used to canonicalize hash-join keys: a `Slot::Term(t)` and a
+    /// `Slot::Id(i)` that name the *same* value must land in the same bucket.
+    /// Encoding the term back to its id when present makes the key
+    /// provenance-independent while paying zero decode on the common all-`Id`
+    /// path. The default returns `None`, so dictionary-less backends
+    /// (`MemStore`, whose rows are all `Slot::Term`) fall back to lexical keys
+    /// on both sides — consistent, just not id-compressed.
+    fn encode_term(&self, _term: &Term) -> Option<horndb_storage::TermId> {
+        None
+    }
+
     /// Best-effort estimate of how many solution rows a BGP yields,
     /// used by `EXPLAIN` (SPEC-07 F9) for per-node cardinality
     /// annotations. The default returns `None` ("unknown"); backends
