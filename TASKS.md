@@ -70,8 +70,8 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Performance_ — SPEC-24 S7: bilinear-join runtime (per-predicate leaves, cost model, hash/sort-merge kernels) — after #203 ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
 - [ ] **MEDIUM** · _Performance_ — SPEC-25 S6: deferred Stage-1 acceptance benches on hornbench (LUBM-8000 rows 2/3/4) ([#230](https://github.com/sunstoneinstitute/horndb/issues/230))
 - [x] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → 100/115) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
-- [ ] **LOW** · _Operational_ — Disk pressure during multi-agent runs (rocksdb) ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
-- [ ] **LOW** · _Operational_ — 1Password SSH agent reliability ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
+- [ ] **MEDIUM** · _Tooling_ — tasks.sh: claim/complete matches any checkbox line containing the issue link, not the task's own line ([#238](https://github.com/sunstoneinstitute/horndb/issues/238))
+- [ ] **LOW** · _Operational_ — incremental: `ChangeFeed::publish` clobbers the global `change_feed_subscribers` gauge ([#221](https://github.com/sunstoneinstitute/horndb/issues/221))
 - [ ] **LOW** · _Performance_ — SPEC-23 Phase 5: later optimizer work (stats sketches, runtime filters/SIP, ML `PlanAdvisor` loop) — after #203/#204 ([#205](https://github.com/sunstoneinstitute/horndb/issues/205))
 - [ ] **LOW** · _Completeness_ — SPEC-24 S8: intra-tick closure↔rule joint fixpoint + non-transitive closure shapes ([#217](https://github.com/sunstoneinstitute/horndb/issues/217))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
@@ -542,6 +542,18 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   On-disk format is E3's (#187); can land against a file-backed stub. Spec §S5.
   Gate: SPEC-24 acceptance #5 (kill-and-replay bit-identical modulo timestamps).
 
+## MEDIUM — Tooling
+
+- [ ] **tasks.sh: claim/complete matches any checkbox line containing the issue link.**
+  ([#238](https://github.com/sunstoneinstitute/horndb/issues/238))
+  The claim/complete/unclaim matchers select any checkbox line whose text
+  contains the issue link, so a transition on a cross-referenced issue flips
+  that other task's checkbox too, and the `_wip:` identity tag can land on the
+  wrong line (breaking `claims`/`reap`): `claim --issue 237` (`3f86a31`)
+  flipped #132 to `[v]` and mis-stamped the tag (repaired in `bcfa7dc`).
+  Fix: anchor on the trailing `([#N](…))` task ref, and fail loudly unless
+  exactly one index line + one body heading change.
+
 ## LOW — Completeness
 
 - [ ] **SPEC-24 S8: intra-tick closure↔rule joint fixpoint + non-transitive closure shapes.** ([#217](https://github.com/sunstoneinstitute/horndb/issues/217))
@@ -563,20 +575,16 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## LOW — Operational
 
-- [ ] **Disk pressure during multi-agent runs.** ([#13](https://github.com/sunstoneinstitute/horndb/issues/13))
-  `oxrocksdb-sys` (pulled in transitively by the harness via `oxigraph`)
-  compiles a ~700 MB artifact per worktree, which exhausted free space on `/`
-  during the 2026-05-24 parallel pass (surfaced as misleading "1Password failed
-  to fill whole buffer" signing errors). The vendored GraphBLAS is already
-  de-duplicated across worktrees; rocksdb is the remaining driver — point
-  `CARGO_TARGET_DIR` at a shared path, prune the rocksdb dep, or document a
-  ≥15 GB-free precondition. Stays open until rocksdb duplication is addressed.
-
-- [ ] **1Password SSH agent reliability.** ([#14](https://github.com/sunstoneinstitute/horndb/issues/14))
-  The agent intermittently returns "no identities" / "communication with agent
-  failed" during long agent sessions even when the desktop app is unlocked. Fix:
-  keep the app foregrounded during long sessions, or pre-cache an unencrypted
-  signing key for CI. (Bypassing signing is not acceptable — global rule.)
+- [ ] **incremental: `ChangeFeed::publish` clobbers the global `change_feed_subscribers` gauge.**
+  ([#221](https://github.com/sunstoneinstitute/horndb/issues/221))
+  `horndb_incremental_change_feed_subscribers` is one process-global gauge, but
+  every `ChangeFeed` instance overwrites it with its own subscriber count
+  (`subscribe()` and `publish()`-after-`retain` both `set`), so with more than
+  one live feed it reports only the most-recently-active feed, not the total.
+  Surfaces as a deterministic `cargo test -p horndb-incremental --test metrics`
+  failure on the multi-threaded runner (nextest's process-per-test hides it).
+  Fix: make the gauge additive (`inc`/`dec` per subscriber), or label it per
+  feed (`docs/metrics.md` row in the same commit).
 
 ## LOW — Maintainability
 
