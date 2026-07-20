@@ -213,19 +213,18 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
      `Runtime::run_stream`/`BindingsStream`, all four SELECT formats stream via
      `spawn_blocking` + bounded-channel body, first chunk pre-buffered for clean
      early 400s) + `docs/plans/PLAN-22-01-http-streaming-results.md`.
-  3. Hasher + join-key representation micro-opt (surfaced by the 2026-07-12
-     elastic-hashing survey). Two independent pieces:
-     (a) every hot hash table in the SPARQL runtime — the streaming join build
-     index (`JoinState::index`, `exec/runtime.rs`), GROUP BY state, and the
-     DISTINCT sets — sits on std's default SipHash hasher, while owlrl/closure
-     already use `rustc-hash` (FxHash); switch these to FxHash.
-     (b) the join index keys on the *decoded lexical form* of each join var
-     (`HashMap<Vec<String>, _>`), one `decode_term` per build+probe row per
-     jvar. That decode is a deliberate provenance choice — `row_join_key`
-     "option (b)": an Id row and a Term row for the same value must land in
-     the same bucket — so id-based keys need a *canonicalizing* key (encode
-     `Slot::Term` back to its dictionary id when present, fall back to lex
-     otherwise), not a plain `KeyPart` swap.
+  3. Hasher + join-key representation micro-opt **LANDED** (#236, 2026-07-20):
+     (a) the hot runtime hash tables — the streaming join build index
+     (`JoinState::index`), GROUP BY state (`eval_group_native`), and the
+     DISTINCT sets (`DistinctOp` seen-set + the per-aggregate
+     `COUNT(DISTINCT …)`/`dedup_terms` sets) — now use `rustc-hash` (FxHash),
+     matching owlrl/closure.
+     (b) `row_join_key` canonicalizes each key column to its dictionary id
+     instead of decoding both sides to a lexical `String`: `Slot::Id` keys on
+     its raw id (no decode), `Slot::Term` is encoded back to its id via the new
+     `Executor::encode_term` (non-interning `Dictionary::get`) when present,
+     `KeyPart::Lex` otherwise — an Id row and a Term row for the same value
+     still share a bucket, but the common all-`Id` probe pays zero decode.
 
   See `docs/architecture.md` §9 and `docs/benchmarks.md`.
 
