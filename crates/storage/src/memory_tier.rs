@@ -119,24 +119,42 @@ impl TierSnapshot {
     }
 
     pub fn stats(&self) -> TierStats {
-        let graphs = self.graphs.len() as u64;
-        let predicates: u64 = self
+        // Live counts: only graphs/predicates with at least one tuple visible
+        // at the pinned version, consistent with `triples` (also version-
+        // filtered). After a full delete/CLEAR, retained MVCC history keeps the
+        // partitions physically present but they hold no visible rows, so they
+        // must not inflate the live graph/predicate counts.
+        let mut graphs = 0u64;
+        let mut predicates = 0u64;
+        for gs in self.graphs.values() {
+            let live_preds = gs
+                .partitions
+                .values()
+                .filter(|p| p.len_at(self.version) > 0)
+                .count() as u64;
+            predicates += live_preds;
+            if live_preds > 0 {
+                graphs += 1;
+            }
+        }
+        let triples = self.triple_count();
+        // Physical footprint spans ALL retained partitions (dead MVCC history
+        // costs bytes until compaction): 32 B/row base (16 B for (s, o) + 16 B
+        // for the begin/end visibility stamps), plus another 32 B/row when the
+        // object-major layout is materialised for a hot predicate; plus
+        // ~16 bytes per physically-retained predicate of overhead.
+        let physical_predicates: u64 = self
             .graphs
             .values()
             .map(|g| g.partitions.len() as u64)
             .sum();
-        let triples = self.triple_count();
-        // Per-partition column footprint: 32 B/row base (16 B for (s, o) +
-        // 16 B for the begin/end visibility stamps), plus another 32 B/row
-        // when the object-major layout is materialised for a hot predicate;
-        // plus ~16 bytes/predicate overhead.
         let column_bytes: u64 = self
             .graphs
             .values()
             .flat_map(|g| g.partitions.values())
             .map(|p| p.estimated_bytes())
             .sum();
-        let bytes_estimated = column_bytes + predicates * 16;
+        let bytes_estimated = column_bytes + physical_predicates * 16;
         TierStats {
             graphs,
             predicates,
@@ -684,5 +702,26 @@ mod tests {
         tier.compact(); // min pin = 1 < end(2) → must NOT reclaim
         assert_eq!(pin.triple_count(), 1, "held pin still sees the tuple");
         drop(pin);
+    }
+
+    #[test]
+    fn stats_live_counts_drop_to_zero_after_full_retraction() {
+        let tier = MemoryTier::new();
+        let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q]).unwrap();
+        let s = tier.stats();
+        assert_eq!((s.graphs, s.predicates, s.triples), (1, 1, 1));
+
+        // Retract the only tuple: the partition is retained as MVCC history but
+        // holds no visible row, so live graph/predicate/triple counts are 0.
+        tier.retract_quad_batch(&[q]).unwrap();
+        let s = tier.stats();
+        assert_eq!(
+            (s.graphs, s.predicates, s.triples),
+            (0, 0, 0),
+            "fully-deleted graph/predicate must not inflate live stats"
+        );
+        // Physical footprint still accounts for the retained (dead) partition.
+        assert!(s.bytes_estimated > 0, "retained history still costs bytes");
     }
 }
