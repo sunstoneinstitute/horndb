@@ -88,6 +88,35 @@ impl PredicatePartition {
         &self.object_set
     }
 
+    /// Distinct subject payloads with at least one row visible at `at`.
+    /// Borrows the prebuilt superset when the partition is insert-only.
+    pub fn subject_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
+        if !self.has_retractions {
+            return std::borrow::Cow::Borrowed(&self.subject_set);
+        }
+        let mut set = RoaringTreemap::new();
+        for i in 0..self.len() {
+            if visible(self.begin.value(i), self.end.value(i), at) {
+                set.insert(TermId(self.subjects.value(i)).payload());
+            }
+        }
+        std::borrow::Cow::Owned(set)
+    }
+
+    /// Distinct object payloads with at least one row visible at `at`.
+    pub fn object_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
+        if !self.has_retractions {
+            return std::borrow::Cow::Borrowed(&self.object_set);
+        }
+        let mut set = RoaringTreemap::new();
+        for i in 0..self.len() {
+            if visible(self.begin.value(i), self.end.value(i), at) {
+                set.insert(TermId(self.objects.value(i)).payload());
+            }
+        }
+        std::borrow::Cow::Owned(set)
+    }
+
     /// True if any row in this partition has been retracted (`end` set). When
     /// false, every version-aware read returns the raw columns with no filter.
     pub fn has_retractions(&self) -> bool {
@@ -496,5 +525,20 @@ mod tests {
             rows2,
             vec![(TermId(1), TermId(10)), (TermId(2), TermId(20))]
         );
+    }
+
+    #[test]
+    fn object_set_at_drops_retracted_only_payloads() {
+        use crate::visibility::UNSET_END;
+        let mut b = PartitionBuilder::default();
+        b.append_stamped(TermId(1), TermId(10), 1, UNSET_END);
+        b.append_stamped(TermId(2), TermId(20), 1, 3); // object 20 only via a retracted row
+        let part = b.build();
+
+        // At v2 both objects present.
+        assert!(part.object_set_at(2).contains(TermId(20).payload()));
+        // At v3 object 20 has no visible row → absent from the exact set.
+        assert!(!part.object_set_at(3).contains(TermId(20).payload()));
+        assert!(part.object_set_at(3).contains(TermId(10).payload()));
     }
 }
