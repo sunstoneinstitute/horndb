@@ -31,7 +31,7 @@ pub mod visibility;
 
 pub use dictionary::Dictionary;
 pub use error::StorageError;
-pub use memory_tier::{MemoryTier, TierSnapshot};
+pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
 pub use ordering::{Ordering, PartitionAxis};
 pub use partition::{OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};

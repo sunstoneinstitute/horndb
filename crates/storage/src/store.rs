@@ -7,12 +7,10 @@
 use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
-use crate::memory_tier::TierSnapshot;
 use crate::ordering::Ordering;
 use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
 use crate::tier::{Tier, TierStats};
 use oxrdf::Term;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FootprintReport {
@@ -189,7 +187,7 @@ impl Store {
 /// at [`Store::snapshot`] time plus a borrow of the append-only dictionary for
 /// term materialization. Cheap to create; cheap to drop.
 pub struct StoreSnapshot<'a> {
-    tier: Arc<TierSnapshot>,
+    tier: crate::memory_tier::PinnedSnapshot,
     dictionary: &'a Dictionary,
 }
 

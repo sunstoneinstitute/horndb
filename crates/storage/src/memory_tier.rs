@@ -6,7 +6,7 @@ use crate::term::{GraphId, TermId};
 use crate::tier::{Tier, TierStats};
 use crate::visibility::UNSET_END;
 use parking_lot::{Mutex, RwLock};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// One graph's predicate partitions. Immutable once built; copy-on-write
@@ -143,6 +143,8 @@ pub struct MemoryTier {
     /// orderings; smaller ones materialise the object-major layout lazily
     /// (SPEC-02 F4).
     hot_threshold: usize,
+    /// version -> number of live pins at that version. Empty ⇒ no pins.
+    pins: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
 
 impl MemoryTier {
@@ -156,6 +158,7 @@ impl MemoryTier {
             current: RwLock::new(Arc::new(TierSnapshot::empty())),
             writer: Mutex::new(()),
             hot_threshold,
+            pins: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -164,17 +167,125 @@ impl MemoryTier {
         self.hot_threshold
     }
 
-    /// Pin the current immutable tier state. The returned `Arc` isolates the
-    /// caller from later writes (copy-on-write): subsequent `insert_quad_batch`
-    /// calls allocate a new snapshot and never mutate this one.
-    pub fn snapshot(&self) -> Arc<TierSnapshot> {
-        self.current.read().clone()
+    /// Pin the current immutable tier state and register the pin so compaction
+    /// will not reclaim rows still visible to it. The pin is released when the
+    /// returned guard drops.
+    pub fn snapshot(&self) -> PinnedSnapshot {
+        let snap = self.current.read().clone();
+        *self.pins.lock().entry(snap.version).or_insert(0) += 1;
+        PinnedSnapshot {
+            snap,
+            pins: self.pins.clone(),
+        }
+    }
+
+    /// Lowest pinned version, or the current version if nothing is pinned.
+    fn min_pinned(&self) -> u64 {
+        let pins = self.pins.lock();
+        pins.keys()
+            .next()
+            .copied()
+            .unwrap_or_else(|| self.current.read().version)
+    }
+
+    /// Reclaim dead rows whose `end <= min_pinned`. Rebuilds only partitions
+    /// that actually hold reclaimable rows; never changes a pinned view (those
+    /// hold their own older `Arc`s). Does not bump the version — compaction is
+    /// not a logical write.
+    pub fn compact(&self) {
+        let _w = self.writer.lock();
+        let horizon = self.min_pinned();
+        let cur = self.current.read().clone();
+        let mut graphs = cur.graphs.clone();
+        let mut changed = false;
+        for (g, gs) in cur.graphs.iter() {
+            let mut new_partitions = gs.partitions.clone();
+            let mut graph_changed = false;
+            for (p, part) in gs.partitions.iter() {
+                if !part.has_retractions() {
+                    continue;
+                }
+                // Reclaimable iff some row has end <= horizon.
+                let reclaimable = (0..part.len()).any(|i| part.ends().value(i) <= horizon);
+                if !reclaimable {
+                    continue;
+                }
+                let mut builder = PartitionBuilder::default();
+                for i in 0..part.len() {
+                    let end = part.ends().value(i);
+                    if end <= horizon {
+                        continue; // reclaim
+                    }
+                    builder.append_stamped(
+                        TermId(part.subjects().value(i)),
+                        TermId(part.objects().value(i)),
+                        part.begins().value(i),
+                        end,
+                    );
+                }
+                new_partitions.insert(
+                    *p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+                graph_changed = true;
+            }
+            if graph_changed {
+                graphs.insert(
+                    *g,
+                    Arc::new(GraphStore {
+                        partitions: new_partitions,
+                    }),
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            // Same version: compaction is not a logical write.
+            let next = Arc::new(TierSnapshot {
+                version: cur.version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
     }
 }
 
 impl Default for MemoryTier {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A pinned tier snapshot that keeps its version un-compactable until dropped.
+pub struct PinnedSnapshot {
+    snap: Arc<TierSnapshot>,
+    pins: Arc<Mutex<BTreeMap<u64, usize>>>,
+}
+
+impl std::ops::Deref for PinnedSnapshot {
+    type Target = TierSnapshot;
+    fn deref(&self) -> &TierSnapshot {
+        &self.snap
+    }
+}
+
+impl PinnedSnapshot {
+    /// The pinned immutable tier state, as a cloneable `Arc`.
+    pub fn arc(&self) -> Arc<TierSnapshot> {
+        self.snap.clone()
+    }
+}
+
+impl Drop for PinnedSnapshot {
+    fn drop(&mut self) {
+        let v = self.snap.version;
+        let mut pins = self.pins.lock();
+        if let Some(count) = pins.get_mut(&v) {
+            *count -= 1;
+            if *count == 0 {
+                pins.remove(&v);
+            }
+        }
     }
 }
 
@@ -507,5 +618,37 @@ mod tests {
             1,
             "tuple live after re-insert"
         );
+    }
+
+    #[test]
+    fn compaction_reclaims_only_below_min_pin() {
+        let tier = MemoryTier::new();
+        let q1 = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        let q2 = (DEFAULT_GRAPH, id(3), id(100), id(4));
+        tier.insert_quad_batch(&[q1, q2]).unwrap(); // v1
+        tier.retract_quad_batch(&[q1]).unwrap(); // v2: q1.end = 2
+
+        // No pins below v2 → q1's dead row is reclaimable.
+        tier.compact();
+        let live = tier.snapshot();
+        assert_eq!(live.triple_count(), 1);
+        // The physical dead row is gone: the partition holds exactly the live row.
+        let phys = tier
+            .with_predicate(DEFAULT_GRAPH, id(100), |p| p.len())
+            .unwrap();
+        assert_eq!(phys, 1, "dead row physically reclaimed");
+    }
+
+    #[test]
+    fn compaction_respects_a_held_pin() {
+        let tier = MemoryTier::new();
+        let q1 = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q1]).unwrap(); // v1
+        let pin = tier.snapshot(); // pins v1 (sees q1)
+        tier.retract_quad_batch(&[q1]).unwrap(); // v2
+
+        tier.compact(); // min pin = 1 < end(2) → must NOT reclaim
+        assert_eq!(pin.triple_count(), 1, "held pin still sees the tuple");
+        drop(pin);
     }
 }
