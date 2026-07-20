@@ -191,6 +191,11 @@ The closure path gets the same treatment on the SPEC-05 boundary:
   for callers that genuinely have only the closed set; its conservatism gets
   documented at the API.
 
+> **Status:** delivered by `PLAN-24-02` (#211). Output-sensitive deletion is a
+> support-counting decremental sweep (`DeleteStrategy::SupportCounting`, the
+> default); the recompute path is retained as `DeleteStrategy::Recompute` (the
+> differential oracle). Exact seeded retraction ships as `seed_base_edges`.
+
 ### S3. Change-feed net-delta reconciliation + bounded backpressure
 
 - **Net-delta contract.** Within one tick, derived-row emissions accumulate in

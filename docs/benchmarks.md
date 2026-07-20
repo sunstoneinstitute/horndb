@@ -130,6 +130,7 @@ criteria. They are the floor each subsystem must hit before it's "done."
 | Incremental single-edge insert vs full recompute (F6, 2,000-node chain) | incremental ≪ full recompute | `benches/incremental.rs` — see *Measured* below |
 | Valued-reasoning readiness ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) — valued `(max,×)` vs boolean `(∨,∧)` closure; generic-kernel penalty | _instrument, then decide_ | `benches/valued_readiness.rs` — see *Measured* below |
 | Valued best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12) Fork A) | one `(max,×)` closure replaces a SPARQL property-path crawl | `benches/crosswalk.rs` — see *Measured* below |
+| Closure retraction, small delta over growing store (SPEC-24 S2, [#211](https://github.com/sunstoneinstitute/horndb/issues/211)) — support-counting vs recompute | output-sensitive: cost ∝ closure delta + frontier, **not** store size | `benches/closure_retraction.rs` — measured: pending hornbench |
 
 ### SPEC-06 — DBSP incremental maintenance (`horndb-incremental`)
 
@@ -292,6 +293,7 @@ numbers should not be compared to the target column above.
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
 | `benches/sameas.rs` | `horndb-closure` | SPEC-05 `owl:sameAs` equivalence-class scaffold. |
+| `benches/closure_retraction.rs` | `horndb-closure` | SPEC-24 S2 A/B: support-counting vs recompute deletion, small delta over a growing store ([#211](https://github.com/sunstoneinstitute/horndb/issues/211)). Pending hornbench. |
 | `benches/four_cycle.rs` (binary-hash leg) | `horndb-wcoj` | Reference half of the 4-cycle comparison above. |
 
 ### Not yet running
