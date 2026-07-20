@@ -27,5 +27,24 @@ Leapfrog Triejoin executor, trie iterators, planner.
   `tests/batchiter_simd.rs` duplicate-subject test and the wide
   (`N_WIDE > 64`) `differential_fuzz` variant guard this; the narrow fuzzer (vocab 30)
   never crosses the threshold, so it does **not** cover the SIMD path on its own.
+- **Per-tuple hot path (SPEC-03 NF1, #237).** The leapfrog descent (`VecIter`)
+  finds child-run boundaries (`open_level`) and repositions cursors (`seek`) with
+  a **bounded gallop from the cursor** (`run_end` / `seek_gallop`), not a
+  `partition_point`/`lower_bound` bisect of the whole parent range — the common
+  narrow-run-under-wide-parent shape was ~log(range) cache-missing probes to
+  advance a few rows. Both return bit-identical lower bounds; a far `seek` target
+  bails to the exact same binary search, so SPB-style varied far seeks are
+  unaffected. Guarded by `run_end`/`seek_gallop` oracle unit tests + the fuzzer.
+- **Armed leaf is bulk-materialized, not drained per value.** At the final
+  variable an armed `k==2` leapfrog has the whole binding set in `simd_buf`;
+  `step` blits it into the batch via `BindingBatchBuilder::push_run_chunk`
+  (ancestor binding replicated across prefix columns, intersection into the leaf
+  column), bypassing the per-value `find_match`/`push_row` machinery. A
+  `simd_tried` flag stops the leaf pre-arm and the scalar prime from both probing
+  `active_run`. `benches/per_tuple.rs` has two cases: `two_star_50k`
+  (descent-bound, will not hit NF1) and `wide_4x100k` (marginal hot path, the NF1
+  gate). Marginal cost is **8.3 ns/tuple** (hornbench); the residual is the
+  AoS→SoA input-column copy (`LevelColumn::from_aos` ~46%), tracked for a
+  columnar `VecTripleSource` in **#239** to reach ≤5 ns.
 
 See `INTEGRATION-NOTES.md` for design decisions.
