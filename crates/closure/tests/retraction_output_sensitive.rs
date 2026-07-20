@@ -3,7 +3,25 @@
 //! as the surrounding store grows. Uses the deterministic `last_delete_probes`
 //! counter rather than wall-clock so the gate is CI-stable.
 
+use std::collections::BTreeSet;
+
 use horndb_closure::closure::incremental::IncrementalTransitiveClosure;
+use horndb_closure::closure::transitive::transitive_closure;
+use horndb_closure::grb::{init_once, BoolMatrix};
+
+fn grb(n: u64, base: &BTreeSet<(u64, u64)>) -> BTreeSet<(u64, u64)> {
+    if base.is_empty() {
+        return BTreeSet::new();
+    }
+    let edges: Vec<(u64, u64)> = base.iter().copied().collect();
+    let m = BoolMatrix::from_edges(n, &edges).unwrap();
+    transitive_closure(&m)
+        .unwrap()
+        .extract_edges()
+        .unwrap()
+        .into_iter()
+        .collect()
+}
 
 /// Build N independent 2-edge chains a_i -> b_i -> c_i (disjoint node ids), plus
 /// one extra redundant edge on chain 0 that, when deleted, withdraws nothing.
@@ -35,4 +53,24 @@ fn deletion_probes_are_independent_of_store_size() {
         large <= small + 2,
         "probes must not scale with store: small={small}, large={large}"
     );
+}
+
+/// Acceptance #2 (seeded-base exact): seed a base with redundant edges, then
+/// retract seeded edges one by one; the closure must exactly track the GRB
+/// closure of the shrinking base — no under-withdrawal.
+#[test]
+fn base_seeded_retraction_is_exact() {
+    init_once().unwrap();
+    let n = 5u64;
+    // Base includes the redundant (1,3) alongside 1->2->3.
+    let seed = [(1u64, 2u64), (2, 3), (1, 3), (3, 4)];
+    let mut c = IncrementalTransitiveClosure::from_base_edges(seed.iter().copied());
+    let mut base: BTreeSet<(u64, u64)> = seed.iter().copied().collect();
+
+    for &edge in &[(2u64, 3u64), (1, 3), (3, 4), (1, 2)] {
+        c.delete_edge(edge.0, edge.1);
+        base.remove(&edge);
+        let got: BTreeSet<(u64, u64)> = c.edges().into_iter().collect();
+        assert_eq!(got, grb(n, &base), "exact after deleting {:?}", edge);
+    }
 }
