@@ -44,7 +44,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
 - [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
-- [v] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202)) — _wip: 5e289f35@Stigs-MacBook-Pro.local · task-202-spec-23-phase-2-heuristic-rewrite-passes · 2026-07-19T13:47:20Z_
+- [x] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
 - [ ] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
@@ -313,7 +313,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/specs/SPEC-15-owlrl-type-index-seminaive.md` (fix #2). Gate: round/inner-loop
   work counters drop, reason-time falls.
 
-- [v] **SPEC-23 Phase 2: heuristic rewrite passes.** ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
+- [x] **SPEC-23 Phase 2: heuristic rewrite passes.** ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
   `Normalize` (`Equal→SameTerm`, constant folding), `FilterPullup` →
   `FilterPushdown` (lattice-gated legality, `LeftJoin`/`Minus` asymmetry),
   `ProjectionPushdown` — always-beneficial, no statistics, each individually
