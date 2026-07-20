@@ -490,9 +490,9 @@ mod tests {
     fn store_retract_is_visible_to_new_reads_only() {
         let store = Store::in_memory();
         let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(&[t.clone()]).unwrap();
+        store.insert_triples(std::slice::from_ref(&t)).unwrap();
         let before = store.snapshot();
-        let n = store.retract_triples(&[t.clone()]).unwrap();
+        let n = store.retract_triples(std::slice::from_ref(&t)).unwrap();
         assert_eq!(n, 1);
 
         assert_eq!(before.triple_count(), 1, "pinned-before read still sees it");
@@ -503,7 +503,7 @@ mod tests {
     fn retract_of_uninterned_term_is_a_noop() {
         let store = Store::in_memory();
         let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(&[t.clone()]).unwrap();
+        store.insert_triples(std::slice::from_ref(&t)).unwrap();
         // A triple mentioning a term that was never inserted retracts nothing.
         let never = iri("http://ex/never-interned");
         let n = store
@@ -518,7 +518,7 @@ mod tests {
     fn snapshot_s6_surface() {
         let store = Store::in_memory();
         let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(&[t.clone()]).unwrap();
+        store.insert_triples(std::slice::from_ref(&t)).unwrap();
         let snap = store.snapshot();
 
         let (s, p, o) = {
@@ -550,7 +550,7 @@ mod tests {
         let a = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
         let c = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
         store.insert_triples(&[a.clone(), c.clone()]).unwrap();
-        store.retract_triples(&[a.clone()]).unwrap();
+        store.retract_triples(std::slice::from_ref(&a)).unwrap();
 
         // No pinned snapshot below the retraction's version, so the dead row
         // is reclaimable.
