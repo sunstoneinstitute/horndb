@@ -181,11 +181,12 @@ impl MemoryTier {
 
     /// Lowest pinned version, or the current version if nothing is pinned.
     fn min_pinned(&self) -> u64 {
+        // Read `current` before `pins` so every path that touches both locks
+        // takes them in the same order (`current` then `pins`), as `snapshot()`
+        // does — keeps the ordering deadlock-free for future refactors.
+        let cur_version = self.current.read().version;
         let pins = self.pins.lock();
-        pins.keys()
-            .next()
-            .copied()
-            .unwrap_or_else(|| self.current.read().version)
+        pins.keys().next().copied().unwrap_or(cur_version)
     }
 
     /// Reclaim dead rows whose `end <= min_pinned`. Rebuilds only partitions
@@ -604,6 +605,11 @@ mod tests {
             .unwrap();
         assert_eq!(n, 0, "absent retraction retracts nothing");
         assert_eq!(tier.snapshot().triple_count(), 1);
+        assert_eq!(
+            tier.snapshot().version(),
+            1,
+            "absent retraction must not mint a new version"
+        );
     }
 
     #[test]
