@@ -126,9 +126,10 @@ impl TierSnapshot {
             .map(|g| g.partitions.len() as u64)
             .sum();
         let triples = self.triple_count();
-        // Per-partition column footprint (16 B/row, doubled when the
-        // object-major layout is materialised for a hot predicate); plus
-        // ~16 bytes/predicate overhead.
+        // Per-partition column footprint: 32 B/row base (16 B for (s, o) +
+        // 16 B for the begin/end visibility stamps), plus another 32 B/row
+        // when the object-major layout is materialised for a hot predicate;
+        // plus ~16 bytes/predicate overhead.
         let column_bytes: u64 = self
             .graphs
             .values()

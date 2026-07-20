@@ -345,12 +345,24 @@ impl StoreSnapshot<'_> {
         self.tier.version()
     }
 
-    /// Number of triples visible in this pinned view (default graph only —
-    /// mirrors [`Self::triple_count`]).
+    /// Number of triples visible in this pinned view — the SPEC-24 S6 `len`.
+    /// Default-graph scoped, matching `contains`/`iter_all_term_ids` (the S6
+    /// surface backs the single-graph incremental circuit). NOT the whole-tier
+    /// count — use `triple_count()` for that.
     pub fn len(&self) -> usize {
-        self.tier.triple_count() as usize
+        let version = self.tier.version();
+        self.tier
+            .predicates(DEFAULT_GRAPH)
+            .into_iter()
+            .filter_map(|p| {
+                self.tier
+                    .with_predicate(DEFAULT_GRAPH, p, |part| part.len_at(version))
+            })
+            .sum()
     }
 
+    /// True if this pinned view has no visible default-graph triples. See
+    /// [`Self::len`] for scope.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -578,5 +590,91 @@ mod tests {
             .with_predicate(DEFAULT_GRAPH, p_id, |part| part.len())
             .unwrap();
         assert_eq!(phys, 1, "dead row physically reclaimed");
+    }
+
+    /// `StoreSnapshot::len()` must stay default-graph scoped, matching
+    /// `iter_all_term_ids()` — the SPEC-24 S6 surface backs the single-graph
+    /// incremental circuit and must not silently pick up named-graph rows via
+    /// `triple_count()` (whole-tier). Regression for the S1 review finding.
+    #[test]
+    fn snapshot_len_is_default_graph_scoped() {
+        let store = Store::in_memory();
+        store
+            .insert_triples(std::slice::from_ref(&(
+                iri("http://ex/a"),
+                iri("http://ex/p"),
+                iri("http://ex/b"),
+            )))
+            .unwrap();
+        let g = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
+        store
+            .insert_quads(&[(
+                g,
+                iri("http://ex/x"),
+                iri("http://ex/q"),
+                iri("http://ex/y"),
+            )])
+            .unwrap();
+
+        let snap = store.snapshot();
+        assert_eq!(
+            snap.len(),
+            snap.iter_all_term_ids().count(),
+            "len() must agree with the default-graph-scoped iterator"
+        );
+        assert_eq!(snap.len(), 1, "named-graph triple must not be counted");
+    }
+
+    #[test]
+    fn retract_quads_removes_only_the_targeted_named_graph_quad() {
+        let store = Store::in_memory();
+        let g = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
+        let q1 = (
+            g,
+            iri("http://ex/a"),
+            iri("http://ex/p"),
+            iri("http://ex/b"),
+        );
+        let q2 = (
+            g,
+            iri("http://ex/c"),
+            iri("http://ex/p"),
+            iri("http://ex/d"),
+        );
+        store.insert_quads(&[q1.clone(), q2.clone()]).unwrap();
+
+        let before = store.snapshot();
+        let n = store.retract_quads(std::slice::from_ref(&q1)).unwrap();
+        assert_eq!(n, 1);
+
+        let p_id = store.dictionary().get(&q1.2).unwrap();
+        let a_id = store.dictionary().get(&q1.1).unwrap();
+        let b_id = store.dictionary().get(&q1.3).unwrap();
+        let c_id = store.dictionary().get(&q2.1).unwrap();
+        let d_id = store.dictionary().get(&q2.3).unwrap();
+
+        // Pinned-before snapshot still sees both quads in the named graph.
+        let before_rows = before
+            .tier
+            .with_predicate(g, p_id, |part| {
+                part.scan_at(before.version()).collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert!(before_rows.contains(&(a_id, b_id)));
+        assert!(before_rows.contains(&(c_id, d_id)));
+
+        // A fresh snapshot sees the retraction: q1 gone, q2 survives.
+        let after = store.snapshot();
+        let after_rows = after
+            .tier
+            .with_predicate(g, p_id, |part| {
+                part.scan_at(after.version()).collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert!(
+            !after_rows.contains(&(a_id, b_id)),
+            "retracted quad must be gone"
+        );
+        assert!(after_rows.contains(&(c_id, d_id)), "surviving quad remains");
     }
 }
