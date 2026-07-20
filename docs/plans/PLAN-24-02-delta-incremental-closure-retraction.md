@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-20
 scope: "SPEC-24 S2 — output-sensitive closure deletion (support-counting decremental transitive closure, recompute fallback retained) + exact warm-store seeded retraction (seed_base_edges)"
 ---
