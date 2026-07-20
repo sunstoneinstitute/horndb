@@ -133,6 +133,22 @@ impl TransitiveClosureRule {
         self.backend
             .seed_transitive_closure(PredicateId(self.predicate), &edges);
     }
+
+    /// Seed the retained closure from this predicate's **true asserted base**
+    /// edges (dictionary-id `(s, o)` pairs), computing the closure at seed time.
+    /// Unlike [`Self::seed_closed_edges`], which seeds an already-closed extent
+    /// as a conservative base and can under-withdraw when a seeded edge is
+    /// retracted, this records the genuine base so a later `apply_retract_delta`
+    /// retracts **exactly** for any seeded edge (SPEC-24 S2). Costs one closure
+    /// computation at seed; prefer it when the store can supply the asserted base.
+    pub fn seed_base_edges(&mut self, base_edges: &[(u64, u64)]) {
+        let edges: Vec<(DictId, DictId)> = base_edges
+            .iter()
+            .map(|&(s, o)| (DictId(s), DictId(o)))
+            .collect();
+        self.backend
+            .seed_base_edges(PredicateId(self.predicate), &edges);
+    }
 }
 
 impl ClosureRule for TransitiveClosureRule {
@@ -352,5 +368,20 @@ mod tests {
         // Only the *new* edges: (2,3) direct and (1,3) transitive. (1,2) was
         // already emitted in the first delta and is not re-emitted.
         assert_eq!(got, vec![(1, 100, 3), (2, 100, 3)]);
+    }
+
+    /// Warm-store exact seed: seeding the TRUE base {(1,2),(2,3)} and then retracting
+    /// the seeded (2,3) withdraws (1,3) and (2,3) exactly (contrast with
+    /// `seed_closed_edges`, which under-withdraws).
+    #[test]
+    fn transitive_rule_seed_base_edges_retracts_exactly() {
+        let mut rule = TransitiveClosureRule::new(100);
+        rule.seed_base_edges(&[(1, 2), (2, 3)]);
+        let mut del: Zset<crate::types::TripleId> = Zset::new();
+        del.add((2, 100, 3), -1);
+        let mut got = rule.apply_retract_delta(&del);
+        got.withdraw.sort_unstable();
+        assert_eq!(got.withdraw, vec![(1, 100, 3), (2, 100, 3)]);
+        assert!(got.promote.is_empty());
     }
 }
