@@ -56,7 +56,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
 - [ ] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
 - [ ] **HIGH** · _Operational_ — SPEC-25 S3: write-ahead log + crash recovery — after #225/#226; SPEC-24 S5 #214 layers on this format ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
-- [ ] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
+- [x] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
 - [ ] **HIGH** · _Performance_ — SPEC-12 SIMD layer: `horndb-simd` primitives crate **landed** (F4+F5); WCOJ seek/intersect consumer (F1) **landed** — `VecIter` SoA-column + `PackedColumn` block-finish seek through `horndb_simd::lower_bound`, `LeapfrogJoin` k==2 `horndb_simd::intersect` fast path, real `per_tuple` microbench wired (differential fuzzer + leapfrog oracle green); storage decode + `rdf:type` scan consumer (F2) **landed** — `Dictionary::decode_inline_ints`/`lookup_batch` bulk inline-int decode + `PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` primitive, `dict_decode`/`partition_scan` benches wired. SIMD intersect now wired into `BatchIter`'s inlined leapfrog (the production executor hot path; `active_run` deduplicates to honour the distinct-key contract). Real wide `intersect` kernels (AVX-512 `compressstore`/AVX2/NEON) **landed**; `intersect`/`lower_bound`/`gather`/`filter_indices_eq` benched on **Intel SPR + Zen4** (2026-06-30): intersect AVX-512 ~2.5× on Intel (regresses on Zen4 double-pump), lower_bound a scalar win on both, gather + sparse filter ~1.5–2.2× wins. **Kernel selection reworked (2026-07-01) after the real workload contradicted the microbenches:** a same-session LDBC SPB-256 A/B on Zen4 (hornbench) and Intel SPR (hel01) showed the calibrated SIMD kernels are **net-harmful vs scalar on both** (dominant culprit: AVX2 `lower_bound` on the seek-heavy leapfrog path; the "AVX-512 intersect ~2.5× on Intel" microbench claim was fiction for SPB — AVX-512 runs at ~half scalar throughput there). **Fixed:** kernel selection is now `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table (CPUID-keyed, SPB-derived) → representative-input calibration → static widest`; the known-CPU table pins scalar for both measured hosts (AMD fam 25 mdl 97 Ryzen 7 7700, Intel fam 6 mdl 143 Xeon Gold 5412U), representative calibration (seek-sweep / >L2 base / moderate selectivity) makes an unlisted CPU reject the killer kernels too, the intersect skew-gate stays, and the selection tier is exported as the `source` label on `horndb_simd_kernel_isa{kernel,isa,source}` + the serve startup log. **SPB-256 aggregation-qps recovered on Zen4: 28.6 (SIMD regression) → 36.16** (table, all scalar; +18% over the 30.6 pre-SIMD baseline); Intel steady at 34.4. **`per_tuple` measured on hornbench (2026-06-30): ~67 ns/tuple, unchanged by the intersect (criterion A/B “no change”) — NF1 ≤2.5 ns not met; bottleneck is the depth-1 narrow-run leapfrog + Arrow materialization, not the intersect.** **hornbench numbers recorded (2026-07-07, Ryzen 7 7700, node-0-pinned):** `dict_decode` scalar 14.74 µs vs AVX2 14.54 µs → **~1.01×, RED** (load/store-bound; NF4 ≥4× is a compute target the memory-bound loop can't reach — SIMD not the lever); `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad (33.1 GB/s full-socket) → GREEN** (SPEC-02 acceptance #4 met). **Remaining:** close NF1 `per_tuple` (depth-1 / materialization path — not SIMD); delta-apply (F3) consumer (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133)) ([#132](https://github.com/sunstoneinstitute/horndb/issues/132))
 - [x] **HIGH** · _Performance_ — SPEC-04: within-partition object index on `MemStore` so `rdf:type` probes are O(|extent|) ([#133](https://github.com/sunstoneinstitute/horndb/issues/133))
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
@@ -147,7 +147,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## HIGH — Performance
 
-- [ ] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
+- [x] **SPARQL aggregation runtime: id-based bindings + hash group-by + streaming.**
   ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
   **Slice 1 + Slice 2 (id-based slot rows) landed** (design spec:
   `docs/specs/SPEC-16-id-based-slot-rows.md`; plans:
@@ -199,32 +199,23 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   `docs/specs/SPEC-20-join-probe-streaming.md`; plan:
   `docs/plans/PLAN-20-01-join-probe-streaming.md`.
 
-  **Remaining / deferred work:**
-  1. Filter-aware / grouped / multi-aggregate count pushdown (only
-     COUNT-over-full-BGP is pushed down today) — **planned**:
-     `docs/specs/SPEC-21-count-pushdown-extensions.md` (covers
-     equality-filter inlining, grouped COUNT via an additive
-     `Executor::count_bgp_grouped` seam, multi-aggregate all-plain-counts; defers
-     mixed COUNT+SUM, COUNT(DISTINCT), non-equality filters, with reasons) +
-     `docs/plans/PLAN-21-01-count-pushdown-extensions.md`.
-  2. Streaming results out to the HTTP layer — `Runtime::run` still collects a
-     `Vec<Bindings>` before serializing — **planned**:
-     `docs/specs/SPEC-22-http-streaming-results.md` (new
-     `Runtime::run_stream`/`BindingsStream`, all four SELECT formats stream via
-     `spawn_blocking` + bounded-channel body, first chunk pre-buffered for clean
-     early 400s) + `docs/plans/PLAN-22-01-http-streaming-results.md`.
-  3. Hasher + join-key representation micro-opt **LANDED** (#236, 2026-07-20):
-     (a) the hot runtime hash tables — the streaming join build index
-     (`JoinState::index`), GROUP BY state (`eval_group_native`), and the
-     DISTINCT sets (`DistinctOp` seen-set + the per-aggregate
-     `COUNT(DISTINCT …)`/`dedup_terms` sets) — now use `rustc-hash` (FxHash),
-     matching owlrl/closure.
-     (b) `row_join_key` canonicalizes each key column to its dictionary id
-     instead of decoding both sides to a lexical `String`: `Slot::Id` keys on
-     its raw id (no decode), `Slot::Term` is encoded back to its id via the new
-     `Executor::encode_term` (non-interning `Dictionary::get`) when present,
-     `KeyPart::Lex` otherwise — an Id row and a Term row for the same value
-     still share a bucket, but the common all-`Id` probe pays zero decode.
+  **All follow-on work landed (task complete):**
+  1. Count-pushdown extensions — equality-filter inlining, grouped COUNT
+     (`Executor::count_bgp_grouped` + `GroupCountScan`), multi-count lowering.
+     `docs/specs/SPEC-21-count-pushdown-extensions.md` (`implemented`) +
+     `docs/plans/PLAN-21-01-count-pushdown-extensions.md` (`executed`).
+     Deferred *with reasons* as permanent non-goals (not open work): mixed
+     COUNT+value aggregates, COUNT(DISTINCT), non-equality filters.
+  2. HTTP result streaming — `Runtime::run_stream`/`BindingsStream` +
+     `server/query.rs::stream_select` chunked `ChannelBody` for all four SELECT
+     formats, sized-body fast path for one-chunk results.
+     `docs/specs/SPEC-22-http-streaming-results.md` (`implemented`) +
+     `docs/plans/PLAN-22-01-http-streaming-results.md` (`executed`).
+  3. Hasher + join-key micro-opt (#236, 2026-07-20): the hot runtime hash
+     tables (`JoinState::index`, GROUP BY state, the DISTINCT sets) now use
+     `rustc-hash` (FxHash); `row_join_key` canonicalizes each key column to its
+     dictionary id via the new `Executor::encode_term` instead of decoding both
+     sides to a lexical `String`.
 
   See `docs/architecture.md` §9 and `docs/benchmarks.md`.
 
