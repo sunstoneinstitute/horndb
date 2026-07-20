@@ -13,6 +13,7 @@
 
 use crate::ordering::{Ordering, PartitionAxis};
 use crate::term::TermId;
+use crate::visibility::{visible, CommitVersion, UNSET_END};
 use arrow::array::{ArrayRef, UInt64Array};
 use roaring::RoaringTreemap;
 use std::sync::{Arc, OnceLock};
@@ -33,6 +34,14 @@ pub struct PredicatePartition {
     // Subject-major (SPO) columns: rows sorted by (subject, object).
     subjects: Arc<UInt64Array>,
     objects: Arc<UInt64Array>,
+    // Per-row visibility stamps, aligned 1:1 with the subject-major columns.
+    // `end[i] == UNSET_END` means row i is live. Object-major carries its own
+    // re-sorted copies (see `ObjectMajor`).
+    begin: Arc<UInt64Array>,
+    end: Arc<UInt64Array>,
+    // True once any row has a set `end` (a retraction). Lets read paths take a
+    // zero-copy fast path when the partition is insert-only.
+    has_retractions: bool,
     subject_set: RoaringTreemap,
     object_set: RoaringTreemap,
     // Object-major columns: rows sorted by (object, subject). Eager for hot
@@ -77,6 +86,21 @@ impl PredicatePartition {
         &self.object_set
     }
 
+    /// True if any row in this partition has been retracted (`end` set). When
+    /// false, every version-aware read returns the raw columns with no filter.
+    pub fn has_retractions(&self) -> bool {
+        self.has_retractions
+    }
+
+    /// The `begin`/`end` stamp columns (subject-major order), for the WAL and
+    /// compaction. Aligned 1:1 with `subjects()`/`objects()`.
+    pub fn begins(&self) -> &UInt64Array {
+        &self.begin
+    }
+    pub fn ends(&self) -> &UInt64Array {
+        &self.end
+    }
+
     /// Scan the partition in subject-major (SPO) order.
     pub fn scan(&self) -> impl Iterator<Item = (TermId, TermId)> + '_ {
         (0..self.len()).map(move |i| {
@@ -85,6 +109,32 @@ impl PredicatePartition {
                 TermId(self.objects.value(i)),
             )
         })
+    }
+
+    /// Scan `(subject, object)` rows visible at `at`, in subject-major order.
+    /// Zero-filter fast path when the partition is insert-only.
+    pub fn scan_at(&self, at: CommitVersion) -> impl Iterator<Item = (TermId, TermId)> + '_ {
+        let filtered = self.has_retractions;
+        (0..self.len()).filter_map(move |i| {
+            if filtered && !visible(self.begin.value(i), self.end.value(i), at) {
+                None
+            } else {
+                Some((
+                    TermId(self.subjects.value(i)),
+                    TermId(self.objects.value(i)),
+                ))
+            }
+        })
+    }
+
+    /// Count of rows visible at `at`.
+    pub fn len_at(&self, at: CommitVersion) -> usize {
+        if !self.has_retractions {
+            return self.len();
+        }
+        (0..self.len())
+            .filter(|&i| visible(self.begin.value(i), self.end.value(i), at))
+            .count()
     }
 
     /// Ordered access to the partition's `(subject, object)` rows for any of the
@@ -127,7 +177,8 @@ impl PredicatePartition {
     /// estimate).
     pub fn estimated_bytes(&self) -> u64 {
         let rows = self.len() as u64;
-        let base = rows * 16;
+        // 16 B for (s, o) + 16 B for (begin, end) stamps.
+        let base = rows * 32;
         if self.object_major_materialized() {
             base + rows * 16
         } else {
@@ -238,20 +289,34 @@ impl OrderedColumns {
 
 #[derive(Default)]
 pub struct PartitionBuilder {
-    pairs: Vec<(u64, u64)>,
+    // (subject, object, begin, end) rows.
+    rows: Vec<(u64, u64, CommitVersion, CommitVersion)>,
 }
 
 impl PartitionBuilder {
+    /// Append a live row (used by legacy/test call sites that predate stamps):
+    /// begin 0, end UNSET_END — visible at every version.
     pub fn append(&mut self, s: TermId, o: TermId) {
-        self.pairs.push((s.0, o.0));
+        self.rows.push((s.0, o.0, 0, UNSET_END));
+    }
+
+    /// Append a row with explicit visibility stamps.
+    pub fn append_stamped(
+        &mut self,
+        s: TermId,
+        o: TermId,
+        begin: CommitVersion,
+        end: CommitVersion,
+    ) {
+        self.rows.push((s.0, o.0, begin, end));
     }
 
     pub fn len(&self) -> usize {
-        self.pairs.len()
+        self.rows.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
+        self.rows.is_empty()
     }
 
     /// Finalize the partition, eagerly materialising the object-major layout for
@@ -265,29 +330,48 @@ impl PartitionBuilder {
     /// six orderings are immediately queryable; otherwise it is left for lazy
     /// materialisation on first object-major request.
     pub fn build_with_hot_threshold(mut self, hot_threshold: usize) -> PredicatePartition {
-        // Stage-1: stable sort once at finalize. SPO order ⇒ (subject, object) lexicographic.
-        self.pairs.sort_unstable();
-        self.pairs.dedup();
+        // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
+        // order for trie iteration; begin orders a tuple's history.
+        self.rows
+            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        // Collapse only exact-duplicate *live* rows for the same (s, o): a
+        // repeated insert is a no-op. Dead rows (end set) are history and are
+        // kept until compaction.
+        self.rows
+            .dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.3 == UNSET_END && b.3 == UNSET_END);
 
+        let n = self.rows.len();
         let mut subj_set = RoaringTreemap::new();
         let mut obj_set = RoaringTreemap::new();
-        let mut s_col = Vec::with_capacity(self.pairs.len());
-        let mut o_col = Vec::with_capacity(self.pairs.len());
-        for (s, o) in &self.pairs {
+        let mut s_col = Vec::with_capacity(n);
+        let mut o_col = Vec::with_capacity(n);
+        let mut begin_col = Vec::with_capacity(n);
+        let mut end_col = Vec::with_capacity(n);
+        let mut has_retractions = false;
+        for (s, o, begin, end) in &self.rows {
             s_col.push(*s);
             o_col.push(*o);
+            begin_col.push(*begin);
+            end_col.push(*end);
+            if *end != UNSET_END {
+                has_retractions = true;
+            }
+            // Side-sets are supersets across all versions; version-exact sets
+            // are computed on demand (Task 4).
             subj_set.insert(TermId(*s).payload());
             obj_set.insert(TermId(*o).payload());
         }
         let partition = PredicatePartition {
             subjects: Arc::new(UInt64Array::from(s_col)),
             objects: Arc::new(UInt64Array::from(o_col)),
+            begin: Arc::new(UInt64Array::from(begin_col)),
+            end: Arc::new(UInt64Array::from(end_col)),
+            has_retractions,
             subject_set: subj_set,
             object_set: obj_set,
             object_major: OnceLock::new(),
         };
-        if partition.len() >= hot_threshold {
-            // Eager materialisation; `set` cannot fail on a fresh OnceLock.
+        if partition.len_at(u64::MAX - 1) >= hot_threshold {
             let _ = partition.object_major.set(partition.build_object_major());
         }
         partition
@@ -320,5 +404,38 @@ mod tests {
         }
         let part = b.build();
         assert!(part.subjects_with_object(42).is_empty());
+    }
+
+    #[test]
+    fn stamped_scan_filters_by_version() {
+        use crate::visibility::UNSET_END;
+        let mut b = PartitionBuilder::default();
+        // (1,10) inserted at v1, live; (2,20) inserted at v1 then retracted at v3.
+        b.append_stamped(TermId(1), TermId(10), 1, UNSET_END);
+        b.append_stamped(TermId(2), TermId(20), 1, 3);
+        let part = b.build();
+
+        // At v2: both visible (retraction not yet in effect).
+        let at2: Vec<_> = part.scan_at(2).collect();
+        assert_eq!(at2, vec![(TermId(1), TermId(10)), (TermId(2), TermId(20))]);
+
+        // At v3: (2,20) hidden (v3 == end).
+        let at3: Vec<_> = part.scan_at(3).collect();
+        assert_eq!(at3, vec![(TermId(1), TermId(10))]);
+
+        assert_eq!(part.len_at(2), 2);
+        assert_eq!(part.len_at(3), 1);
+    }
+
+    #[test]
+    fn has_retractions_reports_dead_rows() {
+        use crate::visibility::UNSET_END;
+        let mut live = PartitionBuilder::default();
+        live.append_stamped(TermId(1), TermId(10), 1, UNSET_END);
+        assert!(!live.build().has_retractions(), "no dead rows");
+
+        let mut dead = PartitionBuilder::default();
+        dead.append_stamped(TermId(1), TermId(10), 1, 2);
+        assert!(dead.build().has_retractions(), "one dead row");
     }
 }
