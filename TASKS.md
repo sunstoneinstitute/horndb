@@ -53,7 +53,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
-- [v] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225)) — _wip: 1a534b03@Stigs-MacBook-Pro.local · task-225-spec-25-s1-per-tuple-mvcc-visibility-del · 2026-07-20T14:08:13Z_
+- [x] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
 - [ ] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
 - [ ] **HIGH** · _Operational_ — SPEC-25 S3: write-ahead log + crash recovery — after #225/#226; SPEC-24 S5 #214 layers on this format ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
 - [x] **HIGH** · _Performance_ — SPARQL aggregation runtime: id-based bindings + hash group-by + streaming (12× SPB gap) ([#128](https://github.com/sunstoneinstitute/horndb/issues/128))
@@ -419,7 +419,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   before either side builds); removes the O(n) first-acquire presence rebuild;
   makes mid-tick point reads expressible. Spec §S6. Gate: SPEC-24 acceptance #6.
 
-- [v] **SPEC-25 S1: per-tuple MVCC visibility + delete path.** ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
+- [x] **SPEC-25 S1: per-tuple MVCC visibility + delete path.** ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
   The store cannot delete today (`Tier` has `insert_quad_batch` and no removal;
   SPARQL `DELETE DATA` lives in a `horndb-sparql` tombstone overlay). Add
   begin/end visibility stamps on the tier commit clock, `retract_quad_batch`
