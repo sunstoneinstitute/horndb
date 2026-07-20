@@ -101,3 +101,36 @@ SuiteSparse's iso/bitmap fast paths; a valued carrier cannot, which is the cost
 this metric quantifies. The measured generic-kernel penalty on this v10.3.0
 build for a *scalar* FP64 op is ~1.0×, so PreJIT is only worth revisiting for a
 *structured* (UDT) carrier — recorded as the #12 gate.
+
+## Incremental closure retraction (SPEC-24 S2, #211)
+
+`IncrementalTransitiveClosure::delete_edge` is **output-sensitive by default**.
+The default `DeleteStrategy::SupportCounting` is a two-phase decremental sweep:
+remove the base edge, seed a worklist with only the closed pairs that could have
+used the deleted first hop (over-delete candidates), then re-derive by checking
+each pair's live *support* (does any base out-edge still witness the target?),
+cascading backward along `bwd_base` only through pairs that lose all support.
+Cost is proportional to the closure delta plus the inspected frontier, not the
+store size. No stored counters — support is computed on the fly — so the insert
+path is unchanged.
+
+The original full-recompute algorithm is retained as
+`DeleteStrategy::Recompute` (set per instance with `set_delete_strategy`). The
+differential proptests run **both** strategies against the GraphBLAS bulk
+closure, so Recompute stays in-tree as the oracle and can be flipped on per
+predicate if a future density ever favours it.
+
+`last_delete_probes()` returns the number of pairs the most recent `delete_edge`
+inspected (seeded + support evaluations). It is the deterministic,
+CI-stable gate for output-sensitivity — a wall-clock bench is env-sensitive,
+this counter is not. `benches/closure_retraction.rs` is the A/B (support-counting
+vs recompute); recorded numbers come from hornbench.
+
+Seeding: `IncrementalClosureBackend::seed_base_edges` (and the SPEC-06 wrapper
+`TransitiveClosureRule::seed_base_edges`) seed from the **true asserted base**
+and re-close once, so retracting any seeded edge is **exact**. The older
+`seed_transitive_closure` seeds an already-closed extent as a conservative
+stand-in base; retracting a seeded edge there is sound but may under-withdraw
+(a redundant transitive edge can keep a pair reachable). Use the base seed when
+the store can supply the asserted base; use the closed-extent seed only when the
+true base is unavailable.

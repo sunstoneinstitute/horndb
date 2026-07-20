@@ -54,3 +54,7 @@ harness = false
 [[bench]]
 name = "crosswalk"
 harness = false
+
+[[bench]]
+name = "closure_retraction"
+harness = false
