@@ -13,7 +13,7 @@
 
 use crate::ordering::{Ordering, PartitionAxis};
 use crate::term::TermId;
-use crate::visibility::{visible, CommitVersion, UNSET_END};
+use crate::visibility::{visible, CommitVersion, LATEST, UNSET_END};
 use arrow::array::{ArrayRef, UInt64Array};
 use roaring::RoaringTreemap;
 use std::sync::{Arc, OnceLock};
@@ -44,6 +44,11 @@ pub struct PredicatePartition {
     // True once any row has a set `end` (a retraction). Lets read paths take a
     // zero-copy fast path when the partition is insert-only.
     has_retractions: bool,
+    // The maximum `begin` stamp across all rows (0 for an empty partition).
+    // Combined with `has_retractions`, this gates the zero-copy fast path: it
+    // is only safe to skip filtering when `at >= max_begin`, i.e. every row's
+    // begin bound is already satisfied at the query version `at`.
+    max_begin: CommitVersion,
     subject_set: RoaringTreemap,
     object_set: RoaringTreemap,
     // Object-major columns: rows sorted by (object, subject). Eager for hot
@@ -89,9 +94,11 @@ impl PredicatePartition {
     }
 
     /// Distinct subject payloads with at least one row visible at `at`.
-    /// Borrows the prebuilt superset when the partition is insert-only.
+    /// Borrows the prebuilt superset when the partition is insert-only AND
+    /// every row's `begin` is already `<= at` (so the superset needs no
+    /// filtering); otherwise computes the version-exact set.
     pub fn subject_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
-        if !self.has_retractions {
+        if !self.has_retractions && at >= self.max_begin {
             return std::borrow::Cow::Borrowed(&self.subject_set);
         }
         let mut set = RoaringTreemap::new();
@@ -104,8 +111,11 @@ impl PredicatePartition {
     }
 
     /// Distinct object payloads with at least one row visible at `at`.
+    /// Borrows the prebuilt superset when the partition is insert-only AND
+    /// every row's `begin` is already `<= at`; otherwise computes the
+    /// version-exact set.
     pub fn object_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
-        if !self.has_retractions {
+        if !self.has_retractions && at >= self.max_begin {
             return std::borrow::Cow::Borrowed(&self.object_set);
         }
         let mut set = RoaringTreemap::new();
@@ -143,9 +153,11 @@ impl PredicatePartition {
     }
 
     /// Scan `(subject, object)` rows visible at `at`, in subject-major order.
-    /// Zero-filter fast path when the partition is insert-only.
+    /// Zero-filter fast path when the partition is insert-only AND every
+    /// row's `begin` is already `<= at`; otherwise each row is checked
+    /// against [`visible`] individually.
     pub fn scan_at(&self, at: CommitVersion) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        let filtered = self.has_retractions;
+        let filtered = self.has_retractions || at < self.max_begin;
         (0..self.len()).filter_map(move |i| {
             if filtered && !visible(self.begin.value(i), self.end.value(i), at) {
                 None
@@ -160,7 +172,7 @@ impl PredicatePartition {
 
     /// Count of rows visible at `at`.
     pub fn len_at(&self, at: CommitVersion) -> usize {
-        if !self.has_retractions {
+        if !self.has_retractions && at >= self.max_begin {
             return self.len();
         }
         (0..self.len())
@@ -173,12 +185,13 @@ impl PredicatePartition {
     /// [`Self::ordered_at`] for the version-aware form and the general
     /// documentation of this access pattern (SPEC-02 F4).
     pub fn ordered(&self, ord: Ordering) -> OrderedColumns {
-        self.ordered_at(ord, u64::MAX - 1)
+        self.ordered_at(ord, LATEST)
     }
 
     /// Ordered access to rows visible at `at`, in any of the six orderings.
-    /// Zero-copy when the partition is insert-only (raw columns shared by
-    /// `Arc`); otherwise the visible subset is materialized once for this call.
+    /// Zero-copy when the partition is insert-only AND every row's `begin` is
+    /// already `<= at` (raw columns shared by `Arc`); otherwise the visible
+    /// subset is materialized once for this call.
     pub fn ordered_at(&self, ord: Ordering, at: CommitVersion) -> OrderedColumns {
         let (level0, level1, begin, end, axis) = match ord.axis() {
             PartitionAxis::SubjectMajor => (
@@ -199,7 +212,7 @@ impl PredicatePartition {
                 )
             }
         };
-        if !self.has_retractions {
+        if !self.has_retractions && at >= self.max_begin {
             return OrderedColumns {
                 axis,
                 level0,
@@ -229,17 +242,19 @@ impl PredicatePartition {
         self.object_major.get().is_some()
     }
 
-    /// Estimated in-memory footprint in bytes: 16 bytes per row for the
-    /// subject-major columns, plus another 16 bytes per row when the
-    /// object-major layout is materialised. The Roaring side-sets are excluded
-    /// (small relative to the columns, and shared shape with the Stage-1
-    /// estimate).
+    /// Estimated in-memory footprint in bytes: 32 bytes per row for the
+    /// subject-major axis (16 B for (s, o) + 16 B for (begin, end) stamps),
+    /// plus another 32 bytes per row when the object-major layout is
+    /// materialised (it carries its own re-sorted (o, s) and (begin, end)
+    /// columns). The Roaring side-sets are excluded (small relative to the
+    /// columns, and shared shape with the Stage-1 estimate).
     pub fn estimated_bytes(&self) -> u64 {
         let rows = self.len() as u64;
         // 16 B for (s, o) + 16 B for (begin, end) stamps.
         let base = rows * 32;
         if self.object_major_materialized() {
-            base + rows * 16
+            // Object-major carries its own (o, s) + (begin, end) columns.
+            base + rows * 32
         } else {
             base
         }
@@ -284,6 +299,11 @@ impl PredicatePartition {
     /// collect matching positions, then [`horndb_simd::gather`] maps those
     /// positions onto the subject column. This is the SIMD-friendly half of the
     /// `rdf:type` partition scan (SPEC-12 F2 / SPEC-02 acceptance #4).
+    ///
+    /// NOT visibility-filtered: it scans the raw columns regardless of `at`.
+    /// Currently only used by a bench and unit tests. Do not call this on a
+    /// version-aware read path without first adding a `subjects_with_object_at`
+    /// variant.
     pub fn subjects_with_object(&self, object: u64) -> Vec<u64> {
         let objs: &[u64] = self.objects.values();
         let subs: &[u64] = self.subjects.values();
@@ -413,6 +433,7 @@ impl PartitionBuilder {
         let mut begin_col = Vec::with_capacity(n);
         let mut end_col = Vec::with_capacity(n);
         let mut has_retractions = false;
+        let mut max_begin: CommitVersion = 0;
         for (s, o, begin, end) in &self.rows {
             s_col.push(*s);
             o_col.push(*o);
@@ -420,6 +441,9 @@ impl PartitionBuilder {
             end_col.push(*end);
             if *end != UNSET_END {
                 has_retractions = true;
+            }
+            if *begin > max_begin {
+                max_begin = *begin;
             }
             // Side-sets are supersets across all versions; version-exact sets
             // are computed on demand (Task 4).
@@ -432,11 +456,12 @@ impl PartitionBuilder {
             begin: Arc::new(UInt64Array::from(begin_col)),
             end: Arc::new(UInt64Array::from(end_col)),
             has_retractions,
+            max_begin,
             subject_set: subj_set,
             object_set: obj_set,
             object_major: OnceLock::new(),
         };
-        if partition.len_at(u64::MAX - 1) >= hot_threshold {
+        if partition.len_at(LATEST) >= hot_threshold {
             let _ = partition.object_major.set(partition.build_object_major());
         }
         partition
@@ -525,6 +550,39 @@ mod tests {
             rows2,
             vec![(TermId(1), TermId(10)), (TermId(2), TermId(20))]
         );
+    }
+
+    #[test]
+    fn insert_only_fast_path_still_respects_begin_bound() {
+        // Regression for SPEC-25 S1 review Fix 2: an insert-only partition
+        // (no retractions, so `has_retractions == false`) with staggered
+        // `begin` stamps. The zero-copy fast path must not kick in — and
+        // must not return not-yet-visible rows — for an `at` below the
+        // partition's max begin.
+        use crate::visibility::UNSET_END;
+        let mut b = PartitionBuilder::default();
+        b.append_stamped(TermId(1), TermId(10), 1, UNSET_END); // visible from v1
+        b.append_stamped(TermId(2), TermId(20), 5, UNSET_END); // visible from v5
+        let part = b.build();
+        assert!(!part.has_retractions(), "insert-only: no retractions");
+
+        // At v3, row (2,20) is not yet inserted — must be excluded.
+        let at3: Vec<_> = part.scan_at(3).collect();
+        assert_eq!(at3, vec![(TermId(1), TermId(10))]);
+        assert_eq!(part.len_at(3), 1);
+        assert!(part.subject_set_at(3).contains(TermId(1).payload()));
+        assert!(!part.subject_set_at(3).contains(TermId(2).payload()));
+        assert!(part.object_set_at(3).contains(TermId(10).payload()));
+        assert!(!part.object_set_at(3).contains(TermId(20).payload()));
+
+        let cols = part.ordered_at(crate::ordering::Ordering::Spo, 3);
+        let rows: Vec<_> = cols.subject_object().collect();
+        assert_eq!(rows, vec![(TermId(1), TermId(10))]);
+
+        // At v5 (== max begin) and later, both rows are visible.
+        let at5: Vec<_> = part.scan_at(5).collect();
+        assert_eq!(at5, vec![(TermId(1), TermId(10)), (TermId(2), TermId(20))]);
+        assert_eq!(part.len_at(5), 2);
     }
 
     #[test]

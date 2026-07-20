@@ -131,16 +131,20 @@ fn footprint_accounts_for_materialized_object_major() {
     };
 
     // SPEC-25 S1: each row now also carries begin/end visibility stamps (16 B),
-    // so the subject-major base is 32 B/row instead of 16 B/row.
+    // so the subject-major base is 32 B/row instead of 16 B/row: 16 B for
+    // (s, o) + 16 B for (begin, end). The object-major layout, when
+    // materialised, carries its own re-sorted (o, s) + (begin, end) columns —
+    // another 32 B/row, not 16 — so a hot (or lazily-materialised) partition
+    // is 64 B/row total.
     let cold = build_partition(usize::MAX);
     assert_eq!(cold.estimated_bytes(), rows * 32);
 
     let hot = build_partition(1);
-    assert_eq!(hot.estimated_bytes(), rows * 48);
+    assert_eq!(hot.estimated_bytes(), rows * 64);
 
     // Lazy materialisation flips a cold partition's footprint.
     let _ = cold.ordered(Ordering::Pos);
-    assert_eq!(cold.estimated_bytes(), rows * 48);
+    assert_eq!(cold.estimated_bytes(), rows * 64);
 }
 
 #[test]

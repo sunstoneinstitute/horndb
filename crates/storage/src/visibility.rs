@@ -13,6 +13,11 @@ pub type CommitVersion = u64;
 /// version reaches `u64::MAX`, so `v < UNSET_END` is always true for a live row.
 pub const UNSET_END: CommitVersion = u64::MAX;
 
+/// The highest queryable version — "latest committed". NOT `UNSET_END`:
+/// `visible()`'s bound is strict (`at < end`), so a live row (`end == UNSET_END`)
+/// would be invisible at `at == UNSET_END`. Query at `LATEST` to see all live rows.
+pub const LATEST: CommitVersion = u64::MAX - 1;
+
 /// True if a tuple stamped `[begin, end)` is visible at version `at`.
 #[inline]
 pub fn visible(begin: CommitVersion, end: CommitVersion, at: CommitVersion) -> bool {

@@ -38,4 +38,4 @@ pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{Tier, TierStats};
-pub use visibility::{visible, CommitVersion, UNSET_END};
+pub use visibility::{visible, CommitVersion, LATEST, UNSET_END};
