@@ -74,6 +74,10 @@ pub struct IncrementalTransitiveClosure {
     /// Asserted base edges (forward adjacency). For a closed-seeded instance
     /// this holds the closed extent itself (used as a conservative base).
     base: FxHashMap<u64, FxHashSet<u64>>,
+    /// Backward adjacency of the asserted base (`bwd_base[o]` = { s : base(s, o) }).
+    /// Maintained in lockstep with `base`; lets retraction cascade to a node's
+    /// base predecessors in O(in-degree) without scanning the whole base.
+    bwd_base: FxHashMap<u64, FxHashSet<u64>>,
     nnz: usize,
 }
 
@@ -122,6 +126,7 @@ impl IncrementalTransitiveClosure {
             // and makes retraction work uniformly (post-seed inserts retract
             // exactly; seeded-edge retraction is sound but may under-withdraw).
             c.base.entry(s).or_default().insert(o);
+            c.bwd_base.entry(o).or_default().insert(s);
         }
         c
     }
@@ -148,6 +153,15 @@ impl IncrementalTransitiveClosure {
             }
         }
         out
+    }
+
+    /// Base predecessors of `node` (`{ s : base(s, node) }`), unordered.
+    /// Test/among-internal helper mirroring `base_edges`.
+    pub fn base_predecessors(&self, node: u64) -> Vec<u64> {
+        self.bwd_base
+            .get(&node)
+            .map(|set| set.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Number of edges (`nnz`) currently in the closure.
@@ -187,6 +201,9 @@ impl IncrementalTransitiveClosure {
         // delta computation below (which is unchanged). The base set is what
         // makes correct retraction possible.
         let base_was_new = self.base.entry(s).or_default().insert(o);
+        if base_was_new {
+            self.bwd_base.entry(o).or_default().insert(s);
+        }
 
         // B = {x : x reaches s} ∪ {s}; F = {y : o reaches y} ∪ {o}.
         let mut b = neighbors(&self.bwd, s);
@@ -220,6 +237,12 @@ impl IncrementalTransitiveClosure {
                 set.remove(&o);
                 if set.is_empty() {
                     self.base.remove(&s);
+                }
+            }
+            if let Some(set) = self.bwd_base.get_mut(&o) {
+                set.remove(&s);
+                if set.is_empty() {
+                    self.bwd_base.remove(&o);
                 }
             }
         }
@@ -327,6 +350,14 @@ impl IncrementalTransitiveClosure {
         if self.base.get(&s).is_some_and(|set| set.is_empty()) {
             self.base.remove(&s);
         }
+        if was_base {
+            if let Some(set) = self.bwd_base.get_mut(&o) {
+                set.remove(&s);
+                if set.is_empty() {
+                    self.bwd_base.remove(&o);
+                }
+            }
+        }
 
         // 2. Affected sources X = closed-bwd[s] ∪ {s}; targets Y = closed-fwd[o] ∪ {o}.
         // Use a set so that when `s` lies on a cycle/self-loop (closed-bwd[s]
@@ -413,6 +444,23 @@ mod tests {
 
     fn edge_set(c: &IncrementalTransitiveClosure) -> std::collections::BTreeSet<(u64, u64)> {
         c.edges().into_iter().collect()
+    }
+
+    #[test]
+    fn bwd_base_tracks_base_predecessors() {
+        let mut c = IncrementalTransitiveClosure::from_base_edges([(1, 2), (3, 2)]);
+        // Both 1 and 3 are base predecessors of 2.
+        let mut preds = c.base_predecessors(2);
+        preds.sort_unstable();
+        assert_eq!(preds, vec![1, 3]);
+        // Deleting (1,2) removes 1 as a predecessor of 2; 3 remains.
+        c.delete_edge(1, 2);
+        assert_eq!(c.base_predecessors(2), vec![3]);
+        // Reinserting restores it.
+        c.insert_edge(1, 2);
+        let mut preds = c.base_predecessors(2);
+        preds.sort_unstable();
+        assert_eq!(preds, vec![1, 3]);
     }
 
     #[test]
