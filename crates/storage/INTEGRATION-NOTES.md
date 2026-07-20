@@ -82,5 +82,54 @@ swaps the live pointer. `Store::snapshot()` / `StoreSnapshot` pin a stable,
 internally-consistent read view; concurrent writers never disturb a pinned
 snapshot, which stays readable until dropped. The dictionary is append-only, so
 pinned term ids never change meaning. HDT export reads one pinned snapshot, so a
-checkpoint taken under concurrent writes is internally consistent (NF5). True
-per-tuple-visibility MVCC remains deferred to Stage 2 (SPEC-06).
+checkpoint taken under concurrent writes is internally consistent (NF5).
+Per-tuple visibility (row-level delete) is the next section, delivered under
+`SPEC-25` S1.
+
+## Per-tuple MVCC (SPEC-25 S1, delivered)
+
+Substrate: two stamp columns, `begin`/`end` (`CommitVersion = u64`, `visibility.rs`),
+added to each `PredicatePartition` alongside the `(subject, object)` columns —
+not a delete-bitmap sidecar and not in-place append. A row is visible at
+version `v` iff `begin <= v < end`; `end == UNSET_END` (`u64::MAX`) means live.
+Insert stamps `begin = commit_version, end = UNSET_END`; retract stamps
+`end = commit_version` on the matching live row — the row stays physically
+present, a delete is a stamp, not an eviction. This keeps the existing
+copy-on-write substrate (immutable `Arc<TierSnapshot>` swapped per commit)
+unchanged; MVCC is layered on top of it, not a replacement for it. The
+hornbench comparison against delete-bitmap sidecars and in-place append,
+against the NF4 write-amplification budget, is deferred — [#242](https://github.com/sunstoneinstitute/horndb/issues/242).
+
+- **`Tier::retract_quad_batch(&[(GraphId, TermId, TermId, TermId)]) -> Result<usize>`**
+  (`memory_tier.rs`, `tier.rs`): one call = one commit version. A quad absent
+  from the current live set is a **counted no-op** — it does not bump `end` on
+  anything and does not error — so retracting an already-absent quad is safe
+  and idempotent. The returned count is how many quads actually matched a live
+  row.
+- **Read filter:** every read helper is version-parameterized —
+  `scan_at`/`ordered_at`/`subject_set_at`/`object_set_at`/`len_at` on
+  `PredicatePartition` (`partition.rs`) — and applies `begin <= at < end`.
+  **Zero-copy fast path:** when a partition has no retracted rows at all
+  (`!has_retractions()`) and the query version is at or after the partition's
+  newest insert (`at >= max_begin`), the filter is skipped entirely and the
+  raw columns are returned as-is. This is the common insert-only case, so the
+  WCOJ hot-path benches do not regress from the MVCC read filter.
+- **Compaction + pin registry:** `MemoryTier`/`Store::compact()` builds a fresh
+  partition dropping rows whose `end <= min_pinned_version`; it never mutates a
+  row a pinned view still needs (pinned `StoreSnapshot`s hold their own older
+  `Arc<TierSnapshot>`). The pin registry (`Mutex<BTreeMap<u64, usize>>`,
+  version -> live pin count) tracks the oldest version any snapshot still
+  holds. **Compaction is explicit-only today** — nothing calls `compact()`
+  automatically, so dead (retracted) rows accumulate under insert/retract
+  churn until a caller invokes it. A compaction trigger policy is part of the
+  deferred hornbench follow-up ([#242](https://github.com/sunstoneinstitute/horndb/issues/242)).
+- **SPEC-24 S6 surface** on `StoreSnapshot` (`store.rs`), default-graph scoped
+  to match the incremental engine's single-graph circuit: `contains(s, p, o)`,
+  `iter_all_term_ids()` (ordered), `len()`/`is_empty()`, `logical_time()`
+  (== the pinned commit version, ADR-0018's clock binding). This is the
+  storage-side half of the SPEC-24 S6 contract; wiring `horndb-incremental`'s
+  `Circuit::snapshot()` onto it is separate, tracked under
+  [#215](https://github.com/sunstoneinstitute/horndb/issues/215).
+- **`horndb-sparql` overlay retired:** `HornEngine`'s `tombstones: HashSet`
+  is gone; `DELETE DATA` and pattern delete now call `Store::retract_*`
+  directly and reads see the store's own visibility filter.

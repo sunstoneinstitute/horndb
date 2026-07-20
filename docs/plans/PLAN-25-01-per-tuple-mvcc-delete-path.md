@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-20
 scope: "SPEC-25 S1 — per-tuple MVCC visibility stamps + delete path on the copy-on-write memory tier; retire the sparql DELETE DATA tombstone overlay"
 ---
