@@ -19,6 +19,12 @@ pub struct TierStats {
 pub trait Tier: Send + Sync + std::any::Any {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()>;
 
+    /// Retract a batch of quads. Stamps each matching live tuple's `end` at the
+    /// new commit version (one batch = one version). Retracting an absent or
+    /// already-dead tuple is a counted no-op, not an error. Returns the number
+    /// of tuples actually retracted.
+    fn retract_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<usize>;
+
     fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&PredicatePartition>;
 
     fn predicates(&self, graph: GraphId) -> Vec<TermId>;

@@ -295,6 +295,7 @@ numbers should not be compared to the target column above.
 | `benches/sameas.rs` | `horndb-closure` | SPEC-05 `owl:sameAs` equivalence-class scaffold. |
 | `benches/closure_retraction.rs` | `horndb-closure` | SPEC-24 S2 A/B: support-counting vs recompute deletion, small delta over a growing store ([#211](https://github.com/sunstoneinstitute/horndb/issues/211)). Pending hornbench. |
 | `benches/four_cycle.rs` (binary-hash leg) | `horndb-wcoj` | Reference half of the 4-cycle comparison above. |
+| `benches/insert_retract.rs` (`insert_10k`, `retract_then_scan_10k`) | `horndb-storage` | SPEC-25 S1 per-tuple MVCC scaffold — insert-only baseline + retract-then-read cost. Builds and runs locally; measure on hornbench (deferred, [#242](https://github.com/sunstoneinstitute/horndb/issues/242)), which also carries the NF4 write-amp comparison (stamp-columns-on-CoW vs delete-bitmap sidecars, CoW vs in-place append). |
 
 ### Not yet running
 

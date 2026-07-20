@@ -4,8 +4,9 @@ use crate::error::Result;
 use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 use crate::term::{GraphId, TermId};
 use crate::tier::{Tier, TierStats};
+use crate::visibility::UNSET_END;
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 /// One graph's predicate partitions. Immutable once built; copy-on-write
@@ -65,6 +66,21 @@ impl TierSnapshot {
             .map(|part| part.ordered(ord))
     }
 
+    /// Ordered access to a partition, filtered to rows visible at `self.version`
+    /// (SPEC-25 S1) — the version-aware counterpart to [`Self::ordered_predicate`],
+    /// which always reads "latest live" regardless of the pinned version.
+    pub fn ordered_predicate_at(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|part| part.ordered_at(ord, self.version))
+    }
+
     pub fn predicates(&self, graph: GraphId) -> Vec<TermId> {
         self.graphs
             .get(&graph)
@@ -80,7 +96,7 @@ impl TierSnapshot {
         self.graphs
             .values()
             .flat_map(|g| g.partitions.values())
-            .map(|p| p.len() as u64)
+            .map(|p| p.len_at(self.version) as u64)
             .sum()
     }
 
@@ -93,7 +109,7 @@ impl TierSnapshot {
             .map(|gs| {
                 gs.partitions
                     .iter()
-                    .map(|(p, part)| (*p, part.len() as u64))
+                    .map(|(p, part)| (*p, part.len_at(self.version) as u64))
                     .collect()
             })
             .unwrap_or_default();
@@ -103,23 +119,42 @@ impl TierSnapshot {
     }
 
     pub fn stats(&self) -> TierStats {
-        let graphs = self.graphs.len() as u64;
-        let predicates: u64 = self
+        // Live counts: only graphs/predicates with at least one tuple visible
+        // at the pinned version, consistent with `triples` (also version-
+        // filtered). After a full delete/CLEAR, retained MVCC history keeps the
+        // partitions physically present but they hold no visible rows, so they
+        // must not inflate the live graph/predicate counts.
+        let mut graphs = 0u64;
+        let mut predicates = 0u64;
+        for gs in self.graphs.values() {
+            let live_preds = gs
+                .partitions
+                .values()
+                .filter(|p| p.len_at(self.version) > 0)
+                .count() as u64;
+            predicates += live_preds;
+            if live_preds > 0 {
+                graphs += 1;
+            }
+        }
+        let triples = self.triple_count();
+        // Physical footprint spans ALL retained partitions (dead MVCC history
+        // costs bytes until compaction): 32 B/row base (16 B for (s, o) + 16 B
+        // for the begin/end visibility stamps), plus another 32 B/row when the
+        // object-major layout is materialised for a hot predicate; plus
+        // ~16 bytes per physically-retained predicate of overhead.
+        let physical_predicates: u64 = self
             .graphs
             .values()
             .map(|g| g.partitions.len() as u64)
             .sum();
-        let triples = self.triple_count();
-        // Per-partition column footprint (16 B/row, doubled when the
-        // object-major layout is materialised for a hot predicate); plus
-        // ~16 bytes/predicate overhead.
         let column_bytes: u64 = self
             .graphs
             .values()
             .flat_map(|g| g.partitions.values())
             .map(|p| p.estimated_bytes())
             .sum();
-        let bytes_estimated = column_bytes + predicates * 16;
+        let bytes_estimated = column_bytes + physical_predicates * 16;
         TierStats {
             graphs,
             predicates,
@@ -142,6 +177,8 @@ pub struct MemoryTier {
     /// orderings; smaller ones materialise the object-major layout lazily
     /// (SPEC-02 F4).
     hot_threshold: usize,
+    /// version -> number of live pins at that version. Empty ⇒ no pins.
+    pins: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
 
 impl MemoryTier {
@@ -155,6 +192,7 @@ impl MemoryTier {
             current: RwLock::new(Arc::new(TierSnapshot::empty())),
             writer: Mutex::new(()),
             hot_threshold,
+            pins: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -163,11 +201,87 @@ impl MemoryTier {
         self.hot_threshold
     }
 
-    /// Pin the current immutable tier state. The returned `Arc` isolates the
-    /// caller from later writes (copy-on-write): subsequent `insert_quad_batch`
-    /// calls allocate a new snapshot and never mutate this one.
-    pub fn snapshot(&self) -> Arc<TierSnapshot> {
-        self.current.read().clone()
+    /// Pin the current immutable tier state and register the pin so compaction
+    /// will not reclaim rows still visible to it. The pin is released when the
+    /// returned guard drops.
+    pub fn snapshot(&self) -> PinnedSnapshot {
+        let snap = self.current.read().clone();
+        *self.pins.lock().entry(snap.version).or_insert(0) += 1;
+        PinnedSnapshot {
+            snap,
+            pins: self.pins.clone(),
+        }
+    }
+
+    /// Lowest pinned version, or the current version if nothing is pinned.
+    fn min_pinned(&self) -> u64 {
+        // Read `current` before `pins` so every path that touches both locks
+        // takes them in the same order (`current` then `pins`), as `snapshot()`
+        // does — keeps the ordering deadlock-free for future refactors.
+        let cur_version = self.current.read().version;
+        let pins = self.pins.lock();
+        pins.keys().next().copied().unwrap_or(cur_version)
+    }
+
+    /// Reclaim dead rows whose `end <= min_pinned`. Rebuilds only partitions
+    /// that actually hold reclaimable rows; never changes a pinned view (those
+    /// hold their own older `Arc`s). Does not bump the version — compaction is
+    /// not a logical write.
+    pub fn compact(&self) {
+        let _w = self.writer.lock();
+        let horizon = self.min_pinned();
+        let cur = self.current.read().clone();
+        let mut graphs = cur.graphs.clone();
+        let mut changed = false;
+        for (g, gs) in cur.graphs.iter() {
+            let mut new_partitions = gs.partitions.clone();
+            let mut graph_changed = false;
+            for (p, part) in gs.partitions.iter() {
+                if !part.has_retractions() {
+                    continue;
+                }
+                // Reclaimable iff some row has end <= horizon.
+                let reclaimable = (0..part.len()).any(|i| part.ends().value(i) <= horizon);
+                if !reclaimable {
+                    continue;
+                }
+                let mut builder = PartitionBuilder::default();
+                for i in 0..part.len() {
+                    let end = part.ends().value(i);
+                    if end <= horizon {
+                        continue; // reclaim
+                    }
+                    builder.append_stamped(
+                        TermId(part.subjects().value(i)),
+                        TermId(part.objects().value(i)),
+                        part.begins().value(i),
+                        end,
+                    );
+                }
+                new_partitions.insert(
+                    *p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+                graph_changed = true;
+            }
+            if graph_changed {
+                graphs.insert(
+                    *g,
+                    Arc::new(GraphStore {
+                        partitions: new_partitions,
+                    }),
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            // Same version: compaction is not a logical write.
+            let next = Arc::new(TierSnapshot {
+                version: cur.version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
     }
 }
 
@@ -177,39 +291,87 @@ impl Default for MemoryTier {
     }
 }
 
+/// A pinned tier snapshot that keeps its version un-compactable until dropped.
+pub struct PinnedSnapshot {
+    snap: Arc<TierSnapshot>,
+    pins: Arc<Mutex<BTreeMap<u64, usize>>>,
+}
+
+impl std::ops::Deref for PinnedSnapshot {
+    type Target = TierSnapshot;
+    fn deref(&self) -> &TierSnapshot {
+        &self.snap
+    }
+}
+
+impl PinnedSnapshot {
+    /// The pinned immutable tier state, as a cloneable `Arc`.
+    pub fn arc(&self) -> Arc<TierSnapshot> {
+        self.snap.clone()
+    }
+}
+
+impl Drop for PinnedSnapshot {
+    fn drop(&mut self) {
+        let v = self.snap.version;
+        let mut pins = self.pins.lock();
+        if let Some(count) = pins.get_mut(&v) {
+            *count -= 1;
+            if *count == 0 {
+                pins.remove(&v);
+            }
+        }
+    }
+}
+
 impl Tier for MemoryTier {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
         if quads.is_empty() {
             return Ok(());
         }
-        // Group incoming pairs by graph, then predicate, into builders.
-        let mut by_graph: HashMap<GraphId, HashMap<TermId, PartitionBuilder>> = HashMap::new();
+        // Group incoming pairs by graph, then predicate.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, Vec<(TermId, TermId)>>> = HashMap::new();
         for &(g, s, p, o) in quads {
             by_graph
                 .entry(g)
                 .or_default()
                 .entry(p)
                 .or_default()
-                .append(s, o);
+                .push((s, o));
         }
 
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
         let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
 
         // Copy-on-write: clone the top-level graph map (Arc clones of untouched
         // graphs), then rebuild only the affected graphs' partition maps.
         let mut graphs = cur.graphs.clone();
-        for (g, pred_builders) in by_graph {
+        for (g, pred_rows) in by_graph {
             let mut new_partitions = graphs
                 .get(&g)
                 .map(|gs| gs.partitions.clone())
                 .unwrap_or_default();
-            for (p, mut builder) in pred_builders {
+            for (p, rows) in pred_rows {
+                let mut builder = PartitionBuilder::default();
+                // Carry existing rows forward WITH their visibility stamps
+                // (history preserved) — reading indexed columns, not `scan()`,
+                // which would silently drop retraction stamps.
                 if let Some(existing) = new_partitions.get(&p) {
-                    for (s, o) in existing.scan() {
-                        builder.append(s, o);
+                    let n = existing.len();
+                    for i in 0..n {
+                        builder.append_stamped(
+                            TermId(existing.subjects().value(i)),
+                            TermId(existing.objects().value(i)),
+                            existing.begins().value(i),
+                            existing.ends().value(i),
+                        );
                     }
+                }
+                // New rows: live from this version.
+                for (s, o) in rows {
+                    builder.append_stamped(s, o, new_version, UNSET_END);
                 }
                 new_partitions.insert(
                     p,
@@ -225,11 +387,80 @@ impl Tier for MemoryTier {
         }
 
         let next = Arc::new(TierSnapshot {
-            version: cur.version + 1,
+            version: new_version,
             graphs,
         });
         *self.current.write() = next;
         Ok(())
+    }
+
+    fn retract_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<usize> {
+        if quads.is_empty() {
+            return Ok(0);
+        }
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
+
+        // Group targets by graph, then predicate, as a set of (s, o) to end.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> = HashMap::new();
+        for &(g, s, p, o) in quads {
+            by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .insert((s.0, o.0));
+        }
+
+        let mut retracted = 0usize;
+        let mut graphs = cur.graphs.clone();
+        for (g, pred_targets) in by_graph {
+            let Some(gs) = graphs.get(&g) else {
+                continue;
+            };
+            let mut new_partitions = gs.partitions.clone();
+            for (p, targets) in pred_targets {
+                let Some(existing) = new_partitions.get(&p) else {
+                    continue;
+                };
+                let mut builder = PartitionBuilder::default();
+                let n = existing.len();
+                for i in 0..n {
+                    let s = existing.subjects().value(i);
+                    let o = existing.objects().value(i);
+                    let begin = existing.begins().value(i);
+                    let mut end = existing.ends().value(i);
+                    // End the single live row matching a target.
+                    if end == UNSET_END && targets.contains(&(s, o)) {
+                        end = new_version;
+                        retracted += 1;
+                    }
+                    builder.append_stamped(TermId(s), TermId(o), begin, end);
+                }
+                new_partitions.insert(
+                    p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+            }
+            graphs.insert(
+                g,
+                Arc::new(GraphStore {
+                    partitions: new_partitions,
+                }),
+            );
+        }
+
+        // Only bump the clock / swap if something changed, so a fully-absent
+        // retraction batch is a true no-op (no dead version created).
+        if retracted > 0 {
+            let next = Arc::new(TierSnapshot {
+                version: new_version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
+        Ok(retracted)
     }
 
     fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
@@ -281,6 +512,18 @@ impl MemoryTier {
         ord: crate::ordering::Ordering,
     ) -> Option<crate::partition::OrderedColumns> {
         self.snapshot().ordered_predicate(graph, predicate, ord)
+    }
+
+    /// Ordered access to a predicate partition in the current snapshot,
+    /// filtered to rows visible at that snapshot's version (SPEC-25 S1). See
+    /// [`TierSnapshot::ordered_predicate_at`].
+    pub fn ordered_predicate_at(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        ord: crate::ordering::Ordering,
+    ) -> Option<crate::partition::OrderedColumns> {
+        self.snapshot().ordered_predicate_at(graph, predicate, ord)
     }
 
     /// The top-`n` predicates in `graph` by triple count in the current
@@ -375,5 +618,110 @@ mod tests {
             .unwrap();
         assert_eq!(g1_pairs, vec![(id(1), id(2))]);
         assert_eq!(g2_pairs, vec![(id(1), id(3))]);
+    }
+
+    #[test]
+    fn retract_hides_from_later_snapshot_only() {
+        let tier = MemoryTier::new();
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        let before = tier.snapshot(); // version 1, sees the tuple
+        let n = tier
+            .retract_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        assert_eq!(n, 1, "one tuple retracted");
+        let after = tier.snapshot(); // version 2, tuple gone
+
+        assert_eq!(
+            before.triple_count(),
+            1,
+            "snapshot pinned before delete still sees it"
+        );
+        assert_eq!(after.triple_count(), 0, "snapshot after delete does not");
+    }
+
+    #[test]
+    fn retract_absent_is_counted_noop() {
+        let tier = MemoryTier::new();
+        tier.insert_quad_batch(&[(DEFAULT_GRAPH, id(1), id(100), id(2))])
+            .unwrap();
+        // Retract a tuple that was never inserted.
+        let n = tier
+            .retract_quad_batch(&[(DEFAULT_GRAPH, id(9), id(100), id(9))])
+            .unwrap();
+        assert_eq!(n, 0, "absent retraction retracts nothing");
+        assert_eq!(tier.snapshot().triple_count(), 1);
+        assert_eq!(
+            tier.snapshot().version(),
+            1,
+            "absent retraction must not mint a new version"
+        );
+    }
+
+    #[test]
+    fn reinsert_after_retract_is_live_again() {
+        let tier = MemoryTier::new();
+        let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q]).unwrap();
+        tier.retract_quad_batch(&[q]).unwrap();
+        tier.insert_quad_batch(&[q]).unwrap();
+        assert_eq!(
+            tier.snapshot().triple_count(),
+            1,
+            "tuple live after re-insert"
+        );
+    }
+
+    #[test]
+    fn compaction_reclaims_only_below_min_pin() {
+        let tier = MemoryTier::new();
+        let q1 = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        let q2 = (DEFAULT_GRAPH, id(3), id(100), id(4));
+        tier.insert_quad_batch(&[q1, q2]).unwrap(); // v1
+        tier.retract_quad_batch(&[q1]).unwrap(); // v2: q1.end = 2
+
+        // No pins below v2 → q1's dead row is reclaimable.
+        tier.compact();
+        let live = tier.snapshot();
+        assert_eq!(live.triple_count(), 1);
+        // The physical dead row is gone: the partition holds exactly the live row.
+        let phys = tier
+            .with_predicate(DEFAULT_GRAPH, id(100), |p| p.len())
+            .unwrap();
+        assert_eq!(phys, 1, "dead row physically reclaimed");
+    }
+
+    #[test]
+    fn compaction_respects_a_held_pin() {
+        let tier = MemoryTier::new();
+        let q1 = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q1]).unwrap(); // v1
+        let pin = tier.snapshot(); // pins v1 (sees q1)
+        tier.retract_quad_batch(&[q1]).unwrap(); // v2
+
+        tier.compact(); // min pin = 1 < end(2) → must NOT reclaim
+        assert_eq!(pin.triple_count(), 1, "held pin still sees the tuple");
+        drop(pin);
+    }
+
+    #[test]
+    fn stats_live_counts_drop_to_zero_after_full_retraction() {
+        let tier = MemoryTier::new();
+        let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        tier.insert_quad_batch(&[q]).unwrap();
+        let s = tier.stats();
+        assert_eq!((s.graphs, s.predicates, s.triples), (1, 1, 1));
+
+        // Retract the only tuple: the partition is retained as MVCC history but
+        // holds no visible row, so live graph/predicate/triple counts are 0.
+        tier.retract_quad_batch(&[q]).unwrap();
+        let s = tier.stats();
+        assert_eq!(
+            (s.graphs, s.predicates, s.triples),
+            (0, 0, 0),
+            "fully-deleted graph/predicate must not inflate live stats"
+        );
+        // Physical footprint still accounts for the retained (dead) partition.
+        assert!(s.bytes_estimated > 0, "retained history still costs bytes");
     }
 }

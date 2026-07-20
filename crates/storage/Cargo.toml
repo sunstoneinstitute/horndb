@@ -33,3 +33,7 @@ harness = false
 [[bench]]
 name = "partition_scan"
 harness = false
+
+[[bench]]
+name = "insert_retract"
+harness = false

@@ -24,16 +24,18 @@ pub mod snapshot;
 pub mod store;
 pub mod term;
 pub mod tier;
+pub mod visibility;
 
 // Re-exports below are added incrementally as each module is implemented.
 // See plans/PLAN-02-01-storage.md tasks 2–9.
 
 pub use dictionary::Dictionary;
 pub use error::StorageError;
-pub use memory_tier::{MemoryTier, TierSnapshot};
+pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
 pub use ordering::{Ordering, PartitionAxis};
 pub use partition::{OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{Tier, TierStats};
+pub use visibility::{visible, CommitVersion, LATEST, UNSET_END};
