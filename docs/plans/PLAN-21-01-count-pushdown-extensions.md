@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-06
 scope: "Count-pushdown extensions: equality-filter inlining, grouped COUNT, multi-count"
 ---
