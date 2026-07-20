@@ -1222,7 +1222,7 @@ mod tests {
             &Term::Iri("http://ex/p".into()),
             &Term::Iri("http://ex/o".into()),
         );
-        // Re-insert after delete resurrects the triple (tombstone cleared).
+        // Re-insert after delete resurrects the triple (storage stamps a fresh live row).
         b.insert_triple(
             Term::Iri("http://ex/s".into()),
             Term::Iri("http://ex/p".into()),
@@ -1348,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_resurrect_of_tombstoned_triple_refreshes_snapshot() {
+    fn bulk_resurrect_of_deleted_triple_refreshes_snapshot() {
         let mut b = HornBackend::new();
         b.insert_triple(
             Term::Iri("http://ex/s".into()),

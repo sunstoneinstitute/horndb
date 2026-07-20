@@ -109,7 +109,7 @@ fn hammer_horn_load() {
     let loaded = backend.insert_oxrdf_batch(batch).expect("bulk load failed");
     let load_s = t_load.elapsed().as_secs_f64();
     eprintln!(
-        "[load] {loaded} live triples in {load_s:.2}s ({:.2} M triples/s) | RSS {:.2} GB ({:.0} B/triple, batch freed: storage+dict+stored_keys)",
+        "[load] {loaded} live triples in {load_s:.2}s ({:.2} M triples/s) | RSS {:.2} GB ({:.0} B/triple, batch freed: storage+dict+live_keys)",
         (loaded as f64 / 1e6) / load_s,
         rss_gb(),
         per(rss_gb()),
