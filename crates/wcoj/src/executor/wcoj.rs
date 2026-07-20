@@ -161,6 +161,11 @@ struct DepthState {
     /// that buffer. Mirrors `LeapfrogJoin`'s `simd_active`/`simd_pos`.
     simd_active: bool,
     simd_pos: usize,
+    /// True once `try_arm_simd` has been attempted for this level's current
+    /// entry, so the two call sites (the leaf bulk fast path in `step` and the
+    /// scalar prime in `leapfrog_next`) never both pay for it. Without this a
+    /// narrow leaf would probe `active_run` twice per binding.
+    simd_tried: bool,
 }
 
 impl DepthState {
@@ -172,6 +177,7 @@ impl DepthState {
             has_descended: false,
             simd_active: false,
             simd_pos: 0,
+            simd_tried: false,
         }
     }
 }
@@ -422,8 +428,9 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
             // intersection once and drain it from `find_match`. Falls through
             // to the scalar round-robin when `active_run` is unavailable
             // (`k != 2`, short run, or no SoA column).
-            if k == 2 {
+            if k == 2 && !self.state[d].as_ref().unwrap().simd_tried {
                 self.try_arm_simd(depth);
+                self.state[d].as_mut().unwrap().simd_tried = true;
             }
             if self.state[d].as_ref().unwrap().simd_active {
                 self.state[d].as_mut().unwrap().primed = true;
@@ -526,7 +533,9 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         // value leaves both cursors positioned at it so the executor's
         // descent (`open_level` on the children) binds the right sub-range —
         // one seek per *emitted* match, not per candidate (the candidate
-        // skipping was done in bulk by `intersect`).
+        // skipping was done in bulk by `intersect`). This runs only for
+        // *inner* SIMD levels: an armed **leaf** is drained in bulk by `step`
+        // (see the leaf fast path there) and never reaches `find_match`.
         if self.state[d].as_ref().unwrap().simd_active {
             let pos = self.state[d].as_ref().unwrap().simd_pos;
             if pos < self.simd_buf[d].len() {
@@ -624,6 +633,44 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
                 let st = self.state[self.depth as usize].as_mut().unwrap();
                 if st.has_descended && !st.done {
                     st.has_descended = false;
+                }
+            }
+
+            // Leaf bulk-materialization fast path (SPEC-03 NF1). At the final
+            // variable a `k == 2` leapfrog whose two runs are wide enough arms
+            // the SIMD intersect, which precomputes the whole binding set into
+            // `simd_buf[depth]`. Blit that buffer straight into the batch
+            // columns — the ancestor binding replicated across the prefix
+            // columns, the intersection into the leaf column — one flush-sized
+            // chunk per `step()` call, instead of draining one value at a time
+            // through `leapfrog_next`/`push_row`. Narrow (non-armed) leaves and
+            // all inner levels fall through to the per-value leapfrog below.
+            let d = self.depth as usize;
+            if self.depth + 1 == n_vars {
+                let st = self.state[d].as_ref().unwrap();
+                if !st.primed && !st.done && !st.simd_tried && self.contributing[d].len() == 2 {
+                    self.try_arm_simd(self.depth);
+                    let st = self.state[d].as_mut().unwrap();
+                    st.simd_tried = true;
+                    if st.simd_active {
+                        st.primed = true;
+                    }
+                }
+                if self.state[d].as_ref().unwrap().simd_active {
+                    let pos = self.state[d].as_ref().unwrap().simd_pos;
+                    if pos < self.simd_buf[d].len() {
+                        let (n, flushed) = self
+                            .builder
+                            .push_run_chunk(&self.binding[..d], &self.simd_buf[d][pos..]);
+                        self.state[d].as_mut().unwrap().simd_pos = pos + n;
+                        if let Some(b) = flushed {
+                            return Some(Ok(b));
+                        }
+                        continue;
+                    }
+                    // Fully drained: mark done so `leapfrog_next` returns None
+                    // and the normal ascent tears this level down.
+                    self.state[d].as_mut().unwrap().done = true;
                 }
             }
 
