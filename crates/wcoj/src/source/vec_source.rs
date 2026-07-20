@@ -131,6 +131,99 @@ impl<'a> VecIter<'a> {
         });
         start + off
     }
+
+    /// First absolute index in `[row, hi)` whose `col_depth` column is `> v`,
+    /// found by a bounded gallop from `row`. This is the end of the contiguous
+    /// run of rows equal to `v` that starts at `row` (rows are sorted and the
+    /// parent prefix is fixed, so that run is contiguous).
+    ///
+    /// Why gallop instead of `partition_point`: on a descent (`open_level`) the
+    /// child run is typically short but the parent range is wide — a subject
+    /// with 8 objects sitting inside a 400k-row predicate block. A binary
+    /// search bisects the *whole* wide range (~log(range) probes scattered
+    /// across memory, each a cache miss); an exponential probe from the cursor
+    /// reaches the boundary in ~log(run) cache-local steps. It is never
+    /// asymptotically worse than binary search (the final window is
+    /// binary-searched), so wide runs (e.g. hub subjects) are unaffected.
+    #[inline]
+    fn run_end(&self, col_depth: u8, row: usize, hi: usize, v: TermId) -> usize {
+        let n = hi - row;
+        // Gallop a window `[row + lo_off, row + hi_off)` that brackets the
+        // boundary: `col(row + lo_off) <= v` stays true, `col(row + hi_off) > v`
+        // (or `hi_off == n`).
+        let mut lo_off = 0usize;
+        let mut step = 1usize;
+        while lo_off + step < n && self.col(row + lo_off + step, col_depth) <= v {
+            lo_off += step;
+            step <<= 1;
+        }
+        let hi_off = (lo_off + step).min(n);
+        // Binary-search the bracketed window for the first `col > v`.
+        let slice = &self.data[row + lo_off..row + hi_off];
+        let off = slice.partition_point(|r| {
+            let c = match col_depth {
+                0 => r.0,
+                1 => r.1,
+                2 => r.2,
+                _ => unreachable!(),
+            };
+            c <= v
+        });
+        row + lo_off + off
+    }
+
+    /// Cache-local fast path for the common leapfrog seek: the cursor advances
+    /// monotonically, so the target usually sits just past `start`. Probe a
+    /// bounded window (≤ `GALLOP_CAP` rows) from the cursor and, if the lower
+    /// bound lands inside it, return it exactly. Returns `None` when the target
+    /// is farther than the window and data still remains — the caller then runs
+    /// the full binary search, so a far ("SPB-style") seek keeps its exact
+    /// behaviour and pays only ~log2(cap) extra cache-local probes first.
+    ///
+    /// The returned index (when `Some`) is identical to `lower_bound` — the
+    /// first row in `[start, hi)` whose `depth` column is `>= value`.
+    #[inline]
+    fn seek_gallop(&self, depth: u8, start: usize, hi: usize, value: TermId) -> Option<usize> {
+        const GALLOP_CAP: usize = 64;
+        let n = hi - start;
+        if n == 0 {
+            return Some(hi);
+        }
+        if self.col(start, depth) >= value {
+            // Cursor already at/past the target — the overwhelmingly common
+            // leapfrog case (peek was already >= the seek target).
+            return Some(start);
+        }
+        // `col(start) < value`. Gallop a window `(lo, hi_off]` bracketing the
+        // boundary, capped so a far target bails to the binary search.
+        let mut lo = 0usize;
+        let mut step = 1usize;
+        let hi_off = loop {
+            let probe = lo + step;
+            if probe >= n {
+                break n; // boundary is within `(lo, n)`
+            }
+            if probe > GALLOP_CAP {
+                return None; // far target, data remains → caller binary-searches
+            }
+            if self.col(start + probe, depth) >= value {
+                break probe; // boundary in `(lo, probe]`
+            }
+            lo = probe;
+            step <<= 1;
+        };
+        let slice = &self.data[start + lo..start + hi_off];
+        let off = slice.partition_point(|r| {
+            let c = match depth {
+                0 => r.0,
+                1 => r.1,
+                2 => r.2,
+                _ => unreachable!(),
+            };
+            c < value
+        });
+        Some(start + lo + off)
+    }
 }
 
 impl<'a> OrderedTripleIter for VecIter<'a> {
@@ -149,10 +242,18 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         let d = depth as usize;
         let (lo, hi) = self.range[d];
         let start = self.cursor[d].max(lo);
-        // Build the depth-0 (root) SoA column lazily on first seek; it covers
-        // the full data, is built once, and is reused for the whole scan. Deeper
-        // levels stay scalar here to avoid a per-`open_level` rebuild in the
-        // inner loop (see `col_view` docs).
+        // Cache-local bounded gallop from the cursor first: the leapfrog seeks
+        // monotonically forward, so the target is usually within a few rows.
+        // Resolves that case without touching a wide binary search (and without
+        // building a SoA column). A far target returns `None` and falls through.
+        if let Some(idx) = self.seek_gallop(depth, start, hi, value) {
+            self.cursor[d] = idx;
+            return;
+        }
+        // Build the depth-0 (root) SoA column lazily on first (far) seek; it
+        // covers the full data, is built once, and is reused for the whole scan.
+        // Deeper levels stay scalar here to avoid a per-`open_level` rebuild in
+        // the inner loop (see `col_view` docs).
         if d == 0 && self.col_view[0].is_none() && hi - lo >= SIMD_SEEK_MIN_RUN {
             self.col_view[0] = Some(LevelColumn::from_aos(self.data, lo, hi, 0));
         }
@@ -174,19 +275,10 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         // Find the half-open range of rows in `[row, hi_parent)` whose
         // depth-(depth-1) column equals `v` AND prefix up to depth-2 matches.
         // Since rows are sorted and the prefix is already constrained, the
-        // run with column == v is contiguous.
-        let slice = &self.data[row..hi_parent];
-        let end_off = slice.partition_point(|r| {
-            let c = match depth - 1 {
-                0 => r.0,
-                1 => r.1,
-                2 => r.2,
-                _ => unreachable!(),
-            };
-            c <= v
-        });
+        // run with column == v is contiguous. `run_end` gallops from the
+        // cursor rather than bisecting the whole (wide) parent range.
         let new_lo = row;
-        let new_hi = row + end_off;
+        let new_hi = self.run_end(depth - 1, row, hi_parent, v);
         self.range[depth as usize] = (new_lo, new_hi);
         self.cursor[depth as usize] = new_lo;
         // Invalidate any stale column from a previous sibling subtree at this
@@ -242,6 +334,58 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_end_matches_partition_point() {
+        // Column 0 with runs of varying length inside a wider range; the gallop
+        // must land on the same boundary as a straight `partition_point`.
+        let data: Vec<(TermId, TermId, TermId)> = vec![
+            (0, 0, 0),
+            (0, 1, 0),
+            (0, 2, 0), // run of 0 = [0, 3)
+            (1, 0, 0), // run of 1 = [3, 4)
+            (5, 0, 0),
+            (5, 1, 0),
+            (5, 2, 0),
+            (5, 3, 0), // run of 5 = [4, 8)
+            (9, 0, 0), // run of 9 = [8, 9)
+        ];
+        let it = VecIter::new(&data);
+        let n = data.len();
+        // For every start row, run_end from that row must equal the scalar
+        // partition_point end of the run of `data[row].0`.
+        for row in 0..n {
+            let v = data[row].0;
+            let expect = row + data[row..n].partition_point(|r| r.0 <= v);
+            assert_eq!(it.run_end(0, row, n, v), expect, "row {row}, v {v}");
+            // A narrower `hi` must clamp the answer.
+            for hi in row..=n {
+                let expect_hi = row + data[row..hi].partition_point(|r| r.0 <= v);
+                assert_eq!(it.run_end(0, row, hi, v), expect_hi, "row {row}, hi {hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn seek_matches_lower_bound_oracle_near_and_far() {
+        // Depth-0 column spanning > GALLOP_CAP (64) rows so both the gallop-hit
+        // (near target) and gallop-miss (far target → binary-search fallback)
+        // paths are exercised. Column 0 = row/3 gives runs of length 3.
+        let data: Vec<(TermId, TermId, TermId)> = (0..300u64).map(|i| (i / 3, i % 3, 0)).collect();
+        let n = data.len();
+        let max_key = (n as u64 - 1) / 3;
+        // For every starting cursor and every target, the post-seek cursor must
+        // equal the scalar lower bound over `[start, n)`.
+        for &start in &[0usize, 1, 5, 50, 100, 250, n - 1] {
+            for value in 0..=(max_key + 2) {
+                let mut it = VecIter::new(&data);
+                it.cursor[0] = start;
+                it.seek(0, value);
+                let oracle = start + data[start..n].partition_point(|r| r.0 < value);
+                assert_eq!(it.cursor[0], oracle, "start {start}, value {value}");
+            }
+        }
+    }
 
     #[test]
     fn contains_finds_present_and_rejects_absent() {
