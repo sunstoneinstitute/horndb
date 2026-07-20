@@ -50,7 +50,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
 - [x] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
-- [ ] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
+- [v] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211)) — _wip: 56f4eeaf@Stigs-MacBook-Pro.local · task-211-spec-24-s2-delta-incremental-closure-ret · 2026-07-20T12:00:22Z_
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
 - [ ] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
@@ -396,7 +396,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   consequences, ≥10× over the recompute path on small-delta ticks; extended
   differential suite green; `insert_throughput` bench no regression).
 
-- [ ] **SPEC-24 S2: delta-incremental closure retraction + exact seeded retraction.** ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
+- [v] **SPEC-24 S2: delta-incremental closure retraction + exact seeded retraction.** ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
   Output-sensitive deletion on the SPEC-05 boundary (replace per-edge
   affected-region base-reachability recompute in `delete_transitive_edges` with
   a maintained support structure; keep a per-predicate recompute fallback), and
