@@ -4,7 +4,7 @@ A hybrid forward/backward-chaining RDF reasoner targeting **OWL 2 RL** semantics
 
 Apache-2.0, EU-developed, open from the start. Built by [Sunstone Institute](https://sunstoneinstitute.ai).
 
-> Status: **Stage 1 (feasibility prototype) in progress.** The workspace builds and the SPEC-01 conformance harness runs the Stage-1 OWL 2 RL subset against the real engine in CI — **96 of 115 selected W3C OWL 2 RL cases pass** (the 19 known-failing cases are catalogued in [`harness/KNOWN-MANIFEST-BUGS.md`](harness/KNOWN-MANIFEST-BUGS.md)). The WCOJ engine clears its 4-cycle acceptance gate (~34× a binary-hash-join baseline on a skewed 10⁶-edge graph), and the SPARQL 1.1 frontend now executes on real storage + WCOJ with `GROUP BY`/aggregates. See [`TASKS.md`](TASKS.md) for the live punch list, including remaining correctness and performance gaps.
+> Status: **Stage 1 (feasibility prototype) in progress.** The workspace builds and the SPEC-01 conformance harness runs the Stage-1 OWL 2 RL subset against the real engine in CI — **100 of 115 selected W3C OWL 2 RL cases pass** (the 15 known-failing cases are catalogued in [`harness/KNOWN-MANIFEST-BUGS.md`](harness/KNOWN-MANIFEST-BUGS.md)). The WCOJ engine clears its 4-cycle acceptance gate (~34× a binary-hash-join baseline on a skewed 10⁶-edge graph), and the SPARQL 1.1 frontend now executes on real storage + WCOJ with `GROUP BY`/aggregates. See [`TASKS.md`](TASKS.md) for the live punch list, including remaining correctness and performance gaps.
 
 ## Why this exists
 
