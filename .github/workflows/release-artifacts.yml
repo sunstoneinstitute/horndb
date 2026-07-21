@@ -53,10 +53,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-13 # Intel
-            bottle_tag: ventura
           - os: macos-14 # Apple Silicon
             bottle_tag: arm64_sonoma
+          - os: macos-15 # Apple Silicon
+            bottle_tag: arm64_tahoe
     runs-on: ${{ matrix.os }}
     env:
       # True only when the full Developer ID secret set is present; gates the
