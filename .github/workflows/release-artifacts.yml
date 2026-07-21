@@ -380,9 +380,9 @@ jobs:
             depends_on "libomp"
 
             def install
-              system "cargo", "build", "--release", "--locked",
-                     "-p", "horndb-sparql", "--bin", "serve", "--features", "server"
-              bin.install "target/release/serve" => "horndb"
+              system "cargo", "install", *std_cargo_args(path: "crates/sparql"),
+                     "--bin", "serve", "--features", "server"
+              mv bin/"serve", bin/"horndb"
             end
 
             test do
