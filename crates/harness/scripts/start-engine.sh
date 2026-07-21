@@ -51,8 +51,11 @@ if [[ "$RELEASE" == "1" ]]; then
     TARGET_SUBDIR="release"
 fi
 
-SERVE_BIN="$ROOT/target/$TARGET_SUBDIR/serve"
-BENCH_BIN="$ROOT/target/$TARGET_SUBDIR/horndb-bench"
+# Honor CARGO_TARGET_DIR (the bench runner points it at host-local disk);
+# fall back to the repo-local target/ when it is unset.
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+SERVE_BIN="$TARGET_DIR/$TARGET_SUBDIR/serve"
+BENCH_BIN="$TARGET_DIR/$TARGET_SUBDIR/horndb-bench"
 
 echo "start-engine: building binaries (profile=$TARGET_SUBDIR)..." >&2
 cargo build "${CARGO_PROFILE_FLAG[@]}" \
