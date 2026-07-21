@@ -22,14 +22,24 @@ env:
   # step below keeps a 90-day rolling window, so the uploaded artifact is
   # the retained history, not a single run's points.
   HARNESS_DB: /home/bench/horndb-bench/harness.sqlite
-  # Cargo registry/git + build artifacts on the same persistent disk, so
-  # repeat nightly runs reuse prior downloads/compiles without going through
-  # the GitHub-hosted Actions cache (that's a network round trip to shared
-  # storage for data that's already sitting on this dedicated machine, and it
-  # would draw against the same 10 GB repo cache quota ci.yml relies on).
-  # setup-rust-toolchain's own `cache: true`/rust-cache is left off below.
+  # Cargo registry/git cache on the same persistent disk, so repeat nightly
+  # runs reuse prior downloads without going through the GitHub-hosted Actions
+  # cache (that's a network round trip to shared storage for data already
+  # sitting on this dedicated machine, and it would draw against the same
+  # 10 GB repo cache quota ci.yml relies on). setup-rust-toolchain's own
+  # `cache: true`/rust-cache is left off below.
   CARGO_HOME: /home/bench/horndb-bench/cache/cargo-home
-  CARGO_TARGET_DIR: /home/bench/horndb-bench/cache/target
+  # Build artifacts stay in the checkout's repo-local target/ (which
+  # `git clean -ffdx` wipes each run); sccache backs the recompile from a
+  # size-bounded, LRU-evicted object cache on persistent disk, so a cold
+  # target/ still rebuilds fast. Preferred over a persistent CARGO_TARGET_DIR:
+  # that dir has no eviction and grows unbounded, and a shared mutable target
+  # is unsafe if two builds ever overlap. CARGO_INCREMENTAL=0 because sccache
+  # cannot cache incremental artifacts (leaving it on defeats the cache).
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+  SCCACHE_DIR: /home/bench/horndb-bench/cache/sccache
+  SCCACHE_CACHE_SIZE: 40G
   HORNDB_BIND: 127.0.0.1:3840
   # Pin the GraphDB A/B reference version to the branch, not whatever is
   # installed on the runner. start-graphdb-free.sh downloads this version if
@@ -57,7 +67,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           toolchain: "1.90.0"
-          # No rust-cache: CARGO_HOME/CARGO_TARGET_DIR above already point at
+          # No rust-cache: CARGO_HOME + sccache above already cache on
           # persistent local disk, which does the same job without the
           # GitHub-hosted cache round trip or its shared quota.
           cache: false
@@ -225,6 +235,13 @@ jobs:
             ./target/release/harness report \
               --suite ldbc-spb-256 --metric aggregation-qps --format markdown
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: sccache stats
+        if: always()
+        # Cache hit rate for the run's compiles (harness + serve). A near-zero
+        # hit rate on a warm runner means the object cache is not being reused —
+        # e.g. SCCACHE_DIR was wiped or the wrapper was not picked up.
+        run: sccache --show-stats
 
       - name: upload sqlite
         if: always()
