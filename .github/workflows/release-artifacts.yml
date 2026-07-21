@@ -3,7 +3,7 @@ name: Release Artifacts
 # On every `vX.Y.Z` tag, build and publish the shippable HornDB server binary
 # (`serve`, installed as `horndb`):
 #
-#   - macOS bottles (arm64 + x86_64), Developer ID codesigned + notarized,
+#   - macOS bottles (macos15 + macos26), Developer ID codesigned + notarized,
 #     attached to the GitHub Release, with a matching Homebrew formula pushed to
 #     sunstoneinstitute/homebrew-tap.
 #   - Multi-arch Docker images (linux/amd64 + linux/arm64) pushed to GHCR and
@@ -53,9 +53,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14 # Apple Silicon
-            bottle_tag: arm64_sonoma
           - os: macos-15 # Apple Silicon
+            bottle_tag: arm64_sonoma
+          - os: macos-26 # Apple Silicon
             bottle_tag: arm64_tahoe
     runs-on: ${{ matrix.os }}
     env:
@@ -298,15 +298,15 @@ jobs:
           tar czf "dist/${SRC}.tar.gz" "${SRC}"
 
           source_sha=$(sha256sum "dist/${SRC}.tar.gz" | awk '{print $1}')
-          arm_sha=$(cat "dist/horndb-${VERSION}.arm64_sonoma.bottle.tar.gz.sha256")
-          x86_sha=$(cat "dist/horndb-${VERSION}.ventura.bottle.tar.gz.sha256")
+          macos15_sha=$(cat "dist/horndb-${VERSION}.arm64_sonoma.bottle.tar.gz.sha256")
+          macos26_sha=$(cat "dist/horndb-${VERSION}.arm64_tahoe.bottle.tar.gz.sha256")
 
           jq -n \
             --arg version "$VERSION" \
             --arg source_sha "$source_sha" \
-            --arg arm64_sonoma "$arm_sha" \
-            --arg ventura "$x86_sha" \
-            '{version:$version, source_sha:$source_sha, bottles:{arm64_sonoma:$arm64_sonoma, ventura:$ventura}}' \
+            --arg arm64_sonoma "$macos15_sha" \
+            --arg arm64_tahoe "$macos26_sha" \
+            '{version:$version, source_sha:$source_sha, bottles:{arm64_sonoma:$arm64_sonoma, arm64_tahoe:$arm64_tahoe}}' \
             > formula-data.json
 
           # Aggregate checksums for the release page.
@@ -354,8 +354,8 @@ jobs:
           set -euo pipefail
           VERSION=$(jq -r .version formula-data.json)
           SOURCE_SHA=$(jq -r .source_sha formula-data.json)
-          ARM_SHA=$(jq -r .bottles.arm64_sonoma formula-data.json)
-          X86_SHA=$(jq -r .bottles.ventura formula-data.json)
+          MACOS15_SHA=$(jq -r .bottles.arm64_sonoma formula-data.json)
+          MACOS26_SHA=$(jq -r .bottles.arm64_tahoe formula-data.json)
           BASE="https://github.com/sunstoneinstitute/horndb/releases/download/v${VERSION}"
           mkdir -p tap/Formula
           cat > tap/Formula/horndb.rb <<RUBY
@@ -370,8 +370,8 @@ jobs:
             # the same arch on newer macOS, and to a source build if none match.
             bottle do
               root_url "${BASE}"
-              sha256 cellar: :any, arm64_sonoma: "${ARM_SHA}"
-              sha256 cellar: :any, ventura:      "${X86_SHA}"
+              sha256 cellar: :any, arm64_sonoma: "${MACOS15_SHA}"
+              sha256 cellar: :any, arm64_tahoe:  "${MACOS26_SHA}"
             end
 
             depends_on "cmake" => :build
