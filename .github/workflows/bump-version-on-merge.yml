@@ -3,7 +3,7 @@ name: Bump Version on Merge
 # Adapted from sunstoneinstitute/claude-plugins
 # (.github/workflows/bump-versions-on-merge.yml), reshaped for HornDB's single
 # workspace version. After a PR merges into main, read its bump-* label and
-# push a "Bump version:" commit to main. tag-version.yml then tags vX.Y.Z.
+# push a "Bump version:" commit to main and tag vX.Y.Z inline.
 # No bump-* label → no bump (a comment explains the skip).
 
 on:
@@ -105,11 +105,9 @@ jobs:
             exit 1
           fi
 
-          # Tag the bump here. The push above used GITHUB_TOKEN, and pushes made
-          # with that token do NOT trigger other workflows — so tag-version.yml
-          # would not fire for this commit. Create the tag inline instead.
-          # (tag-version.yml still covers version changes that land on main via
-          # a human-authored merge, which does emit a triggering push event.)
+          # Tag the bump here, inline. The push above used GITHUB_TOKEN, and
+          # pushes made with that token do NOT trigger other workflows, so no
+          # separate tagging workflow can fire for this commit.
           TAG="v$NEW"
           if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "::notice::Tag $TAG already exists."

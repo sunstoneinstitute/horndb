@@ -90,4 +90,4 @@ Show the user the new version tag and remind them to push with tags when ready:
 git push && git push --tags
 ```
 
-Note: pushing the release commit to `main` also lets CI's `tag-version.yml` see the version change, but it is idempotent — since this script already created `vX.Y.Z`, CI will find the tag exists and do nothing.
+Note: this script already created `vX.Y.Z` locally, so `git push --tags` publishes it. No CI workflow tags the version on the human-merge path.
