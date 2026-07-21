@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-21
+
 - Added: hermetic owl:imports resolution — closes the RL-reachable OWL 2 RL conformance gap.
 - Added: datatype value-space intersection narrows rdfs:range for tighter type inference.
 - Added: streaming SPARQL SELECT results over HTTP, sent chunk-by-chunk; ASK answers from the first chunk.
