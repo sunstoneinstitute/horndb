@@ -1,0 +1,10 @@
+# Keep the build context small and deterministic. The vendored GraphBLAS
+# submodule under crates/closure/vendor/GraphBLAS is NOT ignored — it is needed
+# to build.
+target/
+**/target/
+.git/
+.claude/worktrees/
+.claude/scripts/
+graphify-out/
+*.log

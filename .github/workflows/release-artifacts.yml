@@ -1,0 +1,407 @@
+name: Release Artifacts
+
+# On every `vX.Y.Z` tag, build and publish the shippable HornDB server binary
+# (`serve`, installed as `horndb`):
+#
+#   - macOS bottles (arm64 + x86_64), Developer ID codesigned + notarized,
+#     attached to the GitHub Release, with a matching Homebrew formula pushed to
+#     sunstoneinstitute/homebrew-tap.
+#   - Multi-arch Docker images (linux/amd64 + linux/arm64) pushed to GHCR and
+#     signed with cosign (keyless, via GitHub OIDC).
+#
+# The `/release` command (or the CI bump path) creates the tag; this workflow
+# turns that tag into downloadable executables. Nothing here mutates the repo
+# source or the version.
+#
+# Required repository secret:
+#   HOMEBREW_TAP_DEPLOY_KEY    SSH private key with write access to homebrew-tap
+#
+# Optional — macOS Developer ID signing/notarization. If ALL of these are set,
+# the bottle is codesigned + notarized; if absent, the bottle ships with the
+# linker's ad-hoc signature (fine for `brew install`, which strips quarantine).
+#   APPLE_CERT_P12_BASE64      base64 of the Developer ID Application .p12
+#   APPLE_CERT_PASSWORD        password protecting that .p12
+#   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: NAME (TEAMID)"
+#   APPLE_NOTARY_KEY_ID        App Store Connect API key ID
+#   APPLE_NOTARY_ISSUER_ID     App Store Connect issuer UUID
+#   APPLE_NOTARY_KEY_P8_BASE64 base64 of the .p8 App Store Connect private key
+#
+# GHCR push uses the built-in GITHUB_TOKEN; cosign uses OIDC — neither needs a
+# secret.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release
+  packages: write # push to GHCR
+  id-token: write # cosign keyless signing
+
+env:
+  IMAGE: ghcr.io/sunstoneinstitute/horndb
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS bottles: build, sign, notarize, package as a Homebrew bottle tarball.
+  # ---------------------------------------------------------------------------
+  bottles:
+    name: bottle (${{ matrix.bottle_tag }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13 # Intel
+            bottle_tag: ventura
+          - os: macos-14 # Apple Silicon
+            bottle_tag: arm64_sonoma
+    runs-on: ${{ matrix.os }}
+    env:
+      # True only when the full Developer ID secret set is present; gates the
+      # codesign + notarize steps. Job-level env may reference secrets.
+      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERT_P12_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_NOTARY_KEY_P8_BASE64 != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust 1.90
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          toolchain: "1.90.0"
+
+      - name: Install build deps
+        run: brew install cmake libomp pkg-config
+
+      - name: Build serve
+        run: cargo build --release --locked -p horndb-sparql --bin serve --features server
+
+      - name: Stage binary
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          cp target/release/serve stage/horndb
+          strip stage/horndb
+
+      - name: Import codesign certificate
+        if: env.HAS_APPLE_SIGNING == 'true'
+        uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7.0.0
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERT_PASSWORD }}
+
+      - name: Codesign
+        if: env.HAS_APPLE_SIGNING == 'true'
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime --timestamp \
+            --sign "${{ secrets.APPLE_SIGNING_IDENTITY }}" \
+            stage/horndb
+          codesign --verify --strict --verbose=2 stage/horndb
+
+      - name: Notarize
+        if: env.HAS_APPLE_SIGNING == 'true'
+        env:
+          KEY_P8_B64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          echo "$KEY_P8_B64" | base64 --decode > notary_key.p8
+          ditto -c -k --keepParent stage/horndb notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --key notary_key.p8 --key-id "$KEY_ID" --issuer "$ISSUER_ID" \
+            --wait
+          rm -f notary_key.p8 notarize.zip
+          # A bare Mach-O executable cannot be stapled; Gatekeeper verifies the
+          # ticket online. Homebrew installs strip quarantine regardless, so
+          # `brew install` never prompts.
+
+      - name: Package bottle
+        id: bottle
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="${{ matrix.bottle_tag }}"
+          KEG="bottle/horndb/${VERSION}"
+          mkdir -p "${KEG}/bin"
+          cp stage/horndb "${KEG}/bin/horndb"
+          cp LICENSE "${KEG}/LICENSE"
+          FILE="horndb-${VERSION}.${TAG}.bottle.tar.gz"
+          tar czf "${FILE}" -C bottle horndb
+          shasum -a 256 "${FILE}" | awk '{print $1}' > "${FILE}.sha256"
+          echo "file=${FILE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bottle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bottle-${{ matrix.bottle_tag }}
+          path: |
+            ${{ steps.bottle.outputs.file }}
+            ${{ steps.bottle.outputs.file }}.sha256
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Docker: build one image per arch, push by digest, then merge into a
+  # multi-arch manifest and sign it with cosign.
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: docker (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Sanitize platform name
+        id: an
+        run: echo "name=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p digests
+          echo "${{ steps.build.outputs.digest }}" > "digests/${{ steps.an.outputs.name }}.txt"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ steps.an.outputs.name }}
+          path: digests/*
+          if-no-files-found: error
+
+  docker-manifest:
+    name: docker manifest + sign
+    needs: docker-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Create and push manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          refs=""
+          for f in digests/*.txt; do
+            refs="$refs ${IMAGE}@$(cat "$f")"
+          done
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $tags $refs
+          version="${GITHUB_REF_NAME#v}"
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${version}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the image (keyless)
+        run: cosign sign --yes "${IMAGE}@${{ steps.manifest.outputs.digest }}"
+
+  # ---------------------------------------------------------------------------
+  # Release: assemble the source tarball (with vendored GraphBLAS), collect the
+  # bottles, and publish the GitHub Release.
+  # ---------------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs: bottles
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.data.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Download bottles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: bottle-*
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble source tarball + formula data
+        id: data
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # Self-contained source tarball: tracked files plus the vendored
+          # GraphBLAS submodule (a plain tag tarball omits submodules).
+          SRC="horndb-${VERSION}"
+          mkdir -p "${SRC}/crates/closure/vendor/GraphBLAS"
+          git archive HEAD | tar -x -C "${SRC}"
+          git -C crates/closure/vendor/GraphBLAS archive HEAD \
+            | tar -x -C "${SRC}/crates/closure/vendor/GraphBLAS"
+          tar czf "dist/${SRC}.tar.gz" "${SRC}"
+
+          source_sha=$(sha256sum "dist/${SRC}.tar.gz" | awk '{print $1}')
+          arm_sha=$(cat "dist/horndb-${VERSION}.arm64_sonoma.bottle.tar.gz.sha256")
+          x86_sha=$(cat "dist/horndb-${VERSION}.ventura.bottle.tar.gz.sha256")
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg source_sha "$source_sha" \
+            --arg arm64_sonoma "$arm_sha" \
+            --arg ventura "$x86_sha" \
+            '{version:$version, source_sha:$source_sha, bottles:{arm64_sonoma:$arm64_sonoma, ventura:$ventura}}' \
+            > formula-data.json
+
+          # Aggregate checksums for the release page.
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+
+      - name: Upload formula data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: formula-data
+          path: formula-data.json
+          if-no-files-found: error
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            dist/*.bottle.tar.gz
+            dist/horndb-${{ steps.data.outputs.version }}.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # Homebrew: regenerate Formula/horndb.rb in the tap and push it.
+  # ---------------------------------------------------------------------------
+  update-tap:
+    name: Update Homebrew tap
+    needs: release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download formula data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: formula-data
+
+      - name: Checkout tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: sunstoneinstitute/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Generate formula
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version formula-data.json)
+          SOURCE_SHA=$(jq -r .source_sha formula-data.json)
+          ARM_SHA=$(jq -r .bottles.arm64_sonoma formula-data.json)
+          X86_SHA=$(jq -r .bottles.ventura formula-data.json)
+          BASE="https://github.com/sunstoneinstitute/horndb/releases/download/v${VERSION}"
+          mkdir -p tap/Formula
+          cat > tap/Formula/horndb.rb <<RUBY
+          class Horndb < Formula
+            desc "Hybrid RDF reasoner (OWL 2 RL) with a SPARQL 1.1 HTTP frontend"
+            homepage "https://github.com/sunstoneinstitute/horndb"
+            url "${BASE}/horndb-${VERSION}.tar.gz"
+            sha256 "${SOURCE_SHA}"
+            license "Apache-2.0"
+
+            # Bottles are poured by arch; brew falls back to an older-OS bottle of
+            # the same arch on newer macOS, and to a source build if none match.
+            bottle do
+              root_url "${BASE}"
+              sha256 cellar: :any, arm64_sonoma: "${ARM_SHA}"
+              sha256 cellar: :any, ventura:      "${X86_SHA}"
+            end
+
+            depends_on "cmake" => :build
+            depends_on "pkg-config" => :build
+            depends_on "rust" => :build
+            depends_on "libomp"
+
+            def install
+              system "cargo", "build", "--release", "--locked",
+                     "-p", "horndb-sparql", "--bin", "serve", "--features", "server"
+              bin.install "target/release/serve" => "horndb"
+            end
+
+            test do
+              assert_match "SPARQL", shell_output("#{bin}/horndb --help")
+            end
+          end
+          RUBY
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version formula-data.json)
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/horndb.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged."
+            exit 0
+          fi
+          git commit -m "horndb ${VERSION}"
+          git push
