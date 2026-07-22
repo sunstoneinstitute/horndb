@@ -171,11 +171,12 @@ Re-apply config when files change, without dropping the running server.
   current config**, log the error (file + key), and increment the rejected-reload
   metric. A bad edit never takes the server down or leaves it half-applied.
 - **Hot vs restart-only.** `[server.limits]`, `[logging]`, `[reload]` take effect
-  on the next request/operation after a successful reload. `[server].bind` and
-  the `--data` corpora are **restart-only**: a changed restart-only key is stored
-  in the new `ServerConfig` (so a later restart uses it) but a log line states it
-  "requires restart to take effect" — the server never silently claims a
-  restart-only change went live.
+  on the next request/operation after a successful reload. `[server].bind`,
+  `[simd]` (ISA selection and calibration run once at startup), and the `--data`
+  corpora are **restart-only**: a changed restart-only key is stored in the new
+  `ServerConfig` (so a later restart uses it) but a log line states it "requires
+  restart to take effect" — the server never silently claims a restart-only
+  change went live. The reload watcher (S3) never re-applies `[simd]`.
 - **Generation.** Each successfully applied config carries a monotonically
   increasing generation number, exposed as a metric (S6) for operator confidence.
 
