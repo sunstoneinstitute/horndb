@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-07-22
-scope: "Operator configuration system — layered config (built-in defaults < argv < env vars < base config.toml < config.d/*.toml), live watch/reload, and a two-tier server-vs-query settings model with per-query overrides via URL query parameters; wires bind, the SIMD knobs, query timeout, result-row cap, and rdf12 to real config. Per-query memory accounting is delegated to a companion spec."
+scope: "Operator configuration system — layered config (built-in defaults < base config.toml < config.d/*.toml < env vars < argv), live watch/reload, and a two-tier server-vs-query settings model with per-query overrides via URL query parameters; wires bind, the SIMD knobs, query timeout, result-row cap, and rdf12 to real config. Per-query memory accounting is delegated to a companion spec."
 ---
 
 # SPEC-26 — Configuration system
@@ -10,8 +10,8 @@ scope: "Operator configuration system — layered config (built-in defaults < ar
 takes a handful of `clap` flags with hardcoded defaults, and nothing else is
 tunable. This spec gives operators a real, layered config: a base TOML file plus
 a `config.d/` drop-in directory (with environment variables and command-line
-flags as lower-precedence layers), merged by a documented precedence, watched and
-re-applied live where safe; and it gives query authors a way to override a
+flags as higher-precedence overrides), merged by a documented precedence, watched
+and re-applied live where safe; and it gives query authors a way to override a
 bounded set of settings per query via URL query parameters, with server config
 supplying the defaults.
 
@@ -92,21 +92,21 @@ flags, environment variables, and operator files.
   already depends on `toml` + `serde`.
 - **Config-value precedence, lowest → highest (higher wins):**
   1. built-in defaults (compiled in),
-  2. **command-line flags** (argv) — e.g. `--bind`, `--simd-max-isa`,
-     `--simd-autotune`,
-  3. **environment variables** — e.g. `HORNDB_SERVER__BIND`,
+  2. the base `config.toml`,
+  3. `config.d/*.toml` fragments in **lexical filename order** (so `99-*`
+     overrides `00-*`),
+  4. **environment variables** — e.g. `HORNDB_SERVER__BIND`,
      `HORNDB_SIMD_MAX_ISA`,
-  4. the base `config.toml`,
-  5. `config.d/*.toml` fragments in **lexical filename order** (so `99-*`
-     overrides `00-*`).
+  5. **command-line flags** (argv) — e.g. `--bind`, `--simd-max-isa`,
+     `--simd-autotune`.
 
-  So a value set in a config file overrides the same value from an env var, which
-  overrides argv: **argv < env < config file**. Rationale (operator's choice):
-  the on-disk config is the operator's authoritative source of truth, and env/argv
-  are fallbacks for bootstrapping and containers. *(Note: this inverts the more
-  common "CLI wins" convention — see Risks.)*
-- **This is distinct from the config-file *location* precedence** (which file to
-  read), where CLI wins: `--config <path>` > `HORNDB_CONFIG` env var >
+  So an env var overrides any config file, and an explicit command-line flag
+  overrides everything: **config file < env < argv** (CLI wins). This is the
+  conventional precedence — an operator can always force a value with a flag, and
+  env vars are the standard container/bootstrap override that sits above the
+  on-disk files.
+- **This is separate from the config-file *location* precedence** (which file to
+  read): `--config <path>` > `HORNDB_CONFIG` env var >
   `/etc/horndb/config.toml` (default path).
   - A missing file at the **default** path is not an error — the server runs on
     the lower layers. A missing file at an **explicitly requested** path
@@ -227,10 +227,9 @@ Make the settings real for everything except memory.
   added to `[workspace.dependencies]`). `horndb-sparql` depends on it; the
   companion memory spec and any future consumer depend on it later.
 - **CLI integration.** `serve` gains `--config <path>` (and the curated value
-  flags, S1). Per the S1 value precedence, a config-file value **overrides** the
-  same value given on argv (argv < env < file); flags are the lowest layer above
-  built-in defaults, so existing flag-only invocations keep working when no file
-  sets that key.
+  flags, S1). Per the S1 value precedence, an explicit command-line flag
+  **overrides** the config file and env vars (config file < env < argv), so
+  existing flag-based invocations keep forcing their values.
 - **SIMD wiring.** `[simd]` values (from any layer) are resolved by
   `horndb-config` and passed into the `crates/simd` init path; `simd` stays a
   low-level leaf crate and does not depend on `horndb-config`. The legacy env-var
@@ -271,15 +270,16 @@ and is orthogonal to Phase 2.
    `HORNDB_CONFIG` > `/etc/horndb/config.toml` for *which file* is read; a missing
    default path runs on the lower layers, a missing explicit path is a fatal error.
 2. **Value precedence and merge hold (S1).** A test proves the value order
-   built-in < argv < env < base file < `config.d/99-*` (with `99-*` overriding
-   `00-*`): a value set in the file overrides the same env var and flag, tables
-   deep-merge, scalars/arrays replace — verified against fixtures.
+   built-in < base file < `config.d/99-*` < env < argv (with `99-*` overriding
+   `00-*`): an env var overrides the file and a command-line flag overrides both,
+   tables deep-merge, scalars/arrays replace — verified against fixtures.
 3. **Startup validation is honest (S1/S2).** An unknown key or out-of-range value
    fails startup with a non-zero exit and a message naming the source (file+key or
    env var/flag).
-4. **`bind` and `[simd]` come from config, file wins over argv/env (S1/S6).** With
-   no config, the server binds the flag/env/default value; when the config file
-   sets `bind` (or `[simd]`), the file value wins over `--bind` / the env var.
+4. **`bind` and `[simd]` come from config, CLI/env win over the file (S1/S6).**
+   With no flag or env var, the server binds the config-file value; setting the
+   env var overrides the file, and `--bind` overrides both (config file < env <
+   argv).
 5. **Query overrides work and are ordered (S4).** A test proves
    `?query_timeout=…` > `[server.limits]` default; an unknown/invalid URL
    parameter yields HTTP 400 naming the key without disturbing server config.
@@ -307,13 +307,6 @@ and is orthogonal to Phase 2.
   parameters give the same per-query override with zero grammar risk, so they are
   the only per-query channel (S4). Revisit only if a concrete need for in-query
   settings appears.
-- **Inverted value precedence (argv < env < file).** Making the config file win
-  over `--bind`/env is a deliberate operator choice (the file is authoritative),
-  but it inverts the widespread "CLI overrides everything" convention and can
-  surprise anyone expecting a flag to force a value. Mitigation: document it
-  prominently at the CLI/`--help` and in operator docs; a flag that is silently
-  overridden by a file value is the main footgun to message clearly. Reconsider if
-  it proves to trip operators in practice.
 - **Watcher portability and editor atomic-save patterns.** `notify` semantics
   differ across platforms and editors (rename-into-place vs. truncate-in-place vs.
   multiple events per save). The debounce plus full re-resolve-and-validate on any
