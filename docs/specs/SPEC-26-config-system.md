@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-07-22
-scope: "Operator configuration system — layered TOML config files (base + config.d), live watch/reload, and a two-tier server-vs-query settings model with per-query overrides (URL params + a SETTINGS clause); wires bind, query timeout, result-row cap, and rdf12 to real config. Per-session memory accounting is delegated to a companion spec."
+scope: "Operator configuration system — layered config (built-in defaults < argv < env vars < base config.toml < config.d/*.toml), live watch/reload, and a two-tier server-vs-query settings model with per-query overrides via URL query parameters; wires bind, the SIMD knobs, query timeout, result-row cap, and rdf12 to real config. Per-query memory accounting is delegated to a companion spec."
 ---
 
 # SPEC-26 — Configuration system
@@ -9,21 +9,26 @@ scope: "Operator configuration system — layered TOML config files (base + conf
 **One-line thesis:** HornDB has no config surface today — the `serve` binary
 takes a handful of `clap` flags with hardcoded defaults, and nothing else is
 tunable. This spec gives operators a real, layered config: a base TOML file plus
-a `config.d/` drop-in directory, merged by a documented precedence, watched and
+a `config.d/` drop-in directory (with environment variables and command-line
+flags as lower-precedence layers), merged by a documented precedence, watched and
 re-applied live where safe; and it gives query authors a way to override a
-bounded set of settings per query, with server config supplying the defaults.
+bounded set of settings per query via URL query parameters, with server config
+supplying the defaults.
 
 **Refines:** the SPEC-07 SPARQL frontend server surface (the `serve` binary and
 the axum layer in `crates/sparql/src/server/`). It does not change SPARQL query
 semantics; it changes how the server and individual queries are *configured*.
 Cross-cuts SPEC-17 (metrics) — the config layer emits its own reload metrics.
 
-**Companion:** per-session memory accounting is a separate, larger subsystem
+**Companion:** per-query memory accounting is a separate, larger subsystem
 (allocation tracking threaded through the join and storage layers). This spec
-defines the `max_session_memory` *knob* — parsed, stored, and surfaced — but its
+defines the `max_query_memory` *knob* — parsed, stored, and surfaced — but its
 enforcement is delegated to a companion spec written when that work is picked up.
-Stateful cross-request sessions (a `SET VARIABLE` that persists across HTTP
-requests) are likewise designed-for but deferred (see Non-goals and Risks).
+SPARQL over HTTP is session-less, so this spec has **no session tier**:
+configuration is either server-scoped (files, env vars, argv) or query-scoped
+(URL query parameters). The code keeps the override layering extensible so a
+session tier could be added later without a rewrite (see Risks), but no session
+state ships here.
 
 ## Problem — what exists today, and where it stops
 
@@ -36,11 +41,12 @@ the `serve` binary (`crates/sparql/src/bin/serve.rs`):
 
 Where it stops:
 
-- **No config files, no env config.** Nothing is read from a file or an
-  environment variable. An operator cannot set anything without editing the
-  command line. The only product-facing runtime env vars anywhere are the two
-  SIMD knobs (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`); there is no
-  general mechanism.
+- **No config files, no general env config.** Nothing is read from a config
+  file, and the only product-facing runtime env vars anywhere are the two SIMD
+  knobs (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`, read directly in
+  `crates/simd/src/dispatch.rs`). There is no general mechanism, and those two
+  vars are unreachable from a config file. SPEC-26 absorbs them into a `[simd]`
+  config section (S2), keeping the two env-var names as the env layer (S1).
 - **No live reconfiguration.** Every knob is fixed at process start.
 - **No resource limits.** There is no query timeout, no result-row cap, no
   memory budget, and no per-query or per-session settings of any kind. A
@@ -53,16 +59,18 @@ Where it stops:
 
 ## Non-goals
 
-- **Per-session memory accounting and enforcement.** This spec parses and stores
-  `max_session_memory` but does not enforce it. Real accounting (allocation
+- **Per-query memory accounting and enforcement.** This spec parses and stores
+  `max_query_memory` but does not enforce it. Real accounting (allocation
   tracking across `wcoj`/`storage`, per-query attribution, over-budget abort) is
   the companion spec's job. Until then the knob is accepted and surfaced with a
   metric, and documented as not-yet-enforced.
-- **Stateful cross-request sessions.** A `SET VARIABLE k=v` that persists across
-  multiple HTTP requests needs a session identity (a `session_id`), a
-  server-side session registry, and TTL/eviction. The settings *model* here is
-  shaped to admit it later, but SPEC-26 ships only server-scoped config and
-  query-scoped overrides — no persistent session state.
+- **A session tier / stateful cross-request sessions.** SPARQL over HTTP is
+  session-less. A `SET VARIABLE k=v` that persists across multiple HTTP requests
+  would need a session identity (a `session_id`), a server-side session registry,
+  and TTL/eviction — none of which ships here. SPEC-26 has exactly two tiers:
+  server-scoped config and query-scoped URL-parameter overrides. The override
+  layering is kept extensible in code so a session tier could be slotted in later
+  (see Risks), but no session state exists in this spec.
 - **Reconfiguring the data set live.** Changing `--data` / loaded corpora at
   runtime (hot add/drop of graphs) is not in scope; a changed data path is
   restart-only (see S3).
@@ -75,33 +83,55 @@ Where it stops:
 
 ## Requirements
 
-### S1. Layered config-file resolution and merge
+### S1. Layered config resolution and merge
 
-Assemble one effective `ServerConfig` from built-in defaults plus operator files.
+Assemble one effective `ServerConfig` by layering built-in defaults, command-line
+flags, environment variables, and operator files.
 
-- **Format: TOML.** Config files are TOML (`config.toml`). The workspace already
-  depends on `toml` + `serde`; no new parser is added.
-- **Main-file location precedence, highest wins:** `--config <path>` (CLI flag) >
-  `HORNDB_CONFIG` (env var) > `/etc/horndb/config.toml` (built-in default path).
+- **File format: TOML.** Config files are TOML (`config.toml`). The workspace
+  already depends on `toml` + `serde`.
+- **Config-value precedence, lowest → highest (higher wins):**
+  1. built-in defaults (compiled in),
+  2. **command-line flags** (argv) — e.g. `--bind`, `--simd-max-isa`,
+     `--simd-autotune`,
+  3. **environment variables** — e.g. `HORNDB_SERVER__BIND`,
+     `HORNDB_SIMD_MAX_ISA`,
+  4. the base `config.toml`,
+  5. `config.d/*.toml` fragments in **lexical filename order** (so `99-*`
+     overrides `00-*`).
+
+  So a value set in a config file overrides the same value from an env var, which
+  overrides argv: **argv < env < config file**. Rationale (operator's choice):
+  the on-disk config is the operator's authoritative source of truth, and env/argv
+  are fallbacks for bootstrapping and containers. *(Note: this inverts the more
+  common "CLI wins" convention — see Risks.)*
+- **This is distinct from the config-file *location* precedence** (which file to
+  read), where CLI wins: `--config <path>` > `HORNDB_CONFIG` env var >
+  `/etc/horndb/config.toml` (default path).
   - A missing file at the **default** path is not an error — the server runs on
-    built-in defaults. A missing file at an **explicitly requested** path
+    the lower layers. A missing file at an **explicitly requested** path
     (`--config` or `HORNDB_CONFIG`) is a fatal startup error.
+- **Environment-variable mapping.** Every server setting is reachable from an env
+  var under the `HORNDB_` prefix with `__` (double underscore) as the nesting
+  separator — e.g. `[server].bind` is `HORNDB_SERVER__BIND`,
+  `[server.limits].query_timeout` is `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT`. The
+  two pre-existing SIMD vars (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`) are
+  kept as documented aliases for `[simd]` so current usage keeps working.
+- **Command-line flags** cover a curated subset of common knobs (`--bind`,
+  `--simd-max-isa`, `--simd-autotune`, plus `--config` for the file location); the
+  full surface is reachable via env vars and files, not via a flag per nested
+  field.
 - **Drop-in directory.** The base file may set `config_dir` (default
   `/etc/horndb/config.d/`). Every `*.toml` file directly in that directory is a
   fragment. A missing/empty `config_dir` is not an error.
-- **Merge order, lowest → highest precedence:**
-  1. built-in defaults (compiled in),
-  2. the base `config.toml`,
-  3. `config.d/*.toml` fragments in **lexical filename order** (so `99-*`
-     overrides `00-*`).
-- **Merge semantics:** deep-merge of TOML tables. For a table, keys union and
-  recurse. For a scalar or an array, the higher-precedence value **replaces** the
-  lower (arrays do not concatenate — a `99-*` fragment fully replaces an array,
-  which is the predictable operator-override behavior).
+- **Merge semantics.** Layers deep-merge: for a table, keys union and recurse; for
+  a scalar or an array, the higher-precedence layer **replaces** the lower (arrays
+  do not concatenate — a `99-*` fragment fully replaces an array, the predictable
+  operator-override behavior).
 - **Validation.** The merged tree is deserialized into the typed `ServerConfig`.
-  Unknown keys and type/range errors are rejected with a message naming the file
-  and key. At startup a rejection is fatal (non-zero exit); on reload it is
-  handled per S3 (keep-and-log).
+  Unknown keys and type/range errors are rejected with a message naming the source
+  (file + key, or the env var/flag). At startup a rejection is fatal (non-zero
+  exit); on reload it is handled per S3 (keep-and-log).
 
 ### S2. Config model — two tiers
 
@@ -112,19 +142,22 @@ Separate server-scoped config from the bounded set a query may override.
     server-only fields (e.g. `config_dir`) live here. **Restart-only** (S3).
   - `[server.limits]` — the **defaults** for every query-overridable setting:
     `query_timeout` (duration, default `30s`), `max_result_rows` (integer,
-    default `1_000_000`), `rdf12` (bool, default `false`), `max_session_memory`
+    default `1_000_000`), `rdf12` (bool, default `false`), `max_query_memory`
     (byte size, default unset/unlimited; parsed and stored, enforcement
     delegated). **Hot-reloadable.**
+  - `[simd]` — `max_isa` (string, e.g. `"scalar"`; default: auto-detect) and
+    `autotune` (bool, default `true`), absorbing the current `HORNDB_SIMD_MAX_ISA`
+    / `HORNDB_SIMD_AUTOTUNE` env vars (S1). **Restart-only** — ISA selection and
+    calibration happen once at startup (`crates/simd/src/dispatch.rs`).
   - `[logging]` — `level` (default `info`). **Hot-reloadable.**
   - `[reload]` — `debounce` (duration, default `250ms`). **Hot-reloadable.**
 - **`QuerySettings`** — the query-scoped tier: the overridable subset
-  (`query_timeout`, `max_result_rows`, `rdf12`, `max_session_memory`). It is
+  (`query_timeout`, `max_result_rows`, `rdf12`, `max_query_memory`). It is
   constructed per query by layering overrides (S4) on top of the current
   `[server.limits]` defaults.
 - **Durations and byte sizes** parse from human strings (`"30s"`, `"2GiB"`) via
-  small typed newtypes with `serde` deserializers, reused for file values, URL
-  params, and the `SETTINGS` clause so the three channels accept identical
-  syntax.
+  small typed newtypes with `serde` deserializers, reused for file values and URL
+  params so both channels accept identical syntax.
 
 ### S3. Live watch and reload
 
@@ -151,22 +184,17 @@ Re-apply config when files change, without dropping the running server.
 Let a query override the bounded `QuerySettings` subset, defaulting from
 `[server.limits]`.
 
-- **Two channels, both per-query:**
-  1. **URL query parameters** on `/query`, e.g.
-     `?query_timeout=30s&max_result_rows=1000`.
-  2. **A `SETTINGS` clause** appended to the SPARQL text, ClickHouse-style:
-     `SELECT ... WHERE { ... } SETTINGS query_timeout = 10s, max_result_rows = 500`.
-     The clause is stripped from the tail of the request string before the query
-     reaches `spargebra`, and parsed by a small `key = value {, key = value}`
-     grammar in `horndb-config`.
-- **Precedence, highest wins:** `SETTINGS` clause > URL query param >
-  `[server.limits]` default. Rationale: the clause is embedded by the query
-  author and is the most specific statement of intent.
+- **One channel: URL query parameters** on `/query`, e.g.
+  `?query_timeout=30s&max_result_rows=1000`. (A ClickHouse-style in-query
+  `SETTINGS` clause was considered and dropped — parsing it off the SPARQL text
+  before `spargebra` is too risky; see Risks. URL params are unambiguous and need
+  no grammar change.)
+- **Precedence, highest wins:** URL query param > `[server.limits]` default.
 - **Unknown or out-of-range override.** An unknown setting key or an unparseable
   value is a per-query client error (HTTP 400) naming the offending key — it does
   not affect server config or other queries.
 - **Only the whitelisted subset is overridable.** Server-only keys (`bind`,
-  `config_dir`, `logging`, `reload`) are never settable per query.
+  `config_dir`, `simd`, `logging`, `reload`) are never settable per query.
 
 ### S5. Enforcement wired in this spec
 
@@ -181,22 +209,32 @@ Make the settings real for everything except memory.
   truncating.
 - **`rdf12`.** Flips the already-plumbed `SparqlConfig.rdf12` per query — this
   finally makes the existing per-request path live from the HTTP layer.
-- **`max_session_memory`.** Parsed, stored on `QuerySettings`, and surfaced, but
+- **`max_query_memory`.** Parsed, stored on `QuerySettings`, and surfaced, but
   enforcement is a no-op stub with a metric. The companion memory-accounting spec
   turns the stub into real over-budget aborts. Documented at the API as
   accepted-but-not-yet-enforced.
 
 ### S6. Crate, CLI, and observability
 
-- **Crate.** A new foundation crate **`horndb-config`** owns file resolution, the
-  `config.d` merge, the watcher, the `ArcSwap` live handle, the typed
-  `ServerConfig`/`QuerySettings` structs, and the duration/byte-size newtypes and
-  the `SETTINGS`-clause parser. New workspace dependencies: `notify` and
-  `arc-swap` (both added to `[workspace.dependencies]`). `horndb-sparql` depends
-  on it; the companion memory spec and any future consumer depend on it later.
-- **CLI integration.** `serve` gains `--config <path>`. A server-scoped setting
-  given explicitly on the CLI (e.g. `--bind`) overrides the merged file value —
-  CLI flag > merged config files — so existing invocations keep working.
+- **Crate.** A new foundation crate **`horndb-config`** owns layer resolution
+  (defaults/argv/env/files), the `config.d` merge, the watcher, the `ArcSwap`
+  live handle, the typed `ServerConfig`/`QuerySettings` structs, and the
+  duration/byte-size newtypes. A layered-config library is used for the
+  argv/env/file providers rather than hand-rolling the merge — **`figment`** is
+  the leading candidate (file + env + serde providers, deterministic layer
+  order), settled with the alternatives (`config` crate) in the Phase-1 plan.
+  New workspace dependencies: the layering library, `notify`, and `arc-swap` (all
+  added to `[workspace.dependencies]`). `horndb-sparql` depends on it; the
+  companion memory spec and any future consumer depend on it later.
+- **CLI integration.** `serve` gains `--config <path>` (and the curated value
+  flags, S1). Per the S1 value precedence, a config-file value **overrides** the
+  same value given on argv (argv < env < file); flags are the lowest layer above
+  built-in defaults, so existing flag-only invocations keep working when no file
+  sets that key.
+- **SIMD wiring.** `[simd]` values (from any layer) are resolved by
+  `horndb-config` and passed into the `crates/simd` init path; `simd` stays a
+  low-level leaf crate and does not depend on `horndb-config`. The legacy env-var
+  read sites become one of the resolved layers rather than a separate mechanism.
 - **Metrics** (added to `crates/metrics/` with the matching `docs/metrics.md`
   rows in the **same commit**, per the root sync rule):
   - `config_reload_total{result="applied|rejected"}` — counter.
@@ -210,14 +248,15 @@ subset stays green throughout; existing `sparql` server tests extend rather than
 regress). Implementation plans (`PLAN-26-MM-*.md`) are written when each
 increment is picked up; tracking issues are filed then (use `#TODO` until filed).
 
-1. **Static layered config (S1, S2, S6-crate/CLI/startup-validation).** The
-   `horndb-config` crate, file resolution + `config.d` merge, the typed model,
-   `serve --config`, and startup validation. `bind` now comes from config. No
-   watcher yet, no query overrides yet. *(tracking: `#TODO`)*
-2. **Query-scoped overrides + enforcement (S4, S5, S6-metrics for rejects).**
-   URL params, the `SETTINGS` clause, precedence, and real enforcement of
-   `query_timeout` / `max_result_rows` / `rdf12`; `max_session_memory` stub.
+1. **Static layered config (S1, S2, S6-crate/CLI/SIMD/startup-validation).** The
+   `horndb-config` crate, the defaults/argv/env/file layering + `config.d` merge,
+   the typed model, `serve --config` and the curated value flags, the `[simd]`
+   section wired into `crates/simd` init, and startup validation. `bind` and the
+   SIMD knobs now come from config. No watcher yet, no query overrides yet.
    *(tracking: `#TODO`)*
+2. **Query-scoped overrides + enforcement (S4, S5, S6-metrics for rejects).**
+   URL-parameter overrides and real enforcement of `query_timeout` /
+   `max_result_rows` / `rdf12`; `max_query_memory` stub. *(tracking: `#TODO`)*
 3. **Live watch and reload (S3, remaining S6 metrics).** The `notify` watcher,
    debounce, `ArcSwap` publish, keep-and-log on bad reload, generation metric,
    hot-vs-restart-only handling. *(tracking: `#TODO`)*
@@ -228,24 +267,26 @@ and is orthogonal to Phase 2.
 
 ## Acceptance criteria
 
-1. **Resolution precedence holds (S1).** A test proves `--config` > `HORNDB_CONFIG`
-   > `/etc/horndb/config.toml`; a missing default path runs on defaults, a missing
-   explicit path is a fatal error.
-2. **Merge precedence holds (S1).** A `config.d/99-*.toml` fragment overrides a
-   `00-*.toml` fragment and the base file; tables deep-merge, scalars and arrays
-   replace — all verified against fixture directories.
+1. **File-location precedence holds (S1).** A test proves `--config` >
+   `HORNDB_CONFIG` > `/etc/horndb/config.toml` for *which file* is read; a missing
+   default path runs on the lower layers, a missing explicit path is a fatal error.
+2. **Value precedence and merge hold (S1).** A test proves the value order
+   built-in < argv < env < base file < `config.d/99-*` (with `99-*` overriding
+   `00-*`): a value set in the file overrides the same env var and flag, tables
+   deep-merge, scalars/arrays replace — verified against fixtures.
 3. **Startup validation is honest (S1/S2).** An unknown key or out-of-range value
-   fails startup with a non-zero exit and a message naming the file and key.
-4. **`bind` comes from config, CLI still wins (S6).** With no flag, the server
-   binds the config value; with `--bind`, the flag overrides the file.
+   fails startup with a non-zero exit and a message naming the source (file+key or
+   env var/flag).
+4. **`bind` and `[simd]` come from config, file wins over argv/env (S1/S6).** With
+   no config, the server binds the flag/env/default value; when the config file
+   sets `bind` (or `[simd]`), the file value wins over `--bind` / the env var.
 5. **Query overrides work and are ordered (S4).** A test proves
-   `SETTINGS query_timeout=…` > `?query_timeout=…` > `[server.limits]` default; an
-   unknown/invalid override yields HTTP 400 naming the key without disturbing
-   server config.
-6. **Enforcement is real (S5).** `SETTINGS query_timeout=…` cancels a long-running
-   query via the `CancelToken`; `max_result_rows` ends an over-cap stream with a
-   typed error; `rdf12` per query flips RDF 1.2 acceptance. `max_session_memory`
-   is accepted and surfaced but documented as not-yet-enforced.
+   `?query_timeout=…` > `[server.limits]` default; an unknown/invalid URL
+   parameter yields HTTP 400 naming the key without disturbing server config.
+6. **Enforcement is real (S5).** A `?query_timeout=…` override cancels a
+   long-running query via the `CancelToken`; `max_result_rows` ends an over-cap
+   stream with a typed error; `rdf12` per query flips RDF 1.2 acceptance.
+   `max_query_memory` is accepted and surfaced but documented as not-yet-enforced.
 7. **Live reload is safe (S3).** Editing a hot key (`[server.limits]`,
    `[logging]`) takes effect within the debounce window and bumps
    `config_active_generation` and `config_reload_total{result="applied"}`; editing
@@ -258,13 +299,21 @@ and is orthogonal to Phase 2.
 
 ## Risks and open questions
 
-- **`SETTINGS`-clause parsing vs. the SPARQL grammar.** Stripping a trailing
-  `SETTINGS …` clause off the query string before `spargebra` sees it must not
-  misfire on a legitimate query that contains the token `SETTINGS` (e.g. as an
-  IRI local name or a string literal). Mitigation: only recognize the clause as a
-  suffix after the outermost query form, and bench it against the SPARQL test
-  corpus; if ambiguity remains, gate the clause behind the URL-param channel and
-  reconsider. This is the highest-risk grammar decision in the spec.
+- **In-query `SETTINGS` clause — dropped (why).** A ClickHouse-style
+  `... SETTINGS k=v` clause was considered and rejected: recognizing and stripping
+  it off the query string before `spargebra` sees it risks misfiring on a
+  legitimate query that contains the token `SETTINGS` (as an IRI local name or a
+  string literal), and it is a grammar change with no clean fallback. URL query
+  parameters give the same per-query override with zero grammar risk, so they are
+  the only per-query channel (S4). Revisit only if a concrete need for in-query
+  settings appears.
+- **Inverted value precedence (argv < env < file).** Making the config file win
+  over `--bind`/env is a deliberate operator choice (the file is authoritative),
+  but it inverts the widespread "CLI overrides everything" convention and can
+  surprise anyone expecting a flag to force a value. Mitigation: document it
+  prominently at the CLI/`--help` and in operator docs; a flag that is silently
+  overridden by a file value is the main footgun to message clearly. Reconsider if
+  it proves to trip operators in practice.
 - **Watcher portability and editor atomic-save patterns.** `notify` semantics
   differ across platforms and editors (rename-into-place vs. truncate-in-place vs.
   multiple events per save). The debounce plus full re-resolve-and-validate on any
@@ -273,17 +322,17 @@ and is orthogonal to Phase 2.
   by rename. Verify on Linux (the deploy target) and macOS (dev).
 - **Duration/byte-size syntax scope.** The human-string parsers (`"30s"`,
   `"2GiB"`) must be pinned to one unambiguous grammar (binary vs decimal byte
-  units, allowed duration suffixes) and shared verbatim across files, URL params,
-  and `SETTINGS`, or the three channels will drift. Settle the grammar in the
-  Phase-1 plan.
-- **Deferred memory knob honesty.** Accepting `max_session_memory` while not
+  units, allowed duration suffixes) and shared verbatim across config files and
+  URL params, or the two channels will drift. Settle the grammar in the Phase-1
+  plan.
+- **Deferred memory knob honesty.** Accepting `max_query_memory` while not
   enforcing it risks operators believing they are protected. Mitigation: the
   accepted-but-not-enforced state is documented at the API and (optionally) a
   one-time log line notes it; the companion spec removes the gap.
-- **Deferred session tier shape.** Deferring stateful `SET VARIABLE` is only cheap
-  if the `QuerySettings` model does not have to change to admit it later. Keep the
-  override-layering design (defaults → session → query) explicit in the code even
-  though the session layer is absent, so adding it is a new layer, not a rewrite.
+- **Deferred session tier shape.** SPARQL over HTTP is session-less, so no session
+  tier ships now — but keep the override-layering design (server defaults → [future
+  session] → query) explicit in the code so that if a session tier is ever added
+  it slots in as a new layer, not a rewrite of `QuerySettings` resolution.
 - **Restart-only reload UX.** Storing a changed restart-only value (so a later
   restart honors it) while not applying it live is the least-surprising behavior,
   but an operator watching only the generation metric could think `bind` changed.
