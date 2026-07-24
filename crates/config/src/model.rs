@@ -84,24 +84,13 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
     pub server: Server,
     pub simd: Simd,
     pub logging: Logging,
     pub reload: Reload,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server: Server::default(),
-            simd: Simd::default(),
-            logging: Logging::default(),
-            reload: Reload::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

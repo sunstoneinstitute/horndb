@@ -29,12 +29,12 @@ fn config_d_fragment_overrides_base_and_orders_lexically() {
     )
     .unwrap();
     fs::write(
-        &cfg_d.join("00-a.toml"),
+        cfg_d.join("00-a.toml"),
         "[server.limits]\nmax_result_rows = 2\n",
     )
     .unwrap();
     fs::write(
-        &cfg_d.join("99-z.toml"),
+        cfg_d.join("99-z.toml"),
         "[server.limits]\nmax_result_rows = 3\n",
     )
     .unwrap();
@@ -68,12 +68,12 @@ fn multiple_config_dirs_pool_and_sort_by_filename() {
     // Operator drops 50-*, manual overrides with 90-*: cross-directory filename
     // order means 90-* is applied last and wins, regardless of directory.
     fs::write(
-        &operator.join("50-op.toml"),
+        operator.join("50-op.toml"),
         "[server.limits]\nmax_result_rows = 2\n",
     )
     .unwrap();
     fs::write(
-        &manual.join("90-override.toml"),
+        manual.join("90-override.toml"),
         "[server.limits]\nmax_result_rows = 3\n",
     )
     .unwrap();
@@ -82,7 +82,7 @@ fn multiple_config_dirs_pool_and_sort_by_filename() {
 
     // Same filename in both dirs: the later directory (operator) wins the tie.
     fs::write(
-        &manual.join("50-op.toml"),
+        manual.join("50-op.toml"),
         "[server.limits]\nmax_result_rows = 7\n",
     )
     .unwrap();

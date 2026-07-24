@@ -460,7 +460,29 @@ HIGH *Performance* task in `TASKS.md`.
 
 ---
 
-## 15. Cross-cutting concerns
+## 15. SPEC-26 — Operator configuration system
+
+**Crate:** new `horndb-config` (dependency-light leaf) · **Spec:** `SPEC-26` · **Overall status: specified** (library landed; `serve` wiring not yet integrated)
+
+A single typed `ServerConfig` loaded by layering, lowest precedence to highest:
+built-in defaults, a base `config.toml`, `config.d/*.toml` drop-in fragments
+(pooled across every configured directory and applied in file-name order),
+environment variables (`HORNDB_` prefix, `__` nesting), and caller-supplied
+command-line overrides. Two small newtypes, `ByteSize` and `HumanDuration`,
+parse human-readable strings like `"2GiB"` and `"30s"` so config values stay
+both typed and readable. `figment` (an internal implementation detail, not part
+of the public API) does the layering; every model struct rejects unknown keys
+so a typo in a config file fails loudly instead of being silently ignored.
+
+| Component | Status | Notes |
+|---|---|---|
+| Layered load (`horndb-config`: defaults < base < config.d < env < argv), typed model, validation | **implemented** | `crates/config/`, SPEC-26 S1/S2 (PLAN-26-01). Library only. |
+| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **planned** | SPEC-26 S6 (PLAN-26-02, [#250](https://github.com/sunstoneinstitute/horndb/issues/250)). |
+| Live watch/reload, per-query URL overrides + enforcement | **planned** | SPEC-26 S3/S4/S5 (later phases, [#251](https://github.com/sunstoneinstitute/horndb/issues/251)/[#252](https://github.com/sunstoneinstitute/horndb/issues/252)). |
+
+---
+
+## 16. Cross-cutting concerns
 
 ### Query optimization vs. reasoning-strategy selection
 **Status: partially implemented — Phases 1–3 are implemented. Phase 1
@@ -637,7 +659,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 
 ---
 
-## 16. Roadmap stages
+## 17. Roadmap stages
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -651,7 +673,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 The Stage-2 push (opened 2026-07-07) pulls the previously-**deferred** work into
 **to-spec**: each cluster below has a `needs-decomposition` epic issue and is
 queued to be specified, then decomposed into leaf issues via the `to-issues`
-skill. The flagship is the **single unified query+reasoning IR** (E1) — see §15
+skill. The flagship is the **single unified query+reasoning IR** (E1) — see §16
 "Query optimization vs. reasoning-strategy selection" for why it comes first.
 Individual subsystem rows above keep their fine-grained deferred sub-notes; those
 are now rolled up under the named epic here.

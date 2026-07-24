@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-22
 scope: "SPEC-26 Phase 1a — the horndb-config crate: typed ServerConfig/QuerySettings model, ByteSize/HumanDuration unit newtypes, layered load (defaults < base config.toml < config.d/*.toml < env < argv) with config.d merge and file-location resolution, and validation. Library only; serve wiring + [simd] injection are PLAN-26-02."
 ---
