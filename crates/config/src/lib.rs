@@ -18,4 +18,5 @@ mod units;
 //   pub use load::{load, CliOverrides, LoadInputs};
 //   pub use model::{Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
 //   pub use units::{ByteSize, HumanDuration};
+pub use model::{Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
 pub use units::{ByteSize, HumanDuration};
