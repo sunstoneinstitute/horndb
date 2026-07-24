@@ -1098,6 +1098,7 @@ version = "0.5.0"
 dependencies = [
  "figment",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

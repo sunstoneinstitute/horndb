@@ -106,3 +106,91 @@ impl<'de> Deserialize<'de> for ByteSize {
         }
     }
 }
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn parses_suffixes() {
+        assert_eq!(
+            "30s".parse::<HumanDuration>().unwrap().0,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            "250ms".parse::<HumanDuration>().unwrap().0,
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            "5m".parse::<HumanDuration>().unwrap().0,
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            "1h".parse::<HumanDuration>().unwrap().0,
+            Duration::from_secs(3600)
+        );
+        assert_eq!(
+            " 0s ".parse::<HumanDuration>().unwrap().0,
+            Duration::from_secs(0)
+        );
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!("30".parse::<HumanDuration>().is_err()); // bare number: unit required
+        assert!("s".parse::<HumanDuration>().is_err());
+        assert!("30x".parse::<HumanDuration>().is_err());
+        assert!("".parse::<HumanDuration>().is_err());
+    }
+
+    #[test]
+    fn round_trips_through_serde_string() {
+        // Deserializing from a TOML-ish string value works.
+        let d: HumanDuration = serde_json::from_str("\"45s\"").unwrap();
+        assert_eq!(d.0, Duration::from_secs(45));
+    }
+}
+
+/// A duration parsed from an integer with an `ms`/`s`/`m`/`h` suffix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HumanDuration(pub Duration);
+
+impl FromStr for HumanDuration {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = s.trim();
+        let digits_end = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+        if digits_end == 0 {
+            return Err(format!("no leading number in duration {s:?}"));
+        }
+        let num: u64 = t[..digits_end]
+            .parse()
+            .map_err(|_| format!("invalid number in duration {s:?}"))?;
+        let unit = t[digits_end..].trim();
+        let dur = match unit {
+            "ms" => Duration::from_millis(num),
+            "s" => Duration::from_secs(num),
+            "m" => Duration::from_secs(num * 60),
+            "h" => Duration::from_secs(num * 3600),
+            "" => return Err(format!("duration {s:?} needs a unit (ms/s/m/h)")),
+            other => return Err(format!("unknown duration unit {other:?} (use ms/s/m/h)")),
+        };
+        Ok(HumanDuration(dur))
+    }
+}
+
+impl Serialize for HumanDuration {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        // Serialize back to a human string so `Serialized::defaults` round-trips.
+        let ms = self.0.as_millis();
+        s.serialize_str(&format!("{ms}ms"))
+    }
+}
+
+impl<'de> Deserialize<'de> for HumanDuration {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
