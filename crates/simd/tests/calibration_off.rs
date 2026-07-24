@@ -1,18 +1,18 @@
 //! SPEC-12 startup micro-calibration, auto-tune OFF path.
 //!
-//! Sets `HORNDB_SIMD_AUTOTUNE=off` before the first dispatch so the memoised
-//! toggle observes it. This is its own test binary so the memoisation can't be
-//! polluted by the default-on test in `calibration.rs`. With calibration off,
-//! dispatch must still return a *correct* kernel (the static widest-ISA
-//! preference).
+//! Seeds `autotune = false` via `configure` before the first dispatch so the
+//! memoised toggle observes it. This is its own test binary so the memoisation
+//! can't be polluted by the default-on test in `calibration.rs`. With
+//! calibration off, dispatch must still return a *correct* kernel (the static
+//! widest-ISA preference).
 
-use horndb_simd::{configured_autotune, intersect, with_forced_isa, Isa};
+use horndb_simd::{configure, configured_autotune, intersect, with_forced_isa, Isa};
 
 #[test]
 fn autotune_off_still_dispatches_correctly() {
-    // First line of the only test in this binary: set before any dispatch so the
-    // one-shot read observes it.
-    std::env::set_var("HORNDB_SIMD_AUTOTUNE", "off");
+    // First line of the only test in this binary: seed before any dispatch so the
+    // one-shot read observes it. `None` cap = uncapped; `false` = calibration off.
+    configure(None, false);
     assert!(!configured_autotune(), "off must disable autotune");
 
     let a: Vec<u64> = (0..1000u64).map(|x| x * 2).collect();

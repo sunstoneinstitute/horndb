@@ -127,10 +127,11 @@ pub fn load(inputs: &LoadInputs) -> Result<ServerConfig, ConfigError> {
 }
 
 /// The environment layer: `HORNDB_`-prefixed vars, restricted to the nested form
-/// (`HORNDB_SERVER__BIND` → `server.bind`). Flat vars are dropped, so
-/// `HORNDB_CONFIG` (the file-location var) and the legacy single-underscore SIMD
-/// aliases (`HORNDB_SIMD_MAX_ISA` / `HORNDB_SIMD_AUTOTUNE`, consumed explicitly by
-/// serve in PLAN-26-02) never leak in and never trip `deny_unknown_fields`.
+/// (`HORNDB_SERVER__BIND` → `server.bind`; `[simd]` via `HORNDB_SIMD__MAX_ISA` /
+/// `HORNDB_SIMD__AUTOTUNE`). Flat vars are dropped, so `HORNDB_CONFIG` (the
+/// file-location var) and the retired single-underscore SIMD names
+/// (`HORNDB_SIMD_MAX_ISA` / `HORNDB_SIMD_AUTOTUNE`, removed in PLAN-26-02) never
+/// leak in and never trip `deny_unknown_fields`.
 fn env_provider() -> Env {
     Env::prefixed("HORNDB_")
         .filter(|key| key.as_str().contains("__"))

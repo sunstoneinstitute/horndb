@@ -155,8 +155,9 @@ fn resolve() -> Fn_ {
             #[cfg(target_arch = "x86_64")]
             {
                 // Bench (acceptance #3) decides whether AVX-512 or AVX2 wins on
-                // Zen4; until then prefer AVX-512 when present. `HORNDB_SIMD_MAX_ISA`
-                // caps this — e.g. `=avx2` forces the AVX2 path on a Zen4 box
+                // Zen4; until then prefer AVX-512 when present. The ISA cap
+                // (seeded via `configure`, e.g. from `HORNDB_SIMD__MAX_ISA=avx2`)
+                // caps this — an `avx2` cap forces the AVX2 path on a Zen4 box
                 // without a rebuild if AVX-512 downclocking loses net.
                 if crate::dispatch::allows(Isa::Avx512) && is_x86_feature_detected!("avx512f") {
                     return avx512_safe;

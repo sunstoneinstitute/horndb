@@ -119,9 +119,10 @@ branching. `choose()` walks this ladder top to bottom:
    `Source` variant**. Bypasses everything below (and, for `intersect`, the skew
    gate — see §4).
 
-2. **`HORNDB_SIMD_MAX_ISA` cap** (`dispatch.rs:allows`) — a process-wide ceiling
-   on the widest tier production may pick. Bounds the candidate list for every
-   layer below. Details in §5.
+2. **ISA cap** (`dispatch.rs:allows`) — a process-wide ceiling on the widest tier
+   production may pick, seeded via `configure` (from `[simd].max_isa` /
+   `HORNDB_SIMD__MAX_ISA`). Bounds the candidate list for every layer below.
+   Details in §5.
 
 3. **Known-CPU table** (`cpu.rs:table_pick`) — CPUID `(vendor, family, model)` →
    per-`Kernel` `Isa`, populated from **real SPB-256 measurements**. A hit picks a
@@ -133,8 +134,8 @@ branching. `choose()` walks this ladder top to bottom:
    fallback for a CPU *not* in the table. Times every cap-allowed candidate on
    inputs shaped like the production access pattern (WARMUP=3 discarded, ITERS=7
    timed, keep the minimum) and adopts a SIMD kernel only if it beats scalar by
-   `MARGIN` (5%). Records `Source::Calibrated`. Disabled with
-   `HORNDB_SIMD_AUTOTUNE=off` (§5).
+   `MARGIN` (5%). Records `Source::Calibrated`. Disabled by seeding
+   `autotune = false` (`[simd].autotune` / `HORNDB_SIMD__AUTOTUNE`) — §5.
 
 5. **Static widest-ISA preference** (calibration off) — pick the widest
    cap-allowed kernel the host supports, no timing. Records `Source::Static`.
@@ -189,18 +190,30 @@ A `forced_isa` override routes straight to the forced block kernel and skips the
 gate, so `tests/differential.rs` still exercises the block kernels while
 `tests/skew_intersect.rs` (unforced) covers the gallop path.
 
-## 5. Controlling selection with environment variables
+## 5. Controlling selection: the seeded policy
 
-There are exactly **two** environment variables. Both are read **once** (memoised
-in a `OnceLock`) on first use, so set them before the process starts. Neither
-affects the `with_forced_isa` test override, so the differential suite still
-exercises every kernel the host can run regardless of what the shell sets.
+There are exactly **two** knobs: the ISA **cap** and the **auto-tune** toggle.
+`crates/simd` reads no environment variable itself. Both are seeded once via
+`horndb_simd::configure(max_isa: Option<Isa>, autotune: bool)`, which the `serve`
+binary calls from the resolved `[simd]` config **before the first dispatch**. The
+values live in `OnceLock`s resolved once per process, so a late seed is a silent
+no-op (`configure` `debug_assert`s it seeded a fresh cell). Reachable from the
+environment through `horndb-config` as `HORNDB_SIMD__MAX_ISA` /
+`HORNDB_SIMD__AUTOTUNE` (double-underscore; the old single-underscore
+`HORNDB_SIMD_MAX_ISA` / `HORNDB_SIMD_AUTOTUNE` names are **gone**, a sanctioned
+0.x break). Neither knob affects the `with_forced_isa` test override, so the
+differential suite still exercises every kernel the host can run. When `configure`
+is never called (benches, unit tests, any non-`serve` embedder), the defaults
+hold: **no cap, auto-tune on**.
 
-### `HORNDB_SIMD_MAX_ISA` — the operational cap
+### The ISA cap — `[simd].max_isa`
 
 A width **tier** ceiling on what production detection may pick:
 `scalar < {avx2, neon} < avx512`. It bounds the candidate set for the table,
-calibration, and static layers alike.
+calibration, and static layers alike. `serve` parses the config string into the
+`Isa` enum with `horndb_simd::parse_max_isa`; an **unknown** non-empty string is a
+startup-fatal error naming the bad value (this crate stays a leaf and only ever
+receives the parsed enum).
 
 | Value(s) (case-insensitive, trimmed) | Effect |
 |---|---|
@@ -208,25 +221,20 @@ calibration, and static layers alike.
 | `avx2` | allow AVX2/NEON, **suppress AVX-512** — e.g. if Zen4 AVX-512 downclocking loses net on your workload |
 | `avx512`, `avx512f`, `avx-512` | allow up to AVX-512 (the default ceiling on a capable host) |
 | `neon` | allow up to NEON (aarch64) |
-| unset / unrecognised | no cap |
+| unset | no cap |
 
 Query the effective value at runtime with `configured_max_isa()`.
 
-### `HORNDB_SIMD_AUTOTUNE` — the calibration toggle
+### The auto-tune toggle — `[simd].autotune`
 
-Controls the calibration layer (step 4). **On by default.**
-
-| Value | Effect |
-|---|---|
-| `off`, `0`, `false`, `no` (case-insensitive) | disable calibration → fall back to the **static widest-ISA** preference |
-| unset / anything else | calibration enabled |
-
-The `HORNDB_SIMD_MAX_ISA` cap still applies when calibration is off. Query with
-`configured_autotune()`.
+Controls the calibration layer (step 4). **On by default.** A `bool` in config
+(parsed by `horndb-config`); seed `false` to disable calibration → fall back to
+the **static widest-ISA** preference. The ISA cap still applies when calibration
+is off. Query with `configured_autotune()`.
 
 > **Interaction:** the known-CPU table (step 3) runs *before* calibration and is
-> not disabled by `HORNDB_SIMD_AUTOTUNE=off`. On a listed CPU the table decides;
-> the toggle only affects the fallback for *unlisted* CPUs. The cap bounds every
+> not disabled by `autotune = false`. On a listed CPU the table decides; the
+> toggle only affects the fallback for *unlisted* CPUs. The cap bounds every
 > layer in every mode.
 
 ## 6. Correctness: one oracle, and a cross-arch trap

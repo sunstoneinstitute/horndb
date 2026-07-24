@@ -12,6 +12,8 @@
 //! ever sets a force, so [`forced_isa`] returns `None` and each primitive's
 //! `dispatch` falls straight through to its cached fn pointer.
 
+use std::sync::OnceLock;
+
 /// Instruction-set path a primitive can dispatch to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isa {
@@ -77,23 +79,62 @@ pub fn with_forced_isa<R>(isa: Isa, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-// --- Operational ISA cap (HORNDB_SIMD_MAX_ISA) -----------------------------
+// --- Operational SIMD policy (ISA cap + auto-tune), seeded via `configure` ---
 //
-// A process-wide ceiling on the ISA the *production* detection path may pick,
-// read once from the environment. Unlike `forced_isa` (a thread-local *force*
-// used only by tests/benches), this is a global *cap* meant as an ops knob:
-// e.g. `HORNDB_SIMD_MAX_ISA=avx2` disables AVX-512 fleet-wide without a
-// rebuild (the AVX-512 downclocking question is a per-deployment property),
-// and `HORNDB_SIMD_MAX_ISA=scalar` turns SIMD off entirely — a clean escape
-// hatch for isolating a suspected kernel regression in production.
+// Two process-wide knobs govern the *production* detection path: an ISA-tier
+// ceiling (the "cap") and the startup auto-calibration toggle. Both are seeded
+// once through [`configure`] before the first dispatch — the `serve` binary
+// calls it from the resolved `[simd]` config. `crates/simd` reads **no**
+// environment variable itself; the old `HORNDB_SIMD_MAX_ISA` /
+// `HORNDB_SIMD_AUTOTUNE` reads moved up to `horndb-config`, reachable as
+// `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE` (double-underscore). When
+// `configure` is never called (benches, unit tests, any embedder that skips
+// it), each cell falls back to its auto-detect default: no cap, auto-tune on.
 //
+// Unlike `forced_isa` (a thread-local *force* used only by tests/benches), the
+// cap is a global *tier* ceiling meant as an ops knob: a cap of `Avx2` disables
+// AVX-512 fleet-wide without a rebuild, and `Scalar` turns SIMD off entirely.
 // The cap is a width *tier*, not an exact ISA: scalar < {avx2, neon} < avx512.
 // It does NOT affect `forced_isa`, so the differential proptests still exercise
-// every kernel the host can run even when the variable is set in the shell.
+// every kernel the host can run.
+
+/// Process-wide ISA cap, seeded by [`configure`]. `None` (once resolved) means
+/// "no cap". Defaults to `None` when `configure` is never called.
+static ISA_CAP: OnceLock<Option<Isa>> = OnceLock::new();
+
+/// Startup auto-calibration toggle, seeded by [`configure`]. Defaults to `true`
+/// when `configure` is never called.
+static AUTOTUNE: OnceLock<bool> = OnceLock::new();
+
+/// Seed the process-wide SIMD policy — the ISA cap and the auto-tune toggle —
+/// **before any primitive dispatches or is primed**. `serve` calls this once,
+/// right after config resolution, from the resolved `[simd]` values.
+///
+/// `max_isa` is the width-tier ceiling (`None` = no cap); `autotune` enables the
+/// startup micro-calibration (the default when this is never called).
+///
+/// **Contract — call exactly once, first.** Both values live in `OnceLock`s that
+/// each primitive resolves lazily on first dispatch. A *second* call, or any
+/// call *after* the first dispatch/priming has already resolved a cell, cannot
+/// re-seed it: the late value is **silently ignored** (this is `OnceLock`
+/// semantics, not an error path). A `debug_assert` fires in debug builds if
+/// either cell was already initialised, to catch a mis-ordered caller; release
+/// builds treat the late call as a no-op. Embedders that never call `configure`
+/// (benches, unit tests) get the auto-detect defaults: no cap, auto-tune on.
+pub fn configure(max_isa: Option<Isa>, autotune: bool) {
+    let cap_fresh = ISA_CAP.set(max_isa).is_ok();
+    let autotune_fresh = AUTOTUNE.set(autotune).is_ok();
+    debug_assert!(
+        cap_fresh && autotune_fresh,
+        "horndb_simd::configure() ran after the SIMD policy cells were already \
+         resolved (called twice, or after the first dispatch/priming) — the seed \
+         was ignored; call configure() once, before any primitive dispatches"
+    );
+}
 
 /// Width tier used to compare ISAs for the cap. Cross-arch values never meet on
 /// one host (an x86 box has no NEON kernels and vice-versa); the tier just lets
-/// a single `HORNDB_SIMD_MAX_ISA` value behave sensibly on either arch.
+/// a single cap value behave sensibly on either arch.
 fn tier(isa: Isa) -> u8 {
     match isa {
         Isa::Scalar => 0,
@@ -102,10 +143,16 @@ fn tier(isa: Isa) -> u8 {
     }
 }
 
-/// Parse a `HORNDB_SIMD_MAX_ISA` value (case-insensitive). Unrecognised values
-/// yield `None` (treated as "no cap"). Accepts `scalar`, `avx2`, `avx512`
-/// (and the `avx512f`/`avx-512` spellings), and `neon`.
-fn parse_isa(s: &str) -> Option<Isa> {
+/// Parse a `max_isa` string into the ISA-cap tier (case-insensitive).
+/// Unrecognised values yield `None`, which the caller distinguishes from
+/// "unset": `serve` treats an unknown non-empty string as a startup-fatal
+/// error rather than silently dropping the cap. Accepts `scalar` (also `none`
+/// / `off`), `avx2`, `avx512` (also `avx512f` / `avx-512`), and `neon`.
+///
+/// Lives here so the string spellings stay next to the [`Isa`] enum; `serve`
+/// (which owns config→enum translation, keeping this crate a leaf) calls it and
+/// decides the fatal-on-unknown policy.
+pub fn parse_max_isa(s: &str) -> Option<Isa> {
     match s.trim().to_ascii_lowercase().as_str() {
         "scalar" | "none" | "off" => Some(Isa::Scalar),
         "avx2" => Some(Isa::Avx2),
@@ -115,19 +162,13 @@ fn parse_isa(s: &str) -> Option<Isa> {
     }
 }
 
-/// The configured cap, read once from `HORNDB_SIMD_MAX_ISA`, or `None`.
+/// The configured cap (seeded by [`configure`], else the `None` default).
 fn isa_cap() -> Option<Isa> {
-    use std::sync::OnceLock;
-    static CAP: OnceLock<Option<Isa>> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        std::env::var("HORNDB_SIMD_MAX_ISA")
-            .ok()
-            .and_then(|v| parse_isa(&v))
-    })
+    *ISA_CAP.get_or_init(|| None)
 }
 
-/// Pure cap check (testable without touching the environment): is `isa`
-/// permitted under `cap`? Scalar is always permitted.
+/// Pure cap check (testable without touching the global): is `isa` permitted
+/// under `cap`? Scalar is always permitted.
 fn cap_allows(isa: Isa, cap: Option<Isa>) -> bool {
     match cap {
         Some(c) => tier(isa) <= tier(c),
@@ -135,16 +176,15 @@ fn cap_allows(isa: Isa, cap: Option<Isa>) -> bool {
     }
 }
 
-/// Whether the production detection path may select `isa`, honouring the
-/// `HORNDB_SIMD_MAX_ISA` cap. Each primitive's `resolve` guards its
-/// feature-detection arms with this; the test/bench `forced_isa` override
-/// deliberately bypasses it.
+/// Whether the production detection path may select `isa`, honouring the seeded
+/// ISA cap. Each primitive's `resolve` guards its feature-detection arms with
+/// this; the test/bench `forced_isa` override deliberately bypasses it.
 pub(crate) fn allows(isa: Isa) -> bool {
     cap_allows(isa, isa_cap())
 }
 
-/// The operational ISA cap configured via `HORNDB_SIMD_MAX_ISA`, or `None` if
-/// the variable is unset or unrecognised. Read once from the environment.
+/// The operational ISA cap seeded via [`configure`], or `None` if uncapped
+/// (or if `configure` was never called).
 ///
 /// Exposed so a host can log the effective SIMD policy at startup, e.g.
 /// `tracing::info!(cap = ?horndb_simd::configured_max_isa(), "SIMD dispatch")`.
@@ -154,42 +194,26 @@ pub fn configured_max_isa() -> Option<Isa> {
     isa_cap()
 }
 
-// --- Startup auto-calibration toggle (HORNDB_SIMD_AUTOTUNE) -----------------
+// --- Startup auto-calibration toggle ---------------------------------------
 //
 // Per-host kernel benchmarks proved the fastest ISA is host-dependent (AVX-512
 // `intersect` wins 2.5x on Sapphire Rapids but loses 2.5x on Zen4, etc.) with
 // no cheap runtime bit to tell the cases apart. So each primitive can
 // micro-calibrate at startup: time every available kernel and cache the
-// fastest. The behaviour is on by default and disabled with
-// `HORNDB_SIMD_AUTOTUNE=off` (also `0`/`false`/`no`), which falls back to the
-// static widest-ISA preference. The `HORNDB_SIMD_MAX_ISA` cap still bounds the
-// candidate set either way.
+// fastest. The behaviour is on by default and disabled by seeding
+// `autotune = false` through [`configure`], which falls back to the static
+// widest-ISA preference. The ISA cap still bounds the candidate set either way.
 
-/// Pure parse of a `HORNDB_SIMD_AUTOTUNE` value (testable without touching the
-/// environment). Auto-tune is *disabled* iff the trimmed, lowercased value is
-/// one of `off`, `0`, `false`, `no`. Unset (`None`) or anything else ⇒ enabled.
-fn autotune_from(s: Option<&str>) -> bool {
-    match s {
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "off" | "0" | "false" | "no"
-        ),
-        None => true,
-    }
-}
-
-/// Whether startup micro-calibration is enabled, read once from
-/// `HORNDB_SIMD_AUTOTUNE`. Defaults to `true`.
+/// Whether startup micro-calibration is enabled (seeded by [`configure`], else
+/// the `true` default).
 pub(crate) fn autotune_enabled() -> bool {
-    use std::sync::OnceLock;
-    static AUTOTUNE: OnceLock<bool> = OnceLock::new();
-    *AUTOTUNE.get_or_init(|| autotune_from(std::env::var("HORNDB_SIMD_AUTOTUNE").ok().as_deref()))
+    *AUTOTUNE.get_or_init(|| true)
 }
 
-/// Whether startup micro-calibration is enabled (`HORNDB_SIMD_AUTOTUNE`, default
-/// on). Exposed so a host can log the effective SIMD policy at startup alongside
-/// [`configured_max_isa`]. When off, each primitive uses its static widest-ISA
-/// preference; the `HORNDB_SIMD_MAX_ISA` cap applies in both modes.
+/// Whether startup micro-calibration is enabled (default on). Exposed so a host
+/// can log the effective SIMD policy at startup alongside [`configured_max_isa`].
+/// When off, each primitive uses its static widest-ISA preference; the ISA cap
+/// applies in both modes.
 pub fn configured_autotune() -> bool {
     autotune_enabled()
 }
@@ -237,30 +261,13 @@ mod tests {
     }
 
     #[test]
-    fn autotune_default_on_when_unset_or_unknown() {
-        assert!(autotune_from(None), "unset ⇒ on");
-        assert!(autotune_from(Some("on")));
-        assert!(autotune_from(Some("1")));
-        assert!(autotune_from(Some("true")));
-        assert!(autotune_from(Some("garbage")));
-        assert!(autotune_from(Some("")));
-    }
-
-    #[test]
-    fn autotune_off_spellings_disable() {
-        for v in ["off", "0", "false", "no", "OFF", " Off ", "FALSE", "No"] {
-            assert!(!autotune_from(Some(v)), "{v:?} must disable autotune");
-        }
-    }
-
-    #[test]
-    fn parse_isa_accepts_known_spellings() {
-        assert_eq!(parse_isa("scalar"), Some(Isa::Scalar));
-        assert_eq!(parse_isa("AVX2"), Some(Isa::Avx2));
-        assert_eq!(parse_isa(" avx512 "), Some(Isa::Avx512));
-        assert_eq!(parse_isa("avx512f"), Some(Isa::Avx512));
-        assert_eq!(parse_isa("neon"), Some(Isa::Neon));
-        assert_eq!(parse_isa("garbage"), None);
-        assert_eq!(parse_isa(""), None);
+    fn parse_max_isa_accepts_known_spellings() {
+        assert_eq!(parse_max_isa("scalar"), Some(Isa::Scalar));
+        assert_eq!(parse_max_isa("AVX2"), Some(Isa::Avx2));
+        assert_eq!(parse_max_isa(" avx512 "), Some(Isa::Avx512));
+        assert_eq!(parse_max_isa("avx512f"), Some(Isa::Avx512));
+        assert_eq!(parse_max_isa("neon"), Some(Isa::Neon));
+        assert_eq!(parse_max_isa("garbage"), None);
+        assert_eq!(parse_max_isa(""), None);
     }
 }

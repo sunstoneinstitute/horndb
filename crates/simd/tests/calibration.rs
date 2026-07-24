@@ -1,10 +1,14 @@
 //! SPEC-12 startup micro-calibration, default (auto-tune ON) path.
 //!
-//! `HORNDB_SIMD_AUTOTUNE` is unset here, so calibration runs. The off path lives
-//! in its own test binary (`calibration_off.rs`) because the toggle is memoised
-//! once per process and each integration-test file is a separate binary.
+//! `configure` is never called here, so the policy cells fall back to their
+//! defaults: no cap, auto-tune on. The off path lives in its own test binary
+//! (`calibration_off.rs`) because the toggle is memoised once per process and
+//! each integration-test file is a separate binary.
 
-use horndb_simd::{calibration_report, configured_autotune, init, intersect, with_forced_isa, Isa};
+use horndb_simd::{
+    calibration_report, configured_autotune, configured_max_isa, init, intersect, with_forced_isa,
+    Isa,
+};
 
 /// Every reported ISA must be one the host can actually execute under
 /// `with_forced_isa` (i.e. it was a real calibration candidate, not garbage).
@@ -24,7 +28,12 @@ fn host_runnable(isa: Isa) -> bool {
 
 #[test]
 fn init_then_report_has_seven_host_runnable_entries() {
-    assert!(configured_autotune(), "autotune defaults on when unset");
+    assert!(configured_autotune(), "autotune defaults on when unseeded");
+    assert_eq!(
+        configured_max_isa(),
+        None,
+        "cap defaults to none when configure() is never called"
+    );
     init();
     let report = calibration_report();
     assert_eq!(report.len(), 7, "one entry per dispatched primitive");
