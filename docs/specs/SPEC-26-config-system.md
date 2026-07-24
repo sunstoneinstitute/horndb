@@ -9,8 +9,9 @@ scope: "Operator configuration system — layered config (built-in defaults < ba
 **One-line thesis:** HornDB has no config surface today — the `serve` binary
 takes a handful of `clap` flags with hardcoded defaults, and nothing else is
 tunable. This spec gives operators a real, layered config: a base TOML file plus
-a `config.d/` drop-in directory (with environment variables and command-line
-flags as higher-precedence overrides), merged by a documented precedence, watched
+one or more `config.d/` drop-in directories (with environment variables and
+command-line flags as higher-precedence overrides), merged by a documented
+precedence, watched
 and re-applied live where safe; and it gives query authors a way to override a
 bounded set of settings per query via URL query parameters, with server config
 supplying the defaults.
@@ -93,8 +94,10 @@ flags, environment variables, and operator files.
 - **Config-value precedence, lowest → highest (higher wins):**
   1. built-in defaults (compiled in),
   2. the base `config.toml`,
-  3. `config.d/*.toml` fragments in **lexical filename order** (so `99-*`
-     overrides `00-*`),
+  3. `config.d/*.toml` fragments from every configured drop-in directory,
+     pooled and applied in **filename order** — the file's base name, not its
+     full path (so `99-*` overrides `00-*` regardless of which directory each
+     lives in),
   4. **environment variables** — e.g. `HORNDB_SERVER__BIND`,
      `HORNDB_SIMD_MAX_ISA`,
   5. **command-line flags** (argv) — e.g. `--bind`, `--simd-max-isa`,
@@ -121,9 +124,17 @@ flags, environment variables, and operator files.
   `--simd-max-isa`, `--simd-autotune`, plus `--config` for the file location); the
   full surface is reachable via env vars and files, not via a flag per nested
   field.
-- **Drop-in directory.** The base file may set `config_dir` (default
-  `/etc/horndb/config.d/`). Every `*.toml` file directly in that directory is a
-  fragment. A missing/empty `config_dir` is not an error.
+- **Drop-in directories.** The base file may set `config_dirs` — an ordered
+  list of directories (default `["/etc/horndb/config.d"]`). Every `*.toml` file
+  directly in any listed directory is a fragment. All fragments from all
+  directories are **pooled and applied in filename order** (base name, not full
+  path), so `50-operator.toml` in one directory and `90-override.toml` in
+  another interleave by name and `90-*` wins. When two directories hold a
+  fragment with the *same* filename, the one from the directory later in
+  `config_dirs` is applied later (wins). A missing or empty directory is not an
+  error. This lets a manually-maintained directory and a machine-maintained one
+  (e.g. a future k8s operator) coexist, each dropping numbered fragments,
+  without either replacing the other wholesale.
 - **Merge semantics.** Layers deep-merge: for a table, keys union and recurse; for
   a scalar or an array, the higher-precedence layer **replaces** the lower (arrays
   do not concatenate — a `99-*` fragment fully replaces an array, the predictable
@@ -139,7 +150,8 @@ Separate server-scoped config from the bounded set a query may override.
 
 - **`ServerConfig`** — the whole merged tree, the server-scoped tier. Sections:
   - `[server]` — network identity: `bind` (default `127.0.0.1:3840`). Additional
-    server-only fields (e.g. `config_dir`) live here. **Restart-only** (S3).
+    server-only fields (e.g. `config_dirs`, the ordered list of drop-in
+    directories) live here. **Restart-only** (S3).
   - `[server.limits]` — the **defaults** for every query-overridable setting:
     `query_timeout` (duration, default `30s`), `max_result_rows` (integer,
     default `1_000_000`), `rdf12` (bool, default `false`), `max_query_memory`
@@ -163,7 +175,8 @@ Separate server-scoped config from the bounded set a query may override.
 
 Re-apply config when files change, without dropping the running server.
 
-- **Watcher.** A `notify`-based watcher observes the base file and `config_dir`.
+- **Watcher.** A `notify`-based watcher observes the base file and every
+  directory in `config_dirs`.
   Events are debounced by `[reload].debounce`.
 - **Reload cycle.** On a settled change: re-resolve (S1) → re-merge → validate →
   on success, atomically publish the new `ServerConfig` via an `ArcSwap`; request
@@ -195,7 +208,7 @@ Let a query override the bounded `QuerySettings` subset, defaulting from
   value is a per-query client error (HTTP 400) naming the offending key — it does
   not affect server config or other queries.
 - **Only the whitelisted subset is overridable.** Server-only keys (`bind`,
-  `config_dir`, `simd`, `logging`, `reload`) are never settable per query.
+  `config_dirs`, `simd`, `logging`, `reload`) are never settable per query.
 
 ### S5. Enforcement wired in this spec
 
@@ -273,7 +286,10 @@ and is orthogonal to Phase 2.
 2. **Value precedence and merge hold (S1).** A test proves the value order
    built-in < base file < `config.d/99-*` < env < argv (with `99-*` overriding
    `00-*`): an env var overrides the file and a command-line flag overrides both,
-   tables deep-merge, scalars/arrays replace — verified against fixtures.
+   tables deep-merge, scalars/arrays replace — verified against fixtures. With
+   two directories in `config_dirs`, a test proves fragments pool and apply in
+   filename order across directories (a `90-*` in one directory overrides a
+   `50-*` in another), and that an identical filename in a later directory wins.
 3. **Startup validation is honest (S1/S2).** An unknown key or out-of-range value
    fails startup with a non-zero exit and a message naming the source (file+key or
    env var/flag).

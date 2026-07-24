@@ -41,13 +41,20 @@ All under a new crate `crates/config/` (crate name `horndb-config`):
    base `config.toml` < `config.d/*.toml` (lexical, `99-*` beats `00-*`) < env vars <
    command-line overrides (`CliOverrides`). CLI wins.
 
-### `config_dir` resolution is single-pass-then-merge
+### `config_dirs` resolution is single-pass-then-merge
 
-`config_dir` (where the `config.d` fragments live, default `/etc/horndb/config.d/`) may
-itself be set in the base file / env / CLI. Resolve it from **defaults + base file + env +
-CLI only** (a first extract), then merge the `config.d` fragments for the final extract.
-A `config_dir` value set *inside a config.d fragment* does NOT relocate the directory (no
-recursion) — document this in the crate docs.
+`config_dirs` (the ordered list of directories where `config.d` fragments live, default
+`["/etc/horndb/config.d"]`) may itself be set in the base file / env / CLI. Resolve it from
+**defaults + base file + env + CLI only** (a first extract), then merge the fragments from
+every listed directory for the final extract. A `config_dirs` value set *inside a config.d
+fragment* does NOT relocate the directories (no recursion) — document this in the crate docs.
+
+**Cross-directory apply order (systemd-style).** Pool every `*.toml` from every listed
+directory, then apply them sorted by **file name** (base name, not full path): a `90-*` in
+one directory overrides a `50-*` in another. Directory position in `config_dirs` only breaks
+exact-filename ties — the fragment from the directory later in the list is applied later
+(wins). This lets a manually-maintained directory and a machine-maintained one (a future k8s
+operator) each drop numbered fragments without clobbering the other wholesale.
 
 ### Env var mapping
 
@@ -158,12 +165,16 @@ Create `crates/config/AGENTS.md`:
 
 Foundation crate for the operator configuration system. Loads one typed
 `ServerConfig` by layering (lowest→highest): built-in defaults < base
-`config.toml` < `config.d/*.toml` (lexical) < env vars (`HORNDB_` prefix,
+`config.toml` < `config.d/*.toml` drop-ins < env vars (`HORNDB_` prefix,
 `__` nesting) < caller command-line overrides. `figment` is an internal
 detail; the public API is `load(&LoadInputs) -> Result<ServerConfig, _>`.
 
 - Model: `src/model.rs` — plain serde structs, `#[serde(deny_unknown_fields, default)]`.
 - Units: `src/units.rs` — `ByteSize` (`"2GiB"`), `HumanDuration` (`"30s"`).
+- `[server].config_dirs` is a *list* of drop-in dirs (default one entry). Fragments
+  from all dirs are pooled and applied in filename order; directory position only
+  breaks exact-filename ties (later dir wins). Lets a manual dir and a k8s-operator
+  dir coexist. A `config_dirs` set inside a fragment does not relocate the dirs.
 - `[simd]` is restart-only; the reload watcher (SPEC-26 S3, later phase) never touches it.
 - `serve` wiring and `[simd]` injection live in `crates/sparql` (PLAN-26-02), not here.
 ```
@@ -457,7 +468,7 @@ mod tests {
     fn empty_table_is_all_defaults() {
         let cfg: ServerConfig = toml_from("");
         assert_eq!(cfg.server.bind, "127.0.0.1:3840");
-        assert_eq!(cfg.server.config_dir, PathBuf::from("/etc/horndb/config.d"));
+        assert_eq!(cfg.server.config_dirs, vec![PathBuf::from("/etc/horndb/config.d")]);
         assert_eq!(cfg.server.limits.query_timeout.0, Duration::from_secs(30));
         assert_eq!(cfg.server.limits.max_result_rows, 1_000_000);
         assert!(!cfg.server.limits.rdf12);
@@ -550,7 +561,10 @@ impl Default for ServerConfig {
 #[serde(deny_unknown_fields, default)]
 pub struct Server {
     pub bind: String,
-    pub config_dir: PathBuf,
+    /// Ordered list of `config.d` drop-in directories. Fragments from every
+    /// directory are pooled and applied in filename order; directory position
+    /// only breaks exact-filename ties (later directory wins). See crate docs.
+    pub config_dirs: Vec<PathBuf>,
     pub limits: Limits,
 }
 
@@ -558,7 +572,7 @@ impl Default for Server {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:3840".to_string(),
-            config_dir: PathBuf::from("/etc/horndb/config.d"),
+            config_dirs: vec![PathBuf::from("/etc/horndb/config.d")],
             limits: Limits::default(),
         }
     }
@@ -737,7 +751,7 @@ Create `crates/config/src/load.rs` with the input types and resolution tests fir
 ```rust
 //! Layered loading: path resolution, figment providers, and `load`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -856,7 +870,7 @@ fn config_d_fragment_overrides_base_and_orders_lexically() {
     fs::write(
         &base,
         format!(
-            "[server]\nbind = \"1.1.1.1:1\"\nconfig_dir = \"{}\"\n[server.limits]\nmax_result_rows = 1\n",
+            "[server]\nbind = \"1.1.1.1:1\"\nconfig_dirs = [\"{}\"]\n[server.limits]\nmax_result_rows = 1\n",
             cfg_d.display()
         ),
     )
@@ -869,6 +883,39 @@ fn config_d_fragment_overrides_base_and_orders_lexically() {
     assert_eq!(cfg.server.limits.max_result_rows, 3);
     // A key only in the base survives the merge.
     assert_eq!(cfg.server.bind, "1.1.1.1:1");
+}
+
+#[test]
+fn multiple_config_dirs_pool_and_sort_by_filename() {
+    let dir = tempdir().unwrap();
+    // Two independent drop-in directories: a "manual" one and an "operator" one.
+    let manual = dir.path().join("manual.d");
+    let operator = dir.path().join("operator.d");
+    fs::create_dir(&manual).unwrap();
+    fs::create_dir(&operator).unwrap();
+
+    let base = dir.path().join("config.toml");
+    fs::write(
+        &base,
+        format!(
+            "[server]\nconfig_dirs = [\"{}\", \"{}\"]\n[server.limits]\nmax_result_rows = 1\n",
+            manual.display(),
+            operator.display()
+        ),
+    )
+    .unwrap();
+    // Operator drops 50-*, manual overrides with 90-*: cross-directory filename
+    // order means 90-* is applied last and wins, regardless of directory.
+    fs::write(&operator.join("50-op.toml"), "[server.limits]\nmax_result_rows = 2\n").unwrap();
+    fs::write(&manual.join("90-override.toml"), "[server.limits]\nmax_result_rows = 3\n").unwrap();
+    let cfg = load(&inputs_for(&base)).unwrap();
+    assert_eq!(cfg.server.limits.max_result_rows, 3);
+
+    // Same filename in both dirs: the later directory (operator) wins the tie.
+    fs::write(&manual.join("50-op.toml"), "[server.limits]\nmax_result_rows = 7\n").unwrap();
+    fs::remove_file(manual.join("90-override.toml")).unwrap();
+    let cfg = load(&inputs_for(&base)).unwrap();
+    assert_eq!(cfg.server.limits.max_result_rows, 2); // operator.d/50-op wins the tie
 }
 
 #[test]
@@ -912,8 +959,8 @@ Append to `crates/config/src/load.rs`:
 /// built-in defaults, the base `config.toml`, `config.d/*.toml` (lexical), env
 /// vars (`HORNDB_` prefix, `__` nesting), and the caller's command-line overrides.
 ///
-/// `config_dir` is resolved from everything *except* the `config.d` fragments
-/// (a value set inside a fragment does not relocate the directory).
+/// `config_dirs` is resolved from everything *except* the `config.d` fragments
+/// (a value set inside a fragment does not relocate the directories).
 pub fn load(inputs: &LoadInputs) -> Result<ServerConfig, ConfigError> {
     let (base_path, explicit) = resolve_base_path(inputs);
     if explicit && !base_path.exists() {
@@ -921,8 +968,8 @@ pub fn load(inputs: &LoadInputs) -> Result<ServerConfig, ConfigError> {
     }
     let source_desc = base_path.display().to_string();
 
-    // Pass 1: resolve config_dir from defaults + base file + env (no fragments;
-    // config_dir is not a CLI override, so CLI is irrelevant here).
+    // Pass 1: resolve config_dirs from defaults + base file + env (no fragments;
+    // config_dirs is not a CLI override, so CLI is irrelevant here).
     let cfg1: ServerConfig = Figment::from(Serialized::defaults(ServerConfig::default()))
         .merge(Toml::file(&base_path))
         .merge(env_provider())
@@ -932,10 +979,11 @@ pub fn load(inputs: &LoadInputs) -> Result<ServerConfig, ConfigError> {
             message: e.to_string(),
         })?;
 
-    // Pass 2: defaults < base file < config.d/*.toml (lexical) < env.
+    // Pass 2: defaults < base file < config.d/*.toml (pooled across all
+    // directories, filename order) < env.
     let mut fig =
         Figment::from(Serialized::defaults(ServerConfig::default())).merge(Toml::file(&base_path));
-    for path in config_d_files(&cfg1.server.config_dir)? {
+    for path in config_d_files(&cfg1.server.config_dirs)? {
         fig = fig.merge(Toml::file(path));
     }
     let cfg = fig
@@ -976,29 +1024,37 @@ fn apply_cli_overrides(mut cfg: ServerConfig, o: &CliOverrides) -> ServerConfig 
     cfg
 }
 
-/// The `*.toml` files directly in `dir`, sorted by file name (lexical). A missing
-/// directory yields an empty list (not an error); an unreadable one errors.
-fn config_d_files(dir: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    let rd = fs::read_dir(dir).map_err(|e| ConfigError::ConfigDir {
-        dir: dir.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    for entry in rd {
-        let entry = entry.map_err(|e| ConfigError::ConfigDir {
-            dir: dir.to_path_buf(),
+/// The `*.toml` fragments across all configured drop-in directories, in apply
+/// order: sorted by **file name** (base name, not full path), with a directory's
+/// position in `dirs` breaking exact-filename ties (later directory applied
+/// later, so it wins). A missing directory contributes nothing (not an error);
+/// an unreadable one errors.
+fn config_d_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, ConfigError> {
+    // (file_name, dir_index, full_path) so the sort key is name-then-dir.
+    let mut out: Vec<(String, usize, PathBuf)> = Vec::new();
+    for (idx, dir) in dirs.iter().enumerate() {
+        if !dir.exists() {
+            continue;
+        }
+        let rd = fs::read_dir(dir).map_err(|e| ConfigError::ConfigDir {
+            dir: dir.clone(),
             message: e.to_string(),
         })?;
-        let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) == Some("toml") && p.is_file() {
-            out.push(p);
+        for entry in rd {
+            let entry = entry.map_err(|e| ConfigError::ConfigDir {
+                dir: dir.clone(),
+                message: e.to_string(),
+            })?;
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("toml") && p.is_file() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                out.push((name, idx, p));
+            }
         }
     }
-    out.sort();
-    Ok(out)
+    // Filename first (cross-directory pool), directory index as the tie-breaker.
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Ok(out.into_iter().map(|(_, _, p)| p).collect())
 }
 ```
 
@@ -1182,8 +1238,9 @@ Run before the first task lands:
 - **Type consistency:** `HumanDuration(Duration)` and `ByteSize(u64)` are used identically in
   `units.rs`, `model.rs`, and the tests; `Limits` field names (`query_timeout`,
   `max_result_rows`, `rdf12`, `max_query_memory`) match `QuerySettings::from_limits` and every
-  test. `config_dir` default `/etc/horndb/config.d` (no trailing slash) is asserted in the
-  model test and used by `config_d_files`.
+  test. `config_dirs` default `["/etc/horndb/config.d"]` (single entry, no trailing slash) is
+  asserted in the model test; `config_d_files` pools `*.toml` across all listed directories and
+  applies them in filename order (directory index breaks exact-name ties).
 - **`[simd]` is restart-only** — nothing in this crate reloads or re-reads it; injection into
   `horndb-simd` is PLAN-26-02 and happens once at startup.
 - **Placeholder scan:** no `TODO`/`TBD` in code; the only `#TODO`s are the sanctioned
