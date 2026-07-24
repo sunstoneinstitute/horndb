@@ -56,13 +56,14 @@ struct Cli {
     #[arg(long = "bind")]
     bind: Option<String>,
 
-    /// Override `[simd].max_isa` (`scalar`/`avx2`/`avx512`/`neon`). Consumed
-    /// by `crates/simd` injection, added in a follow-up increment.
+    /// Override `[simd].max_isa` (`scalar`/`avx2`/`avx512`/`neon`). Seeds the
+    /// `crates/simd` ISA cap before the first dispatch; leave unset to
+    /// auto-detect.
     #[arg(long = "simd-max-isa")]
     simd_max_isa: Option<String>,
 
-    /// Override `[simd].autotune`. Consumed by `crates/simd` injection, added
-    /// in a follow-up increment.
+    /// Override `[simd].autotune`. Seeds the `crates/simd` autotune toggle
+    /// before the first dispatch; leave unset to keep autotune on.
     #[arg(long = "simd-autotune")]
     simd_autotune: Option<bool>,
 
