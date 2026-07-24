@@ -119,3 +119,28 @@ fn missing_default_file_is_ok_missing_explicit_is_error() {
     let cfg = load(&LoadInputs::default()).unwrap();
     assert_eq!(cfg.server.limits.max_query_memory, None::<ByteSize>);
 }
+
+#[test]
+fn unknown_key_in_base_file_errors_with_key_name() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("config.toml");
+    fs::write(&base, "[server]\nbnid = \"oops\"\n").unwrap();
+
+    let err = load(&inputs_for(&base)).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("bnid"), "error should name the bad key: {msg}");
+    assert!(
+        msg.contains("config.toml"),
+        "error should name the source file: {msg}"
+    );
+}
+
+#[test]
+fn bad_duration_value_errors() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("config.toml");
+    fs::write(&base, "[server.limits]\nquery_timeout = \"30x\"\n").unwrap();
+
+    let err = load(&inputs_for(&base)).unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("duration"), "{err}");
+}
