@@ -174,7 +174,8 @@ records which path picked it (known-CPU table / micro-calibration / static wides
 |---|---|---|---|---|
 | `horndb_simd_kernel_isa` | gauge | `kernel`, `isa`, `source` | count | 1 on the `(kernel, isa, source)` series chosen by startup selection; `source` = which path chose it (table/calibrated/static); emitted once at server startup |
 
-> **Caveat.** Under `HORNDB_SIMD_AUTOTUNE=off` on x86, `merge` (all arms) and
+> **Caveat.** With auto-tune seeded off (`[simd].autotune = false` /
+> `HORNDB_SIMD__AUTOTUNE`) on x86, `merge` (all arms) and
 > `filter_range` (its AVX2 arm) report their widest *available* ISA label even
 > though those kernels run scalar bodies there; the default autotune-on path
 > reports `scalar` for them correctly. (`filter_range`'s NEON arm is genuinely

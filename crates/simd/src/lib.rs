@@ -6,7 +6,7 @@
 //! This crate is the *only* place in the workspace allowed to carry
 //! hand-written SIMD intrinsics.
 //!
-//! ## Dispatch and the `HORNDB_SIMD_MAX_ISA` cap
+//! ## Dispatch and the ISA cap
 //!
 //! Each primitive resolves the widest kernel the CPU supports (via
 //! `is_x86_feature_detected!` / `is_aarch64_feature_detected!`) **once**, caching
@@ -14,20 +14,24 @@
 //! baseline, so it runs on any x86-64 / aarch64 host and simply picks a narrower
 //! kernel where a feature is absent.
 //!
-//! Set the environment variable `HORNDB_SIMD_MAX_ISA` to cap the selection
-//! without a rebuild — an operational knob, read once at first use:
+//! The operational **ISA cap** bounds that selection without a rebuild. It is
+//! seeded once via [`configure`] (the `serve` binary passes the resolved
+//! `[simd]` config); this crate reads no environment variable itself — the knob
+//! flows through `horndb-config` as `HORNDB_SIMD__MAX_ISA` (double-underscore).
 //!
-//! - `HORNDB_SIMD_MAX_ISA=avx2` — disable AVX-512 fleet-wide (e.g. if Zen4
-//!   AVX-512 downclocking loses net on your workload).
-//! - `HORNDB_SIMD_MAX_ISA=scalar` — disable all SIMD (escape hatch for isolating
-//!   a suspected kernel regression in production).
+//! - cap `avx2` — disable AVX-512 fleet-wide (e.g. if Zen4 AVX-512 downclocking
+//!   loses net on your workload).
+//! - cap `scalar` — disable all SIMD (escape hatch for isolating a suspected
+//!   kernel regression in production).
 //!
 //! The cap is a width *tier* (`scalar` < `avx2` ≈ `neon` < `avx512`). It affects
 //! only production detection, not the test/bench [`with_forced_isa`] override, so
 //! the differential suite still exercises every kernel the host can run.
-//! Query the active cap with [`configured_max_isa`].
+//! Query the active cap with [`configured_max_isa`]. When [`configure`] is never
+//! called (benches, unit tests, any non-`serve` embedder), the cap defaults to
+//! "none" and auto-tune to on.
 //!
-//! ## Kernel selection: known-CPU table → calibration (`HORNDB_SIMD_AUTOTUNE`)
+//! ## Kernel selection: known-CPU table → calibration (auto-tune toggle)
 //!
 //! The fastest kernel is **workload- and host-dependent**, and real LDBC SPB-256
 //! measurements proved the SIMD kernels are net-*harmful* versus scalar on the
@@ -39,21 +43,23 @@
 //! kernel through this priority:
 //!
 //! 1. [`with_forced_isa`] — test/bench override; bypasses everything below.
-//! 2. `HORNDB_SIMD_MAX_ISA` cap — bounds the candidate set for all lower tiers.
+//! 2. ISA cap (seeded via [`configure`]) — bounds the candidate set for all
+//!    lower tiers.
 //! 3. **Known-CPU table** (`cpu.rs`) — keyed on CPUID vendor/family/model and
 //!    populated from real SPB-256 measurements. A table hit selects a kernel with
 //!    **no timing**. Today both known rows (AMD Zen4 Ryzen 7 7700, Intel Xeon
 //!    Gold 5412U / Sapphire Rapids) pin every kernel to scalar.
-//! 4. **Representative-input calibration** (`HORNDB_SIMD_AUTOTUNE`, default on):
-//!    for an unlisted CPU, time every cap-allowed kernel on inputs shaped like the
+//! 4. **Representative-input calibration** (auto-tune, default on): for an
+//!    unlisted CPU, time every cap-allowed kernel on inputs shaped like the
 //!    production access pattern (seek-sweep for `lower_bound`, >L2 base for
 //!    `gather`, moderate selectivity for `filter_indices_eq`) and adopt a SIMD
 //!    kernel only when it beats scalar by a safety margin.
 //! 5. Static widest-ISA preference (autotune off) / scalar baseline.
 //!
-//! Disable calibration with `HORNDB_SIMD_AUTOTUNE=off` (also `0`/`false`/`no`),
-//! which falls back to the static widest-ISA preference; the `HORNDB_SIMD_MAX_ISA`
-//! cap still bounds the candidate set in every mode. Call [`init`] at startup to
+//! Disable calibration by seeding `autotune = false` via [`configure`] (through
+//! `horndb-config` / `HORNDB_SIMD__AUTOTUNE`), which falls back to the static
+//! widest-ISA preference; the ISA cap still bounds the candidate set in every
+//! mode. Call [`init`] at startup to
 //! pay the (small) calibration cost up front; [`calibration_report`] returns the
 //! chosen `(kernel, ISA, source)` per primitive for startup logging, where the
 //! [`Source`] records which tier chose it (table / calibrated / static). The same
@@ -81,7 +87,9 @@ pub use lower_bound::lower_bound;
 pub use merge::merge;
 
 pub use cpu::Kernel;
-pub use dispatch::{configured_autotune, configured_max_isa, forced_isa, Isa, Source};
+pub use dispatch::{
+    configure, configured_autotune, configured_max_isa, forced_isa, parse_max_isa, Isa, Source,
+};
 
 /// The host's human-readable CPU identity for startup logging — the CPU brand
 /// string where the arch exposes one (x86_64 via CPUID, Apple Silicon via
@@ -98,8 +106,9 @@ pub fn cpu_identity() -> Option<String> {
 /// calibration cost up front instead of lazily on first use. Hosts that want
 /// deterministic first-call latency call this once at startup; otherwise each
 /// primitive calibrates on its first call. A no-op beyond the first call per
-/// primitive (results are cached). Honours `HORNDB_SIMD_AUTOTUNE` and
-/// `HORNDB_SIMD_MAX_ISA`.
+/// primitive (results are cached). Honours the ISA cap and auto-tune toggle
+/// seeded via [`configure`] — call `configure` *before* this, or the priming
+/// here resolves the policy cells to their defaults.
 pub fn init() {
     intersect::prime();
     lower_bound::prime();

@@ -451,7 +451,7 @@ HIGH *Performance* task in `TASKS.md`.
 | WCOJ seek + leapfrog intersect SIMD | **implemented** | F1; highest payoff. Seek: `VecIter` builds a transient SoA `LevelColumn` for the **depth-0 (root, full-data) level** — built once, reused for the whole scan — and seeks it through `horndb_simd::lower_bound`; deeper levels stay on the scalar AoS `partition_point` to avoid an O(range) per-`open_level` column rebuild in the inner loop (a single bound predicate makes the depth-1 child range nearly the whole dataset). `PackedColumn::lower_bound` (compressed source) bisects to the owning block, decodes it, and SIMD-finishes (`source/soa.rs`, `source/vec_source.rs`, `source/packed_column.rs`). Intersect: both the standalone `LeapfrogJoin` (`trie/leapfrog.rs`) **and the production executor's inlined leapfrog** (`executor/wcoj.rs::BatchIter`) gain a k==2 fast path over `active_run` contiguous views via `horndb_simd::intersect` — when both contributing iters at a depth expose a run ≥ `SIMD_SEEK_MIN_RUN` (64), the whole pairwise intersection is precomputed once and drained, replacing per-candidate round-robin seeks. The SIMD *seek* path is likewise live in `BatchIter`. To honour the leapfrog's distinct-key contract, `active_run` now returns a **deduplicated** view (`LevelColumn::distinct_run`): the raw SoA column keeps duplicates for the seek index-mapping, but the intersect path consumes a cached distinct copy, so a subject with many objects still emits each key once. Output bit-identical to scalar — gated by the WCOJ differential fuzzer (narrow + a wide `N_WIDE > 64` variant that arms the intersect), the leapfrog BTreeSet oracle, and `tests/batchiter_simd.rs` (incl. the duplicate-subject hazard). **#237** then attacked the non-intersect half of NF1: the leapfrog descent gallops child-run/cursor boundaries instead of bisecting the wide parent range (`run_end`/`seek_gallop`), and an armed leaf is **bulk-materialized** into the Arrow batch (`push_run_chunk`) instead of drained per value — marginal cost 14.4 → **8.3 ns/tuple** (hornbench). The residual to ≤5 ns is the AoS→SoA input-column copy (`from_aos` ~46% of the marginal profile), tracked for a columnar `VecTripleSource` in [#239](https://github.com/sunstoneinstitute/horndb/issues/239) (`docs/benchmarks.md`). |
 | Dictionary decode + `rdf:type` partition scan SIMD | **implemented (hornbench numbers recorded; scan meets SPEC-02 #4, decode misses NF4)** | F2; jointly satisfies SPEC-02 acceptance #4. `horndb-storage` consumes `horndb-simd`: bulk inline-int decode (`Dictionary::decode_inline_ints`/`lookup_inline_int_batch`/`lookup_batch`, the mask+cast unpack core) and a vectorised `rdf:type` partition scan (`PredicatePartition::subjects_with_object` via the new `horndb_simd::filter_indices_eq` scan+index-compact primitive composed with `gather`). New primitive is differential-proven equal to scalar on every host ISA path (`crates/simd/tests/differential.rs`); storage paths covered by `crates/storage` unit tests. **hornbench measured (2026-07-07, Ryzen 7 7700, node-0-pinned):** `partition_scan` **34.5 GB/s = ~104% of STREAM-Triad** → SPEC-02 acceptance #4 **met (GREEN)**; `dict_decode` AVX2 vs scalar **~1.01×** → NF4 ≥4× **not met (RED)**, the decode loop is load/store-bound so SIMD is not the lever (`docs/benchmarks.md`). |
 | Delta-apply merge/dedup/sort SIMD | **specified (gated on [#133](https://github.com/sunstoneinstitute/horndb/issues/133))** | F3; needs hash-delta → sorted-run change first. The `cax-sco` partition-filter scan is **out of scope** — superseded by #133's object index + semi-naïve firing. |
-| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **implemented** | NF5; cached `OnceLock` fn-ptr per primitive, scalar-forced build green on stable 1.90. F5 `with_forced_isa` makes dispatch test-forceable so the differential suite exercises every host ISA path. **Kernel selection** resolves each primitive through the ladder `forced → HORNDB_SIMD_MAX_ISA cap → known-CPU table → representative-input calibration → static widest` (reworked 2026-07-01 after an LDBC SPB-256 A/B proved the previously-calibrated SIMD kernels net-harmful vs scalar on both measured hosts — a kernel microbench win does not imply a workload win). The known-CPU table (`cpu.rs`, CPUID-keyed, SPB-derived) pins scalar on both measured hosts; representative-input calibration (`HORNDB_SIMD_AUTOTUNE`) is the fallback for unlisted CPUs. Selected ISA + selection tier exported as the `horndb_simd_kernel_isa{kernel,isa,source}` gauge. Full ladder + knobs: `docs/architecture/simd.md`; measurements: `docs/benchmarks.md`. |
+| Runtime ISA dispatch (cached fn-ptr, `is_*_feature_detected!`, no nightly) | **implemented** | NF5; cached `OnceLock` fn-ptr per primitive, scalar-forced build green on stable 1.90. F5 `with_forced_isa` makes dispatch test-forceable so the differential suite exercises every host ISA path. **Kernel selection** resolves each primitive through the ladder `forced → ISA cap → known-CPU table → representative-input calibration → static widest` (reworked 2026-07-01 after an LDBC SPB-256 A/B proved the previously-calibrated SIMD kernels net-harmful vs scalar on both measured hosts — a kernel microbench win does not imply a workload win). The ISA cap and auto-tune toggle are seeded via `horndb_simd::configure` from `[simd]` config (`HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE`; `crates/simd` reads no env directly). The known-CPU table (`cpu.rs`, CPUID-keyed, SPB-derived) pins scalar on both measured hosts; representative-input calibration (auto-tune) is the fallback for unlisted CPUs. Selected ISA + selection tier exported as the `horndb_simd_kernel_isa{kernel,isa,source}` gauge. Full ladder + knobs: `docs/architecture/simd.md`; measurements: `docs/benchmarks.md`. |
 
 > SIMD accelerates loops that are already *algorithmically right*. It is **not** a
 > substitute for the missing indexes/semi-naïve firing that dominate the SPEC-04
@@ -460,7 +460,29 @@ HIGH *Performance* task in `TASKS.md`.
 
 ---
 
-## 15. Cross-cutting concerns
+## 15. SPEC-26 — Operator configuration system
+
+**Crate:** new `horndb-config` (dependency-light leaf) · **Spec:** `SPEC-26` · **Overall status: partially implemented** (library and `serve` wiring landed — Phases 1a/1b; live watch/reload and per-query URL overrides remain planned)
+
+A single typed `ServerConfig` loaded by layering, lowest precedence to highest:
+built-in defaults, a base `config.toml`, `config.d/*.toml` drop-in fragments
+(pooled across every configured directory and applied in file-name order),
+environment variables (`HORNDB_` prefix, `__` nesting), and caller-supplied
+command-line overrides. Two small newtypes, `ByteSize` and `HumanDuration`,
+parse human-readable strings like `"2GiB"` and `"30s"` so config values stay
+both typed and readable. `figment` (an internal implementation detail, not part
+of the public API) does the layering; every model struct rejects unknown keys
+so a typo in a config file fails loudly instead of being silently ignored.
+
+| Component | Status | Notes |
+|---|---|---|
+| Layered load (`horndb-config`: defaults < base < config.d < env < argv), typed model, validation | **implemented** | `crates/config/`, SPEC-26 S1/S2 (PLAN-26-01). Library only. |
+| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **implemented** | SPEC-26 S6 (PLAN-26-02, [#250](https://github.com/sunstoneinstitute/horndb/issues/250)). |
+| Live watch/reload, per-query URL overrides + enforcement | **planned** | SPEC-26 S3/S4/S5 (later phases, [#251](https://github.com/sunstoneinstitute/horndb/issues/251)/[#252](https://github.com/sunstoneinstitute/horndb/issues/252)). |
+
+---
+
+## 16. Cross-cutting concerns
 
 ### Query optimization vs. reasoning-strategy selection
 **Status: partially implemented — Phases 1–3 are implemented. Phase 1
@@ -637,7 +659,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 
 ---
 
-## 16. Roadmap stages
+## 17. Roadmap stages
 
 | Stage | Scope | Status |
 |---|---|---|
@@ -651,7 +673,7 @@ source and risk dropping coverage for a smaller, riskier win ([#108](https://git
 The Stage-2 push (opened 2026-07-07) pulls the previously-**deferred** work into
 **to-spec**: each cluster below has a `needs-decomposition` epic issue and is
 queued to be specified, then decomposed into leaf issues via the `to-issues`
-skill. The flagship is the **single unified query+reasoning IR** (E1) — see §15
+skill. The flagship is the **single unified query+reasoning IR** (E1) — see §16
 "Query optimization vs. reasoning-strategy selection" for why it comes first.
 Individual subsystem rows above keep their fine-grained deferred sub-notes; those
 are now rolled up under the named epic here.

@@ -410,7 +410,7 @@ PTIME-tractable way to serve OWL 2 RL) and runs SPARQL as pure pattern matching
 over the closed graph. Reasoning-strategy selection — compiled OWL-RL rule vs.
 GraphBLAS closure resolver (SPEC-05 `delegate = "closure"`), SSSOM crosswalk
 expansion, SKOS hierarchy resolution — is fixed at rule-compile / materialization
-time, *upstream* of this optimizer (see `docs/architecture.md` §15). That leaves
+time, *upstream* of this optimizer (see `docs/architecture.md` §16). That leaves
 joint optimizations on the table. Once demand-driven backward-chaining exists, a
 query can answer without full materialization, and the engine faces a real
 per-subgoal choice: **materialize vs. rewrite vs. delegate-to-resolver**.

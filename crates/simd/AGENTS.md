@@ -6,9 +6,27 @@ primitive resolves the widest kernel the host supports (scalar / AVX2 / AVX-512 
 NEON) once, caching a function pointer, and is proven bit-identical to the scalar
 oracle by the differential proptest in `tests/differential.rs`. This is the **only**
 crate allowed to carry hand-written SIMD intrinsics. See the `src/lib.rs` module doc
-for the dispatch story and the `HORNDB_SIMD_MAX_ISA` operational cap, and
+for the dispatch story and the operational ISA cap, and
 `docs/architecture/simd.md` for the subsystem-level guide (selection ladder,
-consumers, env-var knobs).
+consumers, policy knobs).
+
+## Policy seeding (`configure`) — no direct env reads
+
+The crate reads **no** environment variable. The operational policy — the ISA
+**cap** (a width-tier ceiling) and the **auto-tune** toggle — is seeded once via
+`horndb_simd::configure(max_isa: Option<Isa>, autotune: bool)` **before the first
+dispatch or `init()` priming**. The `serve` binary calls it from the resolved
+`[simd]` config (`horndb-config`), passing the enum it parses from the config
+string with `horndb_simd::parse_max_isa` (unknown string ⇒ startup-fatal, on
+`serve`'s side — this crate stays a leaf and only receives the enum). Reachable
+from the environment as `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE`
+(double-underscore, via config); the old single-underscore `HORNDB_SIMD_MAX_ISA`
+/ `HORNDB_SIMD_AUTOTUNE` names are **gone** (sanctioned 0.x break).
+
+`configure` seeds `OnceLock`s: a second or late call (after first dispatch) is a
+**silent no-op** with a `debug_assert` guard — call it once, first. When it is
+never called (benches, unit tests, any non-`serve` embedder), the policy falls
+back to auto-detect defaults: **no cap, auto-tune on**.
 
 ## ⚠️ Cross-arch false-green — read before trusting a local green run
 
@@ -23,8 +41,9 @@ Before claiming any x86 SIMD kernel correct:
 
 - Don't treat a local green as proof — the x86 differential arms didn't run.
 - Force every ISA explicitly via `with_forced_isa(Isa::Avx2 | Isa::Avx512, …)` and,
-  for x86 coverage, run on an x86_64 host (CI, or `HORNDB_SIMD_MAX_ISA` on a real
-  Intel box). A CI x86 failure here is **signal, not flakiness**.
+  for x86 coverage, run on an x86_64 host (CI, or seed a cap via
+  `HORNDB_SIMD__MAX_ISA` / `configure` on a real Intel box). A CI x86 failure here
+  is **signal, not flakiness**.
 - Boundary values (`0`, `u64::MAX`, empty/one-element slices) are the usual
   killers — add them as explicit differential cases, not just proptest-random.
 

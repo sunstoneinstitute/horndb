@@ -50,6 +50,9 @@ horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
 horndb-metrics.workspace = true
 horndb-simd.workspace = true
+# SPEC-26 layered configuration, consumed by the `serve` binary only (the
+# library code does not reference it).
+horndb-config = { workspace = true }
 arrow = { workspace = true }
 
 [[bin]]
@@ -64,3 +67,6 @@ pretty_assertions = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# `serve` binary integration tests (config-file/env/CLI bind precedence,
+# startup-fatal validation).
+assert_cmd = { workspace = true }
