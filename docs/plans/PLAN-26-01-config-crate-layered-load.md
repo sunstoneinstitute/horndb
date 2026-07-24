@@ -8,7 +8,7 @@ scope: "SPEC-26 Phase 1a — the horndb-config crate: typed ServerConfig/QuerySe
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the new `horndb-config` foundation crate that loads one typed `ServerConfig` by layering built-in defaults, a base `config.toml`, `config.d/*.toml` drop-ins, environment variables, and caller-supplied command-line overrides — with the precedence, `config.d` merge, and validation SPEC-26 S1/S2 require. Tracking issue: `#TODO` (file before the first task lands).
+**Goal:** Build the new `horndb-config` foundation crate that loads one typed `ServerConfig` by layering built-in defaults, a base `config.toml`, `config.d/*.toml` drop-ins, environment variables, and caller-supplied command-line overrides — with the precedence, `config.d` merge, and validation SPEC-26 S1/S2 require. Tracking issue: [#249](https://github.com/sunstoneinstitute/horndb/issues/249).
 
 **Architecture:** A dependency-light library crate. The typed model (`ServerConfig` and its sections, plus `QuerySettings`) is plain serde structs with `Default` impls and `deny_unknown_fields`. Two small newtypes (`ByteSize`, `HumanDuration`) parse human strings like `"2GiB"` / `"30s"`. Layering uses the [`figment`](https://docs.rs/figment) crate internally (providers merged low→high: `Serialized` defaults → `Toml` base file → each `Toml` `config.d` fragment in lexical order → `Env` with the `HORNDB_` prefix → a `Serialized` dict built from caller command-line overrides). `figment` is an internal implementation detail — the public API is `load(&LoadInputs) -> Result<ServerConfig, ConfigError>`, so no `figment` type appears in the crate's surface.
 
@@ -59,10 +59,12 @@ operator) each drop numbered fragments without clobbering the other wholesale.
 ### Env var mapping
 
 `figment`'s `Env::prefixed("HORNDB_").split("__")` maps `HORNDB_SERVER__BIND` → `server.bind`
-and `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT` → `server.limits.query_timeout`. The two legacy
-SIMD var *aliases* (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`) are handled in PLAN-26-02
-at the `serve` layer (they are single-underscore and would otherwise map to `simd.max` /
-`simd.autotune`); this crate only implements the general `__`-split mapping. Note that in tests.
+and `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT` → `server.limits.query_timeout`. The `[simd]`
+knobs use the same scheme — `HORNDB_SIMD__MAX_ISA` → `simd.max_isa`,
+`HORNDB_SIMD__AUTOTUNE` → `simd.autotune` — so the general `__`-split mapping covers them
+with no special-casing. (The old single-underscore names `HORNDB_SIMD_MAX_ISA` /
+`HORNDB_SIMD_AUTOTUNE` are dropped, a sanctioned 0.x break; PLAN-26-02 removes the direct
+reads in `crates/simd/src/dispatch.rs`.)
 
 ### Validation
 
@@ -1085,14 +1087,13 @@ mod env_tests {
         figment::Jail::expect_with(|jail| {
             jail.create_file("config.toml", "[server]\nbind = \"1.1.1.1:1\"\n")?;
             jail.set_env("HORNDB_SERVER__BIND", "3.3.3.3:3");
-            // Flat HORNDB_ vars must be IGNORED, not rejected by deny_unknown_fields:
-            // the file-location var and the legacy single-underscore SIMD alias.
+            // A flat (single-token) HORNDB_ var like the file-location var must be
+            // IGNORED, not rejected by deny_unknown_fields.
             jail.set_env("HORNDB_CONFIG", "/should/be/ignored.toml");
-            jail.set_env("HORNDB_SIMD_MAX_ISA", "avx2");
 
             let base = jail.directory().join("config.toml");
-            // env beats file; flat vars are ignored (max_isa stays default None here —
-            // the legacy alias is wired in serve, PLAN-26-02).
+            // env beats file; the flat HORNDB_CONFIG var is ignored by the config
+            // provider (it selects the file location, handled by the caller).
             let inputs = LoadInputs { cli_config_path: Some(base.clone()), ..Default::default() };
             let cfg = load(&inputs).unwrap();
             assert_eq!(cfg.server.bind, "3.3.3.3:3");
@@ -1202,8 +1203,8 @@ one-paragraph description, and a component table). The table's first row records
 | Component | Status | Notes |
 |---|---|---|
 | Layered load (`horndb-config`: defaults < base < config.d < env < argv), typed model, validation | **implemented** | `crates/config/`, SPEC-26 S1/S2 (PLAN-26-01). Library only. |
-| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **planned** | SPEC-26 S6 (PLAN-26-02, `#TODO`). |
-| Live watch/reload, per-query URL overrides + enforcement | **planned** | SPEC-26 S3/S4/S5 (later phases, `#TODO`). |
+| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **planned** | SPEC-26 S6 (PLAN-26-02, [#250](https://github.com/sunstoneinstitute/horndb/issues/250)). |
+| Live watch/reload, per-query URL overrides + enforcement | **planned** | SPEC-26 S3/S4/S5 (later phases, [#251](https://github.com/sunstoneinstitute/horndb/issues/251)/[#252](https://github.com/sunstoneinstitute/horndb/issues/252)). |
 ```
 
 (Do not edit `TASKS.md` on this feature branch — the matching `TASKS.md` transition lands as a
@@ -1243,5 +1244,5 @@ Run before the first task lands:
   applies them in filename order (directory index breaks exact-name ties).
 - **`[simd]` is restart-only** — nothing in this crate reloads or re-reads it; injection into
   `horndb-simd` is PLAN-26-02 and happens once at startup.
-- **Placeholder scan:** no `TODO`/`TBD` in code; the only `#TODO`s are the sanctioned
-  unfiled-issue markers (file the tracking issue before Task 1).
+- **Placeholder scan:** no `TODO`/`TBD` in code; the tracking issue is filed
+  ([#249](https://github.com/sunstoneinstitute/horndb/issues/249)).
