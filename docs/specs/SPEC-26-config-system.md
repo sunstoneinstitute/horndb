@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 date: 2026-07-22
 scope: "Operator configuration system — layered config (built-in defaults < base config.toml < config.d/*.toml < env vars < argv), live watch/reload, and a two-tier server-vs-query settings model with per-query overrides via URL query parameters; wires bind, the SIMD knobs, query timeout, result-row cap, and rdf12 to real config. Per-query memory accounting is delegated to a companion spec."
 ---
@@ -47,7 +47,10 @@ Where it stops:
   knobs (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`, read directly in
   `crates/simd/src/dispatch.rs`). There is no general mechanism, and those two
   vars are unreachable from a config file. SPEC-26 absorbs them into a `[simd]`
-  config section (S2), keeping the two env-var names as the env layer (S1).
+  config section (S2); the env layer reaches them under the standard nesting
+  scheme as `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE` (S1). The old
+  single-underscore names are dropped — a sanctioned 0.x breaking change, so
+  there is no alias to carry.
 - **No live reconfiguration.** Every knob is fixed at process start.
 - **No resource limits.** There is no query timeout, no result-row cap, no
   memory budget, and no per-query or per-session settings of any kind. A
@@ -99,7 +102,7 @@ flags, environment variables, and operator files.
      full path (so `99-*` overrides `00-*` regardless of which directory each
      lives in),
   4. **environment variables** — e.g. `HORNDB_SERVER__BIND`,
-     `HORNDB_SIMD_MAX_ISA`,
+     `HORNDB_SIMD__MAX_ISA`,
   5. **command-line flags** (argv) — e.g. `--bind`, `--simd-max-isa`,
      `--simd-autotune`.
 
@@ -118,8 +121,11 @@ flags, environment variables, and operator files.
   var under the `HORNDB_` prefix with `__` (double underscore) as the nesting
   separator — e.g. `[server].bind` is `HORNDB_SERVER__BIND`,
   `[server.limits].query_timeout` is `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT`. The
-  two pre-existing SIMD vars (`HORNDB_SIMD_MAX_ISA`, `HORNDB_SIMD_AUTOTUNE`) are
-  kept as documented aliases for `[simd]` so current usage keeps working.
+  `[simd]` section is reachable the same way — `HORNDB_SIMD__MAX_ISA`,
+  `HORNDB_SIMD__AUTOTUNE` — replacing the old single-underscore
+  `HORNDB_SIMD_MAX_ISA` / `HORNDB_SIMD_AUTOTUNE` names (a sanctioned 0.x
+  breaking change; the read sites in `crates/simd/src/dispatch.rs` move to the
+  new names as part of the S6 wiring).
 - **Command-line flags** cover a curated subset of common knobs (`--bind`,
   `--simd-max-isa`, `--simd-autotune`, plus `--config` for the file location); the
   full surface is reachable via env vars and files, not via a flag per nested
@@ -158,8 +164,9 @@ Separate server-scoped config from the bounded set a query may override.
     (byte size, default unset/unlimited; parsed and stored, enforcement
     delegated). **Hot-reloadable.**
   - `[simd]` — `max_isa` (string, e.g. `"scalar"`; default: auto-detect) and
-    `autotune` (bool, default `true`), absorbing the current `HORNDB_SIMD_MAX_ISA`
-    / `HORNDB_SIMD_AUTOTUNE` env vars (S1). **Restart-only** — ISA selection and
+    `autotune` (bool, default `true`), absorbing the current SIMD knobs — now
+    reached via `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE` (S1).
+    **Restart-only** — ISA selection and
     calibration happen once at startup (`crates/simd/src/dispatch.rs`).
   - `[logging]` — `level` (default `info`). **Hot-reloadable.**
   - `[reload]` — `debounce` (duration, default `250ms`). **Hot-reloadable.**
@@ -246,8 +253,10 @@ Make the settings real for everything except memory.
   existing flag-based invocations keep forcing their values.
 - **SIMD wiring.** `[simd]` values (from any layer) are resolved by
   `horndb-config` and passed into the `crates/simd` init path; `simd` stays a
-  low-level leaf crate and does not depend on `horndb-config`. The legacy env-var
-  read sites become one of the resolved layers rather than a separate mechanism.
+  low-level leaf crate and does not depend on `horndb-config`. The current
+  direct env-var reads in `crates/simd/src/dispatch.rs` are removed; the values
+  arrive from the resolved config layers instead (the env names change to
+  `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE`, S1).
 - **Metrics** (added to `crates/metrics/` with the matching `docs/metrics.md`
   rows in the **same commit**, per the root sync rule):
   - `config_reload_total{result="applied|rejected"}` — counter.
