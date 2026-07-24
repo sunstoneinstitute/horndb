@@ -35,7 +35,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 prettyplease = "0.2"
 
 [dev-dependencies]
