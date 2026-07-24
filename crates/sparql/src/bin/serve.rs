@@ -102,14 +102,26 @@ async fn main() -> Result<()> {
     let inputs = load_inputs(&cli);
     let cfg = horndb_config::load(&inputs).context("resolving configuration")?;
 
+    // Seed the SIMD policy (ISA cap + auto-tune) from the resolved `[simd]`
+    // config BEFORE the first dispatch or priming, so it reaches the `OnceLock`s
+    // before any primitive resolves them. This MUST precede
+    // `record_simd_calibration()`, which primes every kernel (and thus resolves
+    // the policy cells) — seeding after it would be a silent no-op. An unknown
+    // `max_isa` string is startup-fatal, naming the bad value: `horndb-config`
+    // types `max_isa` as a free `Option<String>`, so the enum check lands here.
+    let simd_max_isa = match cfg.simd.max_isa.as_deref() {
+        None => None,
+        Some(s) => Some(horndb_simd::parse_max_isa(s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid [simd].max_isa {s:?}: expected one of scalar, avx2, avx512, neon"
+            )
+        })?),
+    };
+    horndb_simd::configure(simd_max_isa, cfg.simd.autotune);
+
     // Pay the SIMD startup micro-calibration cost up front and publish which
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
-    // TODO(PLAN-26-02 Task 3): once `crates/simd` exposes an
-    // `init(max_isa, autotune)` entry point, call it here — after config
-    // resolution, before the first store operation — with `cfg.simd.max_isa`
-    // / `cfg.simd.autotune`, and remove `dispatch.rs`'s direct
-    // `HORNDB_SIMD_*` env reads.
 
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
