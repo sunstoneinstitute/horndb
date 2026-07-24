@@ -148,12 +148,15 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 ## Codebase knowledge graph (graphify, optional)
 
 If `graphify-out/graph.json` exists, an AST-derived knowledge graph of this
-workspace is available. For "where/how does X connect to Y" navigation questions,
-prefer a scoped graph query over broad grep/read:
+workspace is available — with god nodes, community structure, and cross-file
+relationships. For codebase questions and "where/how does X connect to Y"
+navigation, prefer a scoped graph query over broad grep/read:
 
 - `graphify query "<question>"` — scoped subgraph for a codebase question.
 - `graphify path "<A>" "<B>"` — relationship between two symbols.
 - `graphify explain "<concept>"` — a node and its neighbours.
+- If `graphify-out/wiki/index.md` exists, use it for broad navigation instead of raw source browsing.
+- Read `graphify-out/GRAPH_REPORT.md` only for broad architecture review, or when query/path/explain do not surface enough context.
 - After changing code, `graphify update .` refreshes the graph (AST-only, no API cost).
 
 The graph is **AST-only** (structural). It is not committed — rebuild locally with
