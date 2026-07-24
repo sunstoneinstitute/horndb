@@ -10,11 +10,19 @@
 //!
 //! The SPARQL query endpoint is `http://<bind>/query` (GET or POST) — NOT
 //! `/sparql`. SPARQL Update is at `/update`.
+//!
+//! Configuration (SPEC-26) is resolved through `horndb-config` before any data
+//! loads or the socket binds: built-in defaults < `--config`'s (or
+//! `$HORNDB_CONFIG`'s, or `/etc/horndb/config.toml`'s) `config.toml` <
+//! `config.d/*.toml` < `HORNDB_SERVER__BIND` / `HORNDB_SIMD__*` env vars <
+//! `--bind` / `--simd-max-isa` / `--simd-autotune`. An invalid config is fatal
+//! at startup.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use horndb_config::{CliOverrides, LoadInputs};
 #[cfg(feature = "reasoner")]
 use oxrdf::{GraphName, Quad};
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
@@ -36,9 +44,27 @@ struct Cli {
     #[arg(long = "data", required = true, num_args = 1..)]
     data: Vec<PathBuf>,
 
-    /// Address to bind, e.g. `127.0.0.1:3840` (3840 is HornDB's standard port).
-    #[arg(long = "bind", default_value = "127.0.0.1:3840")]
-    bind: String,
+    /// Path to a `config.toml` (SPEC-26). Highest precedence for *which* file
+    /// is read; falls back to `$HORNDB_CONFIG`, then `/etc/horndb/config.toml`.
+    #[arg(long = "config")]
+    config: Option<PathBuf>,
+
+    /// Override `[server].bind`, e.g. `127.0.0.1:3840` (3840 is HornDB's
+    /// standard port). Wins over `HORNDB_SERVER__BIND` and the config file;
+    /// leave unset to use the resolved config value. No default here — a
+    /// `clap` default would silently clobber a file/env value.
+    #[arg(long = "bind")]
+    bind: Option<String>,
+
+    /// Override `[simd].max_isa` (`scalar`/`avx2`/`avx512`/`neon`). Consumed
+    /// by `crates/simd` injection, added in a follow-up increment.
+    #[arg(long = "simd-max-isa")]
+    simd_max_isa: Option<String>,
+
+    /// Override `[simd].autotune`. Consumed by `crates/simd` injection, added
+    /// in a follow-up increment.
+    #[arg(long = "simd-autotune")]
+    simd_autotune: Option<bool>,
 
     /// Run OWL 2 RL materialization over the loaded data and serve the
     /// closure (requires the `reasoner` feature, on by default).
@@ -46,13 +72,44 @@ struct Cli {
     materialize: bool,
 }
 
+/// Map CLI flags onto `horndb_config::LoadInputs`. Only the value flags that
+/// are present (`Some`) enter `cli_overrides`; an absent flag stays `None` and
+/// contributes nothing, so it cannot clobber a lower layer (env or file).
+/// Extracted from `main()` so this mapping is unit-testable without spawning
+/// a server. `env_config_path` reads `HORNDB_CONFIG` directly (not a `clap`
+/// flag) so file-location precedence is file < env < `--config`, matching
+/// `horndb_config::load`'s `cli_config_path > env_config_path > default`
+/// resolution order.
+fn load_inputs(cli: &Cli) -> LoadInputs {
+    LoadInputs {
+        cli_config_path: cli.config.clone(),
+        env_config_path: std::env::var_os("HORNDB_CONFIG").map(PathBuf::from),
+        cli_overrides: CliOverrides {
+            bind: cli.bind.clone(),
+            simd_max_isa: cli.simd_max_isa.clone(),
+            simd_autotune: cli.simd_autotune,
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Resolve configuration before anything else: an invalid config (unknown
+    // key, out-of-range value, a `--config`/`HORNDB_CONFIG` file that does not
+    // exist) is fatal at startup, before any data loads or the socket binds.
+    let inputs = load_inputs(&cli);
+    let cfg = horndb_config::load(&inputs).context("resolving configuration")?;
+
     // Pay the SIMD startup micro-calibration cost up front and publish which
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
+    // TODO(PLAN-26-02 Task 3): once `crates/simd` exposes an
+    // `init(max_isa, autotune)` entry point, call it here — after config
+    // resolution, before the first store operation — with `cfg.simd.max_isa`
+    // / `cfg.simd.autotune`, and remove `dispatch.rs`'s direct
+    // `HORNDB_SIMD_*` env reads.
 
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
@@ -149,9 +206,9 @@ async fn main() -> Result<()> {
 
     let app = build_router(state);
 
-    let listener = tokio::net::TcpListener::bind(&cli.bind)
+    let listener = tokio::net::TcpListener::bind(&cfg.server.bind)
         .await
-        .with_context(|| format!("binding {}", cli.bind))?;
+        .with_context(|| format!("binding {}", cfg.server.bind))?;
     let local = listener.local_addr().context("reading bound address")?;
     eprintln!("serve: {total} triples loaded; SPARQL query endpoint at http://{local}/query");
 
@@ -300,4 +357,68 @@ fn collect_into_dataset(path: &Path, dataset: &mut oxrdf::Dataset) -> Result<usi
         }
     }
     Ok(count)
+}
+
+#[cfg(test)]
+mod load_inputs_tests {
+    use super::*;
+
+    /// A minimal `Cli` with every value flag unset — the "nothing passed on
+    /// argv" case.
+    fn bare_cli() -> Cli {
+        Cli {
+            data: vec![PathBuf::from("x.nt")],
+            config: None,
+            bind: None,
+            simd_max_isa: None,
+            simd_autotune: None,
+            materialize: false,
+        }
+    }
+
+    // Deliberately does NOT touch `HORNDB_CONFIG` (or any env var): unit tests
+    // in this module run concurrently within the same process, and mutating
+    // process-global env state here would race with sibling tests. Env-driven
+    // file-location precedence (file < `HORNDB_CONFIG` < `--config`) is
+    // covered by the subprocess-level integration tests in
+    // `tests/serve_config_wiring.rs`, which each own a dedicated process.
+
+    #[test]
+    fn absent_value_flags_leave_overrides_none() {
+        let inputs = load_inputs(&bare_cli());
+        assert_eq!(inputs.cli_overrides.bind, None);
+        assert_eq!(inputs.cli_overrides.simd_max_isa, None);
+        assert_eq!(inputs.cli_overrides.simd_autotune, None);
+    }
+
+    #[test]
+    fn present_value_flags_land_in_overrides() {
+        let mut cli = bare_cli();
+        cli.bind = Some("0.0.0.0:9".to_string());
+        cli.simd_max_isa = Some("scalar".to_string());
+        cli.simd_autotune = Some(false);
+
+        let inputs = load_inputs(&cli);
+        assert_eq!(inputs.cli_overrides.bind.as_deref(), Some("0.0.0.0:9"));
+        assert_eq!(inputs.cli_overrides.simd_max_isa.as_deref(), Some("scalar"));
+        assert_eq!(inputs.cli_overrides.simd_autotune, Some(false));
+    }
+
+    #[test]
+    fn cli_config_path_maps_through_unchanged() {
+        let mut cli = bare_cli();
+        cli.config = Some(PathBuf::from("/tmp/horndb-test-config.toml"));
+
+        let inputs = load_inputs(&cli);
+        assert_eq!(
+            inputs.cli_config_path,
+            Some(PathBuf::from("/tmp/horndb-test-config.toml"))
+        );
+    }
+
+    #[test]
+    fn absent_config_flag_leaves_cli_config_path_none() {
+        let inputs = load_inputs(&bare_cli());
+        assert_eq!(inputs.cli_config_path, None);
+    }
 }

@@ -1214,9 +1214,11 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "assert_cmd",
  "axum",
  "bytes",
  "clap",
+ "horndb-config",
  "horndb-metrics",
  "horndb-owlrl",
  "horndb-simd",
