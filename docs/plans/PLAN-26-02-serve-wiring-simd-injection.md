@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-24
 scope: "SPEC-26 Phase 1b — wire horndb-config into the serve binary: --config + curated value flags, bind from config, [simd] resolved and injected into crates/simd (direct env reads removed), and startup-fatal validation. Depends on PLAN-26-01 (the horndb-config crate). This is the increment that makes a config file take effect end-to-end."
 ---

@@ -462,7 +462,7 @@ HIGH *Performance* task in `TASKS.md`.
 
 ## 15. SPEC-26 — Operator configuration system
 
-**Crate:** new `horndb-config` (dependency-light leaf) · **Spec:** `SPEC-26` · **Overall status: specified** (library landed; `serve` wiring not yet integrated)
+**Crate:** new `horndb-config` (dependency-light leaf) · **Spec:** `SPEC-26` · **Overall status: partially implemented** (library and `serve` wiring landed — Phases 1a/1b; live watch/reload and per-query URL overrides remain planned)
 
 A single typed `ServerConfig` loaded by layering, lowest precedence to highest:
 built-in defaults, a base `config.toml`, `config.d/*.toml` drop-in fragments
@@ -477,7 +477,7 @@ so a typo in a config file fails loudly instead of being silently ignored.
 | Component | Status | Notes |
 |---|---|---|
 | Layered load (`horndb-config`: defaults < base < config.d < env < argv), typed model, validation | **implemented** | `crates/config/`, SPEC-26 S1/S2 (PLAN-26-01). Library only. |
-| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **planned** | SPEC-26 S6 (PLAN-26-02, [#250](https://github.com/sunstoneinstitute/horndb/issues/250)). |
+| `serve` wiring (`--config`, value flags, `[simd]` injection, startup-fatal validation) | **implemented** | SPEC-26 S6 (PLAN-26-02, [#250](https://github.com/sunstoneinstitute/horndb/issues/250)). |
 | Live watch/reload, per-query URL overrides + enforcement | **planned** | SPEC-26 S3/S4/S5 (later phases, [#251](https://github.com/sunstoneinstitute/horndb/issues/251)/[#252](https://github.com/sunstoneinstitute/horndb/issues/252)). |
 
 ---
