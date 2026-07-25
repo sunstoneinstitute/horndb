@@ -54,7 +54,7 @@ jobs:
       matrix:
         include:
           - os: macos-15 # Apple Silicon
-            bottle_tag: arm64_sonoma
+            bottle_tag: arm64_sequoia
           - os: macos-26 # Apple Silicon
             bottle_tag: arm64_tahoe
     runs-on: ${{ matrix.os }}
@@ -298,15 +298,15 @@ jobs:
           tar czf "dist/${SRC}.tar.gz" "${SRC}"
 
           source_sha=$(sha256sum "dist/${SRC}.tar.gz" | awk '{print $1}')
-          macos15_sha=$(cat "dist/horndb-${VERSION}.arm64_sonoma.bottle.tar.gz.sha256")
+          macos15_sha=$(cat "dist/horndb-${VERSION}.arm64_sequoia.bottle.tar.gz.sha256")
           macos26_sha=$(cat "dist/horndb-${VERSION}.arm64_tahoe.bottle.tar.gz.sha256")
 
           jq -n \
             --arg version "$VERSION" \
             --arg source_sha "$source_sha" \
-            --arg arm64_sonoma "$macos15_sha" \
+            --arg arm64_sequoia "$macos15_sha" \
             --arg arm64_tahoe "$macos26_sha" \
-            '{version:$version, source_sha:$source_sha, bottles:{arm64_sonoma:$arm64_sonoma, arm64_tahoe:$arm64_tahoe}}' \
+            '{version:$version, source_sha:$source_sha, bottles:{arm64_sequoia:$arm64_sequoia, arm64_tahoe:$arm64_tahoe}}' \
             > formula-data.json
 
           # Aggregate checksums for the release page.
@@ -354,7 +354,7 @@ jobs:
           set -euo pipefail
           VERSION=$(jq -r .version formula-data.json)
           SOURCE_SHA=$(jq -r .source_sha formula-data.json)
-          MACOS15_SHA=$(jq -r .bottles.arm64_sonoma formula-data.json)
+          MACOS15_SHA=$(jq -r .bottles.arm64_sequoia formula-data.json)
           MACOS26_SHA=$(jq -r .bottles.arm64_tahoe formula-data.json)
           BASE="https://github.com/sunstoneinstitute/horndb/releases/download/v${VERSION}"
           mkdir -p tap/Formula
@@ -370,8 +370,8 @@ jobs:
             # the same arch on newer macOS, and to a source build if none match.
             bottle do
               root_url "${BASE}"
-              sha256 cellar: :any, arm64_sonoma: "${MACOS15_SHA}"
-              sha256 cellar: :any, arm64_tahoe:  "${MACOS26_SHA}"
+              sha256 cellar: :any, arm64_sequoia: "${MACOS15_SHA}"
+              sha256 cellar: :any, arm64_tahoe:   "${MACOS26_SHA}"
             end
 
             depends_on "cmake" => :build
