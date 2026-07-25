@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-25
+
+- Added: layered operator config — defaults < config.toml < config.d/*.toml < HORNDB_ env < CLI flags, with unit-aware values like "2GiB" and "30s".
+- Added: `serve` takes --config, plus --bind, --simd-max-isa and --simd-autotune overrides. An unknown key or out-of-range value is startup-fatal and names the file it came from.
+- Changed: SIMD settings flow through config only — HORNDB_SIMD_MAX_ISA/HORNDB_SIMD_AUTOTUNE are now HORNDB_SIMD__MAX_ISA/HORNDB_SIMD__AUTOTUNE (double underscore).
+
 ## [0.5.0] - 2026-07-21
 
 - Added: hermetic owl:imports resolution — closes the RL-reachable OWL 2 RL conformance gap.
