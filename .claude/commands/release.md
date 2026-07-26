@@ -7,9 +7,10 @@ every member crate inherits it via `version.workspace = true` (`crates/python`
 is outside the workspace and keeps its own). This command bumps that single
 version, curates the changelog, commits, and tags `vX.Y.Z`.
 
-This is the manual path. Do **not** also apply a `bump-*` label to the release
-PR — that would trigger the CI auto-bump (`bump-version-on-merge.yml`) on top of
-this one. Manual release and the label-driven CI bump are mutually exclusive.
+This is the only path that creates a release. The tag must be pushed from a
+developer machine: GitHub does not start workflow runs for pushes made with
+`GITHUB_TOKEN`, so a tag pushed by CI would never trigger
+`release-artifacts.yml` and the release would ship with no bottles.
 
 ## Step 1: Determine the new version
 

@@ -6,9 +6,9 @@ root ``Cargo.toml`` (under ``[workspace.package]`` — every member crate inheri
 it via ``version.workspace = true``), prepends the entry to ``CHANGELOG.md``,
 syncs ``Cargo.lock``, commits, and tags ``vX.Y.Z``.
 
-This is the *manual* release path, driven by the ``/release`` command. It is not
-the CI label-driven bump (``bump-version-on-merge.yml``); if you release with
-this script, do not also apply a ``bump-*`` label to the PR.
+This is the only release path, driven by the ``/release`` command. Push the tag
+it creates by hand — a tag pushed by CI (with ``GITHUB_TOKEN``) does not start
+``release-artifacts.yml``, so no bottles are built.
 
 Usage::
 
