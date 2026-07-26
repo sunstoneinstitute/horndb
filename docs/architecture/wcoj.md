@@ -400,26 +400,26 @@ column).
 
 ### 7.2 The contiguous view and the dedup hazard
 
-`active_run` is backed by `LevelColumn` (`source/soa.rs`), a transient
-column-major (SoA) copy of one trie level's active `[lo, hi)` range. The dense
-source stores rows as AoS `(u64,u64,u64)`; a single column over a range is
-strided, which the SIMD primitives can't consume — so `LevelColumn` copies the
-column out contiguously once per `open_level` and amortises it over the level's
-seeks.
+`VecTripleSource` stores each ordering **column-major** (struct-of-arrays):
+three `Vec<TermId>`, one per trie level. A level's values are therefore already
+contiguous, and `active_run` hands out a slice of the stored column — no copy
+(SPEC-03 NF2). The earlier row-major layout needed a transient per-level copy
+(`LevelColumn`) to feed the SIMD primitives; that copy, and the module holding
+it, are gone.
 
-**The hazard, and why there are two buffers:**
+**The hazard, and why inner levels still need a second buffer:**
 
-- `LevelColumn.values` keeps **duplicates** — it stays 1:1 with source rows so
-  `lower_bound_from` can map a slice offset back to an absolute row index for
-  seeking. (A subject with N objects repeats N times at the subject level.)
+- At depths 0 and 1 the stored column repeats a key once per child row (a
+  subject with N objects repeats N times at the subject level).
 - But the leapfrog intersects *distinct* level keys, and `horndb_simd::intersect`
-  requires sorted, duplicate-free input. Feeding raw `values` to `intersect`
+  requires sorted, duplicate-free input. Feeding the raw column to `intersect`
   **over-produces** — a subject with N objects would emit each binding N times.
 
-So `active_run` returns a **separate, cached `distinct_run` view** (`soa.rs:76`):
-a deduplicated copy built lazily on first use, sliced to start at the first
-distinct key `≥` the cursor's current key. Two buffers, two contracts:
-duplicate-preserving for seek index-mapping, deduplicated for the SIMD intersect.
+So for depths 0 and 1 `active_run` returns a **cached deduplicated copy**,
+sliced to start at the first distinct key `≥` the cursor's current key. The
+**leaf (depth 2) needs none**: `open_level(2)` fixes the parent prefix
+`(level0, level1)` and rows are deduplicated triples, so the leaf column over
+that range is already strictly increasing — it is returned directly.
 
 > **Test coverage.** The `tests/batchiter_simd.rs` duplicate-subject test and the
 > **wide** (`N_WIDE > 64`) variant of `tests/differential_fuzz.rs` guard this.
@@ -427,12 +427,16 @@ duplicate-preserving for seek index-mapping, deduplicated for the SIMD intersect
 > it does **not** exercise the SIMD path — don't assume a green narrow fuzz run
 > covers the fast path.
 
-### 7.3 Seek-path micro-opt gotcha
+### 7.3 Seek path
 
-Only the **depth-0 full-data level** is worth a SoA `LevelColumn` rebuild.
-Rebuilding the transient SoA on every `open_level` is O(range) per descent and
-was a measured **~760× `four_cycle` regression**. Deeper levels stay on scalar
-AoS `partition_point`. **Re-measure `four_cycle` before touching the seek path.**
+`seek` first gallops a bounded window (≤ 64 rows) from the cursor; on a miss the
+target is far, so it pays the exact `horndb_simd::lower_bound` over the rest of
+the level. With columnar storage that applies at **every** depth — the old rule
+that only the depth-0 full-data level was worth the SIMD path existed because
+deeper levels had to rebuild a transient column per `open_level` (an O(range)
+cost that measured as a ~760× `four_cycle` regression). No column is built now,
+so the rule is gone. **Still re-measure `four_cycle` before touching the seek
+path.**
 
 ## 8. Output & control flow surface
 
@@ -456,7 +460,7 @@ AoS `partition_point`. **Re-measure `four_cycle` before touching the seek path.*
    matched by an `up` on backtrack; every `top_at` exhaustion is matched by a
    `reset`. Drift here corrupts a later re-entry's ranges.
 4. **`active_run` returns distinct, sorted, cursor-relative keys** with no
-   duplicates (§7.2). Raw `values` over-produces.
+   duplicates (§7.2). The raw inner-level column over-produces.
 5. **The two leapfrog copies stay in lockstep.** Fix a bug in
    `executor/wcoj.rs`? Mirror it in `trie/leapfrog.rs` (and vice-versa).
 
@@ -472,7 +476,7 @@ AoS `partition_point`. **Re-measure `four_cycle` before touching the seek path.*
 | `src/trie/source_iter.rs` | `PatternTrieIter` (global→local→physical) |
 | `src/trie/mod.rs` | `TrieIterator` trait |
 | `src/source/mod.rs` | `TripleSource` / `OrderedTripleIter` contracts |
-| `src/source/soa.rs` | `LevelColumn` — SoA view + `distinct_run` |
+| `src/source/vec_source.rs` | columnar `VecTripleSource` + `VecIter` cursor |
 | `src/batch.rs` | Arrow batch builder |
 
 - `tests/differential_fuzz.rs` — 256-case differential fuzzer (WCOJ vs

@@ -10,20 +10,25 @@ Leapfrog Triejoin executor, trie iterators, planner.
   `SyntheticGraph::skewed_four_cycle`) beats the binary-hash reference on the
   canonical skewed win case.
 - Magic-sets / SLG tabling remain deferred.
-- **Trie-seek micro-opt gotcha:** only the depth-0 full-data level is worth a SIMD
-  SoA `LevelColumn` rebuild. Rebuilding the transient SoA on every `open_level` is
-  O(range) per descent and was a measured **~760× `four_cycle` regression**; deeper
-  levels stay on scalar AoS `partition_point`. Re-measure `four_cycle` before
-  touching the seek path.
+- **`VecTripleSource` is columnar (#239).** Each ordering is three `Vec<TermId>`,
+  one per trie level, so a level's values are contiguous and the SIMD primitives
+  read them in place (SPEC-03 NF2). The old row-major layout needed a transient
+  per-level copy (`LevelColumn`, `source/soa.rs`), and rebuilding that copy on
+  every `open_level` was O(range) per descent — a measured **~760× `four_cycle`
+  regression**. No column is built now, so `seek` can take the SIMD `lower_bound`
+  path at every depth. **Still re-measure `four_cycle` before touching the seek
+  path.**
 - **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
   production executor (`executor/wcoj.rs::BatchIter`) has a k==2
   `horndb_simd::intersect` fast path: at prime time, if both contributing iters
   expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the pairwise intersection is
   precomputed once into `simd_buf[depth]` and drained. **Hazard:** the leapfrog
-  requires *distinct* level keys, but the SoA `LevelColumn.values` keeps duplicates
-  (it must, for `lower_bound_from`'s row index-mapping). So `active_run` returns the
-  separate, cached `LevelColumn::distinct_run` view — feeding the raw column to
-  `intersect` over-produces (a subject with N objects emits the binding N times). The
+  requires *distinct* level keys, but at depths 0 and 1 the stored column repeats a
+  key once per child row. So `active_run` returns a cached deduplicated copy for
+  those depths — feeding the raw column to `intersect` over-produces (a subject
+  with N objects emits the binding N times). The leaf (depth 2) needs no dedup:
+  under a fixed `(level0, level1)` prefix the object column of deduplicated triples
+  is already strictly increasing, so it is returned as a slice with no copy. The
   `tests/batchiter_simd.rs` duplicate-subject test and the wide
   (`N_WIDE > 64`) `differential_fuzz` variant guard this; the narrow fuzzer (vocab 30)
   never crosses the threshold, so it does **not** cover the SIMD path on its own.
@@ -43,8 +48,8 @@ Leapfrog Triejoin executor, trie iterators, planner.
   `simd_tried` flag stops the leaf pre-arm and the scalar prime from both probing
   `active_run`. `benches/per_tuple.rs` has two cases: `two_star_50k`
   (descent-bound, will not hit NF1) and `wide_4x100k` (marginal hot path, the NF1
-  gate). Marginal cost is **8.3 ns/tuple** (hornbench); the residual is the
-  AoS→SoA input-column copy (`LevelColumn::from_aos` ~46%), tracked for a
-  columnar `VecTripleSource` in **#239** to reach ≤5 ns.
+  gate). Marginal cost was **8.3 ns/tuple** (hornbench) with the residual in the
+  row→column input copy; #239 removed that copy by making the source columnar —
+  re-measure on hornbench for the NF1 (≤5 ns) verdict.
 
 See `INTEGRATION-NOTES.md` for design decisions.

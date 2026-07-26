@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::ids::{Ordering, TermId};
 use crate::pattern::{Term, TriplePattern, Var};
-use crate::source::vec_source::VecTripleSource;
+use crate::source::vec_source::{SortedColumns, VecTripleSource};
 
 /// Which side of a triple a per-predicate statistic is keyed on. The predicate
 /// is always bound in per-predicate stats, so only subject and object vary.
@@ -225,19 +225,22 @@ impl SnapshotStats {
         let mut ndv_subject: HashMap<TermId, u64> = HashMap::new();
         let mut ndv_object: HashMap<TermId, u64> = HashMap::new();
 
-        // Pso: (predicate, subject, object). Predicate = .0 (major run key),
-        // subject = .1 (the value we dedup within a run). One pass yields both
-        // the per-predicate triple count and the distinct-subject count.
+        // Pso: (predicate, subject, object). Predicate = level 0 (major run
+        // key), subject = level 1 (the value we dedup within a run). One pass
+        // yields both the per-predicate triple count and the distinct-subject
+        // count.
         if let Some(rows) = src.sorted_rows(Ordering::Pso) {
+            let (preds, subjects) = (rows.level(0), rows.level(1));
+            let n = rows.len();
             let mut i = 0;
-            while i < rows.len() {
-                let p = rows[i].0;
+            while i < n {
+                let p = preds[i];
                 let mut count = 0u64;
                 let mut distinct_s = 0u64;
                 let mut prev_s: Option<TermId> = None;
-                while i < rows.len() && rows[i].0 == p {
+                while i < n && preds[i] == p {
                     count += 1;
-                    let s = rows[i].1;
+                    let s = subjects[i];
                     if prev_s != Some(s) {
                         distinct_s += 1;
                         prev_s = Some(s);
@@ -249,15 +252,17 @@ impl SnapshotStats {
             }
         }
 
-        // Pos: (predicate, object, subject). Predicate = .0, object = .1.
+        // Pos: (predicate, object, subject). Predicate = level 0, object = level 1.
         if let Some(rows) = src.sorted_rows(Ordering::Pos) {
+            let (preds, objects) = (rows.level(0), rows.level(1));
+            let n = rows.len();
             let mut i = 0;
-            while i < rows.len() {
-                let p = rows[i].0;
+            while i < n {
+                let p = preds[i];
                 let mut distinct_o = 0u64;
                 let mut prev_o: Option<TermId> = None;
-                while i < rows.len() && rows[i].0 == p {
-                    let o = rows[i].1;
+                while i < n && preds[i] == p {
+                    let o = objects[i];
                     if prev_o != Some(o) {
                         distinct_o += 1;
                         prev_o = Some(o);
@@ -302,7 +307,14 @@ impl SnapshotStats {
         self.sampling_enabled = enabled;
         self.sample_rows = if enabled {
             src.sorted_rows(Ordering::Spo)
-                .map(<[_]>::to_vec)
+                .map(|rows| {
+                    let (s, p, o) = (rows.level(0), rows.level(1), rows.level(2));
+                    s.iter()
+                        .zip(p.iter())
+                        .zip(o.iter())
+                        .map(|((&s, &p), &o)| (s, p, o))
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -329,27 +341,29 @@ impl SnapshotStats {
 
     /// Core of [`SnapshotStats::build_characteristic_sets`], parameterised by the
     /// top-K cap so tests can exercise the residual-folding path with a small `k`.
-    /// `rows` must be the `Spo`-sorted snapshot rows `(subject, predicate,
-    /// object)`. The production path calls this with [`CS_TOP_K`].
+    /// `rows` must be the `Spo`-sorted snapshot columns (levels 0/1/2 =
+    /// subject/predicate/object). The production path calls this with [`CS_TOP_K`].
     fn build_characteristic_sets_with_k(
-        rows: &[(TermId, TermId, TermId)],
+        rows: SortedColumns<'_>,
         k: usize,
     ) -> CharacteristicSetIndex {
         // key (sorted distinct predicates) -> (subject count, occurrences aligned
         // with the key's predicate order).
         let mut agg: HashMap<Vec<TermId>, (u64, Vec<u64>)> = HashMap::new();
 
+        let (subjects, predicates) = (rows.level(0), rows.level(1));
+        let n = rows.len();
         let mut i = 0;
-        while i < rows.len() {
-            let s = rows[i].0;
+        while i < n {
+            let s = subjects[i];
             // Walk this subject's run, collecting (predicate, object-count) in the
             // sorted predicate order the Spo scan yields.
             let mut preds: Vec<TermId> = Vec::new();
             let mut obj_counts: Vec<u64> = Vec::new();
-            while i < rows.len() && rows[i].0 == s {
-                let p = rows[i].1;
+            while i < n && subjects[i] == s {
+                let p = predicates[i];
                 let mut objs = 0u64;
-                while i < rows.len() && rows[i].0 == s && rows[i].1 == p {
+                while i < n && subjects[i] == s && predicates[i] == p {
                     // Triples are unique, so each row on (s, p) is a distinct object.
                     objs += 1;
                     i += 1;
@@ -433,16 +447,18 @@ impl SnapshotStats {
 
         // Pso: max object fan-out per subject → the Subject-role degree (.0).
         if let Some(rows) = src.sorted_rows(Ordering::Pso) {
+            let (preds, subjects) = (rows.level(0), rows.level(1));
+            let n = rows.len();
             let mut i = 0;
-            while i < rows.len() {
-                let p = rows[i].0;
+            while i < n {
+                let p = preds[i];
                 let mut max_fanout = 0u64;
-                while i < rows.len() && rows[i].0 == p {
-                    let s = rows[i].1;
+                while i < n && preds[i] == p {
+                    let s = subjects[i];
                     // Distinct objects for this (p, s): rows are unique so each
                     // row is a distinct object.
                     let mut fanout = 0u64;
-                    while i < rows.len() && rows[i].0 == p && rows[i].1 == s {
+                    while i < n && preds[i] == p && subjects[i] == s {
                         fanout += 1;
                         i += 1;
                     }
@@ -454,14 +470,16 @@ impl SnapshotStats {
 
         // Pos: max subject fan-out per object → the Object-role degree (.1).
         if let Some(rows) = src.sorted_rows(Ordering::Pos) {
+            let (preds, objects) = (rows.level(0), rows.level(1));
+            let n = rows.len();
             let mut i = 0;
-            while i < rows.len() {
-                let p = rows[i].0;
+            while i < n {
+                let p = preds[i];
                 let mut max_fanout = 0u64;
-                while i < rows.len() && rows[i].0 == p {
-                    let o = rows[i].1;
+                while i < n && preds[i] == p {
+                    let o = objects[i];
                     let mut fanout = 0u64;
-                    while i < rows.len() && rows[i].0 == p && rows[i].1 == o {
+                    while i < n && preds[i] == p && objects[i] == o {
                         fanout += 1;
                         i += 1;
                     }
