@@ -130,7 +130,7 @@ TASKS.md                  # Live follow-up list (CRITICAL → LOW)
 crates/                   # The nine workspace crates
 harness/                  # Workspace-level harness assets (selected.toml, curation/)
 .github/workflows/        # CI (per-PR) and nightly (SPB-256)
-initial-research.md       # Feasibility study and competitive landscape
+docs/ideas/               # Feasibility study, design sketches
 ```
 
 ## Performance

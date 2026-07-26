@@ -67,12 +67,16 @@ validate `main` itself and because only `main` runs save the cargo cache.
 
 The workspace carries one version under `[workspace.package]` in the root
 `Cargo.toml`; every member crate inherits it via `version.workspace = true`
-(`crates/python` is outside the workspace and keeps its own). Label a PR
-`bump-major` / `bump-minor` / `bump-patch`; on merge, `bump-version-on-merge.yml`
-runs `scripts/bump-version.py`, commits `Bump version: …` to `main`, and tags
-`vX.Y.Z` inline. No bump label → no bump. The release script
-(`.claude/commands/release.md`) is the other tag-creating path; it also tags
-`vX.Y.Z` itself. A version bump hand-edited into `Cargo.toml` and merged without
-a bump label is not auto-tagged — use the bump label or the release script.
-`bump-version-on-merge.yml` is borrowed/adapted from
-`sunstoneinstitute/claude-plugins`.
+(`crates/python` is outside the workspace and keeps its own). The release
+script (`.claude/commands/release.md` → `.claude/scripts/release.py`) is the
+only path that bumps the version and tags `vX.Y.Z`; run it locally and push
+the tag by hand. A version bump hand-edited into `Cargo.toml` and merged is
+not tagged by anything.
+
+The tag must be pushed by a human, not by CI. GitHub does not start workflow
+runs for pushes made with `GITHUB_TOKEN`, so a tag pushed from a workflow
+never triggers `release-artifacts.yml` — no bottles get built and the Homebrew
+tap is left pointing at the previous release. A label-driven auto-bump
+workflow used to exist here and failed exactly that way (`v0.2.0` was
+bot-tagged and has no Release Artifacts run); it was removed rather than
+patched, to leave one release path that works.
