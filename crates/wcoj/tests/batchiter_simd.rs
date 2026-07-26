@@ -1,8 +1,8 @@
 //! Drives the production `BatchIter` (inlined leapfrog) hard enough to engage
 //! its `k == 2` SIMD intersect fast path — the variable runs at the shared
-//! depth are >= `SIMD_SEEK_MIN_RUN` (64), so `VecIter::active_run` materialises
-//! an SoA column and `BatchIter::try_arm_simd` fires. Each case checks the
-//! executor output against a brute-force join oracle, so an over- or
+//! depth are >= `SIMD_INTERSECT_MIN_RUN` (64), so `VecIter::active_run`
+//! materialises an SoA column and `BatchIter::try_arm_simd` fires. Each case
+//! checks the executor output against a brute-force join oracle, so an over- or
 //! under-production in the SIMD drain shows up as a row-set mismatch.
 
 use std::collections::BTreeSet;

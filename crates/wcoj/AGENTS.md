@@ -22,12 +22,12 @@ Leapfrog Triejoin executor, trie iterators, planner.
 - **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
   production executor (`executor/wcoj.rs::BatchIter`) has a k==2
   `horndb_simd::intersect` fast path: at prime time, if both contributing iters
-  expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the pairwise intersection is
-  precomputed once into `simd_buf[depth]` and drained. **Hazard:** the leapfrog
-  requires *distinct* level keys, but at depths 0 and 1 the stored column repeats a
-  key once per child row. So `active_run` returns a cached deduplicated copy for
-  those depths — feeding the raw column to `intersect` over-produces (a subject
-  with N objects emits the binding N times). The leaf (depth 2) needs no dedup:
+  expose an `active_run` ≥ `SIMD_INTERSECT_MIN_RUN` (64), the pairwise
+  intersection is precomputed once into `simd_buf[depth]` and drained.
+  **Hazard:** the leapfrog requires *distinct* level keys, but at depths 0 and 1
+  the stored column repeats a key once per child row. So `active_run` returns a
+  cached deduplicated copy for those depths — feeding the raw column to
+  `intersect` over-produces (a subject with N objects emits the binding N times). The leaf (depth 2) needs no dedup:
   under a fixed `(level0, level1)` prefix the object column of deduplicated triples
   is already strictly increasing, so it is returned as a slice with no copy. The
   `tests/batchiter_simd.rs` duplicate-subject test and the wide
