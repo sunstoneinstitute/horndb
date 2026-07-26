@@ -1,0 +1,17 @@
+---
+title: "Reference"
+description: "Exact syntax and behaviour: SPARQL functions, configuration keys, and error codes."
+---
+
+Reference pages describe how the machinery behaves — no teaching, no opinion.
+Every entry of a kind uses the same field order, so entries are quick to scan and
+compare. To *learn* a task, start with the [Guides](../guides/index.qmd) instead.
+
+## Sections
+
+- [SPARQL functions and operators](functions.qmd) — every function, operator, and
+  property-path operator HornDB evaluates, with signatures and examples.
+- [Configuration](configuration.qmd) — environment variables, CLI flags, and
+  build-time feature flags that control server and runtime behaviour.
+- [Errors and diagnostics](errors.qmd) — the HTTP status codes and error
+  categories the SPARQL endpoint returns today, and what is stable to rely on.

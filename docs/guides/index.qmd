@@ -1,0 +1,19 @@
+---
+title: "Guides"
+description: "Tutorials, how-to guides, and background for working with HornDB."
+---
+
+Guides are the task-and-learning side of the HornDB docs. They come in three
+kinds, and each page stays in exactly one:
+
+- **Tutorials** take you along a single guided path to a first success.
+- **How-to guides** give the steps to reach one real-world result.
+- **Explanation** discusses *why* — the design decisions and trade-offs.
+
+For exact syntax — SPARQL functions, config keys, error codes — see the
+[Reference](../ref/index.qmd) instead.
+
+## Start here
+
+- [Getting started](getting-started.qmd) — load a small dataset, turn on OWL 2 RL
+  reasoning, and get your first inferred answer.

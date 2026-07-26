@@ -1,0 +1,88 @@
+# Quarto site config for the PUBLISHED HornDB docs.
+#
+# Only this file's own index.qmd plus the reference (docs/ref/) and guides
+# (docs/guides/) trees render — the rest of docs/ (specs, plans, architecture,
+# this file's other siblings) stays internal. The render list below mirrors
+# the include set in publish.toml; keep the two in step. Brand: Sunstone
+# warm-cream direction (see theme/).
+#
+# Rendered in CI by .github/workflows/pages.yml, mounted at horndb.io/docs/
+# alongside the site/ landing page. Build locally with `quarto render docs/`.
+
+project:
+  type: website
+  output-dir: _site
+  # theme/theme.js and theme/theme-toggle.css are loaded via a JS-constructed
+  # href (see theme/pretheme.html), so Quarto's static resource scanner never
+  # sees a literal reference to them — list them explicitly or they never
+  # make it into _site/.
+  resources:
+    - "theme/theme.js"
+    - "theme/theme-toggle.css"
+  render:
+    - "index.qmd"
+    - "ref/**/*.qmd"
+    - "ref/**/*.md"
+    - "guides/**/*.qmd"
+    - "guides/**/*.md"
+
+website:
+  title: "HornDB docs"
+  site-url: "https://horndb.io/docs/"
+  reader-mode: true
+  search:
+    location: navbar
+    type: overlay
+  navbar:
+    background: "#0E1937"
+    pinned: true
+    # Same logo file as the landing page, so the brand doesn't change when you
+    # cross between horndb.io/ and horndb.io/docs/ (copy of site/assets/ — see
+    # head-extra.html). `title` here overrides `website.title` for the navbar
+    # only, giving "[HornDB logo] docs" instead of "HornDB HornDB docs", while
+    # <title> tags and search keep the full "HornDB docs".
+    logo: assets/horndb-horizontal-dark.svg
+    logo-alt: "HornDB"
+    logo-href: index.qmd
+    title: "docs"
+    left:
+      # Full URL, not "/": Quarto resolves a root-relative navbar href against
+      # THIS project's root, so "/" renders as "./" here and "../" under ref/ —
+      # both of which land back in /docs/ instead of the landing page. The
+      # trade-off is that this link leaves a local preview for the real site.
+      - text: "← horndb.io"
+        href: "https://horndb.io/"
+      - text: "Guides"
+        href: guides/index.qmd
+      - text: "Reference"
+        href: ref/index.qmd
+    right:
+      - icon: github
+        href: https://github.com/sunstoneinstitute/horndb
+        aria-label: HornDB on GitHub
+  page-footer:
+    background: "#0E1937"
+    center: "A Sunstone Institute project · Apache-2.0"
+
+format:
+  html:
+    theme:
+      light: [cosmo, theme/horndb.scss]
+      dark: [darkly, theme/horndb-dark.scss]
+    # Unifies the toggle with the marketing site — see theme/pretheme.html.
+    # head-extra.html: tab icons, the same ones the landing page uses.
+    include-in-header:
+      - theme/pretheme.html
+      - head-extra.html
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap
+    smooth-scroll: true
+    grid:
+      sidebar-width: 260px
+      body-width: 820px
+
+# Executable examples: pages that run HornDB use `{python}` cells over the
+# rdflib-compatible binding. Left off by default so prose-only pages don't need
+# a kernel; a page opts in with `jupyter: python3` in its front matter.

@@ -29,3 +29,9 @@ __pycache__
 # graphify local knowledge graph — AST-derived, rebuild with `graphify update .`
 # Un-anchored so per-crate graphs (e.g. crates/sparql/graphify-out/) are ignored too.
 graphify-out/
+
+# Quarto build outputs. Two separate projects: the docs tree and the horndb.io
+# landing page (rebuild with `quarto render docs` / `quarto render site`).
+docs/_site/
+docs/.quarto/
+site/_site/

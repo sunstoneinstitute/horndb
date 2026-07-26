@@ -1,0 +1,67 @@
+/*-- scss:defaults --*/
+// HornDB documentation theme — Sunstone brand, light (warm-cream) direction.
+// Layered on the `cosmo` bootswatch base. Brand guide: Sunstone, May 2026.
+
+$font-family-sans-serif: "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !default;
+$font-family-serif:      "Source Serif 4", Georgia, "Times New Roman", serif !default;
+$font-family-monospace:  "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace !default;
+$headings-font-family:   "Source Serif 4", Georgia, serif;
+$headings-font-weight:   600;
+
+// Warm-cream ground, Dark Blue ink
+$body-bg:          #F3EFE7;
+$body-color:       #0E1937;
+$primary:          #F58221;   // Logo Orange — accent
+$link-color:       #266680;   // Teal — cyan fails contrast on cream
+$link-hover-color: #1B4B5E;
+$border-color:     #DDD4C4;
+$code-color:       #0E1937;
+
+// Sunstone navbar/footer ground
+$navbar-bg:        #0E1937;
+$navbar-fg:        #F3EFE7;
+
+/*-- scss:rules --*/
+@font-face { font-family:"DM Sans"; src:url("theme/fonts/DMSans.woff2") format("woff2"); font-weight:100 1000; font-style:normal; font-display:swap; }
+@font-face { font-family:"DM Sans"; src:url("theme/fonts/DMSans-Italic.woff2") format("woff2"); font-weight:100 1000; font-style:italic; font-display:swap; }
+@font-face { font-family:"Source Serif 4"; src:url("theme/fonts/SourceSerif4.woff2") format("woff2"); font-weight:200 900; font-style:normal; font-display:swap; }
+@font-face { font-family:"Source Serif 4"; src:url("theme/fonts/SourceSerif4-Italic.woff2") format("woff2"); font-weight:200 900; font-style:italic; font-display:swap; }
+
+body { font-optical-sizing: auto; }
+h1, h2, h3, h4, h5 { letter-spacing: -0.01em; }
+
+// Branded navbar: Dark Blue ground, yellow hover
+.navbar { background-color: #0E1937; }
+.navbar .navbar-brand,
+.navbar .nav-link { color: #F3EFE7 !important; }
+.navbar .nav-link:hover,
+.navbar .nav-link:focus { color: #FAD604 !important; }
+
+// Quarto's own navbar-logo default (24px) reads small next to the wordmark
+// lockup the marketing site uses — only site/_quarto.yml sets `logo:`, this
+// is a no-op on docs pages (text-only brand, no logo image).
+.navbar-logo { max-height: 32px; }
+
+// Push the theme toggle to the far right of the navbar, past search/GitHub/
+// reader-toggle, matching the marketing site's nav order (site/index.html).
+// Scoped to Quarto's own desktop breakpoint (992px), where these render as a
+// single row via CSS `order`; below that, Quarto's own mobile layout is left
+// untouched. `.quarto-navbar-tools` becomes `display: contents` so its two
+// children (reader-toggle, color-scheme-toggle) join `#quarto-search` as
+// siblings in one flex context and can be given an explicit shared order.
+@media (min-width: 992px) {
+  .navbar .quarto-navbar-tools { display: contents; }
+  .navbar #quarto-search { order: 950; }
+  .navbar .quarto-reader-toggle { order: 960; margin-left: .5em; }
+  .navbar .quarto-color-scheme-toggle { order: 999; margin-left: .5em; }
+}
+
+// Inline code chips get a faint orange wash (matches the marketing site)
+code:not(.sourceCode):not(.hljs) {
+  background: rgba(245, 130, 33, 0.10);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+// Active sidebar item in brand orange
+.sidebar-item .active { color: #B5601A; font-weight: 600; }

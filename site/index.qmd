@@ -1,0 +1,190 @@
+---
+pagetitle: "HornDB"
+page-layout: full
+toc: false
+# No `title:`/`description:` — those trigger Quarto's visible title-block
+# header (an <h1> + description paragraph above the page content), which
+# would duplicate the hero section's own <h1>. `open-graph:` sets the same
+# copy for social-share meta tags without rendering it on the page.
+open-graph:
+  title: "HornDB"
+  description: "A graph database for RDF, with a hybrid forward/backward-chaining reasoner built in for OWL 2 RL."
+  image: assets/icon-512.png
+---
+
+```{=html}
+<section class="hero">
+  <img class="hero-mark" src="assets/horndb-mark.svg" alt="" width="96" height="140" aria-hidden="true">
+  <h1>A graph database for RDF, with a hybrid<br>reasoner built in for OWL&nbsp;2&nbsp;RL.</h1>
+  <p class="hero-sub">
+    Load RDF, query it with SPARQL&nbsp;1.1, and get back answers that include
+    what the reasoner inferred — forward <em>and</em> backward chaining over
+    OWL&nbsp;2&nbsp;RL semantics. Apache-2.0, EU-developed, open from the start.
+  </p>
+  <p class="status"><span class="status-dot" aria-hidden="true"></span> Active development — the storage-to-SPARQL stack runs end-to-end, with forward and backward chaining and incremental insert and retraction.</p>
+  <div class="cta-row">
+    <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
+    <a class="btn btn-ghost" href="docs/guides/getting-started.html">Get your first reasoned answer</a>
+  </div>
+</section>
+
+<!-- What / Why -->
+<section class="band">
+  <div class="wrap narrow">
+    <h2>What it is, and why we're building it</h2>
+    <p>
+      <strong>HornDB</strong> is a graph database: it stores RDF triples —
+      subject, predicate, object — and answers SPARQL queries over them.
+      It isn't a property-graph database like Neo4j; the graph model here
+      is RDF's, the one behind the SPARQL standard and the wider semantic
+      web. What sets it apart is the reasoner built in: load data, and
+      HornDB derives new triples from it under OWL&nbsp;2&nbsp;RL
+      semantics, with provenance back to the facts each inference came
+      from. The name is literal — <strong>Horn</strong> as in <em>Horn
+      clauses</em>. OWL&nbsp;2&nbsp;RL is the fragment of OWL&nbsp;2 whose
+      entailment rules are Horn rules, evaluated bottom-up to a fixpoint,
+      which is what this engine does.
+    </p>
+    <p>
+      The reasoner space today forces a choice. Pure-materialization
+      commercial engines are fast but give up 100–1000× on backward
+      chaining, and aren't open-source. Open-source toolkits are flexible
+      but slower on the same workload. HornDB takes a different approach:
+      materialize the cheap, regular subset; backward-chain the rest; and
+      treat modern memory hierarchies as a design target from the start,
+      not an afterthought. The full reasoning behind these choices is in
+      the <a href="https://github.com/sunstoneinstitute/horndb/blob/main/docs/specs/SPEC-00-vision.md">vision spec</a>.
+    </p>
+  </div>
+</section>
+
+<!-- The bets -->
+<section class="band band-alt">
+  <div class="wrap">
+    <h2>The bets</h2>
+    <p class="section-lede">Six design decisions shape how HornDB works.</p>
+    <ul class="cards">
+      <li class="card">
+        <h3>Hybrid execution</h3>
+        <p>Not pure materialization. Materialize the schema and transitive-closure subset; backward-chain the rest with magic sets.</p>
+      </li>
+      <li class="card">
+        <h3>Modern memory as a target</h3>
+        <p>A tiered working set — fast memory for the hot data, DRAM for warm, CXL/NVMe for cold — designed in, not bolted on.</p>
+      </li>
+      <li class="card">
+        <h3>Incremental maintenance</h3>
+        <p>DBSP-style Z-set differences instead of DRed counting, so updates touch only what actually changed.</p>
+      </li>
+      <li class="card">
+        <h3>GraphBLAS closure</h3>
+        <p>Schema-level transitive closure as a semiring matrix multiply on SuiteSparse:GraphBLAS.</p>
+      </li>
+      <li class="card">
+        <h3>Compiled rules</h3>
+        <p>Soufflé-style ahead-of-time compilation: OWL&nbsp;2&nbsp;RL rules become native Rust — no rule interpreter in the hot path.</p>
+      </li>
+      <li class="card">
+        <h3>Provenance as a requirement</h3>
+        <p>Every inferred triple traces back to its premises. Explainability is a hard constraint, not a feature flag.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- What works today -->
+<section class="band">
+  <div class="wrap">
+    <h2>What runs today</h2>
+    <p class="section-lede">Every subsystem below has code in the repository today, exercised by tests and the conformance harness — not just specified.</p>
+    <ul class="cards">
+      <li class="card">
+        <h3>Tiered storage <span class="badge">implemented</span></h3>
+        <p>Dictionary-encoded terms and predicate-partitioned columnar triples, with an N-Triples loader that already ingests RDF&nbsp;1.2 triple terms.</p>
+      </li>
+      <li class="card">
+        <h3>Worst-case-optimal joins <span class="badge">implemented</span></h3>
+        <p>Leapfrog Triejoin with cost-based fallback to a binary hash join. Clears its acceptance gate — ≥10× a binary-join baseline on the canonical four-cycle workload (~30–34× measured on a skewed 10⁶-edge graph).</p>
+      </li>
+      <li class="card">
+        <h3>Compiled OWL&nbsp;2&nbsp;RL rules <span class="badge">implemented</span></h3>
+        <p>Entailment rules compiled ahead-of-time to native Rust — no interpreter in the hot path — evaluated semi-naïvely to a fixpoint. 100 of 115 selected W3C OWL&nbsp;2&nbsp;RL cases pass.</p>
+      </li>
+      <li class="card">
+        <h3>GraphBLAS closure <span class="badge">implemented</span></h3>
+        <p>Schema-level transitive closure runs as a semiring matrix multiply on SuiteSparse:GraphBLAS, linked in natively.</p>
+      </li>
+      <li class="card">
+        <h3>Incremental maintenance <span class="badge">implemented</span></h3>
+        <p>DBSP-style Z-set deltas update only what changed. Insertion is fully incremental, and retraction now lands across both the rule path and the closure path — insert 10K / retract 10K is bit-identical to a clean load.</p>
+      </li>
+      <li class="card">
+        <h3>SPARQL&nbsp;1.1 frontend <span class="badge">implemented</span></h3>
+        <p>Parser, algebra, planner and an axum HTTP endpoint: SELECT&nbsp;/&nbsp;ASK&nbsp;/&nbsp;CONSTRUCT&nbsp;/&nbsp;DESCRIBE, full aggregation, every property-path operator (including the recursive ones), pattern and graph-management Update, and an EXPLAIN pragma — driven end-to-end against the LDBC Semantic Publishing Benchmark.</p>
+      </li>
+      <li class="card">
+        <h3>Provenance &amp; proof trees <span class="badge">implemented</span></h3>
+        <p>Every inferred triple records the rule and premises that produced it; an explicit proof query walks the recursive tree down to the asserted facts at its leaves.</p>
+      </li>
+      <li class="card">
+        <h3>SSSOM crosswalks <span class="badge">implemented</span></h3>
+        <p>Ontology mapping chains (SKOS&nbsp;/&nbsp;OWL&nbsp;/&nbsp;semapv) close through the compiled rule engine and the GraphBLAS backend, with confidence propagated along each chain.</p>
+      </li>
+      <li class="card">
+        <h3>Python / rdflib API <span class="badge">implemented</span></h3>
+        <p>A PyO3 binding exposing rdflib-shaped terms, a Graph facade, Turtle&nbsp;/&nbsp;N-Triples parse&nbsp;and&nbsp;serialize, and SPARQL query&nbsp;/&nbsp;update passthrough — differential-tested against upstream rdflib.</p>
+      </li>
+      <li class="card">
+        <h3>SIMD acceleration <span class="badge">implemented</span></h3>
+        <p>A shared, runtime-dispatched SIMD layer — AVX-512&nbsp;/&nbsp;AVX2 on x86, NEON on Apple silicon, scalar fallback always present as the oracle — driving the WCOJ seek&nbsp;/&nbsp;intersect and dictionary-decode&nbsp;/&nbsp;<code>rdf:type</code>-scan hot loops. Every kernel is differential-proven bit-identical to scalar.</p>
+      </li>
+      <li class="card">
+        <h3>Observability <span class="badge">implemented</span></h3>
+        <p>Prometheus metrics across the SPARQL HTTP layer, closure backend, rule engine, incremental maintenance and storage, exposed at a <code>/metrics</code> scrape endpoint. OpenTelemetry traces and logs <span class="badge badge-deferred">deferred</span> to a later phase.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- What's next -->
+<section class="band band-alt">
+  <div class="wrap">
+    <h2>What's next</h2>
+    <p class="section-lede">
+      HornDB is young and under active development. The harness comes first by design — every
+      spec's acceptance criteria reference a concrete test subset, and a spec is not satisfied
+      until its subset is green. Here's what we're building toward.
+    </p>
+    <ul class="cards">
+      <li class="card">
+        <h3>Cost-based join planning <span class="badge badge-deferred">planned</span></h3>
+        <p>HornDB currently runs about 4× behind GraphDB Free on the LDBC Semantic Publishing Benchmark aggregation mix. Cost-based join ordering in the query planner is the next lever to close that gap.</p>
+      </li>
+      <li class="card">
+        <h3>Faster materialization <span class="badge badge-deferred">planned</span></h3>
+        <p>The within-partition object index has shipped. Next: delta-driven semi-naïve rule firing, so <code>rdf:type</code> reasoning scales with what changed rather than the whole store.</p>
+      </li>
+      <li class="card">
+        <h3>Crosswalk serving <span class="badge badge-deferred">planned</span></h3>
+        <p>A compact crosswalk index (~10&nbsp;bytes per mapping pair) and spine over the SSSOM mapping reasoner, for serving large ontology-alignment sets.</p>
+      </li>
+      <li class="card">
+        <h3>Full-scale live benchmarking <span class="badge badge-deferred">planned</span></h3>
+        <p>The nightly LDBC&nbsp;SPB-256 run already tracks closure and aggregation throughput against GraphDB Free and Oxigraph. Extending it to true full scale (256M triples) with live editorial insert&nbsp;/&nbsp;update&nbsp;/&nbsp;delete agents running throughout is still open.</p>
+      </li>
+      <li class="card">
+        <h3>Hardware specialization <span class="badge badge-deferred">planned</span></h3>
+        <p>The long-term bet: GPU GraphBLAS and worst-case-optimal joins, CXL&nbsp;/&nbsp;HBM memory tiering, and multi-node — without lowering the conformance bar as the hardware grows.</p>
+      </li>
+      <li class="card">
+        <h3>Tracing &amp; logs <span class="badge badge-deferred">deferred</span></h3>
+        <p>OpenTelemetry traces and structured logs alongside the Prometheus metrics already exposed at <code>/metrics</code>.</p>
+      </li>
+    </ul>
+    <p class="muted-note">
+      Non-goals: OWL&nbsp;2&nbsp;DL completeness, property-graph compatibility, or embedding-based
+      “neural” reasoning as the source of truth. The symbolic engine is always the source of truth.
+    </p>
+  </div>
+</section>
+```

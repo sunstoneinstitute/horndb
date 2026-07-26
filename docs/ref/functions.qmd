@@ -1,0 +1,643 @@
+---
+title: "SPARQL functions and operators"
+description: "Signatures, arguments, and return values for every SPARQL 1.1 function, operator, and property-path operator HornDB evaluates."
+---
+
+This page lists the SPARQL 1.1 built-in functions, operators, and property-path
+operators HornDB's query engine evaluates. Every entry on this page ships as of
+HornDB 0.2.0; the `Since` field is omitted per entry to avoid repeating that
+baseline on every line.
+
+A few terms recur below:
+
+- **Term** — any value a variable can bind to: an IRI, a blank node, or a
+  literal.
+- **String** — a literal used for its lexical form: a plain literal, or one
+  typed `xsd:string` or tagged with a language.
+- **Numeric** — a literal typed with an XSD numeric datatype (`xsd:integer`,
+  `xsd:decimal`, `xsd:double`, `xsd:float`, or one of their derived types).
+  Arithmetic carries every numeric value as a 64-bit float internally; a
+  result renders as `xsd:integer` when it has no fractional part, otherwise as
+  `xsd:decimal`.
+- **Type error** — an argument of the wrong kind (for example, `LANG()` on an
+  IRI). A type error makes the whole expression unbound rather than raising a
+  query error; inside a `FILTER`, an unbound expression drops the row, same as
+  `false`.
+
+## String functions
+
+```
+STR(term: IRI | literal) → string
+    Return the lexical form of a term as a simple literal.
+    Arguments:  term — an IRI or a literal.
+    Returns:    the lexical value, with no language tag or datatype.
+    Example:    STR(<http://example.org/x>) → "http://example.org/x"
+```
+
+```
+LANG(literal: literal) → string
+    Return a literal's language tag.
+    Arguments:  literal — a literal term.
+    Returns:    the language tag, or an empty string if the literal has none.
+                A non-literal argument is a type error.
+    Example:    LANG("chat"@fr) → "fr"
+```
+
+```
+LANGMATCHES(tag: string, range: string) → boolean
+    Test a language tag against a language range (RFC 4647 basic filtering).
+    Arguments:  tag — a language tag, typically from LANG();
+                range — a language range, or "*" to match any non-empty tag.
+    Returns:    true if tag matches range; case-insensitive.
+    Example:    LANGMATCHES(LANG("chat"@fr), "fr") → true
+```
+
+```
+DATATYPE(literal: literal) → IRI
+    Return a literal's datatype IRI.
+    Arguments:  literal — a literal term.
+    Returns:    the datatype IRI. xsd:string for a plain literal with no
+                language tag; rdf:langString for one with a language tag.
+                A non-literal argument is a type error.
+    Example:    DATATYPE("42"^^xsd:integer) → xsd:integer
+```
+
+```
+STRLEN(str: string) → integer
+    Return the length of a string in characters.
+    Arguments:  str — the input string.
+    Returns:    the character count, as an integer.
+    Example:    STRLEN("café") → 4
+```
+
+```
+SUBSTR(str: string, start: integer) → string
+SUBSTR(str: string, start: integer, length: integer) → string
+    Return a substring of str.
+    Arguments:  str — the input string;
+                start — the 1-based starting position;
+                length — the number of characters to take; omit to take the
+                rest of the string.
+    Returns:    the substring. A start position past the end of str returns
+                an empty string.
+    Example:    SUBSTR("chatouille", 1, 4) → "chat"
+```
+
+```
+UCASE(str: string) → string
+    Return str with every character upper-cased.
+    Arguments:  str — the input string.
+    Returns:    the upper-cased string.
+    Example:    UCASE("chat") → "CHAT"
+```
+
+```
+LCASE(str: string) → string
+    Return str with every character lower-cased.
+    Arguments:  str — the input string.
+    Returns:    the lower-cased string.
+    Example:    LCASE("CHAT") → "chat"
+```
+
+```
+STRSTARTS(str: string, substr: string) → boolean
+    Test whether str begins with substr.
+    Arguments:  str — the string to test; substr — the prefix to look for.
+    Returns:    true if str begins with substr.
+    Example:    STRSTARTS("chatouille", "chat") → true
+```
+
+```
+STRENDS(str: string, substr: string) → boolean
+    Test whether str ends with substr.
+    Arguments:  str — the string to test; substr — the suffix to look for.
+    Returns:    true if str ends with substr.
+    Example:    STRENDS("chatouille", "ille") → true
+```
+
+```
+CONTAINS(str: string, substr: string) → boolean
+    Test whether str contains substr.
+    Arguments:  str — the string to search; substr — the substring to find.
+    Returns:    true if substr occurs anywhere in str.
+    Example:    CONTAINS("chatouille", "atou") → true
+```
+
+```
+STRBEFORE(str: string, substr: string) → string
+    Return the part of str before the first occurrence of substr.
+    Arguments:  str — the input string; substr — the marker to split on.
+    Returns:    the substring before substr; an empty string if substr does
+                not occur in str.
+    Example:    STRBEFORE("chat-noir", "-") → "chat"
+```
+
+```
+STRAFTER(str: string, substr: string) → string
+    Return the part of str after the first occurrence of substr.
+    Arguments:  str — the input string; substr — the marker to split on.
+    Returns:    the substring after substr; an empty string if substr does
+                not occur in str.
+    Example:    STRAFTER("chat-noir", "-") → "noir"
+```
+
+```
+CONCAT(str: string [, … ]) → string
+    Concatenate any number of strings.
+    Arguments:  str — one or more strings, in order.
+    Returns:    the strings joined with no separator.
+    Example:    CONCAT("chat", "-", "noir") → "chat-noir"
+```
+
+```
+REPLACE(str: string, pattern: string, replacement: string) → string
+REPLACE(str: string, pattern: string, replacement: string, flags: string) → string
+    Replace every match of a regular expression in str.
+    Arguments:  str — the input string;
+                pattern — a regular expression;
+                replacement — the replacement text (backreferences $1, $2, …);
+                flags — an optional combination of i (case-insensitive),
+                s (. matches newline), m (multi-line ^/$), and x (ignore
+                whitespace in pattern).
+    Returns:    str with every match of pattern substituted by replacement.
+                An invalid pattern or an unrecognized flag is a type error.
+    Example:    REPLACE("chat", "a", "o") → "chot"
+```
+
+```
+REGEX(str: string, pattern: string) → boolean
+REGEX(str: string, pattern: string, flags: string) → boolean
+    Test whether str matches a regular expression.
+    Arguments:  str — the string to test; pattern — a regular expression;
+                flags — see REPLACE above.
+    Returns:    true if pattern matches anywhere in str. An invalid pattern
+                or an unrecognized flag is a type error.
+    Example:    REGEX("chat", "^c.*t$") → true
+```
+
+## Numeric functions
+
+```
+ABS(n: numeric) → numeric
+    Return the absolute value of n.
+    Arguments:  n — a numeric value.
+    Returns:    |n|.
+    Example:    ABS(-3) → 3
+```
+
+```
+CEIL(n: numeric) → numeric
+    Round n up to the nearest integer.
+    Arguments:  n — a numeric value.
+    Returns:    the smallest integer ≥ n.
+    Example:    CEIL(2.1) → 3
+```
+
+```
+FLOOR(n: numeric) → numeric
+    Round n down to the nearest integer.
+    Arguments:  n — a numeric value.
+    Returns:    the largest integer ≤ n.
+    Example:    FLOOR(2.9) → 2
+```
+
+```
+ROUND(n: numeric) → numeric
+    Round n to the nearest integer.
+    Arguments:  n — a numeric value.
+    Returns:    n rounded to the nearest integer; a tie (n.5) rounds toward
+                positive infinity, so ROUND(-2.5) is -2, not -3.
+    Example:    ROUND(2.5) → 3
+```
+
+## Date/time functions
+
+The six accessors below apply only to a literal typed `xsd:dateTime`, lexical
+form `YYYY-MM-DDThh:mm:ss(.fff…)?`. A literal typed otherwise, or one that
+does not parse to that shape, is a type error.
+
+```
+YEAR(dt: dateTime) → integer
+    Return the year component of dt.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the year.
+    Example:    YEAR("2024-03-05T10:15:30"^^xsd:dateTime) → 2024
+```
+
+```
+MONTH(dt: dateTime) → integer
+    Return the month component of dt.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the month (1–12).
+    Example:    MONTH("2024-03-05T10:15:30"^^xsd:dateTime) → 3
+```
+
+```
+DAY(dt: dateTime) → integer
+    Return the day-of-month component of dt.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the day of the month.
+    Example:    DAY("2024-03-05T10:15:30"^^xsd:dateTime) → 5
+```
+
+```
+HOURS(dt: dateTime) → integer
+    Return the hour component of dt.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the hour (0–23).
+    Example:    HOURS("2024-03-05T10:15:30"^^xsd:dateTime) → 10
+```
+
+```
+MINUTES(dt: dateTime) → integer
+    Return the minute component of dt.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the minute (0–59).
+    Example:    MINUTES("2024-03-05T10:15:30"^^xsd:dateTime) → 15
+```
+
+```
+SECONDS(dt: dateTime) → decimal
+    Return the seconds component of dt, including any fractional part.
+    Arguments:  dt — an xsd:dateTime literal.
+    Returns:    the seconds, as an xsd:decimal.
+    Example:    SECONDS("2024-03-05T10:15:30.5"^^xsd:dateTime) → 30.5
+```
+
+## Type-checking and conditional functions
+
+```
+BOUND(var: variable) → boolean
+    Test whether a variable is bound in the current solution.
+    Arguments:  var — a query variable.
+    Returns:    true if var has a value in the current row.
+    Example:    BOUND(?x) → true
+```
+
+```
+ISIRI(term: term) → boolean
+    Test whether term is an IRI.
+    Arguments:  term — any term.
+    Returns:    true if term is an IRI.
+    Aliases:    ISURI
+    Example:    ISIRI(<http://example.org/x>) → true
+```
+
+```
+ISBLANK(term: term) → boolean
+    Test whether term is a blank node.
+    Arguments:  term — any term.
+    Returns:    true if term is a blank node.
+    Example:    ISBLANK(_:b0) → true
+```
+
+```
+ISLITERAL(term: term) → boolean
+    Test whether term is a literal.
+    Arguments:  term — any term.
+    Returns:    true if term is a literal.
+    Example:    ISLITERAL("chat") → true
+```
+
+```
+ISNUMERIC(term: term) → boolean
+    Test whether term is a numeric literal.
+    Arguments:  term — any term.
+    Returns:    true only for a literal whose datatype is an XSD numeric type
+                and whose lexical form parses as a number. A plain string
+                that merely looks numeric (e.g. "42") is false.
+    Example:    ISNUMERIC("42"^^xsd:integer) → true
+```
+
+```
+IF(cond: boolean, then: term, else: term) → term
+    Choose between two expressions.
+    Arguments:  cond — a boolean expression;
+                then — evaluated and returned if cond is true;
+                else — evaluated and returned if cond is false.
+    Returns:    the value of whichever branch was taken. An error evaluating
+                cond takes the else branch.
+    Example:    IF(STRLEN("chat") > 3, "long", "short") → "long"
+```
+
+```
+COALESCE(term [, … ]) → term
+    Return the first argument that evaluates to a bound value.
+    Arguments:  term — one or more expressions, evaluated left to right.
+    Returns:    the first bound value; unbound if every argument errors or is
+                unbound.
+    Example:    COALESCE(?missing, "fallback") → "fallback"
+```
+
+## Aggregate functions
+
+Aggregates fold a group's rows (all rows, for a query with no `GROUP BY`) down
+to one value per group. `DISTINCT` collapses duplicate input values before the
+fold.
+
+```
+COUNT(*) → integer
+    Count the solutions in a group.
+    Returns:    the number of rows in the group, whether or not any variable
+                is bound.
+    Example:    COUNT(*) → 3
+```
+
+```
+COUNT([DISTINCT] expr: term) → integer
+    Count the rows in a group where expr is bound.
+    Arguments:  expr — an expression.
+    Returns:    the number of rows where expr evaluates to a bound value.
+    Example:    COUNT(?price) → 3
+```
+
+```
+SUM([DISTINCT] expr: numeric) → numeric
+    Sum expr's values over a group.
+    Arguments:  expr — a numeric expression.
+    Returns:    the sum of the numeric values; 0 if the group is empty or no
+                value is numeric.
+    Example:    SUM(?price) → 42.5
+```
+
+```
+AVG([DISTINCT] expr: numeric) → numeric
+    Average expr's values over a group.
+    Arguments:  expr — a numeric expression.
+    Returns:    the mean of the numeric values; 0 if the group is empty or no
+                value is numeric.
+    Example:    AVG(?price) → 14.2
+```
+
+```
+MIN([DISTINCT] expr: term) → term
+    Return the smallest value of expr over a group.
+    Arguments:  expr — an expression.
+    Returns:    the numeric minimum if every value is numeric, otherwise the
+                lexicographically smallest lexical form. Unbound if the group
+                is empty.
+    Example:    MIN(?price) → 5
+```
+
+```
+MAX([DISTINCT] expr: term) → term
+    Return the largest value of expr over a group.
+    Arguments:  expr — an expression.
+    Returns:    the numeric maximum if every value is numeric, otherwise the
+                lexicographically largest lexical form. Unbound if the group
+                is empty.
+    Example:    MAX(?price) → 99
+```
+
+```
+SAMPLE([DISTINCT] expr: term) → term
+    Return one value of expr from a group.
+    Arguments:  expr — an expression.
+    Returns:    one bound value from the group. Which member is unspecified,
+                but deterministic for a given input order.
+    Example:    SAMPLE(?price) → 42
+```
+
+```
+GROUP_CONCAT([DISTINCT] expr: term [; SEPARATOR = sep: string]) → string
+    Concatenate expr's values over a group into one string.
+    Arguments:  expr — an expression;
+                sep — the separator between values; default is a single
+                space.
+    Returns:    the values' lexical forms joined by sep, in group iteration
+                order.
+    Example:    GROUP_CONCAT(?name; SEPARATOR=", ") → "Alice, Bob"
+```
+
+## Operators
+
+Comparison, arithmetic, and logical operators, in one precedence table
+(highest binding first):
+
+| Precedence | Operators |
+|---|---|
+| 1 (highest) | unary `!`, unary `+`, unary `-` |
+| 2 | `*`, `/` |
+| 3 | `+`, `-` |
+| 4 | `=`, `!=`, `<`, `>`, `<=`, `>=`, `IN`, `NOT IN` |
+| 5 | `&&` |
+| 6 (lowest) | `\|\|` |
+
+```
+=(a: term, b: term) → boolean
+    Test value equality.
+    Arguments:  a, b — two terms.
+    Returns:    true if a and b denote equal values: numeric values compare
+                by value, other terms by their full lexical form. Identical
+                to sameTerm today (see below).
+    Example:    1 = 1.0 → true
+```
+
+```
+!=(a: term, b: term) → boolean
+    Test value inequality — the negation of =.
+    Arguments:  a, b — two terms.
+    Returns:    true if a and b do not denote equal values.
+    Example:    1 != 2 → true
+```
+
+```
+sameTerm(a: term, b: term) → boolean
+    Test that a and b are the same RDF term.
+    Arguments:  a, b — two terms.
+    Returns:    true if a and b are structurally identical terms.
+    Example:    sameTerm(<http://example.org/x>, <http://example.org/x>) → true
+```
+
+```
+<(a: term, b: term) → boolean
+    Test whether a orders before b.
+    Arguments:  a, b — two terms.
+    Returns:    true if a is less than b: numerically if both are numeric,
+                chronologically if both look like xsd:dateTime literals,
+                otherwise by lexical form.
+    Example:    1 < 2 → true
+```
+
+```
+>(a: term, b: term) → boolean
+    Test whether a orders after b. See < for the comparison rule.
+    Arguments:  a, b — two terms.
+    Returns:    true if a is greater than b.
+    Example:    2 > 1 → true
+```
+
+```
+<=(a: term, b: term) → boolean
+    Test whether a orders before or equal to b. See < for the comparison
+    rule.
+    Arguments:  a, b — two terms.
+    Returns:    true if a is less than or equal to b.
+    Example:    1 <= 1 → true
+```
+
+```
+>=(a: term, b: term) → boolean
+    Test whether a orders after or equal to b. See < for the comparison rule.
+    Arguments:  a, b — two terms.
+    Returns:    true if a is greater than or equal to b.
+    Example:    1 >= 1 → true
+```
+
+```
+IN(a: term, list: term [, … ]) → boolean
+    Test whether a equals any element of list.
+    Arguments:  a — the probe term; list — one or more comparison terms.
+    Returns:    true if a equals (by the = rule above) any element of list.
+    Example:    2 IN (1, 2, 3) → true
+```
+
+```
+NOT IN(a: term, list: term [, … ]) → boolean
+    The negation of IN.
+    Arguments:  a — the probe term; list — one or more comparison terms.
+    Returns:    true if a equals no element of list.
+    Example:    4 NOT IN (1, 2, 3) → true
+```
+
+```
+&&(a: boolean, b: boolean) → boolean
+    Logical AND, short-circuiting.
+    Arguments:  a, b — two boolean expressions.
+    Returns:    true if both a and b are true. b is not evaluated if a is
+                false.
+    Example:    (1 < 2) && (2 < 3) → true
+```
+
+```
+||(a: boolean, b: boolean) → boolean
+    Logical OR, short-circuiting.
+    Arguments:  a, b — two boolean expressions.
+    Returns:    true if either a or b is true. b is not evaluated if a is
+                true.
+    Example:    (1 > 2) || (2 < 3) → true
+```
+
+```
+!(a: boolean) → boolean
+    Logical negation.
+    Arguments:  a — a boolean expression.
+    Returns:    the opposite of a's effective boolean value.
+    Example:    !(1 > 2) → true
+```
+
+```
++(a: numeric, b: numeric) → numeric
++(a: numeric) → numeric
+    Add a and b; the unary form returns a unchanged.
+    Arguments:  a, b — two numeric values (b omitted for the unary form).
+    Returns:    a + b, or a for the unary form.
+    Example:    2 + 3 → 5
+```
+
+```
+-(a: numeric, b: numeric) → numeric
+-(a: numeric) → numeric
+    Subtract b from a; the unary form negates a.
+    Arguments:  a, b — two numeric values (b omitted for the unary form).
+    Returns:    a - b, or -a for the unary form.
+    Example:    5 - 3 → 2
+```
+
+```
+*(a: numeric, b: numeric) → numeric
+    Multiply a and b.
+    Arguments:  a, b — two numeric values.
+    Returns:    a × b.
+    Example:    2 * 3 → 6
+```
+
+```
+/(a: numeric, b: numeric) → numeric
+    Divide a by b.
+    Arguments:  a — the dividend; b — the divisor.
+    Returns:    a ÷ b. Unbound if b is 0 or not numeric.
+    Example:    6 / 3 → 2
+```
+
+## Property-path operators
+
+A property-path expression matches a set of `(start, end)` node pairs. A
+single path matches each pair at most once, no matter how many distinct
+routes connect the two nodes.
+
+Precedence (highest binding first):
+
+| Precedence | Operator |
+|---|---|
+| 1 (highest) | primary: an IRI, `(…)`, `!(…)`; postfix `?` `*` `+`; prefix `^` |
+| 2 | `/` (sequence) |
+| 3 (lowest) | `\|` (alternative) |
+
+```
+^p → path
+    Match p with its subject and object swapped.
+    Arguments:  p — the inner path.
+    Returns:    every (s, o) pair where p matches (o, s).
+    Example:    ?x ^:childOf ?y matches the same pairs as ?y :childOf ?x
+```
+
+```
+p1 / p2 → path
+    Match p1 followed by p2 through a shared intermediate node.
+    Arguments:  p1, p2 — the two path steps, joined in sequence.
+    Returns:    every (s, o) pair where some node n satisfies both p1(s, n)
+                and p2(n, o).
+    Example:    :parent / :parent matches a grandparent step
+```
+
+```
+p1 | p2 → path
+    Match either p1 or p2.
+    Arguments:  p1, p2 — the two alternative paths.
+    Returns:    the union of p1's and p2's matches.
+    Example:    :parent | :spouse matches a parent step or a spouse step
+```
+
+```
+p? → path
+    Match p zero times or exactly once.
+    Arguments:  p — the inner path.
+    Returns:    the pair (x, x) for every node x the path touches, plus every
+                pair p matches. Not evaluated when both endpoints are
+                unbound variables.
+    Example:    :parent? matches a node paired with itself, or with its
+                parent
+```
+
+```
+p* → path
+    Match p zero or more times.
+    Arguments:  p — the inner path.
+    Returns:    every (s, o) pair reachable by zero or more p steps: the
+                reflexive-transitive closure of p's one-step relation,
+                evaluated by HornDB's runtime closure (a fixpoint over that
+                relation).
+    Example:    :ancestorOf* matches every node paired with itself or with
+                any ancestor
+```
+
+```
+p+ → path
+    Match p one or more times.
+    Arguments:  p — the inner path.
+    Returns:    every (s, o) pair reachable by one or more p steps: the
+                transitive closure of p's one-step relation.
+    Example:    :ancestorOf+ matches every strict-ancestor pair
+```
+
+```
+!(p1 | … | pn) → path
+    Match a single predicate step other than p1, …, pn.
+    Arguments:  p1, …, pn — the excluded predicates, each a plain IRI or an
+                inverse ^IRI.
+    Returns:    every (s, o) pair connected by exactly one predicate not in
+                the excluded set.
+    Example:    !(:parent | :spouse) matches any single step other than
+                :parent or :spouse
+```

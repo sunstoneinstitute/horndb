@@ -1,0 +1,174 @@
+---
+title: "Get your first reasoned answer in five minutes"
+description: "Load a tiny RDF dataset, turn on OWL 2 RL reasoning, and query an inferred triple."
+jupyter: python3
+---
+
+This tutorial takes one path from an empty store to a query answer that only
+appears **because HornDB reasoned about it**. Follow the steps in order; each one
+shows what you should see before you move on.
+
+::: {.callout-note}
+This page runs against a real HornDB server at render time. Quarto starts the
+server, sends it the query below over HTTP, and captures the actual response —
+the output you see is tested, not hand-typed.
+:::
+
+## Before you start
+
+You need:
+
+- HornDB's source checked out, with the `serve` binary built:
+  `cargo build -p horndb-sparql --bin serve`.
+- Python 3, to drive the walkthrough. No package install is needed — every cell
+  below uses only the Python standard library.
+
+HornDB does not yet publish a Python package on PyPI, so this tutorial talks to
+the server directly over HTTP instead of through a client library.
+
+## Step 1 — Start a reasoning server over two facts
+
+Write a small class hierarchy to a Turtle file — a `Cat` is a `Mammal`, and
+`Felix` is a `Cat` — then start `serve` with `--materialize`, which runs OWL 2 RL
+forward-chaining over the data before it answers any query.
+
+```{python}
+import atexit
+import http.client
+import json
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from urllib.parse import urlencode
+
+turtle = """
+@prefix ex: <http://example.org/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+ex:Cat    rdfs:subClassOf ex:Mammal .
+ex:Felix  a               ex:Cat .
+"""
+
+data_file = tempfile.NamedTemporaryFile(mode="w", suffix=".ttl", delete=False)
+data_file.write(turtle)
+data_file.close()
+
+log_path = Path(tempfile.mktemp(suffix=".log"))
+
+
+def find_serve_binary(start: Path) -> Path:
+    for parent in [start, *start.parents]:
+        candidate = parent / "target" / "debug" / "serve"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        "target/debug/serve not found; build it first with: "
+        "cargo build -p horndb-sparql --bin serve"
+    )
+
+
+serve_bin = find_serve_binary(Path.cwd())
+host, port = "127.0.0.1", 18173
+
+with open(log_path, "w") as log_file:
+    server = subprocess.Popen(
+        [
+            str(serve_bin),
+            "--data", data_file.name,
+            "--materialize",
+            "--bind", f"{host}:{port}",
+        ],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def stop_server():
+    if server.poll() is None:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=5)
+
+
+atexit.register(stop_server)
+
+deadline = time.monotonic() + 15
+while True:
+    if server.poll() is not None:
+        raise RuntimeError(
+            f"serve exited early (code {server.returncode}); log:\n"
+            f"{log_path.read_text()}"
+        )
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=0.5)
+        conn.connect()
+        conn.close()
+        break
+    except OSError:
+        if time.monotonic() > deadline:
+            raise TimeoutError("serve did not start accepting connections in time")
+        time.sleep(0.1)
+
+print(log_path.read_text().strip().splitlines()[-1])
+```
+
+The last line confirms the store is loaded and the query endpoint is up. The
+triple count is higher than the two facts you wrote — OWL 2 RL's own vocabulary
+axioms join the closure alongside them.
+
+## Step 2 — Ask a question the data does not state
+
+No triple says `Felix` is a `Mammal` — you never asserted it. Ask anyway, over
+the server's `/query` route:
+
+```{python}
+params = urlencode(
+    {"query": "PREFIX ex: <http://example.org/> SELECT ?x WHERE { ?x a ex:Mammal }"}
+)
+conn = http.client.HTTPConnection(host, port, timeout=5)
+conn.request(
+    "GET",
+    f"/query?{params}",
+    headers={"Accept": "application/sparql-results+json"},
+)
+response = conn.getresponse()
+result = json.loads(response.read())
+conn.close()
+
+for binding in result["results"]["bindings"]:
+    print(binding["x"]["value"])
+```
+
+HornDB applied the OWL 2 RL rule `cax-sco` — anything in a subclass is also in
+the superclass — to infer `Felix a ex:Mammal` and answer the query.
+
+## Proof tracking is not exposed yet
+
+HornDB's reasoner keeps a proof for every triple it derives internally, but
+that proof is not yet reachable through SPARQL or the HTTP API. This tutorial
+stops at the answer; it does not show which rule and premises produced it.
+
+## Step 3 — Stop the server
+
+Shut down the server you started in step 1.
+
+```{python}
+stop_server()
+atexit.unregister(stop_server)
+data_file_path = Path(data_file.name)
+data_file_path.unlink(missing_ok=True)
+log_path.unlink(missing_ok=True)
+print("Server stopped.")
+```
+
+## Next steps
+
+- See the [configuration reference](../ref/configuration.qmd) for every `serve`
+  flag, including `--materialize`.
+- See the [SPARQL function reference](../ref/functions.qmd) for every function
+  and operator HornDB evaluates.
+- See the [errors and diagnostics reference](../ref/errors.qmd) for the HTTP
+  status codes the `/query` and `/update` routes return.
