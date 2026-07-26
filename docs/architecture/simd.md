@@ -85,7 +85,7 @@ delta-apply consumer, is unplanned and gated on issue #133).
 | Call site | Primitive | Role |
 |---|---|---|
 | `wcoj/src/executor/wcoj.rs:517`, `trie/leapfrog.rs:131` | `intersect` | the `k == 2` leapfrog fast path: intersect two `active_run` slices in one bulk call instead of round-robin seeking |
-| `wcoj/src/source/vec_source.rs` (`VecIter::seek`) | `lower_bound` | far-target seek within a stored level column |
+| `wcoj/src/source/vec_source.rs:275` (`VecIter::seek`) | `lower_bound` | far-target seek within a stored level column |
 | `wcoj/src/source/packed_column.rs:188` | `lower_bound` | block-finish seek in a bit-packed column |
 
 The leapfrog intersect path is documented in depth in

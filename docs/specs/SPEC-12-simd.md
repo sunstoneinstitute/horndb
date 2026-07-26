@@ -98,9 +98,10 @@ Out of scope (non-goals):
   invariant (running max via the `order` permutation) is preserved; the SIMD path
   is a pairwise accelerator inside it, not a rewrite of the algorithm.
 - Output bindings remain bit-identical to the scalar leapfrog (SPEC-03 NF4).
-- Note: the dense trie store is currently AoS `Vec<(u64,u64,u64)>`
-  (`vec_source.rs`); a column-major (SoA) view of the active level is a
-  prerequisite for an efficient intersect and is part of this work.
+- Note: an efficient intersect needs each trie level's values contiguous. The
+  dense store (`vec_source.rs`) first met that with a transient per-level copy,
+  then — as of #239 — by storing each ordering column-major (three `Vec<u64>`,
+  one per level), so the kernels read the stored column in place.
 
 **F2. Dictionary + columnar scan (SPEC-02 hot path).**
 - **Decode.** Vectorize the bulk `TermId → Term` path used by scans and result
@@ -291,7 +292,8 @@ criterion/harness bench, every recorded number measured on hornbench and written
 - **F3 may evaporate.** If issue #133's indexing + semi-naïve makes the delta cheap
   enough, the SIMD delta-apply may not be worth the representational change. This is
   an explicit "measure after #133" decision, not a commitment.
-- **Open: AoS → SoA for the WCOJ trie.** F1's intersect wants column-major active
-  levels; the current dense store is AoS tuples. Whether to keep a transient SoA
-  view per level or change the trie storage layout is a SPEC-03 design decision this
-  SPEC surfaces but does not settle.
+- **Settled: AoS → SoA for the WCOJ trie.** F1's intersect wants column-major
+  active levels. This SPEC surfaced the question but left the layout to SPEC-03,
+  which first shipped a transient per-level copy and then, in #239, made the
+  dense store itself column-major — the copy (and its 46%-of-profile cost on the
+  `per_tuple` hot path) is gone.

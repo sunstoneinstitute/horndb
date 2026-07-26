@@ -13,7 +13,8 @@ Leapfrog Triejoin executor, trie iterators, planner.
 - **`VecTripleSource` is columnar (#239).** Each ordering is three `Vec<TermId>`,
   one per trie level, so a level's values are contiguous and the SIMD primitives
   read them in place (SPEC-03 NF2). The old row-major layout needed a transient
-  per-level copy (`LevelColumn`, `source/soa.rs`), and rebuilding that copy on
+  per-level copy (`LevelColumn`, in the since-deleted `source/soa.rs`), and
+  rebuilding that copy on
   every `open_level` was O(range) per descent — a measured **~760× `four_cycle`
   regression**. No column is built now, so `seek` can take the SIMD `lower_bound`
   path at every depth. **Still re-measure `four_cycle` before touching the seek
@@ -48,8 +49,10 @@ Leapfrog Triejoin executor, trie iterators, planner.
   `simd_tried` flag stops the leaf pre-arm and the scalar prime from both probing
   `active_run`. `benches/per_tuple.rs` has two cases: `two_star_50k`
   (descent-bound, will not hit NF1) and `wide_4x100k` (marginal hot path, the NF1
-  gate). Marginal cost was **8.3 ns/tuple** (hornbench) with the residual in the
-  row→column input copy; #239 removed that copy by making the source columnar —
-  re-measure on hornbench for the NF1 (≤5 ns) verdict.
+  gate). Marginal cost was **8.5 ns/tuple** (hornbench) with the residual in the
+  row→column input copy; #239 removed that copy by making the source columnar,
+  taking it to **2.74 ns/tuple** — **NF1 (≤5 ns) is met**. Same-session A/B, so
+  the no-regress side is on the record too: `two_star_50k` 56.1 → 49.0 ns/tuple,
+  `four_cycle/wcoj` 195.8 → 173.9 ms (`docs/benchmarks.md`).
 
 See `INTEGRATION-NOTES.md` for design decisions.
