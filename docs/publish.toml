@@ -1,0 +1,33 @@
+# docs/publish.toml — source of truth for what publishes to horndb.io/docs/.
+#
+# The site build reads this file. Nothing under docs/ is published unless an
+# `include` glob here matches it and no `exclude` glob does. Change what ships by
+# editing these lists — do not hard-code the publish set anywhere else.
+#
+# Prose and structure rules for the published pages live in docs/writing-style.md.
+
+# Globs are relative to this directory (docs/). Markdown and Quarto only.
+include = [
+  "index.qmd",
+  "ref/**/*.md",
+  "ref/**/*.qmd",
+  "guides/**/*.md",
+  "guides/**/*.qmd",
+]
+
+# Excluded even when an include matches — agent-instruction files and drafts.
+exclude = [
+  "**/AGENTS.md",
+  "**/CLAUDE.md",
+  "**/_*",          # leading-underscore files are drafts/partials, never published
+]
+
+# Map a source directory to its published URL prefix. The source dir name need
+# not equal the URL segment: ref/ publishes under /docs/reference/.
+[[mount]]
+source = "ref"
+url = "/docs/reference/"
+
+[[mount]]
+source = "guides"
+url = "/docs/guides/"

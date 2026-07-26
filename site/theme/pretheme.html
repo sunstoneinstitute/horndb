@@ -1,0 +1,40 @@
+<!-- Unifies the docs and marketing-site light/dark/auto toggle. horndb.io/
+     (site/_quarto.yml) and horndb.io/docs/ (docs/_quarto.yml) are two
+     separate Quarto projects, each with its own copy of this file (see
+     the header comment in theme.js for why); both include it here, in
+     <head>, so it runs before Quarto's own inline color-scheme init script
+     (which runs at the top of <body>). Two jobs:
+
+     1. Pre-seed Quarto's own "quarto-color-scheme" sentinel from the
+        site-wide "horndb-theme" choice (same localStorage key theme.js
+        uses), so Quarto's init picks the right stylesheet bundle on first
+        paint instead of always defaulting to light.
+     2. Load the shared toggle stylesheet and script — theme/theme-toggle.css
+        and theme/theme.js, resolved relative to this project's own root
+        (see the path computation below).
+
+        A plain "theme/..." href is wrong on a nested page (e.g. ref/*.html
+        needs "../theme/..."), and Quarto does NOT depth-adjust literal hrefs
+        inside include-in-header content the way it does for its own
+        built-in assets. So this computes the right relative prefix at
+        runtime from one of Quarto's own already-correct site_libs/ asset
+        references, which by this point in <head> is guaranteed to already
+        be in the DOM (include-in-header content is inserted last, right
+        before </head>).
+-->
+<script>
+(function () {
+  try {
+    var mode = localStorage.getItem("horndb-theme");
+    var dark = mode === "dark" || (mode !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+    localStorage.setItem("quarto-color-scheme", dark ? "alternate" : "default");
+  } catch (e) {}
+
+  var ref = document.querySelector('script[src*="site_libs/"], link[href*="site_libs/"]');
+  var refPath = ref ? (ref.getAttribute("src") || ref.getAttribute("href")) : "site_libs/";
+  var prefix = refPath.slice(0, refPath.indexOf("site_libs/"));
+
+  document.write('<link rel="stylesheet" href="' + prefix + 'theme/theme-toggle.css">');
+  document.write('<script src="' + prefix + 'theme/theme.js" defer><' + '/script>');
+})();
+</script>

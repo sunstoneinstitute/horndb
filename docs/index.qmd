@@ -1,0 +1,24 @@
+---
+title: "HornDB docs"
+description: "Guides for learning HornDB and reference for looking up exact behaviour."
+---
+
+HornDB is a graph database with a built-in OWL 2 RL reasoner: load RDF, run
+SPARQL, and get answers that include what the reasoner inferred — with
+provenance back to the facts that produced them. These docs cover two kinds of
+page, so you always know what you're reading.
+
+## Where to go
+
+- **[Guides](guides/index.qmd)** — tutorials that walk you through a task
+  end-to-end, how-to guides for a specific goal, and explanations of the
+  design behind HornDB. Start with
+  [Get your first reasoned answer in five minutes](guides/getting-started.qmd)
+  if you are new here.
+- **[Reference](ref/index.qmd)** — exact syntax and behaviour: SPARQL
+  functions and operators, configuration keys, and error codes. Look here
+  when you already know what you want and need the precise details.
+
+Looking for the project itself, rather than its docs? See
+[horndb.io](https://horndb.io) or the
+[source on GitHub](https://github.com/sunstoneinstitute/horndb).

@@ -1,0 +1,63 @@
+---
+title: "Errors and diagnostics"
+description: "HTTP status codes and error categories from the SPARQL endpoint, and what HornDB does and does not yet guarantee about error stability."
+---
+
+This page describes the errors the SPARQL HTTP endpoint returns today: which
+HTTP status codes appear, what each one covers, and what a client can safely
+depend on. HornDB does not yet have a stable, versioned error-code registry —
+the kind of fixed code table PostgreSQL exposes as SQLSTATE. Read the
+[Stability](#stability) section before you write code that branches on an
+error.
+
+## HTTP status codes
+
+The `/query` and `/update` endpoints return one of four status codes.
+
+| Status code | Fires when | Meaning |
+|---|---|---|
+| `200 OK` | A query completes, in any result format (JSON, XML, CSV, TSV, or the N-Triples body of a `CONSTRUCT`). | The request succeeded. |
+| `204 No Content` | An `/update` request completes with no errors. | The update applied; the body is empty. |
+| `400 Bad Request` | Request parsing, SPARQL parsing, planning, or execution fails. See [Bad-request categories](#bad-request-categories). | The request as sent cannot be answered. Fix the request and retry. |
+| `500 Internal Server Error` | The result stream ends before producing any output (an internal invariant failure, not a client mistake). | Retry is unlikely to help; treat this as a HornDB bug and report it. |
+
+### Bad-request categories
+
+`400` covers several distinct failure points, folded into one status code.
+The response body is a free-text message; the categories below describe what
+that message tends to say, not a fixed vocabulary:
+
+- **Malformed HTTP request** — a `GET` with no `query` parameter, or a form
+  POST body with no `query`/`update` field.
+- **SPARQL syntax error** — the query or update string does not parse.
+- **Unsupported construct** — the query parses but uses an algebra or
+  property-path form HornDB does not translate yet.
+- **Planning failure** — the planner cannot lower the parsed query to a
+  physical execution plan.
+- **Execution failure** — the executor rejects a plan or pattern while
+  running it (for example, a `SELECT` that starts streaming a valid plan but
+  hits a pattern its executor cannot run).
+
+All five arrive as `400`, whether the request was self-inflicted (bad
+syntax) or exposes a real gap in HornDB's supported subset (an unsupported
+construct). Nothing distinguishes those cases beyond the message text.
+
+## Stability
+
+A stable, versioned error-code registry — a fixed code plus symbolic name a
+client can match on, the way PostgreSQL's SQLSTATE or a well-known HTTP API's
+`error.type` field works — is not yet part of HornDB's contract. Today:
+
+- **The HTTP status code is stable.** Build retry and branching logic on
+  `200`/`204`/`400`/`500`.
+- **The response body is a free-text message, not a machine-readable
+  object.** No JSON error envelope, no error code field, no symbolic name.
+  The message wording can change between releases without notice — it exists
+  to help a human debug a request, not for a program to parse.
+- **Do not match on message substrings.** A message that changes wording
+  between releases silently breaks any client that depended on its exact
+  text.
+
+The rdflib-compatible Python binding (`horndb` on PyPI) follows the same
+rule: it raises a Python exception carrying the same free-text message from
+the underlying Rust error, with no stable code either.

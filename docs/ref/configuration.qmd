@@ -1,0 +1,116 @@
+---
+title: "Configuration"
+description: "Every environment variable, CLI flag, and build-time feature flag that controls HornDB's server and runtime behaviour."
+---
+
+This page lists every setting that changes how HornDB behaves at runtime or at
+build time. HornDB's configuration surface is small today: a handful of
+environment variables, the `serve` binary's own command-line flags, and two
+Cargo feature flags. There is no configuration file — nothing here is read from
+a TOML, YAML, or JSON file at startup.
+
+## SPARQL HTTP server
+
+The `serve` binary loads one or more RDF files into a store and exposes SPARQL
+1.1 over HTTP on a single bind address, at three fixed routes: `GET`/`POST
+/query` for SPARQL queries, `POST /update` for SPARQL Update, and `GET
+/metrics` for Prometheus scraping (see [Metrics endpoint](#metrics-endpoint)).
+The routes themselves are not configurable. `serve` takes its settings from
+command-line flags only.
+
+`--data` (list of paths)
+    Default: none. The flag is required — `serve` exits with an error if it is
+    missing.
+    Scope: CLI flag to the `serve` binary; read once at process start.
+    Allowed values: one or more paths to `.nt` (N-Triples) or `.ttl` (Turtle)
+    files, or to directories containing them. Repeat the flag to pass more than
+    one path.
+    Tuning notes: point at a directory to load every `.nt`/`.ttl` file under it,
+    recursively.
+
+`--bind` (address string)
+    Default: `127.0.0.1:3840` (3840 is HornDB's standard port).
+    Scope: CLI flag to the `serve` binary; fixed for the life of the process.
+    Allowed values: any `host:port` address accepted by a Tokio TCP listener,
+    for example `0.0.0.0:3840` to listen on every interface.
+    Tuning notes: change the host to expose the server beyond localhost; change
+    the port to run more than one instance on the same host.
+
+`--materialize` (boolean flag)
+    Default: `false` (off — `serve` answers queries over the asserted triples
+    only).
+    Scope: CLI flag to the `serve` binary; fixed for the life of the process.
+    Requires the binary to be built with the `reasoner` Cargo feature (on by
+    default — see below).
+    Allowed values: present or absent; the flag takes no argument.
+    Tuning notes: pass it to run OWL 2 RL forward-chaining over the loaded data
+    before serving, so queries see the closure — the asserted triples plus
+    every triple the reasoner derives — rather than only what was asserted. If
+    the binary was built without the `reasoner` feature, passing this flag
+    makes `serve` exit with an error instead of starting.
+
+`server` (Cargo feature, `horndb-sparql` crate)
+    Default: on.
+    Scope: compile-time — set with `--features`/`--no-default-features` when
+    building the crate, not at runtime.
+    Allowed values: on or off.
+    Tuning notes: the `serve` binary requires this feature and does not build
+    without it. Turn it off only when using `horndb-sparql` as a library with
+    no HTTP server, for example an embedded query engine with no network
+    listener.
+
+`reasoner` (Cargo feature, `horndb-sparql` crate)
+    Default: on.
+    Scope: compile-time — set with `--features`/`--no-default-features` when
+    building the crate, not at runtime.
+    Allowed values: on or off.
+    Tuning notes: gates `--materialize`. Turn it off to build a smaller binary
+    that serves SPARQL over asserted data without pulling in the OWL 2 RL
+    reasoner.
+
+## SIMD kernel selection
+
+HornDB's shared SIMD layer picks a kernel implementation — scalar, AVX2,
+AVX-512, or NEON — for each vectorized primitive (sorted-set intersection,
+lower-bound seek, and so on) once, at first use, and caches the choice for the
+life of the process. Two environment variables adjust that choice without a
+rebuild.
+
+`HORNDB_SIMD_MAX_ISA` (string, environment variable)
+    Default: unset — no cap; the dispatcher may pick any instruction set the
+    host supports.
+    Scope: environment variable, read once at first use of the SIMD
+    dispatcher; not mutable after that for the life of the process.
+    Allowed values: `scalar` (also accepted: `none`, `off`), `avx2`, `avx512`
+    (also accepted: `avx512f`, `avx-512`), or `neon`; matching is
+    case-insensitive and surrounding whitespace is ignored. The value is a
+    width ceiling, not an exact pick — scalar is narrower than avx2/neon, which
+    are both narrower than avx512 — so `avx2` also permits NEON kernels on an
+    aarch64 host while it blocks AVX-512 on an x86-64 host. An unrecognized
+    value is treated as no cap.
+    Tuning notes: set to `scalar` to turn SIMD off across the process, for
+    example to isolate a suspected kernel regression. Set to `avx2` to disable
+    AVX-512 across a fleet without a rebuild, since wide AVX-512 execution can
+    trigger CPU frequency downclocking on some hosts.
+
+`HORNDB_SIMD_AUTOTUNE` (string, environment variable)
+    Default: unset, which means on — each primitive times its available
+    kernels at startup and caches the fastest.
+    Scope: environment variable, read once at first use of the SIMD
+    dispatcher; not mutable after that for the life of the process.
+    Allowed values: `off`, `0`, `false`, or `no` (case-insensitive, surrounding
+    whitespace ignored) disables startup auto-tuning; any other value, or
+    leaving the variable unset, keeps it on.
+    Tuning notes: turn it off to use a static, widest-instruction-set
+    preference instead of startup timing — for example on a host where
+    per-process timing is unreliable, such as a machine with a mix of
+    performance and efficiency CPU cores. `HORNDB_SIMD_MAX_ISA` still bounds
+    the candidate set in either mode.
+
+## Metrics endpoint
+
+`GET /metrics` on the server's bind address returns an OpenMetrics text
+exposition for Prometheus to scrape. No setting controls it: the route is
+always mounted alongside `/query` and `/update`, at a fixed path, with no
+separate address or port, and there is no flag or environment variable to
+disable it or move it.

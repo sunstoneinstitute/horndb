@@ -1,126 +1,118 @@
-/* HornDB landing page
-   Brand palette (from logo/README.md):
-     Rust  #C0501C   accents, the "DB" in the wordmark
-     Ink   #1A1A20   near-black text on light
-     Dark  #14141A   dark-surface background
-     Cream #F3EFE7   warm light background / text on dark
+/* HornDB marketing homepage — content styling only (hero, bands, cards,
+   footer). Fonts, brand colors, and all navbar/toggle chrome come from the
+   Quarto theme this page is compiled with — see theme/horndb.scss and
+   theme/horndb-dark.scss, loaded via site/_quarto.yml `format.html.theme`.
+   Palette (Sunstone brand guide, May 2026):
+     Logo Orange  #F58221   accent, card rails, status
+     Logo Yellow  #FAD604   primary CTA pill (with Dark Blue text)
+     Dark Blue    #0E1937   ink on light; dark-mode ground
+     Warm Cream   #F3EFE7   light background / text on dark
+     Teal         #266680   links (light) — cyan #46C5DE links (dark)
 */
 
-/* ---- Theme tokens -------------------------------------------------------- */
+/* ---- Brand constants (theme-independent) --------------------------------- */
 :root {
-  --rust: #C0501C;
-  --rust-bright: #e0672f;
+  --orange: #F58221;
+  --orange-alt: #FF9055;   /* softer orange, used as the dark-mode accent */
+  --yellow: #FAD604;
+  --dark-blue: #0E1937;
+  --cream: #F3EFE7;
 
-  /* Light theme (default) */
+  /* Same stacks as theme/horndb*.scss's $font-family-sans-serif /
+     $font-family-serif — not redeclaring @font-face (Quarto's compiled
+     theme already did that), just the fallback list this page's own rules
+     (h1-h3, .btn) reference below. */
+  --font-sans: "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+
+  /* Content measure aligned to the docs site's configured grid.body-width
+     (docs/_quarto.yml: 820px) for prose bands; the card grid keeps a wider
+     measure so three columns don't collapse to one too early. */
+  --maxw: 960px;
+  --maxw-narrow: 820px;
+}
+
+/* ---- Light theme (default): warm cream ground, Dark Blue ink ------------- */
+:root {
   --bg: #F3EFE7;
-  --bg-alt: #ece6da;
-  --surface: #ffffff;
-  --border: #ddd4c4;
-  --text: #1A1A20;
-  --text-muted: #5b5750;
-  --shadow: 0 1px 2px rgba(26, 26, 32, 0.06), 0 8px 24px rgba(26, 26, 32, 0.06);
-
-  --maxw: 1040px;
+  --bg-alt: #ECE6DA;
+  --surface: #FFFFFF;
+  --border: #DDD4C4;
+  --text: var(--dark-blue);
+  --text-muted: #5B5750;
+  --accent: var(--orange);
+  --cta-bg: var(--yellow);
+  --cta-text: var(--dark-blue);
+  --on-accent: var(--dark-blue);     /* text on orange/yellow — never white, per brand guide */
+  --accent-glow: 245, 130, 33;       /* --orange as rgb, for shadows/pulses */
+  --shadow: 0 1px 2px rgba(14, 25, 55, 0.06), 0 8px 24px rgba(14, 25, 55, 0.08);
+  --code-chip-alpha: 0.10;           /* inline-code wash strength — matches theme/horndb.scss */
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #14141A;
-    --bg-alt: #1b1b22;
-    --surface: #1f1f27;
-    --border: #2e2e38;
-    --text: #F3EFE7;
-    --text-muted: #a7a39a;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
-  }
-}
-
-/* Explicit overrides (set by the toggle via data-theme on <html>) */
-:root[data-theme="dark"] {
+/* ---- Dark theme: Dark Blue-adjacent ground, cream text -------------------
+   Quarto toggles `quarto-dark` on <body> when the compiled dark stylesheet
+   is active (see theme.js / theme/pretheme.html) — key off that directly
+   rather than re-deriving light/dark/auto resolution here. */
+body.quarto-dark {
   --bg: #14141A;
-  --bg-alt: #1b1b22;
-  --surface: #1f1f27;
-  --border: #2e2e38;
+  --bg-alt: #1B1B22;
+  --surface: #1F1F27;
+  --border: #2E2E38;
   --text: #F3EFE7;
-  --text-muted: #a7a39a;
+  --text-muted: #A7A39A;
+  --accent: var(--orange-alt);
+  --cta-bg: var(--yellow);
+  --cta-text: var(--dark-blue);
+  --on-accent: var(--dark-blue);
+  --accent-glow: 255, 144, 85;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --code-chip-alpha: 0.14;         /* matches theme/horndb-dark.scss */
 }
-:root[data-theme="light"] {
-  --bg: #F3EFE7;
-  --bg-alt: #ece6da;
-  --surface: #ffffff;
-  --border: #ddd4c4;
-  --text: #1A1A20;
-  --text-muted: #5b5750;
-  --shadow: 0 1px 2px rgba(26, 26, 32, 0.06), 0 8px 24px rgba(26, 26, 32, 0.06);
-}
-
-/* ---- Lockup swap: show the variant that fits the surface ----------------- */
-.lockup-dark { display: none; }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .lockup-light { display: none; }
-  :root:not([data-theme="light"]) .lockup-dark { display: inline; }
-}
-:root[data-theme="dark"] .lockup-light { display: none; }
-:root[data-theme="dark"] .lockup-dark { display: inline; }
-:root[data-theme="light"] .lockup-light { display: inline; }
-:root[data-theme="light"] .lockup-dark { display: none; }
 
 /* ---- Base ---------------------------------------------------------------- */
 *, *::before, *::after { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; }
 
+/* Set page text metrics on `main`, never on `body`: the navbar and footer are
+   Quarto chrome compiled from the shared theme/, and a `font-size` or
+   `line-height` on `body` inherits into them, silently making this navbar a
+   couple of px taller than the one on /docs/. Sizes below are all `rem`/`em`,
+   so they follow the theme's base size. */
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
-a { color: var(--rust); text-decoration: none; }
+main {
+  line-height: 1.6;
+}
+
+/* Link color comes from Quarto's compiled theme ($link-color in
+   theme/horndb*.scss) — no override needed here. */
 a:hover { text-decoration: underline; }
 
-h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
+h1, h2, h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
 
 .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
-.wrap.narrow { max-width: 760px; }
+.wrap.narrow { max-width: var(--maxw-narrow); }
 
-/* ---- Header -------------------------------------------------------------- */
-.site-header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 24px;
-  background: color-mix(in srgb, var(--bg) 85%, transparent);
-  backdrop-filter: saturate(140%) blur(8px);
-  border-bottom: 1px solid var(--border);
-}
-.brand { display: inline-flex; align-items: center; }
-.brand .lockup { display: block; height: 32px; width: auto; }
-
-.site-nav { display: flex; align-items: center; gap: 22px; }
-.site-nav a { color: var(--text); font-weight: 500; font-size: 0.95rem; }
-.site-nav a:hover { color: var(--rust); text-decoration: none; }
-
-.theme-toggle {
-  cursor: pointer;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-muted);
-  border-radius: 999px;
-  padding: 5px 13px;
-  font: inherit;
-  font-size: 0.82rem;
-  line-height: 1;
-}
-.theme-toggle:hover { color: var(--text); border-color: var(--rust); }
+/* Header/nav/footer chrome (including the theme toggle) is Quarto's own
+   navbar/page-footer, configured in _quarto.yml and compiled from
+   theme/horndb*.scss — no page-local CSS for it here, by design (that's
+   the whole point of rendering this page through Quarto instead of hand-
+   maintaining a parallel header implementation). */
 
 /* ---- Hero ---------------------------------------------------------------- */
 .hero {
@@ -134,12 +126,12 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
   margin: 0 auto 28px;
   height: 132px;
   width: auto;
-  filter: drop-shadow(0 6px 18px rgba(192, 80, 28, 0.18));
+  filter: drop-shadow(0 6px 18px rgba(var(--accent-glow), 0.20));
 }
 .hero h1 {
   margin: 0 0 20px;
-  font-size: clamp(1.9rem, 4.6vw, 3.1rem);
-  font-weight: 800;
+  font-size: clamp(2rem, 4.6vw, 3.2rem);
+  font-weight: 700;
 }
 .hero-sub {
   margin: 0 auto 26px;
@@ -162,14 +154,14 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
 }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--rust);
-  box-shadow: 0 0 0 0 rgba(192, 80, 28, 0.5);
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(var(--accent-glow), 0.5);
   animation: pulse 2.4s infinite;
 }
 @keyframes pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(192, 80, 28, 0.45); }
-  70%  { box-shadow: 0 0 0 7px rgba(192, 80, 28, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(192, 80, 28, 0); }
+  0%   { box-shadow: 0 0 0 0 rgba(var(--accent-glow), 0.45); }
+  70%  { box-shadow: 0 0 0 7px rgba(var(--accent-glow), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--accent-glow), 0); }
 }
 @media (prefers-reduced-motion: reduce) {
   .status-dot { animation: none; }
@@ -180,29 +172,36 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
 .btn {
   display: inline-block;
   padding: 12px 22px;
-  border-radius: 10px;
+  /* Modest rounded rectangle — Bootstrap's own .btn-lg convention
+     (docs compiled CSS: --bs-btn-border-radius: 0.5rem for the large
+     variant), not a full pill. */
+  border-radius: 8px;
+  font-family: var(--font-sans);
   font-weight: 600;
   font-size: 0.98rem;
   border: 1px solid transparent;
   transition: transform 0.05s ease, background 0.15s ease, border-color 0.15s ease;
 }
 .btn:hover { text-decoration: none; transform: translateY(-1px); }
-.btn-primary { background: var(--rust); color: #fff; }
-.btn-primary:hover { background: var(--rust-bright); }
+.btn-primary { background: var(--cta-bg); color: var(--cta-text); }
+.btn-primary:hover { background: color-mix(in srgb, var(--cta-bg) 88%, #000); }
 .btn-ghost { color: var(--text); border-color: var(--border); background: var(--surface); }
-.btn-ghost:hover { border-color: var(--rust); color: var(--rust); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ---- Bands --------------------------------------------------------------- */
-.band { padding: 64px 0; border-top: 1px solid var(--border); }
+.band { padding: 56px 0; border-top: 1px solid var(--border); }
 .band-alt { background: var(--bg-alt); }
 .band h2 {
-  margin: 0 0 14px;
-  font-size: clamp(1.5rem, 3vw, 2rem);
-  font-weight: 750;
+  /* Sized and weighted to match the docs site's own h2 (compiled Bootstrap
+     CSS: 1.65rem, weight 600, margin-bottom 1rem) rather than the page's
+     own bigger scale — only the hero h1 keeps its own oversized type. */
+  margin: 0 0 16px;
+  font-size: clamp(1.5rem, 2vw, 1.75rem);
+  font-weight: 600;
 }
-.band p { font-size: 1.05rem; }
+.band p { font-size: 1rem; }
 .band .narrow p + p { margin-top: 1em; }
-.section-lede { color: var(--text-muted); margin: 0 0 28px; max-width: 640px; }
+.section-lede { color: var(--text-muted); margin: 0 0 24px; max-width: 640px; }
 
 /* ---- Cards --------------------------------------------------------------- */
 .cards {
@@ -216,18 +215,22 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 22px 22px 20px;
+  /* Radius/padding brought closer to the docs site's own card/example-block
+     weight (compiled Bootstrap CSS: --bs-card-border-radius: 0.25rem,
+     spacer 1rem) while keeping the accent rail as this page's own accent. */
+  border-radius: 6px;
+  padding: 20px 20px 18px;
   box-shadow: var(--shadow);
-  border-top: 3px solid var(--rust);
+  border-top: 3px solid var(--accent);
 }
-.card h3 { margin: 0 0 8px; font-size: 1.1rem; }
+.card h3 { margin: 0 0 8px; font-size: 1.2rem; }
 .card p { margin: 0; font-size: 0.97rem; color: var(--text-muted); }
 .card code {
-  font-size: 0.88em;
-  padding: 1px 5px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--rust) 10%, transparent);
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 0.86em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: rgba(var(--accent-glow), var(--code-chip-alpha));
   color: var(--text);
 }
 
@@ -238,38 +241,19 @@ h1, h2, h3 { line-height: 1.2; letter-spacing: -0.01em; }
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 0.72rem;
-  font-weight: 600;
-  color: #fff;
-  background: var(--rust);
+  font-weight: 700;
+  color: var(--on-accent);       /* Dark Blue on orange — meets contrast; guide forbids white on orange */
+  background: var(--accent);
   vertical-align: middle;
 }
 .badge-deferred {
   color: var(--text-muted);
   background: transparent;
   border: 1px solid var(--border);
+  font-weight: 600;
 }
 .muted-note { margin-top: 24px; font-size: 0.92rem; color: var(--text-muted); }
 
-/* ---- Footer -------------------------------------------------------------- */
-.site-footer {
-  border-top: 1px solid var(--border);
-  padding: 36px 0;
-  background: var(--bg-alt);
-}
-.footer-inner {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 24px;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-}
-.footer-inner a { color: var(--text-muted); }
-.footer-inner a:hover { color: var(--rust); }
-
 @media (max-width: 560px) {
-  .site-nav { gap: 14px; }
-  .site-nav a { font-size: 0.9rem; }
   .hero { padding-top: 56px; }
 }
