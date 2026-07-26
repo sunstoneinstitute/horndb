@@ -27,12 +27,13 @@ Leapfrog Triejoin executor, trie iterators, planner.
   **Hazard:** the leapfrog requires *distinct* level keys, but at depths 0 and 1
   the stored column repeats a key once per child row. So `active_run` returns a
   cached deduplicated copy for those depths — feeding the raw column to
-  `intersect` over-produces (a subject with N objects emits the binding N times). The leaf (depth 2) needs no dedup:
-  under a fixed `(level0, level1)` prefix the object column of deduplicated triples
-  is already strictly increasing, so it is returned as a slice with no copy. The
-  `tests/batchiter_simd.rs` duplicate-subject test and the wide
-  (`N_WIDE > 64`) `differential_fuzz` variant guard this; the narrow fuzzer (vocab 30)
-  never crosses the threshold, so it does **not** cover the SIMD path on its own.
+  `intersect` over-produces (a subject with N objects emits the binding N times).
+  The leaf (depth 2) needs no dedup: under a fixed `(level0, level1)` prefix the
+  object column of deduplicated triples is already strictly increasing, so it is
+  returned as a slice with no copy. The `tests/batchiter_simd.rs`
+  duplicate-subject test and the wide (`N_WIDE > 64`) `differential_fuzz` variant
+  guard this; the narrow fuzzer (vocab 30) never crosses the threshold, so it
+  does **not** cover the SIMD path on its own.
 - **Per-tuple hot path (SPEC-03 NF1, #237).** The leapfrog descent (`VecIter`)
   finds child-run boundaries (`open_level`) and repositions cursors (`seek`) with
   a **bounded gallop from the cursor** (`run_end` / `seek_gallop`), not a
