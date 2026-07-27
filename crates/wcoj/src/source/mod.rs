@@ -7,7 +7,6 @@
 
 pub mod compressed;
 pub mod packed_column;
-pub(crate) mod soa;
 pub mod synthetic;
 pub mod vec_source;
 
@@ -96,8 +95,8 @@ pub trait OrderedTripleIter: Send {
     /// (from the current cursor to the level end) as a contiguous sorted
     /// `&[TermId]`, return it — for the leapfrog SIMD-intersect fast path.
     /// Default `None`. Takes `&mut self` because a source may need to
-    /// materialise the contiguous view on demand (e.g. the dense AoS `VecIter`
-    /// builds its SoA column lazily).
+    /// materialise the view on demand (e.g. `VecIter` caches a deduplicated
+    /// copy of an inner level, whose stored column repeats each key).
     fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
         None
     }

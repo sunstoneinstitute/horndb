@@ -25,8 +25,9 @@ const N_VERTICES: u64 = 30;
 const PREDICATES: &[u64] = &[100, 101, 102];
 
 /// Wide vocabulary for the SIMD-coverage variant. The leapfrog's `k == 2`
-/// intersect fast path only arms when a level's run is `>= SIMD_SEEK_MIN_RUN`
-/// (64), so the default 30-vertex graph never exercises it. `N_WIDE > 64`
+/// intersect fast path only arms when a level's run is
+/// `>= SIMD_INTERSECT_MIN_RUN` (64), so the default 30-vertex graph never
+/// exercises it. `N_WIDE > 64`
 /// makes a free-subject pattern's depth-0 run wide enough that
 /// `VecIter::active_run` materialises an SoA column and the SIMD path engages
 /// — the binary-hash oracle then cross-checks it across random BGP shapes.
@@ -162,8 +163,8 @@ proptest! {
         prop_assert_eq!(wcoj_rows, bh_rows);
     }
 
-    // SIMD-coverage variant: a wide graph (N_WIDE > SIMD_SEEK_MIN_RUN) so the
-    // leapfrog's `k == 2` SIMD intersect fast path actually arms, with the
+    // SIMD-coverage variant: a wide graph (N_WIDE > SIMD_INTERSECT_MIN_RUN) so
+    // the leapfrog's `k == 2` SIMD intersect fast path actually arms, with the
     // binary-hash executor as the differential oracle. Guards against the
     // active_run dedup hazard (a subject with many objects must still emit
     // each leapfrog key once) across random BGP shapes.

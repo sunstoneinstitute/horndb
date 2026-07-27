@@ -66,8 +66,8 @@ fn leapfrog_empty_when_one_iterator_is_empty() {
 #[test]
 fn leapfrog_k2_simd_intersect_matches_btreeset_oracle() {
     // Two patterns sharing ?x, with the variable runs at the trie level wide
-    // enough (>= SIMD_SEEK_MIN_RUN) that `VecIter::active_run` materialises an
-    // SoA column and the leapfrog's k==2 SIMD intersect fast path engages.
+    // enough (>= SIMD_INTERSECT_MIN_RUN) that `VecIter::active_run` materialises
+    // an SoA column and the leapfrog's k==2 SIMD intersect fast path engages.
     // Subjects A = {0..120} carry (s, 10, 1); subjects B = {60..200 step 2}
     // carry (s, 20, 1). The leapfrog over ?x must emit exactly A ∩ B.
     let a: Vec<u64> = (0..120u64).collect();
