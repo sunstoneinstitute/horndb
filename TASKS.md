@@ -70,6 +70,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-25 S4: named-graph snapshot export/import (quad-set-equality round-trip) ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-25 S5: HDT cold tier + tiering seam — after #225/#228; delivers the #148 tier-bytes deferral ([#229](https://github.com/sunstoneinstitute/horndb/issues/229))
+- [ ] **MEDIUM** · _Completeness_ — SPEC-27: expose OWL 2 RL proofs as a queryable `hprov:` provenance view ([#260](https://github.com/sunstoneinstitute/horndb/issues/260))
 - [ ] **MEDIUM** · _Operational_ — SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling — on-disk format with E3 #187 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
 - [ ] **MEDIUM** · _Performance_ — SPEC-24 S7: bilinear-join runtime (per-predicate leaves, cost model, hash/sort-merge kernels) — after #203 ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
 - [ ] **MEDIUM** · _Performance_ — SPEC-25 S6: deferred Stage-1 acceptance benches on hornbench (LUBM-8000 rows 2/3/4) ([#230](https://github.com/sunstoneinstitute/horndb/issues/230))
@@ -568,6 +569,28 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   values, `docs/metrics.md` rows in the same commit. CXL/NVMe placement stays
   SPEC-09. After #225/#228. Spec §S5. Gate: SPEC-25 acceptance #5 (harness
   selected subset green on a mixed warm/cold store).
+
+- [ ] **SPEC-27: expose OWL 2 RL proofs as a queryable provenance view.** ([#260](https://github.com/sunstoneinstitute/horndb/issues/260))
+  Proofs are recorded and reachable from Rust (`MemStore::proof_tree` /
+  `Engine::proof`) but reach no user: `load_with_reasoning` drops the
+  `owlrl::Engine` after dumping the closure into storage, so a running
+  `serve --materialize` holds no derivation data at all. Expose derivations as a
+  **virtual** RDF view under a reserved `hprov:` vocabulary, resolved at query
+  time and read with ordinary SPARQL — n-ary reification nodes, *not* RDF 1.2
+  triple terms (the OWL-RL engine bails on those, ADR-0014); the recursive proof
+  walk is the property path `(hprov:premise/^hprov:conclusion)*`, which
+  `translate_path` already lowers. Virtual because the store is
+  default-graph-only, so a provenance named graph is unrepresentable until E5
+  #189. Off by default (SPEC-26 config). The minimum retention form keeps the
+  `Engine` resident, so NF3's hornbench memory number (→ `docs/benchmarks.md`)
+  decides whether E4 #188's compressed side-table is a hard prerequisite rather
+  than an upgrade path. Elisions must self-report (`hprov:premisesComplete
+  false`) instead of looking like proof leaves. Replaces the getting-started
+  guide's "Proof tracking is not exposed yet" section.
+  Spec: `docs/specs/SPEC-27-provenance-as-a-queryable-view.md` (draft, no plan).
+  Gate: SPEC-27 acceptance #1–8 — #3 differentials the view against
+  `Engine::proof` over the curated owl2-rl-50 subset, so it cannot become a
+  second, divergent proof implementation.
 
 ## MEDIUM — Conformance
 
