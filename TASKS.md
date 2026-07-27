@@ -73,7 +73,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Operational_ — SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling — on-disk format with E3 #187 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
 - [ ] **MEDIUM** · _Performance_ — SPEC-24 S7: bilinear-join runtime (per-predicate leaves, cost model, hash/sort-merge kernels) — after #203 ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
 - [ ] **MEDIUM** · _Performance_ — SPEC-25 S6: deferred Stage-1 acceptance benches on hornbench (LUBM-8000 rows 2/3/4) ([#230](https://github.com/sunstoneinstitute/horndb/issues/230))
-- [v] **MEDIUM** · _Performance_ — SPEC-03 NF1: columnar (SoA) `VecTripleSource` to remove the AoS→SoA input-column copy — spun out of #237 ([#239](https://github.com/sunstoneinstitute/horndb/issues/239)) — _wip: 957e764b@Stigs-MacBook-Pro.local · task-239-spec-03-nf1-columnar-soa-vectriplesource · 2026-07-26T22:53:37Z_
+- [x] **MEDIUM** · _Performance_ — SPEC-03 NF1: columnar (SoA) `VecTripleSource` to remove the AoS→SoA input-column copy — spun out of #237 ([#239](https://github.com/sunstoneinstitute/horndb/issues/239))
 - [x] **MEDIUM** · _Conformance_ — Close the RL-reachable OWL 2 RL gap: datatype value-space intersection + `owl:imports` (97/115 → 100/115) ([#160](https://github.com/sunstoneinstitute/horndb/issues/160))
 - [ ] **MEDIUM** · _Tooling_ — tasks.sh: claim/complete matches any checkbox line containing the issue link, not the task's own line ([#238](https://github.com/sunstoneinstitute/horndb/issues/238))
 - [ ] **LOW** · _Operational_ — incremental: `ChangeFeed::publish` clobbers the global `change_feed_subscribers` gauge ([#221](https://github.com/sunstoneinstitute/horndb/issues/221))
@@ -525,7 +525,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   surface capacity misses early). Can run immediately; re-run any row whose
   subsystem S1–S5 materially changes. Spec §S6. Gate: SPEC-25 acceptance #6.
 
-- [v] **SPEC-03 NF1: columnar (SoA) `VecTripleSource`.** ([#239](https://github.com/sunstoneinstitute/horndb/issues/239))
+- [x] **SPEC-03 NF1: columnar (SoA) `VecTripleSource`.** ([#239](https://github.com/sunstoneinstitute/horndb/issues/239))
   Store each ordering in `crates/wcoj/src/source/vec_source.rs` as three contiguous
   `TermId` columns (struct-of-arrays) instead of `Vec<(TermId, TermId, TermId)>`
   (array-of-structs). A `perf` profile of `per_tuple/wide_4x100k` after #237 (14 →
