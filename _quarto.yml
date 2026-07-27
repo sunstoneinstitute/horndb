@@ -13,7 +13,11 @@
 # The list mirrors the include set in docs/publish.toml; keep the two in step.
 #
 # Rendered in CI by .github/workflows/pages.yml and deployed to GitHub Pages.
-# Build locally with `quarto render` from the repo root.
+# Build locally with `quarto render` from the repo root. To view the result,
+# use `quarto preview` (serves over http://localhost) rather than opening
+# _site/index.html directly as a file:// URL — Quarto's own dark-mode script
+# skips localStorage under file:// and always starts from the light theme, so
+# every page flashes light-then-dark on load under the light/dark toggle.
 
 project:
   type: website
