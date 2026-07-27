@@ -2,6 +2,11 @@
 pagetitle: "HornDB"
 page-layout: full
 toc: false
+# Page-scoped, not project-wide: this stylesheet carries bare `body`/`main`/
+# `h1` rules for the hero and bands that would wreck a docs page, plus the
+# navbar trimming that makes the project-wide navbar read as a landing-page
+# navbar. Only this page loads it.
+css: theme/landing.css
 # No `title:`/`description:` — those trigger Quarto's visible title-block
 # header (an <h1> + description paragraph above the page content), which
 # would duplicate the hero section's own <h1>. `open-graph:` sets the same
@@ -19,9 +24,8 @@ open-graph:
   <p class="hero-sub">
     Load RDF, query it with SPARQL&nbsp;1.1, and get back answers that include
     what the reasoner inferred — forward <em>and</em> backward chaining over
-    OWL&nbsp;2&nbsp;RL semantics. Apache-2.0, EU-developed, open from the start.
+    OWL&nbsp;2&nbsp;RL semantics. Apache-2.0 license.
   </p>
-  <p class="status"><span class="status-dot" aria-hidden="true"></span> Active development — the storage-to-SPARQL stack runs end-to-end, with forward and backward chaining and incremental insert and retraction.</p>
   <div class="cta-row">
     <a class="btn btn-primary" href="https://github.com/sunstoneinstitute/horndb">View on GitHub</a>
     <a class="btn btn-ghost" href="docs/guides/getting-started.html">Get your first reasoned answer</a>
@@ -40,10 +44,8 @@ open-graph:
       web. What sets it apart is the reasoner built in: load data, and
       HornDB derives new triples from it under OWL&nbsp;2&nbsp;RL
       semantics, with provenance back to the facts each inference came
-      from. The name is literal — <strong>Horn</strong> as in <em>Horn
-      clauses</em>. OWL&nbsp;2&nbsp;RL is the fragment of OWL&nbsp;2 whose
-      entailment rules are Horn rules, evaluated bottom-up to a fixpoint,
-      which is what this engine does.
+      from. The name comes from <em>Horn clauses</em>, a reasoning primitive
+      HornDB uses to implement OWL&nbsp;2&nbsp;RL.
     </p>
     <p>
       The reasoner space today forces a choice. Pure-materialization
@@ -69,8 +71,12 @@ open-graph:
         <p>Not pure materialization. Materialize the schema and transitive-closure subset; backward-chain the rest with magic sets.</p>
       </li>
       <li class="card">
-        <h3>Modern memory as a target</h3>
-        <p>A tiered working set — fast memory for the hot data, DRAM for warm, CXL/NVMe for cold — designed in, not bolted on.</p>
+        <h3>Provenance as a requirement</h3>
+        <p>Every inferred triple traces back to its premises. Explainability is a hard constraint, not a feature flag.</p>
+      </li>
+      <li class="card">
+        <h3>Compiled rules</h3>
+        <p>Soufflé-style ahead-of-time compilation: OWL&nbsp;2&nbsp;RL rules become native Rust — no rule interpreter in the hot path.</p>
       </li>
       <li class="card">
         <h3>Incremental maintenance</h3>
@@ -81,12 +87,8 @@ open-graph:
         <p>Schema-level transitive closure as a semiring matrix multiply on SuiteSparse:GraphBLAS.</p>
       </li>
       <li class="card">
-        <h3>Compiled rules</h3>
-        <p>Soufflé-style ahead-of-time compilation: OWL&nbsp;2&nbsp;RL rules become native Rust — no rule interpreter in the hot path.</p>
-      </li>
-      <li class="card">
-        <h3>Provenance as a requirement</h3>
-        <p>Every inferred triple traces back to its premises. Explainability is a hard constraint, not a feature flag.</p>
+        <h3>Modern memory as a target</h3>
+        <p>A tiered working set — fast memory for the hot data, DRAM for warm, CXL/NVMe for cold — designed in, not bolted on.</p>
       </li>
     </ul>
   </div>
@@ -96,7 +98,7 @@ open-graph:
 <section class="band">
   <div class="wrap">
     <h2>What runs today</h2>
-    <p class="section-lede">Every subsystem below has code in the repository today, exercised by tests and the conformance harness — not just specified.</p>
+    <p class="section-lede">Every subsystem below has code in the repository today, exercised by tests and the conformance harness.</p>
     <ul class="cards">
       <li class="card">
         <h3>Tiered storage <span class="badge">implemented</span></h3>

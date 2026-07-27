@@ -1,0 +1,95 @@
+# Quarto config for horndb.io — the landing page AND the published docs, in one
+# project rooted at the repo root.
+#
+# One project, not two: the landing page and the docs share a navbar, a footer,
+# a theme, and a search index, so they render together and the chrome cannot
+# drift between horndb.io/ and horndb.io/docs/. An earlier split into two
+# projects existed only to give the landing page a smaller navbar; that is now
+# done with page-scoped CSS instead (see theme/landing.css), because Quarto
+# defines the navbar once per project and has no per-page override.
+#
+# What renders is listed explicitly below — the repo root holds far more
+# Markdown (specs, plans, ADRs, README, TASKS) than belongs on the public site.
+# The list mirrors the include set in docs/publish.toml; keep the two in step.
+#
+# Rendered in CI by .github/workflows/pages.yml and deployed to GitHub Pages.
+# Build locally with `quarto render` from the repo root.
+
+project:
+  type: website
+  output-dir: _site
+  # theme/theme.js and theme/theme-toggle.css are loaded via a JS-constructed
+  # href (see theme/pretheme.html), so Quarto's static resource scanner never
+  # sees a literal reference to them — list them explicitly or they never
+  # make it into _site/.
+  resources:
+    - "theme/theme.js"
+    - "theme/theme-toggle.css"
+  render:
+    - "index.qmd"
+    - "docs/index.qmd"
+    - "docs/ref/**/*.qmd"
+    - "docs/ref/**/*.md"
+    - "docs/guides/**/*.qmd"
+    - "docs/guides/**/*.md"
+
+website:
+  title: "HornDB"
+  site-url: "https://horndb.io/"
+  description: "HornDB is a graph database for RDF, with a hybrid forward/backward-chaining reasoner for OWL 2 RL built in."
+  favicon: assets/favicon.ico
+  open-graph: true
+  reader-mode: true
+  search:
+    location: navbar
+    type: overlay
+  navbar:
+    background: "#0E1937"
+    pinned: true
+    logo: assets/horndb-horizontal-dark.svg
+    logo-alt: "HornDB"
+    logo-href: index.qmd
+    # The navbar is project-wide. The landing page hides the items that do not
+    # belong on it — the "docs" wordmark, Guides, Reference, search, and the
+    # reader toggle — from theme/landing.css, which only that page loads, and
+    # keeps logo + Docs + GitHub + the theme toggle. Those CSS rules match
+    # Guides/Reference **by href**, so keep the two in step.
+    title: "docs"
+    left:
+      - text: "Docs"
+        href: docs/index.qmd
+      - text: "Guides"
+        href: docs/guides/index.qmd
+      - text: "Reference"
+        href: docs/ref/index.qmd
+    right:
+      - icon: github
+        href: https://github.com/sunstoneinstitute/horndb
+        aria-label: HornDB on GitHub
+  page-footer:
+    background: "#0E1937"
+    left: "Built by [Sunstone Institute](https://sunstone.institute) · Apache-2.0"
+    right: "[github.com/sunstoneinstitute/horndb](https://github.com/sunstoneinstitute/horndb)"
+
+format:
+  html:
+    theme:
+      light: [cosmo, theme/horndb.scss]
+      dark: [darkly, theme/horndb-dark.scss]
+    # pretheme.html unifies the light/dark toggle across every page.
+    # head-extra.html: tab icons beyond the single `website.favicon` above.
+    include-in-header:
+      - theme/pretheme.html
+      - head-extra.html
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap
+    smooth-scroll: true
+    grid:
+      sidebar-width: 260px
+      body-width: 820px
+
+# Executable examples: pages that run HornDB use `{python}` cells over the
+# rdflib-compatible binding. Left off by default so prose-only pages don't need
+# a kernel; a page opts in with `jupyter: python3` in its front matter.

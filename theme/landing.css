@@ -1,7 +1,9 @@
-/* HornDB marketing homepage — content styling only (hero, bands, cards,
-   footer). Fonts, brand colors, and all navbar/toggle chrome come from the
-   Quarto theme this page is compiled with — see theme/horndb.scss and
-   theme/horndb-dark.scss, loaded via site/_quarto.yml `format.html.theme`.
+/* HornDB landing page (index.qmd) — the hero, bands, cards, and footer, plus
+   the navbar trimming below. Loaded by that page alone, via its front-matter
+   `css:` key, because its bare `body`/`main`/`h1` rules would wreck a docs
+   page. Fonts, brand colors, and the navbar/toggle chrome itself come from the
+   Quarto theme every page compiles with — see theme/horndb.scss and
+   theme/horndb-dark.scss, loaded via _quarto.yml `format.html.theme`.
    Palette (Sunstone brand guide, May 2026):
      Logo Orange  #F58221   accent, card rails, status
      Logo Yellow  #FAD604   primary CTA pill (with Dark Blue text)
@@ -9,6 +11,28 @@
      Warm Cream   #F3EFE7   light background / text on dark
      Teal         #266680   links (light) — cyan #46C5DE links (dark)
 */
+
+/* ---- Landing-page navbar ------------------------------------------------- */
+/* Quarto defines one navbar per project, and this is one project, so the
+   landing page trims the docs-only items here rather than in _quarto.yml.
+   What survives: the logo, "Docs", GitHub, and the light/dark toggle.
+   Guides and Reference are matched by href — keep these selectors in step
+   with the `website.navbar` entries in _quarto.yml. */
+
+/* The "docs" wordmark beside the logo. */
+.navbar .navbar-brand-container .navbar-brand:not(.navbar-brand-logo) { display: none; }
+
+/* "Docs" is the one nav item this page wants, and the themes hide it by
+   default (see horndb.scss) precisely so it appears here alone. */
+.navbar li.nav-item:has(> a[href$="docs/index.html"]) { display: list-item; }
+
+/* Guides and Reference — the hero's own CTAs cover these. */
+.navbar li.nav-item:has(> a[href$="docs/guides/index.html"]),
+.navbar li.nav-item:has(> a[href$="docs/ref/index.html"]) { display: none; }
+
+/* Search and reader mode have nothing to act on: one page, no prose column. */
+.navbar #quarto-search,
+.navbar .quarto-reader-toggle { display: none; }
 
 /* ---- Brand constants (theme-independent) --------------------------------- */
 :root {

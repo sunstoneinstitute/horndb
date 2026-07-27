@@ -1,20 +1,19 @@
-<!-- Unifies the docs and marketing-site light/dark/auto toggle. horndb.io/
-     (site/_quarto.yml) and horndb.io/docs/ (docs/_quarto.yml) are two
-     separate Quarto projects, each with its own copy of this file (see
-     the header comment in theme.js for why); both include it here, in
-     <head>, so it runs before Quarto's own inline color-scheme init script
-     (which runs at the top of <body>). Two jobs:
+<!-- Sets up the site-wide light/dark/auto toggle. Included in <head> on every
+     page (_quarto.yml `format.html.include-in-header`) so it runs before
+     Quarto's own inline color-scheme init script, which runs at the top of
+     <body>. Two jobs:
 
      1. Pre-seed Quarto's own "quarto-color-scheme" sentinel from the
         site-wide "horndb-theme" choice (same localStorage key theme.js
         uses), so Quarto's init picks the right stylesheet bundle on first
         paint instead of always defaulting to light.
      2. Load the shared toggle stylesheet and script — theme/theme-toggle.css
-        and theme/theme.js, resolved relative to this project's own root
-        (see the path computation below).
+        and theme/theme.js, resolved relative to the site root (see the path
+        computation below).
 
-        A plain "theme/..." href is wrong on a nested page (e.g. ref/*.html
-        needs "../theme/..."), and Quarto does NOT depth-adjust literal hrefs
+        A plain "theme/..." href is wrong on a nested page (e.g.
+        docs/ref/*.html needs "../../theme/..."), and Quarto does NOT
+        depth-adjust literal hrefs
         inside include-in-header content the way it does for its own
         built-in assets. So this computes the right relative prefix at
         runtime from one of Quarto's own already-correct site_libs/ asset

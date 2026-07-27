@@ -1,21 +1,17 @@
-// Shared light/dark/auto toggle for horndb.io/ and horndb.io/docs/*.
+// Light/dark/auto toggle for every page on horndb.io.
 // Cycles auto -> light -> dark -> auto. "auto" follows the OS via
 // prefers-color-scheme (no stored choice). An explicit choice is persisted in
 // localStorage under "horndb-theme" and applied through the public
-// `window.quartoToggleColorScheme` hook — both horndb.io/ (site/_quarto.yml)
-// and horndb.io/docs/ (docs/_quarto.yml) are separate Quarto projects
-// compiled from the same theme/ (this directory), so both use Quarto's own
-// compiled light/dark stylesheet swap, not a bespoke one. theme/pretheme.html
+// `window.quartoToggleColorScheme` hook, so the swap is Quarto's own compiled
+// light/dark stylesheet swap rather than a bespoke one. theme/pretheme.html
 // pre-seeds Quarto's own sentinel before its init script runs, so there is no
 // flash of the wrong theme.
 //
-// This directory (docs/theme/) is THE canonical copy of the whole shared
-// theme. site/theme/ is a byte-identical duplicate of every file in it
-// (scss, fonts, this file, theme-toggle.css, pretheme.html) — Quarto's asset
-// pipeline can't follow a symlink out of its own project directory, and
-// site/ and docs/ are each their own Quarto project with a separate output
-// root, so each needs its own physical copy of every asset its render
-// touches. Keep the two theme/ directories in step file-for-file.
+// The landing page and the docs are one Quarto project (`_quarto.yml` at the
+// repo root), so this directory is the single copy of the shared theme — no
+// duplication to keep in step. It was two projects and two theme/ directories
+// until 2026-07; the split existed only to give the landing page a smaller
+// navbar, which theme/landing.css now does with page-scoped CSS.
 (function () {
   "use strict";
 

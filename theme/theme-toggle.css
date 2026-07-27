@@ -1,14 +1,10 @@
-/* Shared light/dark/auto toggle control — identical on horndb.io/ and
-   horndb.io/docs/*. Fixed-size icon button (half-filled circle) so the
-   button never changes width across auto/light/dark. Hardcodes the Dark
-   Blue navbar color instead of a theme variable, since both the site/ and
-   docs/ Quarto projects always render `.navbar`/`.quarto-color-scheme-toggle`
-   against that same fixed navbar background in both light and dark mode
-   (see horndb.scss / horndb-dark.scss). See theme.js for the toggle logic
-   and the icon markup.
-
-   This directory (docs/theme/) is THE canonical copy. site/theme/ is a
-   byte-identical duplicate — see the note in theme.js — keep them in step. */
+/* The light/dark/auto toggle control, identical on every page of horndb.io.
+   Fixed-size icon button (half-filled circle) so the button never changes
+   width across auto/light/dark. Hardcodes the Dark Blue navbar color instead
+   of a theme variable, because `.navbar`/`.quarto-color-scheme-toggle` always
+   render against that same fixed navbar background in both light and dark
+   mode (see horndb.scss / horndb-dark.scss). See theme.js for the toggle
+   logic and the icon markup. */
 .theme-toggle {
   cursor: pointer;
   border: 1px solid rgba(243, 239, 231, 0.35);

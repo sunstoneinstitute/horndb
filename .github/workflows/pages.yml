@@ -1,28 +1,28 @@
 name: Deploy site to GitHub Pages
 
-# Publishes horndb.io: the marketing homepage (`site/`) at the root, and the
-# docs (`docs/ref/`, `docs/guides/`, `docs/index.qmd`) under `/docs/` — one
-# deploy, one host, no separate docs site. Both are their own small Quarto
-# projects (separate `_quarto.yml`s, separate navbars) compiled from the same
-# shared theme (`docs/theme/` and its byte-identical duplicate `site/theme/` —
-# see the header comment in docs/theme/theme.js), which is what keeps the
-# navbar/footer/toggle chrome from drifting between the two. The two projects
-# are rendered independently, then merged into a single artifact directory
-# before upload. Runs on pushes to main that touch either tree, and can be
-# triggered manually.
+# Publishes horndb.io: the landing page (`index.qmd`) at the root and the docs
+# (`docs/ref/`, `docs/guides/`, `docs/index.qmd`) under `/docs/` — one deploy,
+# one host, no separate docs site. One Quarto project rooted at the repo root
+# (`_quarto.yml`) renders both, so the navbar, footer, theme, and search index
+# are shared by construction and cannot drift; the landing page trims the navbar
+# items it does not want from its own page-scoped `theme/landing.css`. Runs on
+# pushes to main that touch a rendered input, and can be triggered manually.
+#
+# Add any new top-level render input to `paths:` below, or edits to it will
+# silently never deploy.
 
 on:
   push:
     branches: [main]
     paths:
-      - "site/**"
+      - "index.qmd"
+      - "docs/index.qmd"
       - "docs/ref/**"
       - "docs/guides/**"
-      - "docs/theme/**"
-      - "docs/assets/**"
-      - "docs/index.qmd"
-      - "docs/_quarto.yml"
-      - "docs/head-extra.html"
+      - "theme/**"
+      - "assets/**"
+      - "_quarto.yml"
+      - "head-extra.html"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -67,22 +67,14 @@ jobs:
       - uses: quarto-dev/quarto-actions/setup@8a96df13519ee81fd526f2dfca5962811136661b # v2
         with:
           version: "1.9.38"
-      - run: quarto render site
-      - run: quarto render docs
-
-      # Merge the two rendered projects into one artifact. Nothing collides —
-      # each project's robots.txt / sitemap.xml / search.json / site_libs lands
-      # in its own namespace. Crawlers only read robots.txt from the host root,
-      # so the docs sitemap has to be advertised there or it is never seen.
-      - run: |
-          mkdir -p _pages_out
-          cp -r site/_site/. _pages_out/
-          cp -r docs/_site _pages_out/docs
-          echo "Sitemap: https://horndb.io/docs/sitemap.xml" >> _pages_out/robots.txt
+      # One render covers the landing page and the docs, and emits one
+      # robots.txt and one sitemap.xml at the site root — no artifact merge,
+      # and no hand-appended second sitemap for crawlers to find.
+      - run: quarto render
 
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: _pages_out
+          path: _site
       - id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

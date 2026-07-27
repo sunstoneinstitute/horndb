@@ -30,8 +30,8 @@ __pycache__
 # Un-anchored so per-crate graphs (e.g. crates/sparql/graphify-out/) are ignored too.
 graphify-out/
 
-# Quarto build outputs. Two separate projects: the docs tree and the horndb.io
-# landing page (rebuild with `quarto render docs` / `quarto render site`).
-docs/_site/
-docs/.quarto/
-site/_site/
+# Quarto build outputs. One project rooted at the repo root covers both the
+# horndb.io landing page and the docs tree (rebuild with `quarto render`).
+/_site/
+/.quarto/
+**/*.quarto_ipynb

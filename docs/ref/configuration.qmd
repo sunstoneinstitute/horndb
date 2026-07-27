@@ -4,10 +4,27 @@ description: "Every environment variable, CLI flag, and build-time feature flag 
 ---
 
 This page lists every setting that changes how HornDB behaves at runtime or at
-build time. HornDB's configuration surface is small today: a handful of
-environment variables, the `serve` binary's own command-line flags, and two
-Cargo feature flags. There is no configuration file — nothing here is read from
-a TOML, YAML, or JSON file at startup.
+build time. HornDB's configuration surface has four parts: a `config.toml` file
+(with `config.d/*.toml` drop-in fragments), environment variables, the `serve`
+binary's own command-line flags, and two Cargo feature flags.
+
+Layers merge from lowest precedence to highest:
+
+1. built-in defaults,
+2. the base `config.toml`,
+3. `config.d/*.toml` drop-in fragments, in filename order,
+4. environment variables,
+5. command-line flags.
+
+Environment variables carry the `HORNDB_` prefix and use **two** underscores to
+separate a config section from the key inside it: `[server].bind` is
+`HORNDB_SERVER__BIND`, `[simd].max_isa` is `HORNDB_SIMD__MAX_ISA`. A `HORNDB_`
+variable with no `__` in its name is not a config key and is ignored by the
+config layer — `HORNDB_CONFIG` is the one such variable HornDB reads, and it is
+read separately, to locate the config file itself.
+
+An unknown key or an unparsable value is fatal: `serve` names the offending
+setting and exits rather than starting with a value it could not read.
 
 ## SPARQL HTTP server
 
@@ -15,96 +32,181 @@ The `serve` binary loads one or more RDF files into a store and exposes SPARQL
 1.1 over HTTP on a single bind address, at three fixed routes: `GET`/`POST
 /query` for SPARQL queries, `POST /update` for SPARQL Update, and `GET
 /metrics` for Prometheus scraping (see [Metrics endpoint](#metrics-endpoint)).
-The routes themselves are not configurable. `serve` takes its settings from
-command-line flags only.
+The routes themselves are not configurable. `serve` resolves the rest of its
+settings through the layers listed above before it loads any data or binds the
+socket.
 
 `--data` (list of paths)
-    Default: none. The flag is required — `serve` exits with an error if it is
-    missing.
-    Scope: CLI flag to the `serve` binary; read once at process start.
-    Allowed values: one or more paths to `.nt` (N-Triples) or `.ttl` (Turtle)
-    files, or to directories containing them. Repeat the flag to pass more than
-    one path.
-    Tuning notes: point at a directory to load every `.nt`/`.ttl` file under it,
-    recursively.
 
-`--bind` (address string)
-    Default: `127.0.0.1:3840` (3840 is HornDB's standard port).
-    Scope: CLI flag to the `serve` binary; fixed for the life of the process.
-    Allowed values: any `host:port` address accepted by a Tokio TCP listener,
-    for example `0.0.0.0:3840` to listen on every interface.
-    Tuning notes: change the host to expose the server beyond localhost; change
-    the port to run more than one instance on the same host.
+:   **Default:** none. The flag is required — `serve` exits with an error if it
+    is missing.
+
+    **Scope:** CLI flag to the `serve` binary; read once at process start.
+
+    **Allowed values:** one or more paths to `.nt` (N-Triples) or `.ttl`
+    (Turtle) files, or to directories containing them. Repeat the flag to pass
+    more than one path.
+
+    **Tuning notes:** point at a directory to load every `.nt`/`.ttl` file
+    under it, recursively.
+
+`--config` (path)
+
+:   **Default:** none. With the flag unset, `serve` reads the path in
+    `HORNDB_CONFIG`; with that unset too, it reads
+    `/etc/horndb/config.toml`.
+
+    **Scope:** CLI flag to the `serve` binary; chooses *which* base config file
+    is read, and outranks `HORNDB_CONFIG` in doing so.
+
+    **Allowed values:** a path to a TOML file.
+
+    **Tuning notes:** a file named explicitly — by this flag or by
+    `HORNDB_CONFIG` — must exist. A missing `/etc/horndb/config.toml`, which
+    nothing asked for by name, is not an error: `serve` starts on built-in
+    defaults.
+
+`HORNDB_CONFIG` (path, environment variable)
+
+:   **Default:** unset, so `serve` reads `/etc/horndb/config.toml`.
+
+    **Scope:** environment variable, read once at process start. Ranks between
+    the default path and `--config`, which wins over it. It names the config
+    file and is not itself a config key, so it carries no `__` section
+    separator.
+
+    **Allowed values:** a path to a TOML file.
+
+    **Tuning notes:** set it to point a whole environment at one config file
+    without changing each unit's command line.
+
+`--bind` (address string), `HORNDB_SERVER__BIND`
+
+:   **Default:** `127.0.0.1:3840` (3840 is HornDB's standard port). The default
+    lives in the config layer as `[server].bind`, not on the flag.
+
+    **Scope:** CLI flag to the `serve` binary, or the matching environment
+    variable and `[server].bind` config key; fixed for the life of the process.
+    The flag wins over the environment variable, which wins over the file.
+
+    **Allowed values:** any `host:port` address accepted by a Tokio TCP
+    listener, for example `0.0.0.0:3840` to listen on every interface.
+
+    **Tuning notes:** change the host to expose the server beyond localhost;
+    change the port to run more than one instance on the same host. Leave the
+    flag off to keep whatever the file or environment resolved to — an unset
+    flag never overrides a lower layer.
+
+`--simd-max-isa` (string), `--simd-autotune` (boolean)
+
+:   **Default:** none; both leave `[simd].max_isa` and `[simd].autotune` as the
+    config layer resolved them.
+
+    **Scope:** CLI flags to the `serve` binary, the top layer for the two
+    `[simd]` settings; fixed for the life of the process.
+
+    **Allowed values:** as for `HORNDB_SIMD__MAX_ISA` and
+    `HORNDB_SIMD__AUTOTUNE` below.
+
+    **Tuning notes:** use these to override the SIMD kernel choice for a single
+    run — a one-off diagnostic — without editing the config file or exporting
+    a variable.
 
 `--materialize` (boolean flag)
-    Default: `false` (off — `serve` answers queries over the asserted triples
-    only).
-    Scope: CLI flag to the `serve` binary; fixed for the life of the process.
-    Requires the binary to be built with the `reasoner` Cargo feature (on by
-    default — see below).
-    Allowed values: present or absent; the flag takes no argument.
-    Tuning notes: pass it to run OWL 2 RL forward-chaining over the loaded data
-    before serving, so queries see the closure — the asserted triples plus
+
+:   **Default:** `false` (off — `serve` answers queries over the asserted
+    triples only).
+
+    **Scope:** CLI flag to the `serve` binary; fixed for the life of the
+    process. Requires the binary to be built with the `reasoner` Cargo feature
+    (on by default — see below).
+
+    **Allowed values:** present or absent; the flag takes no argument.
+
+    **Tuning notes:** pass it to run OWL 2 RL forward-chaining over the loaded
+    data before serving, so queries see the closure — the asserted triples plus
     every triple the reasoner derives — rather than only what was asserted. If
     the binary was built without the `reasoner` feature, passing this flag
     makes `serve` exit with an error instead of starting.
 
 `server` (Cargo feature, `horndb-sparql` crate)
-    Default: on.
-    Scope: compile-time — set with `--features`/`--no-default-features` when
-    building the crate, not at runtime.
-    Allowed values: on or off.
-    Tuning notes: the `serve` binary requires this feature and does not build
-    without it. Turn it off only when using `horndb-sparql` as a library with
-    no HTTP server, for example an embedded query engine with no network
+
+:   **Default:** on.
+
+    **Scope:** compile-time — set with `--features`/`--no-default-features`
+    when building the crate, not at runtime.
+
+    **Allowed values:** on or off.
+
+    **Tuning notes:** the `serve` binary requires this feature and does not
+    build without it. Turn it off only when using `horndb-sparql` as a library
+    with no HTTP server, for example an embedded query engine with no network
     listener.
 
 `reasoner` (Cargo feature, `horndb-sparql` crate)
-    Default: on.
-    Scope: compile-time — set with `--features`/`--no-default-features` when
-    building the crate, not at runtime.
-    Allowed values: on or off.
-    Tuning notes: gates `--materialize`. Turn it off to build a smaller binary
-    that serves SPARQL over asserted data without pulling in the OWL 2 RL
-    reasoner.
+
+:   **Default:** on.
+
+    **Scope:** compile-time — set with `--features`/`--no-default-features`
+    when building the crate, not at runtime.
+
+    **Allowed values:** on or off.
+
+    **Tuning notes:** gates `--materialize`. Turn it off to build a smaller
+    binary that serves SPARQL over asserted data without pulling in the OWL 2
+    RL reasoner.
 
 ## SIMD kernel selection
 
 HornDB's shared SIMD layer picks a kernel implementation — scalar, AVX2,
 AVX-512, or NEON — for each vectorized primitive (sorted-set intersection,
 lower-bound seek, and so on) once, at first use, and caches the choice for the
-life of the process. Two environment variables adjust that choice without a
-rebuild.
+life of the process. Two settings adjust that choice without a rebuild. Both
+live in the `[simd]` config section, and both are shown here under their
+environment-variable names.
 
-`HORNDB_SIMD_MAX_ISA` (string, environment variable)
-    Default: unset — no cap; the dispatcher may pick any instruction set the
-    host supports.
-    Scope: environment variable, read once at first use of the SIMD
-    dispatcher; not mutable after that for the life of the process.
-    Allowed values: `scalar` (also accepted: `none`, `off`), `avx2`, `avx512`
-    (also accepted: `avx512f`, `avx-512`), or `neon`; matching is
+`HORNDB_SIMD__MAX_ISA` (string, environment variable)
+
+:   **Default:** unset — no cap; the dispatcher may pick any instruction set
+    the host supports. Same setting as `[simd].max_isa` in `config.toml` and
+    the `--simd-max-isa` flag, which outranks it.
+
+    **Scope:** environment variable, read by `serve` at startup and applied to
+    the SIMD dispatcher before the first kernel runs; fixed for the life of the
+    process. `[simd]` is restart-only — a live config reload never changes it.
+
+    **Allowed values:** `scalar` (also accepted: `none`, `off`), `avx2`,
+    `avx512` (also accepted: `avx512f`, `avx-512`), or `neon`; matching is
     case-insensitive and surrounding whitespace is ignored. The value is a
     width ceiling, not an exact pick — scalar is narrower than avx2/neon, which
     are both narrower than avx512 — so `avx2` also permits NEON kernels on an
-    aarch64 host while it blocks AVX-512 on an x86-64 host. An unrecognized
-    value is treated as no cap.
-    Tuning notes: set to `scalar` to turn SIMD off across the process, for
+    aarch64 host while it blocks AVX-512 on an x86-64 host. Any other value
+    makes `serve` exit at startup, naming the bad value.
+
+    **Tuning notes:** set to `scalar` to turn SIMD off across the process, for
     example to isolate a suspected kernel regression. Set to `avx2` to disable
     AVX-512 across a fleet without a rebuild, since wide AVX-512 execution can
     trigger CPU frequency downclocking on some hosts.
 
-`HORNDB_SIMD_AUTOTUNE` (string, environment variable)
-    Default: unset, which means on — each primitive times its available
-    kernels at startup and caches the fastest.
-    Scope: environment variable, read once at first use of the SIMD
-    dispatcher; not mutable after that for the life of the process.
-    Allowed values: `off`, `0`, `false`, or `no` (case-insensitive, surrounding
-    whitespace ignored) disables startup auto-tuning; any other value, or
-    leaving the variable unset, keeps it on.
-    Tuning notes: turn it off to use a static, widest-instruction-set
+`HORNDB_SIMD__AUTOTUNE` (boolean, environment variable)
+
+:   **Default:** unset, which means on — each primitive times its available
+    kernels at startup and caches the fastest. Same setting as
+    `[simd].autotune` in `config.toml` and the `--simd-autotune` flag, which
+    outranks it.
+
+    **Scope:** environment variable, read by `serve` at startup and applied to
+    the SIMD dispatcher before the first kernel runs; fixed for the life of the
+    process. `[simd]` is restart-only — a live config reload never changes it.
+
+    **Allowed values:** exactly `true` or `false`, lower case. The value is
+    parsed as a boolean, so `0`, `1`, `off`, `no`, and `False` are all errors
+    that stop `serve` at startup rather than falling back to a default.
+
+    **Tuning notes:** set to `false` to use a static, widest-instruction-set
     preference instead of startup timing — for example on a host where
     per-process timing is unreliable, such as a machine with a mix of
-    performance and efficiency CPU cores. `HORNDB_SIMD_MAX_ISA` still bounds
+    performance and efficiency CPU cores. `HORNDB_SIMD__MAX_ISA` still bounds
     the candidate set in either mode.
 
 ## Metrics endpoint

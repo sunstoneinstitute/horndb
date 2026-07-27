@@ -65,3 +65,27 @@ code:not(.sourceCode):not(.hljs) {
 
 // Active sidebar item in brand orange
 .sidebar-item .active { color: #B5601A; font-weight: 600; }
+
+// The "Docs" navbar entry exists for the landing page. On a docs page the
+// "docs" wordmark beside the logo already says where you are, so hide it here
+// and let theme/landing.css — which only the landing page loads — show it
+// again. Matched by href; keep in step with `website.navbar` in _quarto.yml.
+// Duplicated in horndb-dark.scss: a rule in one theme applies in that mode only.
+.navbar li.nav-item:has(> a[href$="docs/index.html"]) { display: none; }
+
+// Reference entries (docs/ref/) are Pandoc definition lists: the setting or
+// function name in the <dt>, its fixed fields (Default / Scope / Allowed
+// values / Tuning notes) as <dd> paragraphs. Bootstrap's reboot sets
+// `dd { margin-left: 0 }`, which flattens each entry into one undifferentiated
+// column of text. Restore the hanging indent so an entry reads as a block, and
+// space entries apart so the eye finds the next name. Scoped to the page body
+// so the sidebar and TOC are untouched.
+#quarto-document-content {
+  dt { margin-top: 1.6rem; }
+  dd {
+    margin-left: 1.5rem;
+    border-left: 2px solid $border-color;
+    padding-left: 1rem;
+    p:last-child { margin-bottom: 0; }
+  }
+}

@@ -34,31 +34,36 @@ templates. Read it before writing or editing anything under `docs/ref/` or
 `docs/guides/`. This `AGENTS.md` governs the docs index and tree; `writing-style.md`
 governs page content.
 
-The site is a **Quarto** project: config in [`_quarto.yml`](_quarto.yml), the
-Sunstone brand theme in `theme/` (light `horndb.scss` + dark `horndb-dark.scss`,
-self-hosted fonts), tab icons in `head-extra.html` + `assets/`. It renders both
-`.md` and `.qmd`; `.qmd` pages execute their code cells so example output is
-real, not hand-typed. Build with `quarto render docs/`. The `_quarto.yml`
-`render:` list must stay in step with `publish.toml`.
-`.github/workflows/pages.yml` runs this render in CI on every push to `main`
-that touches one of the docs paths it lists (`docs/ref/`, `docs/guides/`,
-`docs/theme/`, `docs/assets/`, `docs/index.qmd`, `_quarto.yml`,
-`head-extra.html`), and deploys the result under `horndb.io/docs/` alongside
-the `site/` landing page in one GitHub Pages artifact — there is no separate
-docs host. **Add any new top-level render input to that `paths:` list**, or
-edits to it will silently never deploy.
+All of `horndb.io` — the landing page **and** these docs — is **one Quarto
+project**, rooted at the repo root, not at `docs/`:
 
-`../site/` (the `horndb.io/` landing page) is a **second, separate Quarto
-project**, not a subdirectory of this one — the two navbars differ too much to
-share one config. What they do share is the compiled theme: `docs/theme/` is
-canonical and `site/theme/` is a byte-identical duplicate (Quarto cannot follow
-a symlink out of its own project directory). Change one, change both, or the
-navbar/footer/toggle chrome drifts between `horndb.io/` and `horndb.io/docs/`.
-The same duplication applies to the icon files in `assets/`. Beware the subtler
-version of that drift: a page-level rule in `site/styles.css` (a `font-size` or
-`line-height` on `body`) inherits into the shared chrome and shifts the navbar
-by a pixel or two even though both compile from the same theme — set page text
-metrics on `main`, not `body`.
+| Path | What it is |
+|---|---|
+| [`../_quarto.yml`](../_quarto.yml) | The one project config. Its `render:` list must stay in step with [`publish.toml`](publish.toml). |
+| `../index.qmd` | The `horndb.io/` landing page. |
+| `index.qmd`, `ref/`, `guides/` | Everything under `horndb.io/docs/`. |
+| `../theme/` | The Sunstone brand theme — light `horndb.scss`, dark `horndb-dark.scss`, self-hosted fonts, the shared toggle, and `landing.css`. One copy. |
+| `../assets/`, `../head-extra.html` | Tab icons and the navbar logo. |
+
+Build the whole site with `quarto render` from the repo root — not `quarto
+render docs/`, which is not a project. Quarto renders both `.md` and `.qmd`;
+`.qmd` pages execute their code cells so example output is real, not
+hand-typed.
+
+`.github/workflows/pages.yml` runs that one render in CI on every push to
+`main` that touches a path it lists, and uploads `_site/` as a single GitHub
+Pages artifact. **Add any new top-level render input to that `paths:` list**,
+or edits to it will silently never deploy.
+
+The navbar is defined once, project-wide, because Quarto has no per-page
+override. The landing page hides the parts it does not want (the "docs"
+wordmark, Guides, Reference, search, the reader toggle) from `theme/landing.css`,
+which only that page loads via its front-matter `css:` key. Those rules match
+Guides and Reference **by href**, so a change to the `website.navbar` entries in
+`_quarto.yml` means a matching change there. Keep landing-only page rules in
+that file too, and beware the classic leak: a `font-size` or `line-height` on
+`body` inherits into the shared navbar and footer and shifts them by a pixel or
+two — set page text metrics on `main`, not `body`.
 
 A page opts into execution with `jupyter: python3` in its front matter (see
 `guides/getting-started.qmd`). Rendering those pages needs a Python kernel:
