@@ -252,12 +252,12 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   pending):** the WCOJ seek/intersect consumer is now live in the **production executor**.
   `executor/wcoj.rs::BatchIter`'s inlined leapfrog gains a k==2 `horndb_simd::intersect`
   fast path (mirroring the standalone `LeapfrogJoin`): when both contributing iters at a
-  depth expose an `active_run` ≥ `SIMD_SEEK_MIN_RUN` (64), the whole pairwise intersection
-  is precomputed once and drained, replacing per-candidate round-robin seeks. To honour the
-  leapfrog's distinct-key contract, `active_run` now returns a **deduplicated** view
-  (`LevelColumn::distinct_run`) — the raw SoA column keeps its duplicates for the seek
-  index-mapping, but the intersect path consumes a cached distinct copy, so a subject with
-  many objects still emits each leapfrog key once. Output bit-identical to scalar, gated by
+  depth expose an `active_run` ≥ `SIMD_INTERSECT_MIN_RUN` (64), the whole pairwise
+  intersection is precomputed once and drained, replacing per-candidate round-robin seeks.
+  To honour the leapfrog's distinct-key contract, `active_run` deduplicates at depths 0 and
+  1 (a cached copy — the stored column repeats a key once per child row), so a subject with
+  many objects still emits each leapfrog key once; since #239 the leaf level needs no copy
+  at all, because a fixed `(level0, level1)` prefix already makes that column distinct. Output bit-identical to scalar, gated by
   the WCOJ differential fuzzer (narrow + a new wide `N_WIDE > 64` variant that actually
   arms the intersect), the leapfrog BTreeSet oracle, and `tests/batchiter_simd.rs` (incl.
   the duplicate-subject hazard); `four_cycle` no-regress confirmed locally (WCOJ ~40× over
