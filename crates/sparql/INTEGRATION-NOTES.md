@@ -47,15 +47,35 @@ adds it, the implementation should:
 For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.
 
-## GRAPH patterns (Stage 1, #66)
+## GRAPH patterns — currently WRONG, not merely limited (#261)
 
-`GRAPH <iri> { P }` and `GRAPH ?g { P }` lower transparently to `P`.
-The Stage-1 executor holds a single merged graph (corpora are loaded
-from flat triple dumps), so there is no named-graph store to scope
-against; a graph-name variable remains unbound in results. This makes
-the SPB named-graph queries (Q10/Q12) translate and run. Correct
-named-graph scoping (zero solutions for absent graphs, `?g` binding
-per named graph) is deferred to the named-graph epic (#7).
+`translate.rs::translate_pattern` **discards** the `GRAPH` wrapper:
+`GraphPattern::Graph { name: _, inner }` lowers to `inner`. All four
+`translate_query_with` arms likewise bind `dataset: _`, so `FROM` and
+`FROM NAMED` are ignored too. `GRAPH <g> { P }` therefore evaluates `P`
+against the default graph and returns HTTP 200; `GRAPH ?g { P }` does the
+same with `?g` unbound.
+
+This was originally recorded as a Stage-1 simplification, on the premise
+that the executor held one merged graph loaded from flat triple dumps and
+there was nothing to scope against. **That premise no longer holds.**
+`horndb-storage` has been quad-aware since SPEC-25 S1 (#225) —
+`Store::insert_quads` / `retract_quads` / `intern_graph_uri` take a
+`GraphId`, `MemoryTier` keys partitions by graph, and the N-Quads loader
+routes each quad to its named graph. It is this crate, not storage, that
+throws the graph away.
+
+The practical consequence: on any store whose data lives in named graphs
+(which is how the Sunstone data platform writes everything), these queries
+return **wrong answers that a caller cannot detect** — not empty results,
+not errors. The SPB named-graph queries (Q10/Q12) "run" only because their
+corpus is a single merged graph.
+
+`SPEC-28` owns the fix. Phase 1 turns `GRAPH` and a non-empty dataset
+clause into explicit 400s — small, no storage work, and correct straight
+away. Phases 2–4 add `Algebra::Graph`, real dataset construction, and
+named-graph update. Do not add features on top of the current behaviour;
+it is a bug, not a baseline.
 
 ## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)
 
@@ -231,11 +251,17 @@ a graph-management verb or any `;`-joined sequence — becomes
 `ParsedUpdate::GraphManagement`, and the executor walks the whole operation
 list in order.
 
-The execution store is **default-graph only** (one merged graph; see "GRAPH
-patterns" above). The graph-management verbs therefore map onto that single
-graph, with a uniform `SILENT` convention: an operation that would touch a
-named graph the Stage-1 store cannot represent is an **error** when not silent
-and a **no-op** when `SILENT`. Concretely:
+The **execution** store is default-graph only — `HornBackend` writes through the
+triple-grain path and never targets a named graph. Note the distinction from the
+section above: the limit is in this crate, not in `horndb-storage`, which has been
+quad-aware since SPEC-25 S1 (#225). The graph-management verbs therefore map onto
+that single graph, with a uniform `SILENT` convention: an operation that would
+touch a named graph the execution store does not represent is an **error** when
+not silent and a **no-op** when `SILENT`.
+
+Unlike the query side, this behaviour is **honest** — it refuses rather than
+quietly answering against the wrong graph — so it is a limitation, not a bug.
+`SPEC-28` phase 4 replaces it with real named-graph writes. Concretely:
 
 - **`INSERT DATA`/`DELETE DATA`** with a `GRAPH <g> { … }` block are rejected
   (`require_default_graph_name`): the apply loop ignores `q.graph_name`, so a

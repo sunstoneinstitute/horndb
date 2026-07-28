@@ -567,6 +567,21 @@ library is using.
 
 ## 7. Known caveats and Stage-2 deferrals
 
+- **The engine is graph-blind, and `Engine::load` silently drops named
+  graphs.** `crates/owlrl/src/integration.rs` skips every quad whose graph
+  name is not the default graph, so a store whose data lives in named
+  graphs reasons to an **empty closure and reports no error**. Nothing
+  below the load boundary carries a graph either: `TripleStore`
+  (`src/store.rs`) is `scan_predicate` / `probe` / `insert_inferred` over
+  `Triple = (s, p, o)`, and `Provenance.premises` is a list of the same —
+  there is no slot a graph could go in. `horndb-storage` has been
+  quad-aware since SPEC-25 S1 (#225); this crate is where the graph is
+  thrown away. `SPEC-29` settles what reasoning runs over (a declared
+  view: shared vocabulary spine plus one data graph) and where derived
+  triples land (a per-view inferred graph, never the source graph). Expect
+  it to touch the load boundary, the premise record, and the delta unit —
+  which is exactly why it is spec'd rather than patched in.
+
 - **`rdf-12` feature is on workspace-wide** after PR2 of the RDF 1.2
   migration. The Stage-1 OWL 2 RL engine still rejects triple-term
   inputs — `intern_term` and `triple_entailed` bail explicitly when a
