@@ -562,6 +562,14 @@ budget (`owlrl/tests/proof_tree.rs`). Production *persistence* of proofs
 (compressed side-table, on-demand re-derivation) is **planned**
 (`TASKS.md` SPEC-04 rules).
 
+**No user-facing surface yet — proofs are reachable only from Rust.**
+`load_with_reasoning` (`sparql/src/exec/horn.rs`) drops the `owlrl::Engine`
+after dumping the closure into storage, so a running `serve --materialize`
+holds no derivation data; there is no HTTP, SPARQL, or Python surface.
+Exposure is **specified** in `specs/SPEC-27-provenance-as-a-queryable-view.md`
+(virtual `hprov:` RDF view, queried with ordinary SPARQL) — draft, no plan yet
+([#260](https://github.com/sunstoneinstitute/horndb/issues/260)).
+
 ### RDF 1.2 (triple terms)
 **Status: implemented end-to-end (Stage-1 surface).** We track W3C **RDF 1.2**,
 not the community RDF-star extension. `TermKind::TripleTerm` in storage, the
