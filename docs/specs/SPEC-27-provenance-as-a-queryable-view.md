@@ -124,13 +124,21 @@ needed — `FILTER NOT EXISTS { ?d hprov:conclusion ?stmt }` is the test.
 ### Node identity
 
 Statement and derivation nodes are skolem IRIs under the reserved namespace,
-named deterministically from a fixed-width hash of the reified triple's
-canonical N-Triples form:
+named deterministically from a fixed-width hash of the reified statement's
+canonical **N-Quads** form:
 
 ```
 https://horndb.io/ns/prov/stmt/<hash>
 https://horndb.io/ns/prov/deriv/<hash>       # <hash> of the conclusion
 ```
+
+**Why N-Quads and not N-Triples.** The graph a statement sits in is part of its
+identity. Hashing the triple alone gives one node to the same triple asserted in
+two graphs, so once premises carry their source graph (SPEC-29 D8) a proof would
+attribute a premise to the wrong graph. A statement in the default graph hashes
+its N-Quads line **without** a graph label — which is exactly its N-Triples
+line — so default-graph node identities stay stable, including on today's
+default-graph-only store (constraint 1).
 
 Hashing the *lexical* form, not `TermId`s, is deliberate: dictionary ids are not
 stable across loads, and a proof reference that changes meaning after a
