@@ -38,11 +38,12 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **HIGH** · _Completeness_ — **EPIC E2**: SPEC-06 incremental maintenance completeness (delta-incremental retraction, MVCC backing) ([#186](https://github.com/sunstoneinstitute/horndb/issues/186))
 - [x] **HIGH** · _Completeness_ — **EPIC E3**: SPEC-02 storage Stage-2 (per-tuple MVCC, persistent dict, tiering, snapshots, WAL) ([#187](https://github.com/sunstoneinstitute/horndb/issues/187))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E4**: SPEC-04 rule completeness Stage-2 (proof persistence, full dt-*, list/QCR rules, user-defined rules) ([#188](https://github.com/sunstoneinstitute/horndb/issues/188))
-- [ ] **MEDIUM** · _Completeness_ — **EPIC E5**: SPEC-07 SPARQL surface completeness Stage-2 (GSP, named-graph scoping, remote LOAD, XML, DESCRIBE) ([#189](https://github.com/sunstoneinstitute/horndb/issues/189))
+- [ ] **MEDIUM** · _Completeness_ — **EPIC E5**: SPEC-07 SPARQL surface completeness Stage-2 (remote LOAD, XML, DESCRIBE, streaming CONSTRUCT/DESCRIBE) ([#189](https://github.com/sunstoneinstitute/horndb/issues/189))
 - [ ] **MEDIUM** · _Completeness_ — **EPIC E6**: SPEC-08 ML integration Stage-2 (FAISS candidate gen, NL→SPARQL) ([#190](https://github.com/sunstoneinstitute/horndb/issues/190))
 - [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
+- [ ] **CRITICAL** · _Completeness_ — SPEC-28: named-graph + dataset semantics end to end (GRAPH, FROM/FROM NAMED, named-graph Update, GSP) — query silently discards `GRAPH` today ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
 - [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
@@ -67,9 +68,11 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Performance_ — SPEC-04: genuine delta-driven semi-naïve firing for the compiled rules ([#134](https://github.com/sunstoneinstitute/horndb/issues/134))
 - [ ] **HIGH** · _Completeness_ — SPEC-11 SSSOM mappings + compact crosswalk index ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
 - [ ] **HIGH** · _Completeness_ — SPEC-27: expose OWL 2 RL proofs as a queryable `hprov:` provenance view ([#260](https://github.com/sunstoneinstitute/horndb/issues/260))
+- [ ] **HIGH** · _Completeness_ — SPEC-29: named-graph reasoning scope — declared views, shared spine, per-view inferred graphs — after #261 ([#262](https://github.com/sunstoneinstitute/horndb/issues/262))
+- [ ] **HIGH** · _Operational_ — SPEC-30: change-feed materializer — applied-position slot, cursor reconciliation, rebuild-from-zero ([#263](https://github.com/sunstoneinstitute/horndb/issues/263))
+- [ ] **HIGH** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
+- [ ] **HIGH** · _Completeness_ — SPEC-25 S4: named-graph snapshot export/import (quad-set-equality round-trip) ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
-- [ ] **MEDIUM** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
-- [ ] **MEDIUM** · _Completeness_ — SPEC-25 S4: named-graph snapshot export/import (quad-set-equality round-trip) ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-25 S5: HDT cold tier + tiering seam — after #225/#228; delivers the #148 tier-bytes deferral ([#229](https://github.com/sunstoneinstitute/horndb/issues/229))
 - [ ] **MEDIUM** · _Operational_ — SPEC-24 S5: DeltaLog WAL contract + checkpoint scheduling — on-disk format with E3 #187 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214))
 - [ ] **MEDIUM** · _Performance_ — SPEC-24 S7: bilinear-join runtime (per-predicate leaves, cost model, hash/sort-merge kernels) — after #203 ([#216](https://github.com/sunstoneinstitute/horndb/issues/216))
@@ -124,8 +127,9 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   user-defined rules, owlrl Z-set wiring. Successor to Stage-1 epic #4. (Perf hotspots #133/#134
   stay separate.)
 - [ ] **EPIC E5 — SPEC-07 SPARQL surface completeness Stage-2.** _MEDIUM · Completeness._
-  ([#189](https://github.com/sunstoneinstitute/horndb/issues/189)) Graph Store Protocol +
-  named-graph scoping, remote LOAD, XML results, recursive DESCRIBE, streaming CONSTRUCT/DESCRIBE.
+  ([#189](https://github.com/sunstoneinstitute/horndb/issues/189)) Remote LOAD, XML results, recursive DESCRIBE, streaming
+  CONSTRUCT/DESCRIBE. **Re-scoped 2026-07-28:** the named-graph half (GSP + named-graph
+  scoping) is carved out into SPEC-28 ([#261](https://github.com/sunstoneinstitute/horndb/issues/261)), which is its contract.
   Successor to Stage-1 epic #7. (Streaming/agg remainder → #128; python graph-scoping → #119.)
 - [ ] **EPIC E6 — SPEC-08 ML integration Stage-2.** _MEDIUM · Completeness._
   ([#190](https://github.com/sunstoneinstitute/horndb/issues/190)) FAISS-backed candidate
@@ -140,6 +144,25 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   — the phase after Prometheus metrics (#148).
 
 ## CRITICAL — Completeness
+
+- [ ] **SPEC-28: named-graph and RDF dataset semantics end to end.** ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
+  Storage has been quad-aware since SPEC-25 S1 (#225) — `Store::insert_quads`/
+  `retract_quads`/`intern_graph_uri` take a `GraphId`, `MemoryTier` keys partitions
+  by graph — but everything above it still behaves as if the store held one merged
+  graph. **`translate.rs::translate_pattern` discards the `GRAPH` wrapper and all
+  four `translate_query_with` arms bind `dataset: _`**, so a named-graph query
+  returns default-graph rows with HTTP 200: a wrong answer, not an error. Update is
+  at least honest (named targets error unless `SILENT`). Five phases: (1) refuse,
+  do not lie — `GRAPH` and a non-empty dataset clause become explicit 400s, small
+  and immediately correct; (2) graph-scoped access paths (`scan_graph`,
+  `scan_predicate(graph, …)`, `graph_len`, visibility-filtered `graphs()`);
+  (3) query — `Algebra::Graph`, ground and variable form, dataset construction,
+  the default-graph mode, path and pushdown scoping; (4) update + store-boundary
+  idempotent quad apply; (5) Graph Store Protocol. Phase 1 stands alone; 3/4/5
+  depend on 2; 5 depends on 4. Phase 5 is standalone-product surface and is **not**
+  on the data-platform integration path. Supersedes #54; carves the named-graph
+  half out of E5 #189. Spec: `docs/specs/SPEC-28-named-graph-dataset-semantics.md`.
+  Needs decomposition into per-phase leaf issues before pickup.
 
 - [x] **SPEC-23 Phase 1: optimizer framework scaffolding.** ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
   The foundation of epic E1 (#185, closed → decomposed) — logical IR with a flat
@@ -345,6 +368,41 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## HIGH — Completeness
 
+- [ ] **SPEC-29: named-graph reasoning scope.** ([#262](https://github.com/sunstoneinstitute/horndb/issues/262))
+  Nothing says what set of triples a rule fires over or which graph a conclusion
+  belongs to. `Engine::load` (`owlrl/src/integration.rs`) skips every
+  non-default-graph quad, so a store of named graphs reasons to an empty closure
+  and reports no error. Cannot be retrofitted cheaply: it decides the rule-engine
+  input shape, the identity of a derived triple, the Z-set key, and the premise
+  record in a proof. Reasoning runs over a declared **reasoning view** (shared
+  vocabulary spine + one data graph); the spine closes once and is reused
+  (`lfp(T, S∪D) == lfp(T, lfp(T,S) ∪ D)` for a monotone rule set); derived triples
+  land in a per-view inferred graph under a reserved namespace, **never** in the
+  source graph — inferences there would make a whole-graph `PUT` diff emit `dels`
+  for triples the client never sent, which HornDB then re-derives, a churn loop
+  with data loss attached. The spine is shared read-only join state, not streamed
+  circuit input, or per-view trace state dominates. Four slices (P1 materializer
+  slice, P2 incremental spine fan-out, P3 provenance graph attribution, P4 virtual
+  views). After #261. Spec: `docs/specs/SPEC-29-named-graph-reasoning-scope.md`.
+  Needs decomposition into per-slice leaf issues before pickup.
+
+- [ ] **SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure.** ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
+  Tick-local accumulation keyed `(triple, kind)`; publish only non-zero nets in
+  deterministic order; `derived_merged` counts net records (the mixed-tick
+  withdraw+re-add transient disappears — the pinned test flips to asserting its
+  absence). Bounded `subscribe()` variant with a lag policy (`Block` /
+  `DisconnectSlow`, default the latter) + drop counter metric (docs/metrics.md
+  row in the same commit). Land **before** S4 (#213) creates real subscribers.
+  Spec §S3. Gate: SPEC-24 acceptance #3.
+
+- [ ] **SPEC-25 S4: named-graph snapshot export/import.** ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
+  Extend the HDT-derived snapshot format with a graphs section (all named
+  graphs + default), drop the `has_named_graph_data` export error, round-trip
+  to exact quad-set equality; format version bump with one-way compatibility
+  (new reads old; old cleanly rejects new). Prerequisite for S3 checkpoints of
+  quad-bearing stores; rdfhdt wire compatibility stays a non-goal.
+  Spec: `docs/specs/SPEC-25-storage-stage2.md` §S4. Gate: SPEC-25 acceptance #4.
+
 - [ ] **SPEC-11 SSSOM mappings + compact crosswalk index.**
   ([#130](https://github.com/sunstoneinstitute/horndb/issues/130))
   First-class support for [SSSOM](https://mapping-commons.github.io/sssom/) ontology
@@ -470,6 +528,26 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## HIGH — Operational
 
+- [ ] **SPEC-30: change-feed materializer — apply, cursor, recovery.** ([#263](https://github.com/sunstoneinstitute/horndb/issues/263))
+  A consumer applies a batch to HornDB, advances its own cursor, then HornDB
+  crashes. SPEC-02 NF5 accepts losing updates between checkpoints and the WAL is
+  S3 (#227, planned), so the applied batches are gone, the consumer cursor is ahead
+  of HornDB, and replay-from-cursor never re-delivers them: permanent, silent
+  divergence. The usual apply-then-advance correctness argument assumes a durable
+  target, and no spec of ours said HornDB is not one. Answer: an **applied-position
+  slot committed in the same store batch as the quads** — it can only survive if
+  the batch it describes survived. On today's checkpoint-less store it recovers as
+  absent, so every restart reconciles to "resume from the beginning" as a
+  consequence of the contract, reported in a metric, rather than an unstated
+  assumption; SPEC-25 S4 (#228) then makes the slot ride the checkpoint and S2/S3
+  (#226/#227) the WAL, without changing the contract. Also: startup reconciliation
+  (resume from `min(H, C)`, feed id + generation so an unrelated or rebuilt store
+  is detected), rebuild-from-zero as a store-level operation wider than any SPARQL
+  verb (circuit state and the slot are not nameable as graphs), the feed-level
+  ordering contract, and consumer-facing metrics. Consumes SPEC-28 S6 (#261).
+  Spec: `docs/specs/SPEC-30-change-feed-materializer.md`.
+  Needs decomposition into per-slice leaf issues before pickup.
+
 - [ ] **SPEC-25 S3: write-ahead log + crash recovery.** ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
   Sequenced, checksummed WAL record per committed batch (insert/retract),
   including the batch's dictionary appends; configurable fsync policy
@@ -563,23 +641,6 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   WCOJ differential fuzzer green. Spec: `docs/specs/SPEC-03-query-engine.md` NF1/NF2.
 
 ## MEDIUM — Completeness
-
-- [ ] **SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure.** ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
-  Tick-local accumulation keyed `(triple, kind)`; publish only non-zero nets in
-  deterministic order; `derived_merged` counts net records (the mixed-tick
-  withdraw+re-add transient disappears — the pinned test flips to asserting its
-  absence). Bounded `subscribe()` variant with a lag policy (`Block` /
-  `DisconnectSlow`, default the latter) + drop counter metric (docs/metrics.md
-  row in the same commit). Land **before** S4 (#213) creates real subscribers.
-  Spec §S3. Gate: SPEC-24 acceptance #3.
-
-- [ ] **SPEC-25 S4: named-graph snapshot export/import.** ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
-  Extend the HDT-derived snapshot format with a graphs section (all named
-  graphs + default), drop the `has_named_graph_data` export error, round-trip
-  to exact quad-set equality; format version bump with one-way compatibility
-  (new reads old; old cleanly rejects new). Prerequisite for S3 checkpoints of
-  quad-bearing stores; rdfhdt wire compatibility stays a non-goal.
-  Spec: `docs/specs/SPEC-25-storage-stage2.md` §S4. Gate: SPEC-25 acceptance #4.
 
 - [ ] **SPEC-25 S5: HDT cold tier + tiering seam.** ([#229](https://github.com/sunstoneinstitute/horndb/issues/229))
   Read-only second `Tier` impl over the snapshot encoding (memory-mapped,
