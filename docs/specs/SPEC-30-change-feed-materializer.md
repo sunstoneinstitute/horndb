@@ -24,7 +24,8 @@ story real. **Upgraded by** SPEC-25 S4
 ([#228](https://github.com/sunstoneinstitute/horndb/issues/228)), S2
 ([#226](https://github.com/sunstoneinstitute/horndb/issues/226)) and S3
 ([#227](https://github.com/sunstoneinstitute/horndb/issues/227)) as they land —
-see Phasing. **Tracking:** `#TODO`.
+see Phasing. **Tracking:**
+[#263](https://github.com/sunstoneinstitute/horndb/issues/263).
 
 ## Problem — the correctness argument the upstream design cannot make here
 
@@ -328,11 +329,13 @@ overstates by the downtime, which is fine for alerting and is stated at the metr
 
 ## Phasing
 
-Each slice is independently shippable. Implementation plans (`PLAN-30-MM-*.md`)
-are written when a slice is picked up; tracking issues are filed then (`#TODO`
-until they exist).
+Each slice is independently shippable. P1 is decomposed
+([#270](https://github.com/sunstoneinstitute/horndb/issues/270),
+`PLAN-30-01`); plans and tracking issues for P2–P4 are filed when each is
+picked up (`#TODO` until they exist).
 
-1. **P1 — the slot and the contract.** *(tracking: `#TODO`)* The slot (S2), the
+1. **P1 — the slot and the contract.** *(tracking:
+   [#270](https://github.com/sunstoneinstitute/horndb/issues/270))* The slot (S2), the
    startup reconciliation surface (S3), the ordering contract made explicit and
    tested (S5), and the metrics (S6). On today's store the slot recovers as
    absent, so every restart reconciles to "resume from the beginning" — the

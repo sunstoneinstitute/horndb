@@ -17,7 +17,8 @@ never in the graph it was derived from.
 (the delta unit and per-view maintenance), SPEC-02 / SPEC-25 (the quad-aware
 store the views read). **Configured through** SPEC-26. **Constrains** SPEC-27
 (proofs must name the graph a premise came from) and SPEC-28 (dataset
-semantics — see "Resolved with SPEC-28"). **Tracking:** `#TODO`.
+semantics — see "Resolved with SPEC-28"). **Tracking:**
+[#262](https://github.com/sunstoneinstitute/horndb/issues/262).
 
 **Depends on SPEC-28** for the `GRAPH` keyword, `FROM` / `FROM NAMED` dataset
 construction, the Graph Store Protocol (GSP), and the default-graph-when-
@@ -25,7 +26,8 @@ unspecified decision. This spec designs none of those; it states the invariants
 they must preserve.
 
 **Depends on SPEC-30** (change-feed materializer: apply, cursor, recovery;
-tracking `#TODO`) for applied-state durability, startup cursor reconciliation,
+tracking [#263](https://github.com/sunstoneinstitute/horndb/issues/263)) for
+applied-state durability, startup cursor reconciliation,
 and rebuild-from-zero. P1 leans on rebuild-from-feed as the recovery story;
 SPEC-30 is what makes that story real.
 
@@ -469,9 +471,10 @@ table, and acceptance 7 measures per-view spine-attributable state to prove it.
 ## Phasing
 
 Each slice is independently shippable and harness-gated (the SPEC-01 selected
-subset stays green throughout). Implementation plans (`PLAN-29-MM-*.md`) are
-written when a slice is picked up; tracking issues are filed then (`#TODO` until
-they are).
+subset stays green throughout). P1 is decomposed
+([#269](https://github.com/sunstoneinstitute/horndb/issues/269),
+`PLAN-29-01`); plans and tracking issues for P2–P4 are filed when each is
+picked up (`#TODO` until they are).
 
 1. **P1 — the reasoning materializer slice.** The near-term H1 target: HornDB
    beside Oxigraph, fed by a `{adds, dels}` change feed per named graph. Contains:
@@ -481,13 +484,18 @@ they are).
    `reasoning.enabled = false` no-op path. Spine changes mark every dependent view
    stale and re-derive it in the background, resumably — no incremental fan-out
    yet. This is acceptable because rebuild-from-feed is the platform's recovery
-   story. **SPEC-30** (`#TODO`) is what makes that story real — it owns
+   story. **SPEC-30**
+   ([#263](https://github.com/sunstoneinstitute/horndb/issues/263)) is what
+   makes that story real — it owns
    applied-state durability, startup cursor reconciliation, and
    rebuild-from-zero — so P1 rests on SPEC-30 here rather than assuming
    recoverability HornDB does not yet have. On the write path P1 needs **SPEC-28 S6**
-   (store-boundary idempotent quad apply), which is landable independently of the
+   (store-boundary idempotent quad apply,
+   [#267](https://github.com/sunstoneinstitute/horndb/issues/267)), which is
+   landable independently of the
    rest of SPEC-28; it needs SPEC-28's `FROM NAMED` only for a client to query an
-   inferred graph by name. *(tracking: `#TODO`)*
+   inferred graph by name. *(tracking:
+   [#269](https://github.com/sunstoneinstitute/horndb/issues/269))*
 2. **P2 — incremental spine fan-out.** Replace slice 1's re-derive with the
    delta-incremental path (SPEC-24 S1/S2, landed), bounded and rate-limited, plus
    per-view lag and staleness metrics. Sets the per-view overhead budget from P1's

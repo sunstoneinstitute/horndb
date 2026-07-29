@@ -259,7 +259,9 @@ with real named-graph operations.
   derived triples of the graphs that were dropped, and by D11 then cease to
   exist. `DROP ALL` is therefore not the rebuild-from-zero primitive: resetting
   a store's applied position, its view catalog, and its cursor relationship with
-  an external feed is SPEC-30's (tracking: `#TODO`), not this spec's.
+  an external feed is SPEC-30's
+  ([#263](https://github.com/sunstoneinstitute/horndb/issues/263)), not this
+  spec's.
 - **One store batch per Update operation.** A multi-operation request
   (`DELETE DATA{…}; INSERT DATA{…}; DELETE DATA{…}`) applies each operation as
   its own store batch, in request order. Batches may be collapsed only if the
@@ -374,7 +376,8 @@ through `/query` — so nothing on that integration path waits on this section.
 - **Feed-level ordering and durability are SPEC-30's.** This spec owns the store
   batch. What a consumer may assume about applied-state durability, how an
   external cursor is reconciled at startup, and the ordering contract across a
-  whole feed belong to SPEC-30 (tracking: `#TODO`).
+  whole feed belong to SPEC-30
+  ([#263](https://github.com/sunstoneinstitute/horndb/issues/263)).
 
 ### S7. Conformance
 
@@ -414,28 +417,36 @@ selection lives in `harness/selected.toml`; corpora are fetched by
 ## Phasing
 
 Each phase is independently shippable, tracked as a sub-issue of
-[#189](https://github.com/sunstoneinstitute/horndb/issues/189), and
-harness-gated: the SPEC-01 selected subset stays green throughout, and each
-phase grows the subset per S7. Implementation plans (`PLAN-28-MM-*.md`) are
-written when each phase is picked up; tracking issues are filed then (`#TODO`
-until they exist).
+[#261](https://github.com/sunstoneinstitute/horndb/issues/261) (this spec's
+epic), and harness-gated: the SPEC-01 selected subset stays green throughout,
+and each phase grows the subset per S7. Phases 1–4 have implementation plans
+(`PLAN-28-01`..`04`); phase 5's is written when it is picked up.
 
-1. **S1 — refuse, do not lie.** *(tracking: `#TODO`)* Small and immediately
+1. **S1 — refuse, do not lie.**
+   *([#264](https://github.com/sunstoneinstitute/horndb/issues/264),
+   `PLAN-28-01`)* Small and immediately
    correct. Turns a silent wrong answer into a 400. No storage work, no new
    algebra. Ship first, independently of everything below.
-2. **S2 — graph-scoped access paths.** *(tracking: `#TODO`)* `scan_graph`,
+2. **S2 — graph-scoped access paths.**
+   *([#265](https://github.com/sunstoneinstitute/horndb/issues/265),
+   `PLAN-28-02`)* `scan_graph`,
    `scan_predicate(graph, …)`, `graph_len`, visibility-filtered `graphs()`,
    whole-store `len`, and the `HornBackend` de-hardwiring. Pure plumbing with no
    user-visible behaviour change; prerequisite for phases 3–5.
-3. **S3 — query.** *(tracking: `#TODO`)* `Algebra::Graph`, ground and variable
+3. **S3 — query.**
+   *([#266](https://github.com/sunstoneinstitute/horndb/issues/266),
+   `PLAN-28-03`)* `Algebra::Graph`, ground and variable
    evaluation, dataset construction, the `default_graph` mode, path and pushdown
    scoping. Removes S1's query-side error. Grows `sparql11` by the `graph/` and
    `dataset/` families.
-4. **S4 + S6 — update and idempotence.** *(tracking: `#TODO`)* Named-graph
+4. **S4 + S6 — update and idempotence.**
+   *([#267](https://github.com/sunstoneinstitute/horndb/issues/267),
+   `PLAN-28-04`)* Named-graph
    quads, the graph-management verbs, `WITH`/`USING`, `SILENT` fidelity, and the
    store-boundary idempotence contract. Grows `sparql11` by the update graph
    families; adds the change-feed replay test.
-5. **S5 — Graph Store Protocol.** *(tracking: `#TODO`)* The four routes, the
+5. **S5 — Graph Store Protocol.**
+   *([#268](https://github.com/sunstoneinstitute/horndb/issues/268))* The four routes, the
    status-code contract, the `PUT` read-diff-commit path. Adds the
    `sparql11-gsp` suite key and its runner support — a live-server harness kind,
    which is the expensive part of this phase (see Risks). Depends on phases 2
