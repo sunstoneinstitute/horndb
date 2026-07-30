@@ -248,7 +248,7 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// The direct children of a node, in render order.
-fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
+pub(crate) fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
     match plan {
         PhysicalPlan::BgpScan { .. }
         | PhysicalPlan::CountScan { .. }

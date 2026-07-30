@@ -508,6 +508,27 @@ fn graph_var_is_one_scan_node_whatever_the_graph_count<
     );
 }
 
+/// A property path inside `GRAPH ?g` must **refuse** until the closure is
+/// computed per graph (PLAN-28-03 Task 5). One closure over every graph's
+/// edges connects `a → b` in g1 with `b → c` in g2 — a path that leaves the
+/// graph, which is a different and wrong answer (SPEC-28 S3).
+fn path_inside_graph_var_refuses<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let mut b: B = fixture();
+    b.seed_quad(Some(G1), "http://ex/x", "http://ex/q", "http://ex/y");
+    b.seed_quad(Some(G2), "http://ex/y", "http://ex/q", "http://ex/z");
+    let err = execute_query_with(
+        "SELECT ?g ?x ?y WHERE { GRAPH ?g { ?x <http://ex/q>+ ?y } }",
+        &b,
+        &SparqlConfig::default(),
+    )
+    .expect_err("a path under GRAPH ?g must refuse, not merge the graphs");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("property path") && msg.contains("GRAPH ?g"),
+        "the error must name the construct: {msg}"
+    );
+}
+
 /// Reserved graphs stay out of the enumeration; naming one is the opt-in.
 fn reserved_graphs_do_not_enumerate<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
     let mut b: B = fixture();
@@ -564,5 +585,6 @@ both_backends!(
     graph_var_bound_by_the_pattern_itself,
     graph_var_count_counts_every_graph,
     graph_var_is_one_scan_node_whatever_the_graph_count,
+    path_inside_graph_var_refuses,
     reserved_graphs_do_not_enumerate,
 );

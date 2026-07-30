@@ -10,7 +10,7 @@ mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
 use crate::algebra::Var;
-use crate::error::Result;
+use crate::error::{Result, SparqlError};
 use crate::exec::{Batch, Executor, Row};
 use crate::plan::PhysicalPlan;
 
@@ -83,6 +83,23 @@ impl ChunkedBatch {
     pub(crate) fn schema(&self) -> &[Var] {
         &self.schema
     }
+}
+
+/// The graph variable of the first `GRAPH ?g` scan leaf in `plan`, if it has
+/// one. Used to spot the sub-plans whose per-row graph column an operator
+/// cannot yet honour.
+fn per_graph_leaf(plan: &PhysicalPlan) -> Option<&Var> {
+    let own = match plan {
+        PhysicalPlan::BgpScan { scope, .. }
+        | PhysicalPlan::CountScan { scope, .. }
+        | PhysicalPlan::GroupCountScan { scope, .. } => scope.graph_var(),
+        _ => None,
+    };
+    own.or_else(|| {
+        crate::plan::explain::children(plan)
+            .into_iter()
+            .find_map(per_graph_leaf)
+    })
 }
 
 #[cfg(test)]
@@ -196,6 +213,21 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
+                // SPEC-28 S3 wants the scope applied *before* the closure:
+                // one closure per graph. Under `GRAPH ?g` the edge relation
+                // instead arrives as every graph's edges in one batch with a
+                // `?g` column the closure flattens away — which would join
+                // a hop in one graph to a hop in another and drop the graph
+                // binding. Refuse; PLAN-28-03 Task 5 scopes paths.
+                if let Some(v) = per_graph_leaf(edge) {
+                    return Err(SparqlError::UnsupportedAlgebra(format!(
+                        "a property path inside GRAPH ?{} is not implemented yet \
+                         (SPEC-28 S3, #266): the closure has to be computed per \
+                         graph, and one merged closure would connect paths that \
+                         leave the graph",
+                        v.name()
+                    )));
+                }
                 let edge_op = self.build(edge)?;
                 Ok(Box::new(PathClosureOp::new(
                     self,
