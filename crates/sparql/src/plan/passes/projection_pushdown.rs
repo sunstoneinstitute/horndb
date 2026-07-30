@@ -303,6 +303,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let plan = LogicalPlan::Project {
             vars: vec![Var::new("s")],
@@ -330,6 +331,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let plan = LogicalPlan::Project {
             vars: vec![Var::new("s")],

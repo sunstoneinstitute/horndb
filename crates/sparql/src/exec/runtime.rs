@@ -5,25 +5,50 @@
 //! removed once Slice 2 landed).
 
 use crate::algebra::{
-    AggFunc, Aggregate, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
+    AggFunc, Aggregate, DatasetSpec, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
 };
 use crate::error::{Result, SparqlError};
-use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, Slot};
-use crate::plan::PhysicalPlan;
+use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, ScanScope, Slot};
+use crate::plan::{GraphScope, PhysicalPlan};
+use crate::DefaultGraphMode;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
 
 pub struct Runtime<'a, E: Executor + ?Sized> {
     exec: &'a E,
+    /// The query's `FROM`/`FROM NAMED` clause and default-graph mode. Every
+    /// scan leaf pairs its own [`GraphScope`] with these to name the graphs
+    /// it reads (SPEC-28 S3).
+    dataset: DatasetSpec,
+    mode: DefaultGraphMode,
 }
 
 impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
+    /// A runtime for a query with no dataset clause, under the default
+    /// (`union`) default-graph mode. Callers that have a translated query
+    /// should chain [`Self::with_dataset`].
     pub fn new(exec: &'a E) -> Self {
-        Self { exec }
+        Self {
+            exec,
+            dataset: DatasetSpec::default(),
+            mode: DefaultGraphMode::default(),
+        }
+    }
+
+    /// Attach the query's resolved dataset and default-graph mode.
+    pub fn with_dataset(mut self, dataset: DatasetSpec, mode: DefaultGraphMode) -> Self {
+        self.dataset = dataset;
+        self.mode = mode;
+        self
     }
 
     pub(crate) fn exec(&self) -> &'a E {
         self.exec
+    }
+
+    /// Pair a scan leaf's plan-level scope with this query's dataset.
+    pub(crate) fn scan_scope<'s>(&'s self, graph: &'s GraphScope) -> ScanScope<'s> {
+        ScanScope::new(graph, &self.dataset, self.mode)
     }
 
     // NOTE: `build` (the pull-based operator-tree constructor that `run` uses)
@@ -1957,8 +1982,13 @@ pub fn construct_triples(
 /// erasure in `MemStore` defeats). Typed-literal / Turtle serialisation
 /// is likewise a separate increment (#57); this reuses the N-Triples
 /// path.
+///
+/// `scope` is the query's default graph: `DESCRIBE` has no `GRAPH`
+/// wrapper, so the expansion reads whatever the dataset clause and
+/// `default_graph` mode make the default graph (SPEC-28 S3).
 pub fn describe_triples<E: Executor + ?Sized>(
     exec: &E,
+    scope: &ScanScope<'_>,
     seeds: &[Term],
     rows: &[Bindings],
 ) -> Result<Vec<(String, String, String)>> {
@@ -2018,7 +2048,7 @@ pub fn describe_triples<E: Executor + ?Sized>(
             predicate: Term::Var(Var::new(PRED_VAR)),
             object: Term::Var(Var::new(OBJ_VAR)),
         };
-        for b in exec.scan_bgp(std::slice::from_ref(&pattern))? {
+        for b in exec.scan_bgp(std::slice::from_ref(&pattern), scope)? {
             let p = match b.get(PRED_VAR) {
                 Some(Term::Iri(s)) | Some(Term::Literal(s)) | Some(Term::BlankNode(s)) => s.clone(),
                 _ => continue,

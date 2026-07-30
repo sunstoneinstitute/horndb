@@ -49,7 +49,7 @@ fn plan_select_routes_only_plain_select() {
     use horndb_sparql::SparqlConfig;
 
     let cfg = SparqlConfig::default();
-    let (vars, _plan) = plan_select("SELECT ?s ?o WHERE { ?s ?p ?o }", &cfg)
+    let (vars, _plan, _dataset) = plan_select("SELECT ?s ?o WHERE { ?s ?p ?o }", &cfg)
         .unwrap()
         .expect("a plain SELECT plans for streaming");
     assert_eq!(vars, vec!["s".to_string(), "o".to_string()]);

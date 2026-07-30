@@ -132,7 +132,7 @@ fn add_term_vars(t: &Term, mask: TypeMask, out: &mut VarTypes) {
 pub fn infer(plan: &LogicalPlan) -> VarTypes {
     use LogicalPlan::*;
     match plan {
-        Bgp { patterns } => {
+        Bgp { patterns, .. } => {
             let mut vt = VarTypes::default();
             for p in patterns {
                 add_pattern_vars(p, &mut vt);
@@ -308,7 +308,10 @@ mod tests {
         }
     }
     fn bgp(pats: Vec<TriplePattern>) -> LogicalPlan {
-        LogicalPlan::Bgp { patterns: pats }
+        LogicalPlan::Bgp {
+            patterns: pats,
+            scope: crate::plan::GraphScope::DefaultGraph,
+        }
     }
 
     #[test]

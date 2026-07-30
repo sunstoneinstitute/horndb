@@ -61,7 +61,7 @@
 use crate::algebra::{AggFunc, Aggregate, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
 use crate::exec::runtime::{agg_inner_exprs, referenced_vars};
-use crate::plan::PhysicalPlan;
+use crate::plan::{GraphScope, PhysicalPlan};
 use std::collections::HashSet;
 
 /// Rewrite `plan` into a result-equivalent plan. Two passes run in order:
@@ -138,9 +138,9 @@ fn lower_count_group(
     //    inlinable conjunction of `?v = <const>` equalities — either of which
     //    may sit behind a restricting Project that retains every var read
     //    below it.
-    let (patterns, subst): (&Vec<TriplePattern>, Vec<(String, Term)>) =
+    let (patterns, scope, subst): (&Vec<TriplePattern>, &GraphScope, Vec<(String, Term)>) =
         match peel_restricting_project(inner, &required) {
-            BgpScan { patterns } => (patterns, Vec::new()),
+            BgpScan { patterns, scope } => (patterns, scope, Vec::new()),
             Filter { expr, inner: f } => {
                 // Below the Filter, the retained set must also cover the
                 // filter expression's vars: a Project that dropped one the
@@ -150,14 +150,14 @@ fn lower_count_group(
                 // it adds a Filter's expr vars to its child's demand.)
                 let mut f_required = required.clone();
                 referenced_vars(expr, &mut f_required);
-                let BgpScan { patterns } = peel_restricting_project(f, &f_required) else {
+                let BgpScan { patterns, scope } = peel_restricting_project(f, &f_required) else {
                     return None;
                 };
                 let mut subst = Vec::new();
                 if !eq_conjuncts(expr, &mut subst) {
                     return None;
                 }
-                (patterns, subst)
+                (patterns, scope, subst)
             }
             _ => return None,
         };
@@ -208,12 +208,17 @@ fn lower_count_group(
     let out_vars: Vec<Var> = aggregates.iter().map(|a| a.out.clone()).collect();
     if keys.is_empty() && out_vars.len() == 1 {
         let out_var = out_vars.into_iter().next().expect("len checked == 1");
-        return Some(CountScan { patterns, out_var });
+        return Some(CountScan {
+            patterns,
+            out_var,
+            scope: scope.clone(),
+        });
     }
     Some(GroupCountScan {
         patterns,
         keys: keys.to_vec(),
         out_vars,
+        scope: scope.clone(),
     })
 }
 
@@ -403,7 +408,7 @@ fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> Phys
 pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
     use PhysicalPlan::*;
     match node {
-        BgpScan { patterns } => {
+        BgpScan { patterns, .. } => {
             let mut out = Vec::new();
             for p in patterns {
                 collect_pattern_vars(p, &mut out);
@@ -525,11 +530,12 @@ fn intersect(superset: &HashSet<String>, scope: &[String]) -> HashSet<String> {
 fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
     use PhysicalPlan::*;
     match node {
-        BgpScan { patterns } => {
+        BgpScan { patterns, scope } => {
             let nat = output_vars(node);
             wrap_if_wider(
                 BgpScan {
                     patterns: patterns.clone(),
+                    scope: scope.clone(),
                 },
                 &nat,
                 demanded,
@@ -886,6 +892,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let plan = PhysicalPlan::Project {
             vars: vec![Var::new("s")],
@@ -1058,6 +1065,7 @@ mod tests {
                 object: var("o"),
             }],
             out_var: Var::new("n"),
+            scope: GraphScope::DefaultGraph,
         };
         let out: Vec<Bindings> = Runtime::new(&mem).run(&plan).unwrap().collect();
         assert_eq!(
@@ -1087,6 +1095,7 @@ mod tests {
             }],
             keys: vec![Var::new("s")],
             out_vars: vec![Var::new("c")],
+            scope: GraphScope::DefaultGraph,
         };
         let out: Vec<Bindings> = Runtime::new(&mem).run(&plan).unwrap().collect();
         // Same deterministic order as eval_group_native: decoded-lexical key
@@ -1117,6 +1126,7 @@ mod tests {
             }],
             keys: vec![],
             out_vars: vec![Var::new("n"), Var::new("m")],
+            scope: GraphScope::DefaultGraph,
         };
         // Zero solutions + implicit group: exactly one row of zeros
         // (SPARQL §11.2 — COUNT of nothing is 0).
@@ -1158,6 +1168,7 @@ mod tests {
             }],
             keys: vec![Var::new("s")],
             out_vars: vec![Var::new("c")],
+            scope: GraphScope::DefaultGraph,
         };
         let out: Vec<Bindings> = Runtime::new(&empty).run(&plan).unwrap().collect();
         assert!(
@@ -1404,6 +1415,7 @@ mod tests {
                     predicate: Term::Iri("http://ex/p".into()),
                     object: var("o"),
                 }],
+                scope: crate::plan::GraphScope::DefaultGraph,
             }),
             keys: vec![Var::new("z")], // not produced by the BGP
             aggregates: vec![Aggregate {

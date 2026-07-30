@@ -124,6 +124,7 @@ mod tests {
                 predicate: Term::Iri(format!("http://ex/{p}")),
                 object: var(p),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         }
     }
     fn pred(v: &str) -> Expr {

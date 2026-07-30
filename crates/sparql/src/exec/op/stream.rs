@@ -286,6 +286,7 @@ mod tests {
                 predicate: iri("p"),
                 object: Term::Var(Var::new("o")),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let plan = PhysicalPlan::Slice {
             inner: Box::new(scan),
@@ -352,6 +353,7 @@ mod tests {
                 predicate: iri("p"),
                 object: Term::Var(Var::new("o")),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let proj = PhysicalPlan::Project {
             vars: vec![Var::new("o")],

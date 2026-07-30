@@ -22,6 +22,7 @@ fn scan_plan() -> PhysicalPlan {
             predicate: iri("p"),
             object: Term::Var(Var::new("o")),
         }],
+        scope: crate::plan::GraphScope::DefaultGraph,
     }
 }
 

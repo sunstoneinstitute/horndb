@@ -4,10 +4,10 @@
 //! Callers that need finer control should use the individual modules.
 
 use crate::algebra::translate::translate_query_with;
-use crate::algebra::DatasetSpec;
+use crate::algebra::{DatasetSpec, TranslatedQuery};
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
-use crate::exec::{Bindings, Executor, FullBackend};
+use crate::exec::{Bindings, Executor, FullBackend, ScanScope};
 use crate::parser::{parse_query, parse_update, strip_plan_pragmas, ParsedQuery};
 use crate::plan::explain::{explain, ExecutionMode, ExplainFormat};
 use crate::plan::pass::PlanCtx;
@@ -37,25 +37,19 @@ fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
     out
 }
 
-/// SPEC-28 phase 3 Task 1 stopgap: `translate_query_with` captures a
-/// query's `FROM`/`FROM NAMED` clause into a [`DatasetSpec`], but nothing
-/// downstream (planning, execution) reads it yet — that lands in
-/// PLAN-28-03 Task 3. Silently proceeding would answer over the wrong
-/// graph set (e.g. `FROM <g>` on a store with no `<g>` data would still
-/// return default-graph rows) — exactly the wrong-answer class SPEC-28
-/// phase 1 (#264) shipped to eliminate. Refuse instead, symmetrically with
-/// `Algebra::Graph`'s "Graph not lowered" guard (`plan/lower.rs`).
-/// **Delete this function and its call sites once Task 3 threads
-/// `DatasetSpec` through the executor.**
-fn reject_unthreaded_dataset(dataset: &DatasetSpec) -> Result<()> {
-    if *dataset != DatasetSpec::default() {
-        return Err(SparqlError::Planner(
-            "dataset clause (FROM/FROM NAMED) not threaded to the executor yet \
-             (SPEC-28 phase 3 Task 3, #266)"
-                .into(),
-        ));
-    }
-    Ok(())
+/// The scope of a scan outside any `GRAPH` wrapper — used to build the
+/// `DESCRIBE` expansion's scope, which has no plan node to read it from.
+const DEFAULT_GRAPH_SCOPE: crate::plan::GraphScope = crate::plan::GraphScope::DefaultGraph;
+
+/// A [`Runtime`] carrying the query's dataset (`FROM`/`FROM NAMED`) and the
+/// caller's default-graph mode, so every scan leaf resolves the graphs it
+/// reads (SPEC-28 S3).
+fn runtime_for<'a, E: Executor + ?Sized>(
+    exec: &'a E,
+    translated: &TranslatedQuery,
+    cfg: &SparqlConfig,
+) -> Runtime<'a, E> {
+    Runtime::new(exec).with_dataset(translated.dataset.clone(), cfg.default_graph)
 }
 
 /// Classify a parsed query into its metric `QueryKind`. `EXPLAIN` is reported
@@ -119,24 +113,21 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let vars = projected_vars(&translated.algebra);
             let plan = timed(Stage::Plan, || {
-                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
-            let rows: Vec<Bindings> = timed(Stage::Exec, || {
-                Runtime::new(exec).run(&plan).map(Iterator::collect)
-            })?;
+            let rt = runtime_for(exec, &translated, cfg);
+            let rows: Vec<Bindings> = timed(Stage::Exec, || rt.run(&plan).map(Iterator::collect))?;
             Ok(QueryAnswer::Solutions { vars, rows })
         }
         ParsedQuery::Ask { inner } => {
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || {
-                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
+            let rt = runtime_for(exec, &translated, cfg);
             let any = timed(Stage::Exec, || {
                 // Early exit: only the first operator chunk is pulled and
                 // decoded — `run` would drain the whole result set.
-                let rt = Runtime::new(exec);
                 let mut stream = rt.run_stream(&plan)?;
                 Ok(stream.next_chunk()?.is_some())
             })?;
@@ -145,12 +136,10 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         ParsedQuery::Construct { inner } => {
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || {
-                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
-            let rows: Vec<Bindings> = timed(Stage::Exec, || {
-                Runtime::new(exec).run(&plan).map(Iterator::collect)
-            })?;
+            let rt = runtime_for(exec, &translated, cfg);
+            let rows: Vec<Bindings> = timed(Stage::Exec, || rt.run(&plan).map(Iterator::collect))?;
             let triples = construct_triples(&inner, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
@@ -171,13 +160,14 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let seeds = explicit_describe_iris(&translated.algebra);
             let plan = timed(Stage::Plan, || {
-                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
-            let rows: Vec<Bindings> = timed(Stage::Exec, || {
-                Runtime::new(exec).run(&plan).map(Iterator::collect)
-            })?;
-            let triples = describe_triples(exec, &seeds, &rows)?;
+            let rt = runtime_for(exec, &translated, cfg);
+            let rows: Vec<Bindings> = timed(Stage::Exec, || rt.run(&plan).map(Iterator::collect))?;
+            // DESCRIBE expands each resource over the query's default graph.
+            let scope =
+                ScanScope::new(&DEFAULT_GRAPH_SCOPE, &translated.dataset, cfg.default_graph);
+            let triples = describe_triples(exec, &scope, &seeds, &rows)?;
             Ok(QueryAnswer::Triples(triples))
         }
         ParsedQuery::Explain { inner, json } => {
@@ -200,7 +190,10 @@ pub fn execute_query_with<E: Executor + ?Sized>(
 }
 
 /// Parse → translate → plan a query for streaming execution, without
-/// running it. Returns `Some((projected_vars, plan))` for a plain SELECT;
+/// running it. Returns `Some((projected_vars, plan, dataset))` for a plain
+/// SELECT — the caller must hand `dataset` (with its own default-graph
+/// mode) to the `Runtime` it builds, or every scan falls back to the
+/// no-`FROM` default graph;
 /// `None` for every other form (ASK / CONSTRUCT / DESCRIBE / EXPLAIN),
 /// which the caller answers via [`execute_query`]. Records the same
 /// Parse/Translate/Plan stage metrics as `execute_query`;
@@ -211,7 +204,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
 pub fn plan_select(
     query: &str,
     cfg: &SparqlConfig,
-) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan)>> {
+) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan, DatasetSpec)>> {
     // Strip plan pragmas here too: the HTTP /query handler routes EVERY
     // request through this function first, so without stripping a
     // pragma-carrying query of any form would die as a spargebra parse
@@ -233,10 +226,9 @@ pub fn plan_select(
     let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
     let vars = projected_vars(&translated.algebra);
     let plan = timed(Stage::Plan, || {
-        reject_unthreaded_dataset(&translated.dataset)?;
         planner::plan_with_ctx(&translated.algebra, &ctx)
     })?;
-    Ok(Some((vars, plan)))
+    Ok(Some((vars, plan, translated.dataset)))
 }
 
 /// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,
@@ -259,7 +251,6 @@ fn plan_of(
         }
     };
     let translated = translate_query_with(inner, cfg)?;
-    reject_unthreaded_dataset(&translated.dataset)?;
     planner::plan_with_ctx(&translated.algebra, ctx)
 }
 

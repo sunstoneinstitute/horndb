@@ -10,6 +10,10 @@ pub mod horn;
 pub mod mem;
 pub mod op;
 pub mod runtime;
+pub mod scope;
+pub use scope::{
+    is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope, RESERVED_GRAPH_PREFIX,
+};
 
 use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
@@ -70,12 +74,19 @@ pub type GroupCount = (Vec<Slot>, usize);
 /// The single seam Stage 1 needs from the storage/join backend.
 /// SPEC-03 will eventually back this with Leapfrog Triejoin; in the
 /// meantime [`mem::MemStore`] satisfies it for tests.
+///
+/// Every read takes a [`ScanScope`]: the graph(s) the scan reads, resolved
+/// from the plan leaf's `GRAPH` scope plus the query's dataset clause and
+/// `default_graph` mode (SPEC-28 S3). A backend that cannot express a scope
+/// must **error or decline**, never widen it — a whole-store answer under a
+/// graph scope is exactly the silent wrong answer SPEC-28 exists to remove.
 pub trait Executor {
-    /// Iterate solutions to a BGP. Implementations are free to
-    /// optimise — `MemStore` uses a naive nested loop.
+    /// Iterate solutions to a BGP within `scope`. Implementations are free
+    /// to optimise — `MemStore` uses a naive nested loop.
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
+        scope: &ScanScope<'_>,
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>>;
 
     /// Scan a BGP returning id-carrying slot rows (no `TermId → String`
@@ -84,8 +95,8 @@ pub trait Executor {
     /// back as `Slot::Term`. `HornBackend` overrides this to read the WCOJ
     /// id columns directly.
     // keep in sync with HornBackend::scan_bgp_ids
-    fn scan_bgp_ids(&self, patterns: &[TriplePattern]) -> Result<Batch> {
-        let rows: Vec<Bindings> = self.scan_bgp(patterns)?.collect();
+    fn scan_bgp_ids(&self, patterns: &[TriplePattern], scope: &ScanScope<'_>) -> Result<Batch> {
+        let rows: Vec<Bindings> = self.scan_bgp(patterns, scope)?.collect();
         Ok(Batch::from_bindings(rows))
     }
 
@@ -124,7 +135,14 @@ pub trait Executor {
     /// This deliberately does not execute the BGP join: a leaf-pattern
     /// row count is enough for the Stage-1 plan printer, which has no
     /// cost model.
-    fn cardinality_estimate(&self, _patterns: &[TriplePattern]) -> Option<usize> {
+    /// `scope` is advisory here: an estimate that ignores it stays a valid
+    /// upper bound, and SPEC-28 S3 permits coarse estimates precisely
+    /// because they never reach a result.
+    fn cardinality_estimate(
+        &self,
+        _patterns: &[TriplePattern],
+        _scope: &ScanScope<'_>,
+    ) -> Option<usize> {
         None
     }
 
@@ -132,8 +150,14 @@ pub trait Executor {
     /// count available" (caller falls back to scanning). Additive; does not
     /// change `scan_bgp_ids`. The returned count, when `Some`, MUST equal the
     /// number of solution rows `scan_bgp_ids` would produce (one row per BGP
-    /// solution).
-    fn count_bgp(&self, _patterns: &[TriplePattern]) -> Result<Option<usize>> {
+    /// solution) **in `scope`**. A backend that cannot count within a given
+    /// scope must return `None` (or error), never a wider count — the
+    /// caller's scan fallback is scope-correct by construction.
+    fn count_bgp(
+        &self,
+        _patterns: &[TriplePattern],
+        _scope: &ScanScope<'_>,
+    ) -> Result<Option<usize>> {
         Ok(None)
     }
 
@@ -148,6 +172,7 @@ pub trait Executor {
         &self,
         _patterns: &[TriplePattern],
         _keys: &[Var],
+        _scope: &ScanScope<'_>,
     ) -> Result<Option<Vec<GroupCount>>> {
         Ok(None)
     }

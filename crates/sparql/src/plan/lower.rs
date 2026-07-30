@@ -6,68 +6,85 @@
 //! pre-refactor `planner::plan(alg)`. Coalescing is a *pass* (`CoalesceBgp`),
 //! keeping the transformation in one bisectable place. [`lower_physical`]
 //! maps a (possibly coalesced) [`LogicalPlan`] back to
-//! [`crate::plan::PhysicalPlan`]; a flat `Bgp { patterns }` lowers to
-//! `BgpScan { patterns }`, which the WCOJ executor runs as the natural join
-//! of the whole pattern set — result-equivalent to the nested
+//! [`crate::plan::PhysicalPlan`]; a flat `Bgp` lowers to a `BgpScan` with
+//! the same patterns and graph scope, which the WCOJ executor runs as the
+//! natural join of the whole pattern set — result-equivalent to the nested
 //! `Join(BgpScan, BgpScan)` today's lowering emits (proven in
 //! `tests/logical_pipeline.rs`).
+//!
+//! Lowering is also where the `GRAPH` scope lands: `Algebra::Graph` is not
+//! kept as a node — it sets the scope on every scan leaf beneath it
+//! (SPEC-28 S3/D5). See [`lower_scoped`].
 
 use crate::algebra::Algebra;
-use crate::error::{Result, SparqlError};
+use crate::error::Result;
 use crate::plan::logical::LogicalPlan;
-use crate::plan::PhysicalPlan;
+use crate::plan::{GraphScope, PhysicalPlan};
 
-/// Naive `Algebra → LogicalPlan` (no coalescing, no folding).
-///
-/// Fallible only for `Algebra::Graph` today: SPEC-28 phase 3's scan-scope
-/// lowering (pushing the `GRAPH` scope onto scan leaves, PLAN-28-03 Task 3)
-/// has not landed yet, so a `GRAPH` query translates successfully but fails
-/// here with a clear `Planner` error rather than silently mis-lowering or
-/// panicking.
+/// Naive `Algebra → LogicalPlan` (no coalescing, no folding), starting from
+/// the query's default graph.
 pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
+    lower_scoped(alg, &GraphScope::DefaultGraph)
+}
+
+/// `lower_algebra`'s recursion, carrying the graph scope in force at this
+/// point in the tree (SPEC-28 S3/D5).
+///
+/// `Algebra::Graph` does not survive lowering: it replaces `scope` for its
+/// whole subtree, so every scan leaf underneath is built already scoped.
+/// A nested `GRAPH` therefore overrides the outer one — innermost wins, per
+/// SPARQL 1.1. Every other operator passes `scope` through unchanged; that
+/// includes `PathClosure`, whose `edge` sub-plan is scoped *before* the
+/// closure is computed (S3: post-filtering would admit paths that leave the
+/// graph and come back).
+///
+/// `Values` is scope-free by construction — its rows are literals, not
+/// stored quads — so it needs no scope field.
+fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
     Ok(match alg {
         Algebra::Bgp { patterns } => LogicalPlan::Bgp {
             patterns: patterns.clone(),
+            scope: scope.clone(),
         },
         Algebra::Join { left, right } => LogicalPlan::Join {
-            left: Box::new(lower_algebra(left)?),
-            right: Box::new(lower_algebra(right)?),
+            left: Box::new(lower_scoped(left, scope)?),
+            right: Box::new(lower_scoped(right, scope)?),
         },
         Algebra::LeftJoin { left, right, expr } => LogicalPlan::LeftJoin {
-            left: Box::new(lower_algebra(left)?),
-            right: Box::new(lower_algebra(right)?),
+            left: Box::new(lower_scoped(left, scope)?),
+            right: Box::new(lower_scoped(right, scope)?),
             expr: expr.clone(),
         },
         Algebra::Filter { expr, inner } => LogicalPlan::Filter {
             expr: expr.clone(),
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
         },
         Algebra::Union { left, right } => LogicalPlan::Union {
-            left: Box::new(lower_algebra(left)?),
-            right: Box::new(lower_algebra(right)?),
+            left: Box::new(lower_scoped(left, scope)?),
+            right: Box::new(lower_scoped(right, scope)?),
         },
         Algebra::Project { vars, inner } => LogicalPlan::Project {
             vars: vars.clone(),
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
         },
         Algebra::Distinct { inner } => LogicalPlan::Distinct {
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
         },
         Algebra::Slice {
             inner,
             start,
             length,
         } => LogicalPlan::Slice {
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
             start: *start,
             length: *length,
         },
         Algebra::OrderBy { inner, keys } => LogicalPlan::OrderBy {
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
             keys: keys.clone(),
         },
         Algebra::Extend { inner, var, expr } => LogicalPlan::Extend {
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
             var: var.clone(),
             expr: expr.clone(),
         },
@@ -80,7 +97,7 @@ pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
             keys,
             aggregates,
         } => LogicalPlan::Group {
-            inner: Box::new(lower_algebra(inner)?),
+            inner: Box::new(lower_scoped(inner, scope)?),
             keys: keys.clone(),
             aggregates: aggregates.clone(),
         },
@@ -92,16 +109,10 @@ pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
         } => LogicalPlan::PathClosure {
             subject: subject.clone(),
             object: object.clone(),
-            edge: Box::new(lower_algebra(edge)?),
+            edge: Box::new(lower_scoped(edge, scope)?),
             reflexive: *reflexive,
         },
-        Algebra::Graph { .. } => {
-            return Err(SparqlError::Planner(
-                "Graph not lowered (SPEC-28 phase 3 scan-scope lowering, #266, is not \
-                 implemented yet)"
-                    .into(),
-            ));
-        }
+        Algebra::Graph { name, inner } => lower_scoped(inner, &GraphScope::Named(name.clone()))?,
     })
 }
 
@@ -112,7 +123,7 @@ pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
 /// already cloned once).
 pub fn lower_physical(plan: LogicalPlan) -> PhysicalPlan {
     match plan {
-        LogicalPlan::Bgp { patterns } => PhysicalPlan::BgpScan { patterns },
+        LogicalPlan::Bgp { patterns, scope } => PhysicalPlan::BgpScan { patterns, scope },
         LogicalPlan::Join { left, right } => PhysicalPlan::Join {
             left: Box::new(lower_physical(*left)),
             right: Box::new(lower_physical(*right)),
@@ -201,9 +212,34 @@ mod tests {
         assert_eq!(
             phys,
             PhysicalPlan::BgpScan {
-                patterns: vec![pat("s", "http://ex/p", "o")]
+                patterns: vec![pat("s", "http://ex/p", "o")],
+                scope: GraphScope::DefaultGraph,
             }
         );
+    }
+
+    /// `GRAPH` does not survive lowering: its scope lands on the scan leaf,
+    /// and a nested `GRAPH` wins over the outer one (SPEC-28 S3).
+    #[test]
+    fn graph_scope_lands_on_the_scan_leaf_innermost_wins() {
+        use crate::algebra::GraphSpec;
+        let inner = Algebra::Bgp {
+            patterns: vec![pat("s", "http://ex/p", "o")],
+        };
+        let alg = Algebra::Graph {
+            name: GraphSpec::Iri("http://ex/outer".into()),
+            inner: Box::new(Algebra::Graph {
+                name: GraphSpec::Iri("http://ex/inner".into()),
+                inner: Box::new(inner),
+            }),
+        };
+        match lower_physical(lower_algebra(&alg).unwrap()) {
+            PhysicalPlan::BgpScan { scope, .. } => assert_eq!(
+                scope,
+                GraphScope::Named(GraphSpec::Iri("http://ex/inner".into()))
+            ),
+            other => panic!("expected a scoped BgpScan, got {other:?}"),
+        }
     }
 
     #[test]

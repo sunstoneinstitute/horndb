@@ -31,6 +31,7 @@ fn reference_plan(alg: &Algebra) -> PhysicalPlan {
     match alg {
         Algebra::Bgp { patterns } => PhysicalPlan::BgpScan {
             patterns: patterns.clone(),
+            scope: horndb_sparql::plan::GraphScope::DefaultGraph,
         },
         Algebra::Join { left, right } => PhysicalPlan::Join {
             left: Box::new(reference_plan(left)),
@@ -310,7 +311,7 @@ fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
     // keeps the nested Join the old lowering emitted.
     fn find_bgp_sizes(p: &PhysicalPlan, out: &mut Vec<usize>) -> bool {
         match p {
-            PhysicalPlan::BgpScan { patterns } => {
+            PhysicalPlan::BgpScan { patterns, .. } => {
                 out.push(patterns.len());
                 false
             }

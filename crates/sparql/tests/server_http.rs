@@ -5,6 +5,7 @@ use axum::http::{Request, StatusCode};
 use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
@@ -129,76 +130,91 @@ async fn parse_error_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// A `GRAPH` query must 400 before any store access: scan-scope lowering
-/// isn't implemented yet, so `plan_select` fails at planning with
-/// `Planner("Graph not lowered")`. Exercises the streaming-SELECT path
-/// (`plan_select`, `query.rs`).
-#[tokio::test]
-async fn graph_query_returns_400_naming_graph() {
-    let app = router_with_data();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/query")
-        .header("content-type", "application/sparql-query")
-        .body(Body::from(
-            "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("Graph not lowered"), "body: {text}");
+/// A router whose store holds `<http://ex/a> <p> <b>` in the default graph
+/// and `<http://ex/g_only> <p> <b>` in the named graph `<http://ex/g>` —
+/// enough to tell scoped answers apart from whole-store ones (SPEC-28 S3).
+fn router_with_named_graph() -> axum::Router {
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    s.insert_quad(
+        Some("http://ex/g"),
+        (
+            "http://ex/g_only".into(),
+            "http://ex/p".into(),
+            "http://ex/b".into(),
+        ),
+    );
+    let state = AppState {
+        store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
+    };
+    build_router(state)
 }
 
-/// A `FROM`/`FROM NAMED` dataset clause must 400 before any store access:
-/// `DatasetSpec` isn't threaded to the executor yet, and answering as if
-/// the clause were absent would return the wrong rows
-/// (`api::reject_unthreaded_dataset`). Same streaming-SELECT path as
-/// `graph_query_returns_400_naming_graph`.
-#[tokio::test]
-async fn from_query_returns_400_naming_from() {
-    let app = router_with_data();
+/// POST `q` and return the parsed JSON body, asserting a 200.
+async fn post_query_json(app: axum::Router, q: &str) -> serde_json::Value {
     let req = Request::builder()
         .method("POST")
         .uri("/query")
         .header("content-type", "application/sparql-query")
-        .body(Body::from(
-            "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }".to_string(),
-        ))
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(q.to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK, "query should answer: {q}");
     let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("FROM"), "body: {text}");
+    serde_json::from_slice(&body).unwrap()
 }
 
-/// Same invariant as `graph_query_returns_400_naming_graph`, but for ASK:
-/// `plan_select` only recognizes `SELECT`, so ASK falls through to
-/// `run_materialized` instead — covers the other server-side error path.
+/// `GRAPH <g>` is evaluated, not refused (it 400'd through SPEC-28 phase 1).
+/// Exercises the streaming-SELECT path (`plan_select`, `query.rs`).
 #[tokio::test]
-async fn ask_graph_query_returns_400_naming_graph() {
-    let app = router_with_data();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/query")
-        .header("content-type", "application/sparql-query")
-        .body(Body::from(
-            "ASK { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("Graph not lowered"), "body: {text}");
+async fn graph_query_scopes_to_the_named_graph() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
+    )
+    .await;
+    let b = &v["results"]["bindings"];
+    assert_eq!(b.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(b[0]["s"]["value"], "http://ex/g_only");
+}
+
+/// A `FROM` clause builds the default graph out of exactly the named
+/// graphs, so the default-graph row is *not* in the answer.
+#[tokio::test]
+async fn from_query_builds_the_default_graph_from_the_named_graphs() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }",
+    )
+    .await;
+    let b = &v["results"]["bindings"];
+    assert_eq!(b.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(b[0]["s"]["value"], "http://ex/g_only");
+}
+
+/// Same invariant for ASK: `plan_select` only recognizes `SELECT`, so ASK
+/// falls through to `run_materialized` — the other server-side path.
+#[tokio::test]
+async fn ask_graph_query_answers_over_the_named_graph() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "ASK { GRAPH <http://ex/g> { ?s ?p ?o } }",
+    )
+    .await;
+    assert_eq!(v["boolean"], true, "{v}");
+    let v = post_query_json(
+        router_with_named_graph(),
+        "ASK { GRAPH <http://ex/absent> { ?s ?p ?o } }",
+    )
+    .await;
+    assert_eq!(
+        v["boolean"], false,
+        "an unknown graph is false, not an error"
+    );
 }
 
 /// SPEC-26 S4 / SPEC-28 S3/D2: the `default_graph` per-query override
@@ -232,24 +248,50 @@ async fn default_graph_url_param_form_bad_value_returns_400_naming_key() {
     );
 }
 
-/// A valid `default_graph` value must NOT 400 — proves the override parses
-/// and the query still runs, even though (Task 2 scope) it does not yet
-/// change which rows come back.
+/// A valid `default_graph` value changes which rows come back: over a store
+/// with one default-graph and one named-graph triple, `union` sees both and
+/// `strict` sees only the default graph (SPEC-28 D2).
 #[tokio::test]
-async fn default_graph_url_param_form_valid_value_runs_query() {
-    let app = router_with_data();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/query")
-        .header("content-type", "application/x-www-form-urlencoded")
-        .header("accept", "application/sparql-results+json")
-        .body(Body::from(
-            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=strict"
-                .to_string(),
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+async fn default_graph_url_param_form_valid_value_changes_the_result_set() {
+    let subjects = |mode: &str| {
+        let body = format!(
+            "query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph={mode}"
+        );
+        let app = router_with_named_graph();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/query")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("accept", "application/sparql-results+json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let mut out: Vec<String> = v["results"]["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["s"]["value"].as_str().unwrap().to_owned())
+                .collect();
+            out.sort();
+            out
+        }
+    };
+    assert_eq!(
+        subjects("union").await,
+        vec!["http://ex/a", "http://ex/g_only"],
+        "union sees every non-reserved graph"
+    );
+    assert_eq!(
+        subjects("strict").await,
+        vec!["http://ex/a"],
+        "strict sees only the default-graph sentinel"
+    );
 }
 
 /// The form-encoded POST-body field wins over a `default_graph` also present
@@ -700,6 +742,7 @@ mod streaming_error_semantics {
         fn scan_bgp(
             &self,
             _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             Err(SparqlError::Executor("scan exploded".into()))
         }
@@ -736,10 +779,15 @@ mod streaming_error_semantics {
         fn scan_bgp(
             &self,
             _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             unreachable!("scan_bgp_ids is overridden")
         }
-        fn scan_bgp_ids(&self, _patterns: &[TriplePattern]) -> horndb_sparql::Result<Batch> {
+        fn scan_bgp_ids(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Batch> {
             Ok(Batch {
                 schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
                 rows: (0u64..5000)

@@ -43,7 +43,13 @@ mod tests {
     #[test]
     fn empty_bgp_plans_to_empty_scan() {
         let plan = plan(&Algebra::Bgp { patterns: vec![] }).unwrap();
-        assert_eq!(plan, PhysicalPlan::BgpScan { patterns: vec![] });
+        assert_eq!(
+            plan,
+            PhysicalPlan::BgpScan {
+                patterns: vec![],
+                scope: crate::plan::GraphScope::DefaultGraph,
+            }
+        );
     }
 
     #[test]
@@ -85,7 +91,7 @@ mod tests {
             right: Box::new(bgp),
         };
         match plan(&alg).unwrap() {
-            PhysicalPlan::BgpScan { patterns } => assert_eq!(patterns.len(), 2),
+            PhysicalPlan::BgpScan { patterns, .. } => assert_eq!(patterns.len(), 2),
             other => panic!("expected coalesced BgpScan, got {other:?}"),
         }
     }

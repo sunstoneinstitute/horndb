@@ -477,26 +477,32 @@ fn dataset_clause_translates_all_query_forms() {
     }
 }
 
+/// Phase 1 refused a dataset clause; SPEC-28 phase 3 evaluates it. The
+/// store's data is all in the default graph, so `FROM <g>` — a graph with
+/// no data — is *answered*, with zero rows. The point of the pin is that it
+/// is no longer answered as if the clause were absent.
 #[test]
-fn dataset_clause_end_to_end_refuses_rather_than_answer_wrong_graph() {
-    // A query naming a dataset must refuse end-to-end, not silently answer
-    // as if the clause were absent (that would return default-graph rows
-    // for a `FROM <g>` naming a graph with no data — a wrong answer, not a
-    // missing feature).
+fn dataset_clause_end_to_end_answers_over_the_named_default_graph() {
     let s = store_with_prices();
-    let err = execute_query("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }", &s).unwrap_err();
-    assert!(err.to_string().contains("FROM"), "{err}");
+    let unqualified = rows("SELECT ?s WHERE { ?s ?p ?o }", &s);
+    assert!(
+        !unqualified.is_empty(),
+        "fixture must have default-graph rows for the contrast to mean anything"
+    );
+    let from_empty_graph = rows("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }", &s);
+    assert!(
+        from_empty_graph.is_empty(),
+        "FROM <g> over a graph with no data is zero rows, not the default graph's rows"
+    );
 }
 
+/// Likewise for `GRAPH <g>`: lowered and evaluated, zero rows for a graph
+/// that holds nothing (never an error, never the default graph's rows).
 #[test]
-fn graph_pattern_end_to_end_refuses_until_lowered() {
-    // GRAPH translates but isn't lowered yet (PLAN-28-03 Task 3), so it
-    // must still refuse end-to-end, with the planner's specific error.
+fn graph_pattern_end_to_end_scopes_to_the_named_graph() {
     let s = store_with_prices();
-    let err = execute_query("SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }", &s)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("Graph not lowered"), "{err}");
+    let got = rows("SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }", &s);
+    assert!(got.is_empty(), "GRAPH <g> over an empty graph: {got:?}");
 }
 
 #[test]

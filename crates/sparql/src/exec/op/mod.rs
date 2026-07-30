@@ -98,21 +98,31 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         E: 'r,
     {
         match plan {
-            PhysicalPlan::BgpScan { patterns } => {
-                Ok(Box::new(ScanOp::new(self.exec().scan_bgp_ids(patterns)?)))
-            }
-            PhysicalPlan::CountScan { patterns, out_var } => {
-                Ok(Box::new(CountScanOp::new(self.exec(), patterns, out_var)?))
-            }
+            PhysicalPlan::BgpScan { patterns, scope } => Ok(Box::new(ScanOp::new(
+                self.exec()
+                    .scan_bgp_ids(patterns, &self.scan_scope(scope))?,
+            ))),
+            PhysicalPlan::CountScan {
+                patterns,
+                out_var,
+                scope,
+            } => Ok(Box::new(CountScanOp::new(
+                self.exec(),
+                patterns,
+                out_var,
+                &self.scan_scope(scope),
+            )?)),
             PhysicalPlan::GroupCountScan {
                 patterns,
                 keys,
                 out_vars,
+                scope,
             } => Ok(Box::new(GroupCountScanOp::new(
                 self.exec(),
                 patterns,
                 keys,
                 out_vars,
+                &self.scan_scope(scope),
             )?)),
             PhysicalPlan::Filter { expr, inner } => {
                 let child = self.build(inner)?;

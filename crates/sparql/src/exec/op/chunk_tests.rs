@@ -389,6 +389,7 @@ fn distinct_over_streamed_join_mixed_provenance() {
             predicate: iri("p"),
             object: Term::Var(Var::new("o")),
         }],
+        scope: crate::plan::GraphScope::DefaultGraph,
     };
     let plan = PhysicalPlan::Distinct {
         inner: Box::new(PhysicalPlan::Project {
@@ -430,6 +431,7 @@ fn distinct_over_streamed_left_join_mixed_provenance() {
             predicate: iri("p"),
             object: Term::Var(Var::new("o")),
         }],
+        scope: crate::plan::GraphScope::DefaultGraph,
     };
     let plan = PhysicalPlan::Distinct {
         inner: Box::new(PhysicalPlan::Project {
@@ -504,6 +506,7 @@ fn distinct_over_streamed_join_build_term_trigger() {
                 predicate: iri("q"),
                 object: Term::Var(Var::new("v")),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         }),
         expr: None,
     };

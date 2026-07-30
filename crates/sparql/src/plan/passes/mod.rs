@@ -27,7 +27,7 @@ use std::collections::HashSet;
 pub(crate) fn schema(node: &LogicalPlan) -> Vec<Var> {
     use LogicalPlan::*;
     match node {
-        Bgp { patterns } => {
+        Bgp { patterns, .. } => {
             let mut out = Vec::new();
             for p in patterns {
                 push_pattern_vars(p, &mut out);

@@ -583,7 +583,13 @@ fn apply_delete_insert<B: FullBackend>(
 
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
-    let rows: Vec<Bindings> = Runtime::new(store).run(&plan)?.collect();
+    // The WHERE clause reads the query default graph, composed per the
+    // caller's `default_graph` mode (SPEC-28 S3). `USING`/`WITH` are still
+    // refused (`validate_delete_insert`), so there is no dataset to thread.
+    let rows: Vec<Bindings> = Runtime::new(store)
+        .with_dataset(crate::algebra::DatasetSpec::default(), cfg.default_graph)
+        .run(&plan)?
+        .collect();
 
     // Compute deletions from the original bindings first.
     let mut deletions: Vec<(Term, Term, Term)> = Vec::new();

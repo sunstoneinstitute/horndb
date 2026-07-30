@@ -155,9 +155,10 @@ pub fn load_with_reasoning(
 }
 
 use crate::algebra::{TriplePattern, Var};
+use crate::exec::scope::{is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope};
 use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
-use horndb_storage::{GraphId, Store as ColumnStore, TermId, DEFAULT_GRAPH};
+use horndb_storage::{GraphId, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -204,6 +205,68 @@ impl QuadKey {
     }
 }
 
+/// A [`ScanScope`](crate::exec::ScanScope) resolved against *this* store's
+/// dictionary: the graph ids a WCOJ snapshot is built from. Doubles as the
+/// snapshot memo's key, so equal scopes share one built source.
+///
+/// [`ResolvedScope::PerGraph`] has no variant here on purpose: `GRAPH ?g`
+/// binds a per-row graph column rather than reading one flattened source
+/// (SPEC-28 D6), so it does not resolve to a snapshot at all. It is refused
+/// at [`HornBackend::resolve_scope`] until PLAN-28-03 Task 4 lands.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SnapshotScope {
+    /// Every non-reserved graph, deduped (D2 `union`).
+    DefaultUnion,
+    /// The default-graph sentinel alone (D2 `strict`).
+    DefaultStrict,
+    /// Deduped set union of exactly these graphs, sorted for a stable memo
+    /// key. Empty = the empty graph (an unknown or dataset-excluded graph
+    /// name lands here, which is how "unknown graph ⇒ zero rows, not an
+    /// error" is implemented).
+    FromUnion(Vec<GraphId>),
+    /// Exactly one graph — no dedup needed, since a graph holds a triple at
+    /// most once.
+    OneGraph(GraphId),
+}
+
+/// The empty graph: zero rows, no error.
+const NO_GRAPHS: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
+
+/// True if `g` is a HornDB-internal graph (SPEC-27 F6 / SPEC-29 D4). The
+/// default-graph sentinel has no IRI (`graph_uri` errors on it) and is never
+/// reserved, so it stays in the union default graph.
+fn reserved_graph(snap: &StoreSnapshot<'_>, g: GraphId) -> bool {
+    match snap.graph_uri(g) {
+        Ok(OxTerm::NamedNode(n)) => is_reserved_graph(n.as_str()),
+        _ => false,
+    }
+}
+
+/// Set union of `graphs`' id-triples. Deduped across graphs, because the
+/// union default graph is a set of triples, not a bag (SPEC-28 S3). A
+/// single-graph union skips the dedup — a graph cannot hold a triple twice.
+fn union_triples(snap: &StoreSnapshot<'_>, graphs: &[GraphId]) -> Vec<WTriple> {
+    match graphs {
+        [] => Vec::new(),
+        [g] => snap
+            .iter_graph_term_ids(*g)
+            .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
+            .collect(),
+        many => {
+            let mut seen: HashSet<(u64, u64, u64)> = HashSet::new();
+            let mut out = Vec::new();
+            for g in many {
+                for (s, p, o) in snap.iter_graph_term_ids(*g) {
+                    if seen.insert((s.0, p.0, o.0)) {
+                        out.push(WTriple::new(s.0, p.0, o.0));
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
 /// Storage + WCOJ backed SPARQL backend (issue #67).
 ///
 /// * Term identity: `horndb_storage::Dictionary` (kind-tagged TermIds).
@@ -232,8 +295,11 @@ pub struct HornBackend {
     /// `StoreSnapshot::contains` on the bulk-load hot path. See
     /// `insert_oxrdf_in_graph` for the write funnel's current graph scope.
     live_keys: HashSet<QuadKey>,
-    /// Lazily-built WCOJ source. `None` after any mutation.
-    snapshot: Mutex<Option<Arc<VecTripleSource>>>,
+    /// Lazily-built WCOJ sources, one per [`SnapshotScope`] a query has
+    /// asked for. Cleared wholesale after any mutation. Most workloads use
+    /// one entry (the unqualified default graph); a query mixing `GRAPH`
+    /// scopes adds one per distinct scope.
+    snapshots: Mutex<HashMap<SnapshotScope, Arc<VecTripleSource>>>,
     /// Cached statistics summary derived from a specific snapshot, used by
     /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
     /// stats were built from alongside the stats themselves. The cache
@@ -254,7 +320,7 @@ impl HornBackend {
         Self {
             store: ColumnStore::in_memory(),
             live_keys: HashSet::new(),
-            snapshot: Mutex::new(None),
+            snapshots: Mutex::new(HashMap::new()),
             stats_cache: Mutex::new(None),
         }
     }
@@ -287,7 +353,10 @@ impl HornBackend {
     }
 
     fn invalidate(&mut self) {
-        *self.snapshot.get_mut().expect("snapshot lock poisoned") = None;
+        self.snapshots
+            .get_mut()
+            .expect("snapshot lock poisoned")
+            .clear();
         // Clear the stats cache too: releases the obsolete snapshot's Arc (all six
         // sorted indexes) immediately rather than pinning it until the next estimate.
         *self
@@ -307,13 +376,33 @@ impl HornBackend {
         self.insert_oxrdf_in_graph(DEFAULT_GRAPH, s, p, o)
     }
 
-    /// Insert one oxrdf triple into graph `g`. Private prep for the
-    /// named-graph write path (issue #267) — no public quad-shaped insert
-    /// exists yet, so `g` is always `DEFAULT_GRAPH` today.
+    /// Insert one oxrdf triple into the named graph `graph`, interning the
+    /// graph name first. Returns true if the quad was new.
+    ///
+    /// The seam SPEC-28 phase 3 needs to seed named graphs. The SPARQL
+    /// `Store` write trait stays triple-shaped and default-graph scoped;
+    /// the named-graph *update* path (`INSERT DATA { GRAPH … }`, GSP) is
+    /// phase 4 (#267).
+    pub fn insert_oxrdf_in_named_graph(
+        &mut self,
+        graph: &oxrdf::Term,
+        s: &oxrdf::Term,
+        p: &oxrdf::Term,
+        o: &oxrdf::Term,
+    ) -> Result<bool> {
+        let g = self
+            .store
+            .intern_graph_uri(graph)
+            .map_err(|e| SparqlError::Executor(format!("intern graph: {e}")))?;
+        self.insert_oxrdf_in_graph(g, s, p, o)
+    }
+
+    /// Insert one oxrdf triple into graph `g`.
     ///
     /// Precondition: `g` must already have been interned via
     /// `Store::intern_graph_uri` — `horndb_storage::Store::insert_quads`
     /// requires it and cannot decode an ad-hoc `GraphId`.
+    /// [`Self::insert_oxrdf_in_named_graph`] is the interning entry point.
     fn insert_oxrdf_in_graph(
         &mut self,
         g: GraphId,
@@ -343,11 +432,12 @@ impl HornBackend {
         self.insert_oxrdf_batch_in_graph(DEFAULT_GRAPH, triples)
     }
 
-    /// Bulk-insert oxrdf triples into graph `g` in one storage batch. Private
-    /// prep for the named-graph write path — see `insert_oxrdf_in_graph` for
-    /// why `g` is always `DEFAULT_GRAPH` today. Same idempotency semantics as
+    /// Bulk-insert oxrdf triples into graph `g` in one storage batch. `g`
+    /// must already be interned (see [`Self::insert_oxrdf_in_graph`]); no
+    /// bulk named-graph entry point exists yet, so today's only caller
+    /// passes `DEFAULT_GRAPH`. Same idempotency semantics as
     /// `insert_oxrdf`; the columnar tier rebuilds each predicate partition at
-    /// most once, and the snapshot is invalidated once at the end.
+    /// most once, and the snapshots are invalidated once at the end.
     ///
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
@@ -490,21 +580,76 @@ impl HornBackend {
             .collect()
     }
 
-    /// Get-or-build the WCOJ snapshot.
-    pub(crate) fn wcoj_snapshot(&self) -> Arc<VecTripleSource> {
-        let mut guard = self.snapshot.lock().expect("snapshot lock poisoned");
-        if let Some(s) = guard.as_ref() {
+    /// The `GraphId` an IRI names, or `None` if the dictionary has never
+    /// seen it. A **non-interning** lookup: a read must not mutate the
+    /// dictionary, and an IRI naming no graph simply matches nothing.
+    fn graph_id(&self, iri: &str) -> Option<GraphId> {
+        let ox = OxTerm::NamedNode(NamedNode::new_unchecked(iri));
+        self.store.dictionary().get(&ox).map(|t| GraphId(t.0))
+    }
+
+    /// Resolve a plan-level scan scope against this store's dictionary.
+    ///
+    /// Unknown graph names collapse to [`NO_GRAPHS`] (zero rows), per
+    /// SPEC-28 S3. `GRAPH ?g` is refused — see [`SnapshotScope`].
+    fn resolve_scope(&self, scope: &ScanScope<'_>) -> Result<SnapshotScope> {
+        Ok(match scope.resolve() {
+            ResolvedScope::DefaultUnion => SnapshotScope::DefaultUnion,
+            ResolvedScope::DefaultStrict => SnapshotScope::DefaultStrict,
+            ResolvedScope::OneGraph(iri) => match self.graph_id(iri) {
+                Some(g) => SnapshotScope::OneGraph(g),
+                None => NO_GRAPHS,
+            },
+            ResolvedScope::Union(iris) => {
+                let mut ids: Vec<GraphId> = iris.iter().filter_map(|i| self.graph_id(i)).collect();
+                ids.sort_by_key(|g| g.0);
+                ids.dedup();
+                match ids.len() {
+                    1 => SnapshotScope::OneGraph(ids[0]),
+                    _ => SnapshotScope::FromUnion(ids),
+                }
+            }
+            ResolvedScope::PerGraph(v) => return Err(per_graph_unsupported(v)),
+        })
+    }
+
+    /// Get-or-build the WCOJ snapshot for `scope`, memoised per scope. The
+    /// whole memo is dropped on any write (see [`Self::invalidate`]).
+    fn wcoj_snapshot(&self, scope: &SnapshotScope) -> Arc<VecTripleSource> {
+        let mut guard = self.snapshots.lock().expect("snapshot lock poisoned");
+        if let Some(s) = guard.get(scope) {
             return Arc::clone(s);
         }
-        let triples: Vec<WTriple> = self
-            .store
-            .scan_all_term_ids()
-            .into_iter()
-            .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
-            .collect();
-        let built = Arc::new(VecTripleSource::from_triples(triples));
-        *guard = Some(Arc::clone(&built));
+        let built = Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
+        guard.insert(scope.clone(), Arc::clone(&built));
         built
+    }
+
+    /// Every `(s, p, o)` id-triple visible in `scope`, from one pinned store
+    /// snapshot. Multi-graph scopes are a **set** union: the same triple in
+    /// two graphs is one row of the union graph (SPEC-28 S3).
+    fn scope_triples(&self, scope: &SnapshotScope) -> Vec<WTriple> {
+        let snap = self.store.snapshot();
+        let one = |g: GraphId| -> Vec<WTriple> {
+            snap.iter_graph_term_ids(g)
+                .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
+                .collect()
+        };
+        match scope {
+            SnapshotScope::DefaultStrict => one(DEFAULT_GRAPH),
+            SnapshotScope::OneGraph(g) => one(*g),
+            SnapshotScope::FromUnion(graphs) => union_triples(&snap, graphs),
+            SnapshotScope::DefaultUnion => {
+                // Recomputed on each memo miss, which is exactly when the
+                // graph set may have changed (a write clears the memo).
+                let graphs: Vec<GraphId> = snap
+                    .graphs()
+                    .into_iter()
+                    .filter(|g| !reserved_graph(&snap, *g))
+                    .collect();
+                union_triples(&snap, &graphs)
+            }
+        }
     }
 
     /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
@@ -666,14 +811,18 @@ impl Executor for HornBackend {
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
+        scope: &ScanScope<'_>,
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+        // Resolve the scope even for the empty BGP, so an unsupported scope
+        // (`GRAPH ?g`) refuses uniformly instead of depending on the shape.
+        let resolved = self.resolve_scope(scope)?;
         // The empty BGP is the unit of join: exactly one empty solution
         // (parity with MemStore and the SPARQL algebra).
         if patterns.is_empty() {
             return Ok(Box::new(std::iter::once(Bindings::new())));
         }
 
-        let snapshot = self.wcoj_snapshot();
+        let snapshot = self.wcoj_snapshot(&resolved);
         let dict = self.store.dictionary();
 
         // SPARQL variable name -> WCOJ var index, first-appearance order.
@@ -846,15 +995,17 @@ impl Executor for HornBackend {
     fn scan_bgp_ids(
         &self,
         patterns: &[crate::algebra::TriplePattern],
+        scope: &ScanScope<'_>,
     ) -> Result<crate::exec::Batch> {
         use crate::algebra::Var;
         use crate::exec::{Batch, Row, Slot};
 
+        let resolved = self.resolve_scope(scope)?;
         if patterns.is_empty() {
             return Ok(Batch::unit());
         }
 
-        let snapshot = self.wcoj_snapshot();
+        let snapshot = self.wcoj_snapshot(&resolved);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -996,12 +1147,17 @@ impl Executor for HornBackend {
     /// join identity (`1`); an empty store or a constant unknown to the
     /// dictionary yields `0`; a BGP beyond the WVar index space falls back to the
     /// coarse live count.
-    fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {
+    fn cardinality_estimate(
+        &self,
+        patterns: &[TriplePattern],
+        scope: &ScanScope<'_>,
+    ) -> Option<usize> {
         // The empty BGP is the join identity: one row.
         if patterns.is_empty() {
             return Some(1);
         }
-        let snapshot = self.wcoj_snapshot();
+        // A scope with no snapshot form (`GRAPH ?g`) is simply "unknown".
+        let snapshot = self.wcoj_snapshot(&self.resolve_scope(scope).ok()?);
         // Empty store: no pattern can match.
         if snapshot.total_triples() == 0 {
             return Some(0);
@@ -1038,13 +1194,21 @@ impl Executor for HornBackend {
     /// cannot be done by a bare `num_rows()` sum. Returning `None` keeps the
     /// result correct via the caller's scan+len fallback.
     // keep in sync with scan_bgp_ids
-    fn count_bgp(&self, patterns: &[TriplePattern]) -> Result<Option<usize>> {
+    fn count_bgp(
+        &self,
+        patterns: &[TriplePattern],
+        scope: &ScanScope<'_>,
+    ) -> Result<Option<usize>> {
+        // Scope first: every count below is a count *within the scoped
+        // snapshot*, so an unsupported scope must refuse here rather than
+        // fall through to a wider count (SPEC-28 S3).
+        let resolved = self.resolve_scope(scope)?;
         // The empty BGP is the join identity: one solution.
         if patterns.is_empty() {
             return Ok(Some(1));
         }
 
-        let snapshot = self.wcoj_snapshot();
+        let snapshot = self.wcoj_snapshot(&resolved);
         let dict = self.store.dictionary();
 
         let mut var_index: HashMap<String, u8> = HashMap::new();
@@ -1144,12 +1308,15 @@ impl Executor for HornBackend {
         &self,
         patterns: &[TriplePattern],
         keys: &[Var],
+        scope: &ScanScope<'_>,
     ) -> Result<Option<Vec<GroupCount>>> {
+        // See `count_bgp`: resolve the scope before any counting.
+        let resolved = self.resolve_scope(scope)?;
         if patterns.is_empty() || keys.is_empty() {
             return Ok(None);
         }
 
-        let snapshot = self.wcoj_snapshot();
+        let snapshot = self.wcoj_snapshot(&resolved);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -1439,7 +1606,7 @@ mod tests {
             &Term::Iri("http://ex/p".into()),
             &Term::Iri("http://ex/o".into()),
         );
-        let _ = b.wcoj_snapshot(); // warm: snapshot now has 0 triples
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict); // warm: snapshot now has 0 triples
         b.insert_algebra_triples_bulk(vec![(
             Term::Iri("http://ex/s".into()),
             Term::Iri("http://ex/p".into()),
@@ -1447,7 +1614,8 @@ mod tests {
         )]);
         assert_eq!(b.len(), 1);
         assert_eq!(
-            b.wcoj_snapshot().total_triples(),
+            b.wcoj_snapshot(&SnapshotScope::DefaultStrict)
+                .total_triples(),
             1,
             "snapshot must be rebuilt after a bulk resurrect"
         );
@@ -1461,14 +1629,14 @@ mod tests {
             Term::Iri("http://ex/p".into()),
             Term::Iri("http://ex/o".into()),
         );
-        let _ = b.wcoj_snapshot(); // warm the cache
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict); // warm the cache
         b.delete_triple(
             &Term::Iri("http://ex/s".into()),
             &Term::Iri("http://ex/p".into()),
             &Term::Iri("http://ex/o".into()),
         );
         assert_eq!(b.len(), 0);
-        let snap = b.wcoj_snapshot();
+        let snap = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
         assert_eq!(
             snap.total_triples(),
             0,
@@ -1496,12 +1664,12 @@ mod tests {
         let keys = [Var::new("cat")];
 
         let fast = b
-            .count_bgp_grouped(&patterns, &keys)
+            .count_bgp_grouped(&patterns, &keys, &ScanScope::DEFAULT)
             .unwrap()
             .expect("HornBackend must provide a fast grouped count");
 
         // Oracle: group the id-rows scan_bgp_ids yields on the key column.
-        let batch = b.scan_bgp_ids(&patterns).unwrap();
+        let batch = b.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
         let key_col = batch.col("cat").expect("?cat column");
         let mut want: HashMap<KeyPart, usize> = HashMap::new();
         for r in &batch.rows {
@@ -1529,7 +1697,8 @@ mod tests {
             object: var("cat"),
         }];
         assert_eq!(
-            b.count_bgp_grouped(&missing, &keys).unwrap(),
+            b.count_bgp_grouped(&missing, &keys, &ScanScope::DEFAULT)
+                .unwrap(),
             Some(Vec::new())
         );
     }
@@ -1619,7 +1788,7 @@ mod tests {
             object: var("v"),
         }];
         assert!(b
-            .count_bgp_grouped(&diag, &[Var::new("v")])
+            .count_bgp_grouped(&diag, &[Var::new("v")], &ScanScope::DEFAULT)
             .unwrap()
             .is_none());
         // A key the BGP does not bind has no WCOJ column: fall back (None).
@@ -1629,7 +1798,7 @@ mod tests {
             object: var("o"),
         }];
         assert!(b
-            .count_bgp_grouped(&plain, &[Var::new("z")])
+            .count_bgp_grouped(&plain, &[Var::new("z")], &ScanScope::DEFAULT)
             .unwrap()
             .is_none());
     }

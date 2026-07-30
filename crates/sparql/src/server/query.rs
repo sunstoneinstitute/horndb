@@ -5,6 +5,7 @@
 
 use super::stream_body::ChannelBody;
 use super::AppState;
+use crate::algebra::DatasetSpec;
 use crate::api::{execute_query_with, plan_select, QueryAnswer};
 use crate::error::SparqlError;
 use crate::exec::runtime::Runtime;
@@ -14,7 +15,7 @@ use crate::results::{
     csv::write_select_csv, json::write_ask_json, json::write_select_json, select_serializer,
     tsv::write_select_tsv, xml::write_ask_xml, xml::write_select_xml, ResultFormat,
 };
-use crate::SparqlConfig;
+use crate::{DefaultGraphMode, SparqlConfig};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -179,7 +180,9 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     // Planning needs no store access, so it runs here on the async thread.
     match plan_select(q, &cfg) {
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Ok(Some((vars, plan))) => stream_select(state, vars, plan, fmt).await,
+        Ok(Some((vars, plan, dataset))) => {
+            stream_select(state, vars, plan, dataset, cfg.default_graph, fmt).await
+        }
         Ok(None) => run_materialized(state, q, fmt, &cfg).await,
     }
 }
@@ -245,10 +248,13 @@ enum FirstReply {
 /// writers (not readers). SPEC-02 MVCC removes this; the bounded channel
 /// plus the send-failure-on-disconnect path bound the damage a dead client
 /// can do.
+#[allow(clippy::too_many_arguments)]
 async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
     vars: Vec<String>,
     plan: PhysicalPlan,
+    dataset: DatasetSpec,
+    default_graph: DefaultGraphMode,
     fmt: ResultFormat,
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
@@ -257,7 +263,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
 
     tokio::task::spawn_blocking(move || {
         let store = store.read().unwrap();
-        let rt = Runtime::new(&*store);
+        let rt = Runtime::new(&*store).with_dataset(dataset, default_graph);
         let mut ser = select_serializer(fmt);
         let start = Instant::now();
 

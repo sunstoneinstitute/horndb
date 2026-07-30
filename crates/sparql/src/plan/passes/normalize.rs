@@ -181,6 +181,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let eq = Expr::Eq(
             Box::new(Expr::Term(var("p"))),
@@ -211,6 +212,7 @@ mod tests {
                 predicate: Term::Iri("http://ex/name".into()),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let eq = Expr::Eq(
             Box::new(Expr::Term(var("o"))),
@@ -240,6 +242,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let t = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
@@ -266,6 +269,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let f = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
@@ -294,6 +298,7 @@ mod tests {
                 predicate: Term::Iri("http://ex/age".into()),
                 object: var("age"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let t = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
@@ -328,6 +333,7 @@ mod tests {
                 predicate: var("p"),
                 object: var("o"),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let eq_a = Expr::Eq(
             Box::new(Expr::Term(var("p"))),

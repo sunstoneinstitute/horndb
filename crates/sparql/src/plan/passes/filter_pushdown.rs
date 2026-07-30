@@ -149,9 +149,9 @@ fn push_one(c: Expr, node: LogicalPlan) -> Result<LogicalPlan, (Expr, LogicalPla
         // The deepest possible sink: wrapping the leaf directly IS the
         // one-level descent the caller asked for, so this arm always
         // succeeds.
-        LogicalPlan::Bgp { patterns } => Ok(LogicalPlan::Filter {
+        LogicalPlan::Bgp { patterns, scope } => Ok(LogicalPlan::Filter {
             expr: c,
-            inner: Box::new(LogicalPlan::Bgp { patterns }),
+            inner: Box::new(LogicalPlan::Bgp { patterns, scope }),
         }),
         // A `Filter` already sitting here — either a `FilterPullup` residual
         // or one this same push_filter call created a moment ago by wrapping
@@ -215,6 +215,7 @@ mod tests {
                 predicate: Term::Iri(format!("http://ex/{p}")),
                 object: var(obj),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         }
     }
     fn gt0(v: &str) -> Expr {

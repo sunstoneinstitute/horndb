@@ -1,8 +1,9 @@
-//! Hash-set backed in-memory triple store. Stage 1 only.
+//! In-memory quad store. Stage 1 only.
 //!
 //! Triples are stored as `(String, String, String)` — i.e. all terms
-//! are kept as their N-Triples lexical form. This is intentionally
-//! simple; SPEC-02 introduces the real dictionary-encoded store.
+//! are kept as their N-Triples lexical form — alongside the set of graphs
+//! each one belongs to (SPEC-28 S3). This is intentionally simple; SPEC-02
+//! introduces the real dictionary-encoded store.
 //!
 //! On top of the triple set we maintain a handful of hash indexes so a
 //! triple pattern with one or more bound positions resolves to only the
@@ -14,19 +15,32 @@
 
 use crate::algebra::{Term, TriplePattern};
 use crate::error::Result;
+use crate::exec::scope::{is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope};
 use crate::exec::{unify_one, Bindings, Executor, Store};
 use std::collections::{HashMap, HashSet};
 
-/// In-memory triple store. Clone-on-write semantics — each
+/// The graph a quad lives in: `None` is the default-graph sentinel (which
+/// has no IRI), `Some(iri)` a named graph.
+type GraphName = Option<String>;
+
+/// In-memory quad store. Clone-on-write semantics — each
 /// `MemStore` is independent.
+///
+/// The graph dimension is kept **beside** the triple table rather than in
+/// its key: `triples` holds each distinct `(s, p, o)` once and `graphs[i]`
+/// records which graphs hold it. That keeps every index (and the join) at
+/// its pre-SPEC-28 shape, and makes a union scope's set semantics fall out
+/// — one position is one row however many graphs hold the triple.
 #[derive(Debug, Default, Clone)]
 pub struct MemStore {
     /// Interned triples, addressed by position. Indexes hold positions
     /// into this vector.
     triples: Vec<(String, String, String)>,
-    /// Membership set for O(1) dedup on insert (the store rejects
-    /// duplicate triples, matching the old `HashSet` semantics).
-    seen: HashSet<(String, String, String)>,
+    /// Which graphs hold `triples[i]`. Never empty (an emptied entry is
+    /// removed from the store).
+    graphs: Vec<HashSet<GraphName>>,
+    /// Triple -> position, for O(1) lookup on insert/delete.
+    pos: HashMap<(String, String, String), usize>,
     /// predicate -> triple positions.
     by_p: HashMap<String, Vec<usize>>,
     /// (predicate, object) -> triple positions.
@@ -39,9 +53,23 @@ pub struct MemStore {
 }
 
 impl MemStore {
-    /// Insert a single triple from raw lexical-form strings.
+    /// Insert a single default-graph triple from raw lexical-form strings.
     pub fn insert(&mut self, triple: (String, String, String)) {
-        if !self.seen.insert(triple.clone()) {
+        self.insert_quad(None, triple);
+    }
+
+    /// Insert a quad. `graph` is `None` for the default graph, `Some(iri)`
+    /// for a named one. Inserting a triple already present in `graph` is a
+    /// no-op; inserting it in a *second* graph records the extra membership
+    /// without duplicating the triple.
+    ///
+    /// This is the seam SPEC-28 phase 3 needs to seed named graphs. The
+    /// write trait (`exec::Store`) stays triple-shaped and default-graph
+    /// scoped — the named-graph SPARQL Update path is phase 4 (#267).
+    pub fn insert_quad(&mut self, graph: Option<&str>, triple: (String, String, String)) {
+        let g = graph.map(str::to_owned);
+        if let Some(&idx) = self.pos.get(&triple) {
+            self.graphs[idx].insert(g);
             return;
         }
         let idx = self.triples.len();
@@ -56,9 +84,13 @@ impl MemStore {
             .or_default()
             .push(idx);
         self.by_s.entry(s.clone()).or_default().push(idx);
+        self.pos.insert(triple.clone(), idx);
+        self.graphs.push(HashSet::from([g]));
         self.triples.push(triple);
     }
-    /// Number of triples currently stored. Stable; useful in tests.
+
+    /// Number of **distinct triples** currently stored, across all graphs.
+    /// A triple held by two graphs counts once. Stable; useful in tests.
     pub fn len(&self) -> usize {
         self.triples.len()
     }
@@ -112,11 +144,50 @@ fn lex_of_bound(t: &Term) -> String {
     }
 }
 
+/// Which stored quads a scan may see, resolved once per scan from the
+/// [`ScanScope`] (the `MemStore` analogue of `HornBackend`'s scoped
+/// snapshot).
+enum GraphFilter<'a> {
+    /// The default-graph sentinel only (`strict`, and `FROM`-less strict).
+    DefaultOnly,
+    /// Every non-reserved graph, sentinel included (`union`).
+    AnyNonReserved,
+    /// Exactly these named graphs. Empty = the empty graph.
+    Named(HashSet<&'a str>),
+}
+
+impl GraphFilter<'_> {
+    /// True if a triple held by exactly `graphs` is visible here.
+    fn admits(&self, graphs: &HashSet<GraphName>) -> bool {
+        match self {
+            GraphFilter::DefaultOnly => graphs.contains(&None),
+            GraphFilter::AnyNonReserved => graphs
+                .iter()
+                .any(|g| g.as_deref().is_none_or(|iri| !is_reserved_graph(iri))),
+            GraphFilter::Named(set) => graphs
+                .iter()
+                .any(|g| g.as_deref().is_some_and(|iri| set.contains(iri))),
+        }
+    }
+}
+
+fn graph_filter<'a>(scope: &ScanScope<'a>) -> Result<GraphFilter<'a>> {
+    Ok(match scope.resolve() {
+        ResolvedScope::DefaultStrict => GraphFilter::DefaultOnly,
+        ResolvedScope::DefaultUnion => GraphFilter::AnyNonReserved,
+        ResolvedScope::Union(list) => GraphFilter::Named(list.iter().map(String::as_str).collect()),
+        ResolvedScope::OneGraph(g) => GraphFilter::Named(HashSet::from([g])),
+        ResolvedScope::PerGraph(v) => return Err(per_graph_unsupported(v)),
+    })
+}
+
 impl Executor for MemStore {
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
+        scope: &ScanScope<'_>,
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+        let filter = graph_filter(scope)?;
         // Left-deep, index-nested-loop join. For each pattern we resolve
         // the positions that are bound (either constants in the pattern
         // or variables already bound by an earlier pattern), pick the
@@ -131,6 +202,9 @@ impl Executor for MemStore {
             let mut next: Vec<Bindings> = Vec::new();
             for row in &current {
                 for &idx in self.candidates(pat, row).iter() {
+                    if !filter.admits(&self.graphs[idx]) {
+                        continue;
+                    }
                     let triple = &self.triples[idx];
                     if let Some(b) = unify_one(pat, triple, row) {
                         next.push(b);
@@ -145,7 +219,14 @@ impl Executor for MemStore {
         Ok(Box::new(current.into_iter()))
     }
 
-    fn cardinality_estimate(&self, patterns: &[TriplePattern]) -> Option<usize> {
+    /// Scope-agnostic on purpose: the whole-store leaf-pattern count is a
+    /// valid upper bound under every scope, and estimates never reach a
+    /// result (SPEC-28 S3).
+    fn cardinality_estimate(
+        &self,
+        patterns: &[TriplePattern],
+        _scope: &ScanScope<'_>,
+    ) -> Option<usize> {
         Some(self.estimate_bgp(patterns))
     }
 }
@@ -209,36 +290,45 @@ impl Store for MemStore {
             term_to_lex(&object),
         ));
     }
+    /// Retract the triple from the **default graph** only (the write trait
+    /// is default-graph scoped until SPEC-28 phase 4). A triple that also
+    /// lives in a named graph survives there.
     fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
         let key = (
             term_to_lex(subject),
             term_to_lex(predicate),
             term_to_lex(object),
         );
-        if !self.seen.remove(&key) {
+        let Some(&idx) = self.pos.get(&key) else {
             return;
+        };
+        if !self.graphs[idx].remove(&None) {
+            return; // not in the default graph — no-op
         }
-        // Rebuild from the surviving triples. Deletion is rare (the
-        // server loads once then serves read-only; `DELETE DATA` exists
-        // but is not on a hot path), so a full rebuild keeps the index
-        // bookkeeping trivially correct rather than juggling positional
-        // tombstones.
-        let survivors: Vec<(String, String, String)> = std::mem::take(&mut self.triples)
-            .into_iter()
-            .filter(|t| t != &key)
-            .collect();
-        self.seen.clear();
-        self.by_p.clear();
-        self.by_po.clear();
-        self.by_ps.clear();
-        self.by_s.clear();
-        for t in survivors {
-            self.insert(t);
+        if !self.graphs[idx].is_empty() {
+            return; // still held by a named graph; the triple stays
+        }
+        // Rebuild from the surviving quads. Deletion is rare (the server
+        // loads once then serves read-only; `DELETE DATA` exists but is not
+        // on a hot path), so a full rebuild keeps the index bookkeeping
+        // trivially correct rather than juggling positional tombstones.
+        let survivors: Vec<((String, String, String), HashSet<GraphName>)> =
+            std::mem::take(&mut self.triples)
+                .into_iter()
+                .zip(std::mem::take(&mut self.graphs))
+                .filter(|(t, _)| t != &key)
+                .collect();
+        self.clear_all();
+        for (t, graphs) in survivors {
+            for g in graphs {
+                self.insert_quad(g.as_deref(), t.clone());
+            }
         }
     }
     fn clear_all(&mut self) {
         self.triples.clear();
-        self.seen.clear();
+        self.graphs.clear();
+        self.pos.clear();
         self.by_p.clear();
         self.by_po.clear();
         self.by_ps.clear();
@@ -288,7 +378,7 @@ mod tests {
             pat(var("cw"), iri("title"), var("t")),
         ];
         let mut rows: Vec<(String, String)> = st
-            .scan_bgp(&patterns)
+            .scan_bgp(&patterns, &ScanScope::DEFAULT)
             .unwrap()
             .map(|b| {
                 (
@@ -317,7 +407,10 @@ mod tests {
             pat(var("cw"), iri("title"), var("t")),
             pat(var("cw"), iri("body"), var("b")),
         ];
-        let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+        let rows: Vec<_> = st
+            .scan_bgp(&patterns, &ScanScope::DEFAULT)
+            .unwrap()
+            .collect();
         assert_eq!(rows.len(), 1);
         assert_eq!(lex_of_bound(rows[0].get("cw").unwrap()), "cw1");
         assert_eq!(lex_of_bound(rows[0].get("t").unwrap()), "\"First\"");
@@ -330,7 +423,7 @@ mod tests {
         // Single typed pattern hits the (p,o) index.
         let patterns = vec![pat(var("cw"), iri("a"), iri("BlogPost"))];
         let mut subs: Vec<String> = st
-            .scan_bgp(&patterns)
+            .scan_bgp(&patterns, &ScanScope::DEFAULT)
             .unwrap()
             .map(|b| lex_of_bound(b.get("cw").unwrap()))
             .collect();
@@ -351,7 +444,7 @@ mod tests {
         );
         let patterns = vec![pat(var("cw"), iri("title"), var("t"))];
         let titles: Vec<String> = st
-            .scan_bgp(&patterns)
+            .scan_bgp(&patterns, &ScanScope::DEFAULT)
             .unwrap()
             .map(|b| lex_of_bound(b.get("t").unwrap()))
             .collect();

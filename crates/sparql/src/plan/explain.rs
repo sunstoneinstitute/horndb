@@ -21,7 +21,7 @@
 //! The planner (`plan::planner`) is a 1:1 lowering with no cost model, so
 //! these are *estimates*, surfaced with a `~` prefix — not guarantees.
 
-use crate::exec::Executor;
+use crate::exec::{Executor, ScanScope};
 use crate::plan::PhysicalPlan;
 use std::fmt::Write as _;
 
@@ -72,13 +72,17 @@ pub fn explain<E: Executor + ?Sized>(
 /// `None` when the backend cannot estimate the underlying scans.
 fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize> {
     match plan {
-        PhysicalPlan::BgpScan { patterns } => exec.cardinality_estimate(patterns),
+        PhysicalPlan::BgpScan { patterns, scope } => {
+            exec.cardinality_estimate(patterns, &ScanScope::estimating(scope))
+        }
         // A pushed-down COUNT always yields exactly one row.
         PhysicalPlan::CountScan { .. } => Some(1),
         // Grouped-count leaf: at most one row per underlying solution, so the
         // scan estimate is a sound upper bound (the same signal a Group over
         // the scan reports today).
-        PhysicalPlan::GroupCountScan { patterns, .. } => exec.cardinality_estimate(patterns),
+        PhysicalPlan::GroupCountScan {
+            patterns, scope, ..
+        } => exec.cardinality_estimate(patterns, &ScanScope::estimating(scope)),
         PhysicalPlan::Values { rows, .. } => Some(rows.len()),
         // Join: upper-bounded by the product of inputs. We keep the
         // textbook product (an upper bound when join vars are absent) but
@@ -131,14 +135,16 @@ fn combine2<E: Executor + ?Sized>(
 /// The operator label shown for a node (no children).
 fn node_label(plan: &PhysicalPlan) -> String {
     match plan {
-        PhysicalPlan::BgpScan { patterns } => {
+        PhysicalPlan::BgpScan { patterns, .. } => {
             format!(
                 "BgpScan({} pattern{})",
                 patterns.len(),
                 plural(patterns.len())
             )
         }
-        PhysicalPlan::CountScan { patterns, out_var } => {
+        PhysicalPlan::CountScan {
+            patterns, out_var, ..
+        } => {
             format!(
                 "CountScan({} pattern{} -> ?{})",
                 patterns.len(),
@@ -150,6 +156,7 @@ fn node_label(plan: &PhysicalPlan) -> String {
             patterns,
             keys,
             out_vars,
+            ..
         } => {
             format!(
                 "GroupCountScan({} pattern{}, {} key{} -> {} count{})",
@@ -348,6 +355,7 @@ mod tests {
                 predicate: Term::Iri(p.to_owned()),
                 object: Term::Var(Var::new("o")),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         }
     }
 

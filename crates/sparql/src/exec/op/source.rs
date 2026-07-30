@@ -4,7 +4,7 @@ use super::{ChunkedBatch, Op};
 use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
 use crate::exec::runtime::{integer_literal, lex};
-use crate::exec::{Batch, Executor, GroupCount, KeyPart, Row, Slot};
+use crate::exec::{Batch, Executor, GroupCount, KeyPart, Row, ScanScope, Slot};
 use std::collections::HashMap;
 
 /// Scans a BGP once via the executor, then hands the rows out in chunks.
@@ -69,11 +69,13 @@ impl CountScanOp {
         exec: &E,
         patterns: &[TriplePattern],
         out_var: &Var,
+        scope: &ScanScope<'_>,
     ) -> Result<Self> {
-        let n = match exec.count_bgp(patterns)? {
+        let n = match exec.count_bgp(patterns, scope)? {
             Some(n) => n,
             // Correctness fallback: count the id-rows the scan would yield.
-            None => exec.scan_bgp_ids(patterns)?.rows.len(),
+            // Scope-correct by construction — the same scope the count used.
+            None => exec.scan_bgp_ids(patterns, scope)?.rows.len(),
         };
         let lit = crate::exec::runtime::integer_literal(i64::try_from(n).unwrap_or(i64::MAX));
         let batch = Batch {
@@ -119,6 +121,7 @@ impl GroupCountScanOp {
         patterns: &[TriplePattern],
         keys: &[Var],
         out_vars: &[Var],
+        scope: &ScanScope<'_>,
     ) -> Result<Self> {
         let mut schema: Vec<Var> = keys.to_vec();
         schema.extend(out_vars.iter().cloned());
@@ -127,9 +130,9 @@ impl GroupCountScanOp {
         // solutions (SPARQL §11.2 — COUNT of nothing is 0), answered by the
         // existing count_bgp seam (with its scan+len correctness fallback).
         if keys.is_empty() {
-            let n = match exec.count_bgp(patterns)? {
+            let n = match exec.count_bgp(patterns, scope)? {
                 Some(n) => n,
-                None => exec.scan_bgp_ids(patterns)?.rows.len(),
+                None => exec.scan_bgp_ids(patterns, scope)?.rows.len(),
             };
             let lit = integer_literal(i64::try_from(n).unwrap_or(i64::MAX));
             let rows = vec![Row(out_vars
@@ -148,9 +151,9 @@ impl GroupCountScanOp {
 
         // Per-key counts: fast seam when the backend has one, else scan the
         // id-rows once and hash-count on the key columns only.
-        let groups = match exec.count_bgp_grouped(patterns, keys)? {
+        let groups = match exec.count_bgp_grouped(patterns, keys, scope)? {
             Some(groups) => groups,
-            None => fallback_group_counts(exec, patterns, keys)?,
+            None => fallback_group_counts(exec, patterns, keys, scope)?,
         };
 
         // Sort by decoded-lexical key — byte-identical ordering to
@@ -209,8 +212,9 @@ fn fallback_group_counts<E: Executor + ?Sized>(
     exec: &E,
     patterns: &[TriplePattern],
     keys: &[Var],
+    scope: &ScanScope<'_>,
 ) -> Result<Vec<GroupCount>> {
-    let batch = exec.scan_bgp_ids(patterns)?;
+    let batch = exec.scan_bgp_ids(patterns, scope)?;
     let key_idx: Vec<Option<usize>> = keys.iter().map(|k| batch.col(k.name())).collect();
     let mut groups: HashMap<Vec<KeyPart>, (Vec<Slot>, usize)> = HashMap::new();
     for r in &batch.rows {
@@ -307,6 +311,7 @@ mod tests {
                 predicate: iri("p"),
                 object: Term::Var(Var::new("o")),
             }],
+            scope: crate::plan::GraphScope::DefaultGraph,
         };
         let rt = Runtime::new(&horn);
         let mut op = rt.build(&plan).unwrap();

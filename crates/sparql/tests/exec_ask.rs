@@ -45,6 +45,7 @@ fn ask_false_when_pattern_misses() {
 mod ask_early_exit {
     use horndb_sparql::algebra::{Term, TriplePattern, Var};
     use horndb_sparql::api::{execute_query, QueryAnswer};
+    use horndb_sparql::exec::ScanScope;
     use horndb_sparql::exec::{Batch, Bindings, Executor, Row, Slot};
     use horndb_storage::TermId;
 
@@ -56,10 +57,15 @@ mod ask_early_exit {
         fn scan_bgp(
             &self,
             _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             unreachable!("scan_bgp_ids is overridden")
         }
-        fn scan_bgp_ids(&self, _patterns: &[TriplePattern]) -> horndb_sparql::Result<Batch> {
+        fn scan_bgp_ids(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Batch> {
             Ok(Batch {
                 schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
                 rows: (0u64..5000)
