@@ -30,8 +30,11 @@ pub struct QueryParams {
     pub query: Option<String>,
     /// SPEC-26 S4: the one per-query override key SPEC-28 S3 needs live
     /// ahead of PLAN-26-02's general whitelist mechanism (`union`/`strict`,
-    /// see `SparqlConfig::default_graph`). Parsed next to `query` in both
-    /// the GET (here) and POST-form (`url_form_field`, below) channels.
+    /// see `SparqlConfig::default_graph`). Read from the URL query string on
+    /// GET and on a direct POST (`application/sparql-query`, raw body); a
+    /// POST-form body (`application/x-www-form-urlencoded`) instead carries
+    /// it as a `default-graph=` form field (`url_form_field`, below) — the
+    /// same channel `query=` uses there.
     #[serde(rename = "default-graph")]
     pub default_graph: Option<String>,
 }
@@ -53,6 +56,7 @@ pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
 
 pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
+    Query(p): Query<QueryParams>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
@@ -72,7 +76,13 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
         };
         (q, url_form_field(&body, "default-graph"))
     } else {
-        (body, None)
+        // Direct POST: the raw body IS the query text (SPARQL 1.1 Protocol
+        // §2.1.2), so protocol parameters travel on the URL query string
+        // here, exactly like GET's `?default-graph=...` — NOT in the body.
+        // This branch previously hardcoded `None`, silently discarding a
+        // spec-conformant direct-POST client's override (the silent-wrong-
+        // answer class SPEC-28 exists to eliminate).
+        (body, p.default_graph)
     };
     run(state, &query, &headers, default_graph.as_deref()).await
 }

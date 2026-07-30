@@ -252,6 +252,75 @@ async fn default_graph_url_param_valid_value_runs_query() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// The GET-channel counterpart of `default_graph_url_param_overrides`: same
+/// invalid-value contract (400 naming the key), proven on the other channel
+/// that reads `default-graph` next to `query` (`QueryParams`, GET's `Query`
+/// extractor).
+#[tokio::test]
+async fn default_graph_url_param_get_bad_value_returns_400_naming_key() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .uri(
+            "/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=bogus",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default-graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The direct-POST channel (`application/sparql-query`, raw body = the query
+/// text): per SPARQL 1.1 Protocol §2.1.2 this client puts `default-graph` on
+/// the URL query string, not in the body — same as GET. Before this fix the
+/// handler hardcoded `None` here, silently dropping the override instead of
+/// applying or rejecting it (a silent-wrong-answer bug, the exact class
+/// SPEC-28 exists to eliminate).
+#[tokio::test]
+async fn default_graph_url_param_direct_post_bad_value_returns_400_naming_key() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default-graph=bogus")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default-graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The direct-POST channel's positive case: a valid `?default-graph=` value
+/// must run the query (not 400), proving the override is actually read on
+/// this branch now, not merely rejected when malformed.
+#[tokio::test]
+async fn default_graph_url_param_direct_post_valid_value_runs_query() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default-graph=strict")
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn get_query_returns_json_hornbackend() {
     let mut backend = HornBackend::new();
