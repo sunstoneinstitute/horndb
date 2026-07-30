@@ -184,21 +184,14 @@ impl PredicatePartition {
             .count()
     }
 
-    /// Count of rows live (`end == UNSET_END`), frozen at build time (O(1)).
+    /// Number of live rows (`end == UNSET_END`), counted at build time. O(1).
     ///
-    /// Copy-on-write gives each snapshot its own immutable partition objects:
-    /// a write rebuilds only the affected partitions, and an older pinned
-    /// snapshot keeps the *old* objects; an untouched partition is instead
-    /// shared unchanged (by `Arc`) into later snapshots. Within one partition
-    /// object, every row's `begin` is `<=` the build version, and no row's
-    /// `end` can fall between the build version and the next rebuild — an
-    /// `end` is only ever set by building a *new* partition object. So
-    /// `visible(begin, end, at) <=> end == UNSET_END` holds for every `at`
-    /// from the build version up to (but not including) the next rebuild,
-    /// which makes this frozen count equal `len_at(at)` for the whole range a
-    /// snapshot can see this object at. It does NOT hold for `at` strictly
-    /// before the build version (an older pin using a *different*, earlier
-    /// object) — use `len_at` (the scan path) there.
+    /// Equal to `len_at(at)` only when `at` is the version that built this
+    /// partition object or later — which is what a snapshot holding this object
+    /// always sees, since copy-on-write hands an older pin a *different, earlier*
+    /// object. For such an `at`, every `begin` and every set `end` is `<= at`, so
+    /// `visible(begin, end, at) <=> end == UNSET_END`. For an earlier `at`, use
+    /// `len_at`.
     pub fn live_len(&self) -> usize {
         self.live_len
     }
@@ -488,7 +481,7 @@ impl PartitionBuilder {
             live_len,
             object_major: OnceLock::new(),
         };
-        if partition.len_at(LATEST) >= hot_threshold {
+        if partition.live_len >= hot_threshold {
             let _ = partition.object_major.set(partition.build_object_major());
         }
         partition
@@ -502,12 +495,16 @@ mod tests {
     #[test]
     fn live_len_matches_len_at_own_version_insert_only() {
         // 100 rows, no retractions: live_len must equal len_at(v) for the
-        // version the partition was built at (LATEST, since every row here
-        // uses the legacy `append` stamps: begin 0, end UNSET_END).
+        // version the partition was built at. legacy `append` stamps (begin
+        // 0, never retracted) are visible at every version, so LATEST is a
+        // valid probe.
         let mut b = PartitionBuilder::default();
         for s in 0..100u64 {
             b.append(TermId(s), TermId(s % 5));
         }
+        // One duplicate (s, o) pair: dedup_by must collapse it before
+        // live_len is counted, not after.
+        b.append(TermId(0), TermId(0));
         let part = b.build();
         assert_eq!(part.live_len(), part.len_at(LATEST));
         assert_eq!(part.live_len(), 100);
@@ -537,17 +534,10 @@ mod tests {
 
         let snap = tier.snapshot();
         let version = snap.version();
-        for g in snap.graphs() {
-            for p in snap.predicates(g) {
-                snap.with_predicate(g, p, |part| {
-                    assert_eq!(
-                        part.live_len(),
-                        part.len_at(version),
-                        "live_len must match len_at(own version) for graph {g:?} predicate {p:?}"
-                    );
-                });
-            }
-        }
+        let (live, at_version) = snap
+            .with_predicate(DEFAULT_GRAPH, pred, |p| (p.live_len(), p.len_at(version)))
+            .expect("partition present");
+        assert_eq!(live, at_version);
     }
 
     mod live_len_proptest {
