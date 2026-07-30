@@ -292,7 +292,7 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
         // SPEC-28 phase 1 (#264): refuse rather than silently drop the
         // GRAPH wrapper. Real named-graph evaluation lands in phase 3.
-        GraphPattern::Graph { name: _, inner: _ } => Err(SparqlError::UnsupportedAlgebra(
+        GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra(
             "GRAPH named-graph pattern (named-graph queries are refused until \
              SPEC-28 phase 3; see #264)"
                 .into(),
@@ -553,11 +553,8 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             | GraphPattern::Reduced { inner }
             | GraphPattern::Group { inner, .. } => walk(inner, acc),
             GraphPattern::Graph { name, inner } => {
-                // Unreachable in practice: `translate_pattern` now refuses
-                // every `Graph` node (SPEC-28 phase 1, #264) before this
-                // function would see one. Kept for structural completeness
-                // of the match and for phase 3, when `Graph` translates
-                // instead of erroring.
+                // Unreachable while `translate_pattern` refuses every
+                // `Graph` node (SPEC-28 phase 1, #264); kept for phase 3.
                 if let NamedNodePattern::Variable(v) = name {
                     push(v, acc);
                 }

@@ -408,6 +408,7 @@ fn graph_pattern_is_refused_ground_and_var() {
         "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
     ] {
         let err = translate_str_err(q);
+        assert!(matches!(err, SparqlError::UnsupportedAlgebra(_)), "{err}");
         assert!(err.to_string().contains("GRAPH"), "{err}");
     }
 }
@@ -459,6 +460,7 @@ fn dataset_clause_is_refused_all_query_forms() {
         "DESCRIBE <http://ex/x> FROM <http://ex/g>",
     ] {
         let err = translate_str_err(q);
+        assert!(matches!(err, SparqlError::UnsupportedAlgebra(_)), "{err}");
         assert!(err.to_string().contains("FROM"), "{err}");
     }
 }
