@@ -1,5 +1,5 @@
 ---
-status: draft
+status: in-progress
 date: 2026-07-29
 scope: "SPEC-28 phase 1 (S1) — refuse, do not lie: GRAPH patterns and non-empty FROM/FROM NAMED dataset clauses become explicit translate-time errors surfaced as HTTP 400, replacing today's silent wrong answers"
 ---
@@ -62,19 +62,53 @@ real evaluation.
     (the query can no longer produce a header at all).
   - `crates/sparql/tests/logical_pipeline.rs:277`
     `graph_adjacent_bgps_coalesce_and_stay_result_equivalent` — this test's
-    query used `GRAPH` lowering to *produce* the `Join(Bgp, Bgp)` shape the
-    `CoalesceBgp` pass exists for. Rewrite it to produce the same shape
-    without `GRAPH` (two braced group graph patterns —
-    `{ ?a :p ?b } { ?b :q ?c }` — translate to `Join(Bgp, Bgp)`); verify
-    with `plan_of` that the pass still fires. Update the pass rationale
-    comment at `plan/pass.rs:281-285` in the same commit — its motivating
-    example is now historical.
-  - `crates/sparql/tests/update_where.rs:303-311` — comment (not
-    behaviour) references the transparent lowering; update the wording.
-    The update path's own rejections are untouched.
+    query used the `GRAPH` lowering to *produce* the `Join(Bgp, Bgp)` shape
+    the `CoalesceBgp` pass exists for. After Task 1, **no SPARQL syntax
+    reaches translation as `Join(Bgp, Bgp)`** (see the amendment below), so
+    the test is re-pinned at the algebra level: hand-build
+    `Algebra::Join { left: Bgp, right: Bgp }` with disjoint variables,
+    following the existing precedent
+    `plan/planner.rs::join_of_bare_bgps_coalesces_to_one_flat_scan`. The
+    pass keeps firing on the hand-built shape; its result-equivalence
+    guarantee (including the cross-product case) stays pinned. Exact steps
+    in Task 2. `CoalesceBgp` itself stays: PLAN-28-03's `GRAPH` lowering
+    scope-tags scan leaves and drops the `Graph` wrapper, so real syntax
+    (e.g. `GRAPH <g> { P1 } GRAPH <g> { P2 }`) produces joins of equal-scope
+    BGPs again, and that plan's Task 5 adds the equal-scope merge guard —
+    the pass's future is already tracked there
+    ([#266](https://github.com/sunstoneinstitute/horndb/issues/266)); no
+    separate follow-up issue.
+  - Four more comments carry the same dead premise ("the translator lowers
+    `GRAPH` to its inner pattern") and are corrected in Task 2 — none of
+    them changes behaviour: the `CoalesceBgp` rationale at
+    `plan/pass.rs:280-285`, the `validate_delete_insert` comment at
+    `src/update.rs:522-528` (the `where_has_graph_pattern` scan it explains
+    stays — it rejects with an update-specific error before any mutation,
+    independent of translation), the test doc at
+    `tests/update_where.rs:302-306`, and the "`CoalesceBgp` is NOT a
+    universal no-op" bullet at
+    `crates/sparql/INTEGRATION-NOTES.md:461-468` (which also names the
+    renamed test).
 - **What must NOT change:** every graph-free query. The selected
   conformance subset (`harness/selected.toml`) is the regression gate; no
   selection change this phase.
+
+### Amendment (2026-07-30): the braced-groups claim was wrong
+
+The first draft of Task 2 said two braced group graph patterns —
+`{ ?a :p ?b } { ?b :q ?c }` — translate to `Join(Bgp, Bgp)`. Execution
+disproved it: spargebra merges directly-adjacent pure-BGP siblings into one
+flat `Bgp` regardless of braces. The constructs that do force a real
+`Algebra::Join` (a subquery, an interposed `VALUES`) put a non-`Bgp` on at
+least one side, which `LogicalPlan::join` (`plan/logical.rs:87`)
+deliberately keeps as a real join (pinned by
+`logical.rs::join_keeps_a_real_join_when_a_side_is_not_a_bgp`); `UNION`
+and `OPTIONAL` produce `Union` and `LeftJoin`, not `Join`.
+`planner.rs::join_of_bare_bgps_coalesces_to_one_flat_scan` already recorded
+this: "spargebra never emits this shape". After Task 1 removed the
+`GRAPH`-unwrap — previously the only syntax route to `Join(Bgp, Bgp)` — the
+shape is reachable from hand-built algebra only, until PLAN-28-03 re-creates
+it. Do not re-derive this; Task 2 pins the pass with hand-built algebra.
 
 ### File map
 
@@ -82,7 +116,9 @@ real evaluation.
 - Modify: `crates/sparql/tests/exec_expressions.rs`,
   `crates/sparql/tests/logical_pipeline.rs`,
   `crates/sparql/src/plan/pass.rs` (comment),
-  `crates/sparql/tests/update_where.rs` (comment)
+  `crates/sparql/src/update.rs` (comment),
+  `crates/sparql/tests/update_where.rs` (comment),
+  `crates/sparql/INTEGRATION-NOTES.md` (one bullet, Task 2)
 - Modify: `crates/sparql/tests/server_http.rs` (new 400 tests)
 - Modify: `docs/architecture.md`, `crates/sparql/INTEGRATION-NOTES.md`,
   this plan (status)
@@ -150,16 +186,101 @@ real evaluation.
 
 **Files:**
 - Modify: `crates/sparql/tests/logical_pipeline.rs`,
-  `crates/sparql/src/plan/pass.rs`, `crates/sparql/tests/update_where.rs`
+  `crates/sparql/src/plan/pass.rs` (comment),
+  `crates/sparql/src/update.rs` (comment),
+  `crates/sparql/tests/update_where.rs` (comment),
+  `crates/sparql/INTEGRATION-NOTES.md` (one bullet)
 
-- [ ] **Step 1:** Rewrite
-  `graph_adjacent_bgps_coalesce_and_stay_result_equivalent` per the design
-  note (braced groups instead of `GRAPH`); assert the `CoalesceBgp` pass
-  still fires and results are unchanged. Update the `pass.rs:281-285`
-  rationale comment and the `update_where.rs:303` comment.
-- [ ] **Step 2:** Full crate suite: `cargo nextest run -p horndb-sparql` —
+No behaviour changes in this task — one test moves from parsed to
+hand-built algebra, and four comments stop asserting the retired
+`GRAPH`-unwrap. Follow the amendment note above; do not try query-syntax
+routes to `Join(Bgp, Bgp)` — there are none.
+
+- [ ] **Step 1: Re-pin the coalesce test at the algebra level.** In
+  `logical_pipeline.rs`, rename
+  `graph_adjacent_bgps_coalesce_and_stay_result_equivalent` (`:278`) to
+  `disjoint_var_bgps_coalesce_and_stay_result_equivalent` and replace the
+  `GRAPH` query + `algebra_of(q)` with hand-built algebra using the file's
+  `pat` helper (same precedent as
+  `coalesced_bgp_is_result_equivalent_to_nested_join`, `:158` — which
+  covers the shared-variable case; this test's distinct value is the
+  disjoint-variable cross product):
+  ```rust
+  let alg = Algebra::Join {
+      left: Box::new(Algebra::Bgp {
+          patterns: vec![pat("s", "http://ex/p", "o")],
+      }),
+      right: Box::new(Algebra::Bgp {
+          patterns: vec![pat("a", "http://ex/q", "b")],
+      }),
+  };
+  ```
+  Keep everything else unchanged: the four-triple fixture, the
+  `planner::plan` vs `plan_with_ctx`-with-`CoalesceBgp`-disabled pair, the
+  `find_bgp_sizes` shape asserts (`vec![2]` coalesced, `vec![1, 1]`
+  disabled), the 4-row cross-product assert, and the result-multiset
+  comparison. Replace the doc comment (`:268-276`) with:
+  ```rust
+  /// `CoalesceBgp` on a hand-built `Join(Bgp, Bgp)` with **disjoint**
+  /// variables: the flat 2-pattern scan must stay result-equivalent to the
+  /// nested join even when the join is a genuine cross product. Hand-built
+  /// because no SPARQL syntax reaches translation as `Join(Bgp, Bgp)`
+  /// since the SPEC-28 phase-1 refusal (#264) removed the Stage-1 `GRAPH`
+  /// unwrap (previously the only syntax route) — same precedent as
+  /// `plan/planner.rs::join_of_bare_bgps_coalesces_to_one_flat_scan`.
+  ```
+- [ ] **Step 2: Correct the `pass.rs` rationale.** Replace the second
+  paragraph of the `CoalesceBgp` doc comment (`plan/pass.rs:280-285`, "When
+  it fires today: …") with — keep the first paragraph as is:
+  ```rust
+  /// Producer status: spargebra merges adjacent triple patterns into one
+  /// flat `Algebra::Bgp` at parse time, and the SPEC-28 phase-1 refusal
+  /// (#264) removed the Stage-1 `GRAPH`-unwrap that used to produce
+  /// `Join(Bgp, Bgp)` from real queries — today the pass fires only on
+  /// hand-built algebra (tests). It stays because SPEC-28 phase 3
+  /// (PLAN-28-03) re-creates the shape from syntax: its `GRAPH` lowering
+  /// scope-tags scan leaves and drops the wrapper, so e.g.
+  /// `GRAPH <g> { P1 } GRAPH <g> { P2 }` joins two equal-scope BGPs again,
+  /// and the pass gains an equal-scope merge guard there (its Task 5).
+  ```
+- [ ] **Step 3: Correct the update-side comments.** Replace the
+  `src/update.rs:522-528` comment block ("Reject a GRAPH pattern anywhere
+  … Stage-1 is default-graph only.") with:
+  ```rust
+  // Reject a GRAPH pattern anywhere in the WHERE clause, before any
+  // mutation. Since SPEC-28 phase 1 (#264) the query translator also
+  // refuses GraphPattern::Graph, but this scan stays: it produces the
+  // update-specific error below and guarantees rejection ahead of any
+  // earlier operation's side effects, without leaning on when the WHERE
+  // clause gets translated. Stage-1 updates are default-graph only.
+  ```
+  Replace the `tests/update_where.rs:302-306` doc comment with:
+  ```rust
+  /// A `GRAPH` pattern in the WHERE clause must be rejected before any
+  /// mutation. The update path's own `where_has_graph_pattern` scan
+  /// produces this error; it does not rely on the query translator, which
+  /// since SPEC-28 phase 1 (#264) also refuses `GRAPH` (it silently
+  /// unwrapped it before).
+  ```
+  The `where_has_graph_pattern` behaviour itself is untouched.
+- [ ] **Step 4: Correct the `INTEGRATION-NOTES.md` bullet.** Replace the
+  "`CoalesceBgp` is NOT a universal no-op on real queries" bullet
+  (`crates/sparql/INTEGRATION-NOTES.md:461-468`) with:
+  ```markdown
+  - **`CoalesceBgp` has no syntax-reachable producer since the SPEC-28
+    phase-1 refusal (#264).** spargebra merges adjacent triple patterns,
+    and the Stage-1 `GRAPH` lowering — previously the only route from real
+    syntax to `Algebra::Join(Bgp, Bgp)` — now errors instead. The pass is
+    exercised by hand-built algebra
+    (`disjoint_var_bgps_coalesce_and_stay_result_equivalent`,
+    `join_of_bare_bgps_coalesces_to_one_flat_scan`) and kept for SPEC-28
+    phase 3 (PLAN-28-03), whose `GRAPH` lowering re-creates the shape with
+    per-scan graph scopes and adds the equal-scope merge guard. Every
+    query keeps its pre-pipeline plan byte-for-byte (the golden battery).
+  ```
+- [ ] **Step 5:** Full crate suite: `cargo nextest run -p horndb-sparql` —
   zero failures.
-- [ ] **Step 3: Commit** — `test(sparql): reconcile GRAPH-lowering pins with
+- [ ] **Step 6: Commit** — `test(sparql): reconcile GRAPH-lowering pins with
   the S1 refusal (#264)`.
 
 ### Task 3: Server-level 400 pin
@@ -208,5 +329,7 @@ real evaluation.
   (HTTP 400, construct named) → Task 3 (no server change needed — verified
   against `server/query.rs:125,306,331`); bullet 4 (no graph-free change)
   → Task 1 step 4 + Task 2 step 2 + the untouched conformance selection.
-- The `CoalesceBgp` interaction is the one non-obvious blast site; it is
-  handled, not discovered.
+- The `CoalesceBgp` interaction is the one non-obvious blast site. The
+  first draft mishandled it (the braced-groups claim — see the amendment in
+  the Design section); Task 2 now carries the corrected, verified
+  resolution.
