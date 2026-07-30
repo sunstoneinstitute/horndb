@@ -187,8 +187,9 @@ fn assert_select_equal(got: &str, expected: &str) {
     assert_eq!(gb, eb, "bindings differ");
 }
 
-/// The case's `default_graph` mode: `strict` when the dir carries a
-/// `default-graph` file saying so, otherwise the crate default (`union`).
+/// The case's `default_graph` mode, from an optional `default-graph` file.
+/// Absent means `union` — the crate default — and writing `union` there
+/// explicitly means the same thing.
 ///
 /// The W3C `graph/` family fixes its dataset in the *manifest*
 /// (`qt:data` = the default graph, `qt:graphData` = the named graphs) rather
@@ -198,9 +199,12 @@ fn assert_select_equal(got: &str, expected: &str) {
 /// wins over the mode, so those run under the default.
 fn read_mode(dir: &Path) -> DefaultGraphMode {
     match std::fs::read_to_string(dir.join("default-graph")) {
-        Ok(s) if s.trim() == "strict" => DefaultGraphMode::Strict,
-        Ok(s) => panic!("unknown default-graph value {s:?}"),
         Err(_) => DefaultGraphMode::Union,
+        Ok(s) => match s.trim() {
+            "strict" => DefaultGraphMode::Strict,
+            "union" => DefaultGraphMode::Union,
+            other => panic!("unknown default-graph value {other:?} in {}", dir.display()),
+        },
     }
 }
 
@@ -270,7 +274,7 @@ w3c_case!(path_star_001, "path-star-001");
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/graph/>; each case's
 // dataset is the manifest's `qt:data` (the default graph) + `qt:graphData`
 // (the named graphs), so these run in `strict` mode — see `read_mode`.
-// The 5 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+// The 3 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
 w3c_case!(graph_01, "graph-01");
 w3c_case!(graph_02, "graph-02");
 w3c_case!(graph_03, "graph-03");
@@ -282,6 +286,8 @@ w3c_case!(graph_08, "graph-08");
 w3c_case!(graph_09, "graph-09");
 w3c_case!(graph_10b, "graph-10b");
 w3c_case!(graph_empty, "graph-empty");
+w3c_case!(graph_exist, "graph-exist");
+w3c_case!(graph_not_exist, "graph-not-exist");
 w3c_case!(graph_variable_join, "graph-variable-join");
 
 // W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7). Mirrored from
@@ -328,7 +334,7 @@ w3c_case_horn!(path_star_001_hornbackend, "path-star-001");
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/graph/>; each case's
 // dataset is the manifest's `qt:data` (the default graph) + `qt:graphData`
 // (the named graphs), so these run in `strict` mode — see `read_mode`.
-// The 5 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+// The 3 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
 w3c_case_horn!(graph_01_hornbackend, "graph-01");
 w3c_case_horn!(graph_02_hornbackend, "graph-02");
 w3c_case_horn!(graph_03_hornbackend, "graph-03");
@@ -340,6 +346,8 @@ w3c_case_horn!(graph_08_hornbackend, "graph-08");
 w3c_case_horn!(graph_09_hornbackend, "graph-09");
 w3c_case_horn!(graph_10b_hornbackend, "graph-10b");
 w3c_case_horn!(graph_empty_hornbackend, "graph-empty");
+w3c_case_horn!(graph_exist_hornbackend, "graph-exist");
+w3c_case_horn!(graph_not_exist_hornbackend, "graph-not-exist");
 w3c_case_horn!(graph_variable_join_hornbackend, "graph-variable-join");
 
 // W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7). Mirrored from

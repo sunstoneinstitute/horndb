@@ -642,6 +642,26 @@ impl HornBackend {
         })
     }
 
+    /// Whether an empty group pattern (`{}`) matches under `scope`.
+    ///
+    /// True everywhere except inside a ground `GRAPH <g>` naming a graph the
+    /// dataset does not have — see [`ScanScope::ground_graph`] for why the
+    /// zero-pattern shortcut has to ask. `resolved` has already applied the
+    /// `FROM NAMED` filter and the dictionary lookup, so only a graph that
+    /// survives both *and* holds at least one quad reaches `true`.
+    fn empty_group_matches(&self, scope: &ScanScope<'_>, resolved: &SnapshotScope) -> bool {
+        if scope.ground_graph().is_none() {
+            return true;
+        }
+        match resolved {
+            SnapshotScope::OneGraph(g) => self.store.snapshot().graph_len(*g) > 0,
+            // An unknown or dataset-excluded graph name resolved to the empty
+            // scope; the whole-store scopes are unreachable for a ground
+            // `GRAPH <g>`.
+            _ => false,
+        }
+    }
+
     /// Get-or-build the WCOJ snapshot for `scope`.
     ///
     /// **Only the two whole-store scopes are memoised.** They cost O(store)
@@ -875,9 +895,14 @@ impl Executor for HornBackend {
         // (`GRAPH ?g`) refuses uniformly instead of depending on the shape.
         let resolved = self.resolve_scope(scope)?;
         // The empty BGP is the unit of join: exactly one empty solution
-        // (parity with MemStore and the SPARQL algebra).
+        // (parity with MemStore and the SPARQL algebra) — unless the scope is
+        // a ground `GRAPH <g>` the dataset does not have, which matches
+        // nothing (`ScanScope::ground_graph`).
         if patterns.is_empty() {
-            return Ok(Box::new(std::iter::once(Bindings::new())));
+            let rows = self
+                .empty_group_matches(scope, &resolved)
+                .then(Bindings::new);
+            return Ok(Box::new(rows.into_iter()));
         }
 
         let snapshot = self.wcoj_snapshot(&resolved);
@@ -1106,8 +1131,14 @@ impl Executor for HornBackend {
         use crate::exec::{Batch, Row, Slot};
 
         let resolved = self.resolve_scope(scope)?;
+        // See `scan_bgp`: a ground `GRAPH <g>` the dataset does not have
+        // matches nothing, not the unit row.
         if patterns.is_empty() {
-            return Ok(Batch::unit());
+            return Ok(if self.empty_group_matches(scope, &resolved) {
+                Batch::unit()
+            } else {
+                Batch::empty()
+            });
         }
 
         let snapshot = self.wcoj_snapshot(&resolved);
@@ -1313,9 +1344,12 @@ impl Executor for HornBackend {
             return Ok(None);
         }
         let resolved = self.resolve_scope(scope)?;
-        // The empty BGP is the join identity: one solution.
+        // The empty BGP is the join identity: one solution — zero when the
+        // scope is a ground `GRAPH <g>` the dataset does not have.
         if patterns.is_empty() {
-            return Ok(Some(1));
+            return Ok(Some(usize::from(
+                self.empty_group_matches(scope, &resolved),
+            )));
         }
 
         let snapshot = self.wcoj_snapshot(&resolved);

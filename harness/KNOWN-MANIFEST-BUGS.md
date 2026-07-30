@@ -299,9 +299,18 @@ the W3C SPARQL 1.0 `graph/` and `dataset/` families to it. Fixtures for
 `https://w3c.github.io/rdf-tests/sparql/sparql10/` (re-fetch allowlist and
 mirror rules: `crates/harness/scripts/fetch-w3c-suites.sh`).
 
-29 cases exist upstream (17 `graph/`, 12 `dataset/`); 22 are selected. The
-7 below are not. When one is fixed, move it into `selected.toml` and delete
+29 cases exist upstream (17 `graph/`, 12 `dataset/`); 24 are selected. The
+5 below are not. When one is fixed, move it into `selected.toml` and delete
 its entry here, in the same commit.
+
+**What these 24 cases do not grade: the shipping `union` default-graph
+mode.** The `graph/` family takes its dataset from the upstream manifest, so
+those cases run in `strict`; every `dataset/` query carries its own `FROM` /
+`FROM NAMED`, which fixes the dataset whatever the mode is. No W3C case here
+exercises D2's *default*. That mode is covered by `crates/sparql/tests/
+graph_query.rs` (`union_mode_unqualified_sees_all_non_reserved_deduped`,
+`reserved_graph_excluded_from_union`, and the `GRAPH ?g` cases), not by
+conformance — do not read the headline count as covering it.
 
 ## Blank nodes in the expected result (3 cases)
 
@@ -325,20 +334,18 @@ A second, backend-level gate applies to the same three cases on the
 (`exec/mem.rs::term_to_lex`), so a blank node is indistinguishable from an
 IRI on the way out and the JSON results report it as `"type": "uri"`.
 
-## An empty group inside a ground `GRAPH <g>` does not test the graph (2 cases)
+## ~~An empty group inside a ground `GRAPH <g>` does not test the graph~~ — FIXED
 
-`GRAPH <g> {}` must yield one empty solution when `g` is a graph of the
-dataset and none when it is not. HornDB lowers the group to a `BgpScan`
-with **zero patterns** carrying `GraphScope::Named(Iri(g))`; a zero-pattern
-scan emits the one empty row without ever consulting its scope, so the
-answer is the same either way. The fix is for the scan (or lowering) to
-test graph membership when there is no pattern to scan.
-
-- `graph-not-exist` — `GRAPH ex:unknown {}` returns 1 row; 0 expected.
-- `graph-exist` — `GRAPH <…/data-g1.ttl> {}` returns 1 row, which is the
-  expected answer, but for the wrong reason: it would also return 1 over a
-  store holding no such graph. Excluded together with `graph-not-exist`
-  rather than banked as a false green — the two cases are one feature.
+`graph-exist` and `graph-not-exist` are now **green** and listed in
+`selected.toml`. Both backends took a zero-pattern shortcut that emitted the
+unit row before consulting the scope, so `ASK { GRAPH <g> {} }` — the
+standard graph-existence probe — answered `true` for every IRI, at HTTP 200.
+`graph-not-exist` failed on it; `graph-exist` passed for the wrong reason.
+Both now go through `ScanScope::ground_graph`: an empty group matches only
+when the scope is the default graph, or a ground `GRAPH <g>` whose `g`
+survives the `FROM NAMED` filter and holds at least one quad. Direct pin:
+`empty_group_probes_graph_existence` in `crates/sparql/tests/graph_query.rs`
+(the W3C fixtures alone would not hold it — `graph-exist` passes either way).
 
 ## The graph variable is in scope inside the `GRAPH` block (2 cases)
 

@@ -139,6 +139,14 @@ fi
 # This script therefore does NOT overwrite those fixtures. Which cases are
 # graded is `harness/selected.toml`'s `[sparql_query]` section; the upstream
 # cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+#
+# Note for the next fetch: upstream `dataset-09b.rq` and `dataset-10b.rq` are
+# byte-identical apart from one newline (both are
+# `FROM <data-g3-dup.ttl> FROM NAMED <data-g3.ttl>`), so the two mirrored
+# cases are the same test twice. The manifest lists them as distinct cases,
+# so this is either an upstream quirk or a `10b` that was meant to swap the
+# two files. Re-check when this list is next re-fetched; if upstream has
+# diverged, `dataset-10b`'s fixture needs regenerating.
 SPARQL10_GRAPH_FILES=(
     manifest.ttl
     data-g1.ttl data-g2.ttl data-g3.ttl data-g3-dup.ttl data-g4.ttl

@@ -293,7 +293,7 @@ tests = [
     # `crates/harness/scripts/fetch-w3c-suites.sh`. These cases take their
     # dataset from the upstream *manifest* (`qt:data` = default graph,
     # `qt:graphData` = named graphs), so each dir carries
-    # `default-graph = strict`. The 5 upstream cases left out are in
+    # `default-graph = strict`. The 3 upstream cases left out are in
     # `harness/KNOWN-MANIFEST-BUGS.md`.
     "selected_subset/graph-01",
     "selected_subset/graph-02",
@@ -306,6 +306,8 @@ tests = [
     "selected_subset/graph-09",
     "selected_subset/graph-10b",
     "selected_subset/graph-empty",
+    "selected_subset/graph-exist",
+    "selected_subset/graph-not-exist",
     "selected_subset/graph-variable-join",
     # W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7, #266) — `FROM` /
     # `FROM NAMED` dataset construction, including D4's empty default graph

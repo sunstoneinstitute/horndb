@@ -860,6 +860,52 @@ fn reserved_graphs_do_not_enumerate<B: QuadSeed + Default + horndb_sparql::exec:
     );
 }
 
+/// `ASK { GRAPH <g> {} }` is the standard graph-existence probe: an empty
+/// group has no quad to scan, so the whole answer *is* "does the dataset have
+/// `g`" (SPARQL 1.1 §18.2.2.4 evaluates `Graph(g, P)` only for
+/// `g ∈ names(D)`).
+///
+/// Both backends used to take a zero-pattern shortcut that emitted the unit
+/// row before consulting the scope, so the probe answered `true` for every
+/// IRI — a silent wrong answer at HTTP 200 (SPEC-28 D1). The W3C fixtures
+/// alone would not hold this: `graph-exist` passes either way, and only
+/// `graph-not-exist` catches it. Hence this direct pin.
+fn empty_group_probes_graph_existence<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    let ask = |q: &str| match execute_query_with(q, &b, &SparqlConfig::default()) {
+        Ok(QueryAnswer::Boolean(v)) => v,
+        other => panic!("expected a boolean for {q}: {other:?}"),
+    };
+    assert!(
+        ask(&format!("ASK {{ GRAPH <{G1}> {{}} }}")),
+        "an existing graph makes the empty group match"
+    );
+    assert!(
+        !ask("ASK { GRAPH <http://ex/nope> {} }"),
+        "a graph the dataset does not have must NOT match the empty group"
+    );
+    // The default graph always exists — an empty group outside any GRAPH
+    // still matches, and so does one inside a *variable* GRAPH over the
+    // graphs that do exist.
+    assert!(ask("ASK {}"), "the default graph always matches `{{}}`");
+    assert_eq!(
+        iris_bound_to(
+            &b,
+            "SELECT ?g WHERE { GRAPH ?g {} }",
+            "g",
+            DefaultGraphMode::Union
+        ),
+        vec![G1.to_owned(), G2.to_owned()],
+        "GRAPH ?g {{}} enumerates exactly the graphs that exist (W3C graph-empty)"
+    );
+    // A ground graph outside the dataset's named set does not exist *for
+    // this query*, even though the store holds it.
+    assert!(
+        !ask(&format!("ASK FROM NAMED <{G2}> {{ GRAPH <{G1}> {{}} }}")),
+        "FROM NAMED excludes g1, so the probe must answer false"
+    );
+}
+
 /// Instantiate every case above for both backends.
 macro_rules! both_backends {
     ($($name:ident),+ $(,)?) => {
@@ -906,4 +952,5 @@ both_backends!(
     distinct_and_limit_above_graph_var_still_answer,
     from_only_leaves_no_graphs_to_enumerate,
     reserved_graphs_do_not_enumerate,
+    empty_group_probes_graph_existence,
 );

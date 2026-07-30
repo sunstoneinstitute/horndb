@@ -202,6 +202,16 @@ impl Executor for MemStore {
         scope: &ScanScope<'_>,
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
         let filter = graph_filter(scope)?;
+        // An empty group inside a ground `GRAPH <g>` matches only when `g` is
+        // a graph of the dataset — see [`ScanScope::ground_graph`]. There is
+        // no pattern to scan, so the test has to happen here or
+        // `ASK { GRAPH <absent> {} }` answers `true` for every IRI.
+        if patterns.is_empty()
+            && scope.ground_graph().is_some()
+            && !self.graphs.iter().any(|g| filter.admits(g))
+        {
+            return Ok(Box::new(std::iter::empty()));
+        }
         // Left-deep, index-nested-loop join. For each pattern we resolve
         // the positions that are bound (either constants in the pattern
         // or variables already bound by an earlier pattern), pick the

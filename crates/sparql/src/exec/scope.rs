@@ -78,6 +78,25 @@ impl<'a> ScanScope<'a> {
         }
     }
 
+    /// The graph a ground `GRAPH <g>` names — `None` for every other scope.
+    ///
+    /// This is the one scope whose *emptiness* an empty group pattern has to
+    /// observe. `{}` has no quad to scan, so it matches the empty solution
+    /// unconditionally — except inside `GRAPH <g>`, which SPARQL 1.1
+    /// §18.2.2.4 evaluates only for `g ∈ names(D)`. `ASK { GRAPH <g> {} }`
+    /// is the standard graph-existence probe, so a backend whose
+    /// zero-pattern shortcut skips the test answers `true` for every IRI —
+    /// exactly the silent wrong answer SPEC-28 D1 exists to remove. Both
+    /// backends call this from that shortcut; a graph exists when it holds
+    /// at least one visible quad *and* the dataset's named set admits it
+    /// (the latter is already folded into [`Self::resolve`]).
+    pub fn ground_graph(&self) -> Option<&'a str> {
+        match self.graph {
+            GraphScope::Named(GraphSpec::Iri(g)) => Some(g.as_str()),
+            _ => None,
+        }
+    }
+
     /// Fold the scope, dataset and mode into the graph set to read.
     pub fn resolve(&self) -> ResolvedScope<'a> {
         match self.graph {
