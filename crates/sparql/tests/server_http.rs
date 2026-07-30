@@ -127,6 +127,78 @@ async fn parse_error_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// GRAPH patterns are refused (SPEC-28 phase 1, #264): the translator
+/// returns `SparqlError::UnsupportedAlgebra` instead of silently dropping
+/// the wrapper and answering over the default graph. A plain SELECT plans
+/// before any store access (`plan_select`, `query.rs`), so this exercises
+/// the streaming-SELECT path's pre-store-access error branch.
+#[tokio::test]
+async fn graph_query_returns_400_naming_graph() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from(
+            "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("GRAPH"), "body: {text}");
+}
+
+/// A non-empty `FROM`/`FROM NAMED` dataset clause is refused the same way
+/// (SPEC-28 phase 1, #264) — same streaming-SELECT pre-store-access path
+/// as `graph_query_returns_400_naming_graph`.
+#[tokio::test]
+async fn from_query_returns_400_naming_from() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from(
+            "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("FROM"), "body: {text}");
+}
+
+/// Same refusal, but for an ASK query: `plan_select` only recognizes
+/// `SELECT`, so ASK falls through to `run_materialized`
+/// (`execute_query` -> translate), covering the other server-side error
+/// path from the same construct.
+#[tokio::test]
+async fn ask_graph_query_returns_400_naming_graph() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from(
+            "ASK { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("GRAPH"), "body: {text}");
+}
+
 #[tokio::test]
 async fn get_query_returns_json_hornbackend() {
     let mut backend = HornBackend::new();

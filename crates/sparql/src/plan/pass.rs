@@ -277,12 +277,15 @@ pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeMap<St
 /// Idempotent, and result-invariant (a natural join over the merged pattern
 /// set — proven in `tests/logical_pipeline.rs`).
 ///
-/// When it fires today: spargebra already merges *adjacent triple patterns*
-/// into one `Algebra::Bgp`, but HornDB's Stage-1 `GRAPH` lowering
-/// (`translate.rs` — `GRAPH <g> { P }` lowers to `P` under merged-graph
-/// semantics) produces `Join(Bgp, Bgp)` whenever a query mixes top-level
-/// triples with a `GRAPH` block. Those plans coalesce to one flat `BgpScan`;
-/// everything else is untouched (the Phase-1 golden gate).
+/// Producer status: spargebra merges adjacent triple patterns into one
+/// flat `Algebra::Bgp` at parse time, and the SPEC-28 phase-1 refusal
+/// (#264) removed the Stage-1 `GRAPH`-unwrap that used to produce
+/// `Join(Bgp, Bgp)` from real queries — today the pass fires only on
+/// hand-built algebra (tests). It stays because SPEC-28 phase 3
+/// (PLAN-28-03) re-creates the shape from syntax: its `GRAPH` lowering
+/// scope-tags scan leaves and drops the wrapper, so e.g.
+/// `GRAPH <g> { P1 } GRAPH <g> { P2 }` joins two equal-scope BGPs again,
+/// and the pass gains an equal-scope merge guard there (its Task 5).
 pub struct CoalesceBgp;
 
 impl LogicalPass for CoalesceBgp {

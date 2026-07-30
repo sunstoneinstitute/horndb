@@ -519,13 +519,12 @@ fn validate_delete_insert(
         require_default_graph(&q.graph_name)?;
     }
 
-    // Reject a GRAPH pattern anywhere in the WHERE clause. `translate_where`
-    // lowers `GraphPattern::Graph { name, inner }` to its inner pattern over the
-    // single default graph — an accepted Stage-1 simplification for *read*
-    // queries, but for a mutating update it would make e.g.
-    // `DELETE { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` delete
-    // default-graph triples even though the named graph isn't represented
-    // (silent data corruption). Stage-1 is default-graph only.
+    // Reject a GRAPH pattern anywhere in the WHERE clause, before any
+    // mutation. Since SPEC-28 phase 1 (#264) the query translator also
+    // refuses GraphPattern::Graph, but this scan stays: it produces the
+    // update-specific error below and guarantees rejection ahead of any
+    // earlier operation's side effects, without leaning on when the WHERE
+    // clause gets translated. Stage-1 updates are default-graph only.
     if where_has_graph_pattern(pattern) {
         return Err(SparqlError::UnsupportedAlgebra(
             "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
