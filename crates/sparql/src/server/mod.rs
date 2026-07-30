@@ -32,9 +32,8 @@ use std::time::Instant;
 /// the write lock. SPEC-02 will replace this with MVCC.
 ///
 /// `cfg` is the resolved [`SparqlConfig`] (SPEC-26 `[server.limits]`'s
-/// `rdf12` and `default_graph`, PLAN-28-03 Task 2) — the query handlers use
-/// it instead of `SparqlConfig::default()`, so a loaded config actually
-/// takes effect on `/query` instead of being silently discarded.
+/// `rdf12` and `default_graph`, PLAN-28-03 Task 2), read by both query
+/// handlers.
 ///
 /// Note: `#[derive(Clone)]` is intentionally avoided here — it would
 /// wrongly require `B: Clone`. The manual impl clones only the `Arc`

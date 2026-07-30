@@ -124,21 +124,14 @@ async fn main() -> Result<()> {
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
 
-    // SPEC-28 S3/D2: resolve `[server.limits].default_graph` into the typed
-    // `SparqlConfig` the query handlers use. Domain validation happens here
-    // (not in `horndb-config`, which has no `horndb-sparql` dependency and
-    // stores the raw string), mirroring the `[simd].max_isa` check above —
-    // an unrecognized value is fatal at startup, naming the bad value.
-    let default_graph = horndb_sparql::DefaultGraphMode::parse(&cfg.server.limits.default_graph)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid [server.limits].default_graph {:?}: expected \"union\" or \"strict\"",
-                cfg.server.limits.default_graph
-            )
-        })?;
+    // SPEC-28 S3/D2: map `[server.limits].default_graph` into the typed
+    // `SparqlConfig` the query handlers use. Unlike `[simd].max_isa` above,
+    // no domain check is needed here — `default_graph` is a serde-level enum
+    // (`horndb_config::DefaultGraph`), so an unrecognized value already
+    // failed `horndb_config::load()` above, with file+key attribution.
     let sparql_cfg = horndb_sparql::SparqlConfig {
         rdf12: cfg.server.limits.rdf12,
-        default_graph,
+        default_graph: cfg.server.limits.default_graph.into(),
     };
 
     let mut files: Vec<PathBuf> = Vec::new();

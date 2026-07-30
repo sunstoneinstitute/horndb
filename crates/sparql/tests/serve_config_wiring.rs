@@ -264,13 +264,11 @@ fn explicit_config_flag_pointing_at_missing_file_exits_nonzero() {
 }
 
 /// PLAN-28-03 Task 2: `AppState.cfg` must reflect the loaded
-/// `[server.limits]`, not a hardcoded `SparqlConfig::default()` — the gap
-/// this task fixes (`server/query.rs` previously ignored `AppState` and
-/// always built `SparqlConfig::default()`). `rdf12` is the observable
-/// half of `SparqlConfig` at this point in SPEC-28 phase 3 (`default_graph`
-/// is threaded but not yet consumed by the executor — PLAN-28-03 Task 3):
-/// with `rdf12 = true` in the config file, an RDF 1.2 triple-term pattern
-/// over `/query` must be accepted rather than rejected.
+/// `[server.limits]`. `rdf12` is the observable half of `SparqlConfig` at
+/// this point in SPEC-28 phase 3 (`default_graph` is threaded but not yet
+/// consumed by the executor — PLAN-28-03 Task 3): with `rdf12 = true` in the
+/// config file, an RDF 1.2 triple-term pattern over `/query` must be
+/// accepted rather than rejected.
 #[test]
 fn rdf12_config_flows_to_appstate_cfg() {
     let dir = tempdir().unwrap();
@@ -336,10 +334,15 @@ fn rdf12_defaults_to_off_rejecting_triple_term_patterns() {
 }
 
 /// SPEC-28 S3/D2: an unrecognized `[server.limits].default_graph` value is
-/// startup-fatal, naming the bad value — the `[simd].max_isa` validation
-/// pattern (`serve.rs:114-122`), applied to the new key.
+/// startup-fatal. `default_graph` is a serde-level enum
+/// (`horndb_config::DefaultGraph`), so the rejection comes from
+/// `horndb_config::load()` itself and carries the same source (file + key)
+/// attribution as its siblings below (`unknown_config_key_...`,
+/// `out_of_range_value_...`) — SPEC-26 S1's requirement, gotten for free
+/// instead of by hand (contrast `[simd].max_isa`, a free string checked in
+/// `serve.rs`, which names the value but not the file).
 #[test]
-fn invalid_default_graph_exits_nonzero_naming_the_value() {
+fn invalid_default_graph_exits_nonzero_naming_the_source() {
     let dir = tempdir().unwrap();
     let data = write_data_file(dir.path());
     let cfg = dir.path().join("config.toml");
@@ -360,6 +363,10 @@ fn invalid_default_graph_exits_nonzero_naming_the_value() {
 
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("config.toml"),
+        "stderr should name the source file: {stderr}"
+    );
     assert!(
         stderr.contains("default_graph"),
         "stderr should name the bad key: {stderr}"

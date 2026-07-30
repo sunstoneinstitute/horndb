@@ -201,22 +201,22 @@ async fn ask_graph_query_returns_400_naming_graph() {
     assert!(text.contains("Graph not lowered"), "body: {text}");
 }
 
-/// SPEC-26 S4 / SPEC-28 S3/D2: the `default-graph` per-query override
+/// SPEC-26 S4 / SPEC-28 S3/D2: the `default_graph` per-query override
 /// (`union`/`strict`) is parsed next to `query` in the POST-form channel. An
 /// unrecognized value is a 400 naming the offending key. This pins the
 /// parse/validate contract only — PLAN-28-03 Task 2's scope. The full
-/// behavioural assertion (that `default-graph=strict` actually changes
-/// which rows come back) lands in Task 4, once the executor consumes
+/// behavioural assertion (that `default_graph=strict` actually changes
+/// which rows come back) lands in Task 3, once the executor consumes
 /// `SparqlConfig::default_graph` (currently threaded but not yet read).
 #[tokio::test]
-async fn default_graph_url_param_overrides() {
+async fn default_graph_url_param_form_bad_value_returns_400_naming_key() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
         .uri("/query")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(
-            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=bogus"
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=bogus"
                 .to_string(),
         ))
         .unwrap();
@@ -227,16 +227,16 @@ async fn default_graph_url_param_overrides() {
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(
-        text.contains("default-graph"),
+        text.contains("default_graph"),
         "body should name the offending key: {text}"
     );
 }
 
-/// A valid `default-graph` value must NOT 400 — proves the override parses
+/// A valid `default_graph` value must NOT 400 — proves the override parses
 /// and the query still runs, even though (Task 2 scope) it does not yet
 /// change which rows come back.
 #[tokio::test]
-async fn default_graph_url_param_valid_value_runs_query() {
+async fn default_graph_url_param_form_valid_value_runs_query() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
@@ -244,7 +244,7 @@ async fn default_graph_url_param_valid_value_runs_query() {
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/sparql-results+json")
         .body(Body::from(
-            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=strict"
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=strict"
                 .to_string(),
         ))
         .unwrap();
@@ -252,16 +252,64 @@ async fn default_graph_url_param_valid_value_runs_query() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// The GET-channel counterpart of `default_graph_url_param_overrides`: same
-/// invalid-value contract (400 naming the key), proven on the other channel
-/// that reads `default-graph` next to `query` (`QueryParams`, GET's `Query`
-/// extractor).
+/// The form-encoded POST-body field wins over a `default_graph` also present
+/// on the URL query string: the body carries a *valid* value (`union`) while
+/// the URL carries an *invalid* one (`bogus`) — a 200 here proves the body's
+/// value was applied and the URL's was never even parsed.
+#[tokio::test]
+async fn default_graph_url_param_form_body_field_wins_over_url() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=bogus")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=union"
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// When the form body carries no `default_graph` field at all, the handler
+/// falls back to the URL query string — same channel GET and direct-POST
+/// use. Before this fix the fallback did not exist: a form-encoded POST with
+/// `default_graph` *only* on the URL silently got `union` semantics (200,
+/// no error) instead of this 400.
+#[tokio::test]
+async fn default_graph_url_param_form_falls_back_to_url_when_absent_from_body() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=bogus")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default_graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The GET-channel counterpart: same invalid-value contract (400 naming the
+/// key), proven on the channel that reads `default_graph` next to `query`
+/// (`QueryParams`, GET's `Query` extractor).
 #[tokio::test]
 async fn default_graph_url_param_get_bad_value_returns_400_naming_key() {
     let app = router_with_data();
     let req = Request::builder()
         .uri(
-            "/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=bogus",
+            "/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=bogus",
         )
         .body(Body::empty())
         .unwrap();
@@ -272,23 +320,20 @@ async fn default_graph_url_param_get_bad_value_returns_400_naming_key() {
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(
-        text.contains("default-graph"),
+        text.contains("default_graph"),
         "body should name the offending key: {text}"
     );
 }
 
 /// The direct-POST channel (`application/sparql-query`, raw body = the query
-/// text): per SPARQL 1.1 Protocol §2.1.2 this client puts `default-graph` on
-/// the URL query string, not in the body — same as GET. Before this fix the
-/// handler hardcoded `None` here, silently dropping the override instead of
-/// applying or rejecting it (a silent-wrong-answer bug, the exact class
-/// SPEC-28 exists to eliminate).
+/// text): per SPARQL 1.1 Protocol §2.1.2 this client puts `default_graph` on
+/// the URL query string, not in the body — same as GET.
 #[tokio::test]
 async fn default_graph_url_param_direct_post_bad_value_returns_400_naming_key() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
-        .uri("/query?default-graph=bogus")
+        .uri("/query?default_graph=bogus")
         .header("content-type", "application/sparql-query")
         .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))
         .unwrap();
@@ -299,12 +344,12 @@ async fn default_graph_url_param_direct_post_bad_value_returns_400_naming_key() 
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(
-        text.contains("default-graph"),
+        text.contains("default_graph"),
         "body should name the offending key: {text}"
     );
 }
 
-/// The direct-POST channel's positive case: a valid `?default-graph=` value
+/// The direct-POST channel's positive case: a valid `?default_graph=` value
 /// must run the query (not 400), proving the override is actually read on
 /// this branch now, not merely rejected when malformed.
 #[tokio::test]
@@ -312,7 +357,7 @@ async fn default_graph_url_param_direct_post_valid_value_runs_query() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
-        .uri("/query?default-graph=strict")
+        .uri("/query?default_graph=strict")
         .header("content-type", "application/sparql-query")
         .header("accept", "application/sparql-results+json")
         .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))

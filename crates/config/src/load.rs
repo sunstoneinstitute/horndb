@@ -189,6 +189,7 @@ fn config_d_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, ConfigError> {
 #[cfg(test)]
 mod env_tests {
     use super::*;
+    use crate::model::DefaultGraph;
 
     #[test]
     fn env_overrides_file_but_cli_overrides_env() {
@@ -239,14 +240,20 @@ mod env_tests {
                 cli_config_path: Some(base.clone()),
                 ..Default::default()
             };
-            assert_eq!(load(&inputs).unwrap().server.limits.default_graph, "strict");
+            assert_eq!(
+                load(&inputs).unwrap().server.limits.default_graph,
+                DefaultGraph::Strict
+            );
 
             jail.set_env("HORNDB_SERVER__LIMITS__DEFAULT_GRAPH", "union");
             let inputs = LoadInputs {
                 cli_config_path: Some(base),
                 ..Default::default()
             };
-            assert_eq!(load(&inputs).unwrap().server.limits.default_graph, "union");
+            assert_eq!(
+                load(&inputs).unwrap().server.limits.default_graph,
+                DefaultGraph::Union
+            );
             Ok(())
         });
     }

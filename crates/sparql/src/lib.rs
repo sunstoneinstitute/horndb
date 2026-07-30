@@ -26,6 +26,8 @@ pub mod server;
 
 pub use error::{Result, SparqlError};
 
+use std::str::FromStr;
+
 /// How the no-dataset default graph is composed (SPEC-28 S3, decision D2).
 ///
 /// Applies only when a query has **no** `FROM`/`FROM NAMED` clause — an
@@ -36,31 +38,39 @@ pub use error::{Result, SparqlError};
 /// This enum is a plan-and-config-level marker only as of PLAN-28-03 Task 2:
 /// it is threaded from config through [`SparqlConfig`] to the HTTP layer, but
 /// the executor does not yet consult it (that lands in PLAN-28-03 Task 3).
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum DefaultGraphMode {
     /// The union of every non-reserved graph — the SPARQL-friendly default.
+    #[default]
     Union,
     /// Only the default-graph sentinel; no named-graph data is visible.
     Strict,
 }
 
-impl Default for DefaultGraphMode {
-    fn default() -> Self {
-        Self::Union
+impl FromStr for DefaultGraphMode {
+    type Err = String;
+
+    /// Parse the `[server.limits].default_graph` config value / the
+    /// `default_graph` per-query URL override. `Err` for anything but
+    /// exactly `"union"` or `"strict"` — callers name the offending value in
+    /// their own error (config: startup-fatal in `serve.rs`; per-query: a
+    /// 400 naming the `default_graph` key).
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "union" => Ok(Self::Union),
+            "strict" => Ok(Self::Strict),
+            _ => Err(format!("unknown default_graph mode `{s}`")),
+        }
     }
 }
 
-impl DefaultGraphMode {
-    /// Parse the `[server.limits].default_graph` config value / the
-    /// `default-graph` per-query URL override. `None` for anything but
-    /// exactly `"union"` or `"strict"` — callers name the offending value in
-    /// their own error (config: startup-fatal in `serve.rs`; per-query: a
-    /// 400 naming the `default-graph` key).
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "union" => Some(Self::Union),
-            "strict" => Some(Self::Strict),
-            _ => None,
+/// The config-crate's own typed value (`horndb-config` has no dependency on
+/// this crate, so it can't implement this the other way around).
+impl From<horndb_config::DefaultGraph> for DefaultGraphMode {
+    fn from(g: horndb_config::DefaultGraph) -> Self {
+        match g {
+            horndb_config::DefaultGraph::Union => Self::Union,
+            horndb_config::DefaultGraph::Strict => Self::Strict,
         }
     }
 }
@@ -72,9 +82,9 @@ impl DefaultGraphMode {
 /// callers expecting 1.1 behaviour don't silently get 1.2 results.
 ///
 /// The flags are *runtime* (not a Cargo feature) so the HTTP server can
-/// flip them per request (e.g. via `?rdf12=1` or `?default-graph=strict`)
-/// without a rebuild. See SPEC-07 §"RDF 1.2 mode" / TASKS.md HIGH for
-/// the migration plan, and SPEC-28 S3/D2 for `default_graph`.
+/// flip them per request (e.g. `?default_graph=strict`) without a rebuild.
+/// See SPEC-07 §"RDF 1.2 mode" / TASKS.md HIGH for the migration plan
+/// (`rdf12` has no URL override yet), and SPEC-28 S3/D2 for `default_graph`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct SparqlConfig {
     /// Allow RDF 1.2 triple terms in queries. Defaults to `false`.
@@ -108,20 +118,26 @@ mod tests {
 
     #[test]
     fn default_graph_mode_parses_known_values() {
-        assert_eq!(
-            DefaultGraphMode::parse("union"),
-            Some(DefaultGraphMode::Union)
-        );
-        assert_eq!(
-            DefaultGraphMode::parse("strict"),
-            Some(DefaultGraphMode::Strict)
-        );
+        assert_eq!("union".parse(), Ok(DefaultGraphMode::Union));
+        assert_eq!("strict".parse(), Ok(DefaultGraphMode::Strict));
     }
 
     #[test]
     fn default_graph_mode_rejects_unknown_values() {
-        assert_eq!(DefaultGraphMode::parse("bogus"), None);
-        assert_eq!(DefaultGraphMode::parse("Union"), None); // case-sensitive
-        assert_eq!(DefaultGraphMode::parse(""), None);
+        assert!("bogus".parse::<DefaultGraphMode>().is_err());
+        assert!("Union".parse::<DefaultGraphMode>().is_err()); // case-sensitive
+        assert!("".parse::<DefaultGraphMode>().is_err());
+    }
+
+    #[test]
+    fn default_graph_mode_from_config_enum() {
+        assert_eq!(
+            DefaultGraphMode::from(horndb_config::DefaultGraph::Union),
+            DefaultGraphMode::Union
+        );
+        assert_eq!(
+            DefaultGraphMode::from(horndb_config::DefaultGraph::Strict),
+            DefaultGraphMode::Strict
+        );
     }
 }

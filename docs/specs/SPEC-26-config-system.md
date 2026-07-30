@@ -162,10 +162,12 @@ Separate server-scoped config from the bounded set a query may override.
     `query_timeout` (duration, default `30s`), `max_result_rows` (integer,
     default `1_000_000`), `rdf12` (bool, default `false`), `max_query_memory`
     (byte size, default unset/unlimited; parsed and stored, enforcement
-    delegated), `default_graph` (string enum `"union"` | `"strict"`, default
-    `"union"` — SPEC-28 S3/D2's no-dataset default-graph mode; an unrecognized
-    value is a startup-fatal error naming it, the same pattern as
-    `[simd].max_isa`). **Hot-reloadable.**
+    delegated), `default_graph` (enum `union` | `strict`, default `union` —
+    SPEC-28 S3/D2's no-dataset default-graph mode). A typed enum, not a free
+    string: an unrecognized value is rejected by the config layer itself
+    (serde/figment), which names both the source file and the key — unlike
+    the free-string `[simd].max_isa`, checked by hand downstream and naming
+    only the value. **Hot-reloadable.**
   - `[simd]` — `max_isa` (string, e.g. `"scalar"`; default: auto-detect) and
     `autotune` (bool, default `true`), absorbing the current SIMD knobs — now
     reached via `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE` (S1).
@@ -178,9 +180,14 @@ Separate server-scoped config from the bounded set a query may override.
   `default_graph`). It is constructed per query by layering overrides (S4) on
   top of the current `[server.limits]` defaults. `default_graph` is threaded
   ahead of the rest of this tier: `crates/horndb-sparql`'s HTTP layer already
-  reads and validates a per-query `default-graph` URL/form override
+  reads and validates a per-query `default_graph` URL/form override
   (PLAN-28-03 Task 2, ahead of this spec's own S4 whitelist mechanism landing
-  in PLAN-26-02) — the other four keys stay config-only until S4/S5 ship.
+  in PLAN-26-02) — the other four keys stay config-only until S4/S5 ship. The
+  override is spelled `default_graph`, the `QuerySettings` field name, not
+  `default-graph`: every future S4 override key is spelled after its field
+  name (e.g. `?query_timeout=30s`), and `default-graph` would sit one suffix
+  from the SPARQL 1.1 Protocol's reserved `default-graph-uri`, which SPEC-28
+  phase 5 (GSP) needs on the same endpoint.
 - **Durations and byte sizes** parse from human strings (`"30s"`, `"2GiB"`) via
   small typed newtypes with `serde` deserializers, reused for file values and URL
   params so both channels accept identical syntax.

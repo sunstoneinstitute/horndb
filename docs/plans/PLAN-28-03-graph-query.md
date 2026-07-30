@@ -122,20 +122,33 @@ config (`server/mod.rs:35`), handlers construct `SparqlConfig::default()`
 in `crates/sparql` reads `QuerySettings`). Minimal forward-compatible
 slice:
 
-- `crates/config`: `Limits` gains `default_graph: String` (default
-  `"union"`; values `"union" | "strict"`, anything else is a startup error
-  raised where `serve.rs` already domain-validates, `serve.rs:114-122`
-  pattern). `QuerySettings::from_limits` picks it up.
+- `crates/config`: `Limits` gains `default_graph: DefaultGraph` — a
+  serde-level enum (`union | strict`, default `union`), not a free string:
+  an unrecognized value is then rejected by figment/serde itself, with
+  file+key source attribution (SPEC-26 S1), instead of a hand-written check
+  that only names the value (contrast `[simd].max_isa`). `horndb-sparql`
+  bridges it onto its own `DefaultGraphMode` via `From` (the dependency runs
+  one way: `horndb-config` has no dependency on `horndb-sparql`).
+  `QuerySettings::from_limits` picks it up.
 - `AppState` gains `cfg: SparqlConfig` (built once in `serve.rs` from the
   loaded config); both query handlers use it instead of
   `SparqlConfig::default()`.
-- Per-query override: the query handlers accept a `default-graph` URL/form
+- Per-query override: the query handlers accept a `default_graph` URL/form
   parameter (`union|strict`), parsed next to the existing `query` param
   (`url_form_field`, `query.rs:75`); invalid value → 400 naming the key.
-  This is deliberately the S4 contract for one key; when PLAN-26-02 builds
-  the real whitelist, this parameter folds into it (leave a
-  `// SPEC-26 S4:` comment at the parse site). SPEC-26's spec whitelist
-  already names `default_graph` (SPEC-28 S3 added it).
+  **Amendment (post-Task-2 review):** spelled `default_graph` — the
+  `QuerySettings` field name — not the originally-planned `default-graph`.
+  Reason: SPEC-26 S4 spells every future override key after its field name
+  (e.g. `?query_timeout=30s`), and `default-graph` sits one suffix from the
+  SPARQL 1.1 Protocol's reserved `default-graph-uri`, which SPEC-28 phase 5
+  (GSP) needs on this same endpoint — two near-identical names would be a
+  standing support burden. This is deliberately the S4 contract for one key;
+  when PLAN-26-02 builds the real whitelist, this parameter folds into it
+  (leave a `// SPEC-26 S4:` comment at the parse site). SPEC-26's spec
+  whitelist already names `default_graph` (SPEC-28 S3 added it). A
+  form-encoded POST reads the override from the request body first, falling
+  back to the URL query string if the body doesn't carry it — the same
+  precedence `query=` already implies over any URL query string.
 
 ### Execution: the scoped snapshot
 

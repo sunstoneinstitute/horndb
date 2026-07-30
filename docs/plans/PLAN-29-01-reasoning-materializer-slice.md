@@ -192,7 +192,7 @@ table minus the `fanout.*` keys (P2): `enabled` (false), `spine`
 views.select overlap → fatal naming both keys; any pattern matching
 `https://horndb.io/graph/` → fatal; enabled with empty spine → the
 option-(b) warning log. None of these keys joins any per-query override
-surface (D9 — assert in the same place PLAN-28-03's `default-graph` param
+surface (D9 — assert in the same place PLAN-28-03's `default_graph` param
 is parsed: unknown keys there stay 400).
 
 ### File map

@@ -47,11 +47,15 @@ To start the HTTP server in your own binary:
 ```rust
 use horndb_sparql::server::{build_router, AppState};
 use horndb_sparql::exec::mem::MemStore;
-use std::sync::{Arc, Mutex};
+use horndb_sparql::SparqlConfig;
+use std::sync::{Arc, RwLock};
 
 #[tokio::main]
 async fn main() {
-    let state = AppState { store: Arc::new(Mutex::new(MemStore::default())) };
+    let state = AppState {
+        store: Arc::new(RwLock::new(MemStore::default())),
+        cfg: SparqlConfig::default(),
+    };
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await.unwrap();
     axum::serve(listener, app).await.unwrap();

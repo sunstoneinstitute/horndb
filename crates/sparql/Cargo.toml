@@ -50,8 +50,10 @@ horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
 horndb-metrics.workspace = true
 horndb-simd.workspace = true
-# SPEC-26 layered configuration, consumed by the `serve` binary only (the
-# library code does not reference it).
+# SPEC-26 layered configuration. Mostly consumed by the `serve` binary; the
+# library also references it for one type-level bridge (`impl
+# From<horndb_config::DefaultGraph> for DefaultGraphMode`, `src/lib.rs`),
+# which keeps `horndb-config` free of a reverse dependency on this crate.
 horndb-config = { workspace = true }
 arrow = { workspace = true }
 
