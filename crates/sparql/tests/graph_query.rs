@@ -508,24 +508,105 @@ fn graph_var_is_one_scan_node_whatever_the_graph_count<
     );
 }
 
-/// A property path inside `GRAPH ?g` must **refuse** until the closure is
-/// computed per graph (PLAN-28-03 Task 5). One closure over every graph's
-/// edges connects `a → b` in g1 with `b → c` in g2 — a path that leaves the
-/// graph, which is a different and wrong answer (SPEC-28 S3).
-fn path_inside_graph_var_refuses<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+/// Everything `GRAPH ?g` cannot answer must **refuse**, never answer at
+/// HTTP 200 with the graph column dropped.
+///
+/// The graph variable is a column of the scan leaf, so any node between the
+/// `GRAPH` and its leaves that narrows columns, merges rows, truncates them
+/// or rewrites the relation loses it — and the rows come back merged across
+/// graphs. `plan::lower` refuses all of these in one place; each shape below
+/// answered wrongly before that check existed.
+fn unsupported_shapes_inside_graph_var_refuse<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
     let mut b: B = fixture();
     b.seed_quad(Some(G1), "http://ex/x", "http://ex/q", "http://ex/y");
     b.seed_quad(Some(G2), "http://ex/y", "http://ex/q", "http://ex/z");
-    let err = execute_query_with(
-        "SELECT ?g ?x ?y WHERE { GRAPH ?g { ?x <http://ex/q>+ ?y } }",
-        &b,
-        &SparqlConfig::default(),
-    )
-    .expect_err("a path under GRAPH ?g must refuse, not merge the graphs");
-    let msg = err.to_string();
+    for (q, construct) in [
+        // A closure path: one closure over every graph's edges would join a
+        // hop in g1 to a hop in g2.
+        (
+            "SELECT ?g ?x ?y WHERE { GRAPH ?g { ?x <http://ex/q>+ ?y } }",
+            "property path",
+        ),
+        // An alternative path stays a `Path` in the algebra, which the
+        // translator wraps in Distinct(Project(endpoints)) — the Project
+        // drops ?g and the Distinct then merges g1's and g2's rows.
+        (
+            "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/p>|<http://ex/q> ?o } }",
+            "property path",
+        ),
+        // Negated property set, same wrapper.
+        (
+            "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s !(<http://ex/zzz>) ?o } }",
+            "property path",
+        ),
+        // A ground-endpoint path becomes Slice(inner, 0, 1) — existence
+        // truncated globally instead of once per graph.
+        (
+            "SELECT ?g WHERE { GRAPH ?g { <http://ex/b> <http://ex/p>|<http://ex/q> <http://ex/o2> } }",
+            "property path",
+        ),
+        // A sub-SELECT aggregating inside the graph: the aggregate would run
+        // over the merged multi-graph relation and return one wrong number.
+        (
+            "SELECT ?g ?c WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }",
+            "an aggregate",
+        ),
+        // An inner GRAPH takes over the scan scope, leaving the outer ?g
+        // unbound.
+        (
+            "SELECT ?g ?s WHERE { GRAPH ?g { GRAPH <http://ex/g1> { ?s ?p ?o } } }",
+            "nested GRAPH",
+        ),
+    ] {
+        let err = match execute_query_with(q, &b, &SparqlConfig::default()) {
+            Err(e) => e.to_string(),
+            Ok(ans) => panic!("must refuse, not answer {q}: {ans:?}"),
+        };
+        assert!(
+            err.contains(construct) && err.contains("GRAPH ?g"),
+            "the error must name the construct ({construct}) for {q}: {err}"
+        );
+    }
+}
+
+/// The boundary the refusal must not cross: `DISTINCT`, `LIMIT` and the
+/// projection of the enclosing `SELECT` sit **above** the `GRAPH` node, so
+/// they keep working — only barriers *inside* the graph pattern refuse.
+fn distinct_and_limit_above_graph_var_still_answer<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let b: B = fixture();
+    assert_eq!(
+        union_graph_rows(&b, "SELECT DISTINCT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        all_graph_rows(),
+        "top-level DISTINCT is outside the GRAPH subtree"
+    );
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s LIMIT 2"
+        ),
+        all_graph_rows()[..2].to_vec(),
+        "top-level ORDER BY + LIMIT is outside the GRAPH subtree"
+    );
+}
+
+/// `FROM <g>` with no `FROM NAMED` sets an **empty** named set, so `GRAPH ?g`
+/// enumerates nothing — the trap in `DatasetSpec`'s "any clause ⇒ both fields
+/// `Some`" invariant, pinned end to end here as well as in `scope.rs`.
+fn from_only_leaves_no_graphs_to_enumerate<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let b: B = fixture();
     assert!(
-        msg.contains("property path") && msg.contains("GRAPH ?g"),
-        "the error must name the construct: {msg}"
+        union_graph_rows(
+            &b,
+            &format!("SELECT ?g ?s FROM <{G1}> WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}")
+        )
+        .is_empty(),
+        "FROM without FROM NAMED leaves an empty named set (SPARQL 1.1 §13.2)"
     );
 }
 
@@ -585,6 +666,8 @@ both_backends!(
     graph_var_bound_by_the_pattern_itself,
     graph_var_count_counts_every_graph,
     graph_var_is_one_scan_node_whatever_the_graph_count,
-    path_inside_graph_var_refuses,
+    unsupported_shapes_inside_graph_var_refuse,
+    distinct_and_limit_above_graph_var_still_answer,
+    from_only_leaves_no_graphs_to_enumerate,
     reserved_graphs_do_not_enumerate,
 );

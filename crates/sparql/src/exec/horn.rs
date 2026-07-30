@@ -1031,6 +1031,16 @@ impl Executor for HornBackend {
     /// the graph's IRI (`horndb_storage::store`), so the ordinary
     /// `decode_term` turns it back into the IRI at the result boundary and
     /// it joins an ordinary scan column by raw id.
+    ///
+    /// Snapshot note: this pins its own store snapshot, and each per-graph
+    /// scan the loop then runs pins another (`scope_triples`), so one
+    /// `GRAPH ?g` reads N+1 pinned views rather than the single one SPEC-28
+    /// S2 describes. They cannot disagree today — every write takes
+    /// `&mut self` and no read holds it, so no write can interleave with a
+    /// query. Threading one snapshot through would have to widen the whole
+    /// `Executor` read seam (`scan_bgp_ids` and friends take no snapshot),
+    /// which is out of proportion to a difference that is currently
+    /// unobservable; revisit when writes become concurrent with reads.
     fn named_graphs(&self, named: Option<&[String]>) -> Result<Vec<NamedGraph>> {
         let snap = self.store.snapshot();
         let mut out: Vec<NamedGraph> = Vec::new();

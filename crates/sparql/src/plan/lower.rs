@@ -16,18 +16,18 @@
 //! kept as a node — it sets the scope on every scan leaf beneath it
 //! (SPEC-28 S3/D5). See [`lower_scoped`].
 
-use crate::algebra::Algebra;
-use crate::error::Result;
+use crate::algebra::{Algebra, Var};
+use crate::error::{Result, SparqlError};
 use crate::plan::logical::LogicalPlan;
 use crate::plan::{GraphScope, PhysicalPlan};
 
 /// Naive `Algebra → LogicalPlan` (no coalescing, no folding), starting from
 /// the query's default graph.
 ///
-/// No path can `Err` today — every scope pushes onto every scan leaf. The
-/// `Result` is kept because the design turns on it: a scope that cannot be
-/// pushed must fail here rather than fall back to a post-filter, which would
-/// answer a different question (SPEC-28 D5).
+/// Errors when a scope cannot be pushed all the way down — see
+/// [`per_graph_gap`]. That is by design: a scope that cannot be pushed must
+/// fail here rather than fall back to a post-filter, which would answer a
+/// different question (SPEC-28 D5).
 pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
     lower_scoped(alg, &GraphScope::DefaultGraph)
 }
@@ -117,8 +117,75 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
             edge: Box::new(lower_scoped(edge, scope)?),
             reflexive: *reflexive,
         },
-        Algebra::Graph { name, inner } => lower_scoped(inner, &GraphScope::Named(name.clone()))?,
+        Algebra::Graph { name, inner } => {
+            let scope = GraphScope::Named(name.clone());
+            let lowered = lower_scoped(inner, &scope)?;
+            // `GRAPH ?g` binds `?g` as a column of each scan leaf, so the
+            // whole subtree has to carry that column up. Refuse when it
+            // cannot (SPEC-28 D1: no wrong answers).
+            if let Some(var) = scope.graph_var() {
+                if let Some(gap) = per_graph_gap(&lowered, var) {
+                    return Err(SparqlError::UnsupportedAlgebra(format!(
+                        "{gap} inside GRAPH ?{} is not supported yet (SPEC-28 S3, \
+                         #266): it would drop or merge the graph column, so rows \
+                         would come back mixed across graphs, or with ?{} unbound",
+                        var.name(),
+                        var.name()
+                    )));
+                }
+            }
+            lowered
+        }
     })
+}
+
+/// Why the plan under a `GRAPH ?g` cannot carry the graph column to the top,
+/// named for the error message — or `None` when it can.
+///
+/// The rule is deliberately conservative: every leaf must be a scan carrying
+/// *this* graph variable, and every node above it must pass rows through
+/// one-for-one. A node that narrows columns (`Project` — i.e. a sub-SELECT),
+/// merges rows (`Distinct`, `Group`), truncates them (`Slice`), or rewrites
+/// the relation (`PathClosure`) loses the graph column or blends graphs
+/// together before the result is built.
+///
+/// `Join`/`LeftJoin`/`Union` recurse into both arms. Requiring *both* arms to
+/// bind the variable refuses a few shapes that would in fact be right (a
+/// `VALUES` joined against a scoped BGP, say), but a conservative refusal is
+/// the trade SPEC-28 asks for. PLAN-28-03 Task 5 and later work can relax
+/// individual cases by teaching the operator, never by dropping the check.
+///
+/// Barrier nodes report the **innermost** barrier, because the translator
+/// builds property paths out of these nodes (`translate.rs`: a path becomes
+/// `Distinct(Project(…))`, or `Slice(…, 0, 1)` when both endpoints are
+/// ground). Naming the outermost node would tell a user who wrote `:p+` that
+/// `DISTINCT` is unsupported, which they never wrote — hence the labels that
+/// name both possible sources.
+fn per_graph_gap(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
+    use LogicalPlan::*;
+    match plan {
+        // The one shape that works: a scan leaf carrying this scope.
+        Bgp { scope, .. } if scope.graph_var() == Some(var) => None,
+        // A scan under a *different* scope means an inner `GRAPH` took over
+        // (innermost wins), which leaves the outer `?g` unbound.
+        Bgp { .. } => Some("a nested GRAPH"),
+        Filter { inner, .. } | Extend { inner, .. } | OrderBy { inner, .. } => {
+            per_graph_gap(inner, var)
+        }
+        Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
+            per_graph_gap(left, var).or_else(|| per_graph_gap(right, var))
+        }
+        Project { inner, .. } => {
+            per_graph_gap(inner, var).or(Some("a sub-SELECT or a property path"))
+        }
+        Distinct { inner } => per_graph_gap(inner, var).or(Some("DISTINCT")),
+        Slice { inner, .. } => {
+            per_graph_gap(inner, var).or(Some("LIMIT/OFFSET or a property path"))
+        }
+        Group { inner, .. } => per_graph_gap(inner, var).or(Some("an aggregate or GROUP BY")),
+        PathClosure { edge, .. } => per_graph_gap(edge, var).or(Some("a property path")),
+        Values { .. } => Some("VALUES"),
+    }
 }
 
 /// `LogicalPlan → PhysicalPlan`. A flat `Bgp` lowers to `BgpScan` (the WCOJ
