@@ -43,7 +43,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
-- [ ] **CRITICAL** · _Completeness_ — SPEC-28: named-graph + dataset semantics end to end (GRAPH, FROM/FROM NAMED, named-graph Update, GSP) — query silently discards `GRAPH` today ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
+- [v] **CRITICAL** · _Completeness_ — SPEC-28: named-graph + dataset semantics end to end (GRAPH, FROM/FROM NAMED, named-graph Update, GSP) — query silently discards `GRAPH` today ([#261](https://github.com/sunstoneinstitute/horndb/issues/261)) — _wip: ff8f6689@Mac.localdomain · task-261-spec-28-named-graph-dataset-semantics-en · 2026-07-30T18:53:15Z_
 - [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
@@ -145,7 +145,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 
 ## CRITICAL — Completeness
 
-- [ ] **SPEC-28: named-graph and RDF dataset semantics end to end.** ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
+- [v] **SPEC-28: named-graph and RDF dataset semantics end to end.** ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
   Storage has been quad-aware since SPEC-25 S1 (#225) — `Store::insert_quads`/
   `retract_quads`/`intern_graph_uri` take a `GraphId`, `MemoryTier` keys partitions
   by graph — but everything above it still behaves as if the store held one merged
