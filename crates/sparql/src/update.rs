@@ -162,11 +162,11 @@ fn create_named_graph_unsupported() -> SparqlError {
     SparqlError::UnsupportedAlgebra("CREATE of a named graph (Stage-1 default graph only)".into())
 }
 
-/// Apply `CLEAR`/`DROP` against the single default graph. The two verbs are
-/// semantically identical here: there are no named graphs to remove, so a
-/// `DEFAULT`/`ALL` target clears the store and any named/`NAMED` target refers
-/// to a graph that does not exist (SPARQL 1.1 §3.2.{1,2}: an error unless
-/// `SILENT`, otherwise a no-op).
+/// Apply `CLEAR`/`DROP` against the store. The two verbs are semantically
+/// identical here: no public write path can put data in a named graph yet
+/// (issue #267), so a `DEFAULT`/`ALL` target clears the store and any
+/// named/`NAMED` target refers to a graph that does not exist (SPARQL 1.1
+/// §3.2.{1,2}: an error unless `SILENT`, otherwise a no-op).
 fn apply_clear_drop<B: FullBackend>(
     store: &mut B,
     silent: bool,
@@ -174,6 +174,10 @@ fn apply_clear_drop<B: FullBackend>(
 ) -> Result<()> {
     use spargebra::algebra::GraphTarget;
     match graph {
+        // TODO(#267): DefaultGraph must not route to the whole-store clear_all
+        // once named-graph writes exist — `Store::clear_all` sweeps every
+        // graph (see `HornBackend::clear_all`), so `CLEAR DEFAULT` would
+        // silently destroy named-graph data too.
         GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
             store.clear_all();
             Ok(())
