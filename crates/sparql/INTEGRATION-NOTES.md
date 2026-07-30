@@ -458,13 +458,15 @@ extend it:
   bisects to one `PassId`. Do not fold rewrites into the lowering.
   (`lower_physical` takes the plan by value and moves the field vectors —
   the pipeline's only deep copy is the one `lower_algebra` makes.)
-- **`CoalesceBgp` is NOT a universal no-op on real queries.** spargebra
-  merges adjacent triple patterns, but the Stage-1 `GRAPH` lowering
-  (merged-graph semantics: `GRAPH <g> { P }` lowers to `P`) produces
-  `Algebra::Join(Bgp, Bgp)` whenever a query mixes top-level triples with a
-  `GRAPH` block — those plans now coalesce into one flat `BgpScan`
-  (SPEC-23 §5.1, result-invariant, pinned by
-  `graph_adjacent_bgps_coalesce_and_stay_result_equivalent`). Every other
+- **`CoalesceBgp` has no syntax-reachable producer since the SPEC-28
+  phase-1 refusal (#264).** spargebra merges adjacent triple patterns,
+  and the Stage-1 `GRAPH` lowering — previously the only route from real
+  syntax to `Algebra::Join(Bgp, Bgp)` — now errors instead. The pass is
+  exercised by hand-built algebra
+  (`disjoint_var_bgps_coalesce_and_stay_result_equivalent`,
+  `join_of_bare_bgps_coalesces_to_one_flat_scan`) and kept for SPEC-28
+  phase 3 (PLAN-28-03), whose `GRAPH` lowering re-creates the shape with
+  per-scan graph scopes and adds the equal-scope merge guard. Every
   query keeps its pre-pipeline plan byte-for-byte (the golden battery).
 - **Post-pass debug validation is differential, not absolute.** Legal SPARQL
   may reference variables its pattern never binds (`FILTER(?z = <iri>)` with

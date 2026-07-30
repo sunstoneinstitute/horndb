@@ -265,17 +265,15 @@ mod pragma {
     }
 }
 
-/// The one real-query shape where `CoalesceBgp` fires today: HornDB's
-/// Stage-1 `GRAPH` lowering (merged-graph semantics — `GRAPH <g> { P }`
-/// lowers to `P`) produces `Algebra::Join(Bgp, Bgp)` when a query mixes
-/// top-level triples with a `GRAPH` block. The pipeline coalesces that into
-/// one flat `BgpScan` (SPEC-23 §5.1: widest pattern set for the WCOJ
-/// planner). This test pins the coalesced shape AND proves the results are
-/// unchanged versus the pass disabled — including the disjoint-variable
-/// (cross-product) case, where the flat scan must still equal the nested
-/// join.
+/// `CoalesceBgp` on a hand-built `Join(Bgp, Bgp)` with **disjoint**
+/// variables: the flat 2-pattern scan must stay result-equivalent to the
+/// nested join even when the join is a genuine cross product. Hand-built
+/// because no SPARQL syntax reaches translation as `Join(Bgp, Bgp)`
+/// since the SPEC-28 phase-1 refusal (#264) removed the Stage-1 `GRAPH`
+/// unwrap (previously the only syntax route) — same precedent as
+/// `plan/planner.rs::join_of_bare_bgps_coalesces_to_one_flat_scan`.
 #[test]
-fn graph_adjacent_bgps_coalesce_and_stay_result_equivalent() {
+fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
     let mut horn = HornBackend::new();
     let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
     horn.insert_triple(iri("a"), iri("p"), iri("b"));
@@ -283,9 +281,15 @@ fn graph_adjacent_bgps_coalesce_and_stay_result_equivalent() {
     horn.insert_triple(iri("x"), iri("q"), iri("y"));
     horn.insert_triple(iri("z"), iri("q"), iri("w"));
 
-    // Disjoint variables across the two groups → a genuine cross product.
-    let q = "SELECT * WHERE { ?s <http://ex/p> ?o . GRAPH <http://ex/g> { ?a <http://ex/q> ?b } }";
-    let alg = algebra_of(q);
+    // Disjoint variables across the two BGPs → a genuine cross product.
+    let alg = Algebra::Join {
+        left: Box::new(Algebra::Bgp {
+            patterns: vec![pat("s", "http://ex/p", "o")],
+        }),
+        right: Box::new(Algebra::Bgp {
+            patterns: vec![pat("a", "http://ex/q", "b")],
+        }),
+    };
 
     let coalesced = planner::plan(&alg).expect("plan");
     let nested = planner::plan_with_ctx(
