@@ -144,13 +144,19 @@ a cost proportional to the graph.
   `store.rs::snapshot_len_is_default_graph_scoped` inverts to assert the new
   contract. `graph_len` is what decides GSP 201-vs-204 and `DROP`'s existence
   check, so it must be O(1) or O(predicates in graph), not a scan.
-- **Where the default-graph-scoped `len` contract goes.** That test records why
-  the scoping existed: the SPEC-24 S6 surface backs the single-graph incremental
-  circuit, which must not pick up named-graph rows. Inverting `len` does not
-  drop that requirement, it relocates it — in the same change, the circuit's
-  snapshot backing moves to `graph_len` / graph-scoped iteration, and it becomes
-  per-view under SPEC-29 D7. A change that inverts `len` without moving the
-  circuit is incomplete.
+- **Where the default-graph-scoped `len` contract goes.** The retired test
+  assumed a live storage edge that does not exist: `horndb-incremental` has no
+  `horndb-storage` dependency, and `incremental::snapshot::Snapshot` only
+  mirrors `StoreSnapshot`'s shape, ahead of the SPEC-24 S6 swap
+  ([#215](https://github.com/sunstoneinstitute/horndb/issues/215), not
+  landed). Inverting `len` breaks no live circuit today. What this section
+  still owes S6 is a target: the graph-scoped surface (`graph_len`,
+  `iter_graph_term_ids`) must exist now and be documented as what the S6 swap
+  wires onto, so that backing lands per-graph from the start — per-view under
+  SPEC-29 D7 — instead of re-growing a whole-store assumption.
+  [#213](https://github.com/sunstoneinstitute/horndb/issues/213) (S4, the
+  engine-wiring consumer that depends on the S6 swap) carries a pointer
+  comment to this bullet.
 - **Graph enumeration is visibility-filtered.** `graphs()` returns exactly the
   graphs holding at least one quad visible at the pinned version (D11) — a
   graph all of whose quads are retracted disappears from it. This is what

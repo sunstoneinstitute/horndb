@@ -123,13 +123,18 @@ against the NF4 write-amplification budget, is deferred — [#242](https://githu
   automatically, so dead (retracted) rows accumulate under insert/retract
   churn until a caller invokes it. A compaction trigger policy is part of the
   deferred hornbench follow-up ([#242](https://github.com/sunstoneinstitute/horndb/issues/242)).
-- **SPEC-24 S6 surface** on `StoreSnapshot` (`store.rs`), default-graph scoped
-  to match the incremental engine's single-graph circuit: `contains(s, p, o)`,
-  `iter_all_term_ids()` (ordered), `len()`/`is_empty()`, `logical_time()`
-  (== the pinned commit version, ADR-0018's clock binding). This is the
-  storage-side half of the SPEC-24 S6 contract; wiring `horndb-incremental`'s
-  `Circuit::snapshot()` onto it is separate, tracked under
-  [#215](https://github.com/sunstoneinstitute/horndb/issues/215).
+- **SPEC-24 S6 surface** on `StoreSnapshot` (`store.rs`), still default-graph
+  scoped: `contains(s, p, o)`, `iter_all_term_ids()` (ordered), and
+  `logical_time()` (== the pinned commit version, ADR-0018's clock binding).
+  This is the storage-side half of the SPEC-24 S6 contract; wiring
+  `horndb-incremental`'s `Circuit::snapshot()` onto it is separate, tracked
+  under [#215](https://github.com/sunstoneinstitute/horndb/issues/215).
+  `len()`/`is_empty()` are **not** part of this list any more — SPEC-28 S2
+  ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) flipped
+  them to whole-store. The graph-scoped surface an S6 backing should target
+  instead is `graph_len(GraphId)` and `iter_graph_term_ids(GraphId)`
+  (key-ordered) — see `docs/specs/SPEC-28-named-graph-dataset-semantics.md`
+  §S2.
 - **`horndb-sparql` overlay retired:** `HornEngine`'s `tombstones: HashSet`
   is gone; `DELETE DATA` and pattern delete now call `Store::retract_*`
   directly and reads see the store's own visibility filter.
