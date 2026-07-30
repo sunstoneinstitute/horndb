@@ -183,6 +183,9 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             } else {
                 ExplainFormat::Text
             };
+            // `plan_of` does not return the dataset, so scan-leaf estimates
+            // fall back to `ScanScope::estimating` (estimates only — see its
+            // doc). Threading it here would sharpen the numbers, nothing else.
             let text = explain(&plan, exec, ExecutionMode::Materialized, format);
             Ok(QueryAnswer::Explanation { text, json })
         }

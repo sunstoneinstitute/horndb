@@ -305,14 +305,11 @@ mod tests {
         for i in 0..10 {
             horn.insert_triple(iri(&format!("e{i}")), iri("p"), iri("o"));
         }
-        let plan = PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: Term::Var(Var::new("s")),
-                predicate: iri("p"),
-                object: Term::Var(Var::new("o")),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let plan = PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }]);
         let rt = Runtime::new(&horn);
         let mut op = rt.build(&plan).unwrap();
         let mut total = 0;

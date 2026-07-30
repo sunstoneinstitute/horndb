@@ -43,13 +43,7 @@ mod tests {
     #[test]
     fn empty_bgp_plans_to_empty_scan() {
         let plan = plan(&Algebra::Bgp { patterns: vec![] }).unwrap();
-        assert_eq!(
-            plan,
-            PhysicalPlan::BgpScan {
-                patterns: vec![],
-                scope: crate::plan::GraphScope::DefaultGraph,
-            }
-        );
+        assert_eq!(plan, PhysicalPlan::bgp_scan(vec![]));
     }
 
     #[test]

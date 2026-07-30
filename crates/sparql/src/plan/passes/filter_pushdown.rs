@@ -209,14 +209,11 @@ mod tests {
         PlanCtx::default()
     }
     fn scan(subj: &str, p: &str, obj: &str) -> LogicalPlan {
-        LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var(subj),
-                predicate: Term::Iri(format!("http://ex/{p}")),
-                object: var(obj),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        }
+        LogicalPlan::bgp(vec![TriplePattern {
+            subject: var(subj),
+            predicate: Term::Iri(format!("http://ex/{p}")),
+            object: var(obj),
+        }])
     }
     fn gt0(v: &str) -> Expr {
         Expr::Gt(

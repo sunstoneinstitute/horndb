@@ -308,10 +308,7 @@ mod tests {
         }
     }
     fn bgp(pats: Vec<TriplePattern>) -> LogicalPlan {
-        LogicalPlan::Bgp {
-            patterns: pats,
-            scope: crate::plan::GraphScope::DefaultGraph,
-        }
+        LogicalPlan::bgp(pats)
     }
 
     #[test]

@@ -21,8 +21,9 @@
 //! The planner (`plan::planner`) is a 1:1 lowering with no cost model, so
 //! these are *estimates*, surfaced with a `~` prefix — not guarantees.
 
+use crate::algebra::GraphSpec;
 use crate::exec::{Executor, ScanScope};
-use crate::plan::PhysicalPlan;
+use crate::plan::{GraphScope, PhysicalPlan};
 use std::fmt::Write as _;
 
 /// Output format for an `EXPLAIN` rendering.
@@ -132,40 +133,57 @@ fn combine2<E: Executor + ?Sized>(
     Some(f(l, r))
 }
 
+/// The graph a scan leaf reads, as an `EXPLAIN` suffix. Empty for the
+/// query's default graph — the common case, and the one that would only add
+/// noise. A scan's graph is a plan dimension you cannot otherwise see, and
+/// `EXPLAIN` is where plans get debugged (SPEC-28 S3).
+fn scope_suffix(scope: &GraphScope) -> String {
+    match scope {
+        GraphScope::DefaultGraph => String::new(),
+        GraphScope::Named(GraphSpec::Iri(g)) => format!(" [graph=<{g}>]"),
+        GraphScope::Named(GraphSpec::Var(v)) => format!(" [graph=?{}]", v.name()),
+    }
+}
+
 /// The operator label shown for a node (no children).
 fn node_label(plan: &PhysicalPlan) -> String {
     match plan {
-        PhysicalPlan::BgpScan { patterns, .. } => {
+        PhysicalPlan::BgpScan { patterns, scope } => {
             format!(
-                "BgpScan({} pattern{})",
+                "BgpScan({} pattern{}){}",
                 patterns.len(),
-                plural(patterns.len())
+                plural(patterns.len()),
+                scope_suffix(scope)
             )
         }
         PhysicalPlan::CountScan {
-            patterns, out_var, ..
+            patterns,
+            out_var,
+            scope,
         } => {
             format!(
-                "CountScan({} pattern{} -> ?{})",
+                "CountScan({} pattern{} -> ?{}){}",
                 patterns.len(),
                 plural(patterns.len()),
-                out_var.name()
+                out_var.name(),
+                scope_suffix(scope)
             )
         }
         PhysicalPlan::GroupCountScan {
             patterns,
             keys,
             out_vars,
-            ..
+            scope,
         } => {
             format!(
-                "GroupCountScan({} pattern{}, {} key{} -> {} count{})",
+                "GroupCountScan({} pattern{}, {} key{} -> {} count{}){}",
                 patterns.len(),
                 plural(patterns.len()),
                 keys.len(),
                 plural(keys.len()),
                 out_vars.len(),
-                plural(out_vars.len())
+                plural(out_vars.len()),
+                scope_suffix(scope)
             )
         }
         PhysicalPlan::Join { .. } => "Join".to_owned(),
@@ -349,14 +367,11 @@ mod tests {
     }
 
     fn scan(p: &str) -> PhysicalPlan {
-        PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: Term::Var(Var::new("s")),
-                predicate: Term::Iri(p.to_owned()),
-                object: Term::Var(Var::new("o")),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        }
+        PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: Term::Iri(p.to_owned()),
+            object: Term::Var(Var::new("o")),
+        }])
     }
 
     #[test]
@@ -368,6 +383,40 @@ mod tests {
         assert!(text.contains("BgpScan(1 pattern)"), "{text}");
         // two `sco` triples
         assert!(text.contains("~2 rows"), "{text}");
+    }
+
+    /// A scan's graph is a plan dimension invisible from the query text
+    /// once `GRAPH` is lowered away, so `EXPLAIN` must surface it — and must
+    /// stay quiet for the default graph, which is almost every scan.
+    #[test]
+    fn text_shows_the_graph_scope_only_when_scoped() {
+        let st = store();
+        assert!(
+            !explain(
+                &scan("sco"),
+                &st,
+                ExecutionMode::Materialized,
+                ExplainFormat::Text
+            )
+            .contains("graph="),
+            "an unscoped scan must not be annotated"
+        );
+
+        let scoped = |scope: GraphScope| {
+            let PhysicalPlan::BgpScan { patterns, .. } = scan("sco") else {
+                unreachable!()
+            };
+            explain(
+                &PhysicalPlan::BgpScan { patterns, scope },
+                &st,
+                ExecutionMode::Materialized,
+                ExplainFormat::Text,
+            )
+        };
+        let iri = scoped(GraphScope::Named(GraphSpec::Iri("http://ex/g".into())));
+        assert!(iri.contains("[graph=<http://ex/g>]"), "{iri}");
+        let var = scoped(GraphScope::Named(GraphSpec::Var(Var::new("g"))));
+        assert!(var.contains("[graph=?g]"), "{var}");
     }
 
     #[test]

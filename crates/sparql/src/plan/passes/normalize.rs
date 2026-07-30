@@ -175,14 +175,11 @@ mod tests {
     /// `Eq(?p, <iri>)` reduces to `SameTerm`.
     #[test]
     fn reduces_eq_on_provable_iri_to_sameterm() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let eq = Expr::Eq(
             Box::new(Expr::Term(var("p"))),
             Box::new(Expr::Term(Term::Iri("http://ex/knows".into()))),
@@ -206,14 +203,11 @@ mod tests {
     /// this preserves the physical count-pushdown equality inlining.
     #[test]
     fn keeps_eq_on_unprovable_kind() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: Term::Iri("http://ex/name".into()),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: Term::Iri("http://ex/name".into()),
+            object: var("o"),
+        }]);
         let eq = Expr::Eq(
             Box::new(Expr::Term(var("o"))),
             Box::new(Expr::Term(Term::Literal("\"Alice\"".into()))),
@@ -236,14 +230,11 @@ mod tests {
     /// the Filter is removed.
     #[test]
     fn drops_constant_true_filter() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let t = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
@@ -263,14 +254,11 @@ mod tests {
     /// schema.
     #[test]
     fn empties_constant_false_filter() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let f = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
             Box::new(Expr::Term(Term::Iri("http://ex/b".into()))),
@@ -292,14 +280,11 @@ mod tests {
     /// single (not `And`-wrapped) expression.
     #[test]
     fn drops_constant_true_conjunct_keeps_non_constant_sibling() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: Term::Iri("http://ex/age".into()),
-                object: var("age"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: Term::Iri("http://ex/age".into()),
+            object: var("age"),
+        }]);
         let t = Expr::Eq(
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),
@@ -327,14 +312,11 @@ mod tests {
     /// `SameTerm` when the lattice proves it.
     #[test]
     fn reduces_eq_nested_inside_or_and_not() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let eq_a = Expr::Eq(
             Box::new(Expr::Term(var("p"))),
             Box::new(Expr::Term(Term::Iri("http://ex/a".into()))),

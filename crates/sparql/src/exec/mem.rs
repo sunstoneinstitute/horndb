@@ -89,6 +89,18 @@ impl MemStore {
         self.triples.push(triple);
     }
 
+    /// Drop every quad and every index — a structural reset, independent of
+    /// what the `Store` trait's `clear_all` means at any point in time.
+    fn reset(&mut self) {
+        self.triples.clear();
+        self.graphs.clear();
+        self.pos.clear();
+        self.by_p.clear();
+        self.by_po.clear();
+        self.by_ps.clear();
+        self.by_s.clear();
+    }
+
     /// Number of **distinct triples** currently stored, across all graphs.
     /// A triple held by two graphs counts once. Stable; useful in tests.
     pub fn len(&self) -> usize {
@@ -318,10 +330,26 @@ impl Store for MemStore {
                 .zip(std::mem::take(&mut self.graphs))
                 .filter(|(t, _)| t != &key)
                 .collect();
-        self.clear_all();
+        // `reset`, not `clear_all`: the trait method's contract becomes
+        // default-graph-only in SPEC-28 phase 4 (see its TODO), at which
+        // point routing this rebuild through it would leave the indexes
+        // populated and corrupt the store.
+        self.reset();
         for (t, graphs) in survivors {
-            for g in graphs {
-                self.insert_quad(g.as_deref(), t.clone());
+            // Re-insert once per graph the triple belongs to, moving the
+            // strings on the last one so the common single-graph survivor
+            // costs no clone at all.
+            let mut rest = graphs.into_iter();
+            let mut cur = rest.next();
+            while let Some(g) = cur {
+                cur = rest.next();
+                match cur {
+                    Some(_) => self.insert_quad(g.as_deref(), t.clone()),
+                    None => {
+                        self.insert_quad(g.as_deref(), t);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -329,14 +357,10 @@ impl Store for MemStore {
     // public write path can put data in a named graph via SPARQL Update,
     // `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing here — same gap as
     // `HornBackend::clear_all` and the TODO in `crate::update::apply_clear_drop`.
+    /// Whole-store wipe. Semantics are the `Store` trait's; internal callers
+    /// that just want an empty store must use [`MemStore::reset`].
     fn clear_all(&mut self) {
-        self.triples.clear();
-        self.graphs.clear();
-        self.pos.clear();
-        self.by_p.clear();
-        self.by_po.clear();
-        self.by_ps.clear();
-        self.by_s.clear();
+        self.reset();
     }
 }
 

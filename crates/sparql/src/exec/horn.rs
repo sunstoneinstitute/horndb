@@ -229,8 +229,20 @@ enum SnapshotScope {
     OneGraph(GraphId),
 }
 
-/// The empty graph: zero rows, no error.
-const NO_GRAPHS: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
+impl SnapshotScope {
+    /// Whether a built snapshot for this scope is worth caching — see
+    /// [`HornBackend::wcoj_snapshot`] for the reasoning.
+    fn memoisable(&self) -> bool {
+        matches!(
+            self,
+            SnapshotScope::DefaultUnion | SnapshotScope::DefaultStrict
+        )
+    }
+}
+
+/// The empty graph: zero rows, no error. (Distinct from `scope.rs`'s
+/// `EMPTY_GRAPH_SET`, which is the *name* list this resolves from.)
+const EMPTY_GRAPH_SCOPE: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
 
 /// True if `g` is a HornDB-internal graph (SPEC-27 F6 / SPEC-29 D4). The
 /// default-graph sentinel has no IRI (`graph_uri` errors on it) and is never
@@ -242,25 +254,39 @@ fn reserved_graph(snap: &StoreSnapshot<'_>, g: GraphId) -> bool {
     }
 }
 
-/// Set union of `graphs`' id-triples. Deduped across graphs, because the
-/// union default graph is a set of triples, not a bag (SPEC-28 S3). A
-/// single-graph union skips the dedup — a graph cannot hold a triple twice.
+/// Every id-triple in one graph. `graph_len` is O(predicates in `g`), so
+/// sizing the vector up front costs nothing and avoids the doubling regrowth
+/// a `FlatMap` collect would pay (its `size_hint` is `(0, None)`).
+fn graph_triples(snap: &StoreSnapshot<'_>, g: GraphId) -> Vec<WTriple> {
+    let mut out = Vec::with_capacity(snap.graph_len(g));
+    out.extend(
+        snap.iter_graph_term_ids(g)
+            .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0)),
+    );
+    out
+}
+
+/// Union of `graphs`' id-triples, concatenated.
+///
+/// No dedup pass here: `VecTripleSource::from_triples` sorts and dedups each
+/// of its six orderings unconditionally, so the snapshot has set semantics
+/// however many copies of a triple it is handed — which is what SPEC-28 S3's
+/// union default graph requires. The one thing a pre-pass would buy is a
+/// truthful `VecTripleSource::total_triples()`, which over-counts under a
+/// multi-graph union; it reaches only `cardinality_estimate`'s `== 0` check
+/// (still correct — an empty input is still zero) and the WCOJ estimators,
+/// never a result row.
 fn union_triples(snap: &StoreSnapshot<'_>, graphs: &[GraphId]) -> Vec<WTriple> {
     match graphs {
         [] => Vec::new(),
-        [g] => snap
-            .iter_graph_term_ids(*g)
-            .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
-            .collect(),
+        [g] => graph_triples(snap, *g),
         many => {
-            let mut seen: HashSet<(u64, u64, u64)> = HashSet::new();
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(many.iter().map(|g| snap.graph_len(*g)).sum());
             for g in many {
-                for (s, p, o) in snap.iter_graph_term_ids(*g) {
-                    if seen.insert((s.0, p.0, o.0)) {
-                        out.push(WTriple::new(s.0, p.0, o.0));
-                    }
-                }
+                out.extend(
+                    snap.iter_graph_term_ids(*g)
+                        .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0)),
+                );
             }
             out
         }
@@ -590,7 +616,7 @@ impl HornBackend {
 
     /// Resolve a plan-level scan scope against this store's dictionary.
     ///
-    /// Unknown graph names collapse to [`NO_GRAPHS`] (zero rows), per
+    /// Unknown graph names collapse to [`EMPTY_GRAPH_SCOPE`] (zero rows), per
     /// SPEC-28 S3. `GRAPH ?g` is refused — see [`SnapshotScope`].
     fn resolve_scope(&self, scope: &ScanScope<'_>) -> Result<SnapshotScope> {
         Ok(match scope.resolve() {
@@ -598,7 +624,7 @@ impl HornBackend {
             ResolvedScope::DefaultStrict => SnapshotScope::DefaultStrict,
             ResolvedScope::OneGraph(iri) => match self.graph_id(iri) {
                 Some(g) => SnapshotScope::OneGraph(g),
-                None => NO_GRAPHS,
+                None => EMPTY_GRAPH_SCOPE,
             },
             ResolvedScope::Union(iris) => {
                 let mut ids: Vec<GraphId> = iris.iter().filter_map(|i| self.graph_id(i)).collect();
@@ -613,31 +639,49 @@ impl HornBackend {
         })
     }
 
-    /// Get-or-build the WCOJ snapshot for `scope`, memoised per scope. The
-    /// whole memo is dropped on any write (see [`Self::invalidate`]).
+    /// Get-or-build the WCOJ snapshot for `scope`.
+    ///
+    /// **Only the two whole-store scopes are memoised.** They cost O(store)
+    /// to build and every unqualified query wants one, so caching them is
+    /// the pre-SPEC-28 behaviour preserved. A graph-scoped build is
+    /// O(that graph), so caching it would buy little and cost a cache with
+    /// no ceiling: one `Arc<VecTripleSource>` — six sorted index copies —
+    /// per graph ever named, evicted only by a write, and reachable from an
+    /// unauthenticated `/query` (`EXPLAIN` populates it without executing
+    /// anything). A client walking `GRAPH <g1>`…`GRAPH <gN>` would pin ~6×
+    /// the store. See `graph_scoped_snapshots_are_not_memoised`.
+    ///
+    /// The memo is dropped wholesale on any write ([`Self::invalidate`]).
     fn wcoj_snapshot(&self, scope: &SnapshotScope) -> Arc<VecTripleSource> {
-        let mut guard = self.snapshots.lock().expect("snapshot lock poisoned");
-        if let Some(s) = guard.get(scope) {
-            return Arc::clone(s);
+        if !scope.memoisable() {
+            return Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
         }
+        {
+            let guard = self.snapshots.lock().expect("snapshot lock poisoned");
+            if let Some(s) = guard.get(scope) {
+                return Arc::clone(s);
+            }
+        }
+        // Build with the lock RELEASED: six sort passes over the whole store
+        // must not stall a concurrent reader whose own scope is already
+        // cached (readers do run concurrently — `server/query.rs`). A race
+        // duplicates the build and `or_insert` keeps the first result; the
+        // two are interchangeable, since a write needs `&mut self` and so
+        // cannot interleave with any read.
         let built = Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
-        guard.insert(scope.clone(), Arc::clone(&built));
-        built
+        let mut guard = self.snapshots.lock().expect("snapshot lock poisoned");
+        Arc::clone(guard.entry(scope.clone()).or_insert(built))
     }
 
     /// Every `(s, p, o)` id-triple visible in `scope`, from one pinned store
-    /// snapshot. Multi-graph scopes are a **set** union: the same triple in
-    /// two graphs is one row of the union graph (SPEC-28 S3).
+    /// snapshot. Multi-graph scopes are a **set** union — the same triple in
+    /// two graphs is one row of the union graph (SPEC-28 S3) — enforced by
+    /// the snapshot builder's dedup; see [`union_triples`].
     fn scope_triples(&self, scope: &SnapshotScope) -> Vec<WTriple> {
         let snap = self.store.snapshot();
-        let one = |g: GraphId| -> Vec<WTriple> {
-            snap.iter_graph_term_ids(g)
-                .map(|(s, p, o)| WTriple::new(s.0, p.0, o.0))
-                .collect()
-        };
         match scope {
-            SnapshotScope::DefaultStrict => one(DEFAULT_GRAPH),
-            SnapshotScope::OneGraph(g) => one(*g),
+            SnapshotScope::DefaultStrict => graph_triples(&snap, DEFAULT_GRAPH),
+            SnapshotScope::OneGraph(g) => graph_triples(&snap, *g),
             SnapshotScope::FromUnion(graphs) => union_triples(&snap, graphs),
             SnapshotScope::DefaultUnion => {
                 // Recomputed on each memo miss, which is exactly when the
@@ -650,6 +694,13 @@ impl HornBackend {
                 union_triples(&snap, &graphs)
             }
         }
+    }
+
+    /// Number of memoised snapshots. Test-only window on the cache that
+    /// `graph_scoped_snapshots_are_not_memoised` bounds.
+    #[cfg(test)]
+    fn memo_len(&self) -> usize {
+        self.snapshots.lock().expect("snapshot lock poisoned").len()
     }
 
     /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
@@ -1446,6 +1497,53 @@ impl Executor for HornBackend {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+
+    /// The snapshot memo must not grow with the number of graphs a client
+    /// names. Walking N distinct `GRAPH <gi>` scopes used to leave N cached
+    /// `VecTripleSource`s (six sorted indexes each), evicted only by a
+    /// write — an unbounded, unauthenticated memory sink. Only the two
+    /// whole-store scopes are cached now.
+    #[test]
+    fn graph_scoped_snapshots_are_not_memoised() {
+        use crate::algebra::GraphSpec;
+        use crate::plan::GraphScope;
+
+        let mut b = HornBackend::new();
+        let iri = |v: &str| OxTerm::NamedNode(NamedNode::new_unchecked(v));
+        for i in 0..20 {
+            b.insert_oxrdf_in_named_graph(
+                &iri(&format!("http://ex/g{i}")),
+                &iri(&format!("http://ex/s{i}")),
+                &iri("http://ex/p"),
+                &iri("http://ex/o"),
+            )
+            .unwrap();
+        }
+        let patterns = vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: Term::Iri("http://ex/p".into()),
+            object: Term::Var(Var::new("o")),
+        }];
+
+        // One unqualified scan warms the single memoisable entry.
+        let _ = b.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
+        assert_eq!(b.memo_len(), 1, "the union default graph is cached");
+
+        // Twenty distinct ground scopes must add nothing, and must still
+        // return the right rows (bounded ≠ broken).
+        let dataset = crate::algebra::DatasetSpec::default();
+        for i in 0..20 {
+            let scope = GraphScope::Named(GraphSpec::Iri(format!("http://ex/g{i}")));
+            let scope = ScanScope::new(&scope, &dataset, crate::DefaultGraphMode::Union);
+            let batch = b.scan_bgp_ids(&patterns, &scope).unwrap();
+            assert_eq!(batch.rows.len(), 1, "graph g{i} holds exactly one triple");
+        }
+        assert_eq!(
+            b.memo_len(),
+            1,
+            "graph-scoped snapshots must not accumulate in the memo"
+        );
+    }
 
     #[test]
     fn insert_and_delete_round_trip() {

@@ -886,14 +886,11 @@ mod tests {
         horn.insert_triple(iri("s1"), iri("p2"), iri("o2"));
 
         let var = |n: &str| Term::Var(Var::new(n));
-        let bgp = PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let bgp = PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let plan = PhysicalPlan::Project {
             vars: vec![Var::new("s")],
             inner: Box::new(PhysicalPlan::Distinct {
@@ -1409,14 +1406,11 @@ mod tests {
         use crate::algebra::TriplePattern;
         let var = |n: &str| Term::Var(Var::new(n));
         let plan = PhysicalPlan::Group {
-            inner: Box::new(PhysicalPlan::BgpScan {
-                patterns: vec![TriplePattern {
-                    subject: var("s"),
-                    predicate: Term::Iri("http://ex/p".into()),
-                    object: var("o"),
-                }],
-                scope: crate::plan::GraphScope::DefaultGraph,
-            }),
+            inner: Box::new(PhysicalPlan::bgp_scan(vec![TriplePattern {
+                subject: var("s"),
+                predicate: Term::Iri("http://ex/p".into()),
+                object: var("o"),
+            }])),
             keys: vec![Var::new("z")], // not produced by the BGP
             aggregates: vec![Aggregate {
                 out: Var::new("c"),

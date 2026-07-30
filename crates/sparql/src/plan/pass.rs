@@ -380,10 +380,7 @@ mod tests {
         }
     }
     fn bgp(pats: Vec<TriplePattern>) -> LogicalPlan {
-        LogicalPlan::Bgp {
-            patterns: pats,
-            scope: crate::plan::GraphScope::DefaultGraph,
-        }
+        LogicalPlan::bgp(pats)
     }
     fn raw_join(l: LogicalPlan, r: LogicalPlan) -> LogicalPlan {
         LogicalPlan::Join {

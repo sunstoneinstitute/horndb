@@ -280,14 +280,11 @@ mod tests {
         for i in 0..10 {
             horn.insert_triple(iri(&format!("e{i}")), iri("p"), iri("o"));
         }
-        let scan = PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: Term::Var(Var::new("s")),
-                predicate: iri("p"),
-                object: Term::Var(Var::new("o")),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let scan = PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }]);
         let plan = PhysicalPlan::Slice {
             inner: Box::new(scan),
             start,
@@ -347,14 +344,11 @@ mod tests {
         horn.insert_triple(iri("e1"), iri("p"), iri("X"));
         horn.insert_triple(iri("e2"), iri("p"), iri("Y"));
 
-        let scan = PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: Term::Var(Var::new("s")),
-                predicate: iri("p"),
-                object: Term::Var(Var::new("o")),
-            }],
-            scope: crate::plan::GraphScope::DefaultGraph,
-        };
+        let scan = PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: iri("p"),
+            object: Term::Var(Var::new("o")),
+        }]);
         let proj = PhysicalPlan::Project {
             vars: vec![Var::new("o")],
             inner: Box::new(scan),

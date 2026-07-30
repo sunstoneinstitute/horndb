@@ -23,6 +23,11 @@ use crate::plan::{GraphScope, PhysicalPlan};
 
 /// Naive `Algebra → LogicalPlan` (no coalescing, no folding), starting from
 /// the query's default graph.
+///
+/// No path can `Err` today — every scope pushes onto every scan leaf. The
+/// `Result` is kept because the design turns on it: a scope that cannot be
+/// pushed must fail here rather than fall back to a post-filter, which would
+/// answer a different question (SPEC-28 D5).
 pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
     lower_scoped(alg, &GraphScope::DefaultGraph)
 }

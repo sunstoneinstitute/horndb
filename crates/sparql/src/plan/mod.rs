@@ -136,3 +136,15 @@ pub enum PhysicalPlan {
         reflexive: bool,
     },
 }
+
+impl PhysicalPlan {
+    /// A `BgpScan` reading the query's default graph — the shape lowering
+    /// produces outside any `GRAPH` wrapper. Mirrors
+    /// [`LogicalPlan::bgp`](crate::plan::logical::LogicalPlan::bgp).
+    pub fn bgp_scan(patterns: Vec<TriplePattern>) -> Self {
+        PhysicalPlan::BgpScan {
+            patterns,
+            scope: GraphScope::DefaultGraph,
+        }
+    }
+}
