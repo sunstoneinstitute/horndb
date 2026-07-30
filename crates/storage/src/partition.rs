@@ -51,6 +51,10 @@ pub struct PredicatePartition {
     max_begin: CommitVersion,
     subject_set: RoaringTreemap,
     object_set: RoaringTreemap,
+    // Number of rows with `end == UNSET_END`, frozen at build time. Equal to
+    // `len_at(v)` for the version `v` that owns this partition object — see
+    // `live_len()` for why that equivalence holds.
+    live_len: usize,
     // Object-major columns: rows sorted by (object, subject). Eager for hot
     // predicates, otherwise materialised on first `ordered(ObjectMajor)` call.
     object_major: OnceLock<ObjectMajor>,
@@ -178,6 +182,25 @@ impl PredicatePartition {
         (0..self.len())
             .filter(|&i| visible(self.begin.value(i), self.end.value(i), at))
             .count()
+    }
+
+    /// Count of rows live (`end == UNSET_END`), frozen at build time (O(1)).
+    ///
+    /// Copy-on-write gives each snapshot its own immutable partition objects:
+    /// a write rebuilds only the affected partitions, and an older pinned
+    /// snapshot keeps the *old* objects; an untouched partition is instead
+    /// shared unchanged (by `Arc`) into later snapshots. Within one partition
+    /// object, every row's `begin` is `<=` the build version, and no row's
+    /// `end` can fall between the build version and the next rebuild — an
+    /// `end` is only ever set by building a *new* partition object. So
+    /// `visible(begin, end, at) <=> end == UNSET_END` holds for every `at`
+    /// from the build version up to (but not including) the next rebuild,
+    /// which makes this frozen count equal `len_at(at)` for the whole range a
+    /// snapshot can see this object at. It does NOT hold for `at` strictly
+    /// before the build version (an older pin using a *different*, earlier
+    /// object) — use `len_at` (the scan path) there.
+    pub fn live_len(&self) -> usize {
+        self.live_len
     }
 
     /// Latest-live ordered access (all rows not yet retracted). Convenience for
@@ -434,6 +457,7 @@ impl PartitionBuilder {
         let mut end_col = Vec::with_capacity(n);
         let mut has_retractions = false;
         let mut max_begin: CommitVersion = 0;
+        let mut live_len = 0usize;
         for (s, o, begin, end) in &self.rows {
             s_col.push(*s);
             o_col.push(*o);
@@ -441,6 +465,8 @@ impl PartitionBuilder {
             end_col.push(*end);
             if *end != UNSET_END {
                 has_retractions = true;
+            } else {
+                live_len += 1;
             }
             if *begin > max_begin {
                 max_begin = *begin;
@@ -459,6 +485,7 @@ impl PartitionBuilder {
             max_begin,
             subject_set: subj_set,
             object_set: obj_set,
+            live_len,
             object_major: OnceLock::new(),
         };
         if partition.len_at(LATEST) >= hot_threshold {
@@ -471,6 +498,111 @@ impl PartitionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_len_matches_len_at_own_version_insert_only() {
+        // 100 rows, no retractions: live_len must equal len_at(v) for the
+        // version the partition was built at (LATEST, since every row here
+        // uses the legacy `append` stamps: begin 0, end UNSET_END).
+        let mut b = PartitionBuilder::default();
+        for s in 0..100u64 {
+            b.append(TermId(s), TermId(s % 5));
+        }
+        let part = b.build();
+        assert_eq!(part.live_len(), part.len_at(LATEST));
+        assert_eq!(part.live_len(), 100);
+    }
+
+    #[test]
+    fn live_len_matches_len_at_own_version_after_retraction() {
+        use crate::memory_tier::MemoryTier;
+        use crate::term::DEFAULT_GRAPH;
+        use crate::tier::Tier;
+
+        fn id(payload: u64) -> TermId {
+            TermId::new(crate::term::TermKind::Uri, payload)
+        }
+
+        let tier = MemoryTier::new();
+        let pred = id(100);
+        let quads: Vec<_> = (0..20u64)
+            .map(|s| (DEFAULT_GRAPH, id(s), pred, id(s + 1000)))
+            .collect();
+        tier.insert_quad_batch(&quads).unwrap();
+
+        // Retract a strict subset (first 7 of the 20).
+        let retractions: Vec<_> = quads[..7].to_vec();
+        let n = tier.retract_quad_batch(&retractions).unwrap();
+        assert_eq!(n, 7, "strict subset retracted");
+
+        let snap = tier.snapshot();
+        let version = snap.version();
+        for g in snap.graphs() {
+            for p in snap.predicates(g) {
+                snap.with_predicate(g, p, |part| {
+                    assert_eq!(
+                        part.live_len(),
+                        part.len_at(version),
+                        "live_len must match len_at(own version) for graph {g:?} predicate {p:?}"
+                    );
+                });
+            }
+        }
+    }
+
+    mod live_len_proptest {
+        use super::*;
+        use crate::memory_tier::MemoryTier;
+        use crate::term::DEFAULT_GRAPH;
+        use crate::tier::Tier;
+        use proptest::prelude::*;
+
+        fn id(payload: u64) -> TermId {
+            TermId::new(crate::term::TermKind::Uri, payload)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// Random interleavings of insert/retract batches over a small id
+            /// space (subjects 0..20, across 3 predicates so a batch can touch
+            /// several partitions at once). After every batch, `live_len()`
+            /// must equal `len_at(version)` for every partition in the
+            /// resulting snapshot — the differential referee for the cached
+            /// count through arbitrary write sequences.
+            #[test]
+            fn live_len_matches_len_at_version_after_random_batches(
+                ops in proptest::collection::vec(
+                    (any::<bool>(), proptest::collection::vec((0u64..20, 0u64..3), 1..8)),
+                    1..12,
+                )
+            ) {
+                let tier = MemoryTier::new();
+                for (is_insert, rows) in ops {
+                    let quads: Vec<_> = rows
+                        .iter()
+                        .map(|&(s, p)| (DEFAULT_GRAPH, id(s), id(100 + p), id(s + 1000)))
+                        .collect();
+                    if is_insert {
+                        tier.insert_quad_batch(&quads).unwrap();
+                    } else {
+                        tier.retract_quad_batch(&quads).unwrap();
+                    }
+
+                    let snap = tier.snapshot();
+                    let version = snap.version();
+                    for g in snap.graphs() {
+                        for p in snap.predicates(g) {
+                            let (live, at_version) = snap
+                                .with_predicate(g, p, |part| (part.live_len(), part.len_at(version)))
+                                .unwrap();
+                            prop_assert_eq!(live, at_version);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn scan_objects_equal_matches_scalar() {
