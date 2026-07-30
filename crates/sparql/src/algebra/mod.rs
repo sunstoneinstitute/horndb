@@ -266,8 +266,14 @@ pub struct DatasetSpec {
     /// strict default-graph sentinel only).
     pub default: Option<Vec<String>>,
     /// `FROM NAMED <g1> FROM NAMED <g2> …` — exactly these graphs are
-    /// nameable/enumerable by `GRAPH ?g`. `None` = no `FROM NAMED`: every
-    /// non-reserved graph is nameable/enumerable.
+    /// nameable/enumerable by `GRAPH ?g`. `None` means no `FROM NAMED`
+    /// clause was written — what that implies for the named-graph set
+    /// depends on `default` (SPARQL 1.1 §13.2, SPEC-28 D4): no dataset
+    /// clause at all (`default` is also `None`) → every non-reserved graph
+    /// is nameable/enumerable; `FROM` without `FROM NAMED` (`default` is
+    /// `Some`) → the named set is **empty**, not "every graph" — a query
+    /// that names *any* part of the dataset gets exact SPARQL 1.1
+    /// semantics, it does not fall back to the no-dataset-clause default.
     pub named: Option<Vec<String>>,
 }
 

@@ -155,13 +155,16 @@ async fn graph_query_returns_400_naming_graph() {
 }
 
 /// A non-empty `FROM`/`FROM NAMED` dataset clause now translates (SPEC-28
-/// phase 3, #266, replacing phase 1's refusal): the `DatasetSpec` is
-/// captured but not yet threaded to the executor (that lands in Task 3), so
-/// the query runs to completion as if the clause were absent — a temporary
-/// gap this task's design accepts (translation-level coverage only; see
-/// `algebra_translate.rs`'s dataset pins for the resolved `DatasetSpec`).
+/// phase 3, #266, replacing phase 1's refusal), but the resolved
+/// `DatasetSpec` is not threaded to the executor until PLAN-28-03 Task 3.
+/// Silently running the query as if the clause were absent would answer
+/// over the wrong graph set (the exact wrong-answer class SPEC-28 phase 1,
+/// #264, shipped to eliminate), so `api::reject_unthreaded_dataset` refuses
+/// with a `Planner` error at the planning stage — one stage later than
+/// phase 1's translation-time refusal, same outcome. Same
+/// pre-store-access streaming-SELECT path as `graph_query_returns_400_naming_graph`.
 #[tokio::test]
-async fn from_query_runs_dataset_clause_not_yet_enforced() {
+async fn from_query_returns_400_naming_from() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
@@ -172,7 +175,12 @@ async fn from_query_runs_dataset_clause_not_yet_enforced() {
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("FROM"), "body: {text}");
 }
 
 /// Same "still 400s at planning, not translation" story, but for an ASK

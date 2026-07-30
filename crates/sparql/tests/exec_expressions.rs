@@ -461,6 +461,33 @@ fn dataset_clause_translates_all_query_forms() {
 }
 
 #[test]
+fn dataset_clause_end_to_end_refuses_rather_than_answer_wrong_graph() {
+    // Regression guard: DatasetSpec is captured at translation but not yet
+    // threaded to the executor (PLAN-28-03 Task 3), so a query naming a
+    // dataset must refuse end-to-end rather than silently answer as if the
+    // clause were absent — that would return default-graph rows for a
+    // `FROM <g>` naming a graph with no data, exactly the wrong-answer
+    // class SPEC-28 phase 1 (#264) shipped to eliminate.
+    let s = store_with_prices();
+    let err = execute_query("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }", &s).unwrap_err();
+    assert!(err.to_string().contains("FROM"), "{err}");
+}
+
+#[test]
+fn graph_pattern_end_to_end_refuses_until_lowered() {
+    // Same story for GRAPH: translation succeeds (SPEC-28 phase 3), but
+    // scan-scope lowering isn't implemented until Task 3, so the query
+    // must still refuse — with a `Planner` error now, not the phase-1
+    // translation-time refusal.
+    let s = store_with_prices();
+    let err = execute_query("SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }", &s)
+        .unwrap_err()
+        .to_string()
+        .to_lowercase();
+    assert!(err.contains("graph"), "{err}");
+}
+
+#[test]
 fn absent_dataset_still_translates() {
     // Graph-free query with no FROM stays a no-op — the regression guard.
     translate_str_ok("SELECT ?s WHERE { ?s ?p ?o }");

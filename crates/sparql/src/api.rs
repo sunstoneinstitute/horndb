@@ -4,6 +4,7 @@
 //! Callers that need finer control should use the individual modules.
 
 use crate::algebra::translate::translate_query_with;
+use crate::algebra::DatasetSpec;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{construct_triples, describe_triples, Runtime};
 use crate::exec::{Bindings, Executor, FullBackend};
@@ -34,6 +35,27 @@ fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
         m.sparql.query_errors.get_or_create(&label).inc();
     }
     out
+}
+
+/// SPEC-28 phase 3 Task 1 stopgap: `translate_query_with` captures a
+/// query's `FROM`/`FROM NAMED` clause into a [`DatasetSpec`], but nothing
+/// downstream (planning, execution) reads it yet — that lands in
+/// PLAN-28-03 Task 3. Silently proceeding would answer over the wrong
+/// graph set (e.g. `FROM <g>` on a store with no `<g>` data would still
+/// return default-graph rows) — exactly the wrong-answer class SPEC-28
+/// phase 1 (#264) shipped to eliminate. Refuse instead, symmetrically with
+/// `Algebra::Graph`'s "Graph not lowered" guard (`plan/lower.rs`).
+/// **Delete this function and its call sites once Task 3 threads
+/// `DatasetSpec` through the executor.**
+fn reject_unthreaded_dataset(dataset: &DatasetSpec) -> Result<()> {
+    if *dataset != DatasetSpec::default() {
+        return Err(SparqlError::Planner(
+            "dataset clause (FROM/FROM NAMED) not threaded to the executor yet \
+             (SPEC-28 phase 3 Task 3, #266)"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Classify a parsed query into its metric `QueryKind`. `EXPLAIN` is reported
@@ -97,6 +119,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let vars = projected_vars(&translated.algebra);
             let plan = timed(Stage::Plan, || {
+                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
@@ -107,6 +130,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         ParsedQuery::Ask { inner } => {
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || {
+                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
             let any = timed(Stage::Exec, || {
@@ -121,6 +145,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         ParsedQuery::Construct { inner } => {
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let plan = timed(Stage::Plan, || {
+                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
@@ -146,6 +171,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
             let seeds = explicit_describe_iris(&translated.algebra);
             let plan = timed(Stage::Plan, || {
+                reject_unthreaded_dataset(&translated.dataset)?;
                 planner::plan_with_ctx(&translated.algebra, &ctx)
             })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
@@ -207,6 +233,7 @@ pub fn plan_select(
     let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
     let vars = projected_vars(&translated.algebra);
     let plan = timed(Stage::Plan, || {
+        reject_unthreaded_dataset(&translated.dataset)?;
         planner::plan_with_ctx(&translated.algebra, &ctx)
     })?;
     Ok(Some((vars, plan)))
@@ -232,6 +259,7 @@ fn plan_of(
         }
     };
     let translated = translate_query_with(inner, cfg)?;
+    reject_unthreaded_dataset(&translated.dataset)?;
     planner::plan_with_ctx(&translated.algebra, ctx)
 }
 
