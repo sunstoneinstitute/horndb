@@ -29,6 +29,11 @@ pub trait Tier: Send + Sync + std::any::Any {
 
     fn predicates(&self, graph: GraphId) -> Vec<TermId>;
 
+    /// The graphs holding at least one visible quad. A graph whose every quad
+    /// has been retracted is not returned — D11 (SPEC-28): a named graph
+    /// exists iff it holds at least one visible quad, so a fully-retracted
+    /// graph ceases to exist rather than lingering as an empty entry.
+    /// Includes `DEFAULT_GRAPH` when it holds data.
     fn graphs(&self) -> Vec<GraphId>;
 
     fn triple_count(&self) -> u64;

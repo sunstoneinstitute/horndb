@@ -88,8 +88,24 @@ impl TierSnapshot {
             .unwrap_or_default()
     }
 
+    /// The graphs with >=1 visible quad (D11 — see [`crate::tier::Tier::graphs`]
+    /// for the full contract). Shares [`Self::partition_is_live`] with
+    /// [`Self::stats`] so the two live counts never disagree.
     pub fn graphs(&self) -> Vec<GraphId> {
-        self.graphs.keys().copied().collect()
+        self.graphs
+            .iter()
+            .filter(|(_, gs)| gs.partitions.values().any(|p| Self::partition_is_live(p)))
+            .map(|(g, _)| *g)
+            .collect()
+    }
+
+    /// True if `p` holds at least one row visible at this snapshot's version.
+    /// `live_len()` is frozen at partition-build time and equals `len_at(v)`
+    /// for the version `v` that owns the partition object — see
+    /// `PredicatePartition::live_len`'s doc comment for why that holds for
+    /// every `TierSnapshot`, not just the one that built the partition.
+    fn partition_is_live(p: &PredicatePartition) -> bool {
+        p.live_len() > 0
     }
 
     pub fn triple_count(&self) -> u64 {
@@ -130,7 +146,7 @@ impl TierSnapshot {
             let live_preds = gs
                 .partitions
                 .values()
-                .filter(|p| p.len_at(self.version) > 0)
+                .filter(|p| Self::partition_is_live(p))
                 .count() as u64;
             predicates += live_preds;
             if live_preds > 0 {

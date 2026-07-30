@@ -206,15 +206,11 @@ impl Store {
     /// True if any non-default graph holds at least one triple. The snapshot
     /// format currently covers the default graph only; export refuses to run
     /// (rather than silently dropping data) when this is true.
+    /// `Tier::graphs()` is visibility-filtered (D11), so this is just "any
+    /// enumerated graph other than the default one". Routed through a pinned
+    /// snapshot so the public method and the snapshot-pinned exporter check
+    /// share one implementation.
     pub fn has_named_graph_data(&self) -> bool {
-        // A predicate key only exists in a graph once at least one (s, o) pair
-        // has been appended for it (see `MemoryTier::insert_quad_batch`), so a
-        // non-default graph with any predicate partition holds ≥1 triple.
-        // NB: `Tier::predicate` is a Stage-1 stub that always returns `None`
-        // (real partition access is via `MemoryTier::with_predicate`), so this
-        // guard relies on `predicates(g)` rather than scanning a partition.
-        // Routed through a pinned snapshot so the public method and the
-        // snapshot-pinned exporter check share one implementation.
         self.snapshot().has_named_graph_data()
     }
 
@@ -327,16 +323,10 @@ impl StoreSnapshot<'_> {
     /// triple. Mirrors [`Store::has_named_graph_data`] but against the pinned
     /// tier state, so an exporter can check this and scan the default graph from
     /// the *same* snapshot (no TOCTOU between the check and the scan).
+    /// `tier.graphs()` is already visibility-filtered (D11), so this is just
+    /// "any enumerated graph other than the default one".
     pub fn has_named_graph_data(&self) -> bool {
-        let version = self.tier.version();
-        self.tier.graphs().into_iter().any(|g| {
-            g != DEFAULT_GRAPH
-                && self.tier.predicates(g).into_iter().any(|p| {
-                    self.tier
-                        .with_predicate(g, p, |part| part.len_at(version) > 0)
-                        .unwrap_or(false)
-                })
-        })
+        self.tier.graphs().into_iter().any(|g| g != DEFAULT_GRAPH)
     }
 
     /// SPEC-24 S6 as-of token: the commit version this view is pinned to (==
@@ -345,26 +335,49 @@ impl StoreSnapshot<'_> {
         self.tier.version()
     }
 
-    /// Number of triples visible in this pinned view — the SPEC-24 S6 `len`.
-    /// Default-graph scoped, matching `contains`/`iter_all_term_ids` (the S6
-    /// surface backs the single-graph incremental circuit). NOT the whole-tier
-    /// count — use `triple_count()` for that.
+    /// Number of triples visible in this pinned view, across ALL graphs
+    /// (SPEC-28 S2). Equivalent to `triple_count() as usize`. The old
+    /// default-graph-scoped contract moved to [`Self::graph_len`] — see the
+    /// `snapshot_len_is_whole_store` test for why the inversion is safe.
     pub fn len(&self) -> usize {
-        let version = self.tier.version();
-        self.tier
-            .predicates(DEFAULT_GRAPH)
-            .into_iter()
-            .filter_map(|p| {
-                self.tier
-                    .with_predicate(DEFAULT_GRAPH, p, |part| part.len_at(version))
-            })
-            .sum()
+        self.triple_count() as usize
     }
 
-    /// True if this pinned view has no visible default-graph triples. See
+    /// True if this pinned view has no visible triples in any graph. See
     /// [`Self::len`] for scope.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Number of triples visible in graph `g` at this pinned view. O(number
+    /// of predicates in `g`); unconditional — an absent or never-interned
+    /// graph yields 0, not an error.
+    pub fn graph_len(&self, g: GraphId) -> usize {
+        self.tier
+            .predicates(g)
+            .into_iter()
+            .filter_map(|p| self.tier.with_predicate(g, p, |part| part.live_len()))
+            .sum()
+    }
+
+    /// The graphs holding at least one visible quad in this pinned view (D11
+    /// — see [`crate::tier::Tier::graphs`] for the full contract), including
+    /// `DEFAULT_GRAPH` when it holds data. Callers wanting named graphs only
+    /// should filter out `DEFAULT_GRAPH`.
+    pub fn graphs(&self) -> Vec<GraphId> {
+        self.tier.graphs()
+    }
+
+    /// Decode `g` back to the IRI [`Term`] it was interned from. Errors on
+    /// `DEFAULT_GRAPH`: the sentinel has no dictionary entry — it is not a
+    /// real graph name.
+    pub fn graph_uri(&self, g: GraphId) -> Result<Term> {
+        if g == DEFAULT_GRAPH {
+            return Err(crate::StorageError::InvalidTerm(
+                "DEFAULT_GRAPH has no URI".into(),
+            ));
+        }
+        self.term(TermId(g.0))
     }
 
     /// True if `(s, p, o)` is visible in the default graph at this pinned
@@ -592,12 +605,17 @@ mod tests {
         assert_eq!(phys, 1, "dead row physically reclaimed");
     }
 
-    /// `StoreSnapshot::len()` must stay default-graph scoped, matching
-    /// `iter_all_term_ids()` — the SPEC-24 S6 surface backs the single-graph
-    /// incremental circuit and must not silently pick up named-graph rows via
-    /// `triple_count()` (whole-tier). Regression for the S1 review finding.
+    /// `StoreSnapshot::len()` is whole-store (SPEC-28 S2, #265): the old
+    /// default-graph-scoped contract relocated to `graph_len`. The old test
+    /// pinned `len()` to the default graph on the belief that the SPEC-24 S6
+    /// surface backs the single-graph incremental circuit — verified false:
+    /// `crates/incremental` has no dependency on `horndb-storage` (its
+    /// `Snapshot` type only mirrors this shape, in anticipation of the S6
+    /// swap tracked by #213, not yet landed). So inverting `len()` breaks no
+    /// circuit; `graph_len` is the graph-scoped surface #213 will wire to
+    /// (see PLAN-28-02 design).
     #[test]
-    fn snapshot_len_is_default_graph_scoped() {
+    fn snapshot_len_is_whole_store() {
         let store = Store::in_memory();
         store
             .insert_triples(std::slice::from_ref(&(
@@ -606,23 +624,85 @@ mod tests {
                 iri("http://ex/b"),
             )))
             .unwrap();
-        let g = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
+        let g1 = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
         store
             .insert_quads(&[(
-                g,
+                g1,
                 iri("http://ex/x"),
                 iri("http://ex/q"),
                 iri("http://ex/y"),
             )])
             .unwrap();
+        let absent = store.intern_graph_uri(&iri("http://ex/absent")).unwrap();
 
         let snap = store.snapshot();
         assert_eq!(
             snap.len(),
-            snap.iter_all_term_ids().count(),
-            "len() must agree with the default-graph-scoped iterator"
+            2,
+            "len() is whole-store, not default-graph scoped"
         );
-        assert_eq!(snap.len(), 1, "named-graph triple must not be counted");
+        assert_eq!(snap.graph_len(DEFAULT_GRAPH), 1);
+        assert_eq!(snap.graph_len(g1), 1);
+        assert_eq!(snap.graph_len(absent), 0, "absent graph has no rows");
+    }
+
+    /// `graphs()` is visibility-filtered (D11: a graph exists iff it holds at
+    /// least one visible quad — a fully-retracted graph ceases to exist).
+    #[test]
+    fn graphs_is_visibility_filtered() {
+        let store = Store::in_memory();
+        let g1 = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
+        let g2 = store.intern_graph_uri(&iri("http://ex/graph2")).unwrap();
+        let q1 = (
+            g1,
+            iri("http://ex/a"),
+            iri("http://ex/p"),
+            iri("http://ex/b"),
+        );
+        let q2 = (
+            g2,
+            iri("http://ex/c"),
+            iri("http://ex/p"),
+            iri("http://ex/d"),
+        );
+        store.insert_quads(&[q1, q2.clone()]).unwrap();
+        let n = store.retract_quads(std::slice::from_ref(&q2)).unwrap();
+        assert_eq!(n, 1, "g2's only quad must be retracted");
+
+        let snap = store.snapshot();
+        let graphs = snap.graphs();
+        assert!(graphs.contains(&g1), "g1 still holds a visible quad");
+        assert!(
+            !graphs.contains(&g2),
+            "g2 is fully retracted and must not be enumerated"
+        );
+        assert_eq!(
+            graphs.contains(&DEFAULT_GRAPH),
+            snap.graph_len(DEFAULT_GRAPH) > 0,
+            "DEFAULT_GRAPH appears in graphs() iff it holds data"
+        );
+
+        // The tier-level view (used directly by production callers such as
+        // `has_named_graph_data`) must agree with the snapshot view.
+        let tier_graphs = store.tier().graphs();
+        assert!(tier_graphs.contains(&g1));
+        assert!(!tier_graphs.contains(&g2));
+    }
+
+    /// `graph_uri` decodes a `GraphId` back to the IRI it was interned from;
+    /// the `DEFAULT_GRAPH` sentinel has no dictionary entry and errors.
+    #[test]
+    fn graph_uri_roundtrip() {
+        let store = Store::in_memory();
+        let t = iri("http://ex/graph1");
+        let g = store.intern_graph_uri(&t).unwrap();
+
+        let snap = store.snapshot();
+        assert_eq!(snap.graph_uri(g).unwrap(), t);
+        assert!(
+            snap.graph_uri(DEFAULT_GRAPH).is_err(),
+            "the default-graph sentinel has no URI"
+        );
     }
 
     #[test]
