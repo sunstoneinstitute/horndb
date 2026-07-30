@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 2 (S2) — graph-scoped access paths: scan_graph, scan_predicate(graph, …), graph_len via cached per-partition live counts, visibility-filtered graphs(), whole-store len, and the HornBackend quad-grain de-hardwiring"
 ---
@@ -196,7 +196,7 @@ New `crates/storage/benches/graph_scan.rs`:
 - Modify: `crates/storage/src/partition.rs`
 - Modify: `crates/storage/src/memory_tier.rs`
 
-- [ ] **Step 1: Write the failing tests** — in `partition.rs`'s test module:
+- [x] **Step 1: Write the failing tests** — in `partition.rs`'s test module:
   (a) `live_len_matches_len_at_own_version_insert_only`: build a partition
   of 100 rows, no retractions; assert `part.live_len() == part.len_at(v)`
   where `v` is the build version.
@@ -209,19 +209,19 @@ New `crates/storage/benches/graph_scan.rs`:
   (c) Property test (proptest, matching the crate's existing style): random
   interleavings of insert/retract batches over a small id space; after each
   batch, for every partition, `live_len() == len_at(version)`.
-- [ ] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
+- [x] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
   horndb-storage live_len` → compile error (`live_len` undefined).
-- [ ] **Step 3: Implement** — `live_len: usize` on `PredicatePartition`;
+- [x] **Step 3: Implement** — `live_len: usize` on `PredicatePartition`;
   count `end == UNSET_END` after the dedup in
   `build_with_hot_threshold` (`partition.rs:417-452`); in
   `retract_quad_batch`'s rebuild pass (`memory_tier.rs:429-440`), carry
   `old.live_len - retracted_here` (or recount in the same linear pass —
   whichever the code structure makes obviously correct; the differential
   test is the referee). `pub fn live_len(&self) -> usize`.
-- [ ] **Step 4: Run tests, verify pass** — `cargo nextest run -p
+- [x] **Step 4: Run tests, verify pass** — `cargo nextest run -p
   horndb-storage live_len` and the full crate: `cargo nextest run -p
   horndb-storage`.
-- [ ] **Step 5: Commit** — `feat(storage): cached per-partition live count
+- [x] **Step 5: Commit** — `feat(storage): cached per-partition live count
   (SPEC-28 S2, #265)`.
 
 ### Task 2: `graph_len`, whole-store `len`, visibility-filtered `graphs()`
@@ -230,7 +230,7 @@ New `crates/storage/benches/graph_scan.rs`:
 - Modify: `crates/storage/src/store.rs`, `crates/storage/src/memory_tier.rs`,
   `crates/storage/src/tier.rs`
 
-- [ ] **Step 1: Write the failing tests** — in `store.rs`'s test module:
+- [x] **Step 1: Write the failing tests** — in `store.rs`'s test module:
   (a) **Invert** `snapshot_len_is_default_graph_scoped` (`store.rs:600`):
   rename to `snapshot_len_is_whole_store`; same fixture (one default-graph
   triple + one named-graph quad); assert `snap.len() == 2`,
@@ -245,10 +245,10 @@ New `crates/storage/benches/graph_scan.rs`:
   (D11).
   (c) `graph_uri_roundtrip`: `intern_graph_uri(t)` then
   `snap.graph_uri(g) == t`; `graph_uri(DEFAULT_GRAPH)` errors.
-- [ ] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
+- [x] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
   horndb-storage snapshot_len_is_whole_store graphs_is_visibility_filtered
   graph_uri_roundtrip`.
-- [ ] **Step 3: Implement** — `StoreSnapshot::len` = `triple_count() as
+- [x] **Step 3: Implement** — `StoreSnapshot::len` = `triple_count() as
   usize` (update `is_empty` accordingly); `graph_len(g)` = Σ
   `with_predicate(g, p, |part| part.live_len())` over
   `tier.predicates(g)`; `TierSnapshot::graphs()` filters
@@ -259,11 +259,11 @@ New `crates/storage/benches/graph_scan.rs`:
   `has_named_graph_data` (`store.rs:330`) — it can now be
   `self.tier.graphs().into_iter().any(|g| g != DEFAULT_GRAPH)` since
   `graphs()` is visibility-filtered; simplify it and keep its tests green.
-- [ ] **Step 4: Run the full crate suite** — `cargo nextest run -p
+- [x] **Step 4: Run the full crate suite** — `cargo nextest run -p
   horndb-storage`. `snapshot_isolation.rs` exercises pinned old versions —
   watch for any test that asserted the old `len()` scoping and update it
   with a comment citing this plan.
-- [ ] **Step 5: Commit** — `feat(storage): graph_len + whole-store len +
+- [x] **Step 5: Commit** — `feat(storage): graph_len + whole-store len +
   visibility-filtered graphs() (SPEC-28 S2, #265)`.
 
 ### Task 3: `scan_graph`, `iter_graph_term_ids`, `scan_predicate(graph, …)`
@@ -273,7 +273,7 @@ New `crates/storage/benches/graph_scan.rs`:
 - Modify: `crates/storage/tests/store_roundtrip.rs`,
   `crates/storage/tests/snapshot_isolation.rs`
 
-- [ ] **Step 1: Write the failing tests** — in `store.rs`'s test module:
+- [x] **Step 1: Write the failing tests** — in `store.rs`'s test module:
   (a) `scan_graph_returns_exactly_the_graphs_quads`: three graphs (default +
   two named) with overlapping triples (same `(s,p,o)` asserted in two
   graphs); `scan_graph(g1)` returns exactly `g1`'s triples, decoded, and the
@@ -288,9 +288,9 @@ New `crates/storage/benches/graph_scan.rs`:
   (d) `scan_predicate_takes_a_graph`: `scan_predicate(g1, &p)` sees only
   `g1`'s rows; `scan_predicate(DEFAULT_GRAPH, &p)` reproduces what
   `scan_predicate_default_graph` returned on the same fixture.
-- [ ] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
+- [x] **Step 2: Run tests, verify they fail** — `cargo nextest run -p
   horndb-storage scan_graph iter_graph_term_ids scan_predicate_takes`.
-- [ ] **Step 3: Implement** — `scan_graph` / `iter_graph_term_ids` follow
+- [x] **Step 3: Implement** — `scan_graph` / `iter_graph_term_ids` follow
   the `scan_all_term_ids` pattern (`store.rs:315-327`) with `g` in place of
   `DEFAULT_GRAPH` (sorted `tier.predicates(g)`, `with_predicate(g, p,
   scan_at(version))`, decode via `self.term` for the lexical form). Rename
@@ -299,11 +299,11 @@ New `crates/storage/benches/graph_scan.rs`:
   delete the old name (grep proves zero external callers; the three
   storage-internal test call sites update mechanically:
   `store_roundtrip.rs:22`, `snapshot_isolation.rs:63,106`).
-- [ ] **Step 4: Run the crate suite, then the workspace's storage
+- [x] **Step 4: Run the crate suite, then the workspace's storage
   dependents** — `cargo nextest run -p horndb-storage && cargo nextest run
   -p horndb-sparql` (sparql compiles against storage; the rename must not
   reach it — it never called the old name).
-- [ ] **Step 5: Commit** — `feat(storage): scan_graph + graph-parameterized
+- [x] **Step 5: Commit** — `feat(storage): scan_graph + graph-parameterized
   scan_predicate; retire scan_predicate_default_graph (SPEC-28 S2, #265)`.
 
 ### Task 4: HornBackend de-hardwiring
@@ -311,7 +311,7 @@ New `crates/storage/benches/graph_scan.rs`:
 **Files:**
 - Modify: `crates/sparql/src/exec/horn.rs`
 
-- [ ] **Step 1: Write the failing test** — in the sparql test tree (follow
+- [x] **Step 1: Write the failing test** — in the sparql test tree (follow
   the existing `HornBackend` unit-test placement),
   `clear_all_sweeps_named_graphs`: build a `HornBackend`, reach through
   `backend.store()` (or the existing test accessor) to `insert_quads` one
@@ -322,9 +322,9 @@ New `crates/storage/benches/graph_scan.rs`:
   returns early when `live_keys` is empty — a named-graph-only store would
   skip the sweep entirely; the new code must consult the store, not the
   cache, for the early-out).
-- [ ] **Step 2: Run it, verify it fails** — `cargo nextest run -p
+- [x] **Step 2: Run it, verify it fails** — `cargo nextest run -p
   horndb-sparql clear_all_sweeps_named_graphs`.
-- [ ] **Step 3: Implement** — key `live_keys` by `(graph.0, s, p, o)` with
+- [x] **Step 3: Implement** — key `live_keys` by `(graph.0, s, p, o)` with
   `DEFAULT_GRAPH.0` at every current site (`horn.rs:281`, `:331`, `:353`,
   `:557`); thread a `GraphId` parameter through the private write funnel
   (`insert_oxrdf`, `insert_oxrdf_batch` internals) with the public
@@ -336,10 +336,10 @@ New `crates/storage/benches/graph_scan.rs`:
   comments — whole-store live count as the stated contract, with a pointer
   to phase 3 for the union-default-graph re-examination. Delete the "never
   writes a named graph" sentence everywhere it appears.
-- [ ] **Step 4: Run the sparql suite** — `cargo nextest run -p horndb-sparql`
+- [x] **Step 4: Run the sparql suite** — `cargo nextest run -p horndb-sparql`
   and `cargo nextest run -p horndb-sparql --features server`. Everything
   must pass unchanged: this task alters no observable SPARQL behaviour.
-- [ ] **Step 5: Commit** — `refactor(sparql): quad-keyed live_keys +
+- [x] **Step 5: Commit** — `refactor(sparql): quad-keyed live_keys +
   graph-threaded write funnel + all-graph clear_all (SPEC-28 S2, #265)`.
 
 ### Task 5: Thousand-graph bench
@@ -349,21 +349,21 @@ New `crates/storage/benches/graph_scan.rs`:
 - Modify: `crates/storage/Cargo.toml` (`[[bench]] name = "graph_scan"
   harness = false`)
 
-- [ ] **Step 1: Write the bench** per the design section: groups
+- [x] **Step 1: Write the bench** per the design section: groups
   `scan_graph/small_graph_in_1k_store`, `scan_graph/small_graph_in_2k_store`,
   `graph_len/small_graph_in_1k_store`; corpus built once per group via
   `intern_graph_uri` + `insert_quads` in 65k batches; eprintln the
   `TierStats`-derived bytes/quad from setup.
-- [ ] **Step 2: Local smoke** — `cargo bench -p horndb-storage --bench
+- [x] **Step 2: Local smoke** — `cargo bench -p horndb-storage --bench
   graph_scan -- --quick`; sanity: the 1k-store and 2k-store small-graph
   numbers are within noise of each other (that is the acceptance-4 signal),
   and `graph_len` is microseconds, not milliseconds.
-- [ ] **Step 3: hornbench run** — `ssh hornbench`, repo at `~/src/horndb`,
+- [x] **Step 3: hornbench run** — `ssh hornbench`, repo at `~/src/horndb`,
   check out the branch, `cargo bench -p horndb-storage --bench graph_scan`;
   record scan time, `graph_len` time, and B/quad in `docs/benchmarks.md`
   (new "graph-scoped scan" row set, host + commit noted, NF1 budget named).
   If B/quad > 50, note the bust in #265 — measurement, not redesign.
-- [ ] **Step 4: Commit** — `bench(storage): thousand-graph scan_graph /
+- [x] **Step 4: Commit** — `bench(storage): thousand-graph scan_graph /
   graph_len / partition-overhead bench (SPEC-28 S2, #265)`.
 
 ### Task 6: Docs + spec amendment
@@ -371,8 +371,11 @@ New `crates/storage/benches/graph_scan.rs`:
 **Files:**
 - Modify: `docs/specs/SPEC-28-named-graph-dataset-semantics.md`,
   `docs/architecture.md`, `crates/storage/INTEGRATION-NOTES.md`, this plan
+- Modify (plan gap, found during review): `crates/sparql/INTEGRATION-NOTES.md`
+  — three statements (`live_keys` type, `insert_triples` call, `clear_all`
+  scope) were contradicted by Task 4's code and needed the same sync.
 
-- [ ] **Step 1: Amend SPEC-28 S2's circuit bullet** ("Where the
+- [x] **Step 1: Amend SPEC-28 S2's circuit bullet** ("Where the
   default-graph-scoped `len` contract goes"): the incremental circuit has no
   live storage edge — `crates/incremental` does not depend on
   `horndb-storage`; the S6 backing (#213) is a shape contract. Rewrite the
@@ -380,15 +383,15 @@ New `crates/storage/benches/graph_scan.rs`:
   surface (`graph_len`, `iter_graph_term_ids`) exists, is documented as what
   #213 wires to, and #213 carries a comment pointing here. Post that note on
   #213 (one `gh issue comment`).
-- [ ] **Step 2: Sync docs** — `docs/architecture.md`: SPEC-28 phase-2 row →
+- [x] **Step 2: Sync docs** — `docs/architecture.md`: SPEC-28 phase-2 row →
   implemented; `crates/storage/INTEGRATION-NOTES.md`: the snapshot-surface
   section gains the graph-scoped APIs and drops any "default-graph only"
   claims this plan made false; flip this plan to `status: in-progress` at
   Task 1 and `executed` here (same commit as the last task).
-- [ ] **Step 3: Full verification** — `cargo fmt --all`, `cargo clippy
+- [x] **Step 3: Full verification** — `cargo fmt --all`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo nextest run
   --workspace`.
-- [ ] **Step 4: Commit** — `docs(storage): SPEC-28 S2 sync — spec circuit
+- [x] **Step 4: Commit** — `docs(storage): SPEC-28 S2 sync — spec circuit
   amendment, architecture, integration notes (#265)`.
 
 ---

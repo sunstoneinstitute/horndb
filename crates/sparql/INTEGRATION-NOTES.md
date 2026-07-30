@@ -107,10 +107,11 @@ lifetime on the tier commit clock (SPEC-25 S1). `DELETE DATA` and
 the row stays physically present as history until compaction. Every
 store read (`scan_all_term_ids`, `triple_count`, …) is already
 visibility-filtered, so `HornBackend` applies no overlay when building
-the WCOJ snapshot. `HornBackend` keeps a `live_keys:
-HashSet<(u64, u64, u64)>` mirror of currently-live triples — not for
-visibility filtering, but to give `INSERT DATA` idempotency and
-`DELETE DATA` no-op detection an O(1) check, avoiding storage's
+the WCOJ snapshot. `HornBackend` keeps a `live_keys: HashSet<QuadKey>`
+mirror of currently-live quads (`QuadKey { g, s, p, o }`, keyed by
+*quad* since SPEC-28 S2 — the same triple in two graphs is two entries)
+— not for visibility filtering, but to give `INSERT DATA` idempotency
+and `DELETE DATA` no-op detection an O(1) check, avoiding storage's
 O(partition-size) `StoreSnapshot::contains` on the bulk-load hot path.
 
 ### Lazily-rebuilt VecTripleSource snapshot
@@ -138,7 +139,7 @@ read-compute / write-commit split:
    storage batch. Intern failures skip the triple (lenient for bulk
    loads — the single-triple `insert_oxrdf` propagates intern errors
    instead).
-2. Phase 2 (write): call `store.insert_triples` once for the surviving
+2. Phase 2 (write): call `store.insert_quads` once for the surviving
    entries, rebuilding each predicate partition at most once, then mark
    them live and invalidate the WCOJ snapshot only on success.
 
@@ -270,10 +271,17 @@ quietly answering against the wrong graph — so it is a limitation, not a bug.
   multi-op data updates.)
 - **`CLEAR`/`DROP DEFAULT`/`ALL`** clear the store via the new
   `Store::clear_all` seam method. `MemStore::clear_all` resets its vector and
-  indexes; `HornBackend::clear_all` retracts every currently-live default-graph
-  triple through `Tier::retract_quad_batch` (SPEC-25 S1) and clears its
-  `live_keys` mirror. Re-inserting a cleared triple resurrects it via the
-  normal insert path (storage stamps a fresh live row).
+  indexes; `HornBackend::clear_all` sweeps **every graph** — it walks
+  `store.snapshot().graphs()` and retracts every currently-live quad in each
+  one through `Tier::retract_quad_batch` (SPEC-25 S1, SPEC-28 S2), then clears
+  its `live_keys` mirror. This is wider than the update surface above:
+  `clear_all` empties the whole store even though nothing on the write path
+  can currently target a named graph, because a future caller (or data
+  planted below the funnel) could hold named-graph rows that must not survive
+  a `CLEAR ALL`. Re-inserting a cleared triple resurrects it via the normal
+  insert path (storage stamps a fresh live row).
+  `TODO(#267)`: once phase 4 opens a public named-graph write path,
+  `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing to this whole-store sweep.
 - **`CLEAR`/`DROP GRAPH <iri>` / `NAMED`** address a graph that does not exist:
   error unless `SILENT`.
 - **`CREATE GRAPH <iri>`** cannot create a named graph: error unless `SILENT`.

@@ -157,7 +157,7 @@ pub fn load_with_reasoning(
 use crate::algebra::{TriplePattern, Var};
 use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
-use horndb_storage::{Store as ColumnStore, TermId, DEFAULT_GRAPH};
+use horndb_storage::{GraphId, Store as ColumnStore, TermId, DEFAULT_GRAPH};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -180,6 +180,30 @@ pub struct HornStorageStats {
     pub bytes_estimated: u64,
 }
 
+/// A `(graph, subject, predicate, object)` TermId key. A named struct
+/// instead of a positional `(u64, u64, u64, u64)` tuple: `g` is a
+/// different *kind* of id from `s`/`p`/`o` (a graph id, not a term id),
+/// and a bare tuple of four same-typed fields lets a transposed
+/// construction pass the type checker silently.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+struct QuadKey {
+    g: u64,
+    s: u64,
+    p: u64,
+    o: u64,
+}
+
+impl QuadKey {
+    fn new(g: GraphId, s: TermId, p: TermId, o: TermId) -> Self {
+        Self {
+            g: g.0,
+            s: s.0,
+            p: p.0,
+            o: o.0,
+        }
+    }
+}
+
 /// Storage + WCOJ backed SPARQL backend (issue #67).
 ///
 /// * Term identity: `horndb_storage::Dictionary` (kind-tagged TermIds).
@@ -200,12 +224,14 @@ pub struct HornStorageStats {
 /// SPARQL BGP semantics require.
 pub struct HornBackend {
     store: ColumnStore,
-    /// Mirror of every `(s, p, o)` TermId key currently LIVE in `store`
-    /// (inserted on insert, removed on retract). Gives O(1) membership
-    /// tests for `INSERT DATA` idempotency and `DELETE DATA` no-op
-    /// detection, avoiding storage's O(partition-size)
-    /// `StoreSnapshot::contains` on the bulk-load hot path.
-    live_keys: HashSet<(u64, u64, u64)>,
+    /// Mirror of every `(graph, s, p, o)` TermId key currently LIVE in
+    /// `store` (inserted on insert, removed on retract), keyed by *quad* —
+    /// the same triple in two graphs is two entries (SPEC-28 S2). Gives O(1)
+    /// membership tests for `INSERT DATA` idempotency and `DELETE DATA`
+    /// no-op detection, avoiding storage's O(partition-size)
+    /// `StoreSnapshot::contains` on the bulk-load hot path. See
+    /// `insert_oxrdf_in_graph` for the write funnel's current graph scope.
+    live_keys: HashSet<QuadKey>,
     /// Lazily-built WCOJ source. `None` after any mutation.
     snapshot: Mutex<Option<Arc<VecTripleSource>>>,
     /// Cached statistics summary derived from a specific snapshot, used by
@@ -233,9 +259,8 @@ impl HornBackend {
         }
     }
 
-    /// Live triple count. `store.triple_count()` is already visibility-filtered
-    /// (SPEC-25 S1) and whole-tier, which equals the default-graph count here
-    /// because `HornBackend` never writes a named graph.
+    /// Live triple count across every graph, visibility-filtered (SPEC-25 S1).
+    /// (SPEC-28 phase 3 revisits the union default graph.)
     pub fn len(&self) -> u64 {
         self.store.triple_count()
     }
@@ -256,6 +281,7 @@ impl HornBackend {
         }
     }
 
+    /// Whole-store emptiness — see [`Self::len`] for scope.
     pub fn is_empty(&self) -> bool {
         self.store.triple_count() == 0
     }
@@ -270,19 +296,37 @@ impl HornBackend {
             .expect("stats_cache lock poisoned") = None;
     }
 
-    /// Insert one oxrdf triple. Returns true if it was new (i.e. live count increased).
+    /// Insert one oxrdf triple into the default graph. Returns true if it was
+    /// new (i.e. live count increased).
     pub fn insert_oxrdf(
         &mut self,
         s: &oxrdf::Term,
         p: &oxrdf::Term,
         o: &oxrdf::Term,
     ) -> Result<bool> {
-        let key = self.intern_key(s, p, o)?;
+        self.insert_oxrdf_in_graph(DEFAULT_GRAPH, s, p, o)
+    }
+
+    /// Insert one oxrdf triple into graph `g`. Private prep for the
+    /// named-graph write path (issue #267) — no public quad-shaped insert
+    /// exists yet, so `g` is always `DEFAULT_GRAPH` today.
+    ///
+    /// Precondition: `g` must already have been interned via
+    /// `Store::intern_graph_uri` — `horndb_storage::Store::insert_quads`
+    /// requires it and cannot decode an ad-hoc `GraphId`.
+    fn insert_oxrdf_in_graph(
+        &mut self,
+        g: GraphId,
+        s: &oxrdf::Term,
+        p: &oxrdf::Term,
+        o: &oxrdf::Term,
+    ) -> Result<bool> {
+        let key = self.intern_key(g, s, p, o)?;
         if self.live_keys.contains(&key) {
             return Ok(false); // SPARQL INSERT DATA is idempotent on an already-live triple
         }
         self.store
-            .insert_triples(&[(s.clone(), p.clone(), o.clone())])
+            .insert_quads(&[(g, s.clone(), p.clone(), o.clone())])
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
         self.live_keys.insert(key);
         self.invalidate();
@@ -290,9 +334,20 @@ impl HornBackend {
     }
 
     /// Bulk-insert oxrdf triples in one storage batch. Returns the number of
-    /// newly-live triples. Same idempotency semantics as `insert_oxrdf`; the
-    /// columnar tier rebuilds each predicate partition at most once, and the
-    /// snapshot is invalidated once at the end.
+    /// newly-live triples. Delegates to the graph-scoped internal funnel with
+    /// `DEFAULT_GRAPH`; see `insert_oxrdf_batch_in_graph` for the algorithm.
+    pub fn insert_oxrdf_batch(
+        &mut self,
+        triples: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)>,
+    ) -> Result<u64> {
+        self.insert_oxrdf_batch_in_graph(DEFAULT_GRAPH, triples)
+    }
+
+    /// Bulk-insert oxrdf triples into graph `g` in one storage batch. Private
+    /// prep for the named-graph write path — see `insert_oxrdf_in_graph` for
+    /// why `g` is always `DEFAULT_GRAPH` today. Same idempotency semantics as
+    /// `insert_oxrdf`; the columnar tier rebuilds each predicate partition at
+    /// most once, and the snapshot is invalidated once at the end.
     ///
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
@@ -300,11 +355,12 @@ impl HornBackend {
     /// * Phase 1 (read-only): intern all terms and drop any triple already
     ///   live (via `live_keys`, an O(1) check) or repeated within this batch.
     ///   Any intern failure skips that triple.
-    /// * Phase 2 (write): call `store.insert_triples` once for the surviving
+    /// * Phase 2 (write): call `store.insert_quads` once for the surviving
     ///   entries, then mark them live only on success. Propagates storage
     ///   errors.
-    pub fn insert_oxrdf_batch(
+    fn insert_oxrdf_batch_in_graph(
         &mut self,
+        g: GraphId,
         triples: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)>,
     ) -> Result<u64> {
         if triples.is_empty() {
@@ -315,19 +371,19 @@ impl HornBackend {
         // triples. `intra_batch` deduplicates within the batch itself in O(1)
         // per triple.
         struct Entry {
-            key: (u64, u64, u64),
+            key: QuadKey,
             ox: (oxrdf::Term, oxrdf::Term, oxrdf::Term),
         }
         let mut entries: Vec<Entry> = Vec::with_capacity(triples.len());
-        let mut intra_batch: HashSet<(u64, u64, u64)> = HashSet::new();
+        let mut intra_batch: HashSet<QuadKey> = HashSet::new();
         {
             let d = self.store.dictionary();
             for (s, p, o) in triples {
                 let (si, pi, oi) = match (d.intern(&s), d.intern(&p), d.intern(&o)) {
-                    (Ok(a), Ok(b), Ok(c)) => (a.0, b.0, c.0),
+                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
                     _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
                 };
-                let key = (si, pi, oi);
+                let key = QuadKey::new(g, si, pi, oi);
                 if self.live_keys.contains(&key) {
                     continue; // already live — no-op
                 }
@@ -342,19 +398,25 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 2 (write): storage insert first, then bookkeeping.
-        let to_store: Vec<(oxrdf::Term, oxrdf::Term, oxrdf::Term)> =
-            entries.iter().map(|e| e.ox.clone()).collect();
+        // Phase 2 (write): storage insert first, then bookkeeping. `entries`
+        // is dead after the move below except for `e.key` (already extracted
+        // into `keys`, and `Copy`), so this moves each triple's terms into
+        // the storage call instead of cloning them.
+        let keys: Vec<QuadKey> = entries.iter().map(|e| e.key).collect();
+        let to_store: Vec<(GraphId, oxrdf::Term, oxrdf::Term, oxrdf::Term)> = entries
+            .into_iter()
+            .map(|e| (g, e.ox.0, e.ox.1, e.ox.2))
+            .collect();
         self.store
-            .insert_triples(&to_store)
+            .insert_quads(&to_store)
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
 
-        for e in &entries {
-            self.live_keys.insert(e.key);
+        for key in keys {
+            self.live_keys.insert(key);
         }
         self.invalidate();
 
-        Ok(entries.len() as u64)
+        Ok(to_store.len() as u64)
     }
 
     /// Bulk-insert algebra triples in one pass — O(n) cost versus O(n²) for
@@ -398,16 +460,18 @@ impl HornBackend {
 
     fn intern_key(
         &self,
+        g: GraphId,
         s: &oxrdf::Term,
         p: &oxrdf::Term,
         o: &oxrdf::Term,
-    ) -> Result<(u64, u64, u64)> {
+    ) -> Result<QuadKey> {
         let d = self.store.dictionary();
         let err = |e: horndb_storage::StorageError| SparqlError::Executor(format!("intern: {e}"));
-        Ok((
-            d.intern(s).map_err(err)?.0,
-            d.intern(p).map_err(err)?.0,
-            d.intern(o).map_err(err)?.0,
+        Ok(QuadKey::new(
+            g,
+            d.intern(s).map_err(err)?,
+            d.intern(p).map_err(err)?,
+            d.intern(o).map_err(err)?,
         ))
     }
 
@@ -552,7 +616,9 @@ impl Store for HornBackend {
             let (Some(sid), Some(pid), Some(oid)) = (d.get(&s), d.get(&p), d.get(&o)) else {
                 return;
             };
-            (sid.0, pid.0, oid.0)
+            // #267: needs the graph-threaded twin — this hardcodes
+            // DEFAULT_GRAPH while the insert funnel is already graph-aware.
+            QuadKey::new(DEFAULT_GRAPH, sid, pid, oid)
         };
         if !self.live_keys.remove(&key) {
             return; // not currently live — no-op (unknown or already deleted)
@@ -562,19 +628,32 @@ impl Store for HornBackend {
         let _ = self.store.retract_triples(&[(s, p, o)]);
         self.invalidate();
     }
+    // TODO(#267): once a public write path can put data in a named graph,
+    // `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing to this whole-store
+    // sweep (see the TODO in `crate::update::apply_clear_drop`).
     fn clear_all(&mut self) {
-        if self.live_keys.is_empty() {
+        // Consult the store, not the cache, for the early-out: `live_keys`
+        // only ever holds entries the public write funnel inserted
+        // (DEFAULT_GRAPH today), so a store that holds only named-graph data
+        // planted below the funnel would have an empty `live_keys` and skip
+        // the sweep entirely if this checked the cache instead.
+        if self.store.triple_count() == 0 {
             return;
         }
-        // Retract every currently-live default-graph triple through the
-        // native storage delete path. Re-inserting a triple afterward goes
+        // Retract every currently-live quad in every graph through the
+        // native storage delete path (SPEC-28 S2: `clear_all` is whole-store,
+        // not default-graph-scoped). Re-inserting a triple afterward goes
         // through `insert_oxrdf`/`insert_oxrdf_batch` as usual, which stamps
         // a fresh live row (resurrection).
-        let quads: Vec<_> = self
-            .store
-            .snapshot()
-            .iter_all_term_ids()
-            .map(|(s, p, o)| (DEFAULT_GRAPH, s, p, o))
+        let snapshot = self.store.snapshot();
+        let snap = &snapshot;
+        let quads: Vec<_> = snap
+            .graphs()
+            .into_iter()
+            .flat_map(move |g| {
+                snap.iter_graph_term_ids(g)
+                    .map(move |(s, p, o)| (g, s, p, o))
+            })
             .collect();
         let _ = self.store.tier().retract_quad_batch(&quads);
         self.live_keys.clear();
@@ -1453,6 +1532,75 @@ mod tests {
             b.count_bgp_grouped(&missing, &keys).unwrap(),
             Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn clear_all_sweeps_named_graphs() {
+        let mut b = HornBackend::new();
+        // #267.
+        let g = b
+            .store
+            .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/g")))
+            .unwrap();
+        b.insert_oxrdf_in_graph(
+            g,
+            &OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/s")),
+            &OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+            &OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/o")),
+        )
+        .unwrap();
+        // One default-graph triple through the backend proper.
+        b.insert_triple(
+            Term::Iri("http://ex/s2".into()),
+            Term::Iri("http://ex/p2".into()),
+            Term::Iri("http://ex/o2".into()),
+        );
+        assert_eq!(b.len(), 2);
+
+        b.clear_all();
+
+        assert!(
+            b.is_empty(),
+            "clear_all must sweep named graphs too, not just the default graph"
+        );
+        assert!(
+            b.store.snapshot().graphs().is_empty(),
+            "SPEC-28 D11: a fully-retracted graph must cease to exist"
+        );
+        assert!(b.live_keys.is_empty());
+    }
+
+    #[test]
+    fn clear_all_sweeps_a_store_with_no_funnel_writes() {
+        let mut b = HornBackend::new();
+        // Plant a named-graph quad directly at the storage layer, bypassing
+        // HornBackend's write funnel entirely, so `live_keys` stays empty on
+        // entry. This is the case `clear_all`'s early-out must not skip:
+        // consulting `live_keys.is_empty()` instead of `store.triple_count()`
+        // would return here and leave the quad live (#265).
+        let g = b
+            .store
+            .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/g")))
+            .unwrap();
+        b.store
+            .insert_quads(&[(
+                g,
+                OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/s")),
+                OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/p")),
+                OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/o")),
+            )])
+            .unwrap();
+        assert!(
+            b.live_keys.is_empty(),
+            "planted below the funnel: live_keys must stay empty"
+        );
+        assert_eq!(b.len(), 1);
+
+        b.clear_all();
+
+        assert!(b.is_empty());
+        assert!(b.store.snapshot().graphs().is_empty());
+        assert!(b.live_keys.is_empty());
     }
 
     #[test]

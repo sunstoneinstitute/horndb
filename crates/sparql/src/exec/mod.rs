@@ -160,9 +160,12 @@ pub trait Executor {
 pub trait Store {
     fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term);
     fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term);
-    /// Remove every triple from the (single, default) graph. Backs the
+    /// Remove every triple from every graph (default and named). Backs the
     /// graph-management `CLEAR`/`DROP` verbs and the destination-clearing
-    /// step of `COPY`/`MOVE` under the Stage-1 default-graph-only model.
+    /// step of `COPY`/`MOVE`. Implementations with no named-graph support
+    /// satisfy this trivially, since all their data lives in the default
+    /// graph. `CLEAR DEFAULT` must not route here once a backend has
+    /// named-graph data (see `HornBackend::clear_all`'s doc; #267).
     fn clear_all(&mut self);
 }
 

@@ -1,7 +1,7 @@
 //! SPEC-02 #19 — copy-on-write snapshot isolation: concurrent readers see a
 //! stable, consistent view while a single writer appends.
 
-use horndb_storage::Store;
+use horndb_storage::{Store, DEFAULT_GRAPH};
 use oxrdf::{NamedNode, Term};
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ fn reader_pinned_snapshot_is_stable_under_concurrent_writes() {
                 );
                 assert_eq!(snap.version(), pinned_version);
                 // The materialized scan must match the count for the same view.
-                let rows = snap.scan_predicate_default_graph(&p()).unwrap();
+                let rows = snap.scan_predicate(DEFAULT_GRAPH, &p()).unwrap();
                 assert_eq!(rows.len() as u64, pinned_count);
             }
         }));
@@ -103,7 +103,7 @@ fn older_snapshot_outlives_newer_writes() {
     // mutable state); the early view is still its original size.
     drop(late);
     assert_eq!(early.triple_count(), 1);
-    assert_eq!(early.scan_predicate_default_graph(&p()).unwrap().len(), 1);
+    assert_eq!(early.scan_predicate(DEFAULT_GRAPH, &p()).unwrap().len(), 1);
 }
 
 /// A checkpoint (HDT export) taken while a writer is appending must be

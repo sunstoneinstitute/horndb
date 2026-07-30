@@ -153,11 +153,11 @@ impl Store {
         Ok(GraphId(id.0))
     }
 
-    /// Scan a single predicate in the default graph, returning materialized
-    /// (subject, object) `Term` pairs. Used by tests; production code should
-    /// use the tier's columnar scan directly.
-    pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
-        self.snapshot().scan_predicate_default_graph(predicate)
+    /// Scan a single predicate in `g`, returning materialized (subject,
+    /// object) `Term` pairs, subject-major. Used by tests; production code
+    /// should use the tier's columnar scan directly.
+    pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
+        self.snapshot().scan_predicate(g, predicate)
     }
 
     /// Scan a single predicate in the default graph in the requested index
@@ -203,18 +203,10 @@ impl Store {
         self.snapshot().scan_all_term_ids()
     }
 
-    /// True if any non-default graph holds at least one triple. The snapshot
-    /// format currently covers the default graph only; export refuses to run
-    /// (rather than silently dropping data) when this is true.
+    /// True if any non-default graph holds at least one triple; the snapshot
+    /// format currently covers the default graph only, so export refuses to
+    /// run rather than silently drop data when this is true.
     pub fn has_named_graph_data(&self) -> bool {
-        // A predicate key only exists in a graph once at least one (s, o) pair
-        // has been appended for it (see `MemoryTier::insert_quad_batch`), so a
-        // non-default graph with any predicate partition holds ≥1 triple.
-        // NB: `Tier::predicate` is a Stage-1 stub that always returns `None`
-        // (real partition access is via `MemoryTier::with_predicate`), so this
-        // guard relies on `predicates(g)` rather than scanning a partition.
-        // Routed through a pinned snapshot so the public method and the
-        // snapshot-pinned exporter check share one implementation.
         self.snapshot().has_named_graph_data()
     }
 
@@ -243,11 +235,24 @@ pub struct StoreSnapshot<'a> {
 }
 
 impl StoreSnapshot<'_> {
-    /// The snapshot id (monotonic tier version) this view is pinned to.
-    pub fn version(&self) -> u64 {
-        self.tier.version()
+    // --- whole-store ---
+
+    /// Number of triples visible in this pinned view, across ALL graphs
+    /// (SPEC-28 S2). Equivalent to `triple_count() as usize`. The old
+    /// default-graph-scoped contract moved to [`Self::graph_len`] — see the
+    /// `snapshot_len_is_whole_store` test for why the inversion is safe.
+    pub fn len(&self) -> usize {
+        self.triple_count() as usize
     }
 
+    /// True if this pinned view has no visible triples in any graph. See
+    /// [`Self::len`] for scope.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Visible triples across all graphs. [`Self::len`] is the `usize` alias;
+    /// [`Self::graph_len`] is the per-graph form.
     pub fn triple_count(&self) -> u64 {
         self.tier.triple_count()
     }
@@ -256,25 +261,49 @@ impl StoreSnapshot<'_> {
         self.tier.stats()
     }
 
-    /// Scan a single predicate in the default graph, returning materialized
-    /// (subject, object) `Term` pairs. A read transaction never mutates the
-    /// dictionary: an absent predicate (never interned) yields no rows.
-    pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
-        let p_id = match self.dictionary.get(predicate) {
-            Some(id) => id,
-            None => return Ok(Vec::new()),
-        };
-        let pairs = self
-            .tier
-            .with_predicate(DEFAULT_GRAPH, p_id, |part| {
-                part.scan_at(self.tier.version()).collect::<Vec<_>>()
+    /// The snapshot id (monotonic tier version) this view is pinned to.
+    pub fn version(&self) -> u64 {
+        self.tier.version()
+    }
+
+    /// SPEC-24 S6 as-of token: the commit version this view is pinned to (==
+    /// the engine's logical clock, ADR-0018).
+    pub fn logical_time(&self) -> u64 {
+        self.tier.version()
+    }
+
+    // --- default-graph-scoped ---
+
+    /// True if `(s, p, o)` is visible in the default graph at this pinned
+    /// version (SPEC-24 S6 point read). O(partition size) for S1: a linear
+    /// scan of the predicate partition's rows. Fine for the point reads S6
+    /// targets against modest per-predicate partitions; a sorted-column binary
+    /// search is a later optimization (tracked with the WCOJ columnar source).
+    pub fn contains(&self, s: TermId, p: TermId, o: TermId) -> bool {
+        let version = self.tier.version();
+        self.tier
+            .with_predicate(DEFAULT_GRAPH, p, |part| {
+                part.scan_at(version).any(|(rs, ro)| rs == s && ro == o)
             })
-            .unwrap_or_default();
-        let mut out = Vec::with_capacity(pairs.len());
-        for (s_id, o_id) in pairs {
-            out.push((self.term(s_id)?, self.term(o_id)?));
-        }
-        Ok(out)
+            .unwrap_or(false)
+    }
+
+    /// Key-ordered iteration over every visible default-graph triple as raw
+    /// `TermId`s: predicates in ascending id order, subject-major within each
+    /// predicate. Stable across concurrent writes (reads the pinned view).
+    pub fn iter_all_term_ids(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
+        self.iter_graph_term_ids(DEFAULT_GRAPH)
+    }
+
+    /// Dump every default-graph triple as raw `TermId`s, key-ordered
+    /// (predicates ascending, subject-major within each predicate — see
+    /// [`Self::iter_all_term_ids`]), from this single pinned snapshot (so the
+    /// dump is internally consistent even under concurrent writes — the NF5
+    /// checkpoint-consistency property).
+    pub fn scan_all_term_ids(&self) -> Vec<(TermId, TermId, TermId)> {
+        let mut out = Vec::with_capacity(self.graph_len(DEFAULT_GRAPH));
+        out.extend(self.iter_all_term_ids());
+        out
     }
 
     /// Scan a single predicate in the default graph in the requested index
@@ -309,94 +338,111 @@ impl StoreSnapshot<'_> {
         Ok(out)
     }
 
-    /// Dump every default-graph triple as raw `TermId`s, in arbitrary order,
-    /// from this single pinned snapshot (so the dump is internally consistent
-    /// even under concurrent writes — the NF5 checkpoint-consistency property).
-    pub fn scan_all_term_ids(&self) -> Vec<(TermId, TermId, TermId)> {
-        let version = self.tier.version();
-        let mut out = Vec::with_capacity(self.tier.triple_count() as usize);
-        for p_id in self.tier.predicates(DEFAULT_GRAPH) {
-            self.tier.with_predicate(DEFAULT_GRAPH, p_id, |part| {
-                out.extend(part.scan_at(version).map(|(s, o)| (s, p_id, o)));
-            });
+    // --- graph-scoped (SPEC-28 S2) ---
+
+    /// Number of triples visible in graph `g` at this pinned view. O(number
+    /// of predicates in `g`); unconditional — an absent or never-interned
+    /// graph yields 0, not an error.
+    pub fn graph_len(&self, g: GraphId) -> usize {
+        self.tier.graph_len(g)
+    }
+
+    /// The graphs holding at least one visible quad in this pinned view (D11
+    /// — see [`crate::tier::Tier::graphs`] for the full contract), including
+    /// `DEFAULT_GRAPH` when it holds data. Callers wanting named graphs only
+    /// should filter out `DEFAULT_GRAPH`. Sorted by `GraphId` for a
+    /// deterministic result — public API that Graph Store Protocol responses
+    /// enumerate.
+    pub fn graphs(&self) -> Vec<GraphId> {
+        let mut graphs = self.tier.graphs();
+        graphs.sort_by_key(|g| g.0);
+        graphs
+    }
+
+    /// Decode `g` back to the IRI [`Term`] it was interned from. Errors on
+    /// `DEFAULT_GRAPH`: the sentinel has no dictionary entry — it is not a
+    /// real graph name.
+    pub fn graph_uri(&self, g: GraphId) -> Result<Term> {
+        if g == DEFAULT_GRAPH {
+            return Err(crate::StorageError::InvalidTerm(
+                "the default graph has no IRI (it is a sentinel, not a named graph)".into(),
+            ));
         }
-        out
+        self.term(TermId(g.0))
     }
 
-    /// True if any non-default graph in this pinned snapshot holds at least one
-    /// triple. Mirrors [`Store::has_named_graph_data`] but against the pinned
-    /// tier state, so an exporter can check this and scan the default graph from
-    /// the *same* snapshot (no TOCTOU between the check and the scan).
-    pub fn has_named_graph_data(&self) -> bool {
+    /// Every visible triple in graph `g`, decoded, from this single pinned
+    /// snapshot. O(quads in `g` + predicates in `g`) — never O(store). This is
+    /// the GSP (Graph Store Protocol) `GET` path and stage 3 of the
+    /// whole-graph `PUT` diff (SPEC-28), so it must stay graph-scoped rather
+    /// than filtering a whole-store scan. Predicates ascending, subject-major
+    /// within each predicate.
+    pub fn scan_graph(&self, g: GraphId) -> Result<Vec<(Term, Term, Term)>> {
         let version = self.tier.version();
-        self.tier.graphs().into_iter().any(|g| {
-            g != DEFAULT_GRAPH
-                && self.tier.predicates(g).into_iter().any(|p| {
-                    self.tier
-                        .with_predicate(g, p, |part| part.len_at(version) > 0)
-                        .unwrap_or(false)
+        let mut preds = self.tier.predicates(g);
+        preds.sort_by_key(|t| t.0);
+        let mut out = Vec::with_capacity(self.graph_len(g));
+        for p_id in preds {
+            let p = self.term(p_id)?;
+            self.tier
+                .with_predicate(g, p_id, |part| -> Result<()> {
+                    for (s_id, o_id) in part.scan_at(version) {
+                        out.push((self.term(s_id)?, p.clone(), self.term(o_id)?));
+                    }
+                    Ok(())
                 })
-        })
+                .transpose()?;
+        }
+        Ok(out)
     }
 
-    /// SPEC-24 S6 as-of token: the commit version this view is pinned to (==
-    /// the engine's logical clock, ADR-0018).
-    pub fn logical_time(&self) -> u64 {
-        self.tier.version()
-    }
-
-    /// Number of triples visible in this pinned view — the SPEC-24 S6 `len`.
-    /// Default-graph scoped, matching `contains`/`iter_all_term_ids` (the S6
-    /// surface backs the single-graph incremental circuit). NOT the whole-tier
-    /// count — use `triple_count()` for that.
-    pub fn len(&self) -> usize {
-        let version = self.tier.version();
-        self.tier
-            .predicates(DEFAULT_GRAPH)
-            .into_iter()
-            .filter_map(|p| {
-                self.tier
-                    .with_predicate(DEFAULT_GRAPH, p, |part| part.len_at(version))
-            })
-            .sum()
-    }
-
-    /// True if this pinned view has no visible default-graph triples. See
-    /// [`Self::len`] for scope.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// True if `(s, p, o)` is visible in the default graph at this pinned
-    /// version (SPEC-24 S6 point read). O(partition size) for S1: a linear
-    /// scan of the predicate partition's rows. Fine for the point reads S6
-    /// targets against modest per-predicate partitions; a sorted-column binary
-    /// search is a later optimization (tracked with the WCOJ columnar source).
-    pub fn contains(&self, s: TermId, p: TermId, o: TermId) -> bool {
-        let version = self.tier.version();
-        self.tier
-            .with_predicate(DEFAULT_GRAPH, p, |part| {
-                part.scan_at(version).any(|(rs, ro)| rs == s && ro == o)
-            })
-            .unwrap_or(false)
-    }
-
-    /// Key-ordered iteration over every visible default-graph triple as raw
+    /// Key-ordered iteration over every visible triple in graph `g`, as raw
     /// `TermId`s: predicates in ascending id order, subject-major within each
-    /// predicate. Stable across concurrent writes (reads the pinned view).
-    pub fn iter_all_term_ids(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
+    /// predicate. The id-level twin of [`Self::scan_graph`] (SPEC-28).
+    pub fn iter_graph_term_ids(
+        &self,
+        g: GraphId,
+    ) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
         let version = self.tier.version();
-        let mut preds = self.tier.predicates(DEFAULT_GRAPH);
+        let mut preds = self.tier.predicates(g);
         preds.sort_by_key(|t| t.0);
         preds.into_iter().flat_map(move |p_id| {
             self.tier
-                .with_predicate(DEFAULT_GRAPH, p_id, |part| {
+                .with_predicate(g, p_id, |part| {
                     part.scan_at(version)
                         .map(move |(s, o)| (s, p_id, o))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })
+    }
+
+    /// Scan a single predicate in `g`, returning materialized (subject,
+    /// object) `Term` pairs, subject-major. A read transaction never mutates
+    /// the dictionary: an absent predicate (never interned) yields no rows.
+    pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
+        let p_id = match self.dictionary.get(predicate) {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
+        let pairs = self
+            .tier
+            .with_predicate(g, p_id, |part| {
+                part.scan_at(self.tier.version()).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(pairs.len());
+        for (s_id, o_id) in pairs {
+            out.push((self.term(s_id)?, self.term(o_id)?));
+        }
+        Ok(out)
+    }
+
+    /// True if any non-default graph in this pinned snapshot holds at least
+    /// one triple; lets an exporter check this and scan the default graph
+    /// from the same snapshot (no TOCTOU between the check and the scan).
+    pub fn has_named_graph_data(&self) -> bool {
+        self.tier.graphs().into_iter().any(|g| g != DEFAULT_GRAPH)
     }
 
     /// The append-only dictionary backing this snapshot, for term materialization.
@@ -412,269 +458,5 @@ impl StoreSnapshot<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use oxrdf::NamedNode;
-
-    fn iri(s: &str) -> Term {
-        Term::NamedNode(NamedNode::new(s).unwrap())
-    }
-
-    #[test]
-    fn scan_all_term_ids_returns_every_default_graph_triple() {
-        let store = Store::in_memory();
-        store
-            .insert_triples(&[
-                (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")),
-                (iri("http://ex/a"), iri("http://ex/q"), iri("http://ex/c")),
-            ])
-            .unwrap();
-        let all = store.scan_all_term_ids();
-        assert_eq!(all.len(), 2);
-        let p = store.dictionary().get(&iri("http://ex/p")).unwrap();
-        let q = store.dictionary().get(&iri("http://ex/q")).unwrap();
-        let preds: Vec<TermId> = all.iter().map(|t| t.1).collect();
-        assert!(preds.contains(&p) && preds.contains(&q));
-    }
-
-    #[test]
-    fn scanning_absent_predicate_does_not_mutate_dictionary() {
-        let store = Store::in_memory();
-        store
-            .insert_triples(&[(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"))])
-            .unwrap();
-        let absent = iri("http://ex/never-interned");
-
-        // A read of an absent predicate yields no rows and must NOT intern the
-        // query term (a read transaction is non-mutating).
-        let snap = store.snapshot();
-        assert!(snap
-            .scan_predicate_default_graph(&absent)
-            .unwrap()
-            .is_empty());
-        assert!(snap
-            .scan_predicate_ordered(&absent, Ordering::Spo)
-            .unwrap()
-            .is_empty());
-        assert!(store
-            .scan_predicate_default_graph(&absent)
-            .unwrap()
-            .is_empty());
-
-        // The absent term was never added to the dictionary by those reads.
-        assert!(store.dictionary().get(&absent).is_none());
-    }
-
-    #[test]
-    fn store_snapshot_is_stable_across_writes() {
-        let store = Store::in_memory();
-        store
-            .insert_triples(&[(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"))])
-            .unwrap();
-        let snap = store.snapshot();
-        assert_eq!(snap.version(), 1);
-        assert_eq!(snap.triple_count(), 1);
-
-        // Mutate the live store; the pinned snapshot is unaffected.
-        store
-            .insert_triples(&[(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/c"))])
-            .unwrap();
-        assert_eq!(snap.triple_count(), 1);
-        assert_eq!(
-            snap.scan_predicate_default_graph(&iri("http://ex/p"))
-                .unwrap()
-                .len(),
-            1
-        );
-
-        // The live store sees both triples.
-        assert_eq!(store.triple_count(), 2);
-        assert_eq!(
-            store
-                .scan_predicate_default_graph(&iri("http://ex/p"))
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn store_retract_is_visible_to_new_reads_only() {
-        let store = Store::in_memory();
-        let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(std::slice::from_ref(&t)).unwrap();
-        let before = store.snapshot();
-        let n = store.retract_triples(std::slice::from_ref(&t)).unwrap();
-        assert_eq!(n, 1);
-
-        assert_eq!(before.triple_count(), 1, "pinned-before read still sees it");
-        assert_eq!(store.snapshot().triple_count(), 0, "new read does not");
-    }
-
-    #[test]
-    fn retract_of_uninterned_term_is_a_noop() {
-        let store = Store::in_memory();
-        let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(std::slice::from_ref(&t)).unwrap();
-        // A triple mentioning a term that was never inserted retracts nothing.
-        let never = iri("http://ex/never-interned");
-        let n = store
-            .retract_triples(&[(never.clone(), iri("http://ex/p"), iri("http://ex/b"))])
-            .unwrap();
-        assert_eq!(n, 0);
-        assert_eq!(store.triple_count(), 1);
-        assert!(store.dictionary().get(&never).is_none());
-    }
-
-    #[test]
-    fn snapshot_s6_surface() {
-        let store = Store::in_memory();
-        let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        store.insert_triples(std::slice::from_ref(&t)).unwrap();
-        let snap = store.snapshot();
-
-        let (s, p, o) = {
-            let d = store.dictionary();
-            (
-                d.get(&t.0).unwrap(),
-                d.get(&t.1).unwrap(),
-                d.get(&t.2).unwrap(),
-            )
-        };
-        assert!(snap.contains(s, p, o), "contains a present triple");
-        assert!(
-            !snap.contains(s, p, TermId(o.0 + 1)),
-            "does not contain an absent one"
-        );
-        assert_eq!(snap.len(), 1);
-        assert!(!snap.is_empty());
-        assert_eq!(snap.logical_time(), snap.version());
-
-        // Ordered iteration is key-sorted and stable.
-        let ids: Vec<_> = snap.iter_all_term_ids().collect();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], (s, p, o));
-    }
-
-    #[test]
-    fn compact_reclaims_dead_rows_and_leaves_live_count_correct() {
-        let store = Store::in_memory();
-        let a = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
-        let c = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
-        store.insert_triples(&[a.clone(), c.clone()]).unwrap();
-        store.retract_triples(std::slice::from_ref(&a)).unwrap();
-
-        // No pinned snapshot below the retraction's version, so the dead row
-        // is reclaimable.
-        store.compact();
-
-        assert_eq!(store.triple_count(), 1, "live count still correct");
-        let snap = store.snapshot();
-        assert_eq!(snap.len(), 1);
-        assert!(
-            !snap.contains(
-                store.dictionary().get(&a.0).unwrap(),
-                store.dictionary().get(&a.1).unwrap(),
-                store.dictionary().get(&a.2).unwrap(),
-            ),
-            "retracted triple stays absent after compaction"
-        );
-        // Physical check: the partition backing predicate `p` holds exactly
-        // one row after compaction (the dead row was reclaimed, not just
-        // hidden by the visibility filter). `tests` is inside `store.rs`, so
-        // it can reach `StoreSnapshot.tier` (a `PinnedSnapshot`, Derefs to
-        // `TierSnapshot`) directly.
-        let p_id = store.dictionary().get(&a.1).unwrap();
-        let phys = snap
-            .tier
-            .with_predicate(DEFAULT_GRAPH, p_id, |part| part.len())
-            .unwrap();
-        assert_eq!(phys, 1, "dead row physically reclaimed");
-    }
-
-    /// `StoreSnapshot::len()` must stay default-graph scoped, matching
-    /// `iter_all_term_ids()` — the SPEC-24 S6 surface backs the single-graph
-    /// incremental circuit and must not silently pick up named-graph rows via
-    /// `triple_count()` (whole-tier). Regression for the S1 review finding.
-    #[test]
-    fn snapshot_len_is_default_graph_scoped() {
-        let store = Store::in_memory();
-        store
-            .insert_triples(std::slice::from_ref(&(
-                iri("http://ex/a"),
-                iri("http://ex/p"),
-                iri("http://ex/b"),
-            )))
-            .unwrap();
-        let g = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
-        store
-            .insert_quads(&[(
-                g,
-                iri("http://ex/x"),
-                iri("http://ex/q"),
-                iri("http://ex/y"),
-            )])
-            .unwrap();
-
-        let snap = store.snapshot();
-        assert_eq!(
-            snap.len(),
-            snap.iter_all_term_ids().count(),
-            "len() must agree with the default-graph-scoped iterator"
-        );
-        assert_eq!(snap.len(), 1, "named-graph triple must not be counted");
-    }
-
-    #[test]
-    fn retract_quads_removes_only_the_targeted_named_graph_quad() {
-        let store = Store::in_memory();
-        let g = store.intern_graph_uri(&iri("http://ex/graph1")).unwrap();
-        let q1 = (
-            g,
-            iri("http://ex/a"),
-            iri("http://ex/p"),
-            iri("http://ex/b"),
-        );
-        let q2 = (
-            g,
-            iri("http://ex/c"),
-            iri("http://ex/p"),
-            iri("http://ex/d"),
-        );
-        store.insert_quads(&[q1.clone(), q2.clone()]).unwrap();
-
-        let before = store.snapshot();
-        let n = store.retract_quads(std::slice::from_ref(&q1)).unwrap();
-        assert_eq!(n, 1);
-
-        let p_id = store.dictionary().get(&q1.2).unwrap();
-        let a_id = store.dictionary().get(&q1.1).unwrap();
-        let b_id = store.dictionary().get(&q1.3).unwrap();
-        let c_id = store.dictionary().get(&q2.1).unwrap();
-        let d_id = store.dictionary().get(&q2.3).unwrap();
-
-        // Pinned-before snapshot still sees both quads in the named graph.
-        let before_rows = before
-            .tier
-            .with_predicate(g, p_id, |part| {
-                part.scan_at(before.version()).collect::<Vec<_>>()
-            })
-            .unwrap();
-        assert!(before_rows.contains(&(a_id, b_id)));
-        assert!(before_rows.contains(&(c_id, d_id)));
-
-        // A fresh snapshot sees the retraction: q1 gone, q2 survives.
-        let after = store.snapshot();
-        let after_rows = after
-            .tier
-            .with_predicate(g, p_id, |part| {
-                part.scan_at(after.version()).collect::<Vec<_>>()
-            })
-            .unwrap();
-        assert!(
-            !after_rows.contains(&(a_id, b_id)),
-            "retracted quad must be gone"
-        );
-        assert!(after_rows.contains(&(c_id, d_id)), "surviving quad remains");
-    }
-}
+#[path = "store_tests.rs"]
+mod tests;
