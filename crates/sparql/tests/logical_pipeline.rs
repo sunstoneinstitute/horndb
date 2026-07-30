@@ -362,6 +362,64 @@ fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
     );
 }
 
+/// `CoalesceBgp`'s scope guard, pinned on the **plan shape** through the
+/// real SPARQL pipeline (parse → translate → lower → passes).
+///
+/// `graph_query.rs::bgps_under_different_graphs_do_not_coalesce` pins the
+/// *answers*; this pins the structure the answers depend on, so a merge
+/// regression names `CoalesceBgp` instead of surfacing as a wrong row count.
+/// Two scans, each keeping its own scope; same-scope neighbours still merge.
+#[test]
+fn adjacent_bgps_under_different_graphs_stay_two_scoped_scans() {
+    use horndb_sparql::algebra::GraphSpec;
+    use horndb_sparql::plan::GraphScope;
+
+    fn scan_scopes(p: &PhysicalPlan, out: &mut Vec<(usize, GraphScope)>) {
+        match p {
+            PhysicalPlan::BgpScan { patterns, scope } => out.push((patterns.len(), scope.clone())),
+            PhysicalPlan::Join { left, right } => {
+                scan_scopes(left, out);
+                scan_scopes(right, out);
+            }
+            PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::Filter { inner, .. } => scan_scopes(inner, out),
+            _ => {}
+        }
+    }
+    let named = |g: &str| GraphScope::Named(GraphSpec::Iri(g.to_owned()));
+    let plan_of = |q: &str| planner::plan(&algebra_of(q)).expect("plan");
+
+    let mut split = Vec::new();
+    scan_scopes(
+        &plan_of(
+            "SELECT ?x ?y WHERE { GRAPH <http://ex/g1> { ?x <http://ex/p> ?o } \
+             GRAPH <http://ex/g2> { ?y <http://ex/p> ?o2 } }",
+        ),
+        &mut split,
+    );
+    assert_eq!(
+        split,
+        vec![(1, named("http://ex/g1")), (1, named("http://ex/g2"))],
+        "different GRAPH scopes must keep two scans, each with its own scope"
+    );
+
+    let mut merged = Vec::new();
+    scan_scopes(
+        &plan_of(
+            "SELECT ?x ?y WHERE { GRAPH <http://ex/g1> { ?x <http://ex/p> ?o . \
+             ?y <http://ex/q> ?o2 } }",
+        ),
+        &mut merged,
+    );
+    assert_eq!(
+        merged,
+        vec![(2, named("http://ex/g1"))],
+        "equal scopes still coalesce into one flat scan"
+    );
+}
+
 mod plan_select_pragmas {
     use horndb_sparql::api::plan_select;
     use horndb_sparql::SparqlConfig;

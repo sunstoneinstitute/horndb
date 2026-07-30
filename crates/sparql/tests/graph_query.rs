@@ -64,11 +64,12 @@ fn fixture<B: QuadSeed + Default>() -> B {
     b
 }
 
-/// Run `q` and return the `?s` bindings, sorted, **with duplicates kept**
-/// (dedup bugs must be visible).
-fn subjects<E: horndb_sparql::exec::Executor + ?Sized>(
+/// Run `q` and return the IRIs bound to `?var`, sorted, **with duplicates
+/// kept** (dedup bugs must be visible).
+fn iris_bound_to<E: horndb_sparql::exec::Executor + ?Sized>(
     store: &E,
     q: &str,
+    var: &str,
     mode: DefaultGraphMode,
 ) -> Vec<String> {
     let cfg = SparqlConfig {
@@ -80,13 +81,22 @@ fn subjects<E: horndb_sparql::exec::Executor + ?Sized>(
     };
     let mut out: Vec<String> = rows
         .iter()
-        .map(|r| match r.get("s") {
+        .map(|r| match r.get(var) {
             Some(horndb_sparql::algebra::Term::Iri(s)) => s.clone(),
-            other => panic!("expected an IRI-bound ?s, got {other:?}"),
+            other => panic!("expected an IRI-bound ?{var}, got {other:?}"),
         })
         .collect();
     out.sort();
     out
+}
+
+/// Run `q` and return the `?s` bindings, sorted, duplicates kept.
+fn subjects<E: horndb_sparql::exec::Executor + ?Sized>(
+    store: &E,
+    q: &str,
+    mode: DefaultGraphMode,
+) -> Vec<String> {
+    iris_bound_to(store, q, "s", mode)
 }
 
 /// `subjects` under the default (`union`) mode.
@@ -318,6 +328,110 @@ fn bgps_under_different_graphs_do_not_coalesce<
         rows.len(),
         1,
         "one row joining g1's t2 with g2's t3: {rows:?}"
+    );
+}
+
+/// Decline-by-default (SPEC-28 S3): a count seam handed a scope it has not
+/// been taught must return `Ok(None)`, which routes the caller to the
+/// scope-correct scan fallback — never a whole-store or wrong-scope count.
+///
+/// `MemStore` implements neither count seam and inherits the `Ok(None)`
+/// trait defaults; `HornBackend` implements both and still declines under
+/// `GRAPH ?g`, which spans several snapshots and so has no single-scope
+/// count form. Asserting the *seam* (rather than a query result) is what
+/// makes this a guard on future scope additions: a new `ResolvedScope`
+/// variant an existing count cannot express keeps declining.
+#[test]
+fn count_declines_unknown_scope() {
+    use horndb_sparql::algebra::{DatasetSpec, GraphSpec, Term, TriplePattern, Var};
+    use horndb_sparql::exec::{Executor, ScanScope};
+    use horndb_sparql::plan::GraphScope;
+
+    let patterns = [TriplePattern {
+        subject: Term::Var(Var::new("s")),
+        predicate: Term::Var(Var::new("p")),
+        object: Term::Var(Var::new("o")),
+    }];
+    let keys = [Var::new("s")];
+    let per_graph = GraphScope::Named(GraphSpec::Var(Var::new("g")));
+    let dataset = DatasetSpec::default();
+    let scope = ScanScope::new(&per_graph, &dataset, DefaultGraphMode::Union);
+
+    let horn: HornBackend = fixture();
+    assert_eq!(
+        horn.count_bgp(&patterns, &scope).unwrap(),
+        None,
+        "HornBackend must decline a per-graph count, not widen it"
+    );
+    assert!(
+        horn.count_bgp_grouped(&patterns, &keys, &scope)
+            .unwrap()
+            .is_none(),
+        "HornBackend must decline a per-graph grouped count"
+    );
+
+    let mem: MemStore = fixture();
+    assert_eq!(mem.count_bgp(&patterns, &scope).unwrap(), None);
+    assert!(mem
+        .count_bgp_grouped(&patterns, &keys, &scope)
+        .unwrap()
+        .is_none());
+    // A backend with no fast count declines under *every* scope, so the
+    // scan fallback is the only path — the trait default is the decline.
+    assert_eq!(mem.count_bgp(&patterns, &ScanScope::DEFAULT).unwrap(), None);
+}
+
+// --- property paths inherit the scope (SPEC-28 S3) ---------------------
+
+/// A chain that walks out of `<g1>` and back in: `pa → pb` in g1,
+/// `pb → pc` in g2, `pc → pd` in g1.
+fn path_fixture<B: QuadSeed + Default>() -> B {
+    let mut b = B::default();
+    b.seed_quad(Some(G1), "http://ex/pa", "http://ex/link", "http://ex/pb");
+    b.seed_quad(Some(G2), "http://ex/pb", "http://ex/link", "http://ex/pc");
+    b.seed_quad(Some(G1), "http://ex/pc", "http://ex/link", "http://ex/pd");
+    b
+}
+
+const PATH_FROM_PA: &str = "SELECT ?y WHERE { <http://ex/pa> <http://ex/link>+ ?y }";
+
+/// The scope is applied to the closure's **edge relation**, not to its
+/// output: inside `GRAPH <g1>` only g1's two edges exist, so `pa` reaches
+/// `pb` and stops. Post-filtering an all-graphs closure would connect
+/// `pa → pd` through g2's hop — a different, wrong answer.
+fn path_scope_applied_before_closure<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = path_fixture();
+    assert_eq!(
+        iris_bound_to(
+            &b,
+            &format!(
+                "SELECT ?y WHERE {{ GRAPH <{G1}> {{ <http://ex/pa> <http://ex/link>+ ?y }} }}"
+            ),
+            "y",
+            DefaultGraphMode::Union,
+        ),
+        vec!["http://ex/pb"],
+        "the closure must run over g1's edges only — pc/pd are reachable \
+         only through g2"
+    );
+}
+
+/// The other half of the pair: with no `GRAPH` wrapper the union default
+/// graph *is* every non-reserved graph, so the same chain legitimately
+/// traverses all three hops. Without this arm the test above would pass on
+/// a closure that simply returned nothing.
+fn path_over_union_traverses_graphs<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = path_fixture();
+    assert_eq!(
+        iris_bound_to(&b, PATH_FROM_PA, "y", DefaultGraphMode::Union),
+        vec!["http://ex/pb", "http://ex/pc", "http://ex/pd"],
+        "the union default graph holds every hop, so the chain connects"
+    );
+    // …and `strict` mode, whose default graph holds none of these quads,
+    // connects nothing — the mode reaches the path's edge relation too.
+    assert!(
+        iris_bound_to(&b, PATH_FROM_PA, "y", DefaultGraphMode::Strict).is_empty(),
+        "strict mode sees only the default-graph sentinel, which is empty here"
     );
 }
 
@@ -696,6 +810,8 @@ both_backends!(
     from_named_restricts_ground_graph,
     count_pushdown_respects_the_graph_scope,
     bgps_under_different_graphs_do_not_coalesce,
+    path_scope_applied_before_closure,
+    path_over_union_traverses_graphs,
     graph_var_enumerates_named_graphs_only,
     graph_var_binds_per_row,
     graph_var_restricted_by_from_named,
