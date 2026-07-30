@@ -226,6 +226,60 @@ pub enum Algebra {
         /// (transitive only).
         reflexive: bool,
     },
+    /// `GRAPH <g> { … }` / `GRAPH ?g { … }` (SPEC-28 S3): scopes `inner` to
+    /// one named graph (`GraphSpec::Iri`) or, for a variable, to every
+    /// graph the query can see, binding the graph IRI to the variable per
+    /// row (`GraphSpec::Var`). Lowering (`plan/lower.rs`) does not keep this
+    /// node: it pushes the scope down onto the scan leaves inside `inner`
+    /// and errors if it cannot (there is deliberately no post-filter
+    /// fallback — see SPEC-28 phase 3 design, "Architecture").
+    Graph {
+        name: GraphSpec,
+        inner: Box<Algebra>,
+    },
+}
+
+/// The scope a `GRAPH` pattern attaches to its inner algebra (SPEC-28 S3).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GraphSpec {
+    /// `GRAPH <g> { … }` — a ground graph IRI.
+    Iri(String),
+    /// `GRAPH ?g { … }` — ranges over every graph the query can see,
+    /// binding `?g` to each graph's IRI in turn (never the default graph —
+    /// SPEC-28 D3).
+    Var(Var),
+}
+
+/// The query's `FROM` / `FROM NAMED` dataset clause, resolved at
+/// translation time and threaded to the executor (SPEC-28 S3, D2–D4).
+///
+/// `None` in either field means "no clause of that kind was written"; the
+/// executor then falls back to its default-graph mode / visibility rules.
+/// `Some(vec![])` is a **distinct** state from `None` — it means the clause
+/// was written but named zero graphs (only reachable today via `FROM NAMED`
+/// without `FROM`, D4's empty-default-graph rule).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DatasetSpec {
+    /// `FROM <g1> FROM <g2> …` — the default graph is the term-level set
+    /// union of these graphs. `None` = no `FROM`: the query's
+    /// `DefaultGraphMode` decides (union of non-reserved graphs, or the
+    /// strict default-graph sentinel only).
+    pub default: Option<Vec<String>>,
+    /// `FROM NAMED <g1> FROM NAMED <g2> …` — exactly these graphs are
+    /// nameable/enumerable by `GRAPH ?g`. `None` = no `FROM NAMED`: every
+    /// non-reserved graph is nameable/enumerable.
+    pub named: Option<Vec<String>>,
+}
+
+/// The result of translating one query form: the algebra tree plus the
+/// dataset it resolved from `FROM`/`FROM NAMED` (SPEC-28 S3). Replaces the
+/// bare `Algebra` [`translate::translate_query_with`] used to return, so
+/// dataset selection survives past translation instead of being refused or
+/// silently dropped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranslatedQuery {
+    pub algebra: Algebra,
+    pub dataset: DatasetSpec,
 }
 
 /// Hidden source-endpoint variable threaded through a

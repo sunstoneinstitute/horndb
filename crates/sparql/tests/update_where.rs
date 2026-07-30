@@ -300,10 +300,10 @@ fn with_named_graph_rejected<B: FullBackend + Default>() {
 }
 
 /// A `GRAPH` pattern in the WHERE clause must be rejected before any
-/// mutation. The update path's own `where_has_graph_pattern` scan
-/// produces this error; it does not rely on the query translator, which
-/// since SPEC-28 phase 1 (#264) also refuses `GRAPH` (it silently
-/// unwrapped it before).
+/// mutation. The update path's own `where_has_graph_pattern` scan produces
+/// this error; it does not rely on the query translator, which since
+/// SPEC-28 phase 3 (#266) accepts `GRAPH` for queries — named-graph Update
+/// is separate scope (SPEC-28 S5) and stays default-graph-only here.
 fn graph_in_where_rejected<B: FullBackend + Default>() {
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     let u = parse_update(

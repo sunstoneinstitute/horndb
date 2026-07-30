@@ -2067,9 +2067,9 @@ mod slot_differential {
             crate::parser::ParsedQuery::Select { inner } => inner,
             other => panic!("expected SELECT, got {:?}", other),
         };
-        let alg =
+        let translated =
             translate_query_with(&inner, &SparqlConfig::default()).expect("translation failed");
-        planner::plan(&alg).expect("planning failed")
+        planner::plan(&translated.algebra).expect("planning failed")
     }
 
     /// Native `Extend` (BIND) must not decode the columns it inherits from

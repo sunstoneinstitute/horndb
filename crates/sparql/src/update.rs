@@ -524,9 +524,10 @@ fn validate_delete_insert(
     }
 
     // Reject a GRAPH pattern anywhere in the WHERE clause, before any
-    // mutation. Since SPEC-28 phase 1 (#264) the query translator also
-    // refuses GraphPattern::Graph, but this scan stays: it produces the
-    // update-specific error below and guarantees rejection ahead of any
+    // mutation. The query-side translator now accepts GraphPattern::Graph
+    // (SPEC-28 phase 3, #266); named-graph Update is separate scope (SPEC-28
+    // S5) and not implemented, so this scan stays independent: it produces
+    // the update-specific error below and guarantees rejection ahead of any
     // earlier operation's side effects, without leaning on when the WHERE
     // clause gets translated. Stage-1 updates are default-graph only.
     if where_has_graph_pattern(pattern) {

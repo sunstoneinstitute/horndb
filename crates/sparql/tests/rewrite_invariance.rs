@@ -27,7 +27,9 @@ fn algebra_of(q: &str) -> Algebra {
         ParsedQuery::Select { inner } => inner,
         other => panic!("expected SELECT, got {other:?}"),
     };
-    translate_query_with(&inner, &SparqlConfig::default()).expect("translate")
+    translate_query_with(&inner, &SparqlConfig::default())
+        .expect("translate")
+        .algebra
 }
 
 /// A small fixture: a knows b, b knows c, c knows a (a 3-cycle), plus d who

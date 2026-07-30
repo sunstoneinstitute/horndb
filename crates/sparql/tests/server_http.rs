@@ -127,11 +127,13 @@ async fn parse_error_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// GRAPH patterns are refused (SPEC-28 phase 1, #264): the translator
-/// returns `SparqlError::UnsupportedAlgebra` instead of silently dropping
-/// the wrapper and answering over the default graph. A plain SELECT plans
-/// before any store access (`plan_select`, `query.rs`), so this exercises
-/// the streaming-SELECT path's pre-store-access error branch.
+/// GRAPH now translates (SPEC-28 phase 3, #266, replacing phase 1's
+/// refusal), but scan-scope lowering doesn't land until PLAN-28-03 Task 3,
+/// so the query still 400s — one stage later, at planning, with a
+/// `Planner("Graph not lowered")` error rather than a translation-time
+/// refusal. A plain SELECT plans before any store access (`plan_select`,
+/// `query.rs`), so this exercises the streaming-SELECT path's planning
+/// error branch.
 #[tokio::test]
 async fn graph_query_returns_400_naming_graph() {
     let app = router_with_data();
@@ -149,14 +151,17 @@ async fn graph_query_returns_400_naming_graph() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("GRAPH"), "body: {text}");
+    assert!(text.contains("Graph not lowered"), "body: {text}");
 }
 
-/// A non-empty `FROM`/`FROM NAMED` dataset clause is refused the same way
-/// (SPEC-28 phase 1, #264) — same streaming-SELECT pre-store-access path
-/// as `graph_query_returns_400_naming_graph`.
+/// A non-empty `FROM`/`FROM NAMED` dataset clause now translates (SPEC-28
+/// phase 3, #266, replacing phase 1's refusal): the `DatasetSpec` is
+/// captured but not yet threaded to the executor (that lands in Task 3), so
+/// the query runs to completion as if the clause were absent — a temporary
+/// gap this task's design accepts (translation-level coverage only; see
+/// `algebra_translate.rs`'s dataset pins for the resolved `DatasetSpec`).
 #[tokio::test]
-async fn from_query_returns_400_naming_from() {
+async fn from_query_runs_dataset_clause_not_yet_enforced() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
@@ -167,18 +172,13 @@ async fn from_query_returns_400_naming_from() {
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("FROM"), "body: {text}");
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// Same refusal, but for an ASK query: `plan_select` only recognizes
-/// `SELECT`, so ASK falls through to `run_materialized`
-/// (`execute_query` -> translate), covering the other server-side error
-/// path from the same construct.
+/// Same "still 400s at planning, not translation" story, but for an ASK
+/// query: `plan_select` only recognizes `SELECT`, so ASK falls through to
+/// `run_materialized` (`execute_query` -> translate -> plan), covering the
+/// other server-side error path from the same construct.
 #[tokio::test]
 async fn ask_graph_query_returns_400_naming_graph() {
     let app = router_with_data();
@@ -196,7 +196,7 @@ async fn ask_graph_query_returns_400_naming_graph() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("GRAPH"), "body: {text}");
+    assert!(text.contains("Graph not lowered"), "body: {text}");
 }
 
 #[tokio::test]

@@ -94,17 +94,21 @@ pub fn execute_query_with<E: Executor + ?Sized>(
         .inc();
     match parsed {
         ParsedQuery::Select { inner } => {
-            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let vars = projected_vars(&alg);
-            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
+            let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let vars = projected_vars(&translated.algebra);
+            let plan = timed(Stage::Plan, || {
+                planner::plan_with_ctx(&translated.algebra, &ctx)
+            })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
             Ok(QueryAnswer::Solutions { vars, rows })
         }
         ParsedQuery::Ask { inner } => {
-            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
+            let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let plan = timed(Stage::Plan, || {
+                planner::plan_with_ctx(&translated.algebra, &ctx)
+            })?;
             let any = timed(Stage::Exec, || {
                 // Early exit: only the first operator chunk is pulled and
                 // decoded — `run` would drain the whole result set.
@@ -115,8 +119,10 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             Ok(QueryAnswer::Boolean(any))
         }
         ParsedQuery::Construct { inner } => {
-            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
+            let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let plan = timed(Stage::Plan, || {
+                planner::plan_with_ctx(&translated.algebra, &ctx)
+            })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
@@ -137,9 +143,11 @@ pub fn execute_query_with<E: Executor + ?Sized>(
             // clause yields zero rows. We therefore seed those explicit IRIs
             // unconditionally (see `explicit_describe_iris`) so they are
             // described even when the WHERE matches nothing.
-            let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-            let seeds = explicit_describe_iris(&alg);
-            let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
+            let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+            let seeds = explicit_describe_iris(&translated.algebra);
+            let plan = timed(Stage::Plan, || {
+                planner::plan_with_ctx(&translated.algebra, &ctx)
+            })?;
             let rows: Vec<Bindings> = timed(Stage::Exec, || {
                 Runtime::new(exec).run(&plan).map(Iterator::collect)
             })?;
@@ -196,9 +204,11 @@ pub fn plan_select(
             kind: QueryKind::Select,
         })
         .inc();
-    let alg = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
-    let vars = projected_vars(&alg);
-    let plan = timed(Stage::Plan, || planner::plan_with_ctx(&alg, &ctx))?;
+    let translated = timed(Stage::Translate, || translate_query_with(&inner, cfg))?;
+    let vars = projected_vars(&translated.algebra);
+    let plan = timed(Stage::Plan, || {
+        planner::plan_with_ctx(&translated.algebra, &ctx)
+    })?;
     Ok(Some((vars, plan)))
 }
 
@@ -221,8 +231,8 @@ fn plan_of(
             ));
         }
     };
-    let alg = translate_query_with(inner, cfg)?;
-    planner::plan_with_ctx(&alg, ctx)
+    let translated = translate_query_with(inner, cfg)?;
+    planner::plan_with_ctx(&translated.algebra, ctx)
 }
 
 pub fn execute_update<B: FullBackend>(update: &str, store: &mut B) -> Result<()> {

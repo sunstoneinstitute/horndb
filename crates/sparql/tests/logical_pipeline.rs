@@ -20,7 +20,9 @@ fn algebra_of(q: &str) -> Algebra {
         ParsedQuery::Select { inner } => inner,
         other => panic!("expected SELECT, got {other:?}"),
     };
-    translate_query_with(&inner, &SparqlConfig::default()).expect("translate")
+    translate_query_with(&inner, &SparqlConfig::default())
+        .expect("translate")
+        .algebra
 }
 
 /// The pre-refactor reference: a straight 1:1 Algebra → PhysicalPlan lowering,
@@ -96,6 +98,10 @@ fn reference_plan(alg: &Algebra) -> PhysicalPlan {
             edge: Box::new(reference_plan(edge)),
             reflexive: *reflexive,
         },
+        // GRAPH is not in GOLDEN_QUERIES: this reference function pins the
+        // pre-refactor 1:1 lowering, which predates SPEC-28 phase 3 and
+        // never had a GRAPH arm.
+        Algebra::Graph { .. } => unreachable!("GRAPH is not exercised by the golden-plan battery"),
     }
 }
 
@@ -174,12 +180,12 @@ fn coalesced_bgp_is_result_equivalent_to_nested_join() {
 
     // Coalesced (CoalesceBgp on) vs nested (CoalesceBgp disabled).
     let coalesced = lower_physical(run_passes(
-        lower_algebra(&join_alg),
+        lower_algebra(&join_alg).unwrap(),
         &standard_passes(),
         &PlanCtx::default(),
     ));
     let nested = lower_physical(run_passes(
-        lower_algebra(&join_alg),
+        lower_algebra(&join_alg).unwrap(),
         &standard_passes(),
         &PlanCtx {
             disabled_passes: HashSet::from([PassId::CoalesceBgp]),

@@ -29,7 +29,7 @@ pub fn plan(alg: &Algebra) -> Result<PhysicalPlan> {
 /// query pragma). Lowers to the logical IR, runs the pass pipeline, then
 /// lowers to the physical plan.
 pub fn plan_with_ctx(alg: &Algebra, ctx: &PlanCtx) -> Result<PhysicalPlan> {
-    let logical = lower_algebra(alg);
+    let logical = lower_algebra(alg)?;
     let optimized = run_passes(logical, &standard_passes(), ctx);
     Ok(lower_physical(optimized))
 }

@@ -13,54 +13,61 @@
 //! `tests/logical_pipeline.rs`).
 
 use crate::algebra::Algebra;
+use crate::error::{Result, SparqlError};
 use crate::plan::logical::LogicalPlan;
 use crate::plan::PhysicalPlan;
 
 /// Naive `Algebra → LogicalPlan` (no coalescing, no folding).
-pub fn lower_algebra(alg: &Algebra) -> LogicalPlan {
-    match alg {
+///
+/// Fallible only for `Algebra::Graph` today: SPEC-28 phase 3's scan-scope
+/// lowering (pushing the `GRAPH` scope onto scan leaves, PLAN-28-03 Task 3)
+/// has not landed yet, so a `GRAPH` query translates successfully but fails
+/// here with a clear `Planner` error rather than silently mis-lowering or
+/// panicking.
+pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
+    Ok(match alg {
         Algebra::Bgp { patterns } => LogicalPlan::Bgp {
             patterns: patterns.clone(),
         },
         Algebra::Join { left, right } => LogicalPlan::Join {
-            left: Box::new(lower_algebra(left)),
-            right: Box::new(lower_algebra(right)),
+            left: Box::new(lower_algebra(left)?),
+            right: Box::new(lower_algebra(right)?),
         },
         Algebra::LeftJoin { left, right, expr } => LogicalPlan::LeftJoin {
-            left: Box::new(lower_algebra(left)),
-            right: Box::new(lower_algebra(right)),
+            left: Box::new(lower_algebra(left)?),
+            right: Box::new(lower_algebra(right)?),
             expr: expr.clone(),
         },
         Algebra::Filter { expr, inner } => LogicalPlan::Filter {
             expr: expr.clone(),
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
         },
         Algebra::Union { left, right } => LogicalPlan::Union {
-            left: Box::new(lower_algebra(left)),
-            right: Box::new(lower_algebra(right)),
+            left: Box::new(lower_algebra(left)?),
+            right: Box::new(lower_algebra(right)?),
         },
         Algebra::Project { vars, inner } => LogicalPlan::Project {
             vars: vars.clone(),
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
         },
         Algebra::Distinct { inner } => LogicalPlan::Distinct {
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
         },
         Algebra::Slice {
             inner,
             start,
             length,
         } => LogicalPlan::Slice {
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
             start: *start,
             length: *length,
         },
         Algebra::OrderBy { inner, keys } => LogicalPlan::OrderBy {
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
             keys: keys.clone(),
         },
         Algebra::Extend { inner, var, expr } => LogicalPlan::Extend {
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
             var: var.clone(),
             expr: expr.clone(),
         },
@@ -73,7 +80,7 @@ pub fn lower_algebra(alg: &Algebra) -> LogicalPlan {
             keys,
             aggregates,
         } => LogicalPlan::Group {
-            inner: Box::new(lower_algebra(inner)),
+            inner: Box::new(lower_algebra(inner)?),
             keys: keys.clone(),
             aggregates: aggregates.clone(),
         },
@@ -85,10 +92,17 @@ pub fn lower_algebra(alg: &Algebra) -> LogicalPlan {
         } => LogicalPlan::PathClosure {
             subject: subject.clone(),
             object: object.clone(),
-            edge: Box::new(lower_algebra(edge)),
+            edge: Box::new(lower_algebra(edge)?),
             reflexive: *reflexive,
         },
-    }
+        Algebra::Graph { .. } => {
+            return Err(SparqlError::Planner(
+                "Graph not lowered (SPEC-28 phase 3 scan-scope lowering, #266, is not \
+                 implemented yet)"
+                    .into(),
+            ));
+        }
+    })
 }
 
 /// `LogicalPlan → PhysicalPlan`. A flat `Bgp` lowers to `BgpScan` (the WCOJ
@@ -183,7 +197,7 @@ mod tests {
         let alg = Algebra::Bgp {
             patterns: vec![pat("s", "http://ex/p", "o")],
         };
-        let phys = lower_physical(lower_algebra(&alg));
+        let phys = lower_physical(lower_algebra(&alg).unwrap());
         assert_eq!(
             phys,
             PhysicalPlan::BgpScan {
@@ -203,7 +217,7 @@ mod tests {
                 patterns: vec![pat("o", "http://ex/q", "z")],
             }),
         };
-        let log = lower_algebra(&alg);
+        let log = lower_algebra(&alg).unwrap();
         assert!(
             matches!(log, LogicalPlan::Join { .. }),
             "naive lowering keeps the Join; got {log:?}"
