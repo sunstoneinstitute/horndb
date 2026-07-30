@@ -723,6 +723,85 @@ fn values_inside_graph_var_answers<B: QuadSeed + Default + horndb_sparql::exec::
     );
 }
 
+/// SPARQL 1.1 §18.2.2.2 evaluates `GRAPH ?g { P }` with `?g` **free** inside
+/// `P` and joins the graph name on afterwards. HornDB binds `?g` on the scan
+/// leaf, so anything in `P` that *reads* `?g` — rather than binding it from
+/// the data — sees a bound variable where the spec sees a free one. Those
+/// shapes must refuse.
+///
+/// What the unfixed code returned, on the W3C fixtures these mirror
+/// (`graph-variable-scope`, `graph-optional`), identical on both backends:
+///
+/// * `GRAPH ?g { FILTER(BOUND(?g)) }` — 2 rows, one per named graph;
+///   the spec's answer is **0 rows**, because `BOUND(?g)` is false when the
+///   block is evaluated with `?g` free.
+/// * `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }` — 4 rows, every left row
+///   carrying its own graph; the spec's answer is **1 row**, because the
+///   OPTIONAL binds `?g` from the object and the post-join then keeps only
+///   the row where that object *is* the graph name.
+fn graph_var_read_inside_the_block_refuses<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let b: B = fixture();
+    for (q, construct) in [
+        // W3C graph-variable-scope.
+        (
+            "SELECT * WHERE { GRAPH ?g { FILTER(BOUND(?g)) } }",
+            "FILTER",
+        ),
+        // The same class, and the shape a user is most likely to write: the
+        // FILTER *inside* the block sees ?g free per the spec, so its answer
+        // is zero rows — not "the rows from <g1>".
+        (
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g = <http://ex/g1>) } }",
+            "FILTER",
+        ),
+        // W3C graph-optional.
+        (
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } } }",
+            "OPTIONAL",
+        ),
+        // An OPTIONAL condition reading ?g diverges the same way.
+        (
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?o2 FILTER(?o2 = ?g) } } }",
+            "OPTIONAL",
+        ),
+        // BIND reading the graph variable.
+        (
+            "SELECT ?g ?x WHERE { GRAPH ?g { ?s ?p ?o BIND(?g AS ?x) } }",
+            "BIND",
+        ),
+    ] {
+        let err = match execute_query_with(q, &b, &SparqlConfig::default()) {
+            Err(e) => e.to_string(),
+            Ok(ans) => panic!("must refuse, not answer {q}: {ans:?}"),
+        };
+        assert!(
+            err.contains(construct) && err.contains("?g") && err.contains("18.2.2.2"),
+            "the error must name the construct ({construct}) and the rule for {q}: {err}"
+        );
+    }
+}
+
+/// The equivalence boundary of that rule: an `OPTIONAL` whose right arm never
+/// mentions `?g` keeps working, and so does `?g` in a plain pattern position
+/// (leaf-binding *is* the post-join there).
+fn graph_var_beside_an_optional_still_answers<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let mut b: B = fixture();
+    b.seed_quad(Some(G1), G1, "http://ex/label", "http://ex/l");
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?g <http://ex/label> ?o \
+             OPTIONAL { ?s <http://ex/p> ?o2 } } }"
+        ),
+        vec![(G1.to_owned(), "http://ex/b".to_owned())],
+        "an OPTIONAL that does not mention ?g leaves the equivalence intact"
+    );
+}
+
 /// The boundary the refusal must not cross: `DISTINCT`, `LIMIT` and the
 /// projection of the enclosing `SELECT` sit **above** the `GRAPH` node, so
 /// they keep working — only barriers *inside* the graph pattern refuse.
@@ -822,6 +901,8 @@ both_backends!(
     graph_var_is_one_scan_node_whatever_the_graph_count,
     unsupported_shapes_inside_graph_var_refuse,
     values_inside_graph_var_answers,
+    graph_var_read_inside_the_block_refuses,
+    graph_var_beside_an_optional_still_answers,
     distinct_and_limit_above_graph_var_still_answer,
     from_only_leaves_no_graphs_to_enumerate,
     reserved_graphs_do_not_enumerate,

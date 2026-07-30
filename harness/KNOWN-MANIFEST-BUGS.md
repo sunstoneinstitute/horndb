@@ -354,18 +354,36 @@ binds `?g`. Closing the gap means evaluating the whole block per graph, not
 just its scan leaves — the machinery SPEC-28 phase 3 deliberately did not
 build.
 
-- `graph-variable-scope` — `GRAPH ?g { FILTER (BOUND(?g)) }`. The filter
-  must see `?g` unbound and reject, giving 0 rows; HornDB's filter sits
-  above a scan that already bound `?g`, so it returns one row per named
-  graph (2).
-- `graph-optional` — `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }`. The
-  `?g` inside the OPTIONAL is a free variable of the inner group, so the
-  OPTIONAL matches on the object and `Graph` then keeps only the rows where
-  that object *is* the graph name (1 row). HornDB scopes the OPTIONAL's own
-  scan leaf instead, which changes both what the OPTIONAL matches and which
-  left rows survive: 4 rows.
+Both cases are **refused**, not answered — HornDB returns an "unsupported
+algebra construct" error naming the construct and §18.2.2.2. They still fail
+the manifest (a refusal is not the expected result set), but they fail
+honestly, which is what SPEC-28 D1 requires.
 
-These two are **wrong answers, not refusals**, which is a live tension with
-SPEC-28 D1 ("no silent wrong answers"). Refusing a `GRAPH ?g` block whose
-inner pattern references `?g` in a way the scan column cannot express would
-close it; that is a phase-3 follow-up, not a mirror-time fix.
+- `graph-variable-scope` — `GRAPH ?g { FILTER (BOUND(?g)) }`. The filter must
+  see `?g` unbound and reject, giving 0 rows. Leaf-binding puts the filter
+  above a scan that already bound `?g`, which used to return one row per
+  named graph (2). Now refused: *"a FILTER that references ?g inside
+  GRAPH ?g"*.
+- `graph-optional` — `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }`. The `?g`
+  inside the OPTIONAL is a free variable of the inner group, so the OPTIONAL
+  matches on the object and `Graph` then keeps only the rows where that
+  object *is* the graph name (1 row). Leaf-binding scopes the OPTIONAL's own
+  scan instead, changing both what the OPTIONAL matches and which left rows
+  survive; that used to return 4 rows. Now refused: *"an OPTIONAL that
+  references ?g inside GRAPH ?g"*.
+
+The refusal rule (`plan::lower::per_graph_var_divergence`) allows `?g` only
+where the data supplies it and an inner join combines it — a triple-pattern
+position or a `VALUES` column, joined upward through `Join`, `Union`, or an
+`OPTIONAL`'s left arm. That is exactly the case where "the leaf keeps rows
+whose `?g` equals this graph" *is* the post-join, and it is why
+`graph-variable-join` stays selected and green. Every other use — any
+expression (`FILTER`, `BIND`, an `OPTIONAL` condition, `ORDER BY`,
+`GROUP BY`), a `BIND` *to* `?g`, or any mention inside an `OPTIONAL`'s right
+arm — refuses.
+
+Lifting either refusal needs the graph variable joined **after** the block is
+evaluated rather than bound on the scan leaf: evaluate `P` per graph with
+`?g` free, then join `{?g → thatGraph}`. That is the per-graph block
+evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
+column), so it is a design change, not a bug fix.

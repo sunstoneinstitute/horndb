@@ -16,10 +16,11 @@
 //! kept as a node — it sets the scope on every scan leaf beneath it
 //! (SPEC-28 S3/D5). See [`lower_scoped`].
 
-use crate::algebra::{Algebra, Var};
+use crate::algebra::{Algebra, Expr, Term, TriplePattern, Var};
 use crate::error::{Result, SparqlError};
 use crate::plan::logical::LogicalPlan;
 use crate::plan::{GraphScope, PhysicalPlan};
+use std::collections::HashSet;
 
 /// Naive `Algebra → LogicalPlan` (no coalescing, no folding), starting from
 /// the query's default graph.
@@ -133,6 +134,17 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
                         g = var.name()
                     )));
                 }
+                if let Some(divergence) = per_graph_var_divergence(&lowered, var) {
+                    return Err(SparqlError::UnsupportedAlgebra(format!(
+                        "{divergence} inside GRAPH ?{g} is not supported yet (SPEC-28 \
+                         S3, #266): SPARQL 1.1 §18.2.2.2 evaluates the block with \
+                         ?{g} still free and joins the graph name on afterwards, \
+                         while HornDB binds ?{g} on the scan leaf — the two answer \
+                         differently in exactly this position; use a ground \
+                         GRAPH <iri>, or move it outside the GRAPH block",
+                        g = var.name()
+                    )));
+                }
             }
             lowered
         }
@@ -204,6 +216,186 @@ fn per_graph_barrier(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
         Group { inner, .. } => per_graph_barrier(inner, var).or(Some("an aggregate or GROUP BY")),
         PathClosure { edge, .. } => per_graph_barrier(edge, var).or(Some("a property path")),
         Values { .. } => Some("VALUES"),
+    }
+}
+
+/// Where the pattern's own use of `?g` makes leaf-binding differ from the
+/// spec's post-join, named for the error message — or `None` when it does not.
+///
+/// SPARQL 1.1 §18.2.2.2 defines `GRAPH ?g { P }` as: evaluate `P` in each
+/// named graph **with `?g` still free**, then join each result with
+/// `{?g → thatGraph}`. HornDB fuses that join into the scan leaves (D5/D6).
+/// The two agree only when `?g` arrives at the top of `P` through ordinary
+/// inner-join compatibility on a value the *data* supplied — i.e. when `?g`
+/// occurs only
+///
+/// * in triple-pattern positions of a scoped `Bgp`, or as a `VALUES`
+///   variable, and
+/// * is combined upward by `Join`, `Union`, or the **left** arm of a
+///   `LeftJoin`.
+///
+/// Then "the leaf keeps rows whose `?g` equals this graph" *is* the post-join
+/// (`graph-variable-join`, and `GRAPH ?g { ?g ?p ?o }`). Everywhere else they
+/// diverge, and this returns the reason:
+///
+/// * **Expressions** (`FILTER`, `BIND`'s expression, an `OPTIONAL` condition,
+///   `ORDER BY`, `GROUP BY`/aggregates): the spec evaluates them with `?g`
+///   unbound — `GRAPH ?g { FILTER(BOUND(?g)) }` is 0 rows, not one row per
+///   graph (W3C `graph-variable-scope`).
+/// * **`BIND(… AS ?g)`**: the spec has `P` bind `?g` and the post-join then
+///   filters on it; on the leaf-bound side `?g` is already bound, which
+///   SPARQL does not even allow.
+/// * **Any mention of `?g` in an `OPTIONAL`'s right arm**: the spec lets the
+///   right arm bind `?g` from data (or leave it unbound and receive the graph
+///   name afterwards), so the post-join drops left rows whose optional match
+///   named a *different* graph. Leaf-binding pre-constrains the right arm to
+///   this graph instead, changing both what matches and which left rows
+///   survive (W3C `graph-optional`). This holds however the right arm is
+///   built, so it is a *mention* test, not a barrier test.
+///
+/// A subtree that reads no quads is exempt: no scan leaf means no injected
+/// column, so it already evaluates exactly as the spec says. The `OPTIONAL`
+/// right-arm rule is deliberately outside that exemption — `OPTIONAL { VALUES
+/// ?g { … } }` binds `?g` with no scan at all and still diverges.
+///
+/// Lifting any of this needs the graph variable joined *after* the block is
+/// evaluated, rather than bound on the leaf — the per-graph block evaluation
+/// SPEC-28 phase 3 deliberately did not build.
+fn per_graph_var_divergence(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
+    use LogicalPlan::*;
+    // No scan leaf below ⇒ no injected graph column ⇒ nothing to diverge.
+    if reads_no_quads(plan) {
+        return None;
+    }
+    match plan {
+        // The equivalent case: a data-supplied binding, inner-joined.
+        Bgp { .. } | Values { .. } => None,
+        Filter { expr, inner } => refs(expr, var)
+            .then_some("a FILTER that references ?g")
+            .or_else(|| per_graph_var_divergence(inner, var)),
+        Extend {
+            inner,
+            var: target,
+            expr,
+        } => {
+            if target == var {
+                Some("a BIND to ?g")
+            } else if refs(expr, var) {
+                Some("a BIND that references ?g")
+            } else {
+                per_graph_var_divergence(inner, var)
+            }
+        }
+        OrderBy { inner, keys } => keys
+            .iter()
+            .any(|(e, _)| refs(e, var))
+            .then_some("an ORDER BY that references ?g")
+            .or_else(|| per_graph_var_divergence(inner, var)),
+        LeftJoin { left, right, expr } => {
+            if expr.as_ref().is_some_and(|e| refs(e, var)) {
+                Some("an OPTIONAL condition that references ?g")
+            } else if mentions_var(right, var) {
+                Some("an OPTIONAL that references ?g")
+            } else {
+                per_graph_var_divergence(left, var).or_else(|| per_graph_var_divergence(right, var))
+            }
+        }
+        Join { left, right } | Union { left, right } => {
+            per_graph_var_divergence(left, var).or_else(|| per_graph_var_divergence(right, var))
+        }
+        // `per_graph_barrier` refuses these inside a `GRAPH ?g` before this
+        // check runs, so these arms are unreachable in practice — kept
+        // exhaustive (no wildcard) so a new variant has to be classified.
+        Group {
+            inner,
+            keys,
+            aggregates,
+        } => {
+            let in_agg = aggregates.iter().any(|a| {
+                a.out == *var
+                    || crate::exec::runtime::agg_inner_exprs(a)
+                        .into_iter()
+                        .any(|e| refs(e, var))
+            });
+            (keys.contains(var) || in_agg)
+                .then_some("a GROUP BY or aggregate that references ?g")
+                .or_else(|| per_graph_var_divergence(inner, var))
+        }
+        Project { inner, .. } | Distinct { inner } | Slice { inner, .. } => {
+            per_graph_var_divergence(inner, var)
+        }
+        PathClosure { edge, .. } => per_graph_var_divergence(edge, var),
+    }
+}
+
+/// Does `expr` reference `var`?
+fn refs(expr: &Expr, var: &Var) -> bool {
+    let mut names = HashSet::new();
+    crate::exec::runtime::referenced_vars(expr, &mut names);
+    names.contains(var.name())
+}
+
+/// Does `var` appear **anywhere** in `plan` — pattern position, `VALUES`
+/// column, `BIND` target, or any expression? Used for the `OPTIONAL`
+/// right-arm rule, which cares that the arm touches `?g` at all, not how.
+fn mentions_var(plan: &LogicalPlan, var: &Var) -> bool {
+    use LogicalPlan::*;
+    fn in_pattern(p: &TriplePattern, var: &Var) -> bool {
+        [&p.subject, &p.predicate, &p.object]
+            .into_iter()
+            .any(|t| match t {
+                Term::Var(v) => v == var,
+                Term::Triple(inner) => in_pattern(inner, var),
+                _ => false,
+            })
+    }
+    match plan {
+        Bgp { patterns, .. } => patterns.iter().any(|p| in_pattern(p, var)),
+        Values { vars, .. } => vars.contains(var),
+        Filter { expr, inner } => refs(expr, var) || mentions_var(inner, var),
+        Extend {
+            inner,
+            var: target,
+            expr,
+        } => target == var || refs(expr, var) || mentions_var(inner, var),
+        OrderBy { inner, keys } => {
+            keys.iter().any(|(e, _)| refs(e, var)) || mentions_var(inner, var)
+        }
+        LeftJoin { left, right, expr } => {
+            expr.as_ref().is_some_and(|e| refs(e, var))
+                || mentions_var(left, var)
+                || mentions_var(right, var)
+        }
+        Join { left, right } | Union { left, right } => {
+            mentions_var(left, var) || mentions_var(right, var)
+        }
+        Project { inner, vars } => vars.contains(var) || mentions_var(inner, var),
+        Distinct { inner } | Slice { inner, .. } => mentions_var(inner, var),
+        Group {
+            inner,
+            keys,
+            aggregates,
+        } => {
+            keys.contains(var)
+                || aggregates.iter().any(|a| {
+                    a.out == *var
+                        || crate::exec::runtime::agg_inner_exprs(a)
+                            .into_iter()
+                            .any(|e| refs(e, var))
+                })
+                || mentions_var(inner, var)
+        }
+        PathClosure {
+            subject,
+            object,
+            edge,
+            ..
+        } => {
+            [subject, object]
+                .into_iter()
+                .any(|t| matches!(t, Term::Var(v) if v == var))
+                || mentions_var(edge, var)
+        }
     }
 }
 
