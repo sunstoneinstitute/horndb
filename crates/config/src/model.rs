@@ -25,6 +25,7 @@ mod tests {
         assert_eq!(cfg.server.limits.max_result_rows, 1_000_000);
         assert!(!cfg.server.limits.rdf12);
         assert_eq!(cfg.server.limits.max_query_memory, None);
+        assert_eq!(cfg.server.limits.default_graph, "union");
         assert_eq!(cfg.simd.max_isa, None);
         assert!(cfg.simd.autotune);
         assert_eq!(cfg.logging.level, "info");
@@ -42,6 +43,7 @@ mod tests {
             max_result_rows = 42
             rdf12 = true
             max_query_memory = "2GiB"
+            default_graph = "strict"
             [simd]
             max_isa = "scalar"
             autotune = false
@@ -55,6 +57,7 @@ mod tests {
             cfg.server.limits.max_query_memory,
             Some(ByteSize(2 * 1024 * 1024 * 1024))
         );
+        assert_eq!(cfg.server.limits.default_graph, "strict");
         assert_eq!(cfg.simd.max_isa.as_deref(), Some("scalar"));
         assert!(!cfg.simd.autotune);
     }
@@ -77,6 +80,7 @@ mod tests {
         let qs = QuerySettings::from_limits(&limits);
         assert_eq!(qs.max_result_rows, 7);
         assert_eq!(qs.query_timeout.0, Duration::from_secs(30));
+        assert_eq!(qs.default_graph, "union");
     }
 
     fn toml_from(s: &str) -> ServerConfig {
@@ -121,6 +125,15 @@ pub struct Limits {
     pub max_result_rows: u64,
     pub rdf12: bool,
     pub max_query_memory: Option<ByteSize>,
+    /// SPEC-28 S3/D2: how the no-dataset default graph is composed —
+    /// `"union"` (every non-reserved graph) or `"strict"` (the default-graph
+    /// sentinel only). Kept as a free-form `String`, not an enum: this crate
+    /// has no dependency on `horndb-sparql`, so the `"union"`/`"strict"`
+    /// domain check happens where other cross-crate domain values are
+    /// validated (`crates/sparql/src/bin/serve.rs`, the `[simd].max_isa`
+    /// pattern) — an unrecognized value is a startup-fatal error there, not
+    /// rejected here by `deny_unknown_fields`.
+    pub default_graph: String,
 }
 
 impl Default for Limits {
@@ -130,6 +143,7 @@ impl Default for Limits {
             max_result_rows: 1_000_000,
             rdf12: false,
             max_query_memory: None,
+            default_graph: "union".to_string(),
         }
     }
 }
@@ -188,6 +202,7 @@ pub struct QuerySettings {
     pub max_result_rows: u64,
     pub rdf12: bool,
     pub max_query_memory: Option<ByteSize>,
+    pub default_graph: String,
 }
 
 impl QuerySettings {
@@ -197,6 +212,7 @@ impl QuerySettings {
             max_result_rows: limits.max_result_rows,
             rdf12: limits.rdf12,
             max_query_memory: limits.max_query_memory,
+            default_graph: limits.default_graph.clone(),
         }
     }
 }

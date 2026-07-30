@@ -8,6 +8,7 @@ use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
+use horndb_sparql::SparqlConfig;
 use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
 
@@ -20,6 +21,7 @@ fn router_with_data() -> axum::Router {
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     build_router(state)
 }
@@ -199,12 +201,64 @@ async fn ask_graph_query_returns_400_naming_graph() {
     assert!(text.contains("Graph not lowered"), "body: {text}");
 }
 
+/// SPEC-26 S4 / SPEC-28 S3/D2: the `default-graph` per-query override
+/// (`union`/`strict`) is parsed next to `query` in the POST-form channel. An
+/// unrecognized value is a 400 naming the offending key. This pins the
+/// parse/validate contract only — PLAN-28-03 Task 2's scope. The full
+/// behavioural assertion (that `default-graph=strict` actually changes
+/// which rows come back) lands in Task 4, once the executor consumes
+/// `SparqlConfig::default_graph` (currently threaded but not yet read).
+#[tokio::test]
+async fn default_graph_url_param_overrides() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=bogus"
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default-graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// A valid `default-graph` value must NOT 400 — proves the override parses
+/// and the query still runs, even though (Task 2 scope) it does not yet
+/// change which rows come back.
+#[tokio::test]
+async fn default_graph_url_param_valid_value_runs_query() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default-graph=strict"
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
 #[tokio::test]
 async fn get_query_returns_json_hornbackend() {
     let mut backend = HornBackend::new();
     backend.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -422,6 +476,7 @@ async fn large_select_streams_in_multiple_chunks() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -476,6 +531,7 @@ async fn small_select_replies_with_sized_single_frame_body() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -544,6 +600,7 @@ mod streaming_error_semantics {
     async fn exec_error_before_first_chunk_returns_400() {
         let state = AppState {
             store: Arc::new(RwLock::new(FailingScan)),
+            cfg: SparqlConfig::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -602,6 +659,7 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
+            cfg: SparqlConfig::default(),
         };
         let app = build_router(state);
         // SELECT all three vars so column pruning keeps every column.

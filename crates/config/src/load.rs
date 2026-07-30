@@ -223,4 +223,31 @@ mod env_tests {
             Ok(())
         });
     }
+
+    /// `[server.limits].default_graph` (SPEC-28 S3/D2) follows the same
+    /// nested env mapping as every other `[server.limits]` key.
+    #[test]
+    fn limits_default_graph_env_override() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                "[server.limits]\ndefault_graph = \"strict\"\n",
+            )?;
+            let base = jail.directory().join("config.toml");
+
+            let inputs = LoadInputs {
+                cli_config_path: Some(base.clone()),
+                ..Default::default()
+            };
+            assert_eq!(load(&inputs).unwrap().server.limits.default_graph, "strict");
+
+            jail.set_env("HORNDB_SERVER__LIMITS__DEFAULT_GRAPH", "union");
+            let inputs = LoadInputs {
+                cli_config_path: Some(base),
+                ..Default::default()
+            };
+            assert_eq!(load(&inputs).unwrap().server.limits.default_graph, "union");
+            Ok(())
+        });
+    }
 }

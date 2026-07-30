@@ -12,6 +12,7 @@ pub mod update;
 
 use crate::exec::mem::MemStore;
 use crate::exec::FullBackend;
+use crate::SparqlConfig;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -30,16 +31,24 @@ use std::time::Instant;
 /// take the read lock and run in parallel, while SPARQL Update takes
 /// the write lock. SPEC-02 will replace this with MVCC.
 ///
+/// `cfg` is the resolved [`SparqlConfig`] (SPEC-26 `[server.limits]`'s
+/// `rdf12` and `default_graph`, PLAN-28-03 Task 2) — the query handlers use
+/// it instead of `SparqlConfig::default()`, so a loaded config actually
+/// takes effect on `/query` instead of being silently discarded.
+///
 /// Note: `#[derive(Clone)]` is intentionally avoided here — it would
-/// wrongly require `B: Clone`. The manual impl clones only the `Arc`.
+/// wrongly require `B: Clone`. The manual impl clones only the `Arc`
+/// (`cfg` is `Copy`).
 pub struct AppState<B: FullBackend + Send + Sync + 'static = MemStore> {
     pub store: Arc<RwLock<B>>,
+    pub cfg: SparqlConfig,
 }
 
 impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
+            cfg: self.cfg,
         }
     }
 }

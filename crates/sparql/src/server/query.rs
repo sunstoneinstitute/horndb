@@ -5,7 +5,7 @@
 
 use super::stream_body::ChannelBody;
 use super::AppState;
-use crate::api::{execute_query, plan_select, QueryAnswer};
+use crate::api::{execute_query_with, plan_select, QueryAnswer};
 use crate::error::SparqlError;
 use crate::exec::runtime::Runtime;
 use crate::exec::FullBackend;
@@ -14,7 +14,7 @@ use crate::results::{
     csv::write_select_csv, json::write_ask_json, json::write_select_json, select_serializer,
     tsv::write_select_tsv, xml::write_ask_xml, xml::write_select_xml, ResultFormat,
 };
-use crate::SparqlConfig;
+use crate::{DefaultGraphMode, SparqlConfig};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -28,6 +28,12 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Deserialize)]
 pub struct QueryParams {
     pub query: Option<String>,
+    /// SPEC-26 S4: the one per-query override key SPEC-28 S3 needs live
+    /// ahead of PLAN-26-02's general whitelist mechanism (`union`/`strict`,
+    /// see `SparqlConfig::default_graph`). Parsed next to `query` in both
+    /// the GET (here) and POST-form (`url_form_field`, below) channels.
+    #[serde(rename = "default-graph")]
+    pub default_graph: Option<String>,
 }
 
 pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
@@ -42,7 +48,7 @@ pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
         )
             .into_response();
     };
-    run(state, &q, &headers).await
+    run(state, &q, &headers, p.default_graph.as_deref()).await
 }
 
 pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
@@ -56,18 +62,43 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let query = if ctype.contains("application/x-www-form-urlencoded") {
-        match url_form_field(&body, "query") {
+    let (query, default_graph) = if ctype.contains("application/x-www-form-urlencoded") {
+        let q = match url_form_field(&body, "query") {
             Some(q) => q,
             None => {
                 return (StatusCode::BAD_REQUEST, "form missing `query`".to_string())
                     .into_response();
             }
-        }
+        };
+        (q, url_form_field(&body, "default-graph"))
     } else {
-        body
+        (body, None)
     };
-    run(state, &query, &headers).await
+    run(state, &query, &headers, default_graph.as_deref()).await
+}
+
+/// Resolve the effective [`SparqlConfig`] for one request: the server's
+/// configured default, with the per-query `default-graph` override (SPEC-26
+/// S4, threaded early for SPEC-28 S3) applied on top if present. `Err` holds
+/// the client-facing message for an unrecognized value — a `String`, not the
+/// `axum::response::Response` itself (`clippy::result_large_err`: `Response`
+/// is large and this fires on the hot per-request path).
+fn resolve_query_config(
+    base: &SparqlConfig,
+    default_graph_override: Option<&str>,
+) -> Result<SparqlConfig, String> {
+    let Some(raw) = default_graph_override else {
+        return Ok(*base);
+    };
+    match DefaultGraphMode::parse(raw) {
+        Some(mode) => Ok(SparqlConfig {
+            default_graph: mode,
+            ..*base
+        }),
+        None => Err(format!(
+            "invalid `default-graph` value {raw:?}: expected `union` or `strict`"
+        )),
+    }
 }
 
 /// Extract a single urlencoded form field by key (`query=…` / `update=…`)
@@ -111,6 +142,7 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
     q: &str,
     headers: &HeaderMap,
+    default_graph_override: Option<&str>,
 ) -> axum::response::Response {
     let accept = headers
         .get("accept")
@@ -118,13 +150,18 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
         .unwrap_or("");
     let fmt = ResultFormat::from_accept(accept);
 
+    let cfg = match resolve_query_config(&state.cfg, default_graph_override) {
+        Ok(cfg) => cfg,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+
     // Plain SELECTs stream; everything else (ASK / CONSTRUCT / DESCRIBE /
     // EXPLAIN) keeps the materialized path — their results are small.
     // Planning needs no store access, so it runs here on the async thread.
-    match plan_select(q, &SparqlConfig::default()) {
+    match plan_select(q, &cfg) {
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Ok(Some((vars, plan))) => stream_select(state, vars, plan, fmt).await,
-        Ok(None) => run_materialized(state, q, fmt).await,
+        Ok(None) => run_materialized(state, q, fmt, &cfg).await,
     }
 }
 
@@ -319,13 +356,14 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
     q: &str,
     fmt: ResultFormat,
+    cfg: &SparqlConfig,
 ) -> axum::response::Response {
     // Scope the read guard to the execution only; results are
     // materialised into `ans`, so serialization below holds no lock and
     // never blocks a concurrent writer.
     let ans = {
         let store = state.store.read().unwrap();
-        match execute_query(q, &*store) {
+        match execute_query_with(q, &*store, cfg) {
             Ok(a) => a,
             Err(e) => {
                 return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
