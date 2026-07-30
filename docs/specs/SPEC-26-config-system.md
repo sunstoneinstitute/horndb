@@ -181,8 +181,9 @@ Separate server-scoped config from the bounded set a query may override.
   top of the current `[server.limits]` defaults. `default_graph` is threaded
   ahead of the rest of this tier: `crates/horndb-sparql`'s HTTP layer already
   reads and validates a per-query `default_graph` URL/form override
-  (PLAN-28-03 Task 2, ahead of this spec's own S4 whitelist mechanism landing
-  in PLAN-26-02) — the other four keys stay config-only until S4/S5 ship. The
+  (PLAN-28-03 Task 2, ahead of this spec's own S4 whitelist mechanism, which
+  is Phase 2's — [#251](https://github.com/sunstoneinstitute/horndb/issues/251))
+  — the other four keys stay config-only until S4/S5 ship. The
   override is spelled `default_graph`, the `QuerySettings` field name, not
   `default-graph`: every future S4 override key is spelled after its field
   name (e.g. `?query_timeout=30s`), and `default-graph` would sit one suffix
@@ -228,8 +229,20 @@ Let a query override the bounded `QuerySettings` subset, defaulting from
 - **Unknown or out-of-range override.** An unknown setting key or an unparseable
   value is a per-query client error (HTTP 400) naming the offending key — it does
   not affect server config or other queries.
-- **Only the whitelisted subset is overridable.** Server-only keys (`bind`,
-  `config_dirs`, `simd`, `logging`, `reload`) are never settable per query.
+- **Only the whitelisted subset is overridable.** The whitelist is exactly the
+  `QuerySettings` keys named in S2: `query_timeout`, `max_result_rows`, `rdf12`,
+  `max_query_memory`, `default_graph`. Server-only keys (`bind`, `config_dirs`,
+  `simd`, `logging`, `reload`) are never settable per query.
+- **`default_graph` is already live, ahead of this section's machinery.**
+  `?default_graph=union|strict` is read and validated on all three `/query`
+  protocol channels (GET, form-POST, direct POST) by
+  `crates/sparql/src/server/query.rs` (SPEC-28 phase 3,
+  [#266](https://github.com/sunstoneinstitute/horndb/issues/266)), with an
+  unparseable value returning 400 naming the key — the precedence and
+  error-handling rules above, hand-wired for one key. When Phase 2
+  ([#251](https://github.com/sunstoneinstitute/horndb/issues/251)) builds the
+  general whitelist, that parse site folds into it; it carries a
+  `// SPEC-26 S4:` comment saying so.
 
 ### S5. Enforcement wired in this spec
 

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 3 (S3) — query-side named graphs: Algebra::Graph, ground and variable evaluation with the graph as a scan scope, FROM/FROM NAMED dataset construction, the union|strict default-graph mode with its config and per-query override, path and pushdown scoping, and the W3C graph/ + dataset/ conformance families"
 ---
@@ -32,6 +32,55 @@ existing `decode_term`.
 
 **Tech Stack:** Rust 1.90; `crates/sparql`, `crates/config`; checked-in W3C
 fixtures for `graph/` + `dataset/`.
+
+---
+
+## Execution notes — where the plan and reality diverged
+
+Recorded when the last task landed (Task 7). Everything below this section is
+the plan **as written**; these are the points where the delivered code differs.
+Current behaviour lives in `docs/architecture.md` and
+`crates/sparql/INTEGRATION-NOTES.md`, not here.
+
+- **Two `GRAPH ?g` shapes are refused, not answered.** The plan assumed every
+  shape would evaluate. Two do not, and each was a silent wrong answer before
+  the refusal landed: (1) a barrier node between the wrapper and its scan
+  leaves — `Project` (sub-`SELECT`), `Distinct`, `Group`, `Slice`,
+  `PathClosure`, `Values` — drops or merges the graph column; (2) a block that
+  **reads** `?g` in a position where binding on the leaf diverges from SPARQL
+  1.1 §18.2.2.2's post-join (any expression, `BIND(… AS ?g)`, or `?g` in a
+  `LeftJoin`'s right arm). Both raise `UnsupportedAlgebra` from `plan/lower.rs`
+  (`per_graph_barrier`, `per_graph_var_divergence`). Lifting them needs
+  per-graph evaluation of the whole block, which is a change to D5/D6.
+- **`PassId::CountPushdown` does not exist** (the design's differential-battery
+  bullet assumed it). `PassId` has six variants, none of them the count
+  pushdown: that pushdown is a *physical* rewrite in `Runtime::run_stream`,
+  downstream of the logical pass pipeline. The battery therefore switches it
+  off with `Runtime::run_unpruned_for_test` — the same off-switch the crate's
+  existing `rewrite_is_result_invariant` battery uses, and a strictly stronger
+  one (it disables the whole module, not one pass).
+- **The `graph/` and `dataset/` families are W3C SPARQL 1.0 (DAWG) tests**, not
+  the SPARQL 1.1 tarball the design assumed. `fetch-w3c-suites.sh` gained a
+  `sparql10` section with an explicit case allowlist. SPEC-28 S7 carries the
+  same correction.
+- **`SnapshotScope` has no `PerGraph` variant.** The design's sketch listed
+  one. The per-graph seam is `ResolvedScope::PerGraph` at the *operator* level
+  (`exec/scope.rs`), which matches the design's own prose that `PerGraph` does
+  not build one flattened source. The backend's `SnapshotScope` only ever names
+  one set of triples.
+- **Graph-scoped snapshots are deliberately not memoized.** The design said the
+  memo becomes a keyed map; it did, but only whole-dataset scopes are cached
+  (`SnapshotScope::memoisable`). Caching per graph would let an unauthenticated
+  `/query` walking `GRAPH <g1>`…`GRAPH <gN>` pin six sorted index copies of the
+  store per graph named, evicted only by a write.
+- **The per-query URL parameter is spelled `default_graph`**, not the
+  originally-planned `default-graph` — amended in Task 2, reasoning at the
+  "Config and the per-query override" heading below.
+
+**Delivered:** 24 of the 29 upstream `graph/`+`dataset/` cases selected and
+green on both backends; the other 5 are in `harness/KNOWN-MANIFEST-BUGS.md`
+with the capability that gates each, including the note that no selected case
+grades the shipping `union` default-graph mode.
 
 ---
 
@@ -143,7 +192,8 @@ slice:
   SPARQL 1.1 Protocol's reserved `default-graph-uri`, which SPEC-28 phase 5
   (GSP) needs on this same endpoint — two near-identical names would be a
   standing support burden. This is deliberately the S4 contract for one key;
-  when PLAN-26-02 builds the real whitelist, this parameter folds into it
+  when SPEC-26 Phase 2 ([#251](https://github.com/sunstoneinstitute/horndb/issues/251))
+  builds the real whitelist, this parameter folds into it
   (leave a `// SPEC-26 S4:` comment at the parse site). SPEC-26's spec
   whitelist already names `default_graph` (SPEC-28 S3 added it). A
   form-encoded POST reads the override from the request body first, falling
@@ -290,7 +340,7 @@ result diff). Therefore:
 - Modify: `crates/sparql/tests/exec_expressions.rs` (the phase-1 refusal
   pins), new tests in `crates/sparql/tests/algebra_translate.rs`
 
-- [ ] **Step 1: Failing tests** — in `algebra_translate.rs`:
+- [x] **Step 1: Failing tests** — in `algebra_translate.rs`:
   `graph_iri_translates_to_graph_node` (translate
   `GRAPH <g> { ?s ?p ?o }`, assert the tree is
   `Graph { name: GraphSpec::Iri(..), inner: Bgp }`),
@@ -301,20 +351,20 @@ result diff). Therefore:
   bare `Algebra` return; `api.rs` callers adapt),
   `from_named_only_yields_empty_default` (D4 pin at the `DatasetSpec`
   level).
-- [ ] **Step 2: Verify failure** — `cargo nextest run -p horndb-sparql
+- [x] **Step 2: Verify failure** — `cargo nextest run -p horndb-sparql
   algebra_translate`.
-- [ ] **Step 3: Implement** — `GraphSpec` + `Algebra::Graph`; the phase-1
+- [x] **Step 3: Implement** — `GraphSpec` + `Algebra::Graph`; the phase-1
   error arm becomes construction; the four dataset arms build
   `DatasetSpec` (the `refuse_nonempty_dataset` helper from PLAN-28-01 is
   deleted); update the phase-1 refusal tests in `exec_expressions.rs` to
   expect success (they become evaluation tests in Task 4 — for now assert
   translation succeeds).
-- [ ] **Step 4: Crate suite** — `cargo nextest run -p horndb-sparql`.
+- [x] **Step 4: Crate suite** — `cargo nextest run -p horndb-sparql`.
   Everything except the old refusal pins passes; downstream lowering of
   `Algebra::Graph` errors with `Planner("Graph not lowered")` until Task 3
   — gate the two new end-to-end paths behind translation-level tests only
   in this task.
-- [ ] **Step 5: Commit** — `feat(sparql): Algebra::Graph + dataset capture
+- [x] **Step 5: Commit** — `feat(sparql): Algebra::Graph + dataset capture
   in translation (SPEC-28 S3, #266)`.
 
 ### Task 2: Config plumbing (`default_graph` mode, server threading, URL override)
@@ -326,21 +376,21 @@ result diff). Therefore:
 - Test: `crates/config` unit tests, `crates/sparql/tests/serve_config_wiring.rs`,
   `crates/sparql/tests/server_http.rs`
 
-- [ ] **Step 1: Failing tests** — config: `Limits` default carries
+- [x] **Step 1: Failing tests** — config: `Limits` default carries
   `default_graph == "union"`, TOML/env override works (follow the crate's
   existing layering tests). Server: `default_graph_url_param_overrides`
-  (POST with `default-graph=strict` flips one query's behaviour — full
+  (POST with `default_graph=strict` flips one query's behaviour — full
   assertion lands in Task 4; here assert the 400 on
-  `default-graph=bogus` naming the key), `serve_config_wiring.rs` asserts
+  `default_graph=bogus` naming the key), `serve_config_wiring.rs` asserts
   `AppState.cfg` reflects the loaded config.
-- [ ] **Step 2: Verify failure.**
-- [ ] **Step 3: Implement** per the design (Limits field + validation,
+- [x] **Step 2: Verify failure.**
+- [x] **Step 3: Implement** per the design (Limits field + validation,
   `DefaultGraphMode` on `SparqlConfig`, `AppState.cfg`, handler param
   parse). `MemStore`-backed handlers thread the same config — the mode is
   interpreted by the executor, not the backend, so this is uniform.
-- [ ] **Step 4: Run** — `cargo nextest run -p horndb-config -p horndb-sparql
+- [x] **Step 4: Run** — `cargo nextest run -p horndb-config -p horndb-sparql
   --features server`.
-- [ ] **Step 5: Commit** — `feat(sparql,config): default_graph mode —
+- [x] **Step 5: Commit** — `feat(sparql,config): default_graph mode —
   server setting + per-query override (SPEC-28 S3/D2, #266)`.
 
 ### Task 3: Scan-scope lowering + scoped snapshots (ground `GRAPH`, modes)
@@ -350,7 +400,7 @@ result diff). Therefore:
   `crates/sparql/src/exec/{mod.rs,horn.rs,mem.rs,op/mod.rs}`
 - Test: new `crates/sparql/tests/graph_query.rs`
 
-- [ ] **Step 1: Failing tests** (`graph_query.rs`, generic over both
+- [x] **Step 1: Failing tests** (`graph_query.rs`, generic over both
   backends like `update_where.rs`): fixture = default graph {t1}, g1 {t2},
   g2 {t3, t2} (t2 in two graphs). Pins:
   `ground_graph_scopes_to_one_graph` (`GRAPH <g1>` → exactly t2),
@@ -362,16 +412,16 @@ result diff). Therefore:
   `reserved_graph_excluded_from_union` (insert a quad into
   `https://horndb.io/graph/x` via the storage/mem seam; unqualified query
   misses it; `GRAPH <…/x>` finds it).
-- [ ] **Step 2: Verify failure.**
-- [ ] **Step 3: Implement** — `GraphScope` on the three scan node types
+- [x] **Step 2: Verify failure.**
+- [x] **Step 3: Implement** — `GraphScope` on the three scan node types
   through `LogicalPlan`/`PhysicalPlan`; lowering rewrite of
   `Graph { … }` (innermost-wins); `Executor` scope parameter;
   `HornBackend::wcoj_snapshot(scope)` with the keyed memo, union dedup,
   reserved-set cache; MemStore quad storage + the same scope resolution;
   runtime `DatasetSpec` threading from `TranslatedQuery` through
   `api.rs`/`plan_select` to the operators.
-- [ ] **Step 4: Run** — the new suite + full crate.
-- [ ] **Step 5: Commit** — `feat(sparql): graph-scoped scans — ground GRAPH,
+- [x] **Step 4: Run** — the new suite + full crate.
+- [x] **Step 5: Commit** — `feat(sparql): graph-scoped scans — ground GRAPH,
   dataset construction, union|strict default graph (SPEC-28 S3, #266)`.
 
 ### Task 4: `GRAPH ?g` — the graph column
@@ -380,7 +430,7 @@ result diff). Therefore:
 - Modify: `crates/sparql/src/exec/{op/mod.rs,op/source.rs,horn.rs,mem.rs,runtime.rs}`
 - Test: `crates/sparql/tests/graph_query.rs`
 
-- [ ] **Step 1: Failing tests** — `graph_var_enumerates_named_graphs_only`
+- [x] **Step 1: Failing tests** — `graph_var_enumerates_named_graphs_only`
   (`GRAPH ?g { ?s ?p ?o }` on the Task-3 fixture binds `?g` ∈ {g1, g2},
   never the default graph — D3, both modes), `graph_var_binds_per_row`
   (t2 appears twice: once with ?g=g1, once ?g=g2),
@@ -389,13 +439,13 @@ result diff). Therefore:
   and a shared-variable join both work),
   `select_star_projects_graph_var` (revives the old `:433` pin, now with a
   bound value), `reserved_graphs_do_not_enumerate`.
-- [ ] **Step 2: Verify failure.**
-- [ ] **Step 3: Implement** — the per-graph scan loop in the scan operator
+- [x] **Step 2: Verify failure.**
+- [x] **Step 3: Implement** — the per-graph scan loop in the scan operator
   (`op/mod.rs:95` build path): resolve the graph list (named set ∩
   visibility ∩ non-reserved), run the per-graph source, append the `?g`
   column as `Slot::Id(TermId(g.0))`; `MemStore` mirrors with its term map.
-- [ ] **Step 4: Run** — full crate suite.
-- [ ] **Step 5: Commit** — `feat(sparql): GRAPH ?g as a scan output column
+- [x] **Step 4: Run** — full crate suite.
+- [x] **Step 5: Commit** — `feat(sparql): GRAPH ?g as a scan output column
   (SPEC-28 S3/D6, #266)`.
 
 ### Task 5: Pushdown + estimator scoping, `CoalesceBgp` guard, paths
@@ -406,21 +456,21 @@ result diff). Therefore:
 - Test: `crates/sparql/src/plan/pushdown.rs` in-file battery,
   `crates/sparql/tests/graph_query.rs`, `crates/sparql/tests/logical_pipeline.rs`
 
-- [ ] **Step 1: Failing tests** — the **differential pushdown battery**
+- [x] **Step 1: Failing tests** — the **differential pushdown battery**
   from the design (every eligible shape × {GRAPH <g>, GRAPH ?g} ×
   {pushdown on, off} → identical results); `count_declines_unknown_scope`
   (a `count_bgp` impl receiving an untaught scope returns `Ok(None)` — pin
   via MemStore); `bgps_under_different_graphs_do_not_coalesce`;
   `path_scope_applied_before_closure` + `path_over_union_traverses_graphs`
   (the g1→g2→g1 pair from the design).
-- [ ] **Step 2: Verify failure.**
-- [ ] **Step 3: Implement** — scope on `CountScan`/`GroupCountScan` reaches
+- [x] **Step 2: Verify failure.**
+- [x] **Step 3: Implement** — scope on `CountScan`/`GroupCountScan` reaches
   `count_bgp`/`count_bgp_grouped` via the scoped snapshot;
   decline-by-default; `CoalesceBgp` equal-scope guard; `explain.rs`
   estimates labelled as estimates (no change to result paths — verify by
   reading, note in the pass doc).
-- [ ] **Step 4: Run** — full crate suite.
-- [ ] **Step 5: Commit** — `feat(sparql): scope-aware pushdowns
+- [x] **Step 4: Run** — full crate suite.
+- [x] **Step 5: Commit** — `feat(sparql): scope-aware pushdowns
   (decline-by-default), CoalesceBgp scope guard, path scoping (SPEC-28 S3,
   #266)`.
 
@@ -433,18 +483,18 @@ result diff). Therefore:
 - Create: fixture dirs under
   `crates/harness/tests/fixtures/sparql11/selected_subset/`
 
-- [ ] **Step 1:** Run `fetch-w3c-suites.sh`; enumerate the `graph/` and
+- [x] **Step 1:** Run `fetch-w3c-suites.sh`; enumerate the `graph/` and
   `dataset/` manifests' evaluation cases; mirror each runnable case into a
   fixture dir (`data.trig`/`data.nt` + `query.rq` + expected results,
   matching the existing dir shape); extend the script with the mirror
   allowlist (rdf12 pattern, `fetch-w3c-suites.sh:51-74`).
-- [ ] **Step 2:** Extend `w3c_suite.rs::run_one` to load `data.trig` via a
+- [x] **Step 2:** Extend `w3c_suite.rs::run_one` to load `data.trig` via a
   quad path on both backends; add the mirrored case names to
   `[sparql_query]` in `harness/selected.toml`. Cases that cannot pass get a
   `KNOWN-MANIFEST-BUGS.md` SPARQL section entry with the gating reason
   (expected: RDF-merge bnode renaming; enumerate exactly).
-- [ ] **Step 3:** `cargo nextest run -p horndb-sparql w3c_suite` — green.
-- [ ] **Step 4: Commit** — `test(sparql): W3C graph/ + dataset/ families in
+- [x] **Step 3:** `cargo nextest run -p horndb-sparql w3c_suite` — green.
+- [x] **Step 4: Commit** — `test(sparql): W3C graph/ + dataset/ families in
   the selected subset (SPEC-28 S7, #266)`.
 
 ### Task 7: Docs + spec amendments
@@ -454,18 +504,18 @@ result diff). Therefore:
   `docs/specs/SPEC-26-config-system.md`, `docs/architecture.md`,
   `crates/sparql/INTEGRATION-NOTES.md`, this plan
 
-- [ ] **Step 1:** SPEC-28 S7 amendment per the design ("fit the existing
+- [x] **Step 1:** SPEC-28 S7 amendment per the design ("fit the existing
   manifest-driven runner unchanged" → the `[sparql_query]` route, with the
   reason). SPEC-26: confirm `default_graph` is on the S4 whitelist list
   (add if the earlier spec edit missed it). `docs/architecture.md`: the
   `GRAPH` row flips **refused** → **implemented (SPEC-28 phase 3)**; the
   dataset-clause line likewise. `INTEGRATION-NOTES.md`: the refusal
   section becomes a description of the semantics + the mode.
-- [ ] **Step 2:** Full verification — `cargo fmt --all`, `cargo clippy
+- [x] **Step 2:** Full verification — `cargo fmt --all`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo nextest run
   --workspace`, plus `cargo nextest run -p horndb-sparql --features
   server`.
-- [ ] **Step 3: Commit** — `docs(sparql): SPEC-28 S3 sync — S7 amendment,
+- [x] **Step 3: Commit** — `docs(sparql): SPEC-28 S3 sync — S7 amendment,
   architecture, notes (#266)`.
 
 ---
