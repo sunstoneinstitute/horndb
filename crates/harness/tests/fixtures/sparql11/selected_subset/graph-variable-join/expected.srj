@@ -1,0 +1,17 @@
+{
+  "head": {
+    "vars": [
+      "g"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-variable-join.ttl"
+        }
+      }
+    ]
+  }
+}

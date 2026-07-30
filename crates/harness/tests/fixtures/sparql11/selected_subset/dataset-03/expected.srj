@@ -1,0 +1,52 @@
+{
+  "head": {
+    "vars": [
+      "g",
+      "o",
+      "p",
+      "s"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g1.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "1"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g1.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "9"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/a"
+        }
+      }
+    ]
+  }
+}

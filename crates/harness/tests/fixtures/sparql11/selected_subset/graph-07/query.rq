@@ -1,0 +1,9 @@
+BASE <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/graph-07.rq>
+PREFIX : <http://example/>
+
+SELECT *
+{
+   { ?s ?p ?o }
+  UNION
+   { GRAPH ?g { ?s ?p ?o } }
+}

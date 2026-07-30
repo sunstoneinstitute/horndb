@@ -1,0 +1,9 @@
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-optional.ttl> {
+    <http://example/s> <http://example/p> <http://example/o> .
+    <http://example/s2> <http://example/p> <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-optional.ttl> .
+}
+
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g1.ttl> {
+    <http://example/a> <http://example/p> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+    <http://example/x> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+}

@@ -1,0 +1,9 @@
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g3-dup.ttl> {
+    _:data-g3-dup-b1 <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+    _:data-g3-dup-b2 <http://example/p> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+}
+
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g3.ttl> {
+    _:data-g3-b1 <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+    _:data-g3-b2 <http://example/p> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+}

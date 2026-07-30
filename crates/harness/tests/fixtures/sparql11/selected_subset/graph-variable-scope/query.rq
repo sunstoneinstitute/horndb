@@ -1,0 +1,4 @@
+BASE <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/graph-variable-scope.rq>
+SELECT * {
+    GRAPH ?g { FILTER (BOUND(?g)) }
+}

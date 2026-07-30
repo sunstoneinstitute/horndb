@@ -1,0 +1,4 @@
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g1.ttl> {
+    <http://example/a> <http://example/p> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+    <http://example/x> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+}
