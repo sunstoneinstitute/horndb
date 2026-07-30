@@ -1,10 +1,13 @@
 //! End-to-end tests for the expanded expression surface (#66):
 //! arithmetic, IF, COALESCE, builtin functions.
 
+use horndb_sparql::algebra::translate::translate_query;
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
+use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::SparqlError;
 
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
@@ -40,6 +43,28 @@ fn lexical(b: &horndb_sparql::exec::Bindings, var: &str) -> String {
     } else {
         raw
     }
+}
+
+/// Parse and translate `q`, asserting translation fails; returns the error.
+fn translate_str_err(q: &str) -> SparqlError {
+    translate_str(q).unwrap_err()
+}
+
+/// Parse and translate `q`, asserting translation succeeds.
+fn translate_str_ok(q: &str) {
+    translate_str(q).expect("translate should succeed");
+}
+
+fn translate_str(q: &str) -> horndb_sparql::Result<horndb_sparql::algebra::Algebra> {
+    let parsed = parse_query(q).expect("parse");
+    let inner = match parsed {
+        ParsedQuery::Select { inner }
+        | ParsedQuery::Ask { inner }
+        | ParsedQuery::Construct { inner }
+        | ParsedQuery::Describe { inner } => inner,
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
+    };
+    translate_query(&inner)
 }
 
 #[test]
@@ -374,25 +399,17 @@ fn if_condition_uses_effective_boolean_value() {
 }
 
 #[test]
-fn graph_iri_lowers_to_inner_pattern() {
-    let s = store_with_prices();
-    let got = rows(
-        "SELECT ?s WHERE { GRAPH <http://example.org/g> { ?s <http://example.org/price> ?p } }",
-        &s,
-    );
-    // Stage-1 merged-graph semantics: GRAPH is transparent.
-    assert_eq!(got.len(), 2);
-}
-
-#[test]
-fn graph_var_lowers_with_unbound_graph_var() {
-    let s = store_with_prices();
-    let got = rows(
-        "SELECT ?g ?s WHERE { GRAPH ?g { ?s <http://example.org/price> ?p } }",
-        &s,
-    );
-    assert_eq!(got.len(), 2);
-    assert!(got.iter().all(|b| b.get("g").is_none()));
+fn graph_pattern_is_refused_ground_and_var() {
+    // SPEC-28 phase 1: GRAPH refuses instead of silently dropping the
+    // wrapper (Stage-1's old merged-graph lowering returned wrong rows).
+    for q in [
+        "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
+        "SELECT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
+        "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
+    ] {
+        let err = translate_str_err(q);
+        assert!(err.to_string().contains("GRAPH"), "{err}");
+    }
 }
 
 #[test]
@@ -431,25 +448,25 @@ fn isnumeric_requires_numeric_datatype() {
 }
 
 #[test]
-fn select_star_keeps_graph_var_visible() {
-    let s = store_with_prices();
-    let got = execute_query(
-        "SELECT * WHERE { GRAPH ?g { ?s <http://example.org/price> ?p } }",
-        &s,
-    )
-    .expect("query should run");
-    match got {
-        QueryAnswer::Solutions { vars, rows } => {
-            assert!(
-                vars.iter().any(|v| v == "g"),
-                "?g missing from head.vars: {vars:?}"
-            );
-            assert!(vars.iter().any(|v| v == "s"));
-            assert_eq!(rows.len(), 2);
-            assert!(rows.iter().all(|b| b.get("g").is_none()));
-        }
-        other => panic!("expected solutions, got {other:?}"),
+fn dataset_clause_is_refused_all_query_forms() {
+    // SPEC-28 phase 1: a non-empty FROM/FROM NAMED dataset clause refuses
+    // rather than being silently dropped, across every query form.
+    for q in [
+        "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }",
+        "SELECT ?s FROM NAMED <http://ex/g> WHERE { ?s ?p ?o }",
+        "ASK FROM <http://ex/g> { ?s ?p ?o }",
+        "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g> WHERE { ?s ?p ?o }",
+        "DESCRIBE <http://ex/x> FROM <http://ex/g>",
+    ] {
+        let err = translate_str_err(q);
+        assert!(err.to_string().contains("FROM"), "{err}");
     }
+}
+
+#[test]
+fn absent_dataset_still_translates() {
+    // Graph-free query with no FROM stays a no-op — the regression guard.
+    translate_str_ok("SELECT ?s WHERE { ?s ?p ?o }");
 }
 
 #[test]

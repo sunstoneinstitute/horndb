@@ -15,7 +15,7 @@ use crate::error::{Result, SparqlError};
 use crate::SparqlConfig;
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression, Function, GraphPattern, OrderExpression,
-    PropertyPathExpression,
+    PropertyPathExpression, QueryDataset,
 };
 use spargebra::term::{
     GroundTerm, NamedNodePattern, TermPattern, TriplePattern as SpgTriplePattern, Variable,
@@ -36,14 +36,18 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
     match q {
         Query::Select {
             pattern,
-            dataset: _,
-            base_iri: _,
-        } => translate_projection(pattern, cfg),
-        Query::Ask {
-            pattern,
-            dataset: _,
+            dataset,
             base_iri: _,
         } => {
+            refuse_nonempty_dataset(dataset)?;
+            translate_projection(pattern, cfg)
+        }
+        Query::Ask {
+            pattern,
+            dataset,
+            base_iri: _,
+        } => {
+            refuse_nonempty_dataset(dataset)?;
             let inner = translate_pattern(pattern, cfg)?;
             Ok(Algebra::Project {
                 vars: Vec::new(),
@@ -53,9 +57,10 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
         Query::Construct {
             template: _,
             pattern,
-            dataset: _,
+            dataset,
             base_iri: _,
         } => {
+            refuse_nonempty_dataset(dataset)?;
             // The CONSTRUCT template is preserved separately by the
             // runtime; here we only return the WHERE-clause algebra.
             // The planner is responsible for re-attaching the
@@ -64,9 +69,10 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
         }
         Query::Describe {
             pattern,
-            dataset: _,
+            dataset,
             base_iri: _,
         } => {
+            refuse_nonempty_dataset(dataset)?;
             // spargebra encodes a DESCRIBE's WHERE clause exactly like a
             // SELECT (via `build_select`): the resources to describe are
             // the values bound to the projected variables across all
@@ -76,6 +82,25 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
             translate_projection(pattern, cfg)
         }
     }
+}
+
+/// Reject a non-empty `FROM`/`FROM NAMED` dataset clause (SPEC-28 phase 1,
+/// #264): naming a dataset silently narrowed evaluation to the merged
+/// default graph, which is a wrong answer a caller could not detect.
+/// `None`, or a clause naming no graphs, is a no-op and passes through;
+/// this mirrors the update side's `validate_delete_insert`
+/// (`update.rs`).
+fn refuse_nonempty_dataset(ds: &Option<QueryDataset>) -> Result<()> {
+    if let Some(ds) = ds {
+        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
+            return Err(SparqlError::UnsupportedAlgebra(
+                "FROM/FROM NAMED dataset clause (dataset selection is refused until \
+                 SPEC-28 phase 3; see #264)"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Shared SELECT/DESCRIBE lowering: spargebra often wraps the WHERE
@@ -265,13 +290,13 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
-        // Stage-1 merged-graph semantics: the executor holds a single
-        // graph (SPB/W3C corpora are loaded from flat dumps), so
-        // `GRAPH <iri> { P }` and `GRAPH ?g { P }` lower to `P`. A
-        // graph-name variable stays unbound in the results. True
-        // named-graph scoping arrives with the storage wiring (#67) —
-        // see INTEGRATION-NOTES.md.
-        GraphPattern::Graph { name: _, inner } => translate_pattern(inner, cfg),
+        // SPEC-28 phase 1 (#264): refuse rather than silently drop the
+        // GRAPH wrapper. Real named-graph evaluation lands in phase 3.
+        GraphPattern::Graph { name: _, inner: _ } => Err(SparqlError::UnsupportedAlgebra(
+            "GRAPH named-graph pattern (named-graph queries are refused until \
+             SPEC-28 phase 3; see #264)"
+                .into(),
+        )),
         GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
     }
 }
@@ -528,9 +553,11 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             | GraphPattern::Reduced { inner }
             | GraphPattern::Group { inner, .. } => walk(inner, acc),
             GraphPattern::Graph { name, inner } => {
-                // The graph-name variable is in scope (and projected by
-                // `SELECT *`) even though the Stage-1 merged-graph
-                // lowering never binds it.
+                // Unreachable in practice: `translate_pattern` now refuses
+                // every `Graph` node (SPEC-28 phase 1, #264) before this
+                // function would see one. Kept for structural completeness
+                // of the match and for phase 3, when `Graph` translates
+                // instead of erroring.
                 if let NamedNodePattern::Variable(v) = name {
                     push(v, acc);
                 }
