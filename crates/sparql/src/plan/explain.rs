@@ -23,12 +23,14 @@
 //!
 //! **An estimate can never reach a result** (SPEC-28 S3: estimates may stay
 //! coarse, but must be labelled estimates, never results). This module holds
-//! the only two `cardinality_estimate` call sites in the crate, both in
+//! the only two `cardinality_estimate` call sites in `src/`, both in
 //! [`estimate`], whose `Option<usize>` is formatted into `EXPLAIN` text and
 //! nothing else — there is no path from it into a
-//! [`Batch`](crate::exec::Batch). That is why estimates are allowed the
-//! latitude the count *seams* are not: those bound a real answer and so
-//! decline any scope they cannot express (`plan::pushdown`).
+//! [`Batch`](crate::exec::Batch). (`tests/exec_horn.rs` calls it directly to
+//! pin the backend's own numbers; that is a test, not a result path.) This is
+//! why estimates are allowed the latitude the count *seams* are not: those
+//! bound a real answer, so they decline any scope they cannot express
+//! (`plan::pushdown`).
 //!
 //! The estimate deliberately ignores the query's dataset clause
 //! ([`ScanScope::estimating`]) — a leaf's own `GRAPH` scope is enough

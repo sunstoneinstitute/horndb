@@ -62,28 +62,26 @@
 //!
 //! A count leaf answers *within one graph scope*, so [`lower_count_group`]
 //! copies the `BgpScan`'s [`GraphScope`] onto the `CountScan` /
-//! `GroupCountScan` it produces. The scope then travels to
-//! `Executor::count_bgp` / `count_bgp_grouped`, which resolve it to a scoped
-//! snapshot.
-//!
-//! Two rules keep that safe as scopes are added:
+//! `GroupCountScan` it produces, and two rules keep that safe:
 //!
 //! * **Decline by default.** A count seam handed a scope it cannot express
-//!   returns `Ok(None)`, and the caller falls back to
-//!   `exec::op::source::scan_scoped` — the same read the plain scan would do,
-//!   so it is scope-correct by construction. `GRAPH ?g` is the live case: it
-//!   spans several snapshots, so both count seams decline it today.
-//!   A count that widened its scope instead would be a silent wrong answer,
-//!   which is the failure mode SPEC-28 exists to remove.
+//!   returns `Ok(None)`; the caller then falls back to
+//!   `exec::op::source::scan_scoped`, the same read the plain scan would do,
+//!   so the answer is scope-correct by construction. `GRAPH ?g` is the live
+//!   case — it spans several snapshots, so both count seams decline it. A
+//!   count that widened its scope instead would be a silent wrong answer.
 //! * **Estimates are not results.** `Executor::cardinality_estimate` may stay
 //!   coarse under any scope because it feeds only `EXPLAIN` text — see the
-//!   module docs of [`crate::plan::explain`], which holds its only call sites.
+//!   module docs of [`crate::plan::explain`], which holds its only call sites
+//!   in `src/`.
 //!
-//! Pushdown regressions are silent by nature, so
-//! `pushdown_is_result_invariant_under_every_graph_scope` runs the whole
-//! shape battery unscoped, inside `GRAPH <g>` and inside `GRAPH ?g`, with the
-//! rewrite on and off, and additionally pins that the pass *fires* — the
-//! count leaf is present and carries the arm's scope.
+//! `pushdown_is_result_invariant_under_every_graph_scope` is the regression
+//! net: every shape, unscoped and inside `GRAPH <g>` and `GRAPH ?g`, with the
+//! rewrite on and off. It **localises** failures rather than being the only
+//! thing that catches them — `graph_query.rs` already pins the *answers* for
+//! a scope-dropped count leaf and for the `CoalesceBgp` guard. The one
+//! regression it catches alone is a count seam that stops declining
+//! `GRAPH ?g`.
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
@@ -1538,6 +1536,17 @@ mod tests {
     /// | default | `e name "Eve"` |
     /// | `<g1>` | `a name "Alice"`, `a age "30"`, `a knows b`, `b name "Bob"`, `b age "25"` |
     /// | `<g2>` | `c name "Carol"`, `c age "40"`, `c knows a`, `d name "Alice"` |
+    ///
+    /// **Two invariants `pushdown_is_result_invariant_under_every_graph_scope`
+    /// depends on** — keep them if you edit this:
+    ///
+    /// 1. No triple appears in two graphs, and the default graph holds one
+    ///    triple that no named graph holds. Both scoped arms therefore total
+    ///    strictly fewer rows than the union default graph, which is how the
+    ///    test detects a scope that never reached the scans.
+    /// 2. Every named graph holds a complete slice of the shape (a name, an
+    ///    age, a `knows`), so every battery shape yields rows in every arm.
+    ///    An empty arm would satisfy the identity assertion vacuously.
     fn graph_fixture() -> HornBackend {
         let mut horn = HornBackend::new();
         let iri = |s: &str| oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s));
@@ -1657,16 +1666,39 @@ mod tests {
                 fires: None,
                 refuses_under_graph_var: true,
             },
+            // An inner `GRAPH` block: the only shape here that survives as a
+            // `PhysicalPlan::Join`, because two differently-scoped `Bgp`s
+            // cannot coalesce. Every other body either coalesces (equal
+            // scopes) or lowers to `LeftJoin`/`Union`. Refuses under
+            // `GRAPH ?gg` — the inner scope takes over the scan, leaving the
+            // outer `?gg` unbound.
+            Shape {
+                proj: "?s ?y",
+                body: "?s <http://ex/name> ?n GRAPH <http://ex/g2> { ?y <http://ex/name> ?n2 }",
+                tail: "",
+                fires: None,
+                refuses_under_graph_var: true,
+            },
         ]
     }
 
     /// SPEC-28 S3's silent-wrong-answer clause, as a differential test:
     /// every pushdown-eligible shape, unscoped and inside `GRAPH <g1>` and
     /// `GRAPH ?gg`, must produce **identical** results with the rewrite on
-    /// and off. Pushdown regressions are silent by nature, so the test also
-    /// pins that the pass actually fires (the count leaf is there, carrying
-    /// the arm's graph scope) — otherwise "identical results" would prove
-    /// nothing but that the rewrite did nothing.
+    /// and off.
+    ///
+    /// "Identical results" alone would be satisfied by a rewrite that never
+    /// fires, so three guards back it up:
+    ///
+    /// 1. For a count-eligible shape, the **rewritten** plan must hold
+    ///    exactly the expected count leaf, carrying that arm's `GraphScope`.
+    ///    This is what pins the pushdown firing *and* keeping the scope.
+    /// 2. Every shape must yield rows in every arm it runs in.
+    /// 3. Both scoped arms must total fewer rows than the union arm.
+    ///
+    /// A shape lowering refuses under `GRAPH ?gg` is asserted to refuse; the
+    /// refusal happens before any rewrite, so both pushdown states refuse
+    /// identically.
     #[test]
     fn pushdown_is_result_invariant_under_every_graph_scope() {
         let horn = graph_fixture();
@@ -1687,12 +1719,14 @@ mod tests {
                 GraphScope::Named(crate::algebra::GraphSpec::Var(Var::new("gg"))),
             ),
         ];
-        // Row totals per arm. The fixture's default-graph triple is outside
-        // both scoped arms (`GRAPH <g1>` reads one graph; `GRAPH ?gg` never
-        // binds the default graph, D3) and it holds no triple in two graphs,
-        // so each scoped arm must total strictly fewer rows than the union
-        // default graph. Equal totals would mean the scope never reached the
-        // scans — the exact regression this battery exists to catch.
+        // Row totals per arm, over the shapes that **run in all three arms**.
+        // Shapes that refuse under `GRAPH ?gg` are left out of every arm's
+        // total: counting them would let the refusal's own skipped rows
+        // satisfy `totals[2] < totals[0]`, so an arm whose scans all read the
+        // union default graph would still pass. Like-for-like, the fixture
+        // (see `graph_fixture`, invariant 1) makes both scoped arms strictly
+        // smaller than the union arm — equal totals mean the scope never
+        // reached the scans.
         let mut totals = [0usize; 3];
         let mut rewrote_something = [false; 3];
 
@@ -1750,17 +1784,22 @@ mod tests {
                     "every battery shape must yield rows under {arm}, or the \
                      identity assertion is vacuous:\n{q}"
                 );
-                totals[i] += with.len();
+                if !shape.refuses_under_graph_var {
+                    totals[i] += with.len();
+                }
             }
         }
 
         assert!(
             rewrote_something.iter().all(|f| *f),
-            "the rewrite must change at least one plan per arm: {rewrote_something:?}"
+            "the rewrite must be live on every arm: {rewrote_something:?}. This is \
+             a weak check — column pruning alone satisfies it. The count-leaf \
+             assertion above is what pins the count pushdown firing."
         );
         assert!(
             totals[1] < totals[0] && totals[2] < totals[0],
-            "the graph-scoped arms must see less than the union default graph: {totals:?}"
+            "the graph-scoped arms must see fewer rows than the union default \
+             graph: {totals:?}"
         );
     }
 
