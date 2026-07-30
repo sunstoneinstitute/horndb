@@ -47,35 +47,35 @@ adds it, the implementation should:
 For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.
 
-## GRAPH patterns — currently WRONG, not merely limited (#261)
+## GRAPH patterns — refused, not evaluated (SPEC-28 phase 1, #264)
 
-`translate.rs::translate_pattern` **discards** the `GRAPH` wrapper:
-`GraphPattern::Graph { name: _, inner }` lowers to `inner`. All four
-`translate_query_with` arms likewise bind `dataset: _`, so `FROM` and
-`FROM NAMED` are ignored too. `GRAPH <g> { P }` therefore evaluates `P`
-against the default graph and returns HTTP 200; `GRAPH ?g { P }` does the
-same with `?g` unbound.
+`translate.rs::translate_pattern` rejects every `GraphPattern::Graph` node
+— both the ground form (`GRAPH <g> { P }`) and the variable form
+(`GRAPH ?g { P }`) — with `SparqlError::UnsupportedAlgebra` naming `GRAPH`.
+`refuse_nonempty_dataset` rejects a non-empty `FROM`/`FROM NAMED` dataset
+clause the same way, naming `FROM`. Both errors are called from all four
+`translate_query_with` arms (`SELECT`/`ASK`/`CONSTRUCT`/`DESCRIBE`), so
+every query form is covered. The server already maps every `SparqlError`
+to HTTP 400 (`server/query.rs`), so no server change was needed: a
+named-graph query now gets an explicit 400 instead of a result.
 
-This was originally recorded as a Stage-1 simplification, on the premise
-that the executor held one merged graph loaded from flat triple dumps and
-there was nothing to scope against. **That premise no longer holds.**
-`horndb-storage` has been quad-aware since SPEC-25 S1 (#225) —
-`Store::insert_quads` / `retract_quads` / `intern_graph_uri` take a
-`GraphId`, `MemoryTier` keys partitions by graph, and the N-Quads loader
-routes each quad to its named graph. It is this crate, not storage, that
-throws the graph away.
+Before this phase, `translate_pattern` **discarded** the `GRAPH` wrapper
+and the four `translate_query_with` arms bound `dataset: _`, so `GRAPH
+<g> { P }` silently evaluated `P` against the default graph and returned
+HTTP 200 — a wrong answer, not a missing feature, and one a caller could
+not detect. That behaviour is gone; this section used to describe it
+under the heading "currently WRONG, not merely limited (#261)".
 
-The practical consequence: on any store whose data lives in named graphs
-(which is how the Sunstone data platform writes everything), these queries
-return **wrong answers that a caller cannot detect** — not empty results,
-not errors. The SPB named-graph queries (Q10/Q12) "run" only because their
-corpus is a single merged graph.
-
-`SPEC-28` owns the fix. Phase 1 turns `GRAPH` and a non-empty dataset
-clause into explicit 400s — small, no storage work, and correct straight
-away. Phases 2–4 add `Algebra::Graph`, real dataset construction, and
-named-graph update. Do not add features on top of the current behaviour;
-it is a bug, not a baseline.
+The underlying premise for the old Stage-1 shortcut — that the executor
+held one merged graph loaded from flat triple dumps, with nothing to
+scope against — no longer held even before this phase: `horndb-storage`
+has been quad-aware since SPEC-25 S1 (#225). `Store::insert_quads` /
+`retract_quads` / `intern_graph_uri` take a `GraphId`, `MemoryTier` keys
+partitions by graph, and the N-Quads loader routes each quad to its named
+graph. Real named-graph *evaluation* (as opposed to refusal) is SPEC-28
+phases 2–4 — see `docs/plans/PLAN-28-03-graph-query.md`
+([#266](https://github.com/sunstoneinstitute/horndb/issues/266)) for the
+`Algebra::Graph` lowering that replaces this refusal with a real answer.
 
 ## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)
 

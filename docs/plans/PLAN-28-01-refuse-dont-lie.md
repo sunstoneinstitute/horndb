@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 1 (S1) — refuse, do not lie: GRAPH patterns and non-empty FROM/FROM NAMED dataset clauses become explicit translate-time errors surfaced as HTTP 400, replacing today's silent wrong answers"
 ---
