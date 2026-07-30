@@ -153,11 +153,11 @@ impl Store {
         Ok(GraphId(id.0))
     }
 
-    /// Scan a single predicate in the default graph, returning materialized
-    /// (subject, object) `Term` pairs. Used by tests; production code should
-    /// use the tier's columnar scan directly.
-    pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
-        self.snapshot().scan_predicate_default_graph(predicate)
+    /// Scan a single predicate in `g`, returning materialized (subject,
+    /// object) `Term` pairs. Used by tests; production code should use the
+    /// tier's columnar scan directly.
+    pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
+        self.snapshot().scan_predicate(g, predicate)
     }
 
     /// Scan a single predicate in the default graph in the requested index
@@ -252,17 +252,17 @@ impl StoreSnapshot<'_> {
         self.tier.stats()
     }
 
-    /// Scan a single predicate in the default graph, returning materialized
-    /// (subject, object) `Term` pairs. A read transaction never mutates the
-    /// dictionary: an absent predicate (never interned) yields no rows.
-    pub fn scan_predicate_default_graph(&self, predicate: &Term) -> Result<Vec<(Term, Term)>> {
+    /// Scan a single predicate in `g`, returning materialized (subject,
+    /// object) `Term` pairs. A read transaction never mutates the dictionary:
+    /// an absent predicate (never interned) yields no rows.
+    pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
         let p_id = match self.dictionary.get(predicate) {
             Some(id) => id,
             None => return Ok(Vec::new()),
         };
         let pairs = self
             .tier
-            .with_predicate(DEFAULT_GRAPH, p_id, |part| {
+            .with_predicate(g, p_id, |part| {
                 part.scan_at(self.tier.version()).collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -380,6 +380,54 @@ impl StoreSnapshot<'_> {
         self.term(TermId(g.0))
     }
 
+    /// Every visible triple in graph `g`, decoded, from this single pinned
+    /// snapshot. O(quads in `g` + predicates in `g`) — never O(store). This is
+    /// the GSP (Graph Store Protocol) `GET` path and stage 3 of the
+    /// whole-graph `PUT` diff (SPEC-28), so it must stay graph-scoped rather
+    /// than filtering a whole-store scan. Predicates are visited in ascending
+    /// `TermId` order for a deterministic result, mirroring
+    /// [`Self::scan_all_term_ids`]'s pattern with `g` in place of
+    /// `DEFAULT_GRAPH`.
+    pub fn scan_graph(&self, g: GraphId) -> Result<Vec<(Term, Term, Term)>> {
+        let version = self.tier.version();
+        let mut preds = self.tier.predicates(g);
+        preds.sort_by_key(|t| t.0);
+        let mut out = Vec::with_capacity(self.graph_len(g));
+        for p_id in preds {
+            let rows = self
+                .tier
+                .with_predicate(g, p_id, |part| part.scan_at(version).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for (s_id, o_id) in rows {
+                out.push((self.term(s_id)?, self.term(p_id)?, self.term(o_id)?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Key-ordered iteration over every visible triple in graph `g`, as raw
+    /// `TermId`s: predicates in ascending id order, subject-major within each
+    /// predicate. The id-level twin of [`Self::scan_graph`] — this is what the
+    /// future SPEC-24 S6 backing and the phase-5 GSP diff consume. Mirrors
+    /// [`Self::iter_all_term_ids`]'s ordering contract, scoped to `g`.
+    pub fn iter_graph_term_ids(
+        &self,
+        g: GraphId,
+    ) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
+        let version = self.tier.version();
+        let mut preds = self.tier.predicates(g);
+        preds.sort_by_key(|t| t.0);
+        preds.into_iter().flat_map(move |p_id| {
+            self.tier
+                .with_predicate(g, p_id, |part| {
+                    part.scan_at(version)
+                        .map(move |(s, o)| (s, p_id, o))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    }
+
     /// True if `(s, p, o)` is visible in the default graph at this pinned
     /// version (SPEC-24 S6 point read). O(partition size) for S1: a linear
     /// scan of the predicate partition's rows. Fine for the point reads S6
@@ -462,7 +510,7 @@ mod tests {
         // query term (a read transaction is non-mutating).
         let snap = store.snapshot();
         assert!(snap
-            .scan_predicate_default_graph(&absent)
+            .scan_predicate(DEFAULT_GRAPH, &absent)
             .unwrap()
             .is_empty());
         assert!(snap
@@ -470,7 +518,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(store
-            .scan_predicate_default_graph(&absent)
+            .scan_predicate(DEFAULT_GRAPH, &absent)
             .unwrap()
             .is_empty());
 
@@ -494,7 +542,7 @@ mod tests {
             .unwrap();
         assert_eq!(snap.triple_count(), 1);
         assert_eq!(
-            snap.scan_predicate_default_graph(&iri("http://ex/p"))
+            snap.scan_predicate(DEFAULT_GRAPH, &iri("http://ex/p"))
                 .unwrap()
                 .len(),
             1
@@ -504,7 +552,7 @@ mod tests {
         assert_eq!(store.triple_count(), 2);
         assert_eq!(
             store
-                .scan_predicate_default_graph(&iri("http://ex/p"))
+                .scan_predicate(DEFAULT_GRAPH, &iri("http://ex/p"))
                 .unwrap()
                 .len(),
             2
@@ -756,5 +804,164 @@ mod tests {
             "retracted quad must be gone"
         );
         assert!(after_rows.contains(&(c_id, d_id)), "surviving quad remains");
+    }
+
+    /// `scan_graph` returns exactly one graph's visible triples, decoded. A
+    /// triple asserted in two graphs (same `(s, p, o)`, different `GraphId`)
+    /// must appear in both graphs' scans — graph membership, not triple
+    /// identity, is what's scoped.
+    #[test]
+    fn scan_graph_returns_exactly_the_graphs_quads() {
+        let store = Store::in_memory();
+        let g1 = store.intern_graph_uri(&iri("http://ex/g1")).unwrap();
+        let g2 = store.intern_graph_uri(&iri("http://ex/g2")).unwrap();
+        let shared = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+        let g1_only = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
+        let g2_only = (iri("http://ex/e"), iri("http://ex/q"), iri("http://ex/f"));
+        let default_only = (iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"));
+
+        store
+            .insert_quads(&[
+                (g1, shared.0.clone(), shared.1.clone(), shared.2.clone()),
+                (g2, shared.0.clone(), shared.1.clone(), shared.2.clone()),
+                (g1, g1_only.0.clone(), g1_only.1.clone(), g1_only.2.clone()),
+                (g2, g2_only.0.clone(), g2_only.1.clone(), g2_only.2.clone()),
+            ])
+            .unwrap();
+        store
+            .insert_triples(std::slice::from_ref(&default_only))
+            .unwrap();
+
+        let snap = store.snapshot();
+
+        let g1_rows = snap.scan_graph(g1).unwrap();
+        assert_eq!(g1_rows.len(), 2, "g1 holds the shared triple plus its own");
+        assert!(g1_rows.contains(&shared));
+        assert!(g1_rows.contains(&g1_only));
+        assert!(
+            !g1_rows.contains(&g2_only),
+            "g1's scan must not see g2's triple"
+        );
+        assert!(
+            !g1_rows.contains(&default_only),
+            "g1's scan must not see default-graph data"
+        );
+
+        let g2_rows = snap.scan_graph(g2).unwrap();
+        assert_eq!(g2_rows.len(), 2, "g2 holds the shared triple plus its own");
+        assert!(
+            g2_rows.contains(&shared),
+            "the shared triple appears in both graphs' scans"
+        );
+        assert!(g2_rows.contains(&g2_only));
+        assert!(!g2_rows.contains(&g1_only));
+    }
+
+    /// `scan_graph` respects visibility: a snapshot pinned before a retraction
+    /// still returns the retracted quad; a fresh snapshot omits it.
+    #[test]
+    fn scan_graph_respects_visibility() {
+        let store = Store::in_memory();
+        let g1 = store.intern_graph_uri(&iri("http://ex/g1")).unwrap();
+        let keep = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+        let gone = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
+        store
+            .insert_quads(&[
+                (g1, keep.0.clone(), keep.1.clone(), keep.2.clone()),
+                (g1, gone.0.clone(), gone.1.clone(), gone.2.clone()),
+            ])
+            .unwrap();
+
+        // Pin a snapshot BEFORE the retraction.
+        let before = store.snapshot();
+
+        let n = store
+            .retract_quads(&[(g1, gone.0.clone(), gone.1.clone(), gone.2.clone())])
+            .unwrap();
+        assert_eq!(n, 1);
+
+        // The old, pinned-before snapshot still sees the retracted quad.
+        let before_rows = before.scan_graph(g1).unwrap();
+        assert_eq!(before_rows.len(), 2);
+        assert!(before_rows.contains(&keep));
+        assert!(before_rows.contains(&gone));
+
+        // A fresh snapshot omits it.
+        let after_rows = store.snapshot().scan_graph(g1).unwrap();
+        assert_eq!(after_rows.len(), 1);
+        assert!(after_rows.contains(&keep));
+        assert!(!after_rows.contains(&gone));
+    }
+
+    /// `iter_graph_term_ids` mirrors `iter_all_term_ids`'s ordering contract:
+    /// predicates in ascending `TermId` order, subject-major (rows sorted by
+    /// subject id) within each predicate — scoped to one graph. Interning
+    /// order below is chosen so the expected `TermId` order is known: `pb` is
+    /// interned before `pa` (so `pb`'s id is lower), and within `pa`, `s3` is
+    /// interned before `s2` (so `s3`'s row must come first even though it was
+    /// inserted second).
+    #[test]
+    fn iter_graph_term_ids_is_key_ordered() {
+        let store = Store::in_memory();
+        let g1 = store.intern_graph_uri(&iri("http://ex/g1")).unwrap();
+        let o = iri("http://ex/o");
+
+        // Interning order: s1, pb, o, s3, pa, s2.
+        store
+            .insert_quads(&[(g1, iri("http://ex/s1"), iri("http://ex/pb"), o.clone())])
+            .unwrap();
+        store
+            .insert_quads(&[(g1, iri("http://ex/s3"), iri("http://ex/pa"), o.clone())])
+            .unwrap();
+        store
+            .insert_quads(&[(g1, iri("http://ex/s2"), iri("http://ex/pa"), o.clone())])
+            .unwrap();
+
+        let snap = store.snapshot();
+        let d = store.dictionary();
+        let (s1, pb, o_id, s3, pa, s2) = (
+            d.get(&iri("http://ex/s1")).unwrap(),
+            d.get(&iri("http://ex/pb")).unwrap(),
+            d.get(&o).unwrap(),
+            d.get(&iri("http://ex/s3")).unwrap(),
+            d.get(&iri("http://ex/pa")).unwrap(),
+            d.get(&iri("http://ex/s2")).unwrap(),
+        );
+        assert!(pb.0 < pa.0, "pb must be interned before pa");
+        assert!(s3.0 < s2.0, "s3 must be interned before s2");
+
+        let ids: Vec<_> = snap.iter_graph_term_ids(g1).collect();
+        assert_eq!(
+            ids,
+            vec![(s1, pb, o_id), (s3, pa, o_id), (s2, pa, o_id),],
+            "predicates ascending, subject-major within each predicate"
+        );
+    }
+
+    /// `scan_predicate` takes a graph parameter: `scan_predicate(g1, &p)` sees
+    /// only `g1`'s rows, and `scan_predicate(DEFAULT_GRAPH, &p)` reproduces the
+    /// old default-graph-only behaviour on the same fixture.
+    #[test]
+    fn scan_predicate_takes_a_graph() {
+        let store = Store::in_memory();
+        let g1 = store.intern_graph_uri(&iri("http://ex/g1")).unwrap();
+        let p = iri("http://ex/p");
+
+        store
+            .insert_triples(&[(iri("http://ex/a"), p.clone(), iri("http://ex/b"))])
+            .unwrap();
+        store
+            .insert_quads(&[(g1, iri("http://ex/c"), p.clone(), iri("http://ex/d"))])
+            .unwrap();
+
+        let snap = store.snapshot();
+
+        let g1_rows = snap.scan_predicate(g1, &p).unwrap();
+        assert_eq!(g1_rows.len(), 1);
+        assert_eq!(g1_rows[0], (iri("http://ex/c"), iri("http://ex/d")));
+
+        let default_rows = snap.scan_predicate(DEFAULT_GRAPH, &p).unwrap();
+        assert_eq!(default_rows.len(), 1);
+        assert_eq!(default_rows[0], (iri("http://ex/a"), iri("http://ex/b")));
     }
 }

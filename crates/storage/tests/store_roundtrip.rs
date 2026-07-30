@@ -1,4 +1,4 @@
-use horndb_storage::Store;
+use horndb_storage::{Store, DEFAULT_GRAPH};
 use oxrdf::{NamedNode, Term};
 
 fn nn(s: &str) -> Term {
@@ -19,7 +19,7 @@ fn insert_triple_and_query_by_predicate() {
         .unwrap();
     assert_eq!(store.triple_count(), 2);
 
-    let pairs = store.scan_predicate_default_graph(&knows).unwrap();
+    let pairs = store.scan_predicate(DEFAULT_GRAPH, &knows).unwrap();
     let mut s_strings: Vec<String> = pairs.iter().map(|(s, _)| format!("{s}")).collect();
     s_strings.sort();
     assert_eq!(
