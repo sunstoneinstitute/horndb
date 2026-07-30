@@ -253,27 +253,24 @@ pub enum GraphSpec {
 /// The query's `FROM` / `FROM NAMED` dataset clause, resolved at
 /// translation time and threaded to the executor (SPEC-28 S3, D2–D4).
 ///
-/// `None` in either field means "no clause of that kind was written"; the
-/// executor then falls back to its default-graph mode / visibility rules.
-/// `Some(vec![])` is a **distinct** state from `None` — it means the clause
-/// was written but named zero graphs (only reachable today via `FROM NAMED`
-/// without `FROM`, D4's empty-default-graph rule).
+/// Invariant: any dataset clause present (`FROM` and/or `FROM NAMED`) ⇒
+/// both fields `Some`; no dataset clause at all ⇒ both `None`. Each field
+/// means exactly one thing on its own — a consumer never has to read the
+/// other field to interpret it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DatasetSpec {
     /// `FROM <g1> FROM <g2> …` — the default graph is the term-level set
-    /// union of these graphs. `None` = no `FROM`: the query's
-    /// `DefaultGraphMode` decides (union of non-reserved graphs, or the
-    /// strict default-graph sentinel only).
+    /// union of these graphs. `Some(vec![])` when only `FROM NAMED` was
+    /// written (D4's empty-default-graph rule). `None` = no dataset clause
+    /// at all: the query's `DefaultGraphMode` decides (union of
+    /// non-reserved graphs, or the strict default-graph sentinel only).
     pub default: Option<Vec<String>>,
     /// `FROM NAMED <g1> FROM NAMED <g2> …` — exactly these graphs are
-    /// nameable/enumerable by `GRAPH ?g`. `None` means no `FROM NAMED`
-    /// clause was written — what that implies for the named-graph set
-    /// depends on `default` (SPARQL 1.1 §13.2, SPEC-28 D4): no dataset
-    /// clause at all (`default` is also `None`) → every non-reserved graph
-    /// is nameable/enumerable; `FROM` without `FROM NAMED` (`default` is
-    /// `Some`) → the named set is **empty**, not "every graph" — a query
-    /// that names *any* part of the dataset gets exact SPARQL 1.1
-    /// semantics, it does not fall back to the no-dataset-clause default.
+    /// nameable/enumerable by `GRAPH ?g`. `Some(vec![])` when only `FROM`
+    /// was written: a query naming any part of the dataset gets exact
+    /// SPARQL 1.1 semantics (§13.2), so the named set is explicitly empty,
+    /// not "every graph". `None` = no dataset clause at all: every
+    /// non-reserved graph is nameable/enumerable.
     pub named: Option<Vec<String>>,
 }
 

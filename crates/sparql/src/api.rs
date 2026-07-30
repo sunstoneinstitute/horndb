@@ -369,7 +369,7 @@ fn explicit_describe_iris(alg: &crate::algebra::Algebra) -> Vec<crate::algebra::
                 }
                 node = inner.as_ref();
             }
-            // Any other variant (Bgp/Join/LeftJoin/Filter/Union/Values):
+            // Any other variant (Bgp/Join/LeftJoin/Filter/Union/Values/Graph):
             // the WHERE-pattern boundary. Stop walking.
             _ => break,
         }

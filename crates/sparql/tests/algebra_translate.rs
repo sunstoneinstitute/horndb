@@ -264,11 +264,12 @@ fn graph_var_translates_and_scopes_var() {
 }
 
 #[test]
-fn nested_graph_innermost_wins() {
+fn nested_graph_preserves_nesting_order() {
     // Translation preserves the nesting order (outer Graph wraps inner
-    // Graph) rather than collapsing or reordering it — scan-scope lowering
-    // (PLAN-28-03 Task 3) relies on that nesting to apply SPARQL's
-    // "innermost wins" rule by overwriting the outer scope on the way down.
+    // Graph) rather than collapsing or reordering it. It does not itself
+    // implement "innermost wins" — that's scan-scope lowering's job
+    // (PLAN-28-03 Task 3, which overwrites the outer scope on the way
+    // down); this only pins the tree shape lowering relies on.
     let alg = translated_of(
         "SELECT * WHERE { GRAPH <http://ex/g1> { GRAPH <http://ex/g2> { ?s ?p ?o } } }",
     )
@@ -293,13 +294,15 @@ fn nested_graph_innermost_wins() {
 
 #[test]
 fn from_clause_recorded() {
-    // FROM list present -> default graph is exactly that list.
+    // FROM list present -> default graph is exactly that list; named is
+    // Some(vec![]), not None — any dataset clause makes both fields Some
+    // (the representation-level invariant `DatasetSpec` documents).
     let tq = translated_of("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }");
     assert_eq!(
         tq.dataset,
         DatasetSpec {
             default: Some(vec!["http://ex/g1".to_owned(), "http://ex/g2".to_owned()]),
-            named: None,
+            named: Some(vec![]),
         }
     );
 }
@@ -314,6 +317,23 @@ fn from_named_only_yields_empty_default() {
         DatasetSpec {
             default: Some(vec![]),
             named: Some(vec!["http://ex/g1".to_owned()]),
+        }
+    );
+}
+
+#[test]
+fn from_and_from_named_recorded_separately() {
+    // Both clauses present: the only combination not covered by the two
+    // tests above, and the one where a mis-partition of spargebra's flat
+    // clause list (which interleaves FROM and FROM NAMED entries) would
+    // show up — each graph must land in the right field.
+    let tq =
+        translated_of("SELECT * FROM <http://ex/g1> FROM NAMED <http://ex/g2> WHERE { ?s ?p ?o }");
+    assert_eq!(
+        tq.dataset,
+        DatasetSpec {
+            default: Some(vec!["http://ex/g1".to_owned()]),
+            named: Some(vec!["http://ex/g2".to_owned()]),
         }
     );
 }

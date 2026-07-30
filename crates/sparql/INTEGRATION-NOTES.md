@@ -77,6 +77,12 @@ phases 2–4 — see `docs/plans/PLAN-28-03-graph-query.md`
 ([#266](https://github.com/sunstoneinstitute/horndb/issues/266)) for the
 `Algebra::Graph` lowering that replaces this refusal with a real answer.
 
+**Phase 3 update (PLAN-28-03 Task 1):** the paragraphs above describe
+phase 1 and are now historical — `translate_pattern` accepts `GRAPH` and
+`refuse_nonempty_dataset` is deleted; `translate.rs::dataset_spec_from`
+resolves `FROM`/`FROM NAMED` into a `DatasetSpec` instead. Full section
+rewrite lands in PLAN-28-03 Task 7.
+
 ## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)
 
 `crates/sparql/src/exec/horn.rs` implements the `Executor` + `Store`

@@ -1,12 +1,13 @@
 //! End-to-end tests for the expanded expression surface (#66):
 //! arithmetic, IF, COALESCE, builtin functions.
 
-use horndb_sparql::algebra::translate::translate_query;
-use horndb_sparql::algebra::Term;
+use horndb_sparql::algebra::translate::{translate_query, translate_query_with};
+use horndb_sparql::algebra::{DatasetSpec, Term};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
 use horndb_sparql::parser::{parse_query, ParsedQuery};
+use horndb_sparql::SparqlConfig;
 
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
@@ -59,6 +60,20 @@ fn translate_str(q: &str) -> horndb_sparql::Result<horndb_sparql::algebra::Algeb
         ParsedQuery::Explain { .. } => panic!("explain not supported here"),
     };
     translate_query(&inner)
+}
+
+/// Like [`translate_str`] but keeps the resolved `DatasetSpec` instead of
+/// discarding it.
+fn translated_str(q: &str) -> horndb_sparql::Result<horndb_sparql::algebra::TranslatedQuery> {
+    let parsed = parse_query(q).expect("parse");
+    let inner = match parsed {
+        ParsedQuery::Select { inner }
+        | ParsedQuery::Ask { inner }
+        | ParsedQuery::Construct { inner }
+        | ParsedQuery::Describe { inner } => inner,
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
+    };
+    translate_query_with(&inner, &SparqlConfig::default())
 }
 
 #[test]
@@ -394,10 +409,9 @@ fn if_condition_uses_effective_boolean_value() {
 
 #[test]
 fn graph_pattern_translates_ground_and_var() {
-    // SPEC-28 phase 3 (#266): GRAPH translates instead of refusing (phase
-    // 1's placeholder). Evaluation-level coverage (query results,
-    // ?g binding) lands in Task 4's graph_query.rs — this only pins that
-    // translation succeeds now.
+    // GRAPH must translate for both the ground and variable forms.
+    // Evaluation-level coverage (query results, ?g binding) is Task 4's
+    // graph_query.rs.
     for q in [
         "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
         "SELECT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
@@ -444,11 +458,13 @@ fn isnumeric_requires_numeric_datatype() {
 
 #[test]
 fn dataset_clause_translates_all_query_forms() {
-    // SPEC-28 phase 3 (#266): a non-empty FROM/FROM NAMED dataset clause
-    // translates instead of refusing (phase 1's placeholder) — the
-    // DatasetSpec-level semantics (default-graph union, D4's empty
-    // default) are pinned in algebra_translate.rs; this only checks every
-    // query form accepts the clause.
+    // A non-empty FROM/FROM NAMED dataset clause must translate to a
+    // *non-default* DatasetSpec for every query form. Asserting on the
+    // captured dataset, not just "translation succeeded", catches an arm
+    // that silently drops it (the four `translate_query_with` arms are
+    // hand-edited near-identically, so this is a live risk). DatasetSpec's
+    // own semantics (default-graph union, D4's empty default) are pinned
+    // in algebra_translate.rs.
     for q in [
         "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }",
         "SELECT ?s FROM NAMED <http://ex/g> WHERE { ?s ?p ?o }",
@@ -456,18 +472,17 @@ fn dataset_clause_translates_all_query_forms() {
         "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g> WHERE { ?s ?p ?o }",
         "DESCRIBE <http://ex/x> FROM <http://ex/g>",
     ] {
-        translate_str_ok(q);
+        let tq = translated_str(q).unwrap_or_else(|e| panic!("translate should succeed: {q}: {e}"));
+        assert_ne!(tq.dataset, DatasetSpec::default(), "{q}");
     }
 }
 
 #[test]
 fn dataset_clause_end_to_end_refuses_rather_than_answer_wrong_graph() {
-    // Regression guard: DatasetSpec is captured at translation but not yet
-    // threaded to the executor (PLAN-28-03 Task 3), so a query naming a
-    // dataset must refuse end-to-end rather than silently answer as if the
-    // clause were absent — that would return default-graph rows for a
-    // `FROM <g>` naming a graph with no data, exactly the wrong-answer
-    // class SPEC-28 phase 1 (#264) shipped to eliminate.
+    // A query naming a dataset must refuse end-to-end, not silently answer
+    // as if the clause were absent (that would return default-graph rows
+    // for a `FROM <g>` naming a graph with no data — a wrong answer, not a
+    // missing feature).
     let s = store_with_prices();
     let err = execute_query("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }", &s).unwrap_err();
     assert!(err.to_string().contains("FROM"), "{err}");
@@ -475,16 +490,13 @@ fn dataset_clause_end_to_end_refuses_rather_than_answer_wrong_graph() {
 
 #[test]
 fn graph_pattern_end_to_end_refuses_until_lowered() {
-    // Same story for GRAPH: translation succeeds (SPEC-28 phase 3), but
-    // scan-scope lowering isn't implemented until Task 3, so the query
-    // must still refuse — with a `Planner` error now, not the phase-1
-    // translation-time refusal.
+    // GRAPH translates but isn't lowered yet (PLAN-28-03 Task 3), so it
+    // must still refuse end-to-end, with the planner's specific error.
     let s = store_with_prices();
     let err = execute_query("SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }", &s)
         .unwrap_err()
-        .to_string()
-        .to_lowercase();
-    assert!(err.contains("graph"), "{err}");
+        .to_string();
+    assert!(err.contains("Graph not lowered"), "{err}");
 }
 
 #[test]

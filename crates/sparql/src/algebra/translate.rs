@@ -22,10 +22,16 @@ use spargebra::term::{
 };
 use spargebra::Query;
 
-/// Top-level entry: lower a parsed `spargebra::Query` to [`Algebra`]
-/// using the default [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term
-/// patterns are rejected). Discards the resolved [`DatasetSpec`] — callers
-/// that need `FROM`/`FROM NAMED` should use [`translate_query_with`].
+/// Lower a parsed `spargebra::Query` to [`Algebra`] using the default
+/// [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term patterns are
+/// rejected), **discarding the resolved [`DatasetSpec`]**.
+///
+/// Has no production callers today — every real query path (`api.rs`)
+/// goes through [`translate_query_with`] so `FROM`/`FROM NAMED` is not
+/// silently dropped. Kept for callers that provably never reach a
+/// dataset-sensitive executor (unit tests over `Algebra` shape only); do
+/// not add a call on any path that plans or executes a query.
+#[doc(hidden)]
 pub fn translate_query(q: &Query) -> Result<Algebra> {
     translate_query_with(q, &SparqlConfig::default()).map(|tq| tq.algebra)
 }
@@ -91,49 +97,38 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
 /// Resolve a parsed `FROM`/`FROM NAMED` clause to a [`DatasetSpec`]
 /// (SPEC-28 S3, D2–D4).
 ///
-/// `spargebra`'s `DatasetClauses()` rule (`parser.rs:1171`) sets
-/// `named: Some(_)` whenever **any** dataset clause (`FROM` or `FROM
-/// NAMED`) is present, not only when `FROM NAMED` itself was written — a
-/// query with only `FROM <g>` also parses to `named: Some(vec![])`. So
-/// `ds.named.is_some()` cannot distinguish "`FROM NAMED` was written" from
-/// "it wasn't"; the real signal is whether that vec is non-empty (each
-/// `FROM NAMED <g>` contributes exactly one entry via `SourceSelector()`,
-/// so an empty vec means no `FROM NAMED` clause was parsed).
+/// Invariant: any dataset clause present (`FROM` and/or `FROM NAMED`) ⇒
+/// both fields `Some`; no dataset clause at all ⇒ both `None`. So
+/// `named: None` means exactly one thing, and no downstream consumer has
+/// to read `default` alongside `named` to know what `None` implies —
+/// `FROM` without `FROM NAMED` still yields `named: Some(vec![])` (an
+/// explicitly empty named set), not `None`.
 ///
-/// Rules pinned:
-/// - `FROM` list present → `default: Some(list)` (the term-level set union
-///   of those graphs).
-/// - `FROM NAMED` without `FROM` → **empty default graph** (D4):
-///   `default: Some(vec![])`, distinct from `None`.
-/// - No dataset clause → `default: None, named: None` (the query's
-///   `DefaultGraphMode` and named-graph visibility rules decide).
+/// `spargebra`'s `DatasetClauses()` rule (`parser.rs:1171`) sets
+/// `named: Some(_)` whenever **any** dataset clause is present, not only
+/// when `FROM NAMED` itself was written — a query with only `FROM <g>`
+/// also parses to `named: Some(vec![])`. So whether `FROM NAMED` was
+/// actually written is read off whether that vec is non-empty, not
+/// `Option::is_some()`.
 fn dataset_spec_from(ds: &Option<QueryDataset>) -> DatasetSpec {
     let Some(ds) = ds else {
         return DatasetSpec::default();
     };
     let has_from = !ds.default.is_empty();
-    let has_from_named = ds.named.as_ref().is_some_and(|n| !n.is_empty());
-    if !has_from && !has_from_named {
-        // No clause actually named a graph (spargebra returns `None` for a
-        // fully absent dataset clause, so this is a defensive no-op).
-        return DatasetSpec::default();
-    }
-    let named = has_from_named.then(|| {
-        ds.named
-            .as_ref()
-            .expect("has_from_named implies Some")
-            .iter()
+    let named_graphs = ds.named.as_ref().filter(|n| !n.is_empty());
+    let has_dataset_clause = has_from || named_graphs.is_some();
+    // `ds.default` is already `[]` when `!has_from`, so mapping it
+    // unconditionally also gives D4's "FROM NAMED without FROM -> empty
+    // default graph" for free.
+    let default =
+        has_dataset_clause.then(|| ds.default.iter().map(|n| n.as_str().to_owned()).collect());
+    let named = has_dataset_clause.then(|| {
+        named_graphs
+            .into_iter()
+            .flatten()
             .map(|n| n.as_str().to_owned())
             .collect()
     });
-    let default = if has_from {
-        Some(ds.default.iter().map(|n| n.as_str().to_owned()).collect())
-    } else if has_from_named {
-        // FROM NAMED without FROM (D4): empty default graph, not "no clause".
-        Some(Vec::new())
-    } else {
-        None
-    };
     DatasetSpec { default, named }
 }
 
