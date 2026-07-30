@@ -1,11 +1,90 @@
 //! Source operators: leaves with no child input.
 
 use super::{ChunkedBatch, Op};
-use crate::algebra::{Term, TriplePattern, Var};
+use crate::algebra::{GraphSpec, Term, TriplePattern, Var};
 use crate::error::Result;
 use crate::exec::runtime::{integer_literal, lex};
-use crate::exec::{Batch, Executor, GroupCount, KeyPart, Row, ScanScope, Slot};
+use crate::exec::{Batch, Executor, GroupCount, KeyPart, ResolvedScope, Row, ScanScope, Slot};
+use crate::plan::GraphScope;
 use std::collections::HashMap;
+
+/// Read one scan leaf under its graph scope.
+///
+/// Every scope but `GRAPH ?g` is a single executor read. The variable form
+/// is the one shape a backend cannot answer in one read, so it is handled
+/// here: enumerate the graphs, scan each one, and append the graph variable
+/// as an output column. That keeps the *plan* one scan node whatever the
+/// graph count (SPEC-28 D6) while the *cost* stays O(Σ scanned graphs).
+///
+/// The appended column joins like any other — an enclosing pattern binding
+/// the same variable meets it in the batch schema — and if the BGP itself
+/// binds the graph variable (`GRAPH ?g { ?g ?p ?o }`) the column is not
+/// duplicated: rows survive only where the two agree.
+pub(crate) fn scan_scoped<E: Executor + ?Sized>(
+    exec: &E,
+    patterns: &[TriplePattern],
+    scope: &ScanScope<'_>,
+) -> Result<Batch> {
+    let ResolvedScope::PerGraph { var, named } = scope.resolve() else {
+        return exec.scan_bgp_ids(patterns, scope);
+    };
+
+    let mut schema: Vec<Var> = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    // Index of the graph column in `schema`, and — when the BGP binds the
+    // graph variable itself — the column the per-graph batch already has
+    // for it. Both are fixed once the first non-empty graph sets `schema`.
+    let mut graph_col = 0usize;
+    let mut bound_by_bgp = false;
+
+    for graph in exec.named_graphs(named)? {
+        // Scan this one graph through the ordinary ground-`GRAPH` path, so
+        // the dataset's named set and the backend's scoping stay the single
+        // implementation (`ScanScope::resolve`).
+        let leaf = GraphScope::Named(GraphSpec::Iri(graph.iri));
+        let batch =
+            exec.scan_bgp_ids(patterns, &ScanScope::new(&leaf, scope.dataset, scope.mode))?;
+        if batch.rows.is_empty() {
+            continue;
+        }
+        if schema.is_empty() {
+            schema = batch.schema.clone();
+            graph_col = match schema.iter().position(|v| v.name() == var.name()) {
+                Some(i) => {
+                    bound_by_bgp = true;
+                    i
+                }
+                None => {
+                    schema.push(var.clone());
+                    schema.len() - 1
+                }
+            };
+        }
+        // Per-graph batches share one schema in practice; map by name
+        // anyway so a backend whose scan schema follows the data (any
+        // `Batch::from_bindings` executor) still lands in the right column.
+        let src: Vec<Option<usize>> = schema.iter().map(|v| batch.col(v.name())).collect();
+        for row in batch.rows {
+            if bound_by_bgp {
+                let own = src[graph_col].map(|i| &row.0[i]).unwrap_or(&Slot::Unbound);
+                if !Slot::eq(own, &graph.binding, |id| exec.decode_term(id))? {
+                    continue;
+                }
+            }
+            let slots = src
+                .iter()
+                .enumerate()
+                .map(|(col, from)| match from {
+                    _ if col == graph_col && !bound_by_bgp => graph.binding.clone(),
+                    Some(i) => row.0[*i].clone(),
+                    None => Slot::Unbound,
+                })
+                .collect();
+            rows.push(Row(slots));
+        }
+    }
+    Ok(Batch { schema, rows })
+}
 
 /// Scans a BGP once via the executor, then hands the rows out in chunks.
 /// The scan seam is unchanged (`scan_bgp_ids` returns a whole `Batch`); this
@@ -74,8 +153,9 @@ impl CountScanOp {
         let n = match exec.count_bgp(patterns, scope)? {
             Some(n) => n,
             // Correctness fallback: count the id-rows the scan would yield.
-            // Scope-correct by construction — the same scope the count used.
-            None => exec.scan_bgp_ids(patterns, scope)?.rows.len(),
+            // Scope-correct by construction — `scan_scoped` is the same read
+            // the scan would do, `GRAPH ?g`'s per-graph loop included.
+            None => scan_scoped(exec, patterns, scope)?.rows.len(),
         };
         let lit = crate::exec::runtime::integer_literal(i64::try_from(n).unwrap_or(i64::MAX));
         let batch = Batch {
@@ -132,7 +212,7 @@ impl GroupCountScanOp {
         if keys.is_empty() {
             let n = match exec.count_bgp(patterns, scope)? {
                 Some(n) => n,
-                None => exec.scan_bgp_ids(patterns, scope)?.rows.len(),
+                None => scan_scoped(exec, patterns, scope)?.rows.len(),
             };
             let lit = integer_literal(i64::try_from(n).unwrap_or(i64::MAX));
             let rows = vec![Row(out_vars
@@ -214,7 +294,7 @@ fn fallback_group_counts<E: Executor + ?Sized>(
     keys: &[Var],
     scope: &ScanScope<'_>,
 ) -> Result<Vec<GroupCount>> {
-    let batch = exec.scan_bgp_ids(patterns, scope)?;
+    let batch = scan_scoped(exec, patterns, scope)?;
     let key_idx: Vec<Option<usize>> = keys.iter().map(|k| batch.col(k.name())).collect();
     let mut groups: HashMap<Vec<KeyPart>, (Vec<Slot>, usize)> = HashMap::new();
     for r in &batch.rows {

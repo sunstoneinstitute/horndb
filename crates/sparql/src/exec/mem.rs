@@ -15,9 +15,11 @@
 
 use crate::algebra::{Term, TriplePattern};
 use crate::error::Result;
-use crate::exec::scope::{is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope};
-use crate::exec::{unify_one, Bindings, Executor, Store};
-use std::collections::{HashMap, HashSet};
+use crate::exec::scope::{
+    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+};
+use crate::exec::{unify_one, Bindings, Executor, Slot, Store};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The graph a quad lives in: `None` is the default-graph sentinel (which
 /// has no IRI), `Some(iri)` a named graph.
@@ -189,7 +191,7 @@ fn graph_filter<'a>(scope: &ScanScope<'a>) -> Result<GraphFilter<'a>> {
         ResolvedScope::DefaultUnion => GraphFilter::AnyNonReserved,
         ResolvedScope::Union(list) => GraphFilter::Named(list.iter().map(String::as_str).collect()),
         ResolvedScope::OneGraph(g) => GraphFilter::Named(HashSet::from([g])),
-        ResolvedScope::PerGraph(v) => return Err(per_graph_unsupported(v)),
+        ResolvedScope::PerGraph { var, .. } => return Err(per_graph_needs_the_scan_loop(var)),
     })
 }
 
@@ -229,6 +231,34 @@ impl Executor for MemStore {
             }
         }
         Ok(Box::new(current.into_iter()))
+    }
+
+    /// The graphs `GRAPH ?g` enumerates, sorted by IRI. Walks the membership
+    /// sets beside the triple table; the default graph (the `None` name) is
+    /// never among them (D3). `?g` binds as a `Slot::Term` IRI, matching
+    /// every other column this dictionary-less backend produces.
+    fn named_graphs(&self, named: Option<&[String]>) -> Result<Vec<NamedGraph>> {
+        let mut iris: BTreeSet<&str> = BTreeSet::new();
+        for holders in &self.graphs {
+            for g in holders.iter().filter_map(Option::as_deref) {
+                let admitted = match named {
+                    // No `FROM NAMED`: every non-reserved graph.
+                    None => !is_reserved_graph(g),
+                    // `FROM NAMED …`: exactly these, reserved included.
+                    Some(list) => list.iter().any(|n| n == g),
+                };
+                if admitted {
+                    iris.insert(g);
+                }
+            }
+        }
+        Ok(iris
+            .into_iter()
+            .map(|iri| NamedGraph {
+                iri: iri.to_owned(),
+                binding: Slot::Term(Term::Iri(iri.to_owned())),
+            })
+            .collect())
     }
 
     /// Scope-agnostic on purpose: the whole-store leaf-pattern count is a

@@ -4,8 +4,8 @@
 
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
-mod source;
-use source::{CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
+pub(crate) mod source;
+use source::{scan_scoped, CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
@@ -98,10 +98,14 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         E: 'r,
     {
         match plan {
-            PhysicalPlan::BgpScan { patterns, scope } => Ok(Box::new(ScanOp::new(
-                self.exec()
-                    .scan_bgp_ids(patterns, &self.scan_scope(scope))?,
-            ))),
+            // `scan_scoped`, not `scan_bgp_ids`: `GRAPH ?g` is one scan node
+            // whose operator loops over the graphs and appends the `?g`
+            // column, so the plan never grows with the graph count (D6).
+            PhysicalPlan::BgpScan { patterns, scope } => Ok(Box::new(ScanOp::new(scan_scoped(
+                self.exec(),
+                patterns,
+                &self.scan_scope(scope),
+            )?))),
             PhysicalPlan::CountScan {
                 patterns,
                 out_var,

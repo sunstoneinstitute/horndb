@@ -155,7 +155,9 @@ pub fn load_with_reasoning(
 }
 
 use crate::algebra::{TriplePattern, Var};
-use crate::exec::scope::{is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope};
+use crate::exec::scope::{
+    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+};
 use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
 use arrow::array::UInt64Array;
 use horndb_storage::{GraphId, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH};
@@ -211,8 +213,9 @@ impl QuadKey {
 ///
 /// [`ResolvedScope::PerGraph`] has no variant here on purpose: `GRAPH ?g`
 /// binds a per-row graph column rather than reading one flattened source
-/// (SPEC-28 D6), so it does not resolve to a snapshot at all. It is refused
-/// at [`HornBackend::resolve_scope`] until PLAN-28-03 Task 4 lands.
+/// (SPEC-28 D6). The scan operator loops over the graphs and calls back in
+/// with a `OneGraph` scope per graph, so a per-graph scope never reaches
+/// [`HornBackend::resolve_scope`] — which refuses it if it somehow does.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SnapshotScope {
     /// Every non-reserved graph, deduped (D2 `union`).
@@ -617,7 +620,7 @@ impl HornBackend {
     /// Resolve a plan-level scan scope against this store's dictionary.
     ///
     /// Unknown graph names collapse to [`EMPTY_GRAPH_SCOPE`] (zero rows), per
-    /// SPEC-28 S3. `GRAPH ?g` is refused — see [`SnapshotScope`].
+    /// SPEC-28 S3. `GRAPH ?g` has no snapshot form — see [`SnapshotScope`].
     fn resolve_scope(&self, scope: &ScanScope<'_>) -> Result<SnapshotScope> {
         Ok(match scope.resolve() {
             ResolvedScope::DefaultUnion => SnapshotScope::DefaultUnion,
@@ -635,7 +638,7 @@ impl HornBackend {
                     _ => SnapshotScope::FromUnion(ids),
                 }
             }
-            ResolvedScope::PerGraph(v) => return Err(per_graph_unsupported(v)),
+            ResolvedScope::PerGraph { var, .. } => return Err(per_graph_needs_the_scan_loop(var)),
         })
     }
 
@@ -1019,6 +1022,43 @@ impl Executor for HornBackend {
         Ok(Box::new(rows.into_iter()))
     }
 
+    /// The graphs `GRAPH ?g` enumerates, sorted by IRI.
+    ///
+    /// Reads the graphs holding visible quads at one pinned snapshot
+    /// (SPEC-28 phase 2's visibility-filtered `graphs()`), drops the
+    /// default-graph sentinel (D3), then applies the named set. `?g` binds
+    /// to `Slot::Id(TermId(g.0))`: a `GraphId` *is* the interned `TermId` of
+    /// the graph's IRI (`horndb_storage::store`), so the ordinary
+    /// `decode_term` turns it back into the IRI at the result boundary and
+    /// it joins an ordinary scan column by raw id.
+    fn named_graphs(&self, named: Option<&[String]>) -> Result<Vec<NamedGraph>> {
+        let snap = self.store.snapshot();
+        let mut out: Vec<NamedGraph> = Vec::new();
+        for g in snap.graphs() {
+            // `graph_uri` errors on DEFAULT_GRAPH (a sentinel with no IRI),
+            // which is also exactly the graph `GRAPH ?g` must never bind.
+            let Ok(OxTerm::NamedNode(n)) = snap.graph_uri(g) else {
+                continue;
+            };
+            let iri = n.into_string();
+            let admitted = match named {
+                // No `FROM NAMED`: every non-reserved graph.
+                None => !is_reserved_graph(&iri),
+                // `FROM NAMED …`: exactly these, reserved included — naming
+                // a reserved graph is the opt-in.
+                Some(list) => list.iter().any(|n| n == &iri),
+            };
+            if admitted {
+                out.push(NamedGraph {
+                    iri,
+                    binding: Slot::Id(TermId(g.0)),
+                });
+            }
+        }
+        out.sort_by(|a, b| a.iri.cmp(&b.iri));
+        Ok(out)
+    }
+
     /// Decode a dictionary id to its term.
     /// keep in sync with scan_bgp's dict.lookup + oxrdf_to_algebra call shape.
     fn decode_term(&self, id: TermId) -> Result<Term> {
@@ -1252,7 +1292,12 @@ impl Executor for HornBackend {
     ) -> Result<Option<usize>> {
         // Scope first: every count below is a count *within the scoped
         // snapshot*, so an unsupported scope must refuse here rather than
-        // fall through to a wider count (SPEC-28 S3).
+        // fall through to a wider count (SPEC-28 S3). `GRAPH ?g` spans
+        // several snapshots — decline, and the caller's scan fallback (the
+        // per-graph loop) supplies the count.
+        if scope.resolve().is_per_graph() {
+            return Ok(None);
+        }
         let resolved = self.resolve_scope(scope)?;
         // The empty BGP is the join identity: one solution.
         if patterns.is_empty() {
@@ -1361,7 +1406,11 @@ impl Executor for HornBackend {
         keys: &[Var],
         scope: &ScanScope<'_>,
     ) -> Result<Option<Vec<GroupCount>>> {
-        // See `count_bgp`: resolve the scope before any counting.
+        // See `count_bgp`: resolve the scope before any counting, and
+        // decline `GRAPH ?g` outright.
+        if scope.resolve().is_per_graph() {
+            return Ok(None);
+        }
         let resolved = self.resolve_scope(scope)?;
         if patterns.is_empty() || keys.is_empty() {
             return Ok(None);
@@ -1542,6 +1591,25 @@ mod tests {
             b.memo_len(),
             1,
             "graph-scoped snapshots must not accumulate in the memo"
+        );
+
+        // Same bound for `GRAPH ?g`, which walks every graph in one scan:
+        // it reads each through the same per-graph (uncached) path, so the
+        // memo stays at the one whole-store entry.
+        let var = Var::new("g");
+        let per_graph = GraphScope::Named(GraphSpec::Var(var.clone()));
+        let scope = ScanScope::new(&per_graph, &dataset, crate::DefaultGraphMode::Union);
+        let batch = crate::exec::op::source::scan_scoped(&b, &patterns, &scope).unwrap();
+        assert_eq!(batch.rows.len(), 20, "one row per graph");
+        assert!(
+            batch.schema.iter().any(|v| v.name() == var.name()),
+            "the scan carries the graph column: {:?}",
+            batch.schema
+        );
+        assert_eq!(
+            b.memo_len(),
+            1,
+            "GRAPH ?g over 20 graphs must not cache 20 snapshots"
         );
     }
 

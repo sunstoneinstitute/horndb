@@ -408,10 +408,15 @@ fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> Phys
 pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
     use PhysicalPlan::*;
     match node {
-        BgpScan { patterns, .. } => {
+        // The graph variable of a `GRAPH ?g` scan is an output column too
+        // (SPEC-28 D6) — see `GraphScope::graph_var`.
+        BgpScan { patterns, scope } => {
             let mut out = Vec::new();
             for p in patterns {
                 collect_pattern_vars(p, &mut out);
+            }
+            if let Some(g) = scope.graph_var() {
+                push_unique(&mut out, g.name());
             }
             out
         }

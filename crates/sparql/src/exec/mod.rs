@@ -12,7 +12,8 @@ pub mod op;
 pub mod runtime;
 pub mod scope;
 pub use scope::{
-    is_reserved_graph, per_graph_unsupported, ResolvedScope, ScanScope, RESERVED_GRAPH_PREFIX,
+    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+    RESERVED_GRAPH_PREFIX,
 };
 
 use crate::algebra::{Term, TriplePattern, Var};
@@ -98,6 +99,26 @@ pub trait Executor {
     fn scan_bgp_ids(&self, patterns: &[TriplePattern], scope: &ScanScope<'_>) -> Result<Batch> {
         let rows: Vec<Bindings> = self.scan_bgp(patterns, scope)?.collect();
         Ok(Batch::from_bindings(rows))
+    }
+
+    /// The graphs `GRAPH ?g` enumerates, in a deterministic order (SPEC-28
+    /// S3/D6). The scan operator calls this once per `GRAPH ?g` leaf, then
+    /// scans each graph on its own — which is why this returns graph *names*
+    /// and never a widened scope.
+    ///
+    /// `named` is the query's `FROM NAMED` set as
+    /// [`ResolvedScope::PerGraph`] carries it: `None` = every non-reserved
+    /// graph the backend holds; `Some(list)` = exactly those of `list` the
+    /// backend holds, reserved ones included (naming one is the opt-in).
+    /// The default graph is never in the result (D3), and a name matching
+    /// no graph simply contributes nothing — never an error.
+    ///
+    /// The default implementation refuses: a backend that cannot enumerate
+    /// its graphs must not let `GRAPH ?g` answer over the wrong ones.
+    fn named_graphs(&self, _named: Option<&[String]>) -> Result<Vec<NamedGraph>> {
+        Err(crate::error::SparqlError::UnsupportedAlgebra(
+            "GRAPH ?g: this backend cannot enumerate named graphs".into(),
+        ))
     }
 
     /// Decode a dictionary id to its term. Only meaningful for backends that

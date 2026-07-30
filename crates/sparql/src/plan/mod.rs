@@ -34,6 +34,20 @@ pub enum GraphScope {
     Named(GraphSpec),
 }
 
+impl GraphScope {
+    /// The variable a `GRAPH ?g` scope binds — an **extra output column** of
+    /// every scan leaf carrying this scope (SPEC-28 D6), on top of the
+    /// variables its patterns bind. Every "what does this node produce"
+    /// computation must add it, or a pass that narrows columns will drop the
+    /// graph binding. `None` for the default graph and for ground `GRAPH <g>`.
+    pub fn graph_var(&self) -> Option<&Var> {
+        match self {
+            GraphScope::Named(GraphSpec::Var(v)) => Some(v),
+            GraphScope::DefaultGraph | GraphScope::Named(GraphSpec::Iri(_)) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalPlan {
     /// Leaf: scan a BGP via the executor, in `scope`.

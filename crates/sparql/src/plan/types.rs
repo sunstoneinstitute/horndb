@@ -132,10 +132,15 @@ fn add_term_vars(t: &Term, mask: TypeMask, out: &mut VarTypes) {
 pub fn infer(plan: &LogicalPlan) -> VarTypes {
     use LogicalPlan::*;
     match plan {
-        Bgp { patterns, .. } => {
+        Bgp { patterns, scope } => {
             let mut vt = VarTypes::default();
             for p in patterns {
                 add_pattern_vars(p, &mut vt);
+            }
+            // A `GRAPH ?g` scan also binds `?g`, always to a graph name —
+            // i.e. an IRI (SPEC-28 S3).
+            if let Some(g) = scope.graph_var() {
+                vt.insert_union(g.clone(), TypeMask::from_bits(TypeMask::NAMED_NODE));
             }
             vt
         }

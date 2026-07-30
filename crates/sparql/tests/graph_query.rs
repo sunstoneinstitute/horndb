@@ -1,6 +1,7 @@
-//! Named-graph query semantics (SPEC-28 S3, PLAN-28-03 Task 3): ground
-//! `GRAPH <g>`, `FROM`/`FROM NAMED` dataset construction, and the
-//! `union`/`strict` default-graph mode — over both Stage-1 backends.
+//! Named-graph query semantics (SPEC-28 S3): ground `GRAPH <g>`, variable
+//! `GRAPH ?g` and its graph column, `FROM`/`FROM NAMED` dataset
+//! construction, and the `union`/`strict` default-graph mode — over both
+//! Stage-1 backends.
 //!
 //! Fixture (shared by every case):
 //!
@@ -92,6 +93,51 @@ fn subjects<E: horndb_sparql::exec::Executor + ?Sized>(
 fn union_subjects<E: horndb_sparql::exec::Executor + ?Sized>(store: &E, q: &str) -> Vec<String> {
     subjects(store, q, DefaultGraphMode::Union)
 }
+
+/// Run `q` and return its `(?g, ?s)` bindings, sorted, **with duplicates
+/// kept** — one triple in two graphs must show up as two rows (SPEC-28 D6).
+/// An unbound `?g` is a failure, not an empty string: `GRAPH ?g` binds it in
+/// every row it emits.
+fn graph_rows<E: horndb_sparql::exec::Executor + ?Sized>(
+    store: &E,
+    q: &str,
+    mode: DefaultGraphMode,
+) -> Vec<(String, String)> {
+    let cfg = SparqlConfig {
+        default_graph: mode,
+        ..SparqlConfig::default()
+    };
+    let QueryAnswer::Solutions { rows, .. } = execute_query_with(q, store, &cfg).unwrap() else {
+        panic!("expected solutions");
+    };
+    let iri = |r: &horndb_sparql::exec::Bindings, v: &str| match r.get(v) {
+        Some(horndb_sparql::algebra::Term::Iri(s)) => s.clone(),
+        other => panic!("expected an IRI-bound ?{v}, got {other:?}"),
+    };
+    let mut out: Vec<(String, String)> = rows.iter().map(|r| (iri(r, "g"), iri(r, "s"))).collect();
+    out.sort();
+    out
+}
+
+/// `graph_rows` under the default (`union`) mode.
+fn union_graph_rows<E: horndb_sparql::exec::Executor + ?Sized>(
+    store: &E,
+    q: &str,
+) -> Vec<(String, String)> {
+    graph_rows(store, q, DefaultGraphMode::Union)
+}
+
+/// The fixture's `(?g, ?s)` rows for an unrestricted `GRAPH ?g`: g1 holds
+/// t2, g2 holds t2 and t3. The default graph's t1 is absent (D3).
+fn all_graph_rows() -> Vec<(String, String)> {
+    vec![
+        (G1.to_owned(), "http://ex/b".to_owned()),
+        (G2.to_owned(), "http://ex/b".to_owned()),
+        (G2.to_owned(), "http://ex/c".to_owned()),
+    ]
+}
+
+const GRAPH_VAR_ALL: &str = "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }";
 
 const ALL: &str = "SELECT ?s WHERE { ?s ?p ?o }";
 
@@ -275,20 +321,209 @@ fn bgps_under_different_graphs_do_not_coalesce<
     );
 }
 
-// --- GRAPH ?g is Task 4: it must ERROR here, never answer wrongly ------
+// --- GRAPH ?g: the graph column (SPEC-28 S3/D6) ------------------------
 
-fn graph_var_errors_until_task_4<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+/// D3: `?g` ranges over the named graphs only — never the default graph —
+/// and the `default_graph` mode does not touch that range.
+fn graph_var_enumerates_named_graphs_only<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
     let b: B = fixture();
-    let err = execute_query_with(
-        "SELECT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
+    for mode in [DefaultGraphMode::Union, DefaultGraphMode::Strict] {
+        assert_eq!(
+            graph_rows(&b, GRAPH_VAR_ALL, mode),
+            all_graph_rows(),
+            "GRAPH ?g enumerates g1 and g2 only, in {mode:?} mode"
+        );
+    }
+}
+
+/// A triple in two graphs is two solutions with different `?g` — the exact
+/// opposite of the union default graph's set semantics.
+fn graph_var_binds_per_row<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s <http://ex/p> <http://ex/o2> } }"
+        ),
+        vec![
+            (G1.to_owned(), "http://ex/b".to_owned()),
+            (G2.to_owned(), "http://ex/b".to_owned()),
+        ],
+        "t2 lives in g1 and g2, so it yields one row per graph"
+    );
+}
+
+/// `FROM NAMED` is the named set `?g` ranges over.
+fn graph_var_restricted_by_from_named<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            &format!("SELECT ?g ?s FROM NAMED <{G1}> WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}")
+        ),
+        vec![(G1.to_owned(), "http://ex/b".to_owned())],
+        "FROM NAMED <g1> leaves exactly one graph to enumerate"
+    );
+}
+
+/// The `?g` column joins like any other: against a constant through a
+/// `FILTER`, and against a value another pattern binds.
+fn graph_var_join_with_ground_var<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let mut b: B = fixture();
+    // A default-graph triple naming g1 — the join partner below.
+    b.seed_quad(None, G1, "http://ex/says", "http://ex/hi");
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            &format!(
+                "SELECT ?g ?s WHERE {{ GRAPH ?g {{ ?s <http://ex/p> ?o }} FILTER(?g = <{G1}>) }}"
+            )
+        ),
+        vec![(G1.to_owned(), "http://ex/b".to_owned())],
+        "FILTER on the graph column restricts it like any bound variable"
+    );
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { ?g <http://ex/says> <http://ex/hi> . \
+             GRAPH ?g { ?s <http://ex/p> ?o } }"
+        ),
+        vec![(G1.to_owned(), "http://ex/b".to_owned())],
+        "a shared ?g joins the graph column against another pattern's binding"
+    );
+}
+
+/// `SELECT *` projects the graph variable, bound (it used to be scoped in
+/// but never bindable).
+fn select_star_projects_graph_var<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    assert_eq!(
+        union_graph_rows(&b, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        all_graph_rows(),
+        "SELECT * must carry a bound ?g"
+    );
+}
+
+/// `GRAPH ?g { ?g … }` — the pattern binds the graph variable itself, so
+/// the two must agree: a row survives only in the graph it names.
+fn graph_var_bound_by_the_pattern_itself<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let mut b: B = fixture();
+    b.seed_quad(Some(G1), G1, "http://ex/label", "http://ex/l"); // agrees
+    b.seed_quad(Some(G2), G1, "http://ex/label", "http://ex/l"); // g2 holds a statement ABOUT g1
+    let QueryAnswer::Solutions { rows, .. } = execute_query_with(
+        "SELECT ?g WHERE { GRAPH ?g { ?g <http://ex/label> ?o } }",
         &b,
         &SparqlConfig::default(),
     )
-    .expect_err("GRAPH ?g must refuse, not approximate");
-    let msg = err.to_string();
+    .unwrap() else {
+        panic!("expected solutions");
+    };
+    let mut graphs: Vec<String> = rows
+        .iter()
+        .map(|r| match r.get("g") {
+            Some(horndb_sparql::algebra::Term::Iri(s)) => s.clone(),
+            other => panic!("expected an IRI-bound ?g, got {other:?}"),
+        })
+        .collect();
+    graphs.sort();
+    assert_eq!(
+        graphs,
+        vec![G1.to_owned()],
+        "g2's statement about g1 must not make ?g bind g1 in g2's scan"
+    );
+}
+
+/// A `COUNT` pushed down under `GRAPH ?g` must count the per-graph rows —
+/// the count seams have no per-graph form, so they decline and the scan
+/// loop answers (SPEC-28 S3's silent-wrong-answer clause).
+fn graph_var_count_counts_every_graph<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    let rows_of = |q: &str| -> Vec<(Option<String>, String)> {
+        let QueryAnswer::Solutions { rows, .. } =
+            execute_query_with(q, &b, &SparqlConfig::default()).unwrap()
+        else {
+            panic!("expected solutions");
+        };
+        let mut out: Vec<(Option<String>, String)> = rows
+            .iter()
+            .map(|r| {
+                let g = match r.get("g") {
+                    Some(horndb_sparql::algebra::Term::Iri(s)) => Some(s.clone()),
+                    None => None,
+                    other => panic!("expected an IRI-bound ?g, got {other:?}"),
+                };
+                let c = match r.get("c") {
+                    Some(horndb_sparql::algebra::Term::Literal(l)) => {
+                        l.split('"').nth(1).unwrap_or_default().to_owned()
+                    }
+                    other => panic!("expected a count literal, got {other:?}"),
+                };
+                (g, c)
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    // t2 in g1, t2 in g2, t3 in g2 — three per-graph solutions, no dedup.
+    assert_eq!(
+        rows_of("SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }"),
+        vec![(None, "3".to_owned())]
+    );
+    assert_eq!(
+        rows_of("SELECT ?g (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g"),
+        vec![
+            (Some(G1.to_owned()), "1".to_owned()),
+            (Some(G2.to_owned()), "2".to_owned()),
+        ]
+    );
+}
+
+/// D6: the plan holds **one** scan node however many graphs `?g` ranges
+/// over — the graph loop lives in the operator, not in the plan. (A union
+/// of per-graph plans would show one `BgpScan` per graph here.)
+fn graph_var_is_one_scan_node_whatever_the_graph_count<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let mut b: B = fixture();
+    for i in 0..8 {
+        let g = format!("http://ex/extra{i}");
+        b.seed_quad(Some(&g), "http://ex/s", "http://ex/p", "http://ex/o");
+    }
+    let QueryAnswer::Explanation { text, .. } = execute_query_with(
+        &format!("EXPLAIN {GRAPH_VAR_ALL}"),
+        &b,
+        &SparqlConfig::default(),
+    )
+    .unwrap() else {
+        panic!("expected an explanation");
+    };
+    assert_eq!(
+        text.matches("BgpScan").count(),
+        1,
+        "one scan node for ten graphs: {text}"
+    );
     assert!(
-        msg.contains("GRAPH ?g"),
-        "error must name the construct: {msg}"
+        text.contains("[graph=?g]"),
+        "the scan carries the graph scope: {text}"
+    );
+}
+
+/// Reserved graphs stay out of the enumeration; naming one is the opt-in.
+fn reserved_graphs_do_not_enumerate<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let mut b: B = fixture();
+    b.seed_quad(Some(RESERVED), "http://ex/r", "http://ex/p", "http://ex/o4");
+    assert_eq!(
+        union_graph_rows(&b, GRAPH_VAR_ALL),
+        all_graph_rows(),
+        "a reserved graph is never enumerated by a bare GRAPH ?g"
+    );
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            &format!("SELECT ?g ?s FROM NAMED <{RESERVED}> WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}")
+        ),
+        vec![(RESERVED.to_owned(), "http://ex/r".to_owned())],
+        "FROM NAMED on a reserved graph is the explicit opt-in"
     );
 }
 
@@ -321,5 +556,13 @@ both_backends!(
     from_named_restricts_ground_graph,
     count_pushdown_respects_the_graph_scope,
     bgps_under_different_graphs_do_not_coalesce,
-    graph_var_errors_until_task_4,
+    graph_var_enumerates_named_graphs_only,
+    graph_var_binds_per_row,
+    graph_var_restricted_by_from_named,
+    graph_var_join_with_ground_var,
+    select_star_projects_graph_var,
+    graph_var_bound_by_the_pattern_itself,
+    graph_var_count_counts_every_graph,
+    graph_var_is_one_scan_node_whatever_the_graph_count,
+    reserved_graphs_do_not_enumerate,
 );
