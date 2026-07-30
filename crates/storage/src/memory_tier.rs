@@ -88,9 +88,20 @@ impl TierSnapshot {
             .unwrap_or_default()
     }
 
+    /// Number of visible triples in `g` at this snapshot's version. One graph
+    /// lookup, no allocation. An absent or never-interned graph yields 0.
+    pub fn graph_len(&self, g: GraphId) -> usize {
+        self.graphs
+            .get(&g)
+            .map(|gs| gs.partitions.values().map(|p| p.live_len()).sum())
+            .unwrap_or(0)
+    }
+
     /// The graphs with >=1 visible quad (D11 — see [`crate::tier::Tier::graphs`]
     /// for the full contract). Shares [`Self::partition_is_live`] with
-    /// [`Self::stats`] so the two live counts never disagree.
+    /// [`Self::stats`] so the two live counts never disagree. Order is
+    /// arbitrary (`HashMap` iteration order); callers needing determinism use
+    /// [`crate::store::StoreSnapshot::graphs`].
     pub fn graphs(&self) -> Vec<GraphId> {
         self.graphs
             .iter()
@@ -99,11 +110,8 @@ impl TierSnapshot {
             .collect()
     }
 
-    /// True if `p` holds at least one row visible at this snapshot's version.
-    /// `live_len()` is frozen at partition-build time and equals `len_at(v)`
-    /// for the version `v` that owns the partition object — see
-    /// `PredicatePartition::live_len`'s doc comment for why that holds for
-    /// every `TierSnapshot`, not just the one that built the partition.
+    /// True if `p` has at least one live row. Version-independent by
+    /// construction: see `PredicatePartition::live_len`.
     fn partition_is_live(p: &PredicatePartition) -> bool {
         p.live_len() > 0
     }
@@ -112,7 +120,7 @@ impl TierSnapshot {
         self.graphs
             .values()
             .flat_map(|g| g.partitions.values())
-            .map(|p| p.len_at(self.version) as u64)
+            .map(|p| p.live_len() as u64)
             .sum()
     }
 

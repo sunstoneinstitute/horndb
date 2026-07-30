@@ -154,8 +154,8 @@ impl Store {
     }
 
     /// Scan a single predicate in `g`, returning materialized (subject,
-    /// object) `Term` pairs. Used by tests; production code should use the
-    /// tier's columnar scan directly.
+    /// object) `Term` pairs, subject-major. Used by tests; production code
+    /// should use the tier's columnar scan directly.
     pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
         self.snapshot().scan_predicate(g, predicate)
     }
@@ -203,13 +203,9 @@ impl Store {
         self.snapshot().scan_all_term_ids()
     }
 
-    /// True if any non-default graph holds at least one triple. The snapshot
-    /// format currently covers the default graph only; export refuses to run
-    /// (rather than silently dropping data) when this is true.
-    /// `Tier::graphs()` is visibility-filtered (D11), so this is just "any
-    /// enumerated graph other than the default one". Routed through a pinned
-    /// snapshot so the public method and the snapshot-pinned exporter check
-    /// share one implementation.
+    /// True if any non-default graph holds at least one triple; the snapshot
+    /// format currently covers the default graph only, so export refuses to
+    /// run rather than silently drop data when this is true.
     pub fn has_named_graph_data(&self) -> bool {
         self.snapshot().has_named_graph_data()
     }
@@ -244,6 +240,8 @@ impl StoreSnapshot<'_> {
         self.tier.version()
     }
 
+    /// Visible triples across all graphs. [`Self::len`] is the `usize` alias;
+    /// [`Self::graph_len`] is the per-graph form.
     pub fn triple_count(&self) -> u64 {
         self.tier.triple_count()
     }
@@ -253,8 +251,8 @@ impl StoreSnapshot<'_> {
     }
 
     /// Scan a single predicate in `g`, returning materialized (subject,
-    /// object) `Term` pairs. A read transaction never mutates the dictionary:
-    /// an absent predicate (never interned) yields no rows.
+    /// object) `Term` pairs, subject-major. A read transaction never mutates
+    /// the dictionary: an absent predicate (never interned) yields no rows.
     pub fn scan_predicate(&self, g: GraphId, predicate: &Term) -> Result<Vec<(Term, Term)>> {
         let p_id = match self.dictionary.get(predicate) {
             Some(id) => id,
@@ -305,26 +303,20 @@ impl StoreSnapshot<'_> {
         Ok(out)
     }
 
-    /// Dump every default-graph triple as raw `TermId`s, in arbitrary order,
-    /// from this single pinned snapshot (so the dump is internally consistent
-    /// even under concurrent writes — the NF5 checkpoint-consistency property).
+    /// Dump every default-graph triple as raw `TermId`s, key-ordered
+    /// (predicates ascending, subject-major within each predicate — see
+    /// [`Self::iter_all_term_ids`]), from this single pinned snapshot (so the
+    /// dump is internally consistent even under concurrent writes — the NF5
+    /// checkpoint-consistency property).
     pub fn scan_all_term_ids(&self) -> Vec<(TermId, TermId, TermId)> {
-        let version = self.tier.version();
-        let mut out = Vec::with_capacity(self.tier.triple_count() as usize);
-        for p_id in self.tier.predicates(DEFAULT_GRAPH) {
-            self.tier.with_predicate(DEFAULT_GRAPH, p_id, |part| {
-                out.extend(part.scan_at(version).map(|(s, o)| (s, p_id, o)));
-            });
-        }
+        let mut out = Vec::with_capacity(self.graph_len(DEFAULT_GRAPH));
+        out.extend(self.iter_all_term_ids());
         out
     }
 
-    /// True if any non-default graph in this pinned snapshot holds at least one
-    /// triple. Mirrors [`Store::has_named_graph_data`] but against the pinned
-    /// tier state, so an exporter can check this and scan the default graph from
-    /// the *same* snapshot (no TOCTOU between the check and the scan).
-    /// `tier.graphs()` is already visibility-filtered (D11), so this is just
-    /// "any enumerated graph other than the default one".
+    /// True if any non-default graph in this pinned snapshot holds at least
+    /// one triple; lets an exporter check this and scan the default graph
+    /// from the same snapshot (no TOCTOU between the check and the scan).
     pub fn has_named_graph_data(&self) -> bool {
         self.tier.graphs().into_iter().any(|g| g != DEFAULT_GRAPH)
     }
@@ -353,19 +345,19 @@ impl StoreSnapshot<'_> {
     /// of predicates in `g`); unconditional — an absent or never-interned
     /// graph yields 0, not an error.
     pub fn graph_len(&self, g: GraphId) -> usize {
-        self.tier
-            .predicates(g)
-            .into_iter()
-            .filter_map(|p| self.tier.with_predicate(g, p, |part| part.live_len()))
-            .sum()
+        self.tier.graph_len(g)
     }
 
     /// The graphs holding at least one visible quad in this pinned view (D11
     /// — see [`crate::tier::Tier::graphs`] for the full contract), including
     /// `DEFAULT_GRAPH` when it holds data. Callers wanting named graphs only
-    /// should filter out `DEFAULT_GRAPH`.
+    /// should filter out `DEFAULT_GRAPH`. Sorted by `GraphId` for a
+    /// deterministic result — public API that Graph Store Protocol responses
+    /// enumerate.
     pub fn graphs(&self) -> Vec<GraphId> {
-        self.tier.graphs()
+        let mut graphs = self.tier.graphs();
+        graphs.sort_by_key(|g| g.0);
+        graphs
     }
 
     /// Decode `g` back to the IRI [`Term`] it was interned from. Errors on
@@ -374,7 +366,7 @@ impl StoreSnapshot<'_> {
     pub fn graph_uri(&self, g: GraphId) -> Result<Term> {
         if g == DEFAULT_GRAPH {
             return Err(crate::StorageError::InvalidTerm(
-                "DEFAULT_GRAPH has no URI".into(),
+                "the default graph has no IRI (it is a sentinel, not a named graph)".into(),
             ));
         }
         self.term(TermId(g.0))
@@ -384,32 +376,30 @@ impl StoreSnapshot<'_> {
     /// snapshot. O(quads in `g` + predicates in `g`) — never O(store). This is
     /// the GSP (Graph Store Protocol) `GET` path and stage 3 of the
     /// whole-graph `PUT` diff (SPEC-28), so it must stay graph-scoped rather
-    /// than filtering a whole-store scan. Predicates are visited in ascending
-    /// `TermId` order for a deterministic result, mirroring
-    /// [`Self::scan_all_term_ids`]'s pattern with `g` in place of
-    /// `DEFAULT_GRAPH`.
+    /// than filtering a whole-store scan. Predicates ascending, subject-major
+    /// within each predicate.
     pub fn scan_graph(&self, g: GraphId) -> Result<Vec<(Term, Term, Term)>> {
         let version = self.tier.version();
         let mut preds = self.tier.predicates(g);
         preds.sort_by_key(|t| t.0);
         let mut out = Vec::with_capacity(self.graph_len(g));
         for p_id in preds {
-            let rows = self
-                .tier
-                .with_predicate(g, p_id, |part| part.scan_at(version).collect::<Vec<_>>())
-                .unwrap_or_default();
-            for (s_id, o_id) in rows {
-                out.push((self.term(s_id)?, self.term(p_id)?, self.term(o_id)?));
-            }
+            let p = self.term(p_id)?;
+            self.tier
+                .with_predicate(g, p_id, |part| -> Result<()> {
+                    for (s_id, o_id) in part.scan_at(version) {
+                        out.push((self.term(s_id)?, p.clone(), self.term(o_id)?));
+                    }
+                    Ok(())
+                })
+                .transpose()?;
         }
         Ok(out)
     }
 
     /// Key-ordered iteration over every visible triple in graph `g`, as raw
     /// `TermId`s: predicates in ascending id order, subject-major within each
-    /// predicate. The id-level twin of [`Self::scan_graph`] — this is what the
-    /// future SPEC-24 S6 backing and the phase-5 GSP diff consume. Mirrors
-    /// [`Self::iter_all_term_ids`]'s ordering contract, scoped to `g`.
+    /// predicate. The id-level twin of [`Self::scan_graph`] (SPEC-28).
     pub fn iter_graph_term_ids(
         &self,
         g: GraphId,
@@ -446,18 +436,7 @@ impl StoreSnapshot<'_> {
     /// `TermId`s: predicates in ascending id order, subject-major within each
     /// predicate. Stable across concurrent writes (reads the pinned view).
     pub fn iter_all_term_ids(&self) -> impl Iterator<Item = (TermId, TermId, TermId)> + '_ {
-        let version = self.tier.version();
-        let mut preds = self.tier.predicates(DEFAULT_GRAPH);
-        preds.sort_by_key(|t| t.0);
-        preds.into_iter().flat_map(move |p_id| {
-            self.tier
-                .with_predicate(DEFAULT_GRAPH, p_id, |part| {
-                    part.scan_at(version)
-                        .map(move |(s, o)| (s, p_id, o))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
+        self.iter_graph_term_ids(DEFAULT_GRAPH)
     }
 
     /// The append-only dictionary backing this snapshot, for term materialization.
@@ -653,15 +632,8 @@ mod tests {
         assert_eq!(phys, 1, "dead row physically reclaimed");
     }
 
-    /// `StoreSnapshot::len()` is whole-store (SPEC-28 S2, #265): the old
-    /// default-graph-scoped contract relocated to `graph_len`. The old test
-    /// pinned `len()` to the default graph on the belief that the SPEC-24 S6
-    /// surface backs the single-graph incremental circuit — verified false:
-    /// `crates/incremental` has no dependency on `horndb-storage` (its
-    /// `Snapshot` type only mirrors this shape, in anticipation of the S6
-    /// swap tracked by #213, not yet landed). So inverting `len()` breaks no
-    /// circuit; `graph_len` is the graph-scoped surface #213 will wire to
-    /// (see PLAN-28-02 design).
+    /// `StoreSnapshot::len()` is whole-store; the old default-graph-scoped
+    /// contract relocated to `graph_len` (SPEC-28 S2, #265, PLAN-28-02).
     #[test]
     fn snapshot_len_is_whole_store() {
         let store = Store::in_memory();
@@ -692,6 +664,11 @@ mod tests {
         assert_eq!(snap.graph_len(DEFAULT_GRAPH), 1);
         assert_eq!(snap.graph_len(g1), 1);
         assert_eq!(snap.graph_len(absent), 0, "absent graph has no rows");
+        assert_eq!(
+            snap.iter_all_term_ids().count(),
+            snap.graph_len(DEFAULT_GRAPH),
+            "the default-graph iterator must not pick up named-graph rows"
+        );
     }
 
     /// `graphs()` is visibility-filtered (D11: a graph exists iff it holds at
@@ -714,6 +691,9 @@ mod tests {
             iri("http://ex/d"),
         );
         store.insert_quads(&[q1, q2.clone()]).unwrap();
+        store
+            .insert_triples(&[(iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"))])
+            .unwrap();
         let n = store.retract_quads(std::slice::from_ref(&q2)).unwrap();
         assert_eq!(n, 1, "g2's only quad must be retracted");
 
@@ -729,12 +709,48 @@ mod tests {
             snap.graph_len(DEFAULT_GRAPH) > 0,
             "DEFAULT_GRAPH appears in graphs() iff it holds data"
         );
+        assert!(
+            graphs.contains(&DEFAULT_GRAPH),
+            "the default graph holds data in this fixture, so it must be enumerated"
+        );
 
         // The tier-level view (used directly by production callers such as
         // `has_named_graph_data`) must agree with the snapshot view.
         let tier_graphs = store.tier().graphs();
         assert!(tier_graphs.contains(&g1));
         assert!(!tier_graphs.contains(&g2));
+    }
+
+    /// `live_len()` is frozen at partition-build time and is only equal to
+    /// "live at this snapshot's version" for the invariant documented on
+    /// `PredicatePartition::live_len` — a pinned older snapshot must still see
+    /// a graph a later retraction removed from the live view.
+    #[test]
+    fn graphs_on_a_pinned_snapshot_predate_a_later_retraction() {
+        let store = Store::in_memory();
+        let g2 = store.intern_graph_uri(&iri("http://ex/g2")).unwrap();
+        let last = (
+            g2,
+            iri("http://ex/a"),
+            iri("http://ex/p"),
+            iri("http://ex/b"),
+        );
+        store.insert_quads(std::slice::from_ref(&last)).unwrap();
+
+        let pinned = store.snapshot();
+        assert!(pinned.graphs().contains(&g2), "g2 holds data when pinned");
+
+        let n = store.retract_quads(std::slice::from_ref(&last)).unwrap();
+        assert_eq!(n, 1, "g2's last quad must be retracted");
+
+        assert!(
+            pinned.graphs().contains(&g2),
+            "the pinned-older snapshot must still list g2"
+        );
+        assert!(
+            !store.snapshot().graphs().contains(&g2),
+            "a fresh snapshot must not list the now-fully-retracted g2"
+        );
     }
 
     /// `graph_uri` decodes a `GraphId` back to the IRI it was interned from;
@@ -895,45 +911,60 @@ mod tests {
 
     /// `iter_graph_term_ids` mirrors `iter_all_term_ids`'s ordering contract:
     /// predicates in ascending `TermId` order, subject-major (rows sorted by
-    /// subject id) within each predicate — scoped to one graph. Interning
-    /// order below is chosen so the expected `TermId` order is known: `pb` is
-    /// interned before `pa` (so `pb`'s id is lower), and within `pa`, `s3` is
-    /// interned before `s2` (so `s3`'s row must come first even though it was
-    /// inserted second).
+    /// subject id) within each predicate — scoped to one graph. Three
+    /// predicates (not two): with only two, deleting the predicate sort still
+    /// passes about half the time (`HashMap` iteration order has a 50% chance
+    /// of matching), which is exactly what let a missing sort through review
+    /// once. Within `p_a`, `s_hi`'s row is inserted before `s_lo`'s even
+    /// though `s_lo` has the lower id (interned earlier, via `p_b`'s row) —
+    /// subject id order opposes insertion order, so a broken
+    /// "insertion-order" implementation cannot pass by accident.
     #[test]
     fn iter_graph_term_ids_is_key_ordered() {
         let store = Store::in_memory();
         let g1 = store.intern_graph_uri(&iri("http://ex/g1")).unwrap();
         let o = iri("http://ex/o");
 
-        // Interning order: s1, pb, o, s3, pa, s2.
+        // Interning order: s_lo, p_b, o, s_hi, p_a, s3, p_c.
         store
-            .insert_quads(&[(g1, iri("http://ex/s1"), iri("http://ex/pb"), o.clone())])
+            .insert_quads(&[(g1, iri("http://ex/s_lo"), iri("http://ex/p_b"), o.clone())])
             .unwrap();
         store
-            .insert_quads(&[(g1, iri("http://ex/s3"), iri("http://ex/pa"), o.clone())])
+            .insert_quads(&[(g1, iri("http://ex/s_hi"), iri("http://ex/p_a"), o.clone())])
             .unwrap();
         store
-            .insert_quads(&[(g1, iri("http://ex/s2"), iri("http://ex/pa"), o.clone())])
+            .insert_quads(&[(g1, iri("http://ex/s_lo"), iri("http://ex/p_a"), o.clone())])
+            .unwrap();
+        store
+            .insert_quads(&[(g1, iri("http://ex/s3"), iri("http://ex/p_c"), o.clone())])
             .unwrap();
 
         let snap = store.snapshot();
         let d = store.dictionary();
-        let (s1, pb, o_id, s3, pa, s2) = (
-            d.get(&iri("http://ex/s1")).unwrap(),
-            d.get(&iri("http://ex/pb")).unwrap(),
+        let (s_lo, p_b, o_id, s_hi, p_a, s3, p_c) = (
+            d.get(&iri("http://ex/s_lo")).unwrap(),
+            d.get(&iri("http://ex/p_b")).unwrap(),
             d.get(&o).unwrap(),
+            d.get(&iri("http://ex/s_hi")).unwrap(),
+            d.get(&iri("http://ex/p_a")).unwrap(),
             d.get(&iri("http://ex/s3")).unwrap(),
-            d.get(&iri("http://ex/pa")).unwrap(),
-            d.get(&iri("http://ex/s2")).unwrap(),
+            d.get(&iri("http://ex/p_c")).unwrap(),
         );
-        assert!(pb.0 < pa.0, "pb must be interned before pa");
-        assert!(s3.0 < s2.0, "s3 must be interned before s2");
+        assert!(
+            p_b.0 < p_a.0 && p_a.0 < p_c.0,
+            "predicates must intern in ascending order p_b, p_a, p_c"
+        );
+        assert!(s_lo.0 < s_hi.0, "s_lo must be interned before s_hi");
 
         let ids: Vec<_> = snap.iter_graph_term_ids(g1).collect();
         assert_eq!(
             ids,
-            vec![(s1, pb, o_id), (s3, pa, o_id), (s2, pa, o_id),],
+            vec![
+                (s_lo, p_b, o_id),
+                (s_lo, p_a, o_id),
+                (s_hi, p_a, o_id),
+                (s3, p_c, o_id),
+            ],
             "predicates ascending, subject-major within each predicate"
         );
     }
