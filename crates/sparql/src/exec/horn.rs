@@ -647,7 +647,11 @@ impl HornBackend {
     /// **Only the two whole-store scopes are memoised.** They cost O(store)
     /// to build and every unqualified query wants one, so caching them is
     /// the pre-SPEC-28 behaviour preserved. A graph-scoped build is
-    /// O(that graph), so caching it would buy little and cost a cache with
+    /// O(that graph) — but note `GRAPH ?g` asks for one per graph, so a
+    /// query enumerating every graph pays roughly one whole-store build per
+    /// execution (six sorted orderings' worth), with no reuse between
+    /// executions. That is the accepted price of the bound below, not an
+    /// oversight: caching would buy little per graph and cost a cache with
     /// no ceiling: one `Arc<VecTripleSource>` — six sorted index copies —
     /// per graph ever named, evicted only by a write, and reachable from an
     /// unauthenticated `/query` (`EXPLAIN` populates it without executing
@@ -1609,7 +1613,7 @@ mod tests {
         let var = Var::new("g");
         let per_graph = GraphScope::Named(GraphSpec::Var(var.clone()));
         let scope = ScanScope::new(&per_graph, &dataset, crate::DefaultGraphMode::Union);
-        let batch = crate::exec::op::source::scan_scoped(&b, &patterns, &scope).unwrap();
+        let batch = crate::exec::op::scan_scoped(&b, &patterns, &scope).unwrap();
         assert_eq!(batch.rows.len(), 20, "one row per graph");
         assert!(
             batch.schema.iter().any(|v| v.name() == var.name()),

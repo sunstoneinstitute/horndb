@@ -4,8 +4,11 @@
 
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
-pub(crate) mod source;
-use source::{scan_scoped, CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
+mod source;
+/// The one scan-side helper outside this module needs (`GRAPH ?g`'s
+/// per-graph read); the operators themselves stay private.
+pub(crate) use source::scan_scoped;
+use source::{CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 

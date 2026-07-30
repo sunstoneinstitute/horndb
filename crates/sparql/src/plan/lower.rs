@@ -25,7 +25,7 @@ use crate::plan::{GraphScope, PhysicalPlan};
 /// the query's default graph.
 ///
 /// Errors when a scope cannot be pushed all the way down — see
-/// [`per_graph_gap`]. That is by design: a scope that cannot be pushed must
+/// [`per_graph_barrier`]. That is by design: a scope that cannot be pushed must
 /// fail here rather than fall back to a post-filter, which would answer a
 /// different question (SPEC-28 D5).
 pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
@@ -124,13 +124,13 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
             // whole subtree has to carry that column up. Refuse when it
             // cannot (SPEC-28 D1: no wrong answers).
             if let Some(var) = scope.graph_var() {
-                if let Some(gap) = per_graph_gap(&lowered, var) {
+                if let Some(barrier) = per_graph_barrier(&lowered, var) {
                     return Err(SparqlError::UnsupportedAlgebra(format!(
-                        "{gap} inside GRAPH ?{} is not supported yet (SPEC-28 S3, \
-                         #266): it would drop or merge the graph column, so rows \
-                         would come back mixed across graphs, or with ?{} unbound",
-                        var.name(),
-                        var.name()
+                        "{barrier} inside GRAPH ?{g} is not supported yet (SPEC-28 \
+                         S3, #266): it would drop or merge the graph column, so rows \
+                         would come back mixed across graphs, or with ?{g} unbound; \
+                         use a ground GRAPH <iri>, or move it outside the GRAPH block",
+                        g = var.name()
                     )));
                 }
             }
@@ -139,21 +139,24 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
     })
 }
 
-/// Why the plan under a `GRAPH ?g` cannot carry the graph column to the top,
-/// named for the error message — or `None` when it can.
+/// What stops the plan under a `GRAPH ?g` from carrying the graph column to
+/// the top, named for the error message — or `None` when nothing does.
 ///
-/// The rule is deliberately conservative: every leaf must be a scan carrying
-/// *this* graph variable, and every node above it must pass rows through
-/// one-for-one. A node that narrows columns (`Project` — i.e. a sub-SELECT),
-/// merges rows (`Distinct`, `Group`), truncates them (`Slice`), or rewrites
-/// the relation (`PathClosure`) loses the graph column or blends graphs
-/// together before the result is built.
+/// The rule is deliberately conservative: every leaf that reads quads must be
+/// a scan carrying *this* graph variable, and every node above it must pass
+/// rows through one-for-one. A node that narrows columns (`Project` — i.e. a
+/// sub-SELECT), merges rows (`Distinct`, `Group`), truncates them (`Slice`),
+/// or rewrites the relation (`PathClosure`) loses the graph column or blends
+/// graphs together before the result is built. Relaxing a case means teaching
+/// the operator to iterate per graph (PLAN-28-03 Task 5 and later), never
+/// dropping the check.
 ///
-/// `Join`/`LeftJoin`/`Union` recurse into both arms. Requiring *both* arms to
-/// bind the variable refuses a few shapes that would in fact be right (a
-/// `VALUES` joined against a scoped BGP, say), but a conservative refusal is
-/// the trade SPEC-28 asks for. PLAN-28-03 Task 5 and later work can relax
-/// individual cases by teaching the operator, never by dropping the check.
+/// Join arms are the one place the rule relaxes: an arm that reads no quads
+/// (`VALUES`, and anything built from it) binds nothing per-graph, and joining
+/// it against a scoped arm keeps the graph column of that arm on every output
+/// row. `Union` still needs **both** arms scoped — an unscoped arm would
+/// contribute rows with `?g` unbound — and `LeftJoin` still needs its left
+/// arm scoped, for the same reason.
 ///
 /// Barrier nodes report the **innermost** barrier, because the translator
 /// builds property paths out of these nodes (`translate.rs`: a path becomes
@@ -161,7 +164,7 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
 /// ground). Naming the outermost node would tell a user who wrote `:p+` that
 /// `DISTINCT` is unsupported, which they never wrote — hence the labels that
 /// name both possible sources.
-fn per_graph_gap(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
+fn per_graph_barrier(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
     use LogicalPlan::*;
     match plan {
         // The one shape that works: a scan leaf carrying this scope.
@@ -170,21 +173,139 @@ fn per_graph_gap(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
         // (innermost wins), which leaves the outer `?g` unbound.
         Bgp { .. } => Some("a nested GRAPH"),
         Filter { inner, .. } | Extend { inner, .. } | OrderBy { inner, .. } => {
-            per_graph_gap(inner, var)
+            per_graph_barrier(inner, var)
         }
-        Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
-            per_graph_gap(left, var).or_else(|| per_graph_gap(right, var))
+        // A quad-free arm (`VALUES`) is fine on either side of a join: the
+        // other arm's graph column reaches every joined row.
+        Join { left, right } => match (per_graph_barrier(left, var), per_graph_barrier(right, var))
+        {
+            (None, None) => None,
+            (None, Some(_)) if reads_no_quads(right) => None,
+            (Some(_), None) if reads_no_quads(left) => None,
+            (l, r) => l.or(r),
+        },
+        // The left arm must bind `?g` — an unmatched left row still has to
+        // carry it. The right arm may be quad-free (an OPTIONAL VALUES).
+        LeftJoin { left, right, .. } => per_graph_barrier(left, var).or_else(|| {
+            (!reads_no_quads(right))
+                .then(|| per_graph_barrier(right, var))
+                .flatten()
+        }),
+        Union { left, right } => {
+            per_graph_barrier(left, var).or_else(|| per_graph_barrier(right, var))
         }
         Project { inner, .. } => {
-            per_graph_gap(inner, var).or(Some("a sub-SELECT or a property path"))
+            per_graph_barrier(inner, var).or(Some("a sub-SELECT or a property path"))
         }
-        Distinct { inner } => per_graph_gap(inner, var).or(Some("DISTINCT")),
+        Distinct { inner } => per_graph_barrier(inner, var).or(Some("DISTINCT")),
         Slice { inner, .. } => {
-            per_graph_gap(inner, var).or(Some("LIMIT/OFFSET or a property path"))
+            per_graph_barrier(inner, var).or(Some("LIMIT/OFFSET or a property path"))
         }
-        Group { inner, .. } => per_graph_gap(inner, var).or(Some("an aggregate or GROUP BY")),
-        PathClosure { edge, .. } => per_graph_gap(edge, var).or(Some("a property path")),
+        Group { inner, .. } => per_graph_barrier(inner, var).or(Some("an aggregate or GROUP BY")),
+        PathClosure { edge, .. } => per_graph_barrier(edge, var).or(Some("a property path")),
         Values { .. } => Some("VALUES"),
+    }
+}
+
+/// Debug-only postcondition: no node dropped a graph column that something
+/// above it still expects.
+///
+/// [`per_graph_barrier`] runs while the `Algebra::Graph` node still exists.
+/// Lowering then dissolves that node, so every later pass sees scoped scan
+/// leaves with no record of where the checked subtree ended. Nothing but this
+/// check would notice a pass inserting a `Project` between a
+/// `BgpScan { scope: Named(Var(g)) }` and a consumer of `g` — and that is the
+/// silent wrong answer this task exists to remove. Today the only
+/// barrier-inserting sites are `passes::projection_pushdown::restrict` and
+/// `pushdown::wrap_if_wider`, both of which build their column set from a
+/// demand set that includes `g`; this makes that a checked property rather
+/// than a reviewed one.
+///
+/// Flags a node `n` when a child `c` outputs `g`, `n` does not, and an
+/// ancestor still does. Aggregating nodes are exempt: dropping non-key
+/// columns is what they are for, and lowering has already guaranteed no
+/// aggregate sits *inside* a `GRAPH ?g`.
+///
+/// Known residual: two independent variables that happen to share a name —
+/// a sub-SELECT with `GRAPH ?g` inside that does not project `?g`, inside a
+/// query that binds `?g` elsewhere — look identical here and would trip this.
+/// If that ever fires, exempt the shape; do not weaken the rule.
+#[cfg(debug_assertions)]
+pub(crate) fn per_graph_columns_survive(plan: &PhysicalPlan) -> Result<()> {
+    fn per_graph_vars(node: &PhysicalPlan, out: &mut Vec<String>) {
+        if let PhysicalPlan::BgpScan { scope, .. }
+        | PhysicalPlan::CountScan { scope, .. }
+        | PhysicalPlan::GroupCountScan { scope, .. } = node
+        {
+            if let Some(g) = scope.graph_var() {
+                out.push(g.name().to_owned());
+            }
+        }
+        for child in crate::plan::explain::children(node) {
+            per_graph_vars(child, out);
+        }
+    }
+
+    fn aggregating(node: &PhysicalPlan) -> bool {
+        matches!(
+            node,
+            PhysicalPlan::Group { .. }
+                | PhysicalPlan::CountScan { .. }
+                | PhysicalPlan::GroupCountScan { .. }
+        )
+    }
+
+    fn walk(node: &PhysicalPlan, wanted: &[String]) -> Result<()> {
+        let out = crate::plan::pushdown::output_vars(node);
+        let mut wanted_below: Vec<String> = wanted.to_vec();
+        for v in &out {
+            if !wanted_below.contains(v) {
+                wanted_below.push(v.clone());
+            }
+        }
+        for child in crate::plan::explain::children(node) {
+            if !aggregating(node) {
+                let child_out = crate::plan::pushdown::output_vars(child);
+                let mut scoped = Vec::new();
+                per_graph_vars(child, &mut scoped);
+                for g in scoped {
+                    if child_out.contains(&g) && !out.contains(&g) && wanted.contains(&g) {
+                        return Err(SparqlError::Planner(format!(
+                            "graph column ?{g} is dropped by {} but still expected \
+                             above it (SPEC-28 S3/D6) — a plan pass narrowed a \
+                             GRAPH ?{g} scan's output",
+                            crate::plan::explain::node_label(node)
+                        )));
+                    }
+                }
+            }
+            walk(child, &wanted_below)?;
+        }
+        Ok(())
+    }
+
+    walk(plan, &crate::plan::pushdown::output_vars(plan))
+}
+
+/// True when `plan` reads no quads at all — i.e. holds no `Bgp`. Such a
+/// subtree has nothing to scope, so it neither needs the graph column nor can
+/// smuggle rows in from another graph.
+fn reads_no_quads(plan: &LogicalPlan) -> bool {
+    use LogicalPlan::*;
+    match plan {
+        Bgp { .. } => false,
+        Values { .. } => true,
+        Filter { inner, .. }
+        | Extend { inner, .. }
+        | OrderBy { inner, .. }
+        | Project { inner, .. }
+        | Distinct { inner }
+        | Slice { inner, .. }
+        | Group { inner, .. } => reads_no_quads(inner),
+        PathClosure { edge, .. } => reads_no_quads(edge),
+        Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
+            reads_no_quads(left) && reads_no_quads(right)
+        }
     }
 }
 
@@ -312,6 +433,33 @@ mod tests {
             ),
             other => panic!("expected a scoped BgpScan, got {other:?}"),
         }
+    }
+
+    /// The debug tripwire must actually trip: a hand-built plan in which a
+    /// narrowing `Project` sits between a `GRAPH ?g` scan and a consumer of
+    /// `?g` is exactly what a future pass could produce, and exactly what
+    /// nothing else would catch.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn postcondition_catches_a_narrowed_graph_column() {
+        use crate::algebra::GraphSpec;
+        let scan = PhysicalPlan::BgpScan {
+            patterns: vec![pat("s", "http://ex/p", "o")],
+            scope: GraphScope::Named(GraphSpec::Var(Var::new("g"))),
+        };
+        let project = |vars: &[&str], inner: PhysicalPlan| PhysicalPlan::Project {
+            vars: vars.iter().map(|v| Var::new(*v)).collect(),
+            inner: Box::new(inner),
+        };
+        // Healthy: the projection keeps ?g.
+        assert!(per_graph_columns_survive(&project(&["g", "s"], scan.clone())).is_ok());
+        // Broken: an inner projection drops ?g while the outer one still
+        // asks for it — every row would carry an unbound ?g.
+        let narrowed = project(&["g", "s"], project(&["s"], scan.clone()));
+        let err = per_graph_columns_survive(&narrowed).expect_err("must flag the dropped column");
+        assert!(err.to_string().contains("?g"), "{err}");
+        // Not flagged: nothing above wants ?g (the sub-SELECT case).
+        assert!(per_graph_columns_survive(&project(&["s"], scan)).is_ok());
     }
 
     #[test]

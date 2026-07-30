@@ -20,6 +20,13 @@ use std::collections::HashMap;
 /// the same variable meets it in the batch schema — and if the BGP itself
 /// binds the graph variable (`GRAPH ?g { ?g ?p ?o }`) the column is not
 /// duplicated: rows survive only where the two agree.
+///
+/// The per-graph batches are expected to share one schema (the same patterns
+/// compile the same way in every graph). Columns are matched by name so a
+/// backend whose scan schema follows the data still lands in the right place,
+/// and a *narrower* batch fills the missing columns with `Unbound` — but a
+/// batch that introduces a column the first one did not have is not
+/// supported, and trips a debug assertion.
 pub(crate) fn scan_scoped<E: Executor + ?Sized>(
     exec: &E,
     patterns: &[TriplePattern],
@@ -44,10 +51,13 @@ pub(crate) fn scan_scoped<E: Executor + ?Sized>(
         let leaf = GraphScope::Named(GraphSpec::Iri(graph.iri));
         let batch =
             exec.scan_bgp_ids(patterns, &ScanScope::new(&leaf, scope.dataset, scope.mode))?;
-        if batch.rows.is_empty() {
-            continue;
-        }
-        if schema.is_empty() {
+        // Latch the output schema on the first batch that carries either rows
+        // or a schema. A row-less batch still names the scan's columns, so
+        // latching on it keeps an all-empty `GRAPH ?g` from returning the
+        // bare `[]` schema; latching on *any* first batch would take the
+        // empty schema of a row-less `Batch::from_bindings` and then drop
+        // every later graph's real columns.
+        if schema.is_empty() && !(batch.rows.is_empty() && batch.schema.is_empty()) {
             schema = batch.schema.clone();
             graph_col = match schema.iter().position(|v| v.name() == var.name()) {
                 Some(i) => {
@@ -60,9 +70,15 @@ pub(crate) fn scan_scoped<E: Executor + ?Sized>(
                 }
             };
         }
-        // Per-graph batches share one schema in practice; map by name
-        // anyway so a backend whose scan schema follows the data (any
-        // `Batch::from_bindings` executor) still lands in the right column.
+        if batch.rows.is_empty() {
+            continue;
+        }
+        debug_assert!(
+            batch.schema.iter().all(|v| schema.contains(v)),
+            "a per-graph batch widened the latched scan schema: {:?} vs {:?}",
+            batch.schema,
+            schema
+        );
         let src: Vec<Option<usize>> = schema.iter().map(|v| batch.col(v.name())).collect();
         for row in batch.rows {
             if bound_by_bgp {
@@ -74,10 +90,15 @@ pub(crate) fn scan_scoped<E: Executor + ?Sized>(
             let slots = src
                 .iter()
                 .enumerate()
-                .map(|(col, from)| match from {
-                    _ if col == graph_col && !bound_by_bgp => graph.binding.clone(),
-                    Some(i) => row.0[*i].clone(),
-                    None => Slot::Unbound,
+                .map(|(col, from)| {
+                    if col == graph_col && !bound_by_bgp {
+                        graph.binding.clone()
+                    } else {
+                        match from {
+                            Some(i) => row.0[*i].clone(),
+                            None => Slot::Unbound,
+                        }
+                    }
                 })
                 .collect();
             rows.push(Row(slots));

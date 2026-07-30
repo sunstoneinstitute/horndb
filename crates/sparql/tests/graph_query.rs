@@ -514,8 +514,28 @@ fn graph_var_is_one_scan_node_whatever_the_graph_count<
 /// The graph variable is a column of the scan leaf, so any node between the
 /// `GRAPH` and its leaves that narrows columns, merges rows, truncates them
 /// or rewrites the relation loses it — and the rows come back merged across
-/// graphs. `plan::lower` refuses all of these in one place; each shape below
-/// answered wrongly before that check existed.
+/// graphs. `plan::lower` refuses all of these in one place.
+///
+/// What each shape returned with only the refusal disabled (the `if let
+/// Some(barrier)` block in `plan::lower` commented out, everything else
+/// intact), on this fixture plus g1: `x q y`, g2: `y q z`:
+///
+/// * `?x :q+ ?y` — 3 rows, `?g` unbound in all of them, including the
+///   cross-graph `x → z` that no single graph contains.
+/// * `?s :p|:q ?o` — 4 rows, `?g` unbound; correct is 5 rows over the two
+///   graphs, so `Distinct` also collapsed g1's and g2's copies of
+///   `<b> :p <o2>`.
+/// * `?s !(:zzz) ?o` — the same 4 rows, `?g` unbound.
+/// * `<b> :p|:q <o2>` — 1 row (g1); correct is 2, the triple being in g1
+///   *and* g2, because `Slice(…, 0, 1)` truncates existence globally rather
+///   than once per graph.
+/// * the aggregating sub-SELECT — 1 row, `?c = 5` counted over every graph
+///   merged, `?g` unbound; correct is g1 → 2 and g2 → 3.
+/// * the nested `GRAPH <g1>` — 2 rows with the outer `?g` unbound.
+///
+/// Identical on both backends. The debug-only postcondition in
+/// `plan::planner` independently trips on these same plans, so observing the
+/// rows above meant disabling both guards.
 fn unsupported_shapes_inside_graph_var_refuse<
     B: QuadSeed + Default + horndb_sparql::exec::Executor,
 >() {
@@ -569,6 +589,24 @@ fn unsupported_shapes_inside_graph_var_refuse<
             "the error must name the construct ({construct}) for {q}: {err}"
         );
     }
+}
+
+/// `VALUES` is legal and correctly evaluable inside `GRAPH ?g`: it reads no
+/// quads, so the scoped BGP it joins against supplies the graph column on
+/// every output row. It must answer, not refuse.
+fn values_inside_graph_var_answers<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let b: B = fixture();
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o VALUES ?o { <http://ex/o2> } } }"
+        ),
+        vec![
+            (G1.to_owned(), "http://ex/b".to_owned()),
+            (G2.to_owned(), "http://ex/b".to_owned()),
+        ],
+        "a quad-free join arm keeps the graph column"
+    );
 }
 
 /// The boundary the refusal must not cross: `DISTINCT`, `LIMIT` and the
@@ -667,6 +705,7 @@ both_backends!(
     graph_var_count_counts_every_graph,
     graph_var_is_one_scan_node_whatever_the_graph_count,
     unsupported_shapes_inside_graph_var_refuse,
+    values_inside_graph_var_answers,
     distinct_and_limit_above_graph_var_still_answer,
     from_only_leaves_no_graphs_to_enumerate,
     reserved_graphs_do_not_enumerate,

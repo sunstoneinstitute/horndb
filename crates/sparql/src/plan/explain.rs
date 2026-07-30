@@ -146,7 +146,7 @@ fn scope_suffix(scope: &GraphScope) -> String {
 }
 
 /// The operator label shown for a node (no children).
-fn node_label(plan: &PhysicalPlan) -> String {
+pub(crate) fn node_label(plan: &PhysicalPlan) -> String {
     match plan {
         PhysicalPlan::BgpScan { patterns, scope } => {
             format!(
@@ -248,7 +248,7 @@ fn plural(n: usize) -> &'static str {
 }
 
 /// The direct children of a node, in render order.
-fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
+pub(crate) fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
     match plan {
         PhysicalPlan::BgpScan { .. }
         | PhysicalPlan::CountScan { .. }
