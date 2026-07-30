@@ -64,10 +64,16 @@ impl<'a> ScanScope<'a> {
     /// A scope for *cardinality estimation only*: the leaf's own graph
     /// scope, with no dataset clause and the default mode.
     ///
-    /// `EXPLAIN` has no dataset to hand and estimates never reach a result
+    /// `EXPLAIN` has no dataset to hand, so a `DefaultGraph` leaf estimates
+    /// against the union default graph rather than the query's `FROM` list.
+    /// That is usually an over-estimate, but not always — `FROM` naming a
+    /// reserved graph estimates against a union that *excludes* reserved
+    /// graphs, so it can also under-estimate. Both are fine: the number is
+    /// rendered in `EXPLAIN` text and nothing else consumes it
     /// (`cardinality_estimate` returns `Option<usize>` into the planner,
-    /// never a `Batch`), so widening the default graph here can only make an
-    /// estimate coarser — which SPEC-28 S3 explicitly permits.
+    /// never a `Batch`), which is exactly the latitude SPEC-28 S3 grants
+    /// estimates. It also cannot collide in the snapshot memo, which is
+    /// keyed on the *resolved* scope, not on this one.
     pub fn estimating(graph: &'a GraphScope) -> Self {
         Self {
             graph,

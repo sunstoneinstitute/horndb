@@ -2,12 +2,13 @@
 //! Stage-1 backends. Each test applies an update, then queries the store
 //! to assert the resulting triples (SPARQL Update has no result set).
 
-use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::api::{execute_query, execute_query_with, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::FullBackend;
 use horndb_sparql::parser::parse_update;
 use horndb_sparql::update::apply_update;
+use horndb_sparql::{DefaultGraphMode, SparqlConfig};
 
 fn seed<B: FullBackend + Default>(triples: &[(&str, &str, &str)]) -> B {
     use horndb_sparql::algebra::Term;
@@ -340,6 +341,105 @@ fn triple_term_template_rejected<B: FullBackend + Default>() {
         vec!["http://ex/b"]
     );
     assert!(objects_of(&store, "http://ex/a", "http://ex/r").is_empty());
+}
+
+/// Seed one quad into a named graph, through each backend's storage seam.
+/// The `Store` write trait is triple-shaped and default-graph only until
+/// SPEC-28 phase 4 (#267), so these tests plant named-graph data directly.
+trait SeedNamedGraph {
+    fn seed_named(&mut self, graph: &str, s: &str, p: &str, o: &str);
+}
+impl SeedNamedGraph for MemStore {
+    fn seed_named(&mut self, graph: &str, s: &str, p: &str, o: &str) {
+        self.insert_quad(Some(graph), (s.to_owned(), p.to_owned(), o.to_owned()));
+    }
+}
+impl SeedNamedGraph for HornBackend {
+    fn seed_named(&mut self, graph: &str, s: &str, p: &str, o: &str) {
+        let iri = |v: &str| oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(v));
+        self.insert_oxrdf_in_named_graph(&iri(graph), &iri(s), &iri(p), &iri(o))
+            .unwrap();
+    }
+}
+
+/// The `?s` bindings of `q`, sorted, evaluated against the **default graph
+/// only** (`strict`) so named-graph rows cannot mask the assertion.
+fn default_graph_subjects<B: FullBackend>(store: &B, q: &str) -> Vec<String> {
+    let QueryAnswer::Solutions { rows, .. } = execute_query_with(
+        q,
+        store,
+        &SparqlConfig {
+            default_graph: DefaultGraphMode::Strict,
+            ..SparqlConfig::default()
+        },
+    )
+    .unwrap() else {
+        panic!("expected solutions");
+    };
+    let mut out: Vec<String> = rows
+        .iter()
+        .filter_map(|r| match r.get("s") {
+            Some(horndb_sparql::algebra::Term::Iri(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// An update's WHERE clause must read exactly the graph its templates
+/// write: the default graph, whatever the query-side `default_graph` mode
+/// says (SPEC-28 S3; the write side stays default-graph only until #267).
+///
+/// The discriminating shape is DELETE+INSERT. Under a `union` default graph
+/// the WHERE also binds named-graph rows; `delete_triple` is keyed on the
+/// default graph so it cannot remove them (a silent no-op), but the INSERT
+/// template still fires — **copying** each named-graph binding into the
+/// default graph. A plain `DELETE WHERE` hides this: the delete no-ops
+/// either way, so the named-graph row survives whether or not the WHERE is
+/// pinned. Assert on the copy, not on the survival.
+fn update_where_does_not_see_named_graph_data<B: FullBackend + Default + SeedNamedGraph>() {
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    store.seed_named("http://ex/g", "http://ex/n", "http://ex/p", "http://ex/c");
+
+    let u = parse_update(
+        "DELETE { ?s <http://ex/p> ?o } INSERT { ?s <http://ex/q> ?o } \
+         WHERE { ?s <http://ex/p> ?o }",
+    )
+    .unwrap();
+    apply_update(&u, &mut store).unwrap();
+
+    // Only the default graph's own row was rewritten. `<http://ex/n>` lives
+    // in <g>; if it shows up here, the WHERE read a graph the templates
+    // cannot write.
+    assert_eq!(
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s <http://ex/q> ?o }"),
+        vec!["http://ex/a"],
+        "named-graph bindings must not be copied into the default graph"
+    );
+    assert!(
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s <http://ex/p> ?o }").is_empty(),
+        "the default graph's own row must still be deleted"
+    );
+
+    // The named graph is untouched — the WHERE never saw it.
+    let QueryAnswer::Solutions { rows, .. } = execute_query(
+        "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s <http://ex/p> ?o } }",
+        &store,
+    )
+    .unwrap() else {
+        panic!("expected solutions");
+    };
+    assert_eq!(rows.len(), 1, "named-graph row must survive: {rows:?}");
+}
+
+#[test]
+fn mem_update_where_does_not_see_named_graph_data() {
+    update_where_does_not_see_named_graph_data::<MemStore>()
+}
+#[test]
+fn horn_update_where_does_not_see_named_graph_data() {
+    update_where_does_not_see_named_graph_data::<HornBackend>()
 }
 
 #[test]

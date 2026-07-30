@@ -325,6 +325,10 @@ impl Store for MemStore {
             }
         }
     }
+    // TODO(#267): this sweeps every graph, named ones included. Once a
+    // public write path can put data in a named graph via SPARQL Update,
+    // `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing here — same gap as
+    // `HornBackend::clear_all` and the TODO in `crate::update::apply_clear_drop`.
     fn clear_all(&mut self) {
         self.triples.clear();
         self.graphs.clear();
