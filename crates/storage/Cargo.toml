@@ -37,3 +37,7 @@ harness = false
 [[bench]]
 name = "insert_retract"
 harness = false
+
+[[bench]]
+name = "graph_scan"
+harness = false
