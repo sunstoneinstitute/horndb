@@ -27,10 +27,15 @@ use std::collections::HashSet;
 pub(crate) fn schema(node: &LogicalPlan) -> Vec<Var> {
     use LogicalPlan::*;
     match node {
-        Bgp { patterns } => {
+        // A `GRAPH ?g` scan binds `?g` on top of its patterns' vars — miss
+        // it and `projection_pushdown` narrows the graph column away.
+        Bgp { patterns, scope } => {
             let mut out = Vec::new();
             for p in patterns {
                 push_pattern_vars(p, &mut out);
+            }
+            if let Some(g) = scope.graph_var() {
+                push_unique(&mut out, g.clone());
             }
             out
         }

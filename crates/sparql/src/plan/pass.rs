@@ -278,14 +278,15 @@ pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeMap<St
 /// set — proven in `tests/logical_pipeline.rs`).
 ///
 /// Producer status: spargebra merges adjacent triple patterns into one
-/// flat `Algebra::Bgp` at parse time, and the SPEC-28 phase-1 refusal
-/// (#264) removed the Stage-1 `GRAPH`-unwrap that used to produce
-/// `Join(Bgp, Bgp)` from real queries — today the pass fires only on
-/// hand-built algebra (tests). It stays because SPEC-28 phase 3
-/// (PLAN-28-03) re-creates the shape from syntax: its `GRAPH` lowering
-/// scope-tags scan leaves and drops the wrapper, so e.g.
-/// `GRAPH <g> { P1 } GRAPH <g> { P2 }` joins two equal-scope BGPs again,
-/// and the pass gains an equal-scope merge guard there (its Task 5).
+/// flat `Algebra::Bgp` at parse time, so before SPEC-28 phase 3 the pass
+/// fired only on hand-built algebra (tests). Phase 3's `GRAPH` lowering
+/// re-creates the shape from syntax — it scope-tags scan leaves and drops
+/// the wrapper, so `GRAPH <g> { P1 } GRAPH <g> { P2 }` joins two
+/// equal-scope BGPs again.
+///
+/// The merge is scope-guarded: [`LogicalPlan::join`] only folds two `Bgp`s
+/// whose `scope` fields are equal, because one flat pattern set is scanned
+/// in one graph (SPEC-28 S3). Different-scope BGPs keep their `Join`.
 pub struct CoalesceBgp;
 
 impl LogicalPass for CoalesceBgp {
@@ -379,7 +380,7 @@ mod tests {
         }
     }
     fn bgp(pats: Vec<TriplePattern>) -> LogicalPlan {
-        LogicalPlan::Bgp { patterns: pats }
+        LogicalPlan::bgp(pats)
     }
     fn raw_join(l: LogicalPlan, r: LogicalPlan) -> LogicalPlan {
         LogicalPlan::Join {
@@ -396,7 +397,7 @@ mod tests {
         );
         let out = run_passes(plan, &standard_passes(), &PlanCtx::default());
         match out {
-            LogicalPlan::Bgp { patterns } => assert_eq!(patterns.len(), 2),
+            LogicalPlan::Bgp { patterns, .. } => assert_eq!(patterns.len(), 2),
             other => panic!("CoalesceBgp must flatten Join(Bgp,Bgp); got {other:?}"),
         }
     }

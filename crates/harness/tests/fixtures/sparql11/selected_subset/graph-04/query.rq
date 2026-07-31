@@ -1,0 +1,6 @@
+BASE <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/graph-04.rq>
+PREFIX : <http://example/>
+
+SELECT * {
+    GRAPH ?g { ?s ?p ?o }
+}

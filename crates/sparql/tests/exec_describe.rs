@@ -8,6 +8,7 @@ use horndb_sparql::algebra::{Term, TriplePattern};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::runtime::describe_triples;
+use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::{Bindings, Executor, Store};
 use horndb_sparql::Result;
 
@@ -286,6 +287,7 @@ impl Executor for KindAwareStore {
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
+        _scope: &ScanScope<'_>,
     ) -> Result<Box<dyn Iterator<Item = Bindings> + '_>> {
         assert_eq!(patterns.len(), 1, "mock only handles single-pattern scans");
         let pat = &patterns[0];
@@ -338,7 +340,7 @@ fn describe_preserves_target_term_kind() {
     row.set("s", Term::BlankNode("b0".into()));
     row.set("t", iri("http://ex/a"));
 
-    let t = describe_triples(&store, &[], &[row]).unwrap();
+    let t = describe_triples(&store, &ScanScope::DEFAULT, &[], &[row]).unwrap();
 
     // The blank node's outgoing triple is described, with the decoy
     // (same lexical, IRI kind) excluded.

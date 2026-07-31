@@ -1,13 +1,13 @@
 //! End-to-end tests for the expanded expression surface (#66):
 //! arithmetic, IF, COALESCE, builtin functions.
 
-use horndb_sparql::algebra::translate::translate_query;
-use horndb_sparql::algebra::Term;
+use horndb_sparql::algebra::translate::{translate_query, translate_query_with};
+use horndb_sparql::algebra::{DatasetSpec, Term};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::Store;
 use horndb_sparql::parser::{parse_query, ParsedQuery};
-use horndb_sparql::SparqlError;
+use horndb_sparql::SparqlConfig;
 
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
@@ -45,11 +45,6 @@ fn lexical(b: &horndb_sparql::exec::Bindings, var: &str) -> String {
     }
 }
 
-/// Parse and translate `q`, asserting translation fails; returns the error.
-fn translate_str_err(q: &str) -> SparqlError {
-    translate_str(q).unwrap_err()
-}
-
 /// Parse and translate `q`, asserting translation succeeds.
 fn translate_str_ok(q: &str) {
     translate_str(q).expect("translate should succeed");
@@ -65,6 +60,20 @@ fn translate_str(q: &str) -> horndb_sparql::Result<horndb_sparql::algebra::Algeb
         ParsedQuery::Explain { .. } => panic!("explain not supported here"),
     };
     translate_query(&inner)
+}
+
+/// Like [`translate_str`] but keeps the resolved `DatasetSpec` instead of
+/// discarding it.
+fn translated_str(q: &str) -> horndb_sparql::Result<horndb_sparql::algebra::TranslatedQuery> {
+    let parsed = parse_query(q).expect("parse");
+    let inner = match parsed {
+        ParsedQuery::Select { inner }
+        | ParsedQuery::Ask { inner }
+        | ParsedQuery::Construct { inner }
+        | ParsedQuery::Describe { inner } => inner,
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
+    };
+    translate_query_with(&inner, &SparqlConfig::default())
 }
 
 #[test]
@@ -399,17 +408,16 @@ fn if_condition_uses_effective_boolean_value() {
 }
 
 #[test]
-fn graph_pattern_is_refused_ground_and_var() {
-    // SPEC-28 phase 1: GRAPH refuses instead of silently dropping the
-    // wrapper (Stage-1's old merged-graph lowering returned wrong rows).
+fn graph_pattern_translates_ground_and_var() {
+    // GRAPH must translate for both the ground and variable forms.
+    // Evaluation-level coverage (query results, ?g binding) is Task 4's
+    // graph_query.rs.
     for q in [
         "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
         "SELECT ?s ?g WHERE { GRAPH ?g { ?s ?p ?o } }",
         "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }",
     ] {
-        let err = translate_str_err(q);
-        assert!(matches!(err, SparqlError::UnsupportedAlgebra(_)), "{err}");
-        assert!(err.to_string().contains("GRAPH"), "{err}");
+        translate_str_ok(q);
     }
 }
 
@@ -449,9 +457,14 @@ fn isnumeric_requires_numeric_datatype() {
 }
 
 #[test]
-fn dataset_clause_is_refused_all_query_forms() {
-    // SPEC-28 phase 1: a non-empty FROM/FROM NAMED dataset clause refuses
-    // rather than being silently dropped, across every query form.
+fn dataset_clause_translates_all_query_forms() {
+    // A non-empty FROM/FROM NAMED dataset clause must translate to a
+    // *non-default* DatasetSpec for every query form. Asserting on the
+    // captured dataset, not just "translation succeeded", catches an arm
+    // that silently drops it (the four `translate_query_with` arms are
+    // hand-edited near-identically, so this is a live risk). DatasetSpec's
+    // own semantics (default-graph union, D4's empty default) are pinned
+    // in algebra_translate.rs.
     for q in [
         "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }",
         "SELECT ?s FROM NAMED <http://ex/g> WHERE { ?s ?p ?o }",
@@ -459,10 +472,37 @@ fn dataset_clause_is_refused_all_query_forms() {
         "CONSTRUCT { ?s ?p ?o } FROM <http://ex/g> WHERE { ?s ?p ?o }",
         "DESCRIBE <http://ex/x> FROM <http://ex/g>",
     ] {
-        let err = translate_str_err(q);
-        assert!(matches!(err, SparqlError::UnsupportedAlgebra(_)), "{err}");
-        assert!(err.to_string().contains("FROM"), "{err}");
+        let tq = translated_str(q).unwrap_or_else(|e| panic!("translate should succeed: {q}: {e}"));
+        assert_ne!(tq.dataset, DatasetSpec::default(), "{q}");
     }
+}
+
+/// Phase 1 refused a dataset clause; SPEC-28 phase 3 evaluates it. The
+/// store's data is all in the default graph, so `FROM <g>` — a graph with
+/// no data — is *answered*, with zero rows. The point of the pin is that it
+/// is no longer answered as if the clause were absent.
+#[test]
+fn dataset_clause_end_to_end_answers_over_the_named_default_graph() {
+    let s = store_with_prices();
+    let unqualified = rows("SELECT ?s WHERE { ?s ?p ?o }", &s);
+    assert!(
+        !unqualified.is_empty(),
+        "fixture must have default-graph rows for the contrast to mean anything"
+    );
+    let from_empty_graph = rows("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }", &s);
+    assert!(
+        from_empty_graph.is_empty(),
+        "FROM <g> over a graph with no data is zero rows, not the default graph's rows"
+    );
+}
+
+/// Likewise for `GRAPH <g>`: lowered and evaluated, zero rows for a graph
+/// that holds nothing (never an error, never the default graph's rows).
+#[test]
+fn graph_pattern_end_to_end_scopes_to_the_named_graph() {
+    let s = store_with_prices();
+    let got = rows("SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }", &s);
+    assert!(got.is_empty(), "GRAPH <g> over an empty graph: {got:?}");
 }
 
 #[test]

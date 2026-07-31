@@ -1,3 +1,9 @@
+> This file has two parts: the **OWL 2 RL** entailment cases the Stage-1
+> reasoner does not cover (below), and the **SPARQL query** cases the
+> SPEC-07/SPEC-28 engine does not cover (at the end). Both follow the same
+> rule — a W3C case that is not in `harness/selected.toml` must be listed
+> here with the specific missing capability that gates it.
+
 # Known-failing W3C OWL 2 RL cases (Stage-1 engine)
 
 Per SPEC-01's "Risks and open questions" section: some upstream W3C
@@ -281,3 +287,112 @@ cargo run -p horndb-harness --bin harness --features real-engine -- \
 Then move each newly-passing id from the lists above into
 `harness/selected.toml`'s `[suites.owl2-w3c-rl]` `include` block and
 delete it from this file. Both files must move in the same commit.
+
+# Known-failing W3C SPARQL query cases
+
+The SPARQL query-evaluation gate is `harness/selected.toml`'s
+`[sparql_query]` section, run by `crates/sparql/tests/w3c_suite.rs` against
+both backends (`MemStore` and `HornBackend`). SPEC-28 phase 3 (#266) added
+the W3C SPARQL 1.0 `graph/` and `dataset/` families to it. Fixtures for
+**every** case of both families — selected or not — are checked in under
+`crates/harness/tests/fixtures/sparql11/selected_subset/`, mirrored from
+`https://w3c.github.io/rdf-tests/sparql/sparql10/` (re-fetch allowlist and
+mirror rules: `crates/harness/scripts/fetch-w3c-suites.sh`).
+
+29 cases exist upstream (17 `graph/`, 12 `dataset/`); 24 are selected. The
+5 below are not. When one is fixed, move it into `selected.toml` and delete
+its entry here, in the same commit.
+
+**What these 24 cases do not grade: the shipping `union` default-graph
+mode.** The `graph/` family takes its dataset from the upstream manifest, so
+those cases run in `strict`; every `dataset/` query carries its own `FROM` /
+`FROM NAMED`, which fixes the dataset whatever the mode is. No W3C case here
+exercises D2's *default*. That mode is covered by `crates/sparql/tests/
+graph_query.rs` (`union_mode_unqualified_sees_all_non_reserved_deduped`,
+`reserved_graph_excluded_from_union`, and the `GRAPH ?g` cases), not by
+conformance — do not read the headline count as covering it.
+
+## Blank nodes in the expected result (3 cases)
+
+`w3c_suite.rs::assert_select_equal` diffs solutions as a multiset of
+**literal** terms. It has no blank-node isomorphism matching, so a result
+row binding a blank node can never match: the upstream result file's label
+and whatever label the engine mints are different strings, and both are
+equally correct RDF. Fixing this means matching expected against actual up
+to a blank-node bijection, in the runner — not in the engine.
+
+- `graph-11` — `{ ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }` over
+  `data-g3`/`data-g4`, whose subjects are blank nodes; 3 of the 8 expected
+  rows bind one.
+- `dataset-11` — same query and same 3 rows, with the dataset given by
+  `FROM` / `FROM NAMED` instead of the manifest.
+- `dataset-12b` — the four-`FROM`, four-`FROM NAMED` variant; 6 of 12
+  expected rows bind a blank node.
+
+A second, backend-level gate applies to the same three cases on the
+`MemStore` leg: `MemStore` keeps every term as a bare lexical string
+(`exec/mem.rs::term_to_lex`), so a blank node is indistinguishable from an
+IRI on the way out and the JSON results report it as `"type": "uri"`.
+
+## ~~An empty group inside a ground `GRAPH <g>` does not test the graph~~ — FIXED
+
+`graph-exist` and `graph-not-exist` are now **green** and listed in
+`selected.toml`. Both backends took a zero-pattern shortcut that emitted the
+unit row before consulting the scope, so `ASK { GRAPH <g> {} }` — the
+standard graph-existence probe — answered `true` for every IRI, at HTTP 200.
+`graph-not-exist` failed on it; `graph-exist` passed for the wrong reason.
+Both now go through `ScanScope::ground_graph`: an empty group matches only
+when the scope is the default graph, or a ground `GRAPH <g>` whose `g`
+survives the `FROM NAMED` filter and holds at least one quad. Direct pin:
+`empty_group_probes_graph_existence` in `crates/sparql/tests/graph_query.rs`
+(the W3C fixtures alone would not hold it — `graph-exist` passes either way).
+
+## The graph variable is in scope inside the `GRAPH` block (2 cases)
+
+SPARQL 1.1 §18.2.2.2 evaluates `GRAPH ?g { P }` as `Graph(?g, eval(P))`:
+`P` is evaluated **first**, with `?g` free, and only then does `Graph`
+bind `?g` to each graph name and drop rows where `P` already bound `?g` to
+something else. HornDB carries the graph scope as a column on each scan
+leaf inside the block (SPEC-28 D5/D6), so `?g` is bound *before* anything
+above the leaf runs. For a `P` that merely mentions `?g` in a pattern the
+two agree (the column joins by equality — that is `graph-variable-join`,
+which is selected and green). They diverge when `P` tests or optionally
+binds `?g`. Closing the gap means evaluating the whole block per graph, not
+just its scan leaves — the machinery SPEC-28 phase 3 deliberately did not
+build.
+
+Both cases are **refused**, not answered — HornDB returns an "unsupported
+algebra construct" error naming the construct and §18.2.2.2. They still fail
+the manifest (a refusal is not the expected result set), but they fail
+honestly, which is what SPEC-28 D1 requires.
+
+- `graph-variable-scope` — `GRAPH ?g { FILTER (BOUND(?g)) }`. The filter must
+  see `?g` unbound and reject, giving 0 rows. Leaf-binding puts the filter
+  above a scan that already bound `?g`, which used to return one row per
+  named graph (2). Now refused: *"a FILTER that references ?g inside
+  GRAPH ?g"*.
+- `graph-optional` — `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }`. The `?g`
+  inside the OPTIONAL is a free variable of the inner group, so the OPTIONAL
+  matches on the object and `Graph` then keeps only the rows where that
+  object *is* the graph name (1 row). Leaf-binding scopes the OPTIONAL's own
+  scan instead, changing both what the OPTIONAL matches and which left rows
+  survive; that used to return 4 rows. Now refused: *"an OPTIONAL that
+  references ?g inside GRAPH ?g"*.
+
+The refusal rule (`plan::lower::per_graph_var_divergence`) allows `?g` only
+where the data supplies it and an inner join combines it — a triple-pattern
+position or a `VALUES` column, joined upward through `Join`, `Union`, or an
+`OPTIONAL`'s left arm. That is exactly the case where "the leaf keeps rows
+whose `?g` equals this graph" *is* the post-join, and it is why
+`graph-variable-join` stays selected and green. (For a `VALUES`-supplied `?g`
+only the `Join` case reaches this rule: `plan::lower::per_graph_barrier` runs
+first and refuses a `VALUES` arm of a `Union` or of an `OPTIONAL`'s left side,
+because neither carries the graph column up.) Every other use — any expression
+(`FILTER`, `BIND`, an `OPTIONAL` condition, `ORDER BY`), a `BIND` *to* `?g`,
+or any mention inside an `OPTIONAL`'s right arm — refuses.
+
+Lifting either refusal needs the graph variable joined **after** the block is
+evaluated rather than bound on the scan leaf: evaluate `P` per graph with
+`?g` free, then join `{?g → thatGraph}`. That is the per-graph block
+evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
+column), so it is a design change, not a bug fix.

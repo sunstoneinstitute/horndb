@@ -156,6 +156,54 @@ socket.
     binary that serves SPARQL over asserted data without pulling in the OWL 2
     RL reasoner.
 
+## Query settings
+
+The `[server.limits]` config section holds the defaults for settings a single
+query may override through a URL query parameter on `/query`. One such setting
+is live today; the rest of the section is not yet wired to runtime behaviour and
+is therefore not documented here.
+
+`[server.limits].default_graph` (string), `HORNDB_SERVER__LIMITS__DEFAULT_GRAPH`
+
+:   **Default:** `union`.
+
+    **Scope:** config key or the matching environment variable. It sets the
+    server-wide default; a query overrides it with the `default_graph` URL
+    parameter below.
+
+    **Allowed values:** `union` or `strict`, lower case. Any other value makes
+    `serve` exit at startup, naming the file and the key.
+
+    **Tuning notes:** the setting decides what the *default graph* is for a
+    query that names no dataset — one with no `FROM` and no `FROM NAMED`
+    clause. Under `union`, the default graph is the union of every named graph
+    in the store plus the unnamed default graph, with a triple held by several
+    graphs counted once. Under `strict`, it is the unnamed default graph alone,
+    so a store whose data lives entirely in named graphs answers every
+    unqualified query with zero rows. Graphs under the reserved
+    `https://horndb.io/graph/` namespace are excluded from the union in both
+    modes. Neither mode affects a query that names its own dataset, or what
+    `GRAPH ?g` ranges over. Choose `strict` when comparing HornDB against
+    another SPARQL store — most read the no-dataset case that way, so `union`
+    will show a difference on every unqualified query.
+
+`default_graph` (URL query parameter on `/query`)
+
+:   **Default:** the value of `[server.limits].default_graph`.
+
+    **Scope:** one query. Accepted on all three protocol channels: as a URL
+    query parameter on `GET /query` and on a direct `POST` with an
+    `application/sparql-query` body, and as a form field in an
+    `application/x-www-form-urlencoded` `POST` body. It changes nothing on the
+    server and does not affect other queries.
+
+    **Allowed values:** `union` or `strict`, lower case. Any other value returns
+    HTTP 400 naming the parameter; the query does not run.
+
+    **Tuning notes:** use it to run one query under the other mode, for example
+    `GET /query?query=…&default_graph=strict`. The meaning of each value is the
+    same as for the config key above.
+
 ## SIMD kernel selection
 
 HornDB's shared SIMD layer picks a kernel implementation — scalar, AVX2,

@@ -1,0 +1,7 @@
+BASE <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/dataset-05.rq>
+PREFIX : <http://example/>
+
+SELECT *
+FROM <data-g1.ttl>
+FROM NAMED <data-g2.ttl>
+{ ?s ?p ?o }

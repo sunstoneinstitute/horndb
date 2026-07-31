@@ -1,0 +1,44 @@
+{
+  "head": {
+    "vars": [
+      "g",
+      "o",
+      "p",
+      "q",
+      "s",
+      "v"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/data-g2.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "1"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "q": {
+          "type": "uri",
+          "value": "http://example/q"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        },
+        "v": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "2"
+        }
+      }
+    ]
+  }
+}

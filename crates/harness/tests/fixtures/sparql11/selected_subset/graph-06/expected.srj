@@ -1,0 +1,33 @@
+{
+  "head": {
+    "vars": [
+      "g",
+      "o",
+      "p",
+      "s"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g2.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "2"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/q"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        }
+      }
+    ]
+  }
+}

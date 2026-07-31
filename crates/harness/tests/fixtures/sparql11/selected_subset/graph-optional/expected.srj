@@ -1,0 +1,22 @@
+{
+  "head": {
+    "vars": [
+      "g",
+      "s"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-optional.ttl"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/s2"
+        }
+      }
+    ]
+  }
+}

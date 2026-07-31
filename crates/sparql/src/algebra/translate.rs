@@ -8,8 +8,8 @@
 //! recursive Kleene `*`/`+` lower to [`Algebra::PathClosure`].
 
 use crate::algebra::{
-    AggFunc, Aggregate, Algebra, Expr, Func, OrderDir, Term, TriplePattern, Var, PATH_DST_VAR,
-    PATH_SRC_VAR,
+    AggFunc, Aggregate, Algebra, DatasetSpec, Expr, Func, GraphSpec, OrderDir, Term,
+    TranslatedQuery, TriplePattern, Var, PATH_DST_VAR, PATH_SRC_VAR,
 };
 use crate::error::{Result, SparqlError};
 use crate::SparqlConfig;
@@ -22,36 +22,59 @@ use spargebra::term::{
 };
 use spargebra::Query;
 
-/// Top-level entry: lower a parsed `spargebra::Query` to [`Algebra`]
-/// using the default [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term
-/// patterns are rejected). For RDF 1.2 callers use
-/// [`translate_query_with`].
+/// Lower a parsed `spargebra::Query` to [`Algebra`] using the default
+/// [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term patterns are
+/// rejected).
+///
+/// This function's return type has no room for a [`DatasetSpec`], so it
+/// **refuses** a query with a non-empty `FROM`/`FROM NAMED` clause rather
+/// than silently discard it — a caller who planned and ran the returned
+/// algebra would get the configured default dataset instead of the one
+/// the query named, a silent wrong answer. Use [`translate_query_with`]
+/// for any query that may carry a dataset clause; it returns the
+/// [`DatasetSpec`] alongside the algebra and cannot lose it. Has no
+/// production callers today — every real query path (`api.rs`) already
+/// goes through `translate_query_with`; this exists for tests that only
+/// need `Algebra` shape on a dataset-free query.
+#[doc(hidden)]
 pub fn translate_query(q: &Query) -> Result<Algebra> {
-    translate_query_with(q, &SparqlConfig::default())
+    let translated = translate_query_with(q, &SparqlConfig::default())?;
+    if translated.dataset != DatasetSpec::default() {
+        return Err(SparqlError::UnsupportedAlgebra(
+            "FROM/FROM NAMED dataset clause (translate_query cannot return the resolved \
+             DatasetSpec and would silently discard it — use translate_query_with instead)"
+                .into(),
+        ));
+    }
+    Ok(translated.algebra)
 }
 
-/// Like [`translate_query`] but takes an explicit [`SparqlConfig`] —
-/// pass [`SparqlConfig::rdf12`] to accept triple-term patterns.
-pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
+/// Like [`translate_query`] but takes an explicit [`SparqlConfig`] — pass
+/// [`SparqlConfig::rdf12`] to accept triple-term patterns — and returns the
+/// [`DatasetSpec`] resolved from the query's `FROM`/`FROM NAMED` clause
+/// alongside the algebra (SPEC-28 S3).
+pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQuery> {
     match q {
         Query::Select {
             pattern,
             dataset,
             base_iri: _,
-        } => {
-            refuse_nonempty_dataset(dataset)?;
-            translate_projection(pattern, cfg)
-        }
+        } => Ok(TranslatedQuery {
+            algebra: translate_projection(pattern, cfg)?,
+            dataset: dataset_spec_from(dataset),
+        }),
         Query::Ask {
             pattern,
             dataset,
             base_iri: _,
         } => {
-            refuse_nonempty_dataset(dataset)?;
             let inner = translate_pattern(pattern, cfg)?;
-            Ok(Algebra::Project {
-                vars: Vec::new(),
-                inner: Box::new(inner),
+            Ok(TranslatedQuery {
+                algebra: Algebra::Project {
+                    vars: Vec::new(),
+                    inner: Box::new(inner),
+                },
+                dataset: dataset_spec_from(dataset),
             })
         }
         Query::Construct {
@@ -59,48 +82,67 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<Algebra> {
             pattern,
             dataset,
             base_iri: _,
-        } => {
-            refuse_nonempty_dataset(dataset)?;
+        } => Ok(TranslatedQuery {
             // The CONSTRUCT template is preserved separately by the
             // runtime; here we only return the WHERE-clause algebra.
             // The planner is responsible for re-attaching the
             // template via Runtime::run_construct.
-            translate_pattern(pattern, cfg)
-        }
+            algebra: translate_pattern(pattern, cfg)?,
+            dataset: dataset_spec_from(dataset),
+        }),
         Query::Describe {
             pattern,
             dataset,
             base_iri: _,
-        } => {
-            refuse_nonempty_dataset(dataset)?;
+        } => Ok(TranslatedQuery {
             // spargebra encodes a DESCRIBE's WHERE clause exactly like a
             // SELECT (via `build_select`): the resources to describe are
             // the values bound to the projected variables across all
             // result rows. So the algebra translation is identical to
             // the SELECT arm — the runtime (`describe_triples`) is what
             // turns those bound resources into a forward CBD graph.
-            translate_projection(pattern, cfg)
-        }
+            algebra: translate_projection(pattern, cfg)?,
+            dataset: dataset_spec_from(dataset),
+        }),
     }
 }
 
-/// Reject a non-empty `FROM`/`FROM NAMED` dataset clause (SPEC-28 phase 1,
-/// #264): naming a dataset silently narrowed evaluation to the merged
-/// default graph, which is a wrong answer a caller could not detect.
-/// `None`, or a clause naming no graphs, is a no-op and passes through;
-/// this mirrors the update side's `validate_delete_insert`
-/// (`update.rs`).
-fn refuse_nonempty_dataset(ds: &Option<QueryDataset>) -> Result<()> {
-    if let Some(ds) = ds {
-        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
-            return Err(SparqlError::UnsupportedAlgebra(
-                "FROM/FROM NAMED dataset clause (dataset selection is refused until \
-                 SPEC-28 phase 3; see #264)"
-                    .into(),
-            ));
-        }
-    }
-    Ok(())
+/// Resolve a parsed `FROM`/`FROM NAMED` clause to a [`DatasetSpec`]
+/// (SPEC-28 S3, D2–D4).
+///
+/// Invariant: any dataset clause present (`FROM` and/or `FROM NAMED`) ⇒
+/// both fields `Some`; no dataset clause at all ⇒ both `None`. So
+/// `named: None` means exactly one thing, and no downstream consumer has
+/// to read `default` alongside `named` to know what `None` implies —
+/// `FROM` without `FROM NAMED` still yields `named: Some(vec![])` (an
+/// explicitly empty named set), not `None`.
+///
+/// `spargebra`'s `DatasetClauses()` rule (`parser.rs:1171`) sets
+/// `named: Some(_)` whenever **any** dataset clause is present, not only
+/// when `FROM NAMED` itself was written — a query with only `FROM <g>`
+/// also parses to `named: Some(vec![])`. So whether `FROM NAMED` was
+/// actually written is read off whether that vec is non-empty, not
+/// `Option::is_some()`.
+fn dataset_spec_from(ds: &Option<QueryDataset>) -> DatasetSpec {
+    let Some(ds) = ds else {
+        return DatasetSpec::default();
+    };
+    let has_from = !ds.default.is_empty();
+    let named_graphs = ds.named.as_ref().filter(|n| !n.is_empty());
+    let has_dataset_clause = has_from || named_graphs.is_some();
+    // `ds.default` is already `[]` when `!has_from`, so mapping it
+    // unconditionally also gives D4's "FROM NAMED without FROM -> empty
+    // default graph" for free.
+    let default =
+        has_dataset_clause.then(|| ds.default.iter().map(|n| n.as_str().to_owned()).collect());
+    let named = has_dataset_clause.then(|| {
+        named_graphs
+            .into_iter()
+            .flatten()
+            .map(|n| n.as_str().to_owned())
+            .collect()
+    });
+    DatasetSpec { default, named }
 }
 
 /// Shared SELECT/DESCRIBE lowering: spargebra often wraps the WHERE
@@ -290,13 +332,20 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
-        // SPEC-28 phase 1 (#264): refuse rather than silently drop the
-        // GRAPH wrapper. Real named-graph evaluation lands in phase 3.
-        GraphPattern::Graph { .. } => Err(SparqlError::UnsupportedAlgebra(
-            "GRAPH named-graph pattern (named-graph queries are refused until \
-             SPEC-28 phase 3; see #264)"
-                .into(),
-        )),
+        // SPEC-28 phase 3 (#266): GRAPH scopes `inner` to one named graph
+        // (ground IRI) or, for a variable, to every graph the query can
+        // see. Lowering (`plan/lower.rs`) pushes the scope onto the scan
+        // leaves inside `inner`; it does not keep an `Algebra::Graph` node.
+        GraphPattern::Graph { name, inner } => {
+            let name = match name {
+                NamedNodePattern::NamedNode(n) => GraphSpec::Iri(n.as_str().to_owned()),
+                NamedNodePattern::Variable(v) => GraphSpec::Var(translate_var(v)),
+            };
+            Ok(Algebra::Graph {
+                name,
+                inner: Box::new(translate_pattern(inner, cfg)?),
+            })
+        }
         GraphPattern::Lateral { .. } => Err(SparqlError::UnsupportedAlgebra("Lateral".into())),
     }
 }
@@ -553,8 +602,9 @@ fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
             | GraphPattern::Reduced { inner }
             | GraphPattern::Group { inner, .. } => walk(inner, acc),
             GraphPattern::Graph { name, inner } => {
-                // Unreachable while `translate_pattern` refuses every
-                // `Graph` node (SPEC-28 phase 1, #264); kept for phase 3.
+                // GRAPH ?g scopes a variable into the surrounding pattern
+                // (SPEC-28 S3): SELECT * over a GRAPH block must project
+                // the graph variable too.
                 if let NamedNodePattern::Variable(v) = name {
                     push(v, acc);
                 }

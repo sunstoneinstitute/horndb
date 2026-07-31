@@ -118,13 +118,11 @@ mod tests {
         PlanCtx::default()
     }
     fn bgp(p: &str) -> LogicalPlan {
-        LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: Term::Iri(format!("http://ex/{p}")),
-                object: var(p),
-            }],
-        }
+        LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: Term::Iri(format!("http://ex/{p}")),
+            object: var(p),
+        }])
     }
     fn pred(v: &str) -> Expr {
         Expr::Gt(

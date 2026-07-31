@@ -1,5 +1,6 @@
 use horndb_sparql::algebra::{Term, TriplePattern, Var};
 use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::{Bindings, Executor};
 
 fn t(s: &str, p: &str, o: &str) -> (String, String, String) {
@@ -26,7 +27,7 @@ fn mem_executor_matches_single_pattern() {
         object: pat_var("o"),
     };
     let result: Vec<Bindings> = s
-        .scan_bgp(std::slice::from_ref(&pat))
+        .scan_bgp(std::slice::from_ref(&pat), &ScanScope::DEFAULT)
         .expect("scan")
         .collect();
     assert_eq!(result.len(), 2);
@@ -62,7 +63,10 @@ fn mem_executor_joins_two_patterns_on_shared_var() {
         object: pat_var("z"),
     };
 
-    let result: Vec<Bindings> = s.scan_bgp(&[p1, p2]).expect("scan").collect();
+    let result: Vec<Bindings> = s
+        .scan_bgp(&[p1, p2], &ScanScope::DEFAULT)
+        .expect("scan")
+        .collect();
     assert_eq!(result.len(), 1);
     let b = &result[0];
     assert_eq!(b.get("o").unwrap(), &Term::Iri("http://ex/b".into()));

@@ -1,0 +1,10 @@
+BASE <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/dataset/dataset-10b.rq>
+PREFIX : <http://example/>
+
+SELECT *
+FROM <data-g3-dup.ttl>
+FROM NAMED <data-g3.ttl>
+{
+   ?s ?p ?o
+   GRAPH ?g { ?s ?q ?v }
+}

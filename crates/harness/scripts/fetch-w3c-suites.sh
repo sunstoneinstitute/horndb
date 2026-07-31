@@ -20,9 +20,11 @@ mkdir -p "$DATA"
 OWL2_PROFILE_RL_URL="https://www.w3.org/2009/11/owl-test/profile-RL.rdf"
 SPARQL_URL="https://www.w3.org/2009/sparql/docs/tests/sparql11-test-suite-20121023.tar.gz"
 RDF12_NT_BASE="https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax"
+SPARQL10_BASE="https://w3c.github.io/rdf-tests/sparql/sparql10"
 
 OWL2_DIR="$DATA/w3c-owl2-rl-tests"
 SPARQL_DIR="$DATA/w3c-sparql11-tests"
+SPARQL10_DIR="$DATA/w3c-sparql10-tests"
 RDF12_NT_DIR="$DATA/rdf12-n-triples"
 RDF12_NT_FIXTURES="$ROOT/crates/harness/tests/fixtures/rdf12-n-triples"
 
@@ -64,7 +66,7 @@ RDF12_NT_FILES=(
 mkdir -p "$RDF12_NT_DIR" "$RDF12_NT_FIXTURES"
 for f in "${RDF12_NT_FILES[@]}"; do
     if [[ ! -f "$RDF12_NT_DIR/$f" ]]; then
-        echo "fetching rdf12-n-triples/$f…"
+        echo "fetching rdf12-n-triples/${f}…"
         curl -sSfL "$RDF12_NT_BASE/$f" -o "$RDF12_NT_DIR/$f"
     fi
     # Mirror into the checked-in tests/fixtures path so CI (which does
@@ -103,5 +105,85 @@ cargo run -p horndb-harness --bin harness -- \
 if [[ -d "$SPARQL_DIR/syntax-query" ]]; then
     echo "upstream SPARQL syntax sub-suites present under $SPARQL_DIR (see sparql11-syntax notes above)."
 fi
+
+# SPARQL 1.0 `graph/` + `dataset/` evaluation families (SPEC-28 S7, #266).
+#
+# These two families are NOT in the SPARQL 1.1 tarball fetched above — they
+# only ever existed in the SPARQL 1.0 (DAWG) suite, so they come from the
+# maintained `rdf-tests` mirror, file by file. The allowlist below is every
+# file the two manifests reference, plus the data files the `dataset/`
+# queries name in their own `FROM` / `FROM NAMED` clauses (the manifest does
+# not list those).
+#
+# The per-case fixture dirs under
+# `crates/harness/tests/fixtures/sparql11/selected_subset/{graph,dataset}-*`
+# are a checked-in mirror of these files (so CI needs no network), derived by
+# three mechanical transformations — the same ones a manifest-driven W3C
+# runner applies:
+#
+#   1. relative IRIs resolve against the upstream file IRI. Data files are
+#      parsed with that base; each `query.rq` gains one explicit
+#      `BASE <upstream-query-iri>` line and is otherwise the upstream text
+#      (the repo's pre-commit hooks additionally strip trailing whitespace
+#      and normalise the final newline — neither changes the query).
+#   2. the dataset becomes one `data.trig`: for `graph/`, the manifest's
+#      `qt:data` files land in the default graph and `qt:graphData` files in
+#      a named graph per file; for `dataset/`, every file named by the
+#      query's `FROM`/`FROM NAMED` lands in a named graph. Graph names are
+#      the files' upstream IRIs. Blank-node labels are made per-document
+#      (`<file-stem>-bN`), which is the RDF merge SPARQL 1.1 §13.1 defines
+#      the dataset by.
+#   3. the `rs:ResultSet` Turtle result graph becomes `expected.srj`
+#      (SPARQL Results JSON), the format `w3c_suite.rs` diffs against.
+#
+# This script therefore does NOT overwrite those fixtures. Which cases are
+# graded is `harness/selected.toml`'s `[sparql_query]` section; the upstream
+# cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+#
+# Note for the next fetch: upstream `dataset-09b.rq` and `dataset-10b.rq` are
+# byte-identical apart from one newline (both are
+# `FROM <data-g3-dup.ttl> FROM NAMED <data-g3.ttl>`), so the two mirrored
+# cases are the same test twice. The manifest lists them as distinct cases,
+# so this is either an upstream quirk or a `10b` that was meant to swap the
+# two files. Re-check when this list is next re-fetched; if upstream has
+# diverged, `dataset-10b`'s fixture needs regenerating.
+SPARQL10_GRAPH_FILES=(
+    manifest.ttl
+    data-g1.ttl data-g2.ttl data-g3.ttl data-g3-dup.ttl data-g4.ttl
+    data-optional.ttl data-variable-join.ttl
+    graph-01.rq graph-01.ttl graph-02.rq graph-02.ttl graph-03.rq graph-03.ttl
+    graph-04.rq graph-04.ttl graph-05.rq graph-05.ttl graph-06.rq graph-06.ttl
+    graph-07.rq graph-07.ttl graph-08.rq graph-08.ttl graph-09.rq graph-09.ttl
+    graph-10.rq graph-10.ttl graph-11.rq graph-11.ttl
+    graph-empty.rq graph-empty.ttl
+    graph-empty-exist.rq graph-empty-exist.ttl
+    graph-empty-not-exist.rq graph-empty-not-exist.ttl
+    graph-optional.rq graph-optional.ttl
+    graph-variable-join.rq graph-variable-join.ttl
+    graph-variable-scope.rq graph-variable-scope.ttl
+)
+SPARQL10_DATASET_FILES=(
+    manifest.ttl
+    data-g1.ttl data-g2.ttl data-g3.ttl data-g4.ttl
+    data-g1-dup.ttl data-g2-dup.ttl data-g3-dup.ttl data-g4-dup.ttl
+    dataset-01.rq dataset-01.ttl dataset-02.rq dataset-02.ttl
+    dataset-03.rq dataset-03.ttl dataset-04.rq dataset-04.ttl
+    dataset-05.rq dataset-05.ttl dataset-06.rq dataset-06.ttl
+    dataset-07.rq dataset-07.ttl dataset-08.rq dataset-08.ttl
+    dataset-09b.rq dataset-09.ttl dataset-10b.rq dataset-10.ttl
+    dataset-11.rq dataset-11.ttl dataset-12b.rq dataset-12.ttl
+)
+fetch_sparql10() {
+    local family="$1"; shift
+    mkdir -p "$SPARQL10_DIR/$family"
+    for f in "$@"; do
+        if [[ ! -f "$SPARQL10_DIR/$family/$f" ]]; then
+            echo "fetching sparql10/${family}/${f}…"
+            curl -sSfL "$SPARQL10_BASE/$family/$f" -o "$SPARQL10_DIR/$family/$f"
+        fi
+    done
+}
+fetch_sparql10 graph "${SPARQL10_GRAPH_FILES[@]}"
+fetch_sparql10 dataset "${SPARQL10_DATASET_FILES[@]}"
 
 echo "done."

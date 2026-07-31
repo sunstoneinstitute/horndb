@@ -297,13 +297,11 @@ mod tests {
     /// below the Project (a restricting Project wraps the scan).
     #[test]
     fn narrows_scan_under_project() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let plan = LogicalPlan::Project {
             vars: vec![Var::new("s")],
             inner: Box::new(bgp),
@@ -324,13 +322,11 @@ mod tests {
     /// the dedup key set changes).
     #[test]
     fn distinct_is_a_barrier() {
-        let bgp = LogicalPlan::Bgp {
-            patterns: vec![TriplePattern {
-                subject: var("s"),
-                predicate: var("p"),
-                object: var("o"),
-            }],
-        };
+        let bgp = LogicalPlan::bgp(vec![TriplePattern {
+            subject: var("s"),
+            predicate: var("p"),
+            object: var("o"),
+        }]);
         let plan = LogicalPlan::Project {
             vars: vec![Var::new("s")],
             inner: Box::new(LogicalPlan::Distinct {

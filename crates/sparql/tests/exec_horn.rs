@@ -5,6 +5,7 @@
 use horndb_sparql::algebra::{Term, TriplePattern, Var};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
+use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::{Executor, Store};
 
 fn iri(s: &str) -> Term {
@@ -48,7 +49,7 @@ fn two_pattern_join_binds_kind_correct_terms() {
         pat(var("cw"), iri("title"), var("t")),
     ];
     let mut rows: Vec<(Term, Term)> = st
-        .scan_bgp(&patterns)
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
         .unwrap()
         .map(|b| (b.get("cw").unwrap().clone(), b.get("t").unwrap().clone()))
         .collect();
@@ -70,7 +71,10 @@ fn four_pattern_bgp_takes_wcoj_path() {
         pat(var("cw"), iri("body"), var("b")),
         pat(var("cw2"), iri("a"), iri("BlogPost")),
     ];
-    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = st
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     // cw1 x {cw1, cw2}: only cw1 has a body.
     assert_eq!(rows.len(), 2);
 }
@@ -83,17 +87,26 @@ fn ground_pattern_filters_without_executor() {
         pat(iri("cw1"), iri("a"), iri("BlogPost")),
         pat(var("x"), iri("a"), iri("NewsItem")),
     ];
-    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = st
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     assert_eq!(rows.len(), 1);
     // Absent ground triple zeroes the result.
     let patterns = vec![
         pat(iri("cw1"), iri("a"), iri("NewsItem")),
         pat(var("x"), iri("a"), iri("BlogPost")),
     ];
-    assert_eq!(st.scan_bgp(&patterns).unwrap().count(), 0);
+    assert_eq!(
+        st.scan_bgp(&patterns, &ScanScope::DEFAULT).unwrap().count(),
+        0
+    );
     // All-ground, all-present: exactly one empty row (ASK semantics).
     let patterns = vec![pat(iri("cw1"), iri("a"), iri("BlogPost"))];
-    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = st
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].is_empty());
 }
@@ -104,7 +117,10 @@ fn repeated_variable_within_pattern_filters_to_diagonal() {
     st.insert_triple(iri("a"), iri("likes"), iri("a"));
     st.insert_triple(iri("a"), iri("likes"), iri("b"));
     let patterns = vec![pat(var("x"), iri("likes"), var("x"))];
-    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = st
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("x"), Some(&iri("a")));
 }
@@ -120,7 +136,10 @@ fn user_variable_resembling_alias_does_not_collide() {
         pat(var("x"), iri("likes"), var("x")),
         pat(var("x"), iri("likes"), var("__horndb_dup_x_2")),
     ];
-    let rows: Vec<_> = st.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = st
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     // Diagonal pins ?x = a; ?__horndb_dup_x_2 ranges over {a, b}.
     assert_eq!(rows.len(), 2);
     for r in &rows {
@@ -133,7 +152,10 @@ fn user_variable_resembling_alias_does_not_collide() {
 fn unknown_constant_yields_empty_not_error() {
     let st = store();
     let patterns = vec![pat(var("x"), iri("never-seen"), var("y"))];
-    assert_eq!(st.scan_bgp(&patterns).unwrap().count(), 0);
+    assert_eq!(
+        st.scan_bgp(&patterns, &ScanScope::DEFAULT).unwrap().count(),
+        0
+    );
 }
 
 #[test]
@@ -163,7 +185,7 @@ fn order_by_literal_object_uses_value_semantics() {
 #[test]
 fn empty_pattern_list_yields_single_empty_row() {
     let st = HornBackend::new();
-    let rows: Vec<_> = st.scan_bgp(&[]).unwrap().collect();
+    let rows: Vec<_> = st.scan_bgp(&[], &ScanScope::DEFAULT).unwrap().collect();
     assert_eq!(rows.len(), 1);
 }
 
@@ -221,8 +243,11 @@ fn scan_bgp_ids_decodes_to_same_rows_as_scan_bgp() {
 
     let patterns = vec![pat(var("s"), iri("p"), var("o"))];
 
-    let mut legacy: Vec<_> = be.scan_bgp(&patterns).unwrap().collect();
-    let batch = be.scan_bgp_ids(&patterns).unwrap();
+    let mut legacy: Vec<_> = be
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
+    let batch = be.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
     let mut ids: Vec<_> = batch.to_bindings(|id| be.decode_term(id)).unwrap();
 
     let key = |b: &horndb_sparql::exec::Bindings| {
@@ -244,8 +269,11 @@ fn scan_bgp_ids_diagonal_self_join_matches_scan_bgp() {
     // BGP with ?x in both subject and object — only (a, p, a) should survive.
     let patterns = vec![pat(var("x"), iri("p"), var("x"))];
 
-    let mut legacy: Vec<_> = be.scan_bgp(&patterns).unwrap().collect();
-    let batch = be.scan_bgp_ids(&patterns).unwrap();
+    let mut legacy: Vec<_> = be
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
+    let batch = be.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
     let mut ids: Vec<_> = batch.to_bindings(|id| be.decode_term(id)).unwrap();
 
     let key = |b: &horndb_sparql::exec::Bindings| {
@@ -319,10 +347,10 @@ fn cardinality_single_pattern_equals_predicate_count() {
     // `?s <p1> ?o` matches exactly the p1 triples: the estimator returns the
     // predicate count (5), NOT the old coarse `self.len()` bound (10).
     let patterns = vec![pat(var("s"), iri("p1"), var("o"))];
-    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    let true_count = st.scan_bgp(&patterns, &ScanScope::DEFAULT).unwrap().count();
     assert_eq!(true_count, 5, "sanity: p1 has 5 triples");
     assert_eq!(
-        st.cardinality_estimate(&patterns),
+        st.cardinality_estimate(&patterns, &ScanScope::DEFAULT),
         Some(5),
         "single-pattern estimate must equal the predicate count, not total triples"
     );
@@ -336,11 +364,11 @@ fn cardinality_two_pattern_star_is_cs_estimate() {
         pat(var("s"), iri("p1"), var("o1")),
         pat(var("s"), iri("p2"), var("o2")),
     ];
-    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    let true_count = st.scan_bgp(&patterns, &ScanScope::DEFAULT).unwrap().count();
     assert_eq!(true_count, 3, "sanity: 3 subjects share p1 and p2");
 
     let est = st
-        .cardinality_estimate(&patterns)
+        .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
         .expect("estimate present");
     // Characteristic-Sets point estimate: within an order of magnitude of the
     // true join size, and NOT the old coarse `self.len()` (10) upper bound.
@@ -359,13 +387,16 @@ fn cardinality_unknown_constant_is_zero() {
     let st = stats_store();
     // A predicate the dictionary has never seen: the BGP can match nothing.
     let patterns = vec![pat(var("s"), iri("never-inserted"), var("o"))];
-    assert_eq!(st.cardinality_estimate(&patterns), Some(0));
+    assert_eq!(
+        st.cardinality_estimate(&patterns, &ScanScope::DEFAULT),
+        Some(0)
+    );
 }
 
 #[test]
 fn cardinality_empty_bgp_is_join_identity() {
     let st = stats_store();
-    assert_eq!(st.cardinality_estimate(&[]), Some(1));
+    assert_eq!(st.cardinality_estimate(&[], &ScanScope::DEFAULT), Some(1));
 }
 
 /// The `SnapshotStats` cache behind `cardinality_estimate` must not go stale:
@@ -380,13 +411,13 @@ fn cardinality_stats_cache_invalidates_on_write() {
 
     // Baseline: p1 has 5 triples; the estimate equals the predicate count.
     let before = st
-        .cardinality_estimate(&patterns)
+        .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
         .expect("estimate present");
     assert_eq!(before, 5, "sanity: p1 starts at 5 triples");
 
     // Cache-hit path: a second call with NO write returns the same number.
     let again = st
-        .cardinality_estimate(&patterns)
+        .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
         .expect("estimate present");
     assert_eq!(
         again, before,
@@ -402,9 +433,9 @@ fn cardinality_stats_cache_invalidates_on_write() {
     // The estimate must reflect the new data, not the stale (5) figure — proof
     // the stats cache invalidated with the snapshot.
     let after = st
-        .cardinality_estimate(&patterns)
+        .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
         .expect("estimate present");
-    let true_count = st.scan_bgp(&patterns).unwrap().count();
+    let true_count = st.scan_bgp(&patterns, &ScanScope::DEFAULT).unwrap().count();
     assert_eq!(true_count, 10, "sanity: p1 now has 10 triples");
     assert_eq!(
         after, 10,
@@ -418,7 +449,7 @@ fn cardinality_stats_cache_invalidates_on_write() {
     // Retraction path: delete one p1 triple; the estimate must drop again.
     st.delete_triple(&iri("s10"), &iri("p1"), &iri("o10"));
     let after_delete = st
-        .cardinality_estimate(&patterns)
+        .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
         .expect("estimate present");
     assert_eq!(
         after_delete, 9,
@@ -442,7 +473,10 @@ fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {
     horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset).unwrap();
     // NB: the local `iri` helper prepends "http://ex/".
     let patterns = vec![pat(iri("x"), iri("p"), var("v"))];
-    let rows: Vec<_> = backend.scan_bgp(&patterns).unwrap().collect();
+    let rows: Vec<_> = backend
+        .scan_bgp(&patterns, &ScanScope::DEFAULT)
+        .unwrap()
+        .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].get("v"),

@@ -16,13 +16,11 @@ fn cell(s: &str) -> Option<Term> {
 }
 
 fn scan_plan() -> PhysicalPlan {
-    PhysicalPlan::BgpScan {
-        patterns: vec![TriplePattern {
-            subject: Term::Var(Var::new("s")),
-            predicate: iri("p"),
-            object: Term::Var(Var::new("o")),
-        }],
-    }
+    PhysicalPlan::bgp_scan(vec![TriplePattern {
+        subject: Term::Var(Var::new("s")),
+        predicate: iri("p"),
+        object: Term::Var(Var::new("o")),
+    }])
 }
 
 fn one_triple_store() -> HornBackend {

@@ -51,6 +51,14 @@ The canonical selection file is `harness/selected.toml` at the workspace root. I
 carries both the manifest-driven `[suites.*]` entries the harness binary loads and
 the path-based `[sparql_query]` section consumed by `crates/sparql/tests/w3c_suite.rs`.
 
+The harness binary's manifest runner has **no result-set test kind**, so
+`[sparql_query]` — not the `sparql11` suite key — is the repo's query-evaluation
+gate. Each entry names a fixture dir holding `query.rq`, `form`, `expected.srj`,
+and its data as either `data.nt` (default graph) or `data.trig` (named graphs),
+plus an optional `default-graph` file selecting the `default_graph` mode
+(SPEC-28 D2). W3C cases that are mirrored but cannot pass are listed with their
+reason in `harness/KNOWN-MANIFEST-BUGS.md`.
+
 ## Suite keys (`src/runner.rs`)
 
 `owl2`, `owl2-w3c-rl`, `sparql11`, `sparql11-syntax`, `rdf12-n-triples`.

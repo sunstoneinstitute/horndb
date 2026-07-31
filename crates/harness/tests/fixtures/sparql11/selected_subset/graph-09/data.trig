@@ -1,0 +1,6 @@
+_:data-g3-b1 <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+_:data-g3-b2 <http://example/p> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+
+GRAPH <http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g4.ttl> {
+    _:data-g4-b1 <http://example/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+}

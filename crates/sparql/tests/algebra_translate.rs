@@ -1,4 +1,6 @@
-use horndb_sparql::algebra::{translate, Algebra, Term, TriplePattern};
+use horndb_sparql::algebra::{
+    translate, Algebra, DatasetSpec, GraphSpec, Term, TranslatedQuery, TriplePattern,
+};
 use horndb_sparql::parser::{parse_query, ParsedQuery};
 use horndb_sparql::SparqlConfig;
 
@@ -181,7 +183,9 @@ fn accepts_triple_term_pattern_in_rdf12_mode() {
     let q = parse_select(
         "SELECT ?s WHERE { ?s <http://ex/claims> <<( <http://ex/Bob> <http://ex/age> 30 )>> }",
     );
-    let alg = translate::translate_query_with(&q, &SparqlConfig::rdf12()).expect("translate ok");
+    let alg = translate::translate_query_with(&q, &SparqlConfig::rdf12())
+        .expect("translate ok")
+        .algebra;
     // The single triple has a triple-term object — the algebra Term enum
     // carries it as `Term::Triple(Box<TriplePattern>)`.
     let inner = match alg {
@@ -202,4 +206,170 @@ fn accepts_triple_term_pattern_in_rdf12_mode() {
         }
         other => panic!("expected Term::Triple object, got {other:?}"),
     }
+}
+
+// SPEC-28 phase 3 (#266): `Algebra::Graph` + `DatasetSpec` capture. Ground
+// and variable-form evaluation land in Task 3/4 (graph_query.rs); these
+// pin translation structure and dataset-clause resolution only.
+
+fn translated_of(query: &str) -> TranslatedQuery {
+    let q = parse_query(query).expect("parse");
+    let inner = match q {
+        ParsedQuery::Select { inner }
+        | ParsedQuery::Ask { inner }
+        | ParsedQuery::Construct { inner } => inner,
+        ParsedQuery::Describe { .. } => panic!("describe not supported here"),
+        ParsedQuery::Explain { .. } => panic!("explain not supported here"),
+    };
+    translate::translate_query_with(&inner, &SparqlConfig::default()).expect("translate")
+}
+
+#[test]
+fn graph_iri_translates_to_graph_node() {
+    let alg = translated_of("SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }").algebra;
+    let inner = match alg {
+        Algebra::Project { inner, .. } => *inner,
+        other => panic!("expected Project, got {other:?}"),
+    };
+    match inner {
+        Algebra::Graph { name, inner } => {
+            assert_eq!(name, GraphSpec::Iri("http://ex/g".to_owned()));
+            assert!(matches!(*inner, Algebra::Bgp { .. }), "expected Bgp inner");
+        }
+        other => panic!("expected Graph, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_var_translates_and_scopes_var() {
+    // GRAPH ?g under SELECT * must project ?g (`collect_visible_vars` scopes
+    // the graph variable — now correct rather than vacuous, per the design).
+    let alg = translated_of("SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }").algebra;
+    match alg {
+        Algebra::Project { vars, inner } => {
+            let names: Vec<&str> = vars.iter().map(|v| v.name()).collect();
+            assert!(
+                names.contains(&"g"),
+                "expected ?g among projected vars, got {names:?}"
+            );
+            match *inner {
+                Algebra::Graph { name, .. } => {
+                    assert!(matches!(name, GraphSpec::Var(v) if v.name() == "g"));
+                }
+                other => panic!("expected Graph, got {other:?}"),
+            }
+        }
+        other => panic!("expected Project, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_graph_preserves_nesting_order() {
+    // Translation preserves the nesting order (outer Graph wraps inner
+    // Graph) rather than collapsing or reordering it. It does not itself
+    // implement "innermost wins" — that's scan-scope lowering's job
+    // (PLAN-28-03 Task 3, which overwrites the outer scope on the way
+    // down); this only pins the tree shape lowering relies on.
+    let alg = translated_of(
+        "SELECT * WHERE { GRAPH <http://ex/g1> { GRAPH <http://ex/g2> { ?s ?p ?o } } }",
+    )
+    .algebra;
+    let inner = match alg {
+        Algebra::Project { inner, .. } => *inner,
+        other => panic!("expected Project, got {other:?}"),
+    };
+    let (outer_name, outer_inner) = match inner {
+        Algebra::Graph { name, inner } => (name, inner),
+        other => panic!("expected outer Graph, got {other:?}"),
+    };
+    assert_eq!(outer_name, GraphSpec::Iri("http://ex/g1".to_owned()));
+    match *outer_inner {
+        Algebra::Graph { name, inner } => {
+            assert_eq!(name, GraphSpec::Iri("http://ex/g2".to_owned()));
+            assert!(matches!(*inner, Algebra::Bgp { .. }), "expected Bgp inner");
+        }
+        other => panic!("expected nested Graph, got {other:?}"),
+    }
+}
+
+#[test]
+fn from_clause_recorded() {
+    // FROM list present -> default graph is exactly that list; named is
+    // Some(vec![]), not None — any dataset clause makes both fields Some
+    // (the representation-level invariant `DatasetSpec` documents).
+    let tq = translated_of("SELECT * FROM <http://ex/g1> FROM <http://ex/g2> WHERE { ?s ?p ?o }");
+    assert_eq!(
+        tq.dataset,
+        DatasetSpec {
+            default: Some(vec!["http://ex/g1".to_owned(), "http://ex/g2".to_owned()]),
+            named: Some(vec![]),
+        }
+    );
+}
+
+#[test]
+fn from_named_only_yields_empty_default() {
+    // D4: FROM NAMED without FROM narrows the default graph to empty,
+    // distinct from "no dataset clause at all" (None).
+    let tq = translated_of("SELECT * FROM NAMED <http://ex/g1> WHERE { ?s ?p ?o }");
+    assert_eq!(
+        tq.dataset,
+        DatasetSpec {
+            default: Some(vec![]),
+            named: Some(vec!["http://ex/g1".to_owned()]),
+        }
+    );
+}
+
+#[test]
+fn from_and_from_named_recorded_separately() {
+    // Both clauses present: the only combination not covered by the two
+    // tests above, and the one where a mis-partition of spargebra's flat
+    // clause list (which interleaves FROM and FROM NAMED entries) would
+    // show up — each graph must land in the right field.
+    let tq =
+        translated_of("SELECT * FROM <http://ex/g1> FROM NAMED <http://ex/g2> WHERE { ?s ?p ?o }");
+    assert_eq!(
+        tq.dataset,
+        DatasetSpec {
+            default: Some(vec!["http://ex/g1".to_owned()]),
+            named: Some(vec!["http://ex/g2".to_owned()]),
+        }
+    );
+}
+
+#[test]
+fn no_dataset_clause_yields_none_dataset() {
+    // Regression guard for the third pinned rule: absent FROM/FROM NAMED
+    // leaves both fields None so the executor's default-graph mode and
+    // visibility rules decide (SPEC-28 S3), rather than defaulting to an
+    // empty selection.
+    let tq = translated_of("SELECT * WHERE { ?s ?p ?o }");
+    assert_eq!(
+        tq.dataset,
+        DatasetSpec {
+            default: None,
+            named: None,
+        }
+    );
+}
+
+#[test]
+fn translate_query_rejects_dataset_clause() {
+    // translate_query's return type has no room for a DatasetSpec, so it
+    // must refuse a query naming FROM/FROM NAMED rather than silently
+    // drop it — a caller who planned and ran the returned algebra would
+    // get the configured default dataset instead of the one the query
+    // named. translate_query_with is the safe path: it returns the
+    // DatasetSpec alongside the algebra and cannot lose it.
+    let q = parse_query("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }").expect("parse");
+    let inner = match q {
+        ParsedQuery::Select { inner } => inner,
+        other => panic!("expected Select, got {other:?}"),
+    };
+    let err = translate::translate_query(&inner).unwrap_err();
+    assert!(
+        err.to_string().contains("translate_query_with"),
+        "expected the error to point at translate_query_with, got: {err}"
+    );
 }

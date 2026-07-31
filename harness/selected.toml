@@ -261,10 +261,14 @@ include = [
 # These fixtures live outside the W3C manifest model used by `[suites.*]`:
 # each entry names a directory under
 # `crates/harness/tests/fixtures/sparql11/<path>` containing
-# `query.rq`, `data.nt`, `expected.srj`, and `form`. They are consumed
+# `query.rq`, `form`, `expected.srj`, and its data as either `data.nt`
+# (default graph only) or `data.trig` (named graphs). A dir may also carry
+# a `default-graph` file naming the `default_graph` mode (SPEC-28 D2);
+# without one the crate default (`union`) applies. They are consumed
 # directly by `crates/sparql/tests/w3c_suite.rs`, not by the harness
-# binary's manifest-driven runner. SPEC-01 will subsume this section
-# into a uniform suite model once the SPARQL engine widens.
+# binary's manifest-driven runner — that runner has no result-set test
+# kind, so this section is the repo's real query-evaluation gate. SPEC-01
+# will subsume it into a uniform suite model once the SPARQL engine widens.
 [sparql_query]
 tests = [
     "selected_subset/basic-001",
@@ -282,4 +286,43 @@ tests = [
     # `*` reflexive-transitive (the acceptance #7 `subClassOf*` shape).
     "selected_subset/path-plus-001",
     "selected_subset/path-star-001",
+    # W3C SPARQL 1.0 `graph/` family (SPEC-28 S7, #266) — `GRAPH <g>`,
+    # `GRAPH ?g`, and the graph variable's join behaviour. Mirrored from
+    # https://w3c.github.io/rdf-tests/sparql/sparql10/graph/ ; the mirror
+    # rules and the re-fetch allowlist are in
+    # `crates/harness/scripts/fetch-w3c-suites.sh`. These cases take their
+    # dataset from the upstream *manifest* (`qt:data` = default graph,
+    # `qt:graphData` = named graphs), so each dir carries
+    # `default-graph = strict`. The 3 upstream cases left out are in
+    # `harness/KNOWN-MANIFEST-BUGS.md`.
+    "selected_subset/graph-01",
+    "selected_subset/graph-02",
+    "selected_subset/graph-03",
+    "selected_subset/graph-04",
+    "selected_subset/graph-05",
+    "selected_subset/graph-06",
+    "selected_subset/graph-07",
+    "selected_subset/graph-08",
+    "selected_subset/graph-09",
+    "selected_subset/graph-10b",
+    "selected_subset/graph-empty",
+    "selected_subset/graph-exist",
+    "selected_subset/graph-not-exist",
+    "selected_subset/graph-variable-join",
+    # W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7, #266) — `FROM` /
+    # `FROM NAMED` dataset construction, including D4's empty default graph
+    # for `FROM NAMED` with no `FROM` (dataset-02, dataset-04). Each query
+    # carries its own dataset clause, so the `default_graph` mode does not
+    # apply. The 2 upstream cases left out are in
+    # `harness/KNOWN-MANIFEST-BUGS.md`.
+    "selected_subset/dataset-01",
+    "selected_subset/dataset-02",
+    "selected_subset/dataset-03",
+    "selected_subset/dataset-04",
+    "selected_subset/dataset-05",
+    "selected_subset/dataset-06",
+    "selected_subset/dataset-07",
+    "selected_subset/dataset-08",
+    "selected_subset/dataset-09b",
+    "selected_subset/dataset-10b",
 ]

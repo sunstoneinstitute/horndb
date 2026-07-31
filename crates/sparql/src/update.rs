@@ -38,7 +38,7 @@ use crate::exec::runtime::Runtime;
 use crate::exec::{Bindings, FullBackend};
 use crate::parser::ParsedUpdate;
 use crate::plan::planner;
-use crate::SparqlConfig;
+use crate::{DefaultGraphMode, SparqlConfig};
 use spargebra::term::{
     GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, NamedNodePattern,
     NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
@@ -524,9 +524,10 @@ fn validate_delete_insert(
     }
 
     // Reject a GRAPH pattern anywhere in the WHERE clause, before any
-    // mutation. Since SPEC-28 phase 1 (#264) the query translator also
-    // refuses GraphPattern::Graph, but this scan stays: it produces the
-    // update-specific error below and guarantees rejection ahead of any
+    // mutation. The query-side translator now accepts GraphPattern::Graph
+    // (SPEC-28 phase 3, #266); named-graph Update is separate scope (SPEC-28
+    // S5) and not implemented, so this scan stays independent: it produces
+    // the update-specific error below and guarantees rejection ahead of any
     // earlier operation's side effects, without leaning on when the WHERE
     // clause gets translated. Stage-1 updates are default-graph only.
     if where_has_graph_pattern(pattern) {
@@ -582,7 +583,22 @@ fn apply_delete_insert<B: FullBackend>(
 
     let alg = translate_where(pattern, cfg)?;
     let plan = planner::plan(&alg)?;
-    let rows: Vec<Bindings> = Runtime::new(store).run(&plan)?.collect();
+    // The WHERE clause is pinned to the default graph — deliberately NOT
+    // the caller's `default_graph` mode. An update must read exactly the
+    // graph its templates write, and the write side is default-graph only
+    // (`Store::delete_triple` keys on `DEFAULT_GRAPH`; named-graph templates
+    // and `USING` are refused in `validate_delete_insert`). Under `union`
+    // the WHERE would bind named-graph rows the DELETE then cannot remove —
+    // reporting success while deleting nothing, and copying those bindings
+    // into the default graph on a DELETE/INSERT. TODO(#267): revisit when
+    // SPEC-28 phase 4 makes the write side quad-grain.
+    let rows: Vec<Bindings> = Runtime::new(store)
+        .with_dataset(
+            crate::algebra::DatasetSpec::default(),
+            DefaultGraphMode::Strict,
+        )
+        .run(&plan)?
+        .collect();
 
     // Compute deletions from the original bindings first.
     let mut deletions: Vec<(Term, Term, Term)> = Vec::new();

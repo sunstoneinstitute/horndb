@@ -383,13 +383,11 @@ fn distinct_over_streamed_join_mixed_provenance() {
         vars: vec![Var::new("v")],
         rows: vec![vec![None], vec![some_iri("v1")]],
     };
-    let right = PhysicalPlan::BgpScan {
-        patterns: vec![TriplePattern {
-            subject: Term::Var(Var::new("v")),
-            predicate: iri("p"),
-            object: Term::Var(Var::new("o")),
-        }],
-    };
+    let right = PhysicalPlan::bgp_scan(vec![TriplePattern {
+        subject: Term::Var(Var::new("v")),
+        predicate: iri("p"),
+        object: Term::Var(Var::new("o")),
+    }]);
     let plan = PhysicalPlan::Distinct {
         inner: Box::new(PhysicalPlan::Project {
             vars: vec![Var::new("v")],
@@ -424,13 +422,11 @@ fn distinct_over_streamed_left_join_mixed_provenance() {
         vars: vec![Var::new("v")],
         rows: vec![vec![None], vec![some_iri("v1")]],
     };
-    let right = PhysicalPlan::BgpScan {
-        patterns: vec![TriplePattern {
-            subject: Term::Var(Var::new("v")),
-            predicate: iri("p"),
-            object: Term::Var(Var::new("o")),
-        }],
-    };
+    let right = PhysicalPlan::bgp_scan(vec![TriplePattern {
+        subject: Term::Var(Var::new("v")),
+        predicate: iri("p"),
+        object: Term::Var(Var::new("o")),
+    }]);
     let plan = PhysicalPlan::Distinct {
         inner: Box::new(PhysicalPlan::Project {
             vars: vec![Var::new("v")],
@@ -498,13 +494,11 @@ fn distinct_over_streamed_join_build_term_trigger() {
             vars: vec![Var::new("x")],
             rows: vec![vec![some_iri("a")], vec![some_iri("b")]],
         }),
-        right: Box::new(PhysicalPlan::BgpScan {
-            patterns: vec![TriplePattern {
-                subject: Term::Var(Var::new("x")),
-                predicate: iri("q"),
-                object: Term::Var(Var::new("v")),
-            }],
-        }),
+        right: Box::new(PhysicalPlan::bgp_scan(vec![TriplePattern {
+            subject: Term::Var(Var::new("x")),
+            predicate: iri("q"),
+            object: Term::Var(Var::new("v")),
+        }])),
         expr: None,
     };
     // Build: actual Slot::Term rows for ?v.

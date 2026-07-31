@@ -20,7 +20,9 @@ fn algebra_of(q: &str) -> Algebra {
         ParsedQuery::Select { inner } => inner,
         other => panic!("expected SELECT, got {other:?}"),
     };
-    translate_query_with(&inner, &SparqlConfig::default()).expect("translate")
+    translate_query_with(&inner, &SparqlConfig::default())
+        .expect("translate")
+        .algebra
 }
 
 /// The pre-refactor reference: a straight 1:1 Algebra → PhysicalPlan lowering,
@@ -29,6 +31,7 @@ fn reference_plan(alg: &Algebra) -> PhysicalPlan {
     match alg {
         Algebra::Bgp { patterns } => PhysicalPlan::BgpScan {
             patterns: patterns.clone(),
+            scope: horndb_sparql::plan::GraphScope::DefaultGraph,
         },
         Algebra::Join { left, right } => PhysicalPlan::Join {
             left: Box::new(reference_plan(left)),
@@ -96,6 +99,10 @@ fn reference_plan(alg: &Algebra) -> PhysicalPlan {
             edge: Box::new(reference_plan(edge)),
             reflexive: *reflexive,
         },
+        // GRAPH is not in GOLDEN_QUERIES: this reference function pins the
+        // pre-refactor 1:1 lowering, which predates SPEC-28 phase 3 and
+        // never had a GRAPH arm.
+        Algebra::Graph { .. } => unreachable!("GRAPH is not exercised by the golden-plan battery"),
     }
 }
 
@@ -174,12 +181,12 @@ fn coalesced_bgp_is_result_equivalent_to_nested_join() {
 
     // Coalesced (CoalesceBgp on) vs nested (CoalesceBgp disabled).
     let coalesced = lower_physical(run_passes(
-        lower_algebra(&join_alg),
+        lower_algebra(&join_alg).unwrap(),
         &standard_passes(),
         &PlanCtx::default(),
     ));
     let nested = lower_physical(run_passes(
-        lower_algebra(&join_alg),
+        lower_algebra(&join_alg).unwrap(),
         &standard_passes(),
         &PlanCtx {
             disabled_passes: HashSet::from([PassId::CoalesceBgp]),
@@ -304,7 +311,7 @@ fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
     // keeps the nested Join the old lowering emitted.
     fn find_bgp_sizes(p: &PhysicalPlan, out: &mut Vec<usize>) -> bool {
         match p {
-            PhysicalPlan::BgpScan { patterns } => {
+            PhysicalPlan::BgpScan { patterns, .. } => {
                 out.push(patterns.len());
                 false
             }
@@ -352,6 +359,64 @@ fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
         canon(a),
         canon(b),
         "coalescing changed GRAPH-adjacent results"
+    );
+}
+
+/// `CoalesceBgp`'s scope guard, pinned on the **plan shape** through the
+/// real SPARQL pipeline (parse → translate → lower → passes).
+///
+/// `graph_query.rs::bgps_under_different_graphs_do_not_coalesce` pins the
+/// *answers*; this pins the structure the answers depend on, so a merge
+/// regression names `CoalesceBgp` instead of surfacing as a wrong row count.
+/// Two scans, each keeping its own scope; same-scope neighbours still merge.
+#[test]
+fn adjacent_bgps_under_different_graphs_stay_two_scoped_scans() {
+    use horndb_sparql::algebra::GraphSpec;
+    use horndb_sparql::plan::GraphScope;
+
+    fn scan_scopes(p: &PhysicalPlan, out: &mut Vec<(usize, GraphScope)>) {
+        match p {
+            PhysicalPlan::BgpScan { patterns, scope } => out.push((patterns.len(), scope.clone())),
+            PhysicalPlan::Join { left, right } => {
+                scan_scopes(left, out);
+                scan_scopes(right, out);
+            }
+            PhysicalPlan::Project { inner, .. }
+            | PhysicalPlan::Distinct { inner }
+            | PhysicalPlan::Slice { inner, .. }
+            | PhysicalPlan::Filter { inner, .. } => scan_scopes(inner, out),
+            _ => {}
+        }
+    }
+    let named = |g: &str| GraphScope::Named(GraphSpec::Iri(g.to_owned()));
+    let plan_of = |q: &str| planner::plan(&algebra_of(q)).expect("plan");
+
+    let mut split = Vec::new();
+    scan_scopes(
+        &plan_of(
+            "SELECT ?x ?y WHERE { GRAPH <http://ex/g1> { ?x <http://ex/p> ?o } \
+             GRAPH <http://ex/g2> { ?y <http://ex/p> ?o2 } }",
+        ),
+        &mut split,
+    );
+    assert_eq!(
+        split,
+        vec![(1, named("http://ex/g1")), (1, named("http://ex/g2"))],
+        "different GRAPH scopes must keep two scans, each with its own scope"
+    );
+
+    let mut merged = Vec::new();
+    scan_scopes(
+        &plan_of(
+            "SELECT ?x ?y WHERE { GRAPH <http://ex/g1> { ?x <http://ex/p> ?o . \
+             ?y <http://ex/q> ?o2 } }",
+        ),
+        &mut merged,
+    );
+    assert_eq!(
+        merged,
+        vec![(2, named("http://ex/g1"))],
+        "equal scopes still coalesce into one flat scan"
     );
 }
 

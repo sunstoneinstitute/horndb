@@ -16,9 +16,9 @@ mod units;
 // intermediate TDD checkpoint. The final set (after Task 7) is exactly:
 //   pub use error::ConfigError;
 //   pub use load::{load, CliOverrides, LoadInputs};
-//   pub use model::{Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
+//   pub use model::{DefaultGraph, Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
 //   pub use units::{ByteSize, HumanDuration};
 pub use error::ConfigError;
 pub use load::{load, CliOverrides, LoadInputs};
-pub use model::{Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
+pub use model::{DefaultGraph, Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
 pub use units::{ByteSize, HumanDuration};

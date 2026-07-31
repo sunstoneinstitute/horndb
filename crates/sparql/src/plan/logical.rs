@@ -11,12 +11,18 @@
 //! happen — but the `CoalesceBgp` pass and later heuristic passes do.
 
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
+use crate::plan::GraphScope;
 
 /// A logical query plan node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogicalPlan {
-    /// Flat, n-ary basic graph pattern — the WCOJ unit.
-    Bgp { patterns: Vec<TriplePattern> },
+    /// Flat, n-ary basic graph pattern — the WCOJ unit. `scope` is the
+    /// graph the patterns read (SPEC-28 S3/D5), pushed down here by
+    /// lowering.
+    Bgp {
+        patterns: Vec<TriplePattern>,
+        scope: GraphScope,
+    },
     /// Join of two non-BGP subtrees (adjacent `Bgp`s coalesce via
     /// [`LogicalPlan::join`] / the `CoalesceBgp` pass).
     Join {
@@ -81,14 +87,40 @@ pub enum LogicalPlan {
 }
 
 impl LogicalPlan {
+    /// A `Bgp` reading the query's default graph — the shape lowering
+    /// produces outside any `GRAPH` wrapper.
+    pub fn bgp(patterns: Vec<TriplePattern>) -> LogicalPlan {
+        LogicalPlan::Bgp {
+            patterns,
+            scope: GraphScope::DefaultGraph,
+        }
+    }
+
     /// Join two subtrees, coalescing **adjacent flat `Bgp`s into one flat
     /// `Bgp`** (SPEC-23 §5.1 — the inverse of `sparopt`'s flatten-and-rebuild,
     /// done once). Any non-`Bgp` operand keeps a real `Join`.
+    ///
+    /// Two `Bgp`s merge only when their graph scopes are **equal**: one flat
+    /// pattern set is scanned in one graph, so merging
+    /// `GRAPH <g1> { P1 } GRAPH <g2> { P2 }` would silently read both
+    /// patterns from one graph (SPEC-28 S3).
     pub fn join(left: LogicalPlan, right: LogicalPlan) -> LogicalPlan {
         match (left, right) {
-            (LogicalPlan::Bgp { patterns: mut l }, LogicalPlan::Bgp { patterns: r }) => {
+            (
+                LogicalPlan::Bgp {
+                    patterns: mut l,
+                    scope: ls,
+                },
+                LogicalPlan::Bgp {
+                    patterns: r,
+                    scope: rs,
+                },
+            ) if ls == rs => {
                 l.extend(r);
-                LogicalPlan::Bgp { patterns: l }
+                LogicalPlan::Bgp {
+                    patterns: l,
+                    scope: ls,
+                }
             }
             (left, right) => LogicalPlan::Join {
                 left: Box::new(left),
@@ -151,7 +183,7 @@ mod tests {
     }
 
     fn bgp(pats: Vec<TriplePattern>) -> LogicalPlan {
-        LogicalPlan::Bgp { patterns: pats }
+        LogicalPlan::bgp(pats)
     }
 
     #[test]
@@ -159,9 +191,25 @@ mod tests {
         let left = bgp(vec![pat("s", "p", "o")]);
         let right = bgp(vec![pat("o", "q", "z")]);
         match LogicalPlan::join(left, right) {
-            LogicalPlan::Bgp { patterns } => assert_eq!(patterns.len(), 2),
+            LogicalPlan::Bgp { patterns, .. } => assert_eq!(patterns.len(), 2),
             other => panic!("expected coalesced Bgp, got {other:?}"),
         }
+    }
+
+    /// Two BGPs under *different* `GRAPH` wrappers must stay separate: one
+    /// flat pattern set is scanned in one graph (SPEC-28 S3).
+    #[test]
+    fn join_keeps_bgps_with_different_graph_scopes_apart() {
+        use crate::algebra::GraphSpec;
+        let left = bgp(vec![pat("s", "p", "o")]);
+        let right = LogicalPlan::Bgp {
+            patterns: vec![pat("o", "q", "z")],
+            scope: GraphScope::Named(GraphSpec::Iri("http://ex/g".into())),
+        };
+        assert!(
+            matches!(LogicalPlan::join(left, right), LogicalPlan::Join { .. }),
+            "different scopes must not coalesce"
+        );
     }
 
     #[test]

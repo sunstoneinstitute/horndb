@@ -37,6 +37,15 @@ at all until named graphs work end to end.
 
 ## Problem — what exists today, and where it stops
 
+> **Status note (2026-07-30).** This section describes the store as it was when
+> the spec was written. Phases 1–3 have since landed
+> ([#264](https://github.com/sunstoneinstitute/horndb/issues/264),
+> [#265](https://github.com/sunstoneinstitute/horndb/issues/265),
+> [#266](https://github.com/sunstoneinstitute/horndb/issues/266)): the two
+> query bullets below are history — `GRAPH` and `FROM`/`FROM NAMED` are
+> evaluated, within the limits recorded at the end of S3. The update, executor
+> and GSP bullets still stand. `docs/architecture.md` carries the current state.
+
 Storage is quad-aware. `Store::insert_quads` / `retract_quads` /
 `intern_graph_uri` take a `GraphId`; `MemoryTier` keys partitions by graph
 (`with_predicate(graph, predicate, …)`, `graphs()`, `predicates(graph)`); the
@@ -228,6 +237,32 @@ a cost proportional to the graph.
   S5's GSP read and `PUT` diff are always base-only (SPEC-29 D5), because a diff
   against derived quads deletes data the client never sent.
 
+**What phase 3 shipped, and the two families it refuses.** Everything above is
+implemented ([#266](https://github.com/sunstoneinstitute/horndb/issues/266))
+except for two families of `GRAPH ?g` query, which are **refused** with an error
+naming the construct rather than answered. Both follow from D5/D6: the graph
+name is bound on the scan leaf, not joined on after the block is evaluated.
+
+1. **A barrier between the `GRAPH ?g` wrapper and its scan leaves** — a
+   sub-`SELECT`, `DISTINCT`, `GROUP BY`/aggregate, `LIMIT`/`OFFSET`, any
+   property path, a nested `GRAPH`, or a `VALUES` that is not joined against a
+   scoped arm. Each drops or merges the graph column, so rows would come back
+   with `?g` unbound or mixed across graphs. The same constructs placed *above*
+   the wrapper work. A quad-free arm is exempt where the other arm's graph
+   column reaches every joined row — either side of a `Join`, or an
+   `OPTIONAL`'s right arm — so `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers.
+2. **`P` reading `?g` where leaf-binding diverges from SPARQL 1.1
+   §18.2.2.2's post-join** — any expression (`FILTER`, a `BIND` expression, an
+   `OPTIONAL` condition, `ORDER BY`), `BIND(… AS ?g)`, or any mention of `?g`
+   in a `LeftJoin`'s right arm. Reading `?g` from a triple position, or from a
+   `VALUES` column joined against a scoped arm, is allowed: there leaf-binding
+   and the post-join agree.
+
+Lifting either refusal means evaluating the whole block once per graph with `?g`
+free and joining the graph name on afterwards — a design change against D5/D6,
+not a bug fix. `harness/KNOWN-MANIFEST-BUGS.md` names the W3C cases each
+refusal costs.
+
 ### S4. Update — named-graph writes and graph management
 
 Replace today's error-unless-`SILENT` behaviour (`crates/sparql/src/update.rs`)
@@ -397,11 +432,32 @@ selection lives in `harness/selected.toml`; corpora are fetched by
   case is an HTTP request/response pair against a live server, so the runner
   needs a `TestKind` that boots the axum server (the `server` feature) and
   drives it, alongside the existing manifest-driven kinds. Gates S5.
-- **`sparql11` grows the dataset and `GRAPH` families.** The W3C query suite's
-  `graph/` manifest (the `GRAPH`-pattern cases, ground and variable form) and
-  `dataset/` manifest (`FROM` / `FROM NAMED` construction, including the
-  empty-default-graph case D4 turns on). Gates S3. These are result-set tests
-  and fit the existing manifest-driven runner unchanged.
+- **The dataset and `GRAPH` families gate S3 through `[sparql_query]`.** The
+  W3C `graph/` manifest (the `GRAPH`-pattern cases, ground and variable form)
+  and `dataset/` manifest (`FROM` / `FROM NAMED` construction, including the
+  empty-default-graph case D4 turns on).
+
+  **Amendment (phase 3, #266).** This bullet originally said the two families
+  are result-set tests that "fit the existing manifest-driven runner
+  unchanged", under the `sparql11` suite key. Both halves were wrong.
+
+  - The `sparql11` harness key does not run a query engine: its `Reasoner::ask`
+    is a stub (`crates/owlrl/src/integration.rs`) that ignores the query, and
+    the runner has no result-set `TestKind`. The repo's real query-evaluation
+    gate is `harness/selected.toml`'s `[sparql_query]` section, run by
+    `crates/sparql/tests/w3c_suite.rs` against both backends with a multiset
+    result diff. The families land there, and are equally CI-gating (the
+    `tests` job).
+  - The families are in the W3C **SPARQL 1.0 (DAWG)** suite, not the SPARQL 1.1
+    tarball. `crates/harness/scripts/fetch-w3c-suites.sh` grew a `sparql10`
+    section with an explicit case allowlist to mirror them.
+
+  The runner did need one change: a case directory may now carry `data.trig`
+  (quads routed to their graphs) in place of `data.nt`. 24 of the 29 upstream
+  cases are selected and green on both backends; the other 5 are listed with
+  their gating reason in `harness/KNOWN-MANIFEST-BUGS.md`, which also records
+  that no selected case grades the shipping `union` default-graph mode — D2's
+  default is covered by `crates/sparql/tests/graph_query.rs` instead.
 - **`sparql11` grows the update graph families.** The `add/`, `copy/`, `move/`,
   `clear/`, `drop/`, and graph-specific `delete-insert/` manifests. Gates S4.
 - **`sparql11-syntax` needs no growth** — it already grades `GRAPH`, `WITH`, and
@@ -428,23 +484,24 @@ epic), and harness-gated: the SPEC-01 selected subset stays green throughout,
 and each phase grows the subset per S7. Phases 1–4 have implementation plans
 (`PLAN-28-01`..`04`); phase 5's is written when it is picked up.
 
-1. **S1 — refuse, do not lie.**
+1. **S1 — refuse, do not lie. Done.**
    *([#264](https://github.com/sunstoneinstitute/horndb/issues/264),
    `PLAN-28-01`)* Small and immediately
    correct. Turns a silent wrong answer into a 400. No storage work, no new
    algebra. Ship first, independently of everything below.
-2. **S2 — graph-scoped access paths.**
+2. **S2 — graph-scoped access paths. Done.**
    *([#265](https://github.com/sunstoneinstitute/horndb/issues/265),
    `PLAN-28-02`)* `scan_graph`,
    `scan_predicate(graph, …)`, `graph_len`, visibility-filtered `graphs()`,
    whole-store `len`, and the `HornBackend` de-hardwiring. Pure plumbing with no
    user-visible behaviour change; prerequisite for phases 3–5.
-3. **S3 — query.**
+3. **S3 — query. Done.**
    *([#266](https://github.com/sunstoneinstitute/horndb/issues/266),
    `PLAN-28-03`)* `Algebra::Graph`, ground and variable
    evaluation, dataset construction, the `default_graph` mode, path and pushdown
-   scoping. Removes S1's query-side error. Grows `sparql11` by the `graph/` and
-   `dataset/` families.
+   scoping. Removes S1's query-side error, except for the two families of `GRAPH ?g` query
+   S3 ends by naming, which stay refused. Grew `[sparql_query]` by the `graph/`
+   and `dataset/` families (S7's amendment).
 4. **S4 + S6 — update and idempotence.**
    *([#267](https://github.com/sunstoneinstitute/horndb/issues/267),
    `PLAN-28-04`)* Named-graph
@@ -476,11 +533,16 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
    `SELECT … FROM NAMED <g> …` each return HTTP 400 naming the construct — never
    a 200 carrying default-graph rows. Verified before phase 3 lands and
    superseded by criterion 2 after it.
-2. **`GRAPH` evaluates correctly (S3).** The `sparql11` selection includes the
-   W3C `graph/` and `dataset/` families and is green. `GRAPH ?g` binds `?g` to
-   each named graph and never to the default graph. A `FROM NAMED`-only query
-   has an empty default graph.
-3. **The default-graph mode is real and switchable (S3/D2).** On a store whose
+2. **`GRAPH` evaluates correctly (S3).** *Met by phase 3, with the two refused
+   `GRAPH ?g` shapes S3 names.* The `[sparql_query]` selection (not `sparql11`
+   — see S7's amendment) includes the W3C `graph/` and `dataset/` families and
+   is green on both backends: 24 of 29 cases, the other 5 in
+   `harness/KNOWN-MANIFEST-BUGS.md`. `GRAPH ?g` binds `?g` to each named graph
+   and never to the default graph. A `FROM NAMED`-only query has an empty
+   default graph.
+3. **The default-graph mode is real and switchable (S3/D2).** *Met by phase 3,
+   pinned by `crates/sparql/tests/graph_query.rs` — no W3C case grades it.*
+   On a store whose
    data lives entirely in named graphs, an unqualified `SELECT ?s ?p ?o` returns
    every quad outside the reserved namespace under `default_graph = "union"` and
    zero rows under `"strict"`;
@@ -544,13 +606,20 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
   scan column, which the WCOJ estimator has never seen. `GRAPH ?g { ?s ?p ?o }`
   over a thousand graphs has a cardinality the current whole-store live-count
   bound describes badly. Expect estimator work in phase 3, and do not let a
-  coarse estimate leak into a count *result* (S3).
+  coarse estimate leak into a count *result* (S3). **Phase 3 outcome:** no
+  estimator work was done — estimates stayed coarse (a whole-store upper bound
+  is valid under any scope) and are structurally kept off the result path.
+  Better estimates for many-graph plans remain open.
 - **Pushdown regressions are silent by nature.** The count and group-count
   shortcuts exist to avoid materializing rows. If one of them ignores a graph
   scope it returns a plausible number, not an error — the exact failure mode S1
   was written to eliminate, reintroduced one layer down. Phase 3 needs a
   differential test that runs every pushdown-eligible shape with and without
-  the pushdown enabled, inside a `GRAPH` scope, and compares.
+  the pushdown enabled, inside a `GRAPH` scope, and compares. **Phase 3
+  outcome:** that battery exists (`crates/sparql/src/plan/pushdown.rs`), and
+  the pushdowns decline (`Ok(None)`) for any scope they were not explicitly
+  taught, so an untaught scope falls back to the scan instead of counting the
+  whole store.
 - **GSP conformance needs a live server in the harness.** Every existing suite
   grades a parser or a reasoner in-process. The GSP tests are HTTP
   request/response pairs, so the runner grows a new kind that binds a port,

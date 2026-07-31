@@ -5,9 +5,11 @@ use axum::http::{Request, StatusCode};
 use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
+use horndb_sparql::SparqlConfig;
 use std::sync::{Arc, RwLock};
 use tower::ServiceExt;
 
@@ -20,6 +22,7 @@ fn router_with_data() -> axum::Router {
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     build_router(state)
 }
@@ -127,67 +130,110 @@ async fn parse_error_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-/// GRAPH patterns are refused (SPEC-28 phase 1, #264): the translator
-/// returns `SparqlError::UnsupportedAlgebra` instead of silently dropping
-/// the wrapper and answering over the default graph. A plain SELECT plans
-/// before any store access (`plan_select`, `query.rs`), so this exercises
-/// the streaming-SELECT path's pre-store-access error branch.
-#[tokio::test]
-async fn graph_query_returns_400_naming_graph() {
-    let app = router_with_data();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/query")
-        .header("content-type", "application/sparql-query")
-        .body(Body::from(
-            "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("GRAPH"), "body: {text}");
+/// A router whose store holds `<http://ex/a> <p> <b>` in the default graph
+/// and `<http://ex/g_only> <p> <b>` in the named graph `<http://ex/g>` —
+/// enough to tell scoped answers apart from whole-store ones (SPEC-28 S3).
+fn router_with_named_graph() -> axum::Router {
+    let mut s = MemStore::default();
+    s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    s.insert_quad(
+        Some("http://ex/g"),
+        (
+            "http://ex/g_only".into(),
+            "http://ex/p".into(),
+            "http://ex/b".into(),
+        ),
+    );
+    let state = AppState {
+        store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
+    };
+    build_router(state)
 }
 
-/// A non-empty `FROM`/`FROM NAMED` dataset clause is refused the same way
-/// (SPEC-28 phase 1, #264) — same streaming-SELECT pre-store-access path
-/// as `graph_query_returns_400_naming_graph`.
-#[tokio::test]
-async fn from_query_returns_400_naming_from() {
-    let app = router_with_data();
+/// POST `q` and return the parsed JSON body, asserting a 200.
+async fn post_query_json(app: axum::Router, q: &str) -> serde_json::Value {
     let req = Request::builder()
         .method("POST")
         .uri("/query")
         .header("content-type", "application/sparql-query")
-        .body(Body::from(
-            "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }".to_string(),
-        ))
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(q.to_string()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK, "query should answer: {q}");
     let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("FROM"), "body: {text}");
+    serde_json::from_slice(&body).unwrap()
 }
 
-/// Same refusal, but for an ASK query: `plan_select` only recognizes
-/// `SELECT`, so ASK falls through to `run_materialized`
-/// (`execute_query` -> translate), covering the other server-side error
-/// path from the same construct.
+/// `GRAPH <g>` is evaluated, not refused (it 400'd through SPEC-28 phase 1).
+/// Exercises the streaming-SELECT path (`plan_select`, `query.rs`).
 #[tokio::test]
-async fn ask_graph_query_returns_400_naming_graph() {
+async fn graph_query_scopes_to_the_named_graph() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
+    )
+    .await;
+    let b = &v["results"]["bindings"];
+    assert_eq!(b.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(b[0]["s"]["value"], "http://ex/g_only");
+}
+
+/// A `FROM` clause builds the default graph out of exactly the named
+/// graphs, so the default-graph row is *not* in the answer.
+#[tokio::test]
+async fn from_query_builds_the_default_graph_from_the_named_graphs() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }",
+    )
+    .await;
+    let b = &v["results"]["bindings"];
+    assert_eq!(b.as_array().map(Vec::len), Some(1), "{v}");
+    assert_eq!(b[0]["s"]["value"], "http://ex/g_only");
+}
+
+/// Same invariant for ASK: `plan_select` only recognizes `SELECT`, so ASK
+/// falls through to `run_materialized` — the other server-side path.
+#[tokio::test]
+async fn ask_graph_query_answers_over_the_named_graph() {
+    let v = post_query_json(
+        router_with_named_graph(),
+        "ASK { GRAPH <http://ex/g> { ?s ?p ?o } }",
+    )
+    .await;
+    assert_eq!(v["boolean"], true, "{v}");
+    let v = post_query_json(
+        router_with_named_graph(),
+        "ASK { GRAPH <http://ex/absent> { ?s ?p ?o } }",
+    )
+    .await;
+    assert_eq!(
+        v["boolean"], false,
+        "an unknown graph is false, not an error"
+    );
+}
+
+/// SPEC-26 S4 / SPEC-28 S3/D2: the `default_graph` per-query override
+/// (`union`/`strict`) is parsed next to `query` in the POST-form channel. An
+/// unrecognized value is a 400 naming the offending key. This pins the
+/// parse/validate contract only — PLAN-28-03 Task 2's scope. The full
+/// behavioural assertion (that `default_graph=strict` actually changes
+/// which rows come back) lands in Task 3, once the executor consumes
+/// `SparqlConfig::default_graph` (currently threaded but not yet read).
+#[tokio::test]
+async fn default_graph_url_param_form_bad_value_returns_400_naming_key() {
     let app = router_with_data();
     let req = Request::builder()
         .method("POST")
         .uri("/query")
-        .header("content-type", "application/sparql-query")
+        .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(
-            "ASK { GRAPH <http://ex/g> { ?s ?p ?o } }".to_string(),
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=bogus"
+                .to_string(),
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -196,7 +242,170 @@ async fn ask_graph_query_returns_400_naming_graph() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("GRAPH"), "body: {text}");
+    assert!(
+        text.contains("default_graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// A valid `default_graph` value changes which rows come back: over a store
+/// with one default-graph and one named-graph triple, `union` sees both and
+/// `strict` sees only the default graph (SPEC-28 D2).
+#[tokio::test]
+async fn default_graph_url_param_form_valid_value_changes_the_result_set() {
+    let subjects = |mode: &str| {
+        let body = format!(
+            "query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph={mode}"
+        );
+        let app = router_with_named_graph();
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/query")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("accept", "application/sparql-results+json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let mut out: Vec<String> = v["results"]["bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["s"]["value"].as_str().unwrap().to_owned())
+                .collect();
+            out.sort();
+            out
+        }
+    };
+    assert_eq!(
+        subjects("union").await,
+        vec!["http://ex/a", "http://ex/g_only"],
+        "union sees every non-reserved graph"
+    );
+    assert_eq!(
+        subjects("strict").await,
+        vec!["http://ex/a"],
+        "strict sees only the default-graph sentinel"
+    );
+}
+
+/// The form-encoded POST-body field wins over a `default_graph` also present
+/// on the URL query string: the body carries a *valid* value (`union`) while
+/// the URL carries an *invalid* one (`bogus`) — a 200 here proves the body's
+/// value was applied and the URL's was never even parsed.
+#[tokio::test]
+async fn default_graph_url_param_form_body_field_wins_over_url() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=bogus")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=union"
+                .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// When the form body carries no `default_graph` field at all, the handler
+/// falls back to the URL query string — same channel GET and direct-POST
+/// use. Before this fix the fallback did not exist: a form-encoded POST with
+/// `default_graph` *only* on the URL silently got `union` semantics (200,
+/// no error) instead of this 400.
+#[tokio::test]
+async fn default_graph_url_param_form_falls_back_to_url_when_absent_from_body() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=bogus")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D".to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default_graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The GET-channel counterpart: same invalid-value contract (400 naming the
+/// key), proven on the channel that reads `default_graph` next to `query`
+/// (`QueryParams`, GET's `Query` extractor).
+#[tokio::test]
+async fn default_graph_url_param_get_bad_value_returns_400_naming_key() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .uri(
+            "/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=bogus",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default_graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The direct-POST channel (`application/sparql-query`, raw body = the query
+/// text): per SPARQL 1.1 Protocol §2.1.2 this client puts `default_graph` on
+/// the URL query string, not in the body — same as GET.
+#[tokio::test]
+async fn default_graph_url_param_direct_post_bad_value_returns_400_naming_key() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=bogus")
+        .header("content-type", "application/sparql-query")
+        .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        text.contains("default_graph"),
+        "body should name the offending key: {text}"
+    );
+}
+
+/// The direct-POST channel's positive case: a valid `?default_graph=` value
+/// must run the query (not 400), proving the override is actually read on
+/// this branch now, not merely rejected when malformed.
+#[tokio::test]
+async fn default_graph_url_param_direct_post_valid_value_runs_query() {
+    let app = router_with_data();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query?default_graph=strict")
+        .header("content-type", "application/sparql-query")
+        .header("accept", "application/sparql-results+json")
+        .body(Body::from("SELECT ?o WHERE { ?s ?p ?o }".to_string()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -205,6 +414,7 @@ async fn get_query_returns_json_hornbackend() {
     backend.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -422,6 +632,7 @@ async fn large_select_streams_in_multiple_chunks() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -476,6 +687,7 @@ async fn small_select_replies_with_sized_single_frame_body() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
     };
     let app = build_router(state);
 
@@ -530,6 +742,7 @@ mod streaming_error_semantics {
         fn scan_bgp(
             &self,
             _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             Err(SparqlError::Executor("scan exploded".into()))
         }
@@ -544,6 +757,7 @@ mod streaming_error_semantics {
     async fn exec_error_before_first_chunk_returns_400() {
         let state = AppState {
             store: Arc::new(RwLock::new(FailingScan)),
+            cfg: SparqlConfig::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -565,10 +779,15 @@ mod streaming_error_semantics {
         fn scan_bgp(
             &self,
             _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             unreachable!("scan_bgp_ids is overridden")
         }
-        fn scan_bgp_ids(&self, _patterns: &[TriplePattern]) -> horndb_sparql::Result<Batch> {
+        fn scan_bgp_ids(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Batch> {
             Ok(Batch {
                 schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
                 rows: (0u64..5000)
@@ -602,6 +821,7 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
+            cfg: SparqlConfig::default(),
         };
         let app = build_router(state);
         // SELECT all three vars so column pruning keeps every column.

@@ -5,6 +5,9 @@
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
+/// The one scan-side helper outside this module needs (`GRAPH ?g`'s
+/// per-graph read); the operators themselves stay private.
+pub(crate) use source::scan_scoped;
 use source::{CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
@@ -98,21 +101,35 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         E: 'r,
     {
         match plan {
-            PhysicalPlan::BgpScan { patterns } => {
-                Ok(Box::new(ScanOp::new(self.exec().scan_bgp_ids(patterns)?)))
-            }
-            PhysicalPlan::CountScan { patterns, out_var } => {
-                Ok(Box::new(CountScanOp::new(self.exec(), patterns, out_var)?))
-            }
+            // `scan_scoped`, not `scan_bgp_ids`: `GRAPH ?g` is one scan node
+            // whose operator loops over the graphs and appends the `?g`
+            // column, so the plan never grows with the graph count (D6).
+            PhysicalPlan::BgpScan { patterns, scope } => Ok(Box::new(ScanOp::new(scan_scoped(
+                self.exec(),
+                patterns,
+                &self.scan_scope(scope),
+            )?))),
+            PhysicalPlan::CountScan {
+                patterns,
+                out_var,
+                scope,
+            } => Ok(Box::new(CountScanOp::new(
+                self.exec(),
+                patterns,
+                out_var,
+                &self.scan_scope(scope),
+            )?)),
             PhysicalPlan::GroupCountScan {
                 patterns,
                 keys,
                 out_vars,
+                scope,
             } => Ok(Box::new(GroupCountScanOp::new(
                 self.exec(),
                 patterns,
                 keys,
                 out_vars,
+                &self.scan_scope(scope),
             )?)),
             PhysicalPlan::Filter { expr, inner } => {
                 let child = self.build(inner)?;
@@ -182,6 +199,10 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
+                // A path under `GRAPH ?g` would flatten the edge relation's
+                // graph column and connect hops from different graphs.
+                // `plan::lower` refuses that shape before it gets here — the
+                // single refusal site (SPEC-28 S3).
                 let edge_op = self.build(edge)?;
                 Ok(Box::new(PathClosureOp::new(
                     self,

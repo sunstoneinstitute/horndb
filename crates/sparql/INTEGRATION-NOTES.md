@@ -47,35 +47,141 @@ adds it, the implementation should:
 For Stage 0/1 the file remains absent — `horndb-ml` ships only
 the boundary; the LLM client trait will land with the Stage 2 plan.
 
-## GRAPH patterns — refused, not evaluated (SPEC-28 phase 1, #264)
+## GRAPH patterns and the query dataset (SPEC-28 phase 3, #266)
 
-`translate.rs::translate_pattern` rejects every `GraphPattern::Graph` node
-— both the ground form (`GRAPH <g> { P }`) and the variable form
-(`GRAPH ?g { P }`) — with `SparqlError::UnsupportedAlgebra` naming `GRAPH`.
-`refuse_nonempty_dataset` rejects a non-empty `FROM`/`FROM NAMED` dataset
-clause the same way, naming `FROM`. Both errors are called from all four
-`translate_query_with` arms (`SELECT`/`ASK`/`CONSTRUCT`/`DESCRIBE`), so
-every query form is covered. The server already maps every `SparqlError`
-to HTTP 400 (`server/query.rs`), so no server change was needed: a
-named-graph query now gets an explicit 400 instead of a result.
+### How the graph scope travels
 
-Before this phase, `translate_pattern` **discarded** the `GRAPH` wrapper
-and the four `translate_query_with` arms bound `dataset: _`, so `GRAPH
-<g> { P }` silently evaluated `P` against the default graph and returned
-HTTP 200 — a wrong answer, not a missing feature, and one a caller could
-not detect. That behaviour is gone; this section used to describe it
-under the heading "currently WRONG, not merely limited (#261)".
+`translate.rs::translate_pattern` builds `Algebra::Graph { name, inner }`
+from a `GRAPH` block, where `name` is a ground IRI or a variable.
+`translate.rs::dataset_spec_from` turns `FROM`/`FROM NAMED` into a
+`DatasetSpec` (all four `translate_query_with` arms — `SELECT`/`ASK`/
+`CONSTRUCT`/`DESCRIBE`).
 
-The underlying premise for the old Stage-1 shortcut — that the executor
-held one merged graph loaded from flat triple dumps, with nothing to
-scope against — no longer held even before this phase: `horndb-storage`
-has been quad-aware since SPEC-25 S1 (#225). `Store::insert_quads` /
-`retract_quads` / `intern_graph_uri` take a `GraphId`, `MemoryTier` keys
-partitions by graph, and the N-Quads loader routes each quad to its named
-graph. Real named-graph *evaluation* (as opposed to refusal) is SPEC-28
-phases 2–4 — see `docs/plans/PLAN-28-03-graph-query.md`
-([#266](https://github.com/sunstoneinstitute/horndb/issues/266)) for the
-`Algebra::Graph` lowering that replaces this refusal with a real answer.
+Lowering keeps **no** `Graph` node. `plan/lower.rs::lower_scoped` carries the
+enclosing scope down and stamps it on every scan leaf (`BgpScan`,
+`CountScan`, `GroupCountScan`, and transitively a `PathClosure`'s edge
+sub-plan) — SPEC-28 D5: the scope is a scan parameter, never a post-filter,
+because post-filtering a many-graph store to answer a one-graph question
+costs O(store). Nested `GRAPH` follows SPARQL: innermost wins (ground form; a
+nested `GRAPH` inside `GRAPH ?g` is refused — see below). There is no
+fallback path — a scope that cannot be pushed is an error, not a silent
+widening.
+
+At execution the plan-level `GraphScope` plus the query's `DatasetSpec` and
+mode make a `ScanScope` (`exec/scope.rs`), which resolves to a
+`ResolvedScope` — the operator-level view, and the only place `PerGraph`
+(`GRAPH ?g`) exists, because the scan operator loops the graphs itself and a
+backend's single-scope read never sees it. `HornBackend` maps the rest onto
+its own `SnapshotScope` and builds a **scoped** WCOJ snapshot. Only the two
+no-dataset default-graph scopes (`union`, `strict`) are memoized. Every other
+scope — a ground `GRAPH <g>`, a `FROM` list, each graph a `GRAPH ?g` visits —
+is built and dropped per execution (`SnapshotScope::memoisable`, pinned by
+`graph_scoped_snapshots_are_not_memoised`): caching them would let a client
+walking `GRAPH <g1>`…`GRAPH <gN>` pin one six-ordering copy of the store per
+graph named, evicted only by a write and reachable from an unauthenticated
+`/query`. `MemStore` implements the same semantics over its own indexes: it
+keeps the graph dimension *beside* the triple table (`graphs[i]` = the set
+of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
+
+### Semantics
+
+- **Ground `GRAPH <g>`** scans only `g`. An unknown graph IRI yields zero
+  rows, never an error. `GRAPH <g> {}` — the standard existence probe —
+  matches only if `g` holds a visible quad (SPEC-28 D11).
+- **`GRAPH ?g`** binds the graph as an extra **scan output column**
+  (`Slot::Id(TermId(g.0))`, since a `GraphId` *is* the interned `TermId`):
+  one scan node looping over the graphs, so plan size is independent of graph
+  count (D6). `?g` never binds the default graph (D3).
+- **`FROM` / `FROM NAMED`** build the dataset per SPARQL 1.1 §13.2, including
+  `FROM NAMED` with no `FROM` = **empty** default graph. `FROM` is a
+  term-level set union of the named graphs; RDF-merge blank-node renaming is
+  not implemented (the platform skolemizes upstream).
+- **No dataset clause** → the default graph follows the `default_graph` mode:
+  `union` (the default) is every non-reserved graph, deduped so a triple in
+  two graphs is one row; `strict` is the default-graph sentinel alone. The
+  named-graph set is every non-reserved graph in both modes.
+- **Reserved graphs** (IRI prefix `https://horndb.io/graph/`,
+  `exec::is_reserved_graph`) are outside the union and outside `GRAPH ?g`
+  enumeration. Naming one explicitly — `FROM <g>`, `FROM NAMED <g>`, ground
+  `GRAPH <g>` — is the opt-in.
+- **Property paths** inherit the scope on their edge sub-plan, so the closure
+  is computed over the scoped edge relation. A `g1 → g2 → g1` chain does not
+  connect inside `GRAPH <g1>`; under the union default graph it does, because
+  the union *is* the default graph.
+- **Count and group-count pushdowns** are scope-aware or **decline**
+  (`Ok(None)`, falling back to the scan). Decline-by-default is what makes
+  adding a scope safe: a shortcut that cannot express the scope can never
+  answer with a whole-store count. Cardinality *estimates* stay coarse (a
+  whole-store count is a valid upper bound under any scope) and reach only the
+  planner and `EXPLAIN`, never a `Batch`.
+
+### The mode setting and its per-query override
+
+`SparqlConfig.default_graph` (`lib.rs`, `DefaultGraphMode::{Union, Strict}`)
+comes from `[server.limits].default_graph` — a typed `union | strict` enum in
+`horndb-config`, so a bad value is rejected at startup naming the file and
+key. `serve.rs` builds one `SparqlConfig` into `AppState.cfg`; the handlers
+use it instead of the `SparqlConfig::default()` they hardcoded before. A
+single query overrides it with the `default_graph` URL or form parameter on
+all three protocol channels (GET, form-POST, direct POST); an unparseable
+value is a 400 naming the key. Spelling: `default_graph`, the config-key
+spelling — SPEC-26 S4 names every override after its field, and
+`default-graph` sits one suffix from the SPARQL 1.1 Protocol's reserved
+`default-graph-uri`, which phase 5's GSP needs on the same endpoint.
+
+### Two families of `GRAPH ?g` query are refused, not answered
+
+Both refusals are raised in `plan/lower.rs` as `UnsupportedAlgebra` (HTTP 400)
+and name the offending construct. Both exist because the graph name is bound
+on the scan **leaf**, not joined on after the block is evaluated.
+
+1. **A barrier between the wrapper and its scan leaves**
+   (`per_graph_barrier`): a sub-`SELECT`, `DISTINCT`, `GROUP BY`/aggregate,
+   `LIMIT`/`OFFSET`, any property path, a nested `GRAPH`, or a `VALUES` that
+   is not joined against a scoped arm. Each drops or merges the graph column,
+   so rows would come back with `?g` unbound or mixed across graphs. The same
+   constructs *above* the wrapper are fine. A quad-free arm is exempt where
+   the other arm's graph column reaches every joined row: either side of a
+   `Join`, or an `OPTIONAL`'s right arm — so
+   `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers
+   (`values_inside_graph_var_answers`).
+2. **The block reads `?g` where leaf-binding diverges from SPARQL 1.1
+   §18.2.2.2's post-join** (`per_graph_var_divergence`): any expression
+   (`FILTER`, a `BIND` expression, an `OPTIONAL` condition, `ORDER BY`),
+   `BIND(… AS ?g)`, or any mention of `?g` in a `LeftJoin`'s right arm.
+   Allowed — because there the leaf's equality filter *is* the post-join — is
+   `?g` in a `Bgp` triple position, or in a `VALUES` column joined against a
+   scoped arm. (The divergence rule also permits a `VALUES`-supplied `?g`
+   under `Union` or a `LeftJoin`'s left arm, but `per_graph_barrier` runs
+   first and refuses those, so only the `Join` case reaches evaluation.)
+
+Lifting either means evaluating the whole block once per graph with `?g` free
+and joining the graph name on afterwards. That is a design change against
+D5/D6, not a bug fix. `harness/KNOWN-MANIFEST-BUGS.md` names the W3C cases
+each refusal costs.
+
+### History
+
+Before SPEC-28 phase 1 (#264), `translate_pattern` **discarded** the `GRAPH`
+wrapper and the four `translate_query_with` arms bound `dataset: _`, so
+`GRAPH <g> { P }` evaluated `P` against the default graph and returned HTTP
+200 — a wrong answer a caller could not detect. Phase 1 turned that into a
+400; phase 3 (this section) replaced the refusal with real evaluation, except
+for the two families above. Storage had been quad-aware since SPEC-25 S1 (#225)
+the whole time, so the Stage-1 premise that there was nothing to scope against
+had already stopped being true.
+
+### Conformance
+
+W3C `graph/` and `dataset/` families, from the **SPARQL 1.0 (DAWG)** suite
+(not the 1.1 tarball), mirrored per case under
+`crates/harness/tests/fixtures/sparql11/selected_subset/` and run by
+`crates/sparql/tests/w3c_suite.rs` on both backends via
+`harness/selected.toml`'s `[sparql_query]` section. A case dir may carry
+`data.trig` (quads routed to their graphs) instead of `data.nt`. 24 of 29
+cases are selected and green; the other 5, and the note that no selected case
+grades the shipping `union` mode, are in `harness/KNOWN-MANIFEST-BUGS.md`.
+Direct pins live in `crates/sparql/tests/graph_query.rs`.
 
 ## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)
 
@@ -118,11 +224,16 @@ O(partition-size) `StoreSnapshot::contains` on the bulk-load hot path.
 
 BGP execution requires all six sort orderings (SPO, SOP, PSO, POS,
 OSP, OPS). `HornBackend` builds a `VecTripleSource` lazily on the first
-query after any mutation and caches it behind a `Mutex<Option<Arc<…>>>`.
+query after any mutation and caches it behind a
+`Mutex<HashMap<SnapshotScope, Arc<…>>>`. Since SPEC-28 phase 3 that map holds
+**at most two** entries, ever: the `union` and the `strict` no-dataset default
+graph. Every other scope — a ground `GRAPH <g>`, a `FROM` list, and each graph
+a `GRAPH ?g` visits — is built and dropped per execution (see the GRAPH
+patterns section above for why).
 The snapshot holds all six orderings eagerly sorted; at ~144 bytes/triple
 steady-state snapshot cost (construction briefly peaks ~168 B/triple
 while the input vec is still alive) this is a documented Stage-1 cost.
-The snapshot is invalidated (set to `None`) on every write (insert or delete).
+The cache is cleared wholesale on every write (insert or delete).
 
 A follow-up item exists to replace this with a direct `TripleSource`
 over the columnar partitions, avoiding the full-copy rebuild.
@@ -167,8 +278,11 @@ this path via the `--materialize` flag.
 
 ### GRAPH patterns
 
-Named-graph patterns remain unscoped (unchanged Stage-1 behaviour).
-See the GRAPH patterns section above.
+`HornBackend`'s reads are graph-scoped: `wcoj_snapshot` takes a resolved
+scope; only the two whole-store default-graph scopes are memoized — every
+graph-scoped read builds and drops its own snapshot. Its **writes** are
+still default-graph-only (SPEC-28 phase 4). See the GRAPH patterns section
+above.
 
 ### Non-recursive property paths (#49)
 

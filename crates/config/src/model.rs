@@ -25,6 +25,7 @@ mod tests {
         assert_eq!(cfg.server.limits.max_result_rows, 1_000_000);
         assert!(!cfg.server.limits.rdf12);
         assert_eq!(cfg.server.limits.max_query_memory, None);
+        assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Union);
         assert_eq!(cfg.simd.max_isa, None);
         assert!(cfg.simd.autotune);
         assert_eq!(cfg.logging.level, "info");
@@ -42,6 +43,7 @@ mod tests {
             max_result_rows = 42
             rdf12 = true
             max_query_memory = "2GiB"
+            default_graph = "strict"
             [simd]
             max_isa = "scalar"
             autotune = false
@@ -55,6 +57,7 @@ mod tests {
             cfg.server.limits.max_query_memory,
             Some(ByteSize(2 * 1024 * 1024 * 1024))
         );
+        assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Strict);
         assert_eq!(cfg.simd.max_isa.as_deref(), Some("scalar"));
         assert!(!cfg.simd.autotune);
     }
@@ -77,6 +80,23 @@ mod tests {
         let qs = QuerySettings::from_limits(&limits);
         assert_eq!(qs.max_result_rows, 7);
         assert_eq!(qs.query_timeout.0, Duration::from_secs(30));
+        assert_eq!(qs.default_graph, DefaultGraph::Union);
+    }
+
+    /// SPEC-26 S1: a rejection names the bad value (and, once loaded through
+    /// `horndb_config::load` rather than raw `toml::from_str`, the source
+    /// file too — see `crates/sparql/tests/serve_config_wiring.rs`'s
+    /// `invalid_default_graph_exits_nonzero_naming_the_value`). A serde-level
+    /// enum gets this validation for free from figment/serde, unlike the
+    /// free-string `[simd].max_isa`, which is checked by hand in `serve.rs`.
+    #[test]
+    fn invalid_default_graph_value_is_rejected() {
+        let err = toml::from_str::<ServerConfig>("[server.limits]\ndefault_graph = \"bogus\"\n")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("bogus"),
+            "error should name the bad value: {err}"
+        );
     }
 
     fn toml_from(s: &str) -> ServerConfig {
@@ -121,6 +141,8 @@ pub struct Limits {
     pub max_result_rows: u64,
     pub rdf12: bool,
     pub max_query_memory: Option<ByteSize>,
+    /// SPEC-28 S3/D2: how the no-dataset default graph is composed.
+    pub default_graph: DefaultGraph,
 }
 
 impl Default for Limits {
@@ -130,8 +152,26 @@ impl Default for Limits {
             max_result_rows: 1_000_000,
             rdf12: false,
             max_query_memory: None,
+            default_graph: DefaultGraph::default(),
         }
     }
+}
+
+/// How the no-dataset default graph is composed (SPEC-28 S3/D2). A typed
+/// enum, not a free `String`: this crate has no dependency on
+/// `horndb-sparql` (`horndb-sparql` maps this onto its own
+/// `DefaultGraphMode` via `From`, the other direction), but an enum still
+/// gets figment/serde's file+key rejection attribution for an unrecognized
+/// value — SPEC-26 S1's requirement — for free, unlike a free-string field
+/// such as `[simd].max_isa`, which is checked by hand downstream.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultGraph {
+    /// The union of every non-reserved graph — the SPARQL-friendly default.
+    #[default]
+    Union,
+    /// Only the default-graph sentinel; no named-graph data is visible.
+    Strict,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -188,6 +228,7 @@ pub struct QuerySettings {
     pub max_result_rows: u64,
     pub rdf12: bool,
     pub max_query_memory: Option<ByteSize>,
+    pub default_graph: DefaultGraph,
 }
 
 impl QuerySettings {
@@ -197,6 +238,7 @@ impl QuerySettings {
             max_result_rows: limits.max_result_rows,
             rdf12: limits.rdf12,
             max_query_memory: limits.max_query_memory,
+            default_graph: limits.default_graph,
         }
     }
 }

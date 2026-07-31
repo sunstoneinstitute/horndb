@@ -1,0 +1,158 @@
+{
+  "head": {
+    "vars": [
+      "g",
+      "o",
+      "p",
+      "s"
+    ]
+  },
+  "results": {
+    "bindings": [
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g3.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "1"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "bnode",
+          "value": "nc1cae8439ad44fd9a9145c39ba1defb7b6"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g1.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "1"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g1.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "9"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/a"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g2.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "2"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/q"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        }
+      },
+      {
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "1"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/x"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g4.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "2"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/q"
+        },
+        "s": {
+          "type": "bnode",
+          "value": "nc1cae8439ad44fd9a9145c39ba1defb7b31"
+        }
+      },
+      {
+        "g": {
+          "type": "uri",
+          "value": "http://www.w3.org/2001/sw/DataAccess/tests/data-r2/graph/data-g3.ttl"
+        },
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "9"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "bnode",
+          "value": "nc1cae8439ad44fd9a9145c39ba1defb7b35"
+        }
+      },
+      {
+        "o": {
+          "datatype": "http://www.w3.org/2001/XMLSchema#integer",
+          "type": "literal",
+          "value": "9"
+        },
+        "p": {
+          "type": "uri",
+          "value": "http://example/p"
+        },
+        "s": {
+          "type": "uri",
+          "value": "http://example/a"
+        }
+      }
+    ]
+  }
+}

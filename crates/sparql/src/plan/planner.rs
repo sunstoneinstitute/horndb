@@ -29,9 +29,17 @@ pub fn plan(alg: &Algebra) -> Result<PhysicalPlan> {
 /// query pragma). Lowers to the logical IR, runs the pass pipeline, then
 /// lowers to the physical plan.
 pub fn plan_with_ctx(alg: &Algebra, ctx: &PlanCtx) -> Result<PhysicalPlan> {
-    let logical = lower_algebra(alg);
+    let logical = lower_algebra(alg)?;
     let optimized = run_passes(logical, &standard_passes(), ctx);
-    Ok(lower_physical(optimized))
+    let physical = lower_physical(optimized);
+    // Debug-only: no pass may narrow a `GRAPH ?g` scan's graph column away
+    // while something above still reads it (SPEC-28 S3/D6). Free in release.
+    debug_assert!(
+        crate::plan::lower::per_graph_columns_survive(&physical).is_ok(),
+        "{:?}",
+        crate::plan::lower::per_graph_columns_survive(&physical)
+    );
+    Ok(physical)
 }
 
 #[cfg(test)]
@@ -43,7 +51,7 @@ mod tests {
     #[test]
     fn empty_bgp_plans_to_empty_scan() {
         let plan = plan(&Algebra::Bgp { patterns: vec![] }).unwrap();
-        assert_eq!(plan, PhysicalPlan::BgpScan { patterns: vec![] });
+        assert_eq!(plan, PhysicalPlan::bgp_scan(vec![]));
     }
 
     #[test]
@@ -85,7 +93,7 @@ mod tests {
             right: Box::new(bgp),
         };
         match plan(&alg).unwrap() {
-            PhysicalPlan::BgpScan { patterns } => assert_eq!(patterns.len(), 2),
+            PhysicalPlan::BgpScan { patterns, .. } => assert_eq!(patterns.len(), 2),
             other => panic!("expected coalesced BgpScan, got {other:?}"),
         }
     }
