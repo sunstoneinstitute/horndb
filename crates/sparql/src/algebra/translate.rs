@@ -24,16 +24,29 @@ use spargebra::Query;
 
 /// Lower a parsed `spargebra::Query` to [`Algebra`] using the default
 /// [`SparqlConfig`] (SPARQL 1.1 semantics — triple-term patterns are
-/// rejected), **discarding the resolved [`DatasetSpec`]**.
+/// rejected).
 ///
-/// Has no production callers today — every real query path (`api.rs`)
-/// goes through [`translate_query_with`] so `FROM`/`FROM NAMED` is not
-/// silently dropped. Kept for callers that provably never reach a
-/// dataset-sensitive executor (unit tests over `Algebra` shape only); do
-/// not add a call on any path that plans or executes a query.
+/// This function's return type has no room for a [`DatasetSpec`], so it
+/// **refuses** a query with a non-empty `FROM`/`FROM NAMED` clause rather
+/// than silently discard it — a caller who planned and ran the returned
+/// algebra would get the configured default dataset instead of the one
+/// the query named, a silent wrong answer. Use [`translate_query_with`]
+/// for any query that may carry a dataset clause; it returns the
+/// [`DatasetSpec`] alongside the algebra and cannot lose it. Has no
+/// production callers today — every real query path (`api.rs`) already
+/// goes through `translate_query_with`; this exists for tests that only
+/// need `Algebra` shape on a dataset-free query.
 #[doc(hidden)]
 pub fn translate_query(q: &Query) -> Result<Algebra> {
-    translate_query_with(q, &SparqlConfig::default()).map(|tq| tq.algebra)
+    let translated = translate_query_with(q, &SparqlConfig::default())?;
+    if translated.dataset != DatasetSpec::default() {
+        return Err(SparqlError::UnsupportedAlgebra(
+            "FROM/FROM NAMED dataset clause (translate_query cannot return the resolved \
+             DatasetSpec and would silently discard it — use translate_query_with instead)"
+                .into(),
+        ));
+    }
+    Ok(translated.algebra)
 }
 
 /// Like [`translate_query`] but takes an explicit [`SparqlConfig`] — pass

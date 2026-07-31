@@ -353,3 +353,23 @@ fn no_dataset_clause_yields_none_dataset() {
         }
     );
 }
+
+#[test]
+fn translate_query_rejects_dataset_clause() {
+    // translate_query's return type has no room for a DatasetSpec, so it
+    // must refuse a query naming FROM/FROM NAMED rather than silently
+    // drop it — a caller who planned and ran the returned algebra would
+    // get the configured default dataset instead of the one the query
+    // named. translate_query_with is the safe path: it returns the
+    // DatasetSpec alongside the algebra and cannot lose it.
+    let q = parse_query("SELECT ?s FROM <http://ex/g> WHERE { ?s ?p ?o }").expect("parse");
+    let inner = match q {
+        ParsedQuery::Select { inner } => inner,
+        other => panic!("expected Select, got {other:?}"),
+    };
+    let err = translate::translate_query(&inner).unwrap_err();
+    assert!(
+        err.to_string().contains("translate_query_with"),
+        "expected the error to point at translate_query_with, got: {err}"
+    );
+}
