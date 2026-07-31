@@ -62,7 +62,8 @@ enclosing scope down and stamps it on every scan leaf (`BgpScan`,
 `CountScan`, `GroupCountScan`, and transitively a `PathClosure`'s edge
 sub-plan) — SPEC-28 D5: the scope is a scan parameter, never a post-filter,
 because post-filtering a many-graph store to answer a one-graph question
-costs O(store). Nested `GRAPH` follows SPARQL: innermost wins. There is no
+costs O(store). Nested `GRAPH` follows SPARQL: innermost wins (ground form; a
+nested `GRAPH` inside `GRAPH ?g` is refused — see below). There is no
 fallback path — a scope that cannot be pushed is an error, not a silent
 widening.
 
@@ -71,12 +72,14 @@ mode make a `ScanScope` (`exec/scope.rs`), which resolves to a
 `ResolvedScope` — the operator-level view, and the only place `PerGraph`
 (`GRAPH ?g`) exists, because the scan operator loops the graphs itself and a
 backend's single-scope read never sees it. `HornBackend` maps the rest onto
-its own `SnapshotScope` and builds a **scoped** WCOJ snapshot. Only
-whole-dataset scopes are memoized; a per-graph scope is built and dropped
-(`SnapshotScope::memoisable`, pinned by
-`graph_scoped_snapshots_are_not_memoised`), so a client walking
-`GRAPH <g1>`…`GRAPH <gN>` cannot pin one six-ordering copy of the store per
-graph named. `MemStore` implements the same semantics over its own indexes: it
+its own `SnapshotScope` and builds a **scoped** WCOJ snapshot. Only the two
+no-dataset default-graph scopes (`union`, `strict`) are memoized. Every other
+scope — a ground `GRAPH <g>`, a `FROM` list, each graph a `GRAPH ?g` visits —
+is built and dropped per execution (`SnapshotScope::memoisable`, pinned by
+`graph_scoped_snapshots_are_not_memoised`): caching them would let a client
+walking `GRAPH <g1>`…`GRAPH <gN>` pin one six-ordering copy of the store per
+graph named, evicted only by a write and reachable from an unauthenticated
+`/query`. `MemStore` implements the same semantics over its own indexes: it
 keeps the graph dimension *beside* the triple table (`graphs[i]` = the set
 of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
 
@@ -126,25 +129,31 @@ spelling — SPEC-26 S4 names every override after its field, and
 `default-graph` sits one suffix from the SPARQL 1.1 Protocol's reserved
 `default-graph-uri`, which phase 5's GSP needs on the same endpoint.
 
-### Two `GRAPH ?g` shapes are refused, not answered
+### Two families of `GRAPH ?g` query are refused, not answered
 
 Both refusals are raised in `plan/lower.rs` as `UnsupportedAlgebra` (HTTP 400)
 and name the offending construct. Both exist because the graph name is bound
 on the scan **leaf**, not joined on after the block is evaluated.
 
 1. **A barrier between the wrapper and its scan leaves**
-   (`per_graph_barrier`): `Project` (sub-`SELECT`), `Distinct`, `Group`,
-   `Slice`, `PathClosure` (any property path), or `Values` *inside* the block.
-   Each drops or merges the graph column, so rows would come back with `?g`
-   unbound or mixed across graphs. The same constructs *above* the wrapper are
-   fine.
+   (`per_graph_barrier`): a sub-`SELECT`, `DISTINCT`, `GROUP BY`/aggregate,
+   `LIMIT`/`OFFSET`, any property path, a nested `GRAPH`, or a `VALUES` that
+   is not joined against a scoped arm. Each drops or merges the graph column,
+   so rows would come back with `?g` unbound or mixed across graphs. The same
+   constructs *above* the wrapper are fine. A quad-free arm is exempt where
+   the other arm's graph column reaches every joined row: either side of a
+   `Join`, or an `OPTIONAL`'s right arm — so
+   `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers
+   (`values_inside_graph_var_answers`).
 2. **The block reads `?g` where leaf-binding diverges from SPARQL 1.1
    §18.2.2.2's post-join** (`per_graph_var_divergence`): any expression
-   (`FILTER`, a `BIND` expression, an `OPTIONAL` condition, `ORDER BY`,
-   `GROUP BY`), `BIND(… AS ?g)`, or any mention of `?g` in a `LeftJoin`'s
-   right arm. Allowed — because there the leaf's equality filter *is* the
-   post-join — is `?g` in a `Bgp` triple position or a `VALUES` column,
-   combined upward by `Join`, `Union`, or a `LeftJoin`'s left arm.
+   (`FILTER`, a `BIND` expression, an `OPTIONAL` condition, `ORDER BY`),
+   `BIND(… AS ?g)`, or any mention of `?g` in a `LeftJoin`'s right arm.
+   Allowed — because there the leaf's equality filter *is* the post-join — is
+   `?g` in a `Bgp` triple position, or in a `VALUES` column joined against a
+   scoped arm. (The divergence rule also permits a `VALUES`-supplied `?g`
+   under `Union` or a `LeftJoin`'s left arm, but `per_graph_barrier` runs
+   first and refuses those, so only the `Join` case reaches evaluation.)
 
 Lifting either means evaluating the whole block once per graph with `?g` free
 and joining the graph name on afterwards. That is a design change against
@@ -158,7 +167,7 @@ wrapper and the four `translate_query_with` arms bound `dataset: _`, so
 `GRAPH <g> { P }` evaluated `P` against the default graph and returned HTTP
 200 — a wrong answer a caller could not detect. Phase 1 turned that into a
 400; phase 3 (this section) replaced the refusal with real evaluation, except
-for the two shapes above. Storage had been quad-aware since SPEC-25 S1 (#225)
+for the two families above. Storage had been quad-aware since SPEC-25 S1 (#225)
 the whole time, so the Stage-1 premise that there was nothing to scope against
 had already stopped being true.
 
@@ -216,9 +225,11 @@ O(partition-size) `StoreSnapshot::contains` on the bulk-load hot path.
 BGP execution requires all six sort orderings (SPO, SOP, PSO, POS,
 OSP, OPS). `HornBackend` builds a `VecTripleSource` lazily on the first
 query after any mutation and caches it behind a
-`Mutex<HashMap<SnapshotScope, Arc<…>>>` — one entry per whole-dataset graph
-scope since SPEC-28 phase 3 (per-graph scopes are built unmemoized; see the
-GRAPH patterns section above).
+`Mutex<HashMap<SnapshotScope, Arc<…>>>`. Since SPEC-28 phase 3 that map holds
+**at most two** entries, ever: the `union` and the `strict` no-dataset default
+graph. Every other scope — a ground `GRAPH <g>`, a `FROM` list, and each graph
+a `GRAPH ?g` visits — is built and dropped per execution (see the GRAPH
+patterns section above for why).
 The snapshot holds all six orderings eagerly sorted; at ~144 bytes/triple
 steady-state snapshot cost (construction briefly peaks ~168 B/triple
 while the input vec is still alive) this is a documented Stage-1 cost.
@@ -268,7 +279,8 @@ this path via the `--materialize` flag.
 ### GRAPH patterns
 
 `HornBackend`'s reads are graph-scoped: `wcoj_snapshot` takes a resolved
-scope and memoizes one `VecTripleSource` per scope key. Its **writes** are
+scope; only the two whole-store default-graph scopes are memoized — every
+graph-scoped read builds and drops its own snapshot. Its **writes** are
 still default-graph-only (SPEC-28 phase 4). See the GRAPH patterns section
 above.
 

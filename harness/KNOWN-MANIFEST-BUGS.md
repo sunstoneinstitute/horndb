@@ -384,10 +384,12 @@ where the data supplies it and an inner join combines it — a triple-pattern
 position or a `VALUES` column, joined upward through `Join`, `Union`, or an
 `OPTIONAL`'s left arm. That is exactly the case where "the leaf keeps rows
 whose `?g` equals this graph" *is* the post-join, and it is why
-`graph-variable-join` stays selected and green. Every other use — any
-expression (`FILTER`, `BIND`, an `OPTIONAL` condition, `ORDER BY`,
-`GROUP BY`), a `BIND` *to* `?g`, or any mention inside an `OPTIONAL`'s right
-arm — refuses.
+`graph-variable-join` stays selected and green. (For a `VALUES`-supplied `?g`
+only the `Join` case reaches this rule: `plan::lower::per_graph_barrier` runs
+first and refuses a `VALUES` arm of a `Union` or of an `OPTIONAL`'s left side,
+because neither carries the graph column up.) Every other use — any expression
+(`FILTER`, `BIND`, an `OPTIONAL` condition, `ORDER BY`), a `BIND` *to* `?g`,
+or any mention inside an `OPTIONAL`'s right arm — refuses.
 
 Lifting either refusal needs the graph variable joined **after** the block is
 evaluated rather than bound on the scan leaf: evaluate `P` per graph with

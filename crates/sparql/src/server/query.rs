@@ -30,7 +30,8 @@ use tokio::sync::{mpsc, oneshot};
 pub struct QueryParams {
     pub query: Option<String>,
     /// SPEC-26 S4: the one per-query override key SPEC-28 S3 needs live
-    /// ahead of PLAN-26-02's general whitelist mechanism (`union`/`strict`,
+    /// ahead of SPEC-26 Phase 2's general whitelist mechanism (#251)
+    /// (`union`/`strict`,
     /// see `SparqlConfig::default_graph`). Spelled `default_graph` — the
     /// config-key spelling, not `default-graph`: SPEC-26 S4 spells URL
     /// overrides after their `QuerySettings` field names (e.g.

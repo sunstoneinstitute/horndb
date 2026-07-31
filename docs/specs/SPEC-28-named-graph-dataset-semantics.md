@@ -237,23 +237,26 @@ a cost proportional to the graph.
   S5's GSP read and `PUT` diff are always base-only (SPEC-29 D5), because a diff
   against derived quads deletes data the client never sent.
 
-**What phase 3 shipped, and the two shapes it refuses.** Everything above is
+**What phase 3 shipped, and the two families it refuses.** Everything above is
 implemented ([#266](https://github.com/sunstoneinstitute/horndb/issues/266))
 except for two families of `GRAPH ?g` query, which are **refused** with an error
 naming the construct rather than answered. Both follow from D5/D6: the graph
 name is bound on the scan leaf, not joined on after the block is evaluated.
 
-1. **A barrier between the `GRAPH ?g` wrapper and its scan leaves** —
-   `Project` (a sub-`SELECT`), `Distinct`, `Group`, `Slice` (`LIMIT`/`OFFSET`),
-   `PathClosure` (any property path), or `Values` *inside* the block. Each drops
-   or merges the graph column, so rows would come back with `?g` unbound or
-   mixed across graphs. The same constructs placed *above* the wrapper work.
+1. **A barrier between the `GRAPH ?g` wrapper and its scan leaves** — a
+   sub-`SELECT`, `DISTINCT`, `GROUP BY`/aggregate, `LIMIT`/`OFFSET`, any
+   property path, a nested `GRAPH`, or a `VALUES` that is not joined against a
+   scoped arm. Each drops or merges the graph column, so rows would come back
+   with `?g` unbound or mixed across graphs. The same constructs placed *above*
+   the wrapper work. A quad-free arm is exempt where the other arm's graph
+   column reaches every joined row — either side of a `Join`, or an
+   `OPTIONAL`'s right arm — so `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers.
 2. **`P` reading `?g` where leaf-binding diverges from SPARQL 1.1
    §18.2.2.2's post-join** — any expression (`FILTER`, a `BIND` expression, an
-   `OPTIONAL` condition, `ORDER BY`, `GROUP BY`), `BIND(… AS ?g)`, or any
-   mention of `?g` in a `LeftJoin`'s right arm. Reading `?g` from a triple
-   position or a `VALUES` column, joined upward through `Join`, `Union`, or a
-   `LeftJoin`'s left arm, is allowed: there leaf-binding and the post-join agree.
+   `OPTIONAL` condition, `ORDER BY`), `BIND(… AS ?g)`, or any mention of `?g`
+   in a `LeftJoin`'s right arm. Reading `?g` from a triple position, or from a
+   `VALUES` column joined against a scoped arm, is allowed: there leaf-binding
+   and the post-join agree.
 
 Lifting either refusal means evaluating the whole block once per graph with `?g`
 free and joining the graph name on afterwards — a design change against D5/D6,
@@ -496,7 +499,7 @@ and each phase grows the subset per S7. Phases 1–4 have implementation plans
    *([#266](https://github.com/sunstoneinstitute/horndb/issues/266),
    `PLAN-28-03`)* `Algebra::Graph`, ground and variable
    evaluation, dataset construction, the `default_graph` mode, path and pushdown
-   scoping. Removes S1's query-side error, except for the two `GRAPH ?g` shapes
+   scoping. Removes S1's query-side error, except for the two families of `GRAPH ?g` query
    S3 ends by naming, which stay refused. Grew `[sparql_query]` by the `graph/`
    and `dataset/` families (S7's amendment).
 4. **S4 + S6 — update and idempotence.**

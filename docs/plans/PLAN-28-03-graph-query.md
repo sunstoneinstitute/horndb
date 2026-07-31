@@ -42,15 +42,18 @@ the plan **as written**; these are the points where the delivered code differs.
 Current behaviour lives in `docs/architecture.md` and
 `crates/sparql/INTEGRATION-NOTES.md`, not here.
 
-- **Two `GRAPH ?g` shapes are refused, not answered.** The plan assumed every
-  shape would evaluate. Two do not, and each was a silent wrong answer before
-  the refusal landed: (1) a barrier node between the wrapper and its scan
-  leaves — `Project` (sub-`SELECT`), `Distinct`, `Group`, `Slice`,
-  `PathClosure`, `Values` — drops or merges the graph column; (2) a block that
-  **reads** `?g` in a position where binding on the leaf diverges from SPARQL
-  1.1 §18.2.2.2's post-join (any expression, `BIND(… AS ?g)`, or `?g` in a
-  `LeftJoin`'s right arm). Both raise `UnsupportedAlgebra` from `plan/lower.rs`
-  (`per_graph_barrier`, `per_graph_var_divergence`). Lifting them needs
+- **Two families of `GRAPH ?g` query are refused, not answered.** The plan
+  assumed every shape would evaluate. Two families do not, and each was a
+  silent wrong answer before the refusal landed: (1) a barrier node between the
+  wrapper and its scan leaves — a sub-`SELECT`, `DISTINCT`, `GROUP BY`,
+  `LIMIT`/`OFFSET`, any property path, a nested `GRAPH`, or a `VALUES` that is
+  not joined against a scoped arm — drops or merges the graph column; (2) a
+  block that **reads** `?g` in a position where binding on the leaf diverges
+  from SPARQL 1.1 §18.2.2.2's post-join (any expression, `BIND(… AS ?g)`, or
+  `?g` in a `LeftJoin`'s right arm). Both raise `UnsupportedAlgebra` from
+  `plan/lower.rs` (`per_graph_barrier`, `per_graph_var_divergence`). A
+  quad-free arm joined against a scoped one is exempt, so
+  `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers. Lifting the refusals needs
   per-graph evaluation of the whole block, which is a change to D5/D6.
 - **`PassId::CountPushdown` does not exist** (the design's differential-battery
   bullet assumed it). `PassId` has six variants, none of them the count
