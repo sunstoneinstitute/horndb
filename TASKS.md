@@ -43,7 +43,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **MEDIUM** · _Conformance_ — **EPIC E7**: RDF 1.2 Stage-2 (Turtle/TriG/N-Quads/JSON-LD serialize + semantics suites + mapping annotation) ([#191](https://github.com/sunstoneinstitute/horndb/issues/191))
 - [ ] **LOW** · _Operational_ — **EPIC E8**: SPEC-17 observability Stage-2 — OpenTelemetry traces & logs ([#192](https://github.com/sunstoneinstitute/horndb/issues/192))
 
-- [ ] **CRITICAL** · _Completeness_ — SPEC-28: named-graph + dataset semantics end to end (GRAPH, FROM/FROM NAMED, named-graph Update, GSP) — query silently discards `GRAPH` today ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
+- [ ] **CRITICAL** · _Completeness_ — SPEC-28: named-graph + dataset semantics end to end (GRAPH, FROM/FROM NAMED, named-graph Update, GSP) — query done (phases 1–3); Update + GSP remain ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
 - [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
@@ -146,23 +146,28 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
 ## CRITICAL — Completeness
 
 - [ ] **SPEC-28: named-graph and RDF dataset semantics end to end.** ([#261](https://github.com/sunstoneinstitute/horndb/issues/261))
-  Storage has been quad-aware since SPEC-25 S1 (#225) — `Store::insert_quads`/
-  `retract_quads`/`intern_graph_uri` take a `GraphId`, `MemoryTier` keys partitions
-  by graph — but everything above it still behaves as if the store held one merged
-  graph. **`translate.rs::translate_pattern` discards the `GRAPH` wrapper and all
-  four `translate_query_with` arms bind `dataset: _`**, so a named-graph query
-  returns default-graph rows with HTTP 200: a wrong answer, not an error. Update is
-  at least honest (named targets error unless `SILENT`). Five phases: (1) refuse,
-  do not lie — `GRAPH` and a non-empty dataset clause become explicit 400s, small
-  and immediately correct; (2) graph-scoped access paths (`scan_graph`,
-  `scan_predicate(graph, …)`, `graph_len`, visibility-filtered `graphs()`);
+  Storage has been quad-aware since SPEC-25 S1 (#225); the read and query tiers
+  above it now are too. Five phases, decomposed into leaf issues:
+  (1) refuse, do not lie — `GRAPH` and a non-empty dataset clause become explicit
+  400s ([#264](https://github.com/sunstoneinstitute/horndb/issues/264), done);
+  (2) graph-scoped access paths — `scan_graph`, `scan_predicate(graph, …)`,
+  `graph_len`, visibility-filtered `graphs()`
+  ([#265](https://github.com/sunstoneinstitute/horndb/issues/265), done);
   (3) query — `Algebra::Graph`, ground and variable form, dataset construction,
-  the default-graph mode, path and pushdown scoping; (4) update + store-boundary
-  idempotent quad apply; (5) Graph Store Protocol. Phase 1 stands alone; 3/4/5
-  depend on 2; 5 depends on 4. Phase 5 is standalone-product surface and is **not**
-  on the data-platform integration path. Supersedes #54; carves the named-graph
-  half out of E5 #189. Spec: `docs/specs/SPEC-28-named-graph-dataset-semantics.md`.
-  Needs decomposition into per-phase leaf issues before pickup.
+  the `union`/`strict` default-graph mode, path and pushdown scoping
+  ([#266](https://github.com/sunstoneinstitute/horndb/issues/266), done — PR #273);
+  (4) update + store-boundary idempotent quad apply
+  ([#267](https://github.com/sunstoneinstitute/horndb/issues/267));
+  (5) Graph Store Protocol
+  ([#268](https://github.com/sunstoneinstitute/horndb/issues/268)).
+  5 depends on 4. Phase 5 is standalone-product surface and is **not** on the
+  data-platform integration path. **Remaining: phases 4 and 5.**
+  Two `GRAPH ?g` query families are deliberately refused rather than answered
+  wrongly (a barrier node between the wrapper and its scan leaves; the block
+  reading `?g` where leaf-binding diverges from SPARQL 1.1 §18.2.2.2) — lifting
+  them needs per-graph block evaluation, which amends D5/D6 and so needs a spec
+  change, not just code. Supersedes #54; carves the named-graph half out of
+  E5 #189. Spec: `docs/specs/SPEC-28-named-graph-dataset-semantics.md`.
 
 - [x] **SPEC-23 Phase 1: optimizer framework scaffolding.** ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
   The foundation of epic E1 (#185, closed → decomposed) — logical IR with a flat
