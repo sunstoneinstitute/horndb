@@ -82,9 +82,11 @@ format:
       dark: [darkly, theme/horndb-dark.scss]
     # pretheme.html unifies the light/dark toggle across every page.
     # head-extra.html: tab icons beyond the single `website.favicon` above.
+    # analytics.html: the Umami tracking snippet, on every page.
     include-in-header:
       - theme/pretheme.html
       - head-extra.html
+      - theme/analytics.html
     toc: true
     toc-depth: 3
     code-copy: true
