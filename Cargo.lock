@@ -1222,6 +1222,7 @@ dependencies = [
  "horndb-metrics",
  "horndb-owlrl",
  "horndb-simd",
+ "horndb-sparql",
  "horndb-storage",
  "horndb-wcoj",
  "http-body",

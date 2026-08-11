@@ -10,6 +10,14 @@ publish = false
 default = ["server", "reasoner"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite"]
 reasoner = ["dep:horndb-owlrl"]
+# Gates `exec::StoreTestExt` (the deleted triple-shaped `insert_triple`/
+# `delete_triple`/`clear_all` sugar, kept only as fixture-loading convenience
+# for tests). Not part of the production API surface — enabled automatically
+# for this crate's own test/example/bench builds via the self-dependency
+# below, so `cargo nextest run -p horndb-sparql` needs no `--features` change,
+# but a plain `cargo check -p horndb-sparql` (no features beyond default)
+# does not see it.
+test-util = []
 
 [dependencies]
 # `sep-0006` enables spargebra's `GraphPattern::Lateral` variant. The
@@ -72,3 +80,8 @@ tokio = { workspace = true }
 # `serve` binary integration tests (config-file/env/CLI bind precedence,
 # startup-fatal validation).
 assert_cmd = { workspace = true }
+# Self-dependency: makes every test/example/bench target link against this
+# crate built with `test-util`, so `crates/sparql/tests/*.rs` (a separate
+# compilation unit that can't see `cfg(test)` items) can still reach
+# `exec::StoreTestExt` without a `--features` change on the test command.
+horndb-sparql = { path = ".", features = ["test-util"] }

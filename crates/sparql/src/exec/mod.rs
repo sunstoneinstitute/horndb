@@ -283,6 +283,20 @@ impl<T: Executor + Store> FullBackend for T {}
 /// with named-graph semantics; rewriting every call site to build
 /// `AlgebraQuad`s by hand would be pure churn. Blanket-implemented for every
 /// `Store`, so a type need only implement `Store` to get this for free.
+///
+/// Gated behind `cfg(any(test, feature = "test-util"))`: this is fixture
+/// sugar, not part of the production API. Left un-gated, `insert_triple`/
+/// `delete_triple`/`clear_all` — hardcoding the default graph and swallowing
+/// `apply_quads`'s `Result` — would be reachable from any production module
+/// that imports it, defeating the graph-naming discipline the quad-shaped
+/// `Store` re-cut exists to enforce. `cfg(test)` alone is not enough: the
+/// integration tests under `crates/sparql/tests/*.rs` are a separate
+/// compilation unit that links the *non*-test library build, so they need
+/// the `test-util` feature — enabled automatically for this crate's own
+/// test/example/bench targets via the self-dependency in `Cargo.toml`'s
+/// `[dev-dependencies]`, with no `--features` change needed on the test
+/// command.
+#[cfg(any(test, feature = "test-util"))]
 pub trait StoreTestExt: Store {
     /// Insert one triple into the default graph. Errors from `apply_quads`
     /// are swallowed (matches the old trait method's `()` return) — test
@@ -306,6 +320,7 @@ pub trait StoreTestExt: Store {
         let _ = self.clear_graph(&GraphTarget::AllGraphs);
     }
 }
+#[cfg(any(test, feature = "test-util"))]
 impl<T: Store + ?Sized> StoreTestExt for T {}
 
 /// Classify a stored lexical value back into the term kind it encodes.
