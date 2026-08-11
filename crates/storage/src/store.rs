@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
 use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
-use crate::tier::{Tier, TierStats};
+use crate::tier::{ApplyReport, Tier, TierStats};
 use oxrdf::Term;
 
 #[derive(Debug, Clone, Copy)]
@@ -86,15 +86,13 @@ impl Store {
         self.tier.insert_quad_batch(&quads)
     }
 
-    /// Insert (graph, s, p, o) quads. Caller-supplied `GraphId`s must already
-    /// have been interned via `intern_graph_uri`.
-    pub fn insert_quads(&self, quads: &[(GraphId, Term, Term, Term)]) -> Result<()> {
-        let mut encoded = Vec::with_capacity(quads.len());
-        for (g, s, p, o) in quads {
-            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
-            encoded.push((*g, s_id, p_id, o_id));
-        }
-        self.tier.insert_quad_batch(&encoded)
+    /// Insert (graph, s, p, o) quads (SPEC-28 S6: a thin wrapper over
+    /// [`Store::apply_quads`] with no deletions). Caller-supplied `GraphId`s
+    /// must already have been interned via `intern_graph_uri`. Returns the
+    /// number of quads actually inserted — a quad already visible is a
+    /// counted no-op, not double-counted.
+    pub fn insert_quads(&self, quads: &[(GraphId, Term, Term, Term)]) -> Result<usize> {
+        Ok(self.apply_quads(&[], quads)?.inserted)
     }
 
     /// Retract triples from the default graph (SPEC-25 S1). Returns the number
@@ -117,12 +115,30 @@ impl Store {
         self.tier.retract_quad_batch(&quads)
     }
 
-    /// Retract (graph, s, p, o) quads (SPEC-25 S1). `GraphId`s must already
+    /// Retract (graph, s, p, o) quads (SPEC-28 S6: a thin wrapper over
+    /// [`Store::apply_quads`] with no insertions). `GraphId`s must already
     /// have been interned via `intern_graph_uri`. See [`Store::retract_triples`]
     /// for the term-lookup (not intern) semantics.
     pub fn retract_quads(&self, quads: &[(GraphId, Term, Term, Term)]) -> Result<usize> {
-        let mut encoded = Vec::with_capacity(quads.len());
-        for (g, s, p, o) in quads {
+        Ok(self.apply_quads(quads, &[])?.retracted)
+    }
+
+    /// Apply a combined batch of deletions and insertions as one commit
+    /// version (SPEC-28 S6, the store boundary a future change-feed
+    /// materializer builds on). Deletions apply before insertions, so a
+    /// delete+insert of the same quad within one batch ends present.
+    /// `GraphId`s must already have been interned via `intern_graph_uri`.
+    /// Deletion terms are looked up, not interned (mirroring
+    /// [`Store::retract_quads`]: a term never seen retracts nothing);
+    /// insertion terms are interned. A batch whose net effect is empty does
+    /// not bump the store's commit version.
+    pub fn apply_quads(
+        &self,
+        dels: &[(GraphId, Term, Term, Term)],
+        adds: &[(GraphId, Term, Term, Term)],
+    ) -> Result<ApplyReport> {
+        let mut del_ids = Vec::with_capacity(dels.len());
+        for (g, s, p, o) in dels {
             let (Some(s_id), Some(p_id), Some(o_id)) = (
                 self.dictionary.get(s),
                 self.dictionary.get(p),
@@ -130,9 +146,14 @@ impl Store {
             ) else {
                 continue;
             };
-            encoded.push((*g, s_id, p_id, o_id));
+            del_ids.push((*g, s_id, p_id, o_id));
         }
-        self.tier.retract_quad_batch(&encoded)
+        let mut add_ids = Vec::with_capacity(adds.len());
+        for (g, s, p, o) in adds {
+            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
+            add_ids.push((*g, s_id, p_id, o_id));
+        }
+        self.tier.apply_quad_batch(&del_ids, &add_ids)
     }
 
     /// Reclaim physically-dead rows (`end <= min pinned version`) across the
