@@ -72,3 +72,7 @@ tokio = { workspace = true }
 # `serve` binary integration tests (config-file/env/CLI bind precedence,
 # startup-fatal validation).
 assert_cmd = { workspace = true }
+# Property-based differential for the SPARQL-level change-feed replay
+# (`tests/update_feed_replay.rs`), the frontend analog of the storage crate's
+# `feed_replay.rs`.
+proptest = { workspace = true }

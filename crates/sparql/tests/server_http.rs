@@ -748,9 +748,31 @@ mod streaming_error_semantics {
         }
     }
     impl horndb_sparql::exec::Store for FailingScan {
-        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
-        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
-        fn clear_all(&mut self) {}
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(horndb_sparql::exec::ApplyCounts::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
     }
 
     #[tokio::test]
@@ -810,9 +832,31 @@ mod streaming_error_semantics {
         }
     }
     impl horndb_sparql::exec::Store for DecodeFailsLate {
-        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
-        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
-        fn clear_all(&mut self) {}
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(horndb_sparql::exec::ApplyCounts::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
     }
 
     #[tokio::test]

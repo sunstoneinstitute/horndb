@@ -158,7 +158,9 @@ use crate::algebra::{TriplePattern, Var};
 use crate::exec::scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
 };
-use crate::exec::{Bindings, Executor, GroupCount, Slot, Store};
+use crate::exec::{
+    AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, GroupCount, Slot, Store,
+};
 use arrow::array::UInt64Array;
 use horndb_storage::{GraphId, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH};
 use horndb_wcoj::cancel::CancelToken;
@@ -408,10 +410,10 @@ impl HornBackend {
     /// Insert one oxrdf triple into the named graph `graph`, interning the
     /// graph name first. Returns true if the quad was new.
     ///
-    /// The seam SPEC-28 phase 3 needs to seed named graphs. The SPARQL
-    /// `Store` write trait stays triple-shaped and default-graph scoped;
-    /// the named-graph *update* path (`INSERT DATA { GRAPH … }`, GSP) is
-    /// phase 4 (#267).
+    /// The seam SPEC-28 phase 3 needs to seed named graphs. Phase 4 (#267)
+    /// made the SPARQL `Store` write trait itself quad-shaped
+    /// ([`Store::apply_quads`]); wiring `INSERT DATA { GRAPH … }` and GSP
+    /// through it (`crate::update`) is a separate task within that phase.
     pub fn insert_oxrdf_in_named_graph(
         &mut self,
         graph: &oxrdf::Term,
@@ -592,6 +594,45 @@ impl HornBackend {
             d.intern(p).map_err(err)?,
             d.intern(o).map_err(err)?,
         ))
+    }
+
+    /// Non-interning `QuadKey` lookup: `None` if `g`/`s`/`p`/`o` has never
+    /// been interned, meaning the quad cannot be live. Used on the delete
+    /// side of [`Store::apply_quads`], mirroring [`Self::intern_key`]'s
+    /// interning lookup on the insert side.
+    fn lookup_key(
+        &self,
+        g: GraphId,
+        s: &oxrdf::Term,
+        p: &oxrdf::Term,
+        o: &oxrdf::Term,
+    ) -> Option<QuadKey> {
+        let d = self.store.dictionary();
+        Some(QuadKey::new(g, d.get(s)?, d.get(p)?, d.get(o)?))
+    }
+
+    /// Resolve a [`GraphName`](crate::exec::GraphName) for a *deletion*: a
+    /// graph nobody has interned yet necessarily holds nothing, so it never
+    /// needs interning — `None` means "this quad retracts nothing" (mirrors
+    /// `horndb_storage::Store::apply_quads`'s own non-interning term lookup
+    /// for `dels`).
+    fn resolve_graph_for_delete(&self, graph: Option<&str>) -> Option<GraphId> {
+        match graph {
+            None => Some(DEFAULT_GRAPH),
+            Some(iri) => self.graph_id(iri),
+        }
+    }
+
+    /// Resolve a [`GraphName`](crate::exec::GraphName) for an *insertion*,
+    /// interning a never-seen named graph so the write can create it.
+    fn resolve_graph_for_insert(&self, graph: Option<&str>) -> Result<GraphId> {
+        match graph {
+            None => Ok(DEFAULT_GRAPH),
+            Some(iri) => self
+                .store
+                .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked(iri)))
+                .map_err(|e| SparqlError::Executor(format!("intern graph: {e}"))),
+        }
     }
 
     /// Materialize every live triple as oxrdf terms, for export /
@@ -811,76 +852,184 @@ impl HornBackend {
 }
 
 impl Store for HornBackend {
-    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term) {
-        let (Ok(s), Ok(p), Ok(o)) = (
-            algebra_to_oxrdf(&subject),
-            algebra_to_oxrdf(&predicate),
-            algebra_to_oxrdf(&object),
-        ) else {
-            // Variables / triple terms cannot reach INSERT DATA (the
-            // parser only produces ground quads); ignore defensively.
-            return;
-        };
-        let _ = self.insert_oxrdf(&s, &p, &o);
+    /// Resolves `dels` and `adds` against this store's dictionary (dels
+    /// non-interning — an unseen graph/term retracts nothing; adds
+    /// interning, so a never-seen named graph or term is created), then
+    /// applies both in one call to `horndb_storage::Store::apply_quads`
+    /// (Task 1, SPEC-28 S6) — the atomic dels-before-adds, idempotent,
+    /// counted store boundary. `live_keys` is kept in step (dels removed
+    /// before adds inserted, mirroring the storage batch's own ordering) —
+    /// not required for correctness (the store is authoritative either way),
+    /// but keeps the O(1) fast path in `insert_oxrdf_in_graph` and friends
+    /// accurate rather than merely harmless-if-stale.
+    fn apply_quads(
+        &mut self,
+        dels: Vec<AlgebraQuad>,
+        adds: Vec<AlgebraQuad>,
+    ) -> Result<ApplyCounts> {
+        let mut del_rows: Vec<(GraphId, OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(dels.len());
+        for (g, s, p, o) in &dels {
+            let Some(gid) = self.resolve_graph_for_delete(g.as_deref()) else {
+                continue;
+            };
+            let (Ok(so), Ok(po), Ok(oo)) = (
+                algebra_to_oxrdf(s),
+                algebra_to_oxrdf(p),
+                algebra_to_oxrdf(o),
+            ) else {
+                continue; // a variable / RDF 1.2 triple term retracts nothing
+            };
+            del_rows.push((gid, so, po, oo));
+        }
+
+        let mut add_rows: Vec<(GraphId, OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(adds.len());
+        for (g, s, p, o) in &adds {
+            let (Ok(so), Ok(po), Ok(oo)) = (
+                algebra_to_oxrdf(s),
+                algebra_to_oxrdf(p),
+                algebra_to_oxrdf(o),
+            ) else {
+                continue; // a variable / RDF 1.2 triple term cannot be stored
+            };
+            let gid = self.resolve_graph_for_insert(g.as_deref())?;
+            add_rows.push((gid, so, po, oo));
+        }
+
+        let report = self
+            .store
+            .apply_quads(&del_rows, &add_rows)
+            .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
+
+        for (g, s, p, o) in &del_rows {
+            if let Some(key) = self.lookup_key(*g, s, p, o) {
+                self.live_keys.remove(&key);
+            }
+        }
+        for (g, s, p, o) in &add_rows {
+            // `store.apply_quads` above already interned every add term, so
+            // this re-intern is a cheap dictionary hit, never a fresh entry.
+            if let Ok(key) = self.intern_key(*g, s, p, o) {
+                self.live_keys.insert(key);
+            }
+        }
+        if report.retracted > 0 || report.inserted > 0 {
+            self.invalidate();
+        }
+        Ok(ApplyCounts {
+            retracted: report.retracted,
+            inserted: report.inserted,
+        })
     }
 
-    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
-        let (Ok(s), Ok(p), Ok(o)) = (
-            algebra_to_oxrdf(subject),
-            algebra_to_oxrdf(predicate),
-            algebra_to_oxrdf(object),
-        ) else {
-            return;
+    /// Sweeps `graph` through `horndb_storage::Tier::apply_quad_batch`
+    /// directly (the id-keyed tier level, not `Store::apply_quads`'s
+    /// dictionary-`Term` level — the ids are already in hand from the
+    /// snapshot scan, so going one layer down skips a needless decode/
+    /// re-intern round trip). A pure deletion batch, so this is still
+    /// "via `apply_quads` internally" per the trait doc — `apply_quad_batch`
+    /// is the same S6 atomic-batch primitive one layer lower.
+    fn clear_graph(&mut self, graph: &spargebra::algebra::GraphTarget) -> Result<usize> {
+        use spargebra::algebra::GraphTarget;
+        let snap = self.store.snapshot();
+        let graphs_to_sweep: Vec<GraphId> = match graph {
+            GraphTarget::DefaultGraph => vec![DEFAULT_GRAPH],
+            GraphTarget::AllGraphs => snap.graphs(),
+            GraphTarget::NamedGraphs => snap
+                .graphs()
+                .into_iter()
+                .filter(|&g| g != DEFAULT_GRAPH)
+                .collect(),
+            GraphTarget::NamedNode(n) => self.graph_id(n.as_str()).into_iter().collect(),
         };
-        let key = {
-            let d = self.store.dictionary();
-            // Non-interning lookups: a term the dictionary has never seen
-            // cannot participate in any stored triple.
-            let (Some(sid), Some(pid), Some(oid)) = (d.get(&s), d.get(&p), d.get(&o)) else {
-                return;
-            };
-            // #267: needs the graph-threaded twin — this hardcodes
-            // DEFAULT_GRAPH while the insert funnel is already graph-aware.
-            QuadKey::new(DEFAULT_GRAPH, sid, pid, oid)
-        };
-        if !self.live_keys.remove(&key) {
-            return; // not currently live — no-op (unknown or already deleted)
-        }
-        // Retract through native storage (SPEC-25 S1): stamps the matching
-        // live row's `end`, the tuple stays physically present as history.
-        let _ = self.store.retract_triples(&[(s, p, o)]);
-        self.invalidate();
-    }
-    // TODO(#267): once a public write path can put data in a named graph,
-    // `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing to this whole-store
-    // sweep (see the TODO in `crate::update::apply_clear_drop`).
-    fn clear_all(&mut self) {
-        // Consult the store, not the cache, for the early-out: `live_keys`
-        // only ever holds entries the public write funnel inserted
-        // (DEFAULT_GRAPH today), so a store that holds only named-graph data
-        // planted below the funnel would have an empty `live_keys` and skip
-        // the sweep entirely if this checked the cache instead.
-        if self.store.triple_count() == 0 {
-            return;
-        }
-        // Retract every currently-live quad in every graph through the
-        // native storage delete path (SPEC-28 S2: `clear_all` is whole-store,
-        // not default-graph-scoped). Re-inserting a triple afterward goes
-        // through `insert_oxrdf`/`insert_oxrdf_batch` as usual, which stamps
-        // a fresh live row (resurrection).
-        let snapshot = self.store.snapshot();
-        let snap = &snapshot;
-        let quads: Vec<_> = snap
-            .graphs()
-            .into_iter()
-            .flat_map(move |g| {
+        let dels: Vec<(GraphId, TermId, TermId, TermId)> = graphs_to_sweep
+            .iter()
+            .flat_map(|&g| {
                 snap.iter_graph_term_ids(g)
                     .map(move |(s, p, o)| (g, s, p, o))
             })
             .collect();
-        let _ = self.store.tier().retract_quad_batch(&quads);
-        self.live_keys.clear();
-        self.invalidate();
+        if dels.is_empty() {
+            return Ok(0);
+        }
+        let report = self
+            .store
+            .tier()
+            .apply_quad_batch(&dels, &[])
+            .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
+        for &(g, s, p, o) in &dels {
+            self.live_keys.remove(&QuadKey::new(g, s, p, o));
+        }
+        if report.retracted > 0 {
+            self.invalidate();
+        }
+        Ok(report.retracted)
+    }
+
+    /// SPEC-28 D11: a named graph exists iff it holds at least one visible
+    /// quad at this pinned snapshot.
+    fn graph_exists(&self, graph: &str) -> bool {
+        match self.graph_id(graph) {
+            Some(g) => self.store.snapshot().graph_len(g) > 0,
+            None => false,
+        }
+    }
+
+    /// Every named graph (the default-graph sentinel excluded) holding at
+    /// least one visible quad, sorted by IRI. Unlike
+    /// [`Executor::named_graphs`], this applies no `FROM NAMED`/reserved-
+    /// prefix filtering — `DROP ALL`/ADD-MOVE-COPY enumeration is a
+    /// store-management question, not a query-dataset one.
+    fn graphs(&self) -> Vec<String> {
+        let snap = self.store.snapshot();
+        let mut out: Vec<String> = snap
+            .graphs()
+            .into_iter()
+            .filter(|&g| g != DEFAULT_GRAPH)
+            .filter_map(|g| match snap.graph_uri(g) {
+                Ok(OxTerm::NamedNode(n)) => Some(n.into_string()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `ADD`/`MOVE`/`COPY` source read: every visible triple in the one
+    /// graph `graph` names. An unknown named graph reads as empty, not an
+    /// error (SPEC-28 S3's "unknown graph ⇒ zero rows" rule, applied here to
+    /// a read rather than a scan scope).
+    fn scan_graph_quads(
+        &self,
+        graph: &spargebra::algebra::GraphTarget,
+    ) -> Result<Vec<AlgebraTriple>> {
+        use spargebra::algebra::GraphTarget;
+        let gid = match graph {
+            GraphTarget::DefaultGraph => DEFAULT_GRAPH,
+            GraphTarget::NamedNode(n) => match self.graph_id(n.as_str()) {
+                Some(g) => g,
+                None => return Ok(Vec::new()),
+            },
+            GraphTarget::AllGraphs | GraphTarget::NamedGraphs => {
+                return Err(SparqlError::Executor(
+                    "scan_graph_quads: AllGraphs/NamedGraphs names no single source graph".into(),
+                ));
+            }
+        };
+        let triples = self
+            .store
+            .snapshot()
+            .scan_graph(gid)
+            .map_err(|e| SparqlError::Executor(format!("scan_graph: {e}")))?;
+        Ok(triples
+            .iter()
+            .map(|(s, p, o)| {
+                (
+                    oxrdf_to_algebra(s),
+                    oxrdf_to_algebra(p),
+                    oxrdf_to_algebra(o),
+                )
+            })
+            .collect())
     }
 }
 
@@ -1594,6 +1743,7 @@ impl Executor for HornBackend {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+    use spargebra::algebra::GraphTarget;
 
     /// The snapshot memo must not grow with the number of graphs a client
     /// names. Walking N distinct `GRAPH <gi>` scopes used to leave N cached
@@ -1918,9 +2068,186 @@ mod tests {
     }
 
     #[test]
-    fn clear_all_sweeps_named_graphs() {
+    fn apply_quads_routes_by_graph() {
         let mut b = HornBackend::new();
-        // #267.
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        // Same predicate in both graphs, so a scope mixup would be visible.
+        let default_add: AlgebraQuad = (None, iri("s1"), iri("p"), iri("o1"));
+        let named_add: AlgebraQuad = (Some("http://ex/g".into()), iri("s2"), iri("p"), iri("o2"));
+        let report = b
+            .apply_quads(Vec::new(), vec![default_add, named_add])
+            .unwrap();
+        assert_eq!(
+            report,
+            ApplyCounts {
+                retracted: 0,
+                inserted: 2
+            }
+        );
+        assert_eq!(b.len(), 2, "both quads are live, in their own graphs");
+
+        assert_eq!(
+            b.scan_graph_quads(&GraphTarget::DefaultGraph).unwrap(),
+            vec![(iri("s1"), iri("p"), iri("o1"))],
+            "the default-graph add must not land in the named graph"
+        );
+        assert_eq!(
+            b.scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/g"
+            )))
+            .unwrap(),
+            vec![(iri("s2"), iri("p"), iri("o2"))],
+            "the named-graph add must not land in the default graph"
+        );
+    }
+
+    #[test]
+    fn apply_counts_are_accurate() {
+        let mut b = HornBackend::new();
+        let q = || -> AlgebraQuad {
+            (
+                None,
+                Term::Iri("http://ex/s".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/o".into()),
+            )
+        };
+
+        // Fresh insert counts.
+        assert_eq!(
+            b.apply_quads(Vec::new(), vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 1
+            }
+        );
+        // Re-inserting an already-live quad is a counted no-op.
+        assert_eq!(
+            b.apply_quads(Vec::new(), vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 0
+            }
+        );
+        // Deleting a live quad counts it.
+        assert_eq!(
+            b.apply_quads(vec![q()], Vec::new()).unwrap(),
+            ApplyCounts {
+                retracted: 1,
+                inserted: 0
+            }
+        );
+        // Deleting an absent quad is a counted no-op.
+        assert_eq!(
+            b.apply_quads(vec![q()], Vec::new()).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 0
+            }
+        );
+
+        // Delete + re-add the same quad within one batch: dels apply
+        // before adds (S6), so the quad ends present; per Task 1's
+        // documented `apply_quad_batch` contract each half is still
+        // counted once (retracted AND inserted), even though the net
+        // effect on the store is a no-op.
+        b.apply_quads(Vec::new(), vec![q()]).unwrap(); // resurrect for the next check
+        assert_eq!(
+            b.apply_quads(vec![q()], vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 1,
+                inserted: 1
+            }
+        );
+        assert_eq!(b.len(), 1, "the quad ends present");
+    }
+
+    #[test]
+    fn clear_graph_and_exists() {
+        let mut b = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        b.apply_quads(
+            Vec::new(),
+            vec![
+                (None, iri("s0"), iri("p"), iri("o0")),
+                (Some("http://ex/g1".into()), iri("s1"), iri("p"), iri("o1")),
+                (Some("http://ex/g2".into()), iri("s2"), iri("p"), iri("o2")),
+            ],
+        )
+        .unwrap();
+
+        assert!(!b.graph_exists("http://ex/never-seen"));
+        assert!(b.graph_exists("http://ex/g1"));
+        assert!(b.graph_exists("http://ex/g2"));
+        assert_eq!(
+            b.graphs(),
+            vec!["http://ex/g1".to_owned(), "http://ex/g2".to_owned()]
+        );
+
+        let removed = b
+            .clear_graph(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/g1",
+            )))
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            !b.graph_exists("http://ex/g1"),
+            "SPEC-28 D11: swept to zero quads, so it ceases to exist"
+        );
+        assert!(b.graph_exists("http://ex/g2"), "g2 is untouched");
+        assert_eq!(b.graphs(), vec!["http://ex/g2".to_owned()]);
+
+        let removed = b.clear_graph(&GraphTarget::AllGraphs).unwrap();
+        assert_eq!(removed, 2, "default graph's quad + g2's quad");
+        assert!(b.is_empty());
+        assert!(b.graphs().is_empty());
+    }
+
+    #[test]
+    fn scan_graph_quads_roundtrip() {
+        let mut b = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let g = "http://ex/g";
+        b.apply_quads(
+            Vec::new(),
+            vec![
+                (Some(g.to_owned()), iri("s1"), iri("p"), iri("o1")),
+                (Some(g.to_owned()), iri("s2"), iri("p"), iri("o2")),
+                (None, iri("s3"), iri("p"), iri("o3")), // must not leak into the named graph
+            ],
+        )
+        .unwrap();
+
+        let got: HashSet<AlgebraTriple> = b
+            .scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(g)))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let want: HashSet<AlgebraTriple> = [
+            (iri("s1"), iri("p"), iri("o1")),
+            (iri("s2"), iri("p"), iri("o2")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+
+        // An unknown named graph reads as empty, not an error.
+        assert_eq!(
+            b.scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/nope"
+            )))
+            .unwrap(),
+            Vec::new()
+        );
+
+        // AllGraphs/NamedGraphs are not a single source — a caller error.
+        assert!(b.scan_graph_quads(&GraphTarget::AllGraphs).is_err());
+        assert!(b.scan_graph_quads(&GraphTarget::NamedGraphs).is_err());
+    }
+
+    #[test]
+    fn clear_graph_all_graphs_sweeps_named_graphs() {
+        let mut b = HornBackend::new();
         let g = b
             .store
             .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/g")))
@@ -1940,11 +2267,12 @@ mod tests {
         );
         assert_eq!(b.len(), 2);
 
-        b.clear_all();
+        let removed = b.clear_graph(&GraphTarget::AllGraphs).unwrap();
 
+        assert_eq!(removed, 2);
         assert!(
             b.is_empty(),
-            "clear_all must sweep named graphs too, not just the default graph"
+            "clear_graph(AllGraphs) must sweep named graphs too, not just the default graph"
         );
         assert!(
             b.store.snapshot().graphs().is_empty(),
@@ -1954,12 +2282,12 @@ mod tests {
     }
 
     #[test]
-    fn clear_all_sweeps_a_store_with_no_funnel_writes() {
+    fn clear_graph_all_graphs_sweeps_a_store_with_no_funnel_writes() {
         let mut b = HornBackend::new();
         // Plant a named-graph quad directly at the storage layer, bypassing
         // HornBackend's write funnel entirely, so `live_keys` stays empty on
-        // entry. This is the case `clear_all`'s early-out must not skip:
-        // consulting `live_keys.is_empty()` instead of `store.triple_count()`
+        // entry. This is the case `clear_graph`'s early-out must not skip:
+        // consulting `live_keys.is_empty()` instead of the snapshot scan
         // would return here and leave the quad live (#265).
         let g = b
             .store
@@ -1979,8 +2307,9 @@ mod tests {
         );
         assert_eq!(b.len(), 1);
 
-        b.clear_all();
+        let removed = b.clear_graph(&GraphTarget::AllGraphs).unwrap();
 
+        assert_eq!(removed, 1);
         assert!(b.is_empty());
         assert!(b.store.snapshot().graphs().is_empty());
         assert!(b.live_keys.is_empty());

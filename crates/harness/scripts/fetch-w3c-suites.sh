@@ -186,4 +186,42 @@ fetch_sparql10() {
 fetch_sparql10 graph "${SPARQL10_GRAPH_FILES[@]}"
 fetch_sparql10 dataset "${SPARQL10_DATASET_FILES[@]}"
 
+# SPARQL 1.1 UPDATE evaluation families (SPEC-28 phase 4, #267).
+#
+# These come from the SPARQL 1.1 tarball already extracted above (they are NOT
+# a separate fetch): the `add/`, `copy/`, `move/`, `clear/`, `drop/`, and
+# `delete-insert/` sub-suites under
+#   $SPARQL_DIR/sparql11-test-suite/{add,copy,move,clear,drop,delete-insert}/
+# Each manifest entry is a `ut:UpdateEvaluationTest`: an `mf:action` with a
+# `ut:request` (the `.ru`), a `ut:data` (default-graph state), and zero or more
+# `ut:graphData [ ut:graph <file> ; rdfs:label <IRI> ]` (named-graph state), and
+# an `mf:result` of the same shape for the expected final state.
+#
+# The per-case fixture dirs under
+# `crates/harness/tests/fixtures/sparql11/update_subset/<case>/` are a checked-in
+# mirror (so CI needs no network), derived by the same mechanical
+# transformations a manifest-driven update-eval runner applies:
+#
+#   1. relative IRIs resolve against BASE http://example.org/ — the namespace
+#      every data file uses — so the `<>` in clear-default/drop-default becomes
+#      <http://example.org/>. Graph names are the manifest `rdfs:label` IRIs and
+#      match the `:gN` the `.ru` requests resolve to.
+#   2. `ut:data` + `ut:graphData` collapse into one `data.trig` (initial) and one
+#      `expected.trig` (final): default-graph triples at top level, each named
+#      graph's triples inside a `GRAPH <label> { … }` block. An empty component
+#      (`empty.ttl`, or a `ut:graphData` that is emptied) contributes no quads,
+#      so it is never emitted as an empty GRAPH block (D11: no empty graphs).
+#   3. `ut:request` is copied verbatim as `request.ru`.
+#
+# The runner is `crates/sparql/tests/w3c_update_suite.rs`; the graded set is
+# `harness/selected.toml`'s `[sparql_update]` section. The upstream cases left
+# out — the three `clear/` cases that keep an empty-but-existing named graph
+# (D11), plus the `delete-insert/` NegativeSyntaxTest11 cases (syntax-graded,
+# not eval) — are in `harness/KNOWN-MANIFEST-BUGS.md`. As with the graph/dataset
+# fixtures, this script does NOT overwrite the checked-in mirror; regenerate by
+# re-running the mechanical transforms above against a fresh tarball extract.
+if [[ -d "$SPARQL_DIR/sparql11-test-suite/add" ]]; then
+    echo "upstream SPARQL 1.1 update families present under $SPARQL_DIR/sparql11-test-suite (see update_subset notes above)."
+fi
+
 echo "done."

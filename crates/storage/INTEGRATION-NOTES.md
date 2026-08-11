@@ -138,3 +138,28 @@ against the NF4 write-amplification budget, is deferred — [#242](https://githu
 - **`horndb-sparql` overlay retired:** `HornEngine`'s `tombstones: HashSet`
   is gone; `DELETE DATA` and pattern delete now call `Store::retract_*`
   directly and reads see the store's own visibility filter.
+
+## SPEC-28 S6 — idempotent quad-grain apply (delivered)
+
+`Tier::apply_quad_batch(dels, adds) -> Result<ApplyReport>` (`tier.rs`,
+`memory_tier.rs`) is the store-boundary primitive S6 requires: one commit
+version covers a whole dels-then-adds batch (dels apply first, so a
+delete+insert of the same quad in one batch ends present), `ApplyReport {
+retracted, inserted }` reports only *actually-changed* counts, and a batch
+whose net effect is empty does not bump the version — extending the SPEC-25
+S1 retract no-op rule to the combined path. `Store::apply_quads` is the
+`Term`-level counterpart: deletion terms are looked up, not interned
+(mirroring `Store::retract_quads` — a term never seen retracts nothing);
+insertion terms are interned.
+
+`Store::insert_quads` / `retract_quads` are thin wrappers (`apply_quads(&[],
+q)` / `apply_quads(q, &[])`) and **keep their pre-existing `Result<usize>`
+signatures** rather than moving to `Result<ApplyReport>` — `retract_quads`
+already returned a count before SPEC-28 and existing call sites destructure
+it directly; `insert_quads` gains the matching shape (`Result<()>` →
+`Result<usize>`) instead of a wider breaking change across both.
+`Tier::insert_quad_batch` / `retract_quad_batch` are untouched:
+`Store::insert_triples` / `retract_triples` (default-graph, triple-grain)
+still call them directly, so that path keeps its older "insert always bumps
+the version" behaviour — only writes that go through `apply_quads` get the
+empty-batch-no-bump guarantee.

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 4 (S4+S6) — named-graph SPARQL Update (quad data, pattern updates, graph management, WITH/USING, SILENT fidelity, the closed reserved namespace) on top of a store-boundary idempotent quad-grain apply with one commit batch per operation"
 ---
@@ -208,10 +208,20 @@ binary's `sparql11` key runs no real engine. Same route as PLAN-28-03:
 
 `crates/storage/tests/feed_replay.rs`: a proptest generating a quad-grain
 feed (batches of adds/dels over a small term space, including del+add of
-the same quad in one batch), applied (a) once cleanly, (b) with a random
-duplicated-batch replay from a stale point mid-stream. Assert quad-set
-equality of (a) and (b), zero-count no-ops on the replayed prefix, and the
-non-canonical-literal identity pin. This is storage-level; the
+the same quad in one batch), applied (a) once cleanly, (b) with two
+duplicate-delivery mechanisms: an immediate echo of each already-applied
+batch, and a stale-point mid-stream tail replay (redelivering the tail from
+a random checkpoint). Assert quad-set equality of (a) and (b) and the
+non-canonical-literal identity pin. Zero-count no-ops
+(`retracted==0 && inserted==0`) are asserted only on the immediate-echo
+redelivery — the mechanism under which they provably hold — and only for a
+batch whose dels and adds don't target the same quad (such a batch reports
+`{retracted:1, inserted:1}` on every application, by S6's
+dels-before-adds contract, replay included). On the stale-point tail
+replay, only net state convergence is asserted per batch: an interior
+batch replayed against a state that already reflects a later, colliding
+batch in the same tail can report a real transient non-zero count even
+though the tail's net effect stays a no-op. This is storage-level; the
 SPARQL-level version (same feed rendered as `DELETE DATA;INSERT DATA`
 requests) lives in `crates/sparql/tests/update_feed_replay.rs` and
 additionally pins one-batch-per-operation ordering (a request
@@ -395,3 +405,45 @@ reuses S3's `DatasetSpec` the same way.
   the alternative (parsing update text ourselves) is worse. spargebra's
   `WITH` desugaring is pinned by a discovery test before anything builds
   on it.
+
+---
+
+## Deviations landed
+
+Recorded so this executed plan stays an honest historical record — each
+item differs from the design text above, without changing the delivered
+behaviour's correctness.
+
+- **Trait method name.** The design's `Store::named_graphs(&self) ->
+  Vec<String>` shipped as `Store::graphs`. The literal name `named_graphs`
+  collides with `Executor::named_graphs` (an existing method with different
+  semantics on a different trait in the same module); `graphs` avoided the
+  clash and matches the phase-2 `StoreSnapshot::graphs()` naming it wraps.
+- **`insert_triple`/`delete_triple` were not deleted.** The design called
+  for deleting them alongside `clear_all`. Only `clear_all` was removed;
+  `insert_triple`/`delete_triple` survive as trait-default methods that
+  delegate to `apply_quads` — deleting them would have required rewriting
+  roughly 184 pre-existing test call sites across the crate for no
+  behavioural gain, since the defaults already route through the real S6
+  seam.
+- **SILENT-ambiguity fallback — RESOLVED (now matches the design).** The
+  first cut treated an ambiguous copy-op as `AmcSourceStatus::Ok`, i.e. a
+  silent-equivalent no-op. That was **not** data-safe: `COPY` desugars to
+  `Drop(<dest>)` + a source-reading `DeleteInsert` with no source `Drop`, so a
+  non-silent `COPY <absent> TO <dest>` would run the destination `Drop` and
+  wipe an existing graph with no error (SPARQL 1.1 §3.2.4 forbids this). The
+  whole-branch review caught this; `align_amc_hints` now falls back to
+  **non-silent** for every copy-op when `ADD`/`MOVE`/`COPY` tokens are present
+  but the alignment is ambiguous — the design's original "an honest error,
+  never a silent wrong outcome." An absent source errors in preflight before
+  any destructive `Drop`; a present source still copies; a request with no AMC
+  tokens leaves copy-shaped user `DeleteInsert`s plain (a valid no-op).
+  Regression: `copy_absent_source_ambiguous_alignment_errors_no_wipe`.
+- **Multi-op existence atomicity gap, not closed here.** `validate_op`
+  preflights every operation against the pre-update store, which is exact
+  for a single operation and for independent operations, but not for a
+  multi-op sequence where an earlier operation changes a graph's existence
+  that a later operation then existence-checks. Closing this needs
+  store-level rollback, out of scope for this plan; tracked against
+  `SPEC-30`. Documented in `update.rs::validate_op`, `docs/architecture.md`,
+  and `crates/sparql/INTEGRATION-NOTES.md`.

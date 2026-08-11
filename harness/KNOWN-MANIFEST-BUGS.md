@@ -396,3 +396,64 @@ evaluated rather than bound on the scan leaf: evaluate `P` per graph with
 `?g` free, then join `{?g → thatGraph}`. That is the per-graph block
 evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
 column), so it is a design change, not a bug fix.
+
+# Known-failing W3C SPARQL Update cases
+
+The SPARQL Update-evaluation gate is `harness/selected.toml`'s `[sparql_update]`
+section, run by `crates/sparql/tests/w3c_update_suite.rs` against both backends
+(`MemStore` and `HornBackend`). SPEC-28 phase 4 (#267) added the W3C SPARQL 1.1
+`add/`, `copy/`, `move/`, `clear/`, `drop/`, and `delete-insert/` families to
+it. Each case is mirrored into
+`crates/harness/tests/fixtures/sparql11/update_subset/<case>/` as `data.trig`
+(initial state), `request.ru` (the update), and `expected.trig` (expected final
+state); the runner loads the initial state, applies the update, and asserts
+**quad-set equality** of the resulting store against the expected state (mirror
+rules and the re-fetch allowlist: `crates/harness/scripts/fetch-w3c-suites.sh`).
+
+Of the **36** `UpdateEvaluationTest` cases across the six families, **33** are
+selected. The 3 left out are all in `clear/`, all for the same reason (D11). The
+`delete-insert/` family additionally has 8 `NegativeSyntaxTest11` entries that
+are *not* evaluation tests — they are graded by the `sparql11-syntax` suite kind
+(spargebra accept/reject), not here, so they are out of scope for this runner
+rather than "excluded".
+
+## Empty-but-existing named graphs under D11 (3 `clear/` cases)
+
+SPEC-28 **D11**: a named graph exists iff it holds at least one visible quad —
+there is no empty-graph registry, so clearing a graph to zero quads makes it
+*cease to exist*. The runner's final-state check is quad-set equality (an
+emptied graph contributes no quads and is indistinguishable from an absent one),
+which is the same D11 view the engine itself takes.
+
+The three `clear/` cases below have an expected final state that keeps a named
+graph **empty but still existing**. Under D11 the engine instead drops the
+emptied graph, so the two states differ in graph *existence* but **not** in
+quads — quad-set equality would report them equal and pass them *for the wrong
+reason* (a silent false-green: the very thing these cases are designed to
+probe). They are therefore excluded rather than selected. Each was confirmed to
+"pass" quad-set equality today, so the exclusion is about faithful grading, not
+an engine failure:
+
+- `clear-graph-01` — `CLEAR GRAPH :g1`; expected keeps `:g1` as an empty graph.
+- `clear-named-01` — `CLEAR NAMED`; expected keeps `:g1` and `:g2` as empty
+  graphs.
+- `clear-all-01` — `CLEAR ALL`; expected keeps `:g1` and `:g2` as empty graphs.
+
+`clear-default-01` (`CLEAR DEFAULT`) **is** selected: the default graph always
+exists regardless of D11, so emptying it is graded faithfully. All four `drop/`
+cases are selected — `DROP` removes graphs, which is exactly what D11 does, so
+they grade faithfully.
+
+**Count judged (SPEC-28 risk clause):** 3 of 36 evaluation cases, all one
+edge (empty-graph existence in `clear/`), with 33 selected and green on both
+backends. This is a handful of edge cases, **not** a material fraction — D11 is
+not costing real conformance here — so no escalation to epic #261's
+explicit-existence-set fallback is warranted. If a later family (or a re-fetch)
+pushes the empty-graph-existence exclusions materially higher, revisit #261
+before building further on D11.
+
+To make any of these three gradable, the runner would need a graph-existence
+set compared alongside the quad set, **and** the fixture format would need to
+represent an empty-but-existing graph (a `GRAPH <g> {}` block parses to zero
+quads and vanishes) — i.e. carry the expected graph set out of band. That is a
+runner + fixture change, gated on the #261 decision, not a bug fix.

@@ -280,9 +280,11 @@ this path via the `--materialize` flag.
 
 `HornBackend`'s reads are graph-scoped: `wcoj_snapshot` takes a resolved
 scope; only the two whole-store default-graph scopes are memoized — every
-graph-scoped read builds and drops its own snapshot. Its **writes** are
-still default-graph-only (SPEC-28 phase 4). See the GRAPH patterns section
-above.
+graph-scoped read builds and drops its own snapshot. Its **writes** are now
+graph-scoped too (SPEC-28 phase 4, #267): every Update write form routes to
+the graph it names, through `Store::apply_quads`/`clear_graph`. See "GRAPH
+patterns and the query dataset" above for the read side and "Named-graph
+Update" below for the write side.
 
 ### Non-recursive property paths (#49)
 
@@ -357,96 +359,151 @@ increment (#50), which routes through closure and is the natural home for proper
 node-set semantics. Kleene `*`/`+` themselves remain rejected
 (`UnsupportedPathOp`).
 
-## Graph-management Update verbs (#52)
+## Named-graph Update (#52, SPEC-28 phase 4 / S4+S6, #267)
 
-`update.rs` implements `LOAD`/`CLEAR`/`DROP`/`CREATE` and (via spargebra
-desugaring) `ADD`/`MOVE`/`COPY`, plus multi-operation update sequences. The
-parser classifies a single data/pattern operation as before; everything else —
-a graph-management verb or any `;`-joined sequence — becomes
-`ParsedUpdate::GraphManagement`, and the executor walks the whole operation
-list in order.
+`update.rs` implements every Update form over real named graphs: quad data
+(`INSERT DATA`/`DELETE DATA`), pattern updates (`INSERT`/`DELETE … WHERE`,
+`WITH`/`USING`/`USING NAMED`), the graph-management verbs
+`LOAD`/`CLEAR`/`DROP`/`CREATE` and (via spargebra desugaring) `ADD`/`MOVE`/
+`COPY`, and multi-operation sequences. The parser classifies a single
+data/pattern operation as before; everything else — a graph-management verb
+or any `;`-joined sequence — becomes `ParsedUpdate::GraphManagement`, and the
+executor walks the whole operation list in order.
 
-The **execution** store is default-graph only — `HornBackend` writes through the
-triple-grain path and never targets a named graph. Note the distinction from the
-section above: the limit is in this crate, not in `horndb-storage`, which has been
-quad-aware since SPEC-25 S1 (#225). The graph-management verbs therefore map onto
-that single graph, with a uniform `SILENT` convention: an operation that would
-touch a named graph the execution store does not represent is an **error** when
-not silent and a **no-op** when `SILENT`.
+**History.** Before phase 4 the execution store was default-graph only:
+`HornBackend` wrote through a triple-grain path and rejected any write
+naming a graph (error unless `SILENT`, else a no-op) even though
+`horndb-storage` had been quad-aware since SPEC-25 S1 (#225) — the limit was
+in this crate, not storage. Phase 4 closed that gap by making the
+`exec::Store` write trait quad-shaped (`apply_quads`, `clear_graph`,
+`graph_exists`, `graphs`, `scan_graph_quads`) and rewriting `update.rs` to
+route every write by graph instead of refusing named ones. The write seam is
+`Store::apply_quads` — **one atomic, idempotent, counted batch of
+`(graph, s, p, o)` quads per Update operation** (SPEC-28 S6; see the store
+boundary note in `crates/storage/INTEGRATION-NOTES.md`), never one call per
+quad — so `INSERT DATA`/`DELETE DATA` with mixed `GRAPH <g> { … }` blocks and
+a default-graph tail commit at one store version.
 
-Unlike the query side, this behaviour is **honest** — it refuses rather than
-quietly answering against the wrong graph — so it is a limitation, not a bug.
-`SPEC-28` phase 4 replaces it with real named-graph writes. Concretely:
+Routing by construct:
 
-- **`INSERT DATA`/`DELETE DATA`** with a `GRAPH <g> { … }` block are rejected
-  (`require_default_graph_name`): the apply loop ignores `q.graph_name`, so a
-  named block would silently mutate the default graph. (Multi-op support newly
-  routes such quads through this path, so the check guards both single- and
-  multi-op data updates.)
-- **`CLEAR`/`DROP DEFAULT`/`ALL`** clear the store via the new
-  `Store::clear_all` seam method. `MemStore::clear_all` resets its vector and
-  indexes; `HornBackend::clear_all` sweeps **every graph** — it walks
-  `store.snapshot().graphs()` and retracts every currently-live quad in each
-  one through `Tier::retract_quad_batch` (SPEC-25 S1, SPEC-28 S2), then clears
-  its `live_keys` mirror. This is wider than the update surface above:
-  `clear_all` empties the whole store even though nothing on the write path
-  can currently target a named graph, because a future caller (or data
-  planted below the funnel) could hold named-graph rows that must not survive
-  a `CLEAR ALL`. Re-inserting a cleared triple resurrects it via the normal
-  insert path (storage stamps a fresh live row).
-  `TODO(#267)`: once phase 4 opens a public named-graph write path,
-  `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing to this whole-store sweep.
-- **`CLEAR`/`DROP GRAPH <iri>` / `NAMED`** address a graph that does not exist:
-  error unless `SILENT`.
-- **`CREATE GRAPH <iri>`** cannot create a named graph: error unless `SILENT`.
-- **`LOAD <source> [INTO GRAPH <g>]`** fetches and parses `source`, merging its
-  triples into the default graph. Only `file:` sources are fetched — the
-  workspace carries no HTTP client, so remote (`http(s):`) sources are an error
-  unless `SILENT`. The `file:` authority is parsed (`file_iri_to_path`):
-  `file:///abs`, `file://localhost/abs`, and `file:/abs` are local; a non-empty
-  non-`localhost` authority is rejected. The path is percent-decoded before
-  reading (so `file:///tmp/a%20b.nt` opens `/tmp/a b.nt`). The serialization is picked from
-  the path extension (`.nt`/`.nq`/`.trig`, else Turtle) and parsed with `oxttl`
-  (the same parser family `serve.rs` uses); all graph names in a quad source
-  merge into the default graph. A named `INTO GRAPH` destination is an error
-  unless `SILENT`. **Blank-node labels are carried through verbatim** — the same
-  Stage-1 approximation the bulk loaders use: labels are not freshened per
-  loaded document, so re-loading an identical blank-node triple dedups.
-  Per-document blank-node scoping belongs with the SPEC-02 dictionary store.
-- **`ADD`/`MOVE`/`COPY`** are not distinct spargebra variants; the parser
-  rewrites them per the W3C spec into `Drop` + a `DeleteInsert` whose insert
-  target / WHERE is a `GRAPH` pattern. Named-graph operands are therefore
-  rejected by the existing `apply_delete_insert` named-graph guards. The
-  same-graph identity case (`… <g> TO <g>`) is rewritten to **zero
-  operations**, a valid no-op (`parse_update` admits an empty op list for this
-  reason). One spargebra-imposed limitation: the rewrite **drops the `SILENT`
-  flag**, so a named-operand `ADD`/`MOVE`/`COPY` errors even with `SILENT`
-  rather than swallowing the error. This is observationally identical to the
-  prescribed no-op for a default-graph-only store (no data can move either
-  way); preserving `SILENT` here would require re-parsing the verb and is
-  out of scope while named graphs are unrepresentable.
+- **Quad data** — `INSERT DATA`/`DELETE DATA` group every quad (each
+  carrying `GRAPH <g>` or the default graph) into one `apply_quads` call per
+  operation.
+- **Pattern updates** — each DELETE/INSERT template quad routes by its own
+  `GraphNamePattern` (default / named / a WHERE-bound variable, via
+  `resolve_graph_name`); the whole operation is still one `apply_quads` call
+  (deletions before insertions, SPARQL 1.1 §3.1.3).
+- **`WITH`/`USING`/`USING NAMED`** — the WHERE clause runs through the
+  phase-3 query translate path (`translate_where`), so it understands
+  `GRAPH`. `USING`/`USING NAMED` build the WHERE dataset via the phase-3
+  `DatasetSpec` machinery (`dataset_spec_from`, made `pub(crate)` for this).
+  spargebra 0.4.6 desugars a `WITH <g>` clause by injecting `<g>` into every
+  default-graph DELETE/INSERT template quad and, absent an explicit `USING`,
+  setting `using = Some(default:[g])` — it does **not** wrap the WHERE
+  pattern in `GraphPattern::Graph`. Honouring `using` when building the WHERE
+  dataset is therefore correct; wrapping the pattern too would double-scope.
+  This finding is a doc comment on `apply_delete_insert`.
+- **Graph management (D11: a graph exists iff it holds ≥1 visible quad, no
+  registry)** — `CREATE <g>`: absent graph succeeds as a no-op, existing
+  graph errors unless `SILENT`. `CLEAR`/`DROP <g>`: absent graph errors
+  unless `SILENT`, present graph retracts every visible quad through
+  `clear_graph` — **never a structural unlink**; there is no separate
+  existence record to remove. `DROP ALL` sweeps the default graph and every
+  **non-reserved** named graph via `graphs()`, quad by quad — never
+  `clear_graph(AllGraphs)`, which would also wipe reserved graphs.
+  `CLEAR`/`DROP NAMED` sweeps the non-reserved named graphs only.
+- **`LOAD <source> [INTO GRAPH <g>]`** — triples formats (`.nt`/`.ttl`/
+  default) route to the destination (default graph if no `INTO`); a plain
+  `LOAD` of a dataset format (`.nq`/`.trig`) routes each quad to its own
+  named graph; a dataset format combined with `INTO GRAPH` is a routing
+  error (redirecting a quad source to one graph is undefined). Still
+  `file:`-only fetch — the workspace carries no HTTP client, so a remote
+  (`http(s):`) source is an error unless `SILENT` (→ E5, #189). The `file:`
+  authority parsing (`file_iri_to_path`: `file:///abs`, `file://localhost/abs`,
+  `file:/abs` are local, a non-empty non-`localhost` authority is rejected),
+  percent-decoding, extension-based serialization pick (`.nt`/`.nq`/`.trig`,
+  else Turtle, via `oxttl`), and verbatim (non-freshened) blank-node labels
+  are unchanged from Stage-1.
+- **`ADD`/`MOVE`/`COPY`** — spargebra rewrites these into `Drop` +
+  `DeleteInsert` sequences per the W3C spec (the same-graph identity case,
+  `… <g> TO <g>`, rewrites to zero operations, a valid no-op). The desugared
+  ops now execute against real named graphs.
+- **The reserved namespace is closed to writes.** A `https://horndb.io/graph/`
+  prefix check (`is_reserved_graph`) covers every write form — data quads,
+  templates, `CREATE`/`CLEAR`/`DROP`, `LOAD INTO`, `ADD`/`MOVE`/`COPY`
+  destinations. It runs **before** any `SILENT`/existence logic and is
+  **not suppressible by `SILENT`** — this is a permission-shaped refusal, not
+  a missing-graph condition. Reads of reserved graphs stay allowed.
+
+### `SILENT` fidelity for `ADD`/`MOVE`/`COPY`
+
+spargebra drops the `SILENT` flag when it desugars `ADD`/`MOVE`/`COPY` into
+`Drop`+`DeleteInsert` — its parser's `Add`/`Move`/`Copy` rules take `silent`
+but discard it for `ADD`, and keep it only on `MOVE`/`COPY`'s source-`Drop`.
+Since `SILENT` changes observable behaviour here (an absent source graph is a
+no-op when silent, an error otherwise — SPARQL 1.1 §3.2.3/§3.2.5), `update.rs`
+recovers the flag with a source-text pre-scan rather than accepting the loss:
+
+- `scan_amc_silent_hints` is a hand-rolled tokenizer (no regex) over the raw
+  update text. It skips the three lexical contexts a bare keyword scan would
+  trip on — `# …` comments, `<…>` IRIs, and `"…"`/`'…'` string literals
+  (single- and triple-quoted) — and records a `(verb, silent)` hint for each
+  `ADD`/`MOVE`/`COPY` keyword it finds, in source order.
+- `align_amc_hints` pairs those hints positionally with the desugared
+  `copy_graph`-shaped `DeleteInsert` ops (detected structurally via
+  `as_copy_graph`). If the hint count does not match the detected op count —
+  e.g. an identity `ADD <g> TO <g>` is one source token but zero ops, or a
+  user-written `DeleteInsert` happens to match the copy shape — alignment
+  falls back to **no hints**: plain, non-silent execution, which for an
+  absent source is a no-op, never a silently wrong data change.
+- The recovered flag drives `amc_source_status` (absent source → no-op when
+  silent, error otherwise for `ADD`/`COPY`; `MOVE` uses its own preserved
+  source-`Drop` flag) and is mirrored in the `validate_op` preflight, so e.g.
+  `COPY <absent> TO DEFAULT` — which desugars to a destructive `Drop{DEFAULT}`
+  followed by a copy from a missing source — aborts before the `Drop` runs.
+
+This tokenizer is a documented stopgap, not a permanent design choice: an
+upstream issue is to be filed against the spargebra (oxigraph) tracker asking
+for a structured `Add`/`Move`/`Copy` op, or a preserved `silent` flag on the
+desugared ops, and linked from the doc comment on `scan_amc_silent_hints`;
+the whole tokenizer is deletable the day that ships.
 
 **Atomicity.** A multi-operation update must not partially apply on failure
-(SPARQL 1.1 §3.1.3). This matters here because spargebra desugars
-`COPY`/`MOVE <named> TO DEFAULT` into a destructive `Drop{DEFAULT}` *followed
-by* a `DeleteInsert` reading the unrepresentable named graph — applying op-by-op
-would clear the default graph and only then reject. `apply_update_with` runs a
-`validate_op` preflight over the whole sequence first: it mirrors every apply-
-time rejection (structural named-graph/triple-term checks, a non-silent `LOAD`
-fetch+parse, and the WHERE-clause `translate_where`+`planner::plan` so an
-unsupported algebra construct like `SERVICE`/`MINUS` is caught), and only mutates
-once the whole sequence is known-applyable.
+(SPARQL 1.1 §3.1.3). `apply_update_with`'s `validate_op` preflights every
+operation against the **pre-update** store first — reserved-namespace checks,
+recovered-`SILENT` source existence, D11 existence, `LOAD` routing/fetch, and
+the WHERE-clause `translate_where`+`planner::plan` (so an unsupported algebra
+construct like `SERVICE`/`MINUS` is caught) — and only mutates once the whole
+sequence is known-applyable. One store batch per operation, applied in
+request order, never collapsed.
+
+**Documented limitation.** The preflight reads D11 existence against the
+pre-update store. That is exact for a single operation and for independent
+operations, but a pathological multi-op request that flips one graph's
+existence *between* operations (e.g. an earlier op creates or empties a
+graph a later op then existence-checks) can, in principle, pass preflight
+and still hit an existence error at apply time after an earlier op has
+already mutated the store. Closing this needs store-level rollback, which is
+out of scope here (→ `SPEC-30`); real graph management uses `SILENT` to
+avoid the edge case, and no shipped test exercises it.
 
 **Turtle/TriG base IRI.** `LOAD` passes the source IRI as the parser base, so a
 document with relative IRIs (`<s> <p> <o> .`) resolves against its own IRI —
 matching the storage Turtle loader. N-Triples/N-Quads need no base.
 
-**Deferred** (documented, out of scope here): true named-graph scoping and a
-quad-aware `Store` seam belong with the Graph Store Protocol increment (#54);
-remote `LOAD` waits on an HTTP client decision; and the W3C SPARQL 1.1 Update
-conformance suite is wired by the harness epic (#10). Coverage for this
-increment lives in `tests/update_graph_mgmt.rs` (both backends) and the
-`/update` server tests in `tests/server_http.rs`.
+**Conformance.** `crates/sparql/tests/update_named_graph.rs` and
+`update_graph_mgmt.rs` cover routing, D11, `SILENT` recovery, and the
+reserved-namespace refusal on both backends. The W3C SPARQL 1.1 Update graph
+families are wired through the harness's `[sparql_update]` selection
+(`harness/selected.toml`): 33 of 36 fetched `UpdateEvaluationTest` cases are
+selected and green on both backends; the other 3 (`clear-graph-01`,
+`clear-named-01`, `clear-all-01`) test an empty-but-existing graph, which D11
+cannot distinguish from an absent one, and are excluded with rationale in
+`harness/KNOWN-MANIFEST-BUGS.md`.
+
+**Deferred:** remote (`http(s):`) `LOAD` still waits on an HTTP client
+decision (→ E5, #189); the Graph Store Protocol (direct REST access to named
+graphs) is `SPEC-28` phase 5, separate and not started (#54, #268).
 
 ## EXPLAIN pragma (F9, #53)
 

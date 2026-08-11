@@ -1,8 +1,15 @@
 use super::*;
-use oxrdf::NamedNode;
+use oxrdf::{Literal, NamedNode};
 
 fn iri(s: &str) -> Term {
     Term::NamedNode(NamedNode::new(s).unwrap())
+}
+
+fn xsd_integer_literal(lexical: &str) -> Term {
+    Term::Literal(Literal::new_typed_literal(
+        lexical,
+        NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+    ))
 }
 
 #[test]
@@ -539,4 +546,38 @@ fn scan_predicate_takes_a_graph() {
     let default_rows = snap.scan_predicate(DEFAULT_GRAPH, &p).unwrap();
     assert_eq!(default_rows.len(), 1);
     assert_eq!(default_rows[0], (iri("http://ex/a"), iri("http://ex/b")));
+}
+
+/// SPEC-28 S6: quad identity is lexical term equality, no value
+/// normalization. `"01"^^xsd:integer` and `"1"^^xsd:integer` are lexically
+/// distinct RDF terms (even though they denote the same integer), so
+/// deleting the canonical form must not touch a quad asserted with the
+/// non-canonical one. `"1"^^xsd:integer` also exercises the dictionary's
+/// identity-preserving inline-int fast path (`dictionary.rs`), which resolves
+/// without ever being interned — the delete must still land as a genuine
+/// 0-count no-op through the store, not merely fail to resolve a term id.
+#[test]
+fn non_canonical_literal_identity_preserved() {
+    let store = Store::in_memory();
+    let s = iri("http://ex/s");
+    let p = iri("http://ex/p");
+    let non_canonical = xsd_integer_literal("01");
+    let canonical = xsd_integer_literal("1");
+
+    store
+        .insert_triples(&[(s.clone(), p.clone(), non_canonical.clone())])
+        .unwrap();
+
+    let report = store
+        .apply_quads(&[(DEFAULT_GRAPH, s, p, canonical)], &[])
+        .unwrap();
+    assert_eq!(
+        report.retracted, 0,
+        "\"1\" and \"01\" are lexically distinct terms"
+    );
+    assert_eq!(
+        store.triple_count(),
+        1,
+        "the non-canonical literal quad survives untouched"
+    );
 }

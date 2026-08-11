@@ -354,6 +354,7 @@ mod tests {
             suites,
             removed: vec![],
             sparql_query: None,
+            sparql_update: None,
         };
 
         let mut engine = StubReasoner::new();
@@ -483,6 +484,7 @@ mod tests {
             suites,
             removed: vec![],
             sparql_query: None,
+            sparql_update: None,
         };
 
         let mut engine = StubReasoner::new();
