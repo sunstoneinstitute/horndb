@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 4 (S4+S6) — named-graph SPARQL Update (quad data, pattern updates, graph management, WITH/USING, SILENT fidelity, the closed reserved namespace) on top of a store-boundary idempotent quad-grain apply with one commit batch per operation"
 ---
@@ -405,3 +405,45 @@ reuses S3's `DatasetSpec` the same way.
   the alternative (parsing update text ourselves) is worse. spargebra's
   `WITH` desugaring is pinned by a discovery test before anything builds
   on it.
+
+---
+
+## Deviations landed
+
+Recorded so this executed plan stays an honest historical record — each
+item differs from the design text above, without changing the delivered
+behaviour's correctness.
+
+- **Trait method name.** The design's `Store::named_graphs(&self) ->
+  Vec<String>` shipped as `Store::graphs`. The literal name `named_graphs`
+  collides with `Executor::named_graphs` (an existing method with different
+  semantics on a different trait in the same module); `graphs` avoided the
+  clash and matches the phase-2 `StoreSnapshot::graphs()` naming it wraps.
+- **`insert_triple`/`delete_triple` were not deleted.** The design called
+  for deleting them alongside `clear_all`. Only `clear_all` was removed;
+  `insert_triple`/`delete_triple` survive as trait-default methods that
+  delegate to `apply_quads` — deleting them would have required rewriting
+  roughly 184 pre-existing test call sites across the crate for no
+  behavioural gain, since the defaults already route through the real S6
+  seam.
+- **SILENT-ambiguity fallback is a no-op, not the design's "non-silent
+  error."** The design text (`ADD`/`MOVE`/`COPY` §) specifies that an
+  ambiguous hint alignment "falls back to non-silent — an honest error."
+  The shipped `amc_source_status` instead treats an unaligned copy-op as
+  `AmcSourceStatus::Ok` (proceed): since the underlying operation is a
+  `DeleteInsert` reading a possibly-absent named graph, an absent source
+  reads as zero rows and the op is a no-op, not an error. This is
+  data-safe (never a silent wrong data change) but is observably different
+  from the specified behaviour on the narrow ambiguous-alignment case
+  (an identity `ADD <g> TO <g>`, or a user `DeleteInsert` matching the
+  copy shape). **Known open minor**, to be resolved at final review —
+  either update this plan's design intent to match, or change the code
+  to error as originally specified.
+- **Multi-op existence atomicity gap, not closed here.** `validate_op`
+  preflights every operation against the pre-update store, which is exact
+  for a single operation and for independent operations, but not for a
+  multi-op sequence where an earlier operation changes a graph's existence
+  that a later operation then existence-checks. Closing this needs
+  store-level rollback, out of scope for this plan; tracked against
+  `SPEC-30`. Documented in `update.rs::validate_op`, `docs/architecture.md`,
+  and `crates/sparql/INTEGRATION-NOTES.md`.
