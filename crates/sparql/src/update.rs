@@ -108,8 +108,9 @@ fn reject_reserved_graph_name(g: &spargebra::term::GraphName) -> Result<()> {
 }
 
 /// Reject a reserved IRI carried by a ground template quad's `GRAPH` name. A
-/// graph *variable* is left to runtime binding: `GRAPH ?g` enumeration already
-/// excludes reserved graphs, so a bound `?g` can never name one.
+/// graph *variable* cannot be checked statically — it may bind to a reserved
+/// IRI at runtime (via `VALUES`/`BIND`/`USING NAMED`), so that check is
+/// deferred to [`resolve_graph_name`], which rejects it per row.
 fn reject_reserved_graph_pattern(g: &GraphNamePattern) -> Result<()> {
     match g {
         GraphNamePattern::NamedNode(n) => reject_reserved(n.as_str()),

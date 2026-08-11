@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-28 phase 4 (S4+S6) — named-graph SPARQL Update (quad data, pattern updates, graph management, WITH/USING, SILENT fidelity, the closed reserved namespace) on top of a store-boundary idempotent quad-grain apply with one commit batch per operation"
 ---
