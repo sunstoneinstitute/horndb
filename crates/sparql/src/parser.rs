@@ -60,9 +60,17 @@ pub enum ParsedUpdate {
     /// `DELETE { … } WHERE { … }`, `DELETE WHERE { … }`, or the
     /// combined `WITH/DELETE/INSERT … WHERE` form. spargebra lowers all
     /// of these (including the `DELETE WHERE` shorthand) into a single
-    /// `GraphUpdateOperation::DeleteInsert`.
+    /// `GraphUpdateOperation::DeleteInsert`. A bare `ADD <s> TO <d>` also
+    /// desugars to a single `DeleteInsert` and lands here — hence `source`
+    /// (see below).
     DeleteInsert {
         inner: Update,
+        /// The raw update text. `ADD`/`MOVE`/`COPY` desugar to `DeleteInsert`
+        /// (+ `Drop`) with their `SILENT` flag dropped by spargebra 0.4.6, so
+        /// the apply path re-scans this text to recover the flag
+        /// (`update::recover_amc_hints`, PLAN-28-04). Carried verbatim so the
+        /// parser stays free of update-semantics knowledge.
+        source: String,
     },
     /// A graph-management and/or multi-operation update whose operations are
     /// all in the executable set (`LOAD`, `CLEAR`, `DROP`, `CREATE`, plus the
@@ -71,6 +79,8 @@ pub enum ParsedUpdate {
     /// whole operation sequence in order.
     GraphManagement {
         inner: Update,
+        /// The raw update text — see [`ParsedUpdate::DeleteInsert::source`].
+        source: String,
     },
     /// Any update form the executor cannot apply is parsed but flagged as
     /// out-of-scope at runtime. With spargebra 0.3.5 every standard verb is
@@ -233,11 +243,17 @@ pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
     match u.operations.as_slice() {
         [GraphUpdateOperation::InsertData { .. }] => Ok(ParsedUpdate::InsertData { inner: u }),
         [GraphUpdateOperation::DeleteData { .. }] => Ok(ParsedUpdate::DeleteData { inner: u }),
-        [GraphUpdateOperation::DeleteInsert { .. }] => Ok(ParsedUpdate::DeleteInsert { inner: u }),
+        [GraphUpdateOperation::DeleteInsert { .. }] => Ok(ParsedUpdate::DeleteInsert {
+            inner: u,
+            source: input.to_owned(),
+        }),
         // An empty operation list is the W3C identity-case rewrite of
         // `ADD`/`MOVE`/`COPY <g> TO <g>` (same source and destination):
         // spargebra lowers it to no operations, and SPARQL 1.1 defines it as a
         // valid no-op. The executor walks an empty list and does nothing.
-        _ => Ok(ParsedUpdate::GraphManagement { inner: u }),
+        _ => Ok(ParsedUpdate::GraphManagement {
+            inner: u,
+            source: input.to_owned(),
+        }),
     }
 }

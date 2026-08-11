@@ -384,6 +384,14 @@ impl HornBackend {
         self.store.triple_count() == 0
     }
 
+    /// The store's monotonic commit version. Each net-effect `apply_quads`
+    /// batch advances it by exactly one; a no-op batch does not (SPEC-28 S4).
+    /// Exposed so a caller can pin "one operation = one store batch = one
+    /// commit" — the per-op batching contract SPARQL Update relies on.
+    pub fn version(&self) -> u64 {
+        self.store.snapshot().version()
+    }
+
     fn invalidate(&mut self) {
         self.snapshots
             .get_mut()

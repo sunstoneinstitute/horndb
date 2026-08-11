@@ -1,18 +1,28 @@
-//! Graph-management SPARQL Update verbs (SPEC-07 #52): `LOAD`, `CLEAR`,
-//! `DROP`, `CREATE`, `ADD`, `MOVE`, `COPY`. Exercised over both Stage-1
-//! backends where the verb is backend-relevant. Under the default-graph-only
-//! Stage-1 model these verbs map onto the single merged graph and honour the
-//! `SILENT` modifier (a SILENT op against an unrepresentable named graph is a
-//! no-op; the same op non-silent is an error).
+//! Graph-management SPARQL Update verbs (SPEC-07 #52, SPEC-28 S4/S6): `LOAD`,
+//! `CLEAR`, `DROP`, `CREATE`, `ADD`, `MOVE`, `COPY`. Exercised over both
+//! Stage-1 backends where the verb is backend-relevant. Named graphs are
+//! first-class (PLAN-28-04): these verbs operate on real named graphs with
+//! SPARQL 1.1 §3.2 D11 existence semantics, and `SILENT` covers the
+//! existence errors only.
 
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::FullBackend;
 use horndb_sparql::exec::StoreTestExt;
+use horndb_sparql::exec::{FullBackend, GraphNamedNode as NamedNode, Store, StoreGraphTarget};
 use horndb_sparql::parser::parse_update;
 use horndb_sparql::update::apply_update;
+
+/// `GraphTarget::NamedNode(<iri>)`, for per-graph store assertions.
+fn tgt(g: &str) -> StoreGraphTarget {
+    StoreGraphTarget::NamedNode(NamedNode::new_unchecked(g))
+}
+
+/// Number of quads in a named graph.
+fn count_named<B: FullBackend>(store: &B, g: &str) -> usize {
+    store.scan_graph_quads(&tgt(g)).unwrap().len()
+}
 
 fn seed<B: FullBackend + Default>(triples: &[(&str, &str, &str)]) -> B {
     let mut b = B::default();
@@ -103,57 +113,102 @@ fn clear_after_insert_then_reinsert_horn() {
 }
 
 #[test]
-fn clear_named_graph_silent_is_noop_nonsilent_errors() {
-    // No named graphs exist: a named target addresses nothing.
-    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    run("CLEAR SILENT GRAPH <http://g/1>", &mut store).unwrap();
-    assert_eq!(
-        count_all(&store),
-        1,
-        "silent clear of absent graph is a no-op"
-    );
+fn clear_named_graph_absent_error_present_empties() {
+    // PLAN-28-04 (inverts the Stage-1 "named graph unrepresentable" pin): D11
+    // existence. CLEAR of an ABSENT named graph is an error unless SILENT; of a
+    // PRESENT one it empties the graph.
+    let mut store = MemStore::default();
+    store
+        .apply_quads(
+            Vec::new(),
+            vec![(
+                Some(Term::Iri("http://g/1".into())),
+                Term::Iri("http://ex/a".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/b".into()),
+            )],
+        )
+        .unwrap();
 
-    let err = run("CLEAR GRAPH <http://g/1>", &mut store).unwrap_err();
+    run("CLEAR SILENT GRAPH <http://g/absent>", &mut store).unwrap();
+    let err = run("CLEAR GRAPH <http://g/absent>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("exist"), "{err}");
+
+    run("CLEAR GRAPH <http://g/1>", &mut store).unwrap();
+    assert!(!store.graph_exists("http://g/1"), "CLEAR empties the graph");
+}
+
+#[test]
+fn drop_named_graph_absent_error_present_empties() {
+    // PLAN-28-04 (inverts the Stage-1 pin): D11 existence for DROP.
+    let mut store = MemStore::default();
+    store
+        .apply_quads(
+            Vec::new(),
+            vec![(
+                Some(Term::Iri("http://g/1".into())),
+                Term::Iri("http://ex/a".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/b".into()),
+            )],
+        )
+        .unwrap();
+    run("DROP SILENT GRAPH <http://g/absent>", &mut store).unwrap();
+    let err = run("DROP GRAPH <http://g/absent>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("exist"), "{err}");
+    run("DROP GRAPH <http://g/1>", &mut store).unwrap();
+    assert!(!store.graph_exists("http://g/1"));
+}
+
+#[test]
+fn clear_named_keyword_clears_all_named() {
+    // PLAN-28-04 (inverts the Stage-1 pin): CLEAR NAMED empties every named
+    // graph and never errors on an empty named set. The default graph survives.
+    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    store
+        .apply_quads(
+            Vec::new(),
+            vec![(
+                Some(Term::Iri("http://g/1".into())),
+                Term::Iri("http://ex/c".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/d".into()),
+            )],
+        )
+        .unwrap();
+    run("CLEAR NAMED", &mut store).unwrap();
     assert!(
-        err.to_lowercase().contains("named-graph"),
-        "non-silent clear of named graph should error: {err}"
+        !store.graph_exists("http://g/1"),
+        "CLEAR NAMED empties named graphs"
     );
-}
-
-#[test]
-fn drop_named_graph_silent_is_noop_nonsilent_errors() {
-    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    run("DROP SILENT GRAPH <http://g/1>", &mut store).unwrap();
-    assert_eq!(count_all(&store), 1);
-    let err = run("DROP GRAPH <http://g/1>", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("named-graph"), "{err}");
-}
-
-#[test]
-fn clear_named_keyword_silent_is_noop() {
-    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    run("CLEAR SILENT NAMED", &mut store).unwrap();
-    assert_eq!(count_all(&store), 1);
-    let err = run("CLEAR NAMED", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("named-graph"), "{err}");
+    assert_eq!(count_all(&store), 1, "default graph survives CLEAR NAMED");
 }
 
 // ── CREATE ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn create_named_graph_silent_is_noop_nonsilent_errors() {
-    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    run("CREATE SILENT GRAPH <http://g/1>", &mut store).unwrap();
-    assert_eq!(
-        count_all(&store),
-        1,
-        "silent create is a no-op, data untouched"
-    );
+fn create_named_graph_absent_ok_present_errors() {
+    // PLAN-28-04 (inverts the Stage-1 pin): D11 CREATE. An absent graph is a
+    // successful no-op (no registry); an existing one errors unless SILENT.
+    let mut store = MemStore::default();
+    run("CREATE GRAPH <http://g/1>", &mut store).unwrap();
+    // No registry: the graph does not "exist" until it holds a quad.
+    assert!(!store.graph_exists("http://g/1"));
+
+    store
+        .apply_quads(
+            Vec::new(),
+            vec![(
+                Some(Term::Iri("http://g/1".into())),
+                Term::Iri("http://ex/a".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/b".into()),
+            )],
+        )
+        .unwrap();
     let err = run("CREATE GRAPH <http://g/1>", &mut store).unwrap_err();
-    assert!(
-        err.to_lowercase().contains("create"),
-        "non-silent create of named graph should error: {err}"
-    );
+    assert!(err.to_lowercase().contains("exist"), "{err}");
+    run("CREATE SILENT GRAPH <http://g/1>", &mut store).unwrap();
 }
 
 // ── LOAD ────────────────────────────────────────────────────────────────────
@@ -260,23 +315,22 @@ fn load_percent_encoded_path() {
 }
 
 #[test]
-fn load_into_named_graph_silent_noop_nonsilent_errors() {
-    let path = write_tmp("data2.nt", "<http://ex/s> <http://ex/p> <http://ex/o> .\n");
-    let mut store = MemStore::default();
-    let u = format!(
-        "LOAD SILENT <file://{}> INTO GRAPH <http://g/1>",
-        path.display()
+fn load_triples_into_named_graph_routes_to_it() {
+    // PLAN-28-04 (inverts the Stage-1 "LOAD INTO named unsupported" pin): a
+    // triples document loads into the named destination graph.
+    let path = write_tmp(
+        "data2.nt",
+        "<http://ex/s> <http://ex/p> <http://ex/o> .\n<http://ex/s> <http://ex/p> <http://ex/o2> .\n",
     );
+    let mut store = MemStore::default();
+    let u = format!("LOAD <file://{}> INTO GRAPH <http://g/1>", path.display());
     run(&u, &mut store).unwrap();
+    assert_eq!(count_named(&store, "http://g/1"), 2);
     assert_eq!(
         count_all(&store),
-        0,
-        "silent LOAD into named graph is a no-op"
+        2,
+        "the union sees the loaded named graph"
     );
-
-    let u = format!("LOAD <file://{}> INTO GRAPH <http://g/1>", path.display());
-    let err = run(&u, &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("named graph"), "{err}");
     std::fs::remove_file(&path).ok();
 }
 
@@ -329,55 +383,73 @@ fn move_default_to_default_is_identity() {
 }
 
 #[test]
-fn add_named_operand_errors() {
-    // A named-graph operand cannot be represented; the DeleteInsert that
-    // ADD/COPY/MOVE desugar to reads/writes a named GRAPH and is rejected.
-    let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run("ADD <http://g/1> TO DEFAULT", &mut store).unwrap_err();
-    assert!(
-        err.to_lowercase().contains("graph"),
-        "named operand should error: {err}"
+fn add_named_operand_executes() {
+    // PLAN-28-04 (inverts the Stage-1 "named operand unrepresentable" pin): a
+    // named-graph operand now executes — ADD merges the source graph into the
+    // destination (here DEFAULT), leaving the source intact.
+    let mut store = MemStore::default();
+    store
+        .apply_quads(
+            Vec::new(),
+            vec![(
+                Some(Term::Iri("http://g/1".into())),
+                Term::Iri("http://ex/a".into()),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri("http://ex/b".into()),
+            )],
+        )
+        .unwrap();
+    run("ADD <http://g/1> TO DEFAULT", &mut store).unwrap();
+    assert_eq!(
+        store
+            .scan_graph_quads(&StoreGraphTarget::DefaultGraph)
+            .unwrap()
+            .len(),
+        1,
+        "ADD merged the source into the default graph"
     );
-    // The store is left untouched (the rejection happens before any mutation).
-    assert_eq!(count_all(&store), 1);
+    assert_eq!(count_named(&store, "http://g/1"), 1, "ADD keeps the source");
 }
 
-fn copy_named_to_default_errors_without_data_loss<B: FullBackend + Default>() {
-    // `COPY <named> TO DEFAULT` desugars to `Drop{DEFAULT}` + a `DeleteInsert`
-    // reading `GRAPH <named>`. Applying op-by-op would clear the default graph
-    // and only then reject the named read, losing data on a failing update.
-    // The atomicity preflight must reject the whole update before any mutation,
-    // leaving the seeded triple intact.
+fn copy_missing_source_errors_without_data_loss<B: FullBackend + Default>() {
+    // PLAN-28-04 (inverts the Stage-1 pin, same atomicity intent): `COPY
+    // <missing> TO DEFAULT` desugars to `Drop{DEFAULT}` + a `DeleteInsert`
+    // reading `GRAPH <missing>`. A non-silent missing source is an error
+    // (SPEC-28 S4); the preflight rejects the whole update before the
+    // destructive `Drop{DEFAULT}` runs, so the default graph is intact.
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run("COPY <http://g/1> TO DEFAULT", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("graph"), "{err}");
+    let err = run("COPY <http://g/missing> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("source"), "{err}");
     assert_eq!(count_all(&store), 1, "failed update must not lose data");
 }
 
 #[test]
-fn copy_named_to_default_errors_without_data_loss_mem() {
-    copy_named_to_default_errors_without_data_loss::<MemStore>();
+fn copy_missing_source_errors_without_data_loss_mem() {
+    copy_missing_source_errors_without_data_loss::<MemStore>();
 }
 #[test]
-fn copy_named_to_default_errors_without_data_loss_horn() {
-    copy_named_to_default_errors_without_data_loss::<HornBackend>();
+fn copy_missing_source_errors_without_data_loss_horn() {
+    copy_missing_source_errors_without_data_loss::<HornBackend>();
 }
 
 #[test]
-fn move_named_to_default_errors_without_data_loss() {
+fn move_missing_source_errors_without_data_loss() {
+    // PLAN-28-04 (inverts the Stage-1 pin): non-silent MOVE of a missing source.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run("MOVE <http://g/1> TO DEFAULT", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("graph"), "{err}");
+    let err = run("MOVE <http://g/missing> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("source"), "{err}");
     assert_eq!(count_all(&store), 1, "failed update must not lose data");
 }
 
 #[test]
 fn multi_op_failing_op_aborts_before_destructive_op() {
     // A destructive op followed by a failing op: the whole update is rejected
-    // up front, so the destructive op never runs.
+    // up front, so the destructive op never runs. PLAN-28-04: the failing op is
+    // now a D11 error (DROP of an absent graph, non-silent) — CREATE of an
+    // absent graph is a success under the new semantics.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run("CLEAR DEFAULT ; CREATE GRAPH <http://g/1>", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("create"), "{err}");
+    let err = run("CLEAR DEFAULT ; DROP GRAPH <http://g/absent>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("exist"), "{err}");
     assert_eq!(
         count_all(&store),
         1,
@@ -405,14 +477,21 @@ fn multi_op_clear_then_unsupported_where_aborts() {
 }
 
 #[test]
-fn add_named_operand_silent_still_errors() {
-    // spargebra drops the SILENT flag when it desugars ADD/MOVE/COPY into a
-    // DeleteInsert, so SILENT is not preserved for a named operand: it errors
-    // like the non-silent form. Documented in update.rs. No data moves either
-    // way (named graphs are unrepresentable), so the store is unchanged.
+fn add_silent_missing_source_is_noop() {
+    // PLAN-28-04 (inverts the Stage-1 pin): spargebra drops the SILENT flag when
+    // it desugars ADD/MOVE/COPY, so update.rs recovers it from the source text
+    // (`recover_amc_hints`). With the flag recovered, a SILENT ADD of a missing
+    // source is a no-op (not an error), and a non-silent one is an error.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run("ADD SILENT <http://g/1> TO DEFAULT", &mut store).unwrap_err();
-    assert!(err.to_lowercase().contains("graph"), "{err}");
+    run("ADD SILENT <http://g/missing> TO DEFAULT", &mut store).unwrap();
+    assert_eq!(
+        count_all(&store),
+        1,
+        "SILENT ADD of a missing source is a no-op"
+    );
+
+    let err = run("ADD <http://g/missing> TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("source"), "{err}");
     assert_eq!(count_all(&store), 1);
 }
 
@@ -439,46 +518,59 @@ fn multi_op_update_applies_in_order() {
     assert!(matches!(rows[0].get("s"), Some(Term::Iri(s)) if s == "http://ex/c"));
 }
 
-// ── Named-graph data updates are rejected (default-graph only) ───────────────
+// ── Named-graph data updates route to the named graph (PLAN-28-04) ───────────
 
 #[test]
-fn insert_data_named_graph_errors_without_mutation() {
-    // `INSERT DATA { GRAPH <g> { … } }` must not silently write to the default
-    // graph: it is rejected, and the store is unchanged.
+fn insert_data_named_graph_routes_to_it() {
+    // PLAN-28-04 (inverts the Stage-1 rejection pin): `INSERT DATA { GRAPH <g>
+    // { … } }` routes to the named graph, leaving the default graph untouched.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run(
+    run(
         "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
         &mut store,
     )
-    .unwrap_err();
-    assert!(err.to_lowercase().contains("named-graph"), "{err}");
-    assert_eq!(count_all(&store), 1);
+    .unwrap();
+    assert_eq!(count_named(&store, "http://g/1"), 1);
+    assert_eq!(
+        store
+            .scan_graph_quads(&StoreGraphTarget::DefaultGraph)
+            .unwrap()
+            .len(),
+        1,
+        "default graph untouched"
+    );
 }
 
 #[test]
-fn delete_data_named_graph_errors_without_mutation() {
+fn delete_data_named_graph_routes_to_it() {
+    // PLAN-28-04 (inverts the Stage-1 pin): `DELETE DATA { GRAPH <g> { … } }`
+    // removes from the named graph; the default graph is never targeted.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
-    let err = run(
+    run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
+        &mut store,
+    )
+    .unwrap();
+    run(
         "DELETE DATA { GRAPH <http://g/1> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
         &mut store,
     )
-    .unwrap_err();
-    assert!(err.to_lowercase().contains("named-graph"), "{err}");
-    // The default-graph triple must survive — it was never targeted.
-    assert_eq!(count_all(&store), 1);
+    .unwrap();
+    assert!(!store.graph_exists("http://g/1"));
+    assert_eq!(count_all(&store), 1, "the default-graph triple survives");
 }
 
 #[test]
-fn multi_op_insert_then_named_delete_data_aborts() {
-    // A default-graph INSERT DATA followed by a named-graph DELETE DATA: the
-    // whole update is rejected up front, so the insert never applies.
+fn multi_op_insert_then_named_delete_data_both_apply() {
+    // PLAN-28-04 (inverts the Stage-1 abort pin): a default-graph INSERT DATA
+    // followed by a named-graph DELETE DATA both apply — the named DELETE of an
+    // absent quad is a counted no-op, not an error.
     let mut store = MemStore::default();
-    let err = run(
+    run(
         "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> } ; \
          DELETE DATA { GRAPH <http://g/1> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
         &mut store,
     )
-    .unwrap_err();
-    assert!(err.to_lowercase().contains("named-graph"), "{err}");
-    assert_eq!(count_all(&store), 0, "no op applies when a later op fails");
+    .unwrap();
+    assert_eq!(count_all(&store), 1, "the default-graph insert applied");
 }

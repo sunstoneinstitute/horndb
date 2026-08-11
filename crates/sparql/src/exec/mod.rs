@@ -21,6 +21,13 @@ use crate::error::Result;
 use spargebra::algebra::GraphTarget;
 use std::collections::BTreeMap;
 
+// The quad-shaped [`Store`] seam takes a [`GraphTarget`] (and callers build one
+// from a [`NamedNode`]); both are spargebra types that appear in this crate's
+// public API, so re-export them here so downstream code — and this crate's
+// integration tests — can name them without a direct `spargebra` dependency.
+pub use spargebra::algebra::GraphTarget as StoreGraphTarget;
+pub use spargebra::term::NamedNode as GraphNamedNode;
+
 /// A single SPARQL solution mapping.
 ///
 /// We use `BTreeMap` so the order of variables in serialised results

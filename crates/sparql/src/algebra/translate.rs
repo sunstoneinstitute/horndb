@@ -61,7 +61,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
             base_iri: _,
         } => Ok(TranslatedQuery {
             algebra: translate_projection(pattern, cfg)?,
-            dataset: dataset_spec_from(dataset),
+            dataset: dataset_spec_from(dataset.as_ref()),
         }),
         Query::Ask {
             pattern,
@@ -74,7 +74,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
                     vars: Vec::new(),
                     inner: Box::new(inner),
                 },
-                dataset: dataset_spec_from(dataset),
+                dataset: dataset_spec_from(dataset.as_ref()),
             })
         }
         Query::Construct {
@@ -88,7 +88,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
             // The planner is responsible for re-attaching the
             // template via Runtime::run_construct.
             algebra: translate_pattern(pattern, cfg)?,
-            dataset: dataset_spec_from(dataset),
+            dataset: dataset_spec_from(dataset.as_ref()),
         }),
         Query::Describe {
             pattern,
@@ -102,7 +102,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
             // the SELECT arm — the runtime (`describe_triples`) is what
             // turns those bound resources into a forward CBD graph.
             algebra: translate_projection(pattern, cfg)?,
-            dataset: dataset_spec_from(dataset),
+            dataset: dataset_spec_from(dataset.as_ref()),
         }),
     }
 }
@@ -123,7 +123,11 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
 /// also parses to `named: Some(vec![])`. So whether `FROM NAMED` was
 /// actually written is read off whether that vec is non-empty, not
 /// `Option::is_some()`.
-fn dataset_spec_from(ds: &Option<QueryDataset>) -> DatasetSpec {
+/// Reused by SPARQL Update (`update.rs`): `USING` / `USING NAMED` — and the
+/// `WITH <g>` desugaring, which spargebra surfaces as `using` — build the WHERE
+/// clause's dataset with the very same machinery as `FROM` / `FROM NAMED`
+/// (SPEC-28 S3/D10).
+pub(crate) fn dataset_spec_from(ds: Option<&QueryDataset>) -> DatasetSpec {
     let Some(ds) = ds else {
         return DatasetSpec::default();
     };

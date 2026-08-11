@@ -1,41 +1,49 @@
 //! SPARQL Update — `INSERT DATA` / `DELETE DATA`, pattern-based
 //! `INSERT`/`DELETE … WHERE`, and the graph-management verbs
-//! `LOAD`/`CLEAR`/`DROP`/`CREATE` plus multi-operation updates (SPEC-07 F5,
-//! #52).
+//! `LOAD`/`CLEAR`/`DROP`/`CREATE`/`ADD`/`MOVE`/`COPY` plus multi-operation
+//! updates (SPEC-07 F5, SPEC-28 S4/S6, #267).
 //!
-//! Under the Stage-1 default-graph-only model the graph-management verbs map
-//! onto the single merged default graph and honour the `SILENT` modifier:
-//! `CLEAR`/`DROP DEFAULT`/`ALL` empty the store; `LOAD` fetches a `file:`
-//! source and merges it into the default graph; and a `CLEAR`/`DROP`/`CREATE`/
-//! `LOAD` that would touch an unrepresentable named graph is an error unless
-//! `SILENT` (then a no-op).
+//! Named graphs are first-class here (they were unrepresentable in Stage 1):
 //!
-//! `ADD`/`MOVE`/`COPY` are not distinct spargebra variants: the parser rewrites
-//! them (per the W3C spec) into `Drop` + `DeleteInsert` sequences, with the
-//! same-graph identity case (`… <g> TO <g>`) collapsing to zero operations (a
-//! valid no-op). A named-graph operand surfaces as a named `GRAPH` pattern in
-//! the desugared `DeleteInsert` and is rejected by `apply_delete_insert`'s
-//! existing named-graph guards. **The `SILENT` flag is dropped by spargebra's
-//! desugaring**, so a named-operand `ADD`/`MOVE`/`COPY` errors even with
-//! `SILENT` — preserving it would require re-parsing the verb, which is out of
-//! scope while named graphs are unrepresentable (the no-op and the error are
-//! observationally identical to a default-graph-only store either way: no data
-//! moves). True named-graph scoping and remote (`http(s):`) `LOAD` stay
-//! deferred — see `INTEGRATION-NOTES.md`.
+//! - **Quad data.** `INSERT DATA` / `DELETE DATA` route each quad to the graph
+//!   its `GRAPH <g> { … }` block names (or the default graph). Each operation
+//!   is one [`Store::apply_quads`] batch — one operation = one commit (S4).
+//! - **Pattern updates.** A named-graph template (`GRAPH <g> { … }` or a graph
+//!   variable bound by the row) instantiates into that graph. `WITH` / `USING`
+//!   / `USING NAMED` scope the WHERE clause's dataset (S3/D10); spargebra
+//!   surfaces all three through the `using` field, which we lower with the same
+//!   `FROM`/`FROM NAMED` machinery as a query.
+//! - **Graph management (D11).** A graph exists iff it holds ≥1 visible quad.
+//!   `CREATE <g>` succeeds if absent, errors if present unless `SILENT`;
+//!   `CLEAR`/`DROP <g>` errors if absent unless `SILENT`, else retracts every
+//!   visible quad **through [`Store::apply_quads`]** (never a structural
+//!   unlink, so a delta consumer sees quad-grain retractions). `DROP ALL` /
+//!   `CLEAR ALL` reset the default graph and every *non-reserved* named graph.
+//! - **Reserved namespace closed to writes.** Any write targeting a graph IRI
+//!   under [`RESERVED_GRAPH_PREFIX`] is an error, **not** suppressible by
+//!   `SILENT` (it is a permission-shaped error, not an existence one). Reads of
+//!   reserved graphs stay allowed.
+//! - **`LOAD` routing.** Triples formats (`.nt`/`.ttl`) load into the
+//!   destination (default if no `INTO GRAPH`); dataset formats (`.nq`/`.trig`)
+//!   route each quad to its own graph on a plain `LOAD`, and `LOAD … INTO GRAPH`
+//!   of a dataset format is an error (redirecting quads is undefined). `LOAD`
+//!   stays `file:`-only (#189).
+//! - **`ADD`/`MOVE`/`COPY`.** spargebra 0.4.6 desugars these into `Drop` +
+//!   `DeleteInsert` pairs and **drops the `SILENT` flag**; we recover it (and
+//!   the source operand) from the raw update text — see [`recover_amc_hints`].
+//!   With that flag, a `SILENT` op with a missing source is a no-op and a
+//!   non-silent one an error (S4). The same-graph identity case already
+//!   collapses to zero operations in the parser.
 //!
-//! A multi-operation update is applied **atomically**: `apply_update_with`
-//! preflights every operation (`validate_op`) for the failures it would hit at
-//! apply time — structural rejections, a non-silent `LOAD` whose fetch/parse
-//! fails, and a pattern update whose WHERE clause fails to translate/plan —
-//! before the first mutation, so e.g. `COPY <named> TO DEFAULT` (a desugared
-//! destructive `Drop{DEFAULT}` + a failing named read) can never clear the
-//! default graph on a failing update.
+//! **Atomicity.** A multi-operation update preflights every operation
+//! (`validate_op`, plus the `ADD`/`MOVE`/`COPY` source-existence check) against
+//! the store *before* the first mutation, so a failing request mutates nothing.
 
-use crate::algebra::translate::translate_where;
+use crate::algebra::translate::{dataset_spec_from, translate_where};
 use crate::algebra::Term;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::Runtime;
-use crate::exec::{Bindings, FullBackend};
+use crate::exec::{is_reserved_graph, Bindings, FullBackend, Store, RESERVED_GRAPH_PREFIX};
 use crate::parser::ParsedUpdate;
 use crate::plan::planner;
 use crate::{DefaultGraphMode, SparqlConfig};
@@ -43,6 +51,7 @@ use spargebra::term::{
     GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, NamedNodePattern,
     NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
 };
+use std::collections::HashSet;
 
 /// Lexical form for an RDF 1.2 triple term embedded in an update. The
 /// Stage-1 store carries `Term::Literal(String)` slots only, so there is
@@ -51,16 +60,61 @@ fn triple_term_unsupported() -> SparqlError {
     SparqlError::UnsupportedAlgebra("RDF 1.2 triple term in update (SPARQL 1.1 mode)".into())
 }
 
-fn named_graph_unsupported() -> SparqlError {
-    SparqlError::UnsupportedAlgebra(
-        "named-graph target in update (Stage-1 default graph only)".into(),
-    )
+/// The write-to-a-reserved-graph error (SPEC-28 S4). Not suppressible by
+/// `SILENT`: it is a permission-shaped error, not an existence one.
+fn reserved_write(iri: &str) -> SparqlError {
+    SparqlError::UnsupportedAlgebra(format!(
+        "write to a reserved graph is not allowed (the `{RESERVED_GRAPH_PREFIX}` namespace is \
+         HornDB-internal): {iri}"
+    ))
 }
 
-fn using_named_graph_unsupported() -> SparqlError {
-    SparqlError::UnsupportedAlgebra(
-        "USING named-graph dataset in update (Stage-1 default graph only)".into(),
-    )
+/// A `CLEAR`/`DROP` of a graph that does not exist (D11), non-`SILENT`.
+fn graph_absent(iri: &str) -> SparqlError {
+    SparqlError::Executor(format!(
+        "graph does not exist (nothing to clear/drop): {iri}"
+    ))
+}
+
+/// A `CREATE` of a graph that already exists (D11), non-`SILENT`.
+fn graph_already_exists(iri: &str) -> SparqlError {
+    SparqlError::Executor(format!("graph already exists: {iri}"))
+}
+
+/// An `ADD`/`MOVE`/`COPY` whose source graph does not exist, non-`SILENT`
+/// (SPEC-28 S4).
+fn amc_source_absent(iri: &str) -> SparqlError {
+    SparqlError::Executor(format!(
+        "source graph of ADD/MOVE/COPY does not exist: {iri}"
+    ))
+}
+
+/// Reject a named graph IRI under the reserved namespace as a write target.
+fn reject_reserved(iri: &str) -> Result<()> {
+    if is_reserved_graph(iri) {
+        Err(reserved_write(iri))
+    } else {
+        Ok(())
+    }
+}
+
+/// Reject a reserved IRI carried by an `INSERT DATA`/`DELETE DATA` quad's
+/// `GRAPH` name.
+fn reject_reserved_graph_name(g: &spargebra::term::GraphName) -> Result<()> {
+    match g {
+        spargebra::term::GraphName::DefaultGraph => Ok(()),
+        spargebra::term::GraphName::NamedNode(n) => reject_reserved(n.as_str()),
+    }
+}
+
+/// Reject a reserved IRI carried by a ground template quad's `GRAPH` name. A
+/// graph *variable* is left to runtime binding: `GRAPH ?g` enumeration already
+/// excludes reserved graphs, so a bound `?g` can never name one.
+fn reject_reserved_graph_pattern(g: &GraphNamePattern) -> Result<()> {
+    match g {
+        GraphNamePattern::NamedNode(n) => reject_reserved(n.as_str()),
+        GraphNamePattern::DefaultGraph | GraphNamePattern::Variable(_) => Ok(()),
+    }
 }
 
 /// Apply an update with the default [`SparqlConfig`] (SPARQL 1.1).
@@ -75,11 +129,14 @@ pub fn apply_update_with<B: FullBackend>(
     cfg: &SparqlConfig,
 ) -> Result<()> {
     use spargebra::GraphUpdateOperation;
-    let ops = match u {
-        ParsedUpdate::InsertData { inner }
-        | ParsedUpdate::DeleteData { inner }
-        | ParsedUpdate::DeleteInsert { inner }
-        | ParsedUpdate::GraphManagement { inner } => &inner.operations,
+    let (ops, source) = match u {
+        ParsedUpdate::InsertData { inner } | ParsedUpdate::DeleteData { inner } => {
+            (&inner.operations, None)
+        }
+        ParsedUpdate::DeleteInsert { inner, source }
+        | ParsedUpdate::GraphManagement { inner, source } => {
+            (&inner.operations, Some(source.as_str()))
+        }
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),
@@ -87,43 +144,65 @@ pub fn apply_update_with<B: FullBackend>(
         }
     };
 
-    // SPARQL Update is atomic: a failed update must not partially apply
-    // (§3.1.3). spargebra desugars `COPY`/`MOVE <named> TO DEFAULT` into a
-    // destructive `Drop{DEFAULT}` *followed by* a `DeleteInsert` that reads the
-    // unrepresentable named graph — so applying op-by-op would clear the
-    // default graph and only then reject, losing data on a failing update.
-    // Preflight every operation for the failures it would hit at apply time —
-    // structural rejections, a non-silent `LOAD` whose fetch/parse fails, and a
-    // pattern update whose WHERE clause fails to translate/plan — without
-    // mutating, so the whole sequence is known-applyable before the first write.
+    // Recover the `SILENT` flag and source operand of every `ADD`/`MOVE`/`COPY`
+    // from the raw text (spargebra drops the flag on desugaring — see
+    // `recover_amc_hints`). Only `DeleteInsert`/`GraphManagement` carry the raw
+    // source; the pure-data variants never contain these verbs.
+    let amc_hints = source.map(recover_amc_hints).unwrap_or_default();
+    // A silent `MOVE <missing> TO <g>` desugars to a trailing *non-silent*
+    // `Drop <missing>` (spargebra's quirk); collect the missing sources of
+    // silent verbs so that drop is not turned into a spurious existence error.
+    let silent_absent_sources: HashSet<&str> = amc_hints
+        .iter()
+        .filter(|h| h.silent)
+        .filter_map(|h| match &h.source {
+            AmcSource::Named(g) => Some(g.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    // Preflight (atomicity, SPARQL 1.1 §3.1.3): validate the whole request
+    // against the store's current state before any mutation. A non-silent
+    // `ADD`/`MOVE`/`COPY` whose named source is absent is an error (S4).
+    for h in &amc_hints {
+        if !h.silent {
+            if let AmcSource::Named(g) = &h.source {
+                if !store.graph_exists(g) {
+                    return Err(amc_source_absent(g));
+                }
+            }
+        }
+    }
     for op in ops {
-        validate_op(op, cfg)?;
+        validate_op(op, store, cfg, &silent_absent_sources)?;
     }
 
-    // `validate_op` above has already rejected every error case (named-graph
-    // quads/templates, triple terms, unrepresentable LOAD/CREATE targets,
-    // untranslatable WHERE clauses), so the apply loop can mutate freely.
+    // Apply. `validate_op` has rejected every statically- and existence-checkable
+    // error, so the handlers mutate freely (a no-op sweep on an absent graph is
+    // still a harmless no-op through `apply_quads`).
     for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
+                let mut adds = Vec::with_capacity(data.len());
                 for q in data {
+                    let g = graph_name_to_slot(&q.graph_name);
                     let s = subject_to_term(&q.subject);
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = object_to_term(&q.object)?;
-                    // `require_default_graph_name` (validate_op) already
-                    // rejected a named `q.graph_name`, so every quad here is
-                    // default-graph scoped (named-graph INSERT DATA routing
-                    // is a later task in SPEC-28 phase 4, #267).
-                    store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
+                    adds.push((g, s, p, o));
                 }
+                store.apply_quads(Vec::new(), adds)?;
             }
             GraphUpdateOperation::DeleteData { data } => {
+                let mut dels = Vec::with_capacity(data.len());
                 for q in data {
+                    let g = graph_name_to_slot(&q.graph_name);
                     let s = Term::Iri(q.subject.as_str().to_owned());
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = ground_term_to_term(&q.object)?;
-                    store.apply_quads(vec![(None, s, p, o)], Vec::new())?;
+                    dels.push((g, s, p, o));
                 }
+                store.apply_quads(dels, Vec::new())?;
             }
             GraphUpdateOperation::DeleteInsert {
                 delete,
@@ -133,21 +212,12 @@ pub fn apply_update_with<B: FullBackend>(
             } => {
                 apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
             }
-            GraphUpdateOperation::Clear { silent, graph } => {
-                apply_clear_drop(store, *silent, graph)?;
-            }
-            GraphUpdateOperation::Drop { silent, graph } => {
-                apply_clear_drop(store, *silent, graph)?;
-            }
-            GraphUpdateOperation::Create { silent, .. } => {
-                // No named-graph store exists (Stage-1 default-graph only),
-                // so a named graph cannot be created. SPARQL 1.1 §3.1.4:
-                // CREATE of an unrepresentable target is an error unless
-                // SILENT, in which case it is a no-op.
-                if !silent {
-                    return Err(create_named_graph_unsupported());
-                }
-            }
+            GraphUpdateOperation::Clear { graph, .. } => apply_clear_drop(store, graph)?,
+            GraphUpdateOperation::Drop { graph, .. } => apply_clear_drop(store, graph)?,
+            // D11 CREATE: creating an absent graph is a no-op that succeeds (no
+            // registry — the graph "exists" only once it holds a quad); a
+            // create of an existing graph was rejected in `validate_op`.
+            GraphUpdateOperation::Create { .. } => {}
             GraphUpdateOperation::Load {
                 silent,
                 source,
@@ -160,51 +230,257 @@ pub fn apply_update_with<B: FullBackend>(
     Ok(())
 }
 
-/// Error for a graph-management verb that targets a named graph, which the
-/// Stage-1 default-graph-only store cannot represent.
-fn create_named_graph_unsupported() -> SparqlError {
-    SparqlError::UnsupportedAlgebra("CREATE of a named graph (Stage-1 default graph only)".into())
-}
-
-/// Apply `CLEAR`/`DROP` against the store. The two verbs are semantically
-/// identical here: no public write path can put data in a named graph yet
-/// (issue #267), so a `DEFAULT`/`ALL` target clears the store and any
-/// named/`NAMED` target refers to a graph that does not exist (SPARQL 1.1
-/// §3.2.{1,2}: an error unless `SILENT`, otherwise a no-op).
-fn apply_clear_drop<B: FullBackend>(
-    store: &mut B,
-    silent: bool,
-    graph: &spargebra::algebra::GraphTarget,
+/// Preflight one operation against `store`: return the error it would produce
+/// at apply time, without mutating (SPARQL Update atomicity, §3.1.3). Reserved
+/// namespace and existence (D11) are both mirrored here so a failing multi-op
+/// request mutates nothing. `silent_absent_sources` names the missing sources
+/// of silent `ADD`/`MOVE`/`COPY` verbs, whose desugared (non-silent) source
+/// drop must not raise an existence error.
+fn validate_op<B: FullBackend>(
+    op: &spargebra::GraphUpdateOperation,
+    store: &B,
+    cfg: &SparqlConfig,
+    silent_absent_sources: &HashSet<&str>,
 ) -> Result<()> {
     use spargebra::algebra::GraphTarget;
-    match graph {
-        // TODO(#267): DefaultGraph must not route to the whole-store sweep
-        // once named-graph writes exist — `clear_graph(&GraphTarget::AllGraphs)`
-        // sweeps every graph (see the `Store` impls), so `CLEAR DEFAULT`
-        // would silently destroy named-graph data too. Splitting these two
-        // targets apart is a later task in SPEC-28 phase 4 (#267), not this
-        // change.
-        GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
-            store.clear_graph(&GraphTarget::AllGraphs)?;
+    use spargebra::term::GraphName;
+    use spargebra::GraphUpdateOperation;
+    match op {
+        GraphUpdateOperation::InsertData { data } => {
+            for q in data {
+                reject_reserved_graph_name(&q.graph_name)?;
+                object_to_term(&q.object)?;
+            }
             Ok(())
         }
-        // No named graphs exist in the Stage-1 store: a named target (or the
-        // `NAMED` keyword) addresses nothing.
-        GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
-            if silent {
-                Ok(())
-            } else {
-                Err(named_graph_unsupported())
+        GraphUpdateOperation::DeleteData { data } => {
+            for q in data {
+                reject_reserved_graph_name(&q.graph_name)?;
+                ground_term_to_term(&q.object)?;
             }
+            Ok(())
+        }
+        GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            using,
+            pattern,
+        } => validate_delete_insert(delete, insert, using.as_ref(), pattern, cfg),
+        GraphUpdateOperation::Clear { silent, graph }
+        | GraphUpdateOperation::Drop { silent, graph } => {
+            // Reserved check first — not suppressible by SILENT.
+            if let GraphTarget::NamedNode(n) = graph {
+                reject_reserved(n.as_str())?;
+            }
+            match graph {
+                // DEFAULT always exists; NAMED/ALL sweep whatever is there.
+                GraphTarget::DefaultGraph | GraphTarget::NamedGraphs | GraphTarget::AllGraphs => {
+                    Ok(())
+                }
+                GraphTarget::NamedNode(n) => {
+                    let iri = n.as_str();
+                    if *silent || store.graph_exists(iri) || silent_absent_sources.contains(iri) {
+                        Ok(())
+                    } else {
+                        Err(graph_absent(iri))
+                    }
+                }
+            }
+        }
+        GraphUpdateOperation::Create { silent, graph } => {
+            reject_reserved(graph.as_str())?;
+            if !*silent && store.graph_exists(graph.as_str()) {
+                Err(graph_already_exists(graph.as_str()))
+            } else {
+                Ok(())
+            }
+        }
+        GraphUpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        } => {
+            // Reserved destination is rejected even for a SILENT load.
+            if let GraphName::NamedNode(n) = destination {
+                reject_reserved(n.as_str())?;
+            }
+            if *silent {
+                // A silent LOAD swallows fetch/parse/format failures, so it can
+                // never abort the request — nothing else to preflight.
+                return Ok(());
+            }
+            // Fetch + parse now (pure read) to surface a non-silent failure —
+            // and the dataset-into-a-named-graph rejection — before any prior
+            // op mutates.
+            let doc = fetch_and_parse(source.as_str())?;
+            if doc.dataset_format && matches!(destination, GraphName::NamedNode(_)) {
+                return Err(load_dataset_into_named());
+            }
+            Ok(())
         }
     }
 }
 
-/// Apply `LOAD <source> [INTO GRAPH <destination>]`. The document is fetched,
-/// parsed, and its triples inserted into the default graph. Stage-1 boundaries:
-/// only `file:` sources are fetched (no HTTP client dependency), and a named
-/// `destination` cannot be targeted. A boundary violation is an error unless
-/// `SILENT`, in which case the whole load is skipped (SPARQL 1.1 §3.1.5).
+/// Shared rejection scan for a pattern-based update, used by both the
+/// atomicity preflight and (implicitly, via preflight) the apply path. Reserved
+/// namespace, triple-terms, and WHERE-clause translatability are all checked
+/// without mutating.
+fn validate_delete_insert(
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+    cfg: &SparqlConfig,
+) -> Result<()> {
+    // Reserved namespace: reject a ground named-graph template targeting it.
+    for q in delete {
+        reject_reserved_graph_pattern(&q.graph_name)?;
+    }
+    for q in insert {
+        reject_reserved_graph_pattern(&q.graph_name)?;
+    }
+
+    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template (the
+    // Stage-1 store has no triple-term slot), so the `resolve_*` `Triple(_)`
+    // arms are unreachable for that reason and never silently drop a triple.
+    for q in delete {
+        if ground_quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+    for q in insert {
+        if quad_has_triple_term(q) {
+            return Err(triple_term_unsupported());
+        }
+    }
+
+    // Translate + plan the WHERE clause now (pure — no store access) so an
+    // unsupported construct (`SERVICE`, `MINUS`, …) aborts the whole request
+    // before any earlier operation mutates. The throwaway plan is recomputed in
+    // `apply_delete_insert`; planning is cheap next to the atomicity it buys.
+    let _ = using; // `using` is a dataset, never a rejectable construct now.
+    let alg = translate_where(pattern, cfg)?;
+    planner::plan(&alg)?;
+    Ok(())
+}
+
+/// Evaluate the WHERE pattern, then instantiate the DELETE/INSERT templates
+/// per solution, routing each instantiated quad to its own graph. Per SPARQL
+/// 1.1 §3.1.3 the deletions are computed from the pre-update solutions and
+/// applied before the insertions; the whole operation is **one**
+/// [`Store::apply_quads`] batch (SPEC-28 S4).
+///
+/// **`WITH` / `USING` (SPEC-28 D10) — spargebra 0.4.6 discovery.** `WITH <g>`
+/// desugars so that (a) every template quad acquires `graph_name = g`, and (b)
+/// the WHERE clause is scoped via `using = QueryDataset { default: [g] }` — the
+/// WHERE pattern is **not** wrapped in `GraphPattern::Graph`. So we do not wrap
+/// the WHERE side ourselves: honouring `using` as the dataset already scopes it.
+/// `USING` / `USING NAMED` populate the same `using` field, so all three go
+/// through [`dataset_spec_from`], the exact `FROM`/`FROM NAMED` machinery.
+fn apply_delete_insert<B: FullBackend>(
+    store: &mut B,
+    cfg: &SparqlConfig,
+    delete: &[GroundQuadPattern],
+    insert: &[QuadPattern],
+    using: Option<&spargebra::algebra::QueryDataset>,
+    pattern: &spargebra::algebra::GraphPattern,
+) -> Result<()> {
+    let alg = translate_where(pattern, cfg)?;
+    let plan = planner::plan(&alg)?;
+    // With no `USING`/`WITH`, the WHERE reads the default-graph sentinel only
+    // (`Strict`) — an update reads exactly the graph a bare template writes.
+    // When `using` names a dataset (including the `WITH <g>` desugaring), that
+    // dataset drives the read and this mode is not consulted.
+    let dataset = dataset_spec_from(using);
+    let rows: Vec<Bindings> = Runtime::new(store)
+        .with_dataset(dataset, DefaultGraphMode::Strict)
+        .run(&plan)?
+        .collect();
+
+    // Deletions computed from the original bindings first.
+    let mut dels: Vec<crate::exec::AlgebraQuad> = Vec::new();
+    for row in &rows {
+        for q in delete {
+            let Some(graph) = resolve_graph_name(&q.graph_name, row) else {
+                continue; // unbound / non-IRI graph variable: skip this quad
+            };
+            if let (Some(s), Some(p), Some(o)) = (
+                resolve_ground(&q.subject, row).and_then(subject_or_skip),
+                resolve_pred(&q.predicate, row),
+                resolve_ground(&q.object, row),
+            ) {
+                dels.push((graph, s, p, o));
+            }
+        }
+    }
+    // Insertions allocate fresh blank nodes per solution row.
+    let mut adds: Vec<crate::exec::AlgebraQuad> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        for q in insert {
+            let Some(graph) = resolve_graph_name(&q.graph_name, row) else {
+                continue;
+            };
+            if let (Some(s), Some(p), Some(o)) = (
+                resolve_term(&q.subject, row, i).and_then(subject_or_skip),
+                resolve_pred(&q.predicate, row),
+                resolve_term(&q.object, row, i),
+            ) {
+                adds.push((graph, s, p, o));
+            }
+        }
+    }
+
+    store.apply_quads(dels, adds)?;
+    Ok(())
+}
+
+/// Apply `CLEAR`/`DROP` against `store`. `SILENT` and the absent-graph error
+/// are already handled in [`validate_op`]; here the target is swept through
+/// [`Store::clear_graph`] (never a structural unlink — SPEC-28 S4). `ALL`/
+/// `NAMED` spare reserved (HornDB-internal) graphs.
+fn apply_clear_drop<B: FullBackend>(
+    store: &mut B,
+    graph: &spargebra::algebra::GraphTarget,
+) -> Result<()> {
+    use spargebra::algebra::GraphTarget;
+    match graph {
+        GraphTarget::DefaultGraph => {
+            store.clear_graph(&GraphTarget::DefaultGraph)?;
+        }
+        GraphTarget::NamedNode(_) => {
+            store.clear_graph(graph)?;
+        }
+        // NAMED = every named graph; ALL = default + every named graph. Both
+        // spare reserved graphs, which are HornDB-internal (SPEC-28 S4:
+        // `DROP ALL` is a data reset, not a system reset).
+        GraphTarget::NamedGraphs | GraphTarget::AllGraphs => {
+            if matches!(graph, GraphTarget::AllGraphs) {
+                store.clear_graph(&GraphTarget::DefaultGraph)?;
+            }
+            // `Store::named_graphs` (not the `Executor` overload) — every named
+            // graph, reserved ones included, which we then filter out.
+            for g in Store::named_graphs(store) {
+                if !is_reserved_graph(&g) {
+                    store.clear_graph(&named_target(&g))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `GraphTarget::NamedNode` for `iri`.
+fn named_target(iri: &str) -> spargebra::algebra::GraphTarget {
+    spargebra::algebra::GraphTarget::NamedNode(spargebra::term::NamedNode::new_unchecked(iri))
+}
+
+/// Apply `LOAD <source> [INTO GRAPH <destination>]`. Routing (SPEC-28 S4):
+/// a triples format loads into `destination` (the default graph if none); a
+/// dataset format (`.nq`/`.trig`) routes each quad to its own graph on a plain
+/// `LOAD`, and `LOAD … INTO GRAPH` of a dataset format is an error. Reserved
+/// destination and the dataset-into-named rejection are mirrored in
+/// [`validate_op`]. A non-silent fetch/parse failure propagates; `SILENT`
+/// swallows every failure (SPARQL 1.1 §3.1.5).
 fn apply_load<B: FullBackend>(
     store: &mut B,
     silent: bool,
@@ -212,40 +488,64 @@ fn apply_load<B: FullBackend>(
     destination: &spargebra::term::GraphName,
 ) -> Result<()> {
     use spargebra::term::GraphName;
-    // A named destination graph cannot be represented (default-graph only).
-    if let GraphName::NamedNode(_) = destination {
+    let doc = match fetch_and_parse(source.as_str()) {
+        Ok(d) => d,
+        Err(e) => return if silent { Ok(()) } else { Err(e) },
+    };
+    let dest_named: Option<String> = match destination {
+        GraphName::DefaultGraph => None,
+        GraphName::NamedNode(n) => Some(n.as_str().to_owned()),
+    };
+    if doc.dataset_format && dest_named.is_some() {
         return if silent {
             Ok(())
         } else {
-            Err(SparqlError::UnsupportedAlgebra(
-                "LOAD INTO a named graph (Stage-1 default graph only)".into(),
-            ))
+            Err(load_dataset_into_named())
         };
     }
-    match fetch_and_parse(source.as_str()) {
-        Ok(triples) => {
-            for (s, p, o) in triples {
-                store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
-            }
-            Ok(())
-        }
-        Err(e) => {
-            if silent {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        }
-    }
+    let adds: Vec<crate::exec::AlgebraQuad> = doc
+        .quads
+        .into_iter()
+        .map(|(file_graph, s, p, o)| {
+            // A named destination overrides the file's graph (triples formats
+            // only — dataset-into-named errored above). No destination keeps
+            // the file's graph (the default-graph sentinel for triples files).
+            let graph = match &dest_named {
+                Some(d) => Some(Term::Iri(d.clone())),
+                None => file_graph,
+            };
+            (graph, s, p, o)
+        })
+        .collect();
+    store.apply_quads(Vec::new(), adds)?;
+    Ok(())
 }
 
-/// Fetch and parse an RDF document named by `source`, returning its triples as
-/// algebra [`Term`]s. Stage-1 supports `file:` IRIs only; remote (`http(s):`)
-/// sources are rejected (the workspace carries no HTTP client). The
-/// serialization is chosen from the path extension, defaulting to Turtle. All
-/// graph names in a quad source are merged into the default graph (Stage-1 has
-/// no named-graph store), matching the N-Quads bulk loader.
-fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
+/// A `LOAD … INTO GRAPH` of a dataset (`.nq`/`.trig`) document. W3C LOAD is a
+/// graph operation, so redirecting a multi-graph document's quads into one
+/// graph has no defined meaning.
+fn load_dataset_into_named() -> SparqlError {
+    SparqlError::UnsupportedAlgebra(
+        "LOAD of a dataset document (.nq/.trig) INTO a named graph is not defined — a plain LOAD \
+         routes each quad to its own graph"
+            .into(),
+    )
+}
+
+/// A parsed LOAD document: its quads (each with its graph slot — `None` is the
+/// default-graph sentinel) and whether the serialization was a dataset format.
+struct LoadedDoc {
+    quads: Vec<crate::exec::AlgebraQuad>,
+    /// `true` for `.nq`/`.trig` (a quad source that carries graph names).
+    dataset_format: bool,
+}
+
+/// Fetch and parse an RDF document named by `source`. Stage-1 supports `file:`
+/// IRIs only; remote (`http(s):`) sources are rejected (no HTTP client). The
+/// serialization is chosen from the path extension, defaulting to Turtle.
+/// Triples formats yield default-graph quads; dataset formats keep each quad's
+/// own graph name.
+fn fetch_and_parse(source: &str) -> Result<LoadedDoc> {
     use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
 
     let raw = file_iri_to_path(source)?;
@@ -258,7 +558,8 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
     let map_err =
         |e: oxttl::TurtleSyntaxError| SparqlError::Executor(format!("LOAD parsing {path}: {e}"));
 
-    let mut out = Vec::new();
+    let mut quads = Vec::new();
+    let mut dataset_format = false;
     match path
         .rsplit('.')
         .next()
@@ -269,23 +570,28 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
         Some("nt") => {
             for t in NTriplesParser::new().for_slice(&bytes) {
                 let t = t.map_err(map_err)?;
-                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+                let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
+                quads.push((None, s, p, o));
             }
         }
         Some("nq") => {
+            dataset_format = true;
             for q in NQuadsParser::new().for_slice(&bytes) {
                 let q = q.map_err(map_err)?;
-                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+                let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
+                quads.push((oxrdf_graph_to_slot(&q.graph_name), s, p, o));
             }
         }
         // Turtle/TriG may carry relative IRIs resolved against the document IRI;
         // use `source` as the base so `<s> <p> <o> .` loaded from
         // `file:///tmp/data.ttl` resolves correctly (mirrors the storage loader).
         Some("trig") => {
+            dataset_format = true;
             let parser = with_base(TriGParser::new(), source)?;
             for q in parser.for_slice(&bytes) {
                 let q = q.map_err(map_err)?;
-                out.push(oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object));
+                let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
+                quads.push((oxrdf_graph_to_slot(&q.graph_name), s, p, o));
             }
         }
         // `.ttl` and anything else default to Turtle.
@@ -293,17 +599,31 @@ fn fetch_and_parse(source: &str) -> Result<Vec<(Term, Term, Term)>> {
             let parser = with_base(TurtleParser::new(), source)?;
             for t in parser.for_slice(&bytes) {
                 let t = t.map_err(map_err)?;
-                out.push(oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object));
+                let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
+                quads.push((None, s, p, o));
             }
         }
     }
-    Ok(out)
+    Ok(LoadedDoc {
+        quads,
+        dataset_format,
+    })
+}
+
+/// Lower an `oxrdf` graph name to a quad graph slot: `None` for the default
+/// graph, `Some(term)` for a named (IRI) or blank-node graph.
+fn oxrdf_graph_to_slot(g: &oxrdf::GraphName) -> Option<Term> {
+    match g {
+        oxrdf::GraphName::DefaultGraph => None,
+        oxrdf::GraphName::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
+        oxrdf::GraphName::BlankNode(b) => Some(Term::BlankNode(b.as_str().to_owned())),
+    }
 }
 
 /// Set the document IRI as the parser's base so relative IRIs in Turtle/TriG
-/// resolve against `source`. `source` is the `LOAD <iri>` operand, which
-/// spargebra already validated as an IRI, so `with_base_iri` succeeds in
-/// practice; a rejected base is surfaced as a clear LOAD error.
+/// resolve against `source`. `source` is the `LOAD <iri>` operand, already
+/// validated as an IRI, so `with_base_iri` succeeds in practice; a rejected
+/// base is surfaced as a clear LOAD error.
 trait WithBase: Sized {
     fn with_base_iri_checked(self, base: &str) -> Result<Self>;
 }
@@ -396,14 +716,9 @@ fn oxrdf_triple_to_terms(
 }
 
 /// Lower an `oxrdf` subject (named node or blank node) to an algebra [`Term`].
-///
-/// Blank-node labels are carried through verbatim (`b.as_str()`). This shares
-/// the Stage-1 store's known blank-node approximation with the N-Triples/Turtle
-/// bulk loaders and `construct_triples`: labels are not freshened per loaded
-/// document, so a `_:b` in one `LOAD` is identified with the same label in
-/// another `LOAD` (or already in the store), and re-loading an identical
-/// blank-node triple dedups. Per-document blank-node scoping belongs with the
-/// dictionary store (SPEC-02), which carries blank-node identity explicitly.
+/// Blank-node labels are carried through verbatim, matching the N-Triples/Turtle
+/// bulk loaders; per-document blank-node scoping is deferred to the dictionary
+/// store (SPEC-02).
 fn oxrdf_subject_to_term(s: &oxrdf::NamedOrBlankNode) -> Term {
     match s {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
@@ -420,258 +735,232 @@ fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
         oxrdf::Term::Literal(l) => Term::Literal(l.to_string()),
         // RDF 1.2 triple-term objects: the Stage-1 store has no triple-term
         // slot, so they are surfaced as their N-Triples lexical form (the same
-        // best-effort lowering the loader applies). A LOAD of triple-term data
-        // into a SPARQL 1.1 store is an edge case; keeping the lexical form is
-        // better than dropping the triple silently.
+        // best-effort lowering the loader applies).
         oxrdf::Term::Triple(tr) => Term::Literal(tr.to_string()),
     }
 }
 
-/// Preflight one operation: return the error it *would* produce at apply time,
-/// without touching the store. Mirrors every rejecting path in the apply loop so
-/// the whole update can be validated before the first mutation (SPARQL Update
-/// atomicity, §3.1.3). A `LOAD` is validated by fetching + parsing its source
-/// (a pure read); on success the parsed triples are discarded and re-fetched at
-/// apply time — acceptable because LOAD is not on a hot path and the alternative
-/// (threading the parsed triples through to apply) complicates the op loop.
-fn validate_op(op: &spargebra::GraphUpdateOperation, cfg: &SparqlConfig) -> Result<()> {
-    use spargebra::term::GraphName;
-    use spargebra::GraphUpdateOperation;
-    match op {
-        GraphUpdateOperation::InsertData { data } => {
-            for q in data {
-                require_default_graph_name(&q.graph_name)?;
-                object_to_term(&q.object)?;
-            }
-            Ok(())
+// ── ADD/MOVE/COPY SILENT recovery (deletable on an upstream spargebra fix) ───
+
+/// The source operand of an `ADD`/`MOVE`/`COPY`, recovered from raw text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmcSource {
+    /// `DEFAULT` — the default graph always exists, never a missing-source error.
+    Default,
+    /// `[GRAPH] <iri>` — the named source graph.
+    Named(String),
+    /// The operand could not be resolved from the text alone (e.g. a prefixed
+    /// name, which needs the query prologue). We do not run a source-existence
+    /// check on it — the desugared ops apply as-is (a natural no-op on a
+    /// missing source), which is the honest, non-destructive outcome.
+    Unknown,
+}
+
+/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag and source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AmcHint {
+    silent: bool,
+    source: AmcSource,
+}
+
+/// Recover the `SILENT` flag (and the source operand) of every
+/// `ADD`/`MOVE`/`COPY` in the raw update text, in source order.
+///
+/// **Why this exists.** spargebra 0.4.6 desugars `ADD`/`MOVE`/`COPY` into
+/// `Drop` + `DeleteInsert` pairs and **discards the `SILENT` flag**. That was
+/// harmless while named graphs were unrepresentable; now a `SILENT COPY
+/// <missing> TO <g>` must be a no-op and a non-silent one an error (SPEC-28
+/// S4), so the flag matters. We re-scan the source text — a small hand-written
+/// tokenizer (no regex) that skips comments, IRIs, and string literals — to
+/// recover it, plus the source operand so the missing-source check needs no
+/// fragile op-shape matching. Delete this whole machinery once spargebra
+/// preserves the flag (or exposes structured `Add`/`Move`/`Copy` ops).
+///
+/// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
+/// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
+/// number).
+fn recover_amc_hints(src: &str) -> Vec<AmcHint> {
+    let toks = amc_tokenize(src);
+    let mut hints = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        if *tok != AmcTok::Amc {
+            continue;
         }
-        GraphUpdateOperation::DeleteData { data } => {
-            for q in data {
-                require_default_graph_name(&q.graph_name)?;
-                ground_term_to_term(&q.object)?;
-            }
-            Ok(())
+        // After the verb: an optional SILENT keyword, then the source operand
+        // `DEFAULT | GRAPH? <iri>`. The tokens are consecutive (whitespace and
+        // comments are not emitted), so index arithmetic tracks the grammar.
+        let mut j = i + 1;
+        let silent = matches!(toks.get(j), Some(AmcTok::Silent));
+        if silent {
+            j += 1;
         }
-        GraphUpdateOperation::DeleteInsert {
-            delete,
-            insert,
-            using,
-            pattern,
-        } => validate_delete_insert(delete, insert, using.as_ref(), pattern, cfg),
-        GraphUpdateOperation::Clear { silent, graph }
-        | GraphUpdateOperation::Drop { silent, graph } => {
-            use spargebra::algebra::GraphTarget;
-            match graph {
-                GraphTarget::DefaultGraph | GraphTarget::AllGraphs => Ok(()),
-                GraphTarget::NamedNode(_) | GraphTarget::NamedGraphs => {
-                    if *silent {
-                        Ok(())
-                    } else {
-                        Err(named_graph_unsupported())
-                    }
+        let source = match toks.get(j) {
+            Some(AmcTok::Default) => AmcSource::Default,
+            Some(AmcTok::Iri(s)) => AmcSource::Named(s.clone()),
+            Some(AmcTok::Graph) => match toks.get(j + 1) {
+                Some(AmcTok::Iri(s)) => AmcSource::Named(s.clone()),
+                _ => AmcSource::Unknown,
+            },
+            _ => AmcSource::Unknown,
+        };
+        hints.push(AmcHint { silent, source });
+    }
+    hints
+}
+
+/// The token kinds the SILENT-recovery scan needs. Everything not one of the
+/// tracked keywords or an IRI is [`AmcTok::Other`] — kept (not dropped) so token
+/// adjacency mirrors the grammar and a non-keyword source operand (a prefixed
+/// name, a variable) reads as [`AmcSource::Unknown`], not the next IRI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmcTok {
+    Amc,
+    Silent,
+    Default,
+    Graph,
+    Iri(String),
+    Other,
+}
+
+/// True for bytes that continue a word (keyword or name segment). Includes `-`
+/// so a hyphenated name segment is one token and cannot be mistaken for a
+/// trailing keyword.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// Tokenize `src` for [`recover_amc_hints`]. Skips ASCII whitespace, `#`
+/// comments (to end of line), IRIs (`<…>`), and string literals (`'…'`, `"…"`,
+/// and their triple-quoted forms, honouring `\` escapes). Emits one token per
+/// keyword/IRI/other-run.
+fn amc_tokenize(src: &str) -> Vec<AmcTok> {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        match c {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'#' => {
+                while i < n && b[i] != b'\n' {
+                    i += 1;
                 }
             }
-        }
-        GraphUpdateOperation::Create { silent, .. } => {
-            if *silent {
-                Ok(())
-            } else {
-                Err(create_named_graph_unsupported())
-            }
-        }
-        GraphUpdateOperation::Load {
-            silent,
-            source,
-            destination,
-        } => {
-            if *silent {
-                // A silent LOAD swallows every failure, so it can never abort
-                // the update — nothing to preflight.
-                return Ok(());
-            }
-            if let GraphName::NamedNode(_) = destination {
-                return Err(SparqlError::UnsupportedAlgebra(
-                    "LOAD INTO a named graph (Stage-1 default graph only)".into(),
+            b'<' => {
+                // IRIREF: no `>` or whitespace inside. If unterminated, stop at
+                // end (best-effort — the parser already accepted the update).
+                let start = i + 1;
+                let mut j = start;
+                while j < n && b[j] != b'>' && !b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                out.push(AmcTok::Iri(
+                    String::from_utf8_lossy(&b[start..j]).into_owned(),
                 ));
+                i = if j < n && b[j] == b'>' { j + 1 } else { j };
             }
-            // Fetch + parse now (pure read) to surface a non-silent fetch/parse
-            // failure before any prior op mutates.
-            fetch_and_parse(source.as_str()).map(|_| ())
-        }
-    }
-}
-
-/// Shared rejection scan for a pattern-based update. Returns the error a
-/// `DeleteInsert` would produce, without mutating — used both by the atomicity
-/// preflight and by `apply_delete_insert` itself.
-fn validate_delete_insert(
-    delete: &[GroundQuadPattern],
-    insert: &[QuadPattern],
-    using: Option<&spargebra::algebra::QueryDataset>,
-    pattern: &spargebra::algebra::GraphPattern,
-    cfg: &SparqlConfig,
-) -> Result<()> {
-    // Reject a USING/USING NAMED dataset that redefines the graphs the
-    // WHERE clause reads from (Stage-1 evaluates WHERE over the single
-    // default graph only). A vacuous dataset (`None`, or one naming no
-    // graphs) stays a no-op.
-    if let Some(ds) = using {
-        if !ds.default.is_empty() || ds.named.as_ref().is_some_and(|n| !n.is_empty()) {
-            return Err(using_named_graph_unsupported());
-        }
-    }
-
-    // Reject named-graph templates (Stage-1 default graph only).
-    for q in delete {
-        require_default_graph(&q.graph_name)?;
-    }
-    for q in insert {
-        require_default_graph(&q.graph_name)?;
-    }
-
-    // Reject a GRAPH pattern anywhere in the WHERE clause, before any
-    // mutation. The query-side translator now accepts GraphPattern::Graph
-    // (SPEC-28 phase 3, #266); named-graph Update is separate scope (SPEC-28
-    // S5) and not implemented, so this scan stays independent: it produces
-    // the update-specific error below and guarantees rejection ahead of any
-    // earlier operation's side effects, without leaning on when the WHERE
-    // clause gets translated. Stage-1 updates are default-graph only.
-    if where_has_graph_pattern(pattern) {
-        return Err(SparqlError::UnsupportedAlgebra(
-            "GRAPH pattern in update WHERE clause (Stage-1 default graph only)".into(),
-        ));
-    }
-
-    // Reject RDF 1.2 triple-term slots in any DELETE/INSERT template. The
-    // Stage-1 store has no triple-term slot, so silently dropping such a
-    // template triple (the `resolve_*` `Triple(_) => None` arms) while
-    // reporting success is inconsistent with INSERT DATA / DELETE DATA, which
-    // return `triple_term_unsupported()`. The up-front scan makes those `None`
-    // arms unreachable for the triple-term reason.
-    for q in delete {
-        if ground_quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
-    for q in insert {
-        if quad_has_triple_term(q) {
-            return Err(triple_term_unsupported());
-        }
-    }
-
-    // Translate and plan the WHERE clause now (pure — no store access) so an
-    // unsupported algebra construct (`SERVICE`, `MINUS`, an unsupported path op,
-    // …) aborts the whole update *before* any earlier operation mutates. The
-    // throwaway plan is recomputed in `apply_delete_insert`; planning is cheap
-    // relative to the safety it buys, and updates are not on a hot path.
-    let alg = translate_where(pattern, cfg)?;
-    planner::plan(&alg)?;
-    Ok(())
-}
-
-/// Evaluate the WHERE pattern, then instantiate the DELETE/INSERT
-/// templates per solution. Per SPARQL 1.1 §3.1.3 the deletions are
-/// computed and applied before the insertions; both are derived from the
-/// WHERE solutions over the *pre-update* graph (we collect every row
-/// first, which also releases the immutable read borrow before mutating).
-fn apply_delete_insert<B: FullBackend>(
-    store: &mut B,
-    cfg: &SparqlConfig,
-    delete: &[GroundQuadPattern],
-    insert: &[QuadPattern],
-    using: Option<&spargebra::algebra::QueryDataset>,
-    pattern: &spargebra::algebra::GraphPattern,
-) -> Result<()> {
-    // All the rejections below must run before any mutation so a failing
-    // update can't partially apply (and so the atomicity preflight in
-    // `apply_update_with` can detect them without side effects).
-    validate_delete_insert(delete, insert, using, pattern, cfg)?;
-
-    let alg = translate_where(pattern, cfg)?;
-    let plan = planner::plan(&alg)?;
-    // The WHERE clause is pinned to the default graph — deliberately NOT
-    // the caller's `default_graph` mode. An update must read exactly the
-    // graph its templates write, and the write side is default-graph only
-    // (`Store::delete_triple` keys on `DEFAULT_GRAPH`; named-graph templates
-    // and `USING` are refused in `validate_delete_insert`). Under `union`
-    // the WHERE would bind named-graph rows the DELETE then cannot remove —
-    // reporting success while deleting nothing, and copying those bindings
-    // into the default graph on a DELETE/INSERT. TODO(#267): revisit when
-    // SPEC-28 phase 4 makes the write side quad-grain.
-    let rows: Vec<Bindings> = Runtime::new(store)
-        .with_dataset(
-            crate::algebra::DatasetSpec::default(),
-            DefaultGraphMode::Strict,
-        )
-        .run(&plan)?
-        .collect();
-
-    // Compute deletions from the original bindings first.
-    let mut deletions: Vec<(Term, Term, Term)> = Vec::new();
-    for row in &rows {
-        for q in delete {
-            if let (Some(s), Some(p), Some(o)) = (
-                resolve_ground(&q.subject, row).and_then(subject_or_skip),
-                resolve_pred(&q.predicate, row),
-                resolve_ground(&q.object, row),
-            ) {
-                deletions.push((s, p, o));
+            b'"' | b'\'' => {
+                i = amc_skip_string(b, i);
+                out.push(AmcTok::Other);
+            }
+            _ if is_word_byte(c) => {
+                let start = i;
+                let mut j = i;
+                while j < n && is_word_byte(b[j]) {
+                    j += 1;
+                }
+                // A word is a keyword only when it is not part of a prefixed
+                // name (`ex:ADD`, `ADD:`) and not a variable (`?ADD`/`$ADD`).
+                let prev = if start > 0 { b[start - 1] } else { 0 };
+                let next = if j < n { b[j] } else { 0 };
+                let name_ctx = prev == b':' || prev == b'?' || prev == b'$' || next == b':';
+                let word = &src[start..j];
+                out.push(if name_ctx {
+                    AmcTok::Other
+                } else if word.eq_ignore_ascii_case("ADD")
+                    || word.eq_ignore_ascii_case("MOVE")
+                    || word.eq_ignore_ascii_case("COPY")
+                {
+                    AmcTok::Amc
+                } else if word.eq_ignore_ascii_case("SILENT") {
+                    AmcTok::Silent
+                } else if word.eq_ignore_ascii_case("DEFAULT") {
+                    AmcTok::Default
+                } else if word.eq_ignore_ascii_case("GRAPH") {
+                    AmcTok::Graph
+                } else {
+                    AmcTok::Other
+                });
+                i = j;
+            }
+            _ => {
+                out.push(AmcTok::Other);
+                i += 1;
             }
         }
     }
-    // Insertions allocate fresh blank nodes per solution row.
-    let mut insertions: Vec<(Term, Term, Term)> = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
-        for q in insert {
-            if let (Some(s), Some(p), Some(o)) = (
-                resolve_term(&q.subject, row, i).and_then(subject_or_skip),
-                resolve_pred(&q.predicate, row),
-                resolve_term(&q.object, row, i),
-            ) {
-                insertions.push((s, p, o));
-            }
-        }
-    }
-
-    for (s, p, o) in &deletions {
-        store.apply_quads(vec![(None, s.clone(), p.clone(), o.clone())], Vec::new())?;
-    }
-    for (s, p, o) in insertions {
-        store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
-    }
-    Ok(())
+    out
 }
 
-/// Recursively scan a WHERE pattern for any `GraphPattern::Graph` node.
-/// Exhaustive over spargebra 0.4.6's `GraphPattern` variants so a new
-/// variant forces a compile error here rather than silently passing.
-fn where_has_graph_pattern(p: &spargebra::algebra::GraphPattern) -> bool {
-    use spargebra::algebra::GraphPattern as GP;
-    match p {
-        // GRAPH node — the thing we reject.
-        GP::Graph { .. } => true,
-        // Leaves: no nested patterns.
-        GP::Bgp { .. } | GP::Path { .. } | GP::Values { .. } => false,
-        // Two children.
-        GP::Join { left, right }
-        | GP::LeftJoin { left, right, .. }
-        | GP::Lateral { left, right }
-        | GP::Union { left, right }
-        | GP::Minus { left, right } => {
-            where_has_graph_pattern(left) || where_has_graph_pattern(right)
+/// Skip a SPARQL string literal starting at `b[start]` (`'` or `"`), including
+/// the triple-quoted forms, honouring `\` escapes. Returns the index just past
+/// the closing quote (or end of input if unterminated).
+fn amc_skip_string(b: &[u8], start: usize) -> usize {
+    let q = b[start];
+    let n = b.len();
+    // Triple-quoted (`"""` / `'''`)?
+    if start + 2 < n && b[start + 1] == q && b[start + 2] == q {
+        let mut i = start + 3;
+        while i < n {
+            if b[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if i + 2 < n && b[i] == q && b[i + 1] == q && b[i + 2] == q {
+                return i + 3;
+            }
+            i += 1;
         }
-        // One inner child.
-        GP::Filter { inner, .. }
-        | GP::Extend { inner, .. }
-        | GP::OrderBy { inner, .. }
-        | GP::Project { inner, .. }
-        | GP::Distinct { inner }
-        | GP::Reduced { inner }
-        | GP::Slice { inner, .. }
-        | GP::Group { inner, .. } => where_has_graph_pattern(inner),
-        // Service wraps a GRAPH-like remote target and an inner pattern;
-        // the translator already rejects Service, but recurse for safety.
-        GP::Service { inner, .. } => where_has_graph_pattern(inner),
+        return n;
+    }
+    let mut i = start + 1;
+    while i < n {
+        if b[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if b[i] == q {
+            return i + 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+// ── Template / quad slot resolution ──────────────────────────────────────────
+
+/// Resolve a template quad's `GRAPH` name to a quad graph slot. Returns
+/// `Some(None)` for the default graph, `Some(Some(iri))` for a named graph, and
+/// `None` to **skip the quad** (an unbound graph variable, or one bound to a
+/// non-IRI term — neither names a writable graph).
+fn resolve_graph_name(g: &GraphNamePattern, row: &Bindings) -> Option<Option<Term>> {
+    match g {
+        GraphNamePattern::DefaultGraph => Some(None),
+        GraphNamePattern::NamedNode(n) => Some(Some(Term::Iri(n.as_str().to_owned()))),
+        GraphNamePattern::Variable(v) => match row.get(v.as_str()) {
+            Some(Term::Iri(iri)) => Some(Some(Term::Iri(iri.clone()))),
+            _ => None,
+        },
+    }
+}
+
+/// The quad graph slot for a data quad's `GRAPH` name: `None` for the default
+/// graph, `Some(iri)` for a named one.
+fn graph_name_to_slot(g: &spargebra::term::GraphName) -> Option<Term> {
+    match g {
+        spargebra::term::GraphName::DefaultGraph => None,
+        spargebra::term::GraphName::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
     }
 }
 
@@ -688,75 +977,36 @@ fn ground_quad_has_triple_term(q: &GroundQuadPattern) -> bool {
         || matches!(q.object, GroundTermPattern::Triple(_))
 }
 
-fn require_default_graph(g: &GraphNamePattern) -> Result<()> {
-    match g {
-        GraphNamePattern::DefaultGraph => Ok(()),
-        GraphNamePattern::NamedNode(_) | GraphNamePattern::Variable(_) => {
-            Err(named_graph_unsupported())
-        }
-    }
-}
-
-/// Reject a named graph on an `INSERT DATA` / `DELETE DATA` quad. The apply
-/// loop ignores `q.graph_name` (Stage-1 default-graph only), so a
-/// `GRAPH <g> { … }` block would silently mutate the default graph; reject it
-/// instead of mis-routing data.
-fn require_default_graph_name(g: &spargebra::term::GraphName) -> Result<()> {
-    match g {
-        spargebra::term::GraphName::DefaultGraph => Ok(()),
-        spargebra::term::GraphName::NamedNode(_) => Err(named_graph_unsupported()),
-    }
-}
-
-/// Resolve an INSERT-template `TermPattern` against a solution row.
-/// `row_ix` scopes per-solution blank nodes so each row's template
-/// blank node is distinct (SPARQL 1.1 §4.1.4). Returns `None` when a
-/// variable slot is unbound (the caller drops the triple).
+/// Resolve an INSERT-template `TermPattern` against a solution row. `row_ix`
+/// scopes per-solution blank nodes so each row's template blank node is
+/// distinct (SPARQL 1.1 §4.1.4). Returns `None` when a variable slot is unbound.
 ///
-/// Lockstep invariant: mirrors `runtime.rs::construct_triples`'s
-/// `resolve_term`. They differ deliberately (this returns `Term` and
-/// scopes blank nodes per row; construct returns `String`), but must stay
-/// in lockstep on shared rules — especially when `Term::Triple` support
-/// lands.
+/// Lockstep invariant: mirrors `runtime.rs::construct_triples`'s `resolve_term`.
 fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> {
     match t {
         TermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
         TermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
-        // Per-row blank-node scoping satisfies SPARQL §4.1.4 within one
-        // solution (each row gets a distinct node) and assumes
-        // spargebra-normalized template labels. Freshness *across*
-        // separate updates is a known Stage-1 parity limit shared with
-        // `runtime.rs::construct_triples`.
         TermPattern::BlankNode(b) => Some(Term::BlankNode(format!("{}_r{row_ix}", b.as_str()))),
         TermPattern::Variable(v) => row.get(v.as_str()).cloned(),
-        // Triple-term template slots are rejected up front in
-        // `apply_delete_insert` (triple_term_unsupported); this arm is
-        // therefore unreachable for that reason but kept exhaustive.
+        // Triple-term template slots are rejected up front (triple_term_unsupported).
         TermPattern::Triple(_) => None,
     }
 }
 
-/// Resolve a DELETE-template `GroundTermPattern` (no blank nodes allowed
-/// in DELETE templates) against a solution row.
-///
-/// Lockstep invariant: see `resolve_pred` / `runtime.rs::construct_triples`.
+/// Resolve a DELETE-template `GroundTermPattern` (no blank nodes allowed) against
+/// a solution row.
 fn resolve_ground(t: &GroundTermPattern, row: &Bindings) -> Option<Term> {
     match t {
         GroundTermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
         GroundTermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
         GroundTermPattern::Variable(v) => row.get(v.as_str()).cloned(),
-        // Rejected up front in `apply_delete_insert`; see `resolve_term`.
         GroundTermPattern::Triple(_) => None,
     }
 }
 
-/// Resolve a predicate template slot. Shared invariant with
-/// `runtime.rs::construct_triples`'s `resolve_pred`: a predicate variable
-/// binding is only valid if it resolves to an IRI (a literal or blank node
-/// in predicate position drops the triple). The two copies legitimately
-/// differ (this returns `Term`, construct returns `String`) but encode the
-/// *same* rule and must stay in lockstep — especially when `Term::Triple`
-/// support lands. See `runtime.rs::construct_triples`.
+/// Resolve a predicate template slot. A predicate variable binding is valid only
+/// if it resolves to an IRI (a literal/blank node in predicate position drops
+/// the triple). Lockstep with `runtime.rs::construct_triples`'s `resolve_pred`.
 fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<Term> {
     match p {
         NamedNodePattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
@@ -767,17 +1017,10 @@ fn resolve_pred(p: &NamedNodePattern, row: &Bindings) -> Option<Term> {
     }
 }
 
-/// Position-aware subject guard. An instantiated template triple is a
-/// legal RDF triple only if its subject is an IRI or a blank node; a
-/// literal (or RDF 1.2 triple term) in subject position is illegal. Per
-/// SPARQL 1.1 Update's illegal-RDF-construct rule (§4.1.4 / §10.2.1, the
-/// same rule CONSTRUCT applies), such a template triple is **silently
-/// skipped** — not an error — so the update still succeeds and the other
-/// valid template triples in the same solution are still applied.
-///
-/// Returning `None` drops the whole triple in the caller's `if let`. Note
-/// the object slot needs no such guard (literals are legal objects) and
-/// predicate validity already lives in `resolve_pred` (IRI-only).
+/// Position-aware subject guard: an instantiated template triple is legal only
+/// if its subject is an IRI or blank node; a literal (or RDF 1.2 triple term) in
+/// subject position makes it an illegal RDF triple, which is **silently
+/// skipped** (SPARQL 1.1 §4.1.4 / §10.2.1, the same rule CONSTRUCT applies).
 fn subject_or_skip(s: Term) -> Option<Term> {
     match s {
         Term::Iri(_) | Term::BlankNode(_) => Some(s),
@@ -807,4 +1050,61 @@ fn ground_term_to_term(gt: &GroundTerm) -> Result<Term> {
         GroundTerm::Literal(l) => Term::Literal(l.to_string()),
         GroundTerm::Triple(_) => return Err(triple_term_unsupported()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn amc_recover_basic_verbs() {
+        let h = recover_amc_hints("ADD <http://g/s> TO <http://g/d>");
+        assert_eq!(
+            h,
+            vec![AmcHint {
+                silent: false,
+                source: AmcSource::Named("http://g/s".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn amc_recover_silent_and_default() {
+        assert_eq!(
+            recover_amc_hints("MOVE SILENT DEFAULT TO <http://g/d>"),
+            vec![AmcHint {
+                silent: true,
+                source: AmcSource::Default
+            }]
+        );
+        assert_eq!(
+            recover_amc_hints("COPY SILENT GRAPH <http://g/s> TO DEFAULT"),
+            vec![AmcHint {
+                silent: true,
+                source: AmcSource::Named("http://g/s".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn amc_recover_multiple_in_order() {
+        let h = recover_amc_hints(
+            "ADD SILENT <http://g/a> TO <http://g/b> ; COPY <http://g/c> TO <http://g/d>",
+        );
+        assert_eq!(h.len(), 2);
+        assert!(h[0].silent);
+        assert!(!h[1].silent);
+        assert_eq!(h[0].source, AmcSource::Named("http://g/a".into()));
+        assert_eq!(h[1].source, AmcSource::Named("http://g/c".into()));
+    }
+
+    #[test]
+    fn amc_tokenizer_ignores_verbs_in_strings_iris_comments() {
+        // `ADD`/`COPY`/`MOVE` appearing inside a string literal, an IRI, a
+        // comment, or a prefixed name must not be recovered as verbs.
+        let src = "# ADD a comment\n\
+                   INSERT DATA { <http://ex/ADD> <http://ex/p> \"COPY MOVE\" . \
+                   ex:MOVE ex:p ex:o }";
+        assert_eq!(recover_amc_hints(src), vec![]);
+    }
 }
