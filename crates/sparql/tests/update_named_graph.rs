@@ -720,3 +720,50 @@ fn add_missing_source_errors_mem() {
 fn add_missing_source_errors_horn() {
     add_missing_source_errors::<HornBackend>();
 }
+
+/// Regression (whole-branch review): a non-silent `COPY <absent> TO <dest>` on
+/// the **ambiguous** SILENT-alignment path must error and leave `<dest>`
+/// intact. COPY desugars to `Drop(<dest>)` + a source-reading `DeleteInsert`
+/// with no source `Drop`, so its ONLY absent-source guard is the recovered
+/// SILENT check. A silent-equivalent fallback would run `Drop(<dest>)`, read
+/// zero rows, and wipe `<dest>` with no error (SPARQL 1.1 §3.2.4 forbids this).
+///
+/// The ambiguity is forced deterministically: an identity `ADD <g> TO <g>`
+/// (one source token, zero desugared ops) co-occurs with the COPY, so the hint
+/// count (2) ≠ the copy-op count (1) — the ambiguous branch — which now falls
+/// back to non-silent, so the absent source errors in preflight before the
+/// destructive `Drop` runs.
+fn copy_absent_source_ambiguous_alignment_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    // Seed the destination so a wrongful Drop would be observable.
+    seed_quad(
+        &mut store,
+        Some("http://g/dest"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://g/dest"), 1);
+
+    let err = run(
+        "ADD <http://g/x> TO <http://g/x> ; \
+         COPY <http://g/absent> TO <http://g/dest>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("does not exist"), "{err}");
+    assert_eq!(
+        count_graph(&store, "http://g/dest"),
+        1,
+        "the destination must survive: the failed COPY's Drop(<dest>) never ran"
+    );
+}
+
+#[test]
+fn copy_absent_source_ambiguous_alignment_errors_no_wipe_mem() {
+    copy_absent_source_ambiguous_alignment_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn copy_absent_source_ambiguous_alignment_errors_no_wipe_horn() {
+    copy_absent_source_ambiguous_alignment_errors_no_wipe::<HornBackend>();
+}

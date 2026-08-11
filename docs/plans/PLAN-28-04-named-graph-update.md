@@ -426,19 +426,19 @@ behaviour's correctness.
   roughly 184 pre-existing test call sites across the crate for no
   behavioural gain, since the defaults already route through the real S6
   seam.
-- **SILENT-ambiguity fallback is a no-op, not the design's "non-silent
-  error."** The design text (`ADD`/`MOVE`/`COPY` §) specifies that an
-  ambiguous hint alignment "falls back to non-silent — an honest error."
-  The shipped `amc_source_status` instead treats an unaligned copy-op as
-  `AmcSourceStatus::Ok` (proceed): since the underlying operation is a
-  `DeleteInsert` reading a possibly-absent named graph, an absent source
-  reads as zero rows and the op is a no-op, not an error. This is
-  data-safe (never a silent wrong data change) but is observably different
-  from the specified behaviour on the narrow ambiguous-alignment case
-  (an identity `ADD <g> TO <g>`, or a user `DeleteInsert` matching the
-  copy shape). **Known open minor**, to be resolved at final review —
-  either update this plan's design intent to match, or change the code
-  to error as originally specified.
+- **SILENT-ambiguity fallback — RESOLVED (now matches the design).** The
+  first cut treated an ambiguous copy-op as `AmcSourceStatus::Ok`, i.e. a
+  silent-equivalent no-op. That was **not** data-safe: `COPY` desugars to
+  `Drop(<dest>)` + a source-reading `DeleteInsert` with no source `Drop`, so a
+  non-silent `COPY <absent> TO <dest>` would run the destination `Drop` and
+  wipe an existing graph with no error (SPARQL 1.1 §3.2.4 forbids this). The
+  whole-branch review caught this; `align_amc_hints` now falls back to
+  **non-silent** for every copy-op when `ADD`/`MOVE`/`COPY` tokens are present
+  but the alignment is ambiguous — the design's original "an honest error,
+  never a silent wrong outcome." An absent source errors in preflight before
+  any destructive `Drop`; a present source still copies; a request with no AMC
+  tokens leaves copy-shaped user `DeleteInsert`s plain (a valid no-op).
+  Regression: `copy_absent_source_ambiguous_alignment_errors_no_wipe`.
 - **Multi-op existence atomicity gap, not closed here.** `validate_op`
   preflights every operation against the pre-update store, which is exact
   for a single operation and for independent operations, but not for a

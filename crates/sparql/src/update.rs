@@ -211,10 +211,18 @@ pub fn apply_update_with<B: FullBackend>(
 
 /// Preflight one operation: return the error it *would* produce at apply time,
 /// without mutating (SPARQL Update atomicity, §3.1.3). Mirrors every rejecting
-/// path in the apply loop. D11 existence is read against the pre-update store —
-/// exact for a single op and for independent ops; a multi-op request that
-/// flips one graph's existence between ops is the one residual gap this shared
-/// snapshot cannot close without store-level rollback (out of scope).
+/// path in the apply loop.
+///
+/// Two apply-time checks read state the preflight cannot see, so they cannot be
+/// mirrored exactly: (a) D11 existence (read here against the *pre-update*
+/// store), and (b) a reserved-graph write through a **variable** template graph
+/// (`resolve_graph_name` can only test it once a WHERE row binds the variable).
+/// In both, the POLICY still fires unconditionally — a reserved write always
+/// errors, a missing/existing graph always errors — so only multi-op
+/// *atomicity* (nothing-mutated-on-failure) can slip: a later op whose D11
+/// existence an earlier op flipped, or a variable-bound reserved write an
+/// earlier op's mutation preceded. Closing either would need store-level
+/// rollback (out of scope); a single op and independent ops are exact.
 fn validate_op<B: FullBackend>(
     op: &GraphUpdateOperation,
     cfg: &SparqlConfig,
@@ -886,12 +894,29 @@ fn is_spo_bgp(patterns: &[spargebra::term::TriplePattern]) -> bool {
 /// spargebra desugars each non-identity `ADD`/`MOVE`/`COPY` into exactly one
 /// `copy_graph` `DeleteInsert` (plus, for `MOVE`/`COPY`, `Drop` ops that keep
 /// their flags). [`scan_amc_silent_hints`] recovers `(verb, silent)` per source
-/// occurrence in order. If the hint count equals the detected copy-op count we
-/// align them positionally; otherwise (an identity `ADD <g> TO <g>` — which
-/// desugars to zero ops but is one source token — or a user `DeleteInsert` that
-/// happens to match the copy shape) we cannot trust the alignment and fall back
-/// to no hints (plain, non-silent execution). An honest no-op/plain outcome
-/// always beats a silent wrong one.
+/// occurrence in order. Three cases:
+///
+/// * **Aligned** (hint count == copy-op count): attach each recovered hint to
+///   its copy-op positionally.
+/// * **Ambiguous** (≥1 `ADD`/`MOVE`/`COPY` token present, but the counts differ
+///   — an identity `ADD <g> TO <g>` is one token but zero ops, or a user
+///   `DeleteInsert` mimics the copy shape): the alignment cannot be trusted, so
+///   fall back to **non-silent** for every copy-op. This is
+///   deliberate — a `COPY`'s only absent-source guard is
+///   [`amc_source_status`] (its desugaring has a destination `Drop` but no
+///   source `Drop`), so a silent-equivalent `None` fallback here would let a
+///   non-silent `COPY <absent> TO <dst>` run the unconditional `Drop(<dst>)`
+///   and wipe an existing destination with no error, which SPARQL 1.1 §3.2.4
+///   forbids. Non-silent means an absent source errors in preflight, before any
+///   destructive `Drop` runs; a present source still copies. "An honest error,
+///   never a silent wrong outcome" (PLAN-28-04 §Design). `MOVE`'s own preserved
+///   source-`Drop` flag is an independent guard, and an identity case has no
+///   copy-op to error on, so both stay correct.
+/// * **No AMC tokens at all** (`hints` empty): every copy-shaped op is a genuine
+///   user `DeleteInsert`, never a desugared AMC — leave it plain (`None`). A
+///   user `INSERT { … } WHERE { GRAPH <absent> { … } }` reads zero rows and is a
+///   valid no-op; forcing it to error would violate SPARQL semantics, and it
+///   carries no destination `Drop`, so there is no data to lose.
 fn align_amc_hints(ops: &[GraphUpdateOperation], source: &str) -> Vec<Option<AmcHint>> {
     let hints = scan_amc_silent_hints(source);
     let copy_positions: Vec<usize> = ops
@@ -901,11 +926,26 @@ fn align_amc_hints(ops: &[GraphUpdateOperation], source: &str) -> Vec<Option<Amc
         .map(|(i, _)| i)
         .collect();
     let mut out = vec![None; ops.len()];
-    if !copy_positions.is_empty() && hints.len() == copy_positions.len() {
+    if copy_positions.is_empty() {
+        return out; // no copy-op to hint
+    }
+    if hints.len() == copy_positions.len() {
         for (h, &pos) in hints.iter().zip(&copy_positions) {
             out[pos] = Some(*h);
         }
+    } else if !hints.is_empty() {
+        // Ambiguous: force the non-silent source-existence check on every
+        // copy-op. The verb is unknown here; `Copy` is the "run the check"
+        // marker — `Add` and `Copy` check identically, and `Move` keeps its own
+        // source-`Drop` guard, so forcing the check is safe for all three.
+        for &pos in &copy_positions {
+            out[pos] = Some(AmcHint {
+                verb: AmcVerb::Copy,
+                silent: false,
+            });
+        }
     }
+    // else: no AMC tokens — leave every copy-shaped op plain (`None`).
     out
 }
 
@@ -921,10 +961,11 @@ enum AmcSourceStatus {
 
 /// Apply the recovered `SILENT` flag to an `ADD`/`COPY` copy-op: a missing
 /// named source is a no-op when silent, an error when not (SPARQL 1.1
-/// §3.2.3/§3.2.5). `MOVE` is handled by its own preserved source-`Drop` flag,
-/// so `MOVE` copy-ops fall through to `Ok` here. A copy-op with no aligned hint
-/// (plain fallback) also falls through — a `DeleteInsert` that just reads an
-/// absent graph is already a no-op, never an error.
+/// §3.2.3/§3.2.5). `MOVE` (verb `Move`) is handled by its own preserved
+/// source-`Drop` flag, so it falls through to `Ok` here. A copy-op with **no**
+/// hint (`None` — the token-free plain case, see [`align_amc_hints`]) also
+/// falls through: a user `DeleteInsert` that just reads an absent graph is a
+/// valid no-op, never an error.
 fn amc_source_status<B: FullBackend>(
     op: &GraphUpdateOperation,
     hint: Option<AmcHint>,
