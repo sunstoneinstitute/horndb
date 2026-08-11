@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
 use crate::term::{GraphId, TermId};
-use crate::tier::{Tier, TierStats};
+use crate::tier::{ApplyReport, Tier, TierStats};
 use crate::visibility::UNSET_END;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -487,6 +487,157 @@ impl Tier for MemoryTier {
         Ok(retracted)
     }
 
+    fn apply_quad_batch(
+        &self,
+        dels: &[(GraphId, TermId, TermId, TermId)],
+        adds: &[(GraphId, TermId, TermId, TermId)],
+    ) -> Result<ApplyReport> {
+        if dels.is_empty() && adds.is_empty() {
+            return Ok(ApplyReport::default());
+        }
+
+        // Group del targets by graph, then predicate: set of (s, o) to end.
+        let mut del_by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> =
+            HashMap::new();
+        for &(g, s, p, o) in dels {
+            del_by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .insert((s.0, o.0));
+        }
+        // Group add rows by graph, then predicate.
+        let mut add_by_graph: HashMap<GraphId, HashMap<TermId, Vec<(TermId, TermId)>>> =
+            HashMap::new();
+        for &(g, s, p, o) in adds {
+            add_by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .push((s, o));
+        }
+
+        // Serialize writers so the read-modify-swap is atomic.
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
+
+        let mut retracted = 0usize;
+        let mut inserted = 0usize;
+        let mut graphs = cur.graphs.clone();
+
+        // Every (graph, predicate) touched by either side, so a graph/
+        // predicate present in only one of the two maps is still visited.
+        let touched_graphs: HashSet<GraphId> = del_by_graph
+            .keys()
+            .chain(add_by_graph.keys())
+            .copied()
+            .collect();
+
+        for g in touched_graphs {
+            let mut new_partitions = graphs
+                .get(&g)
+                .map(|gs| gs.partitions.clone())
+                .unwrap_or_default();
+
+            let del_preds = del_by_graph.get(&g);
+            let add_preds = add_by_graph.get(&g);
+            let touched_preds: HashSet<TermId> = del_preds
+                .into_iter()
+                .flat_map(|m| m.keys().copied())
+                .chain(add_preds.into_iter().flat_map(|m| m.keys().copied()))
+                .collect();
+
+            for p in touched_preds {
+                let del_targets = del_preds.and_then(|m| m.get(&p));
+                let add_rows = add_preds.and_then(|m| m.get(&p));
+                let existing = new_partitions.get(&p).cloned();
+
+                if existing.is_none() && add_rows.is_none() {
+                    // A del-only batch targeting a partition that was never
+                    // created has nothing to retract and nothing to build.
+                    continue;
+                }
+
+                // One rebuild pass per touched partition: carry every
+                // existing row forward, ending the live ones the dels
+                // target (this also freezes `live_before`, the set this
+                // predicate has live prior to the batch), then append the
+                // adds that are not already live once the dels have applied.
+                let mut builder = PartitionBuilder::default();
+                let mut live_before: HashSet<(u64, u64)> = HashSet::new();
+                if let Some(existing) = &existing {
+                    let n = existing.len();
+                    for i in 0..n {
+                        let s = existing.subjects().value(i);
+                        let o = existing.objects().value(i);
+                        let begin = existing.begins().value(i);
+                        let mut end = existing.ends().value(i);
+                        if end == UNSET_END {
+                            live_before.insert((s, o));
+                            if del_targets.is_some_and(|t| t.contains(&(s, o))) {
+                                end = new_version;
+                                retracted += 1;
+                            }
+                        }
+                        builder.append_stamped(TermId(s), TermId(o), begin, end);
+                    }
+                }
+
+                if let Some(rows) = add_rows {
+                    // Dedup within this batch: a repeated add row must count
+                    // (and physically land) as one insert, not one per
+                    // occurrence.
+                    let mut seen: HashSet<(u64, u64)> = HashSet::new();
+                    for &(s, o) in rows {
+                        let key = (s.0, o.0);
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        let deleted_this_batch = del_targets.is_some_and(|t| t.contains(&key));
+                        let live_after_dels = live_before.contains(&key) && !deleted_this_batch;
+                        if live_after_dels {
+                            continue; // already present once the dels have applied — no-op
+                        }
+                        builder.append_stamped(s, o, new_version, UNSET_END);
+                        inserted += 1;
+                    }
+                }
+
+                new_partitions.insert(
+                    p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+            }
+
+            graphs.insert(
+                g,
+                Arc::new(GraphStore {
+                    partitions: new_partitions,
+                }),
+            );
+        }
+
+        // Only bump the clock / swap if something actually changed, so a
+        // batch whose net effect is empty is a true no-op (no dead version
+        // created) — extends `retract_quad_batch`'s existing behaviour to
+        // the combined path.
+        if retracted > 0 || inserted > 0 {
+            let next = Arc::new(TierSnapshot {
+                version: new_version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
+
+        Ok(ApplyReport {
+            retracted,
+            inserted,
+        })
+    }
+
     fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
         // Returning `&PredicatePartition` across the snapshot pointer would
         // require a guard-bound borrow. Stage-1 callers use the guarded
@@ -747,5 +898,176 @@ mod tests {
         );
         // Physical footprint still accounts for the retained (dead) partition.
         assert!(s.bytes_estimated > 0, "retained history still costs bytes");
+    }
+
+    /// SPEC-28 S6: `apply_quad_batch` — atomic dels-then-adds, idempotent,
+    /// counted. Named `apply_quad_batch` so `cargo nextest run -p
+    /// horndb-storage apply_` selects the whole module (its tests' fully
+    /// qualified names all carry this module segment).
+    mod apply_quad_batch {
+        use super::*;
+        use crate::visibility::LATEST;
+
+        /// A del+add batch is one commit: the version advances by exactly one
+        /// step for the whole batch, and a reader pinned before the batch sees
+        /// neither the retraction nor the insertion it makes.
+        #[test]
+        fn apply_is_one_commit_version() {
+            let tier = MemoryTier::new();
+            let stays = (DEFAULT_GRAPH, id(1), id(100), id(2));
+            let gone = (DEFAULT_GRAPH, id(3), id(100), id(4));
+            tier.insert_quad_batch(&[stays, gone]).unwrap(); // v1
+
+            let pinned = tier.snapshot(); // v1: sees `gone`, not the new quad below
+            let fresh = (DEFAULT_GRAPH, id(5), id(100), id(6));
+
+            let report = tier.apply_quad_batch(&[gone], &[fresh]).unwrap();
+            assert_eq!(report.retracted, 1);
+            assert_eq!(report.inserted, 1);
+
+            let after = tier.snapshot();
+            assert_eq!(
+                after.version(),
+                pinned.version() + 1,
+                "one commit version for the whole dels+adds batch"
+            );
+
+            // Pinned-before reader is unaffected: still sees `gone`, still
+            // does not see `fresh`.
+            let pinned_has = |s: TermId, o: TermId| {
+                pinned
+                    .with_predicate(DEFAULT_GRAPH, id(100), |p| {
+                        p.scan_at(pinned.version())
+                            .any(|(rs, ro)| rs == s && ro == o)
+                    })
+                    .unwrap_or(false)
+            };
+            assert!(pinned_has(id(3), id(4)), "pinned-before still sees `gone`");
+            assert!(
+                !pinned_has(id(5), id(6)),
+                "pinned-before must not see the later insert"
+            );
+        }
+
+        /// dels apply before adds within one batch, so a del+add of the same
+        /// quad ends present. Across batches, an add in batch N followed by a
+        /// del+add of the same quad in batch N+1 counts one retract and one
+        /// insert in N+1, and the quad is present afterward.
+        #[test]
+        fn dels_before_adds_within_batch() {
+            let tier = MemoryTier::new();
+            let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+
+            // Batch N: plain insert.
+            let r1 = tier.apply_quad_batch(&[], &[q]).unwrap();
+            assert_eq!((r1.retracted, r1.inserted), (0, 1));
+
+            // Batch N+1: del+add of the same quad in one batch.
+            let r2 = tier.apply_quad_batch(&[q], &[q]).unwrap();
+            assert_eq!(
+                (r2.retracted, r2.inserted),
+                (1, 1),
+                "one retract + one insert counted for a del+add of the same quad"
+            );
+
+            let live = tier
+                .with_predicate(DEFAULT_GRAPH, id(100), |p| {
+                    p.scan_at(LATEST).any(|(s, o)| s == id(1) && o == id(2))
+                })
+                .unwrap();
+            assert!(live, "del+add of the same quad ends present");
+        }
+
+        /// Re-inserting an already-visible quad is a counted no-op: `inserted
+        /// == 0` and the version does not advance.
+        #[test]
+        fn insert_present_is_counted_noop() {
+            let tier = MemoryTier::new();
+            let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+            tier.apply_quad_batch(&[], &[q]).unwrap();
+            let before_version = tier.snapshot().version();
+
+            let report = tier.apply_quad_batch(&[], &[q]).unwrap();
+            assert_eq!(report.inserted, 0, "re-insert of a visible quad is a no-op");
+            assert_eq!(report.retracted, 0);
+            assert_eq!(
+                tier.snapshot().version(),
+                before_version,
+                "a no-op insert must not mint a new version"
+            );
+        }
+
+        /// Retracting an absent quad is a counted no-op (existing
+        /// `retract_quad_batch` behaviour, now exercised through the combined
+        /// `apply_quad_batch` path).
+        #[test]
+        fn retract_absent_is_counted_noop() {
+            let tier = MemoryTier::new();
+            let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+            tier.apply_quad_batch(&[], &[q]).unwrap();
+            let before_version = tier.snapshot().version();
+
+            let absent = (DEFAULT_GRAPH, id(9), id(100), id(9));
+            let report = tier.apply_quad_batch(&[absent], &[]).unwrap();
+            assert_eq!(report.retracted, 0, "absent retraction retracts nothing");
+            assert_eq!(report.inserted, 0);
+            assert_eq!(
+                tier.snapshot().version(),
+                before_version,
+                "absent retraction must not mint a new version"
+            );
+        }
+
+        /// A batch whose net effect is empty (dels hit nothing, adds are
+        /// already all present) does not bump the version at all — neither
+        /// side alone bumps it, nor does the combination.
+        #[test]
+        fn noop_batch_does_not_bump_version() {
+            let tier = MemoryTier::new();
+            let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+            tier.apply_quad_batch(&[], &[q]).unwrap();
+            let before_version = tier.snapshot().version();
+
+            let absent = (DEFAULT_GRAPH, id(9), id(100), id(9));
+            let report = tier.apply_quad_batch(&[absent], &[q]).unwrap();
+            assert_eq!((report.retracted, report.inserted), (0, 0));
+            assert_eq!(
+                tier.snapshot().version(),
+                before_version,
+                "an empty-net-effect batch must not mint a new version"
+            );
+        }
+
+        /// Quad identity is per-graph: the same triple asserted in two graphs
+        /// is two distinct quads, so retracting it from one graph leaves the
+        /// other graph's copy untouched.
+        #[test]
+        fn quad_identity_is_per_graph() {
+            let tier = MemoryTier::new();
+            let g1 = GraphId(TermId::new(TermKind::Uri, 10).0);
+            let g2 = GraphId(TermId::new(TermKind::Uri, 11).0);
+            let q1 = (g1, id(1), id(100), id(2));
+            let q2 = (g2, id(1), id(100), id(2));
+            tier.apply_quad_batch(&[], &[q1, q2]).unwrap();
+
+            let report = tier.apply_quad_batch(&[q1], &[]).unwrap();
+            assert_eq!(report.retracted, 1);
+
+            let g1_live = tier
+                .with_predicate(g1, id(100), |p| {
+                    p.scan_at(LATEST).any(|(s, o)| s == id(1) && o == id(2))
+                })
+                .unwrap();
+            let g2_live = tier
+                .with_predicate(g2, id(100), |p| {
+                    p.scan_at(LATEST).any(|(s, o)| s == id(1) && o == id(2))
+                })
+                .unwrap();
+            assert!(!g1_live, "g1's copy was retracted");
+            assert!(
+                g2_live,
+                "g2's copy is untouched by a retraction scoped to g1"
+            );
+        }
     }
 }

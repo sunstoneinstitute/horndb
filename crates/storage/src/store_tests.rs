@@ -540,3 +540,55 @@ fn scan_predicate_takes_a_graph() {
     assert_eq!(default_rows.len(), 1);
     assert_eq!(default_rows[0], (iri("http://ex/a"), iri("http://ex/b")));
 }
+
+/// SPEC-28 S6: `Store::apply_quads`. Named `apply_quads` so `cargo nextest
+/// run -p horndb-storage apply_` selects it (the fully qualified test name
+/// carries this module segment).
+mod apply_quads {
+    use super::*;
+    use oxrdf::{Literal, NamedNodeRef};
+
+    const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+
+    fn typed_int(lexical: &str) -> Term {
+        Term::Literal(Literal::new_typed_literal(
+            lexical,
+            NamedNodeRef::new(XSD_INTEGER).unwrap(),
+        ))
+    }
+
+    /// Quad identity is lexical term equality, not value equality: the
+    /// dictionary's identity-preserving inline-int path keeps
+    /// `"01"^^xsd:integer` and `"1"^^xsd:integer` distinct all the way
+    /// through `apply_quads`, so deleting the canonical form is a 0-count
+    /// no-op against a stored non-canonical one.
+    #[test]
+    fn non_canonical_literal_identity_preserved() {
+        let store = Store::in_memory();
+        let s = iri("http://ex/s");
+        let p = iri("http://ex/p");
+        let non_canonical = typed_int("01");
+        let canonical = typed_int("1");
+
+        store
+            .insert_quads(&[(DEFAULT_GRAPH, s.clone(), p.clone(), non_canonical.clone())])
+            .unwrap();
+        assert_eq!(store.triple_count(), 1);
+
+        let report = store
+            .apply_quads(
+                &[(DEFAULT_GRAPH, s.clone(), p.clone(), canonical.clone())],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            report.retracted, 0,
+            "\"1\" and \"01\" are lexically distinct quads"
+        );
+        assert_eq!(
+            store.triple_count(),
+            1,
+            "the stored \"01\" quad survives the \"1\" delete untouched"
+        );
+    }
+}
