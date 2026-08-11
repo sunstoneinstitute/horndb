@@ -326,3 +326,69 @@ tests = [
     "selected_subset/dataset-09b",
     "selected_subset/dataset-10b",
 ]
+
+# SPEC-28 W3C SPARQL 1.1 Update evaluation subset.
+#
+# Same fixture model as [sparql_query], but each dir under
+# `crates/harness/tests/fixtures/sparql11/update_subset/<path>` holds
+# `data.trig` (initial state), `request.ru` (the update), and `expected.trig`
+# (expected final state). The runner (`crates/sparql/tests/w3c_update_suite.rs`)
+# loads the initial state, applies the update, and asserts quad-set equality of
+# the resulting store against the expected state — on BOTH backends
+# (`MemStore` and `HornBackend`). Mirrored from the W3C SPARQL 1.1 test suite's
+# add/copy/move/clear/drop/delete-insert families; mirror rules and the
+# re-fetch allowlist are in `crates/harness/scripts/fetch-w3c-suites.sh`.
+#
+# The upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`: the three
+# `clear/` cases whose expected result keeps an empty-but-existing named graph
+# (D11 makes an emptied graph cease to exist, so quad-set equality cannot grade
+# them faithfully — they would pass for the wrong reason), plus the
+# delete-insert NegativeSyntaxTest11 cases (syntax tests, graded by the
+# `sparql11-syntax` suite, not here).
+[sparql_update]
+tests = [
+    # add/ — ADD copies a graph into another, source kept (D11-clean).
+    "update_subset/add-01",
+    "update_subset/add-02",
+    "update_subset/add-03",
+    "update_subset/add-04",
+    "update_subset/add-05",
+    "update_subset/add-06",
+    "update_subset/add-07",
+    "update_subset/add-08",
+    # copy/ — COPY overwrites the destination, source kept.
+    "update_subset/copy-01",
+    "update_subset/copy-02",
+    "update_subset/copy-03",
+    "update_subset/copy-04",
+    "update_subset/copy-06",
+    "update_subset/copy-07",
+    # move/ — MOVE overwrites the destination and empties the source.
+    "update_subset/move-01",
+    "update_subset/move-02",
+    "update_subset/move-03",
+    "update_subset/move-04",
+    "update_subset/move-06",
+    "update_subset/move-07",
+    # clear/ — only the case that empties the (always-existing) default graph
+    # is D11-gradable; the three that keep an empty-but-existing named graph
+    # are excluded (see KNOWN-MANIFEST-BUGS.md).
+    "update_subset/clear-default-01",
+    # drop/ — DROP removes graphs, which is exactly D11 semantics, so all four
+    # grade faithfully.
+    "update_subset/drop-default-01",
+    "update_subset/drop-graph-01",
+    "update_subset/drop-named-01",
+    "update_subset/drop-all-01",
+    # delete-insert/ — pattern-based DELETE/INSERT … WHERE on the default
+    # graph. -01/-01b/-01c pin single-op vs multi-op ordering; -04 exercises a
+    # `GRAPH ?g` arm inside a DELETE WHERE.
+    "update_subset/delete-insert-01",
+    "update_subset/delete-insert-01b",
+    "update_subset/delete-insert-01c",
+    "update_subset/delete-insert-02",
+    "update_subset/delete-insert-04",
+    "update_subset/delete-insert-04b",
+    "update_subset/delete-insert-05b",
+    "update_subset/delete-insert-06b",
+]

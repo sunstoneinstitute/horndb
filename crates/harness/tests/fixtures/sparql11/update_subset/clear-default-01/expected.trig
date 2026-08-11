@@ -1,0 +1,7 @@
+GRAPH <http://example.org/g1> {
+<http://example.org/g1> <http://example.org/name> "G1" .
+<http://example.org/g1> <http://example.org/description> "Graph 1" .
+}
+GRAPH <http://example.org/g2> {
+<http://example.org/g2> <http://example.org/name> "G2" .
+}

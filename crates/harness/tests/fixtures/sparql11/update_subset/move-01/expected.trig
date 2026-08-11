@@ -1,0 +1,5 @@
+GRAPH <http://example.org/g1> {
+<http://example.org/tom> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .
+<http://example.org/tom> <http://xmlns.com/foaf/0.1/givenName> "Tom" .
+<http://example.org/tom> <http://xmlns.com/foaf/0.1/mbox> <mailto:tom@example.org> .
+}
