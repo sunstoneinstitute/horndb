@@ -123,7 +123,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
 /// also parses to `named: Some(vec![])`. So whether `FROM NAMED` was
 /// actually written is read off whether that vec is non-empty, not
 /// `Option::is_some()`.
-fn dataset_spec_from(ds: &Option<QueryDataset>) -> DatasetSpec {
+pub(crate) fn dataset_spec_from(ds: &Option<QueryDataset>) -> DatasetSpec {
     let Some(ds) = ds else {
         return DatasetSpec::default();
     };

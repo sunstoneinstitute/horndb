@@ -208,15 +208,29 @@ fn horn_literal_subject_insert_skips_only_illegal() {
     literal_subject_insert_skips_only_illegal::<HornBackend>()
 }
 
-fn named_graph_template_rejected<B: FullBackend + Default>() {
+/// A named-graph template routes its instantiated triples into that graph
+/// (SPEC-28 phase 4, #267 — previously rejected). The WHERE reads the default
+/// graph; the derived triple lands in `<g>`, not the default graph.
+fn named_graph_template_routes<B: FullBackend + Default>() {
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     let u = parse_update(
         "INSERT { GRAPH <http://ex/g> { ?s <http://ex/q> ?o } } \
          WHERE { ?s <http://ex/p> ?o }",
     )
     .unwrap();
-    let err = apply_update(&u, &mut store).unwrap_err();
-    assert!(format!("{err}").to_lowercase().contains("graph"));
+    apply_update(&u, &mut store).unwrap();
+    let QueryAnswer::Solutions { rows, .. } = execute_query(
+        "SELECT ?s WHERE { GRAPH <http://ex/g> { ?s <http://ex/q> ?o } }",
+        &store,
+    )
+    .unwrap() else {
+        panic!("expected solutions");
+    };
+    assert_eq!(rows.len(), 1, "the template routed the triple into <g>");
+    assert!(
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s <http://ex/q> ?o }").is_empty(),
+        "the derived triple must not land in the default graph"
+    );
 }
 
 #[test]
@@ -251,74 +265,83 @@ fn mem_ground_safety() {
 fn horn_ground_safety() {
     ground_safety_drops_unbound::<HornBackend>()
 }
-/// A `USING <named-graph>` clause redefines the dataset the WHERE reads
-/// from; Stage-1 is default-graph only, so it must be rejected up front
-/// (not silently ignored, which would delete from the default graph).
-fn using_named_graph_rejected<B: FullBackend + Default>() {
-    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+/// A `USING <named-graph>` clause builds the WHERE dataset (SPEC-28 phase 4 /
+/// S3 `DatasetSpec` — previously rejected): the WHERE reads `<g>` as its
+/// default graph, while the (unscoped) INSERT template writes the default
+/// graph.
+fn using_named_graph_reads_dataset<B: FullBackend + Default + SeedNamedGraph>() {
+    let mut store = B::default();
+    store.seed_named("http://ex/g", "http://ex/a", "http://ex/p", "http://ex/b");
     let u = parse_update(
-        "DELETE { ?s <http://ex/p> ?o } USING <http://ex/g> \
+        "INSERT { ?s <http://ex/q> ?o } USING <http://ex/g> \
          WHERE { ?s <http://ex/p> ?o }",
     )
     .unwrap();
-    let err = apply_update(&u, &mut store).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.to_lowercase().contains("graph"));
-    // Also assert the message identifies the USING path, so a future swap
-    // of the two rejection error paths (USING vs. named-graph template) is
-    // caught here. `using_named_graph_unsupported()` contains "USING".
-    assert!(msg.contains("USING"));
-    // The default-graph triple must be intact (USING was rejected, not
-    // silently applied against the default graph).
+    apply_update(&u, &mut store).unwrap();
+    // The WHERE read <g> (else the default graph is empty and nothing inserts);
+    // the template wrote the default graph.
     assert_eq!(
-        objects_of(&store, "http://ex/a", "http://ex/p"),
-        vec!["http://ex/b"]
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s <http://ex/q> ?o }"),
+        vec!["http://ex/a"],
+        "USING <g> made the WHERE read <g>"
     );
 }
 
-/// A `WITH <named-graph>` clause on a combined DELETE/INSERT … WHERE must
-/// be rejected at Stage 1. spargebra desugars `WITH <g>` into both the
-/// quad graph names *and* `using.default`, so it trips the named-graph
-/// template / USING guards (Stage-1 is default-graph only). A *positive*
-/// `WITH` test is impossible at Stage 1: any `WITH <iri>` names a
-/// non-default graph by construction, so there is no accepted form to
-/// assert against.
-fn with_named_graph_rejected<B: FullBackend + Default>() {
-    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+/// A `WITH <named-graph>` clause scopes both the templates and the WHERE clause
+/// to `<g>` (SPEC-28 phase 4 / D10 — previously rejected). spargebra desugars
+/// `WITH <g>` by injecting `<g>` into the templates and setting `USING <g>` for
+/// the WHERE, so both sides resolve to `<g>`.
+fn with_named_graph_scopes_both_sides<B: FullBackend + Default + SeedNamedGraph>() {
+    let mut store = B::default();
+    store.seed_named("http://ex/g", "http://ex/a", "http://ex/p", "http://ex/b");
     let u = parse_update(
         "WITH <http://ex/g> DELETE { ?s <http://ex/p> ?o } \
          INSERT { ?s <http://ex/q> ?o } WHERE { ?s <http://ex/p> ?o }",
     )
     .unwrap();
-    let err = apply_update(&u, &mut store).unwrap_err();
-    assert!(format!("{err}").to_lowercase().contains("graph"));
-    // The default-graph triple must be intact (WITH was rejected up front,
-    // not partially applied).
+    apply_update(&u, &mut store).unwrap();
+    let count_in_g = |pred: &str| {
+        let q = format!("SELECT ?s WHERE {{ GRAPH <http://ex/g> {{ ?s <{pred}> ?o }} }}");
+        let QueryAnswer::Solutions { rows, .. } = execute_query(&q, &store).unwrap() else {
+            panic!("expected solutions");
+        };
+        rows.len()
+    };
     assert_eq!(
-        objects_of(&store, "http://ex/a", "http://ex/p"),
-        vec!["http://ex/b"]
+        count_in_g("http://ex/p"),
+        0,
+        "WITH deleted the source triple in <g>"
+    );
+    assert_eq!(
+        count_in_g("http://ex/q"),
+        1,
+        "WITH inserted the derived triple in <g>"
+    );
+    assert!(
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s ?p ?o }").is_empty(),
+        "the default graph is untouched by WITH <g>"
     );
 }
 
-/// A `GRAPH` pattern in the WHERE clause must be rejected before any
-/// mutation. The update path's own `where_has_graph_pattern` scan produces
-/// this error; it does not rely on the query translator, which since
-/// SPEC-28 phase 3 (#266) accepts `GRAPH` for queries — named-graph Update
-/// is separate scope (SPEC-28 S5) and stays default-graph-only here.
-fn graph_in_where_rejected<B: FullBackend + Default>() {
+/// A ground `GRAPH` pattern in the WHERE clause reads that named graph (SPEC-28
+/// phase 4 routes the WHERE through the phase-3 query path — previously
+/// rejected by the update layer's own scan). Here the WHERE reads `<g>`; the
+/// (default-graph) INSERT template copies the bound row into the default graph.
+fn graph_in_where_reads_named<B: FullBackend + Default + SeedNamedGraph>() {
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    store.seed_named("http://ex/g", "http://ex/n", "http://ex/p", "http://ex/c");
     let u = parse_update(
-        "DELETE { ?s <http://ex/p> ?o } \
+        "INSERT { ?s <http://ex/q> ?o } \
          WHERE { GRAPH <http://ex/g> { ?s <http://ex/p> ?o } }",
     )
     .unwrap();
-    let err = apply_update(&u, &mut store).unwrap_err();
-    assert!(format!("{err}").to_lowercase().contains("graph"));
-    // The default-graph triple must be intact (GRAPH-in-WHERE was rejected
-    // up front, not silently applied against the default graph).
+    apply_update(&u, &mut store).unwrap();
+    // `<http://ex/n>` lives only in <g>; its appearance here proves the WHERE
+    // read <g>, not the default graph.
     assert_eq!(
-        objects_of(&store, "http://ex/a", "http://ex/p"),
-        vec!["http://ex/b"]
+        default_graph_subjects(&store, "SELECT ?s WHERE { ?s <http://ex/q> ?o }"),
+        vec!["http://ex/n"],
+        "GRAPH <g> in the WHERE read the named graph"
     );
 }
 
@@ -387,17 +410,18 @@ fn default_graph_subjects<B: FullBackend>(store: &B, q: &str) -> Vec<String> {
     out
 }
 
-/// An update's WHERE clause must read exactly the graph its templates
-/// write: the default graph, whatever the query-side `default_graph` mode
-/// says (SPEC-28 S3; the write side stays default-graph only until #267).
+/// An update's WHERE clause with no `WITH`/`USING` reads the **default graph
+/// only** (strict), regardless of the query-side `default_graph` mode — so a
+/// default-graph template writes exactly the rows the WHERE bound (SPEC-28
+/// phase 4; `apply_delete_insert` pins the no-clause WHERE to `Strict`).
 ///
-/// The discriminating shape is DELETE+INSERT. Under a `union` default graph
-/// the WHERE also binds named-graph rows; `delete_triple` is keyed on the
-/// default graph so it cannot remove them (a silent no-op), but the INSERT
-/// template still fires — **copying** each named-graph binding into the
-/// default graph. A plain `DELETE WHERE` hides this: the delete no-ops
-/// either way, so the named-graph row survives whether or not the WHERE is
-/// pinned. Assert on the copy, not on the survival.
+/// The discriminating shape is DELETE+INSERT. Were the WHERE run under a
+/// `union` default graph it would also bind named-graph rows; the default-graph
+/// DELETE could not remove them (a silent no-op), but the INSERT template would
+/// still fire — **copying** each named-graph binding into the default graph. A
+/// plain `DELETE WHERE` hides this: the delete no-ops either way, so the
+/// named-graph row survives whether or not the WHERE is pinned. Assert on the
+/// copy, not on the survival.
 fn update_where_does_not_see_named_graph_data<B: FullBackend + Default + SeedNamedGraph>() {
     let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     store.seed_named("http://ex/g", "http://ex/n", "http://ex/p", "http://ex/c");
@@ -443,12 +467,12 @@ fn horn_update_where_does_not_see_named_graph_data() {
 }
 
 #[test]
-fn mem_graph_in_where_rejected() {
-    graph_in_where_rejected::<MemStore>()
+fn mem_graph_in_where_reads_named() {
+    graph_in_where_reads_named::<MemStore>()
 }
 #[test]
-fn horn_graph_in_where_rejected() {
-    graph_in_where_rejected::<HornBackend>()
+fn horn_graph_in_where_reads_named() {
+    graph_in_where_reads_named::<HornBackend>()
 }
 #[test]
 fn mem_triple_term_template_rejected() {
@@ -460,26 +484,26 @@ fn horn_triple_term_template_rejected() {
 }
 
 #[test]
-fn mem_named_graph_rejected() {
-    named_graph_template_rejected::<MemStore>()
+fn mem_named_graph_template_routes() {
+    named_graph_template_routes::<MemStore>()
 }
 #[test]
-fn horn_named_graph_rejected() {
-    named_graph_template_rejected::<HornBackend>()
+fn horn_named_graph_template_routes() {
+    named_graph_template_routes::<HornBackend>()
 }
 #[test]
-fn mem_using_named_graph_rejected() {
-    using_named_graph_rejected::<MemStore>()
+fn mem_using_named_graph_reads_dataset() {
+    using_named_graph_reads_dataset::<MemStore>()
 }
 #[test]
-fn horn_using_named_graph_rejected() {
-    using_named_graph_rejected::<HornBackend>()
+fn horn_using_named_graph_reads_dataset() {
+    using_named_graph_reads_dataset::<HornBackend>()
 }
 #[test]
-fn mem_with_named_graph_rejected() {
-    with_named_graph_rejected::<MemStore>()
+fn mem_with_named_graph_scopes_both_sides() {
+    with_named_graph_scopes_both_sides::<MemStore>()
 }
 #[test]
-fn horn_with_named_graph_rejected() {
-    with_named_graph_rejected::<HornBackend>()
+fn horn_with_named_graph_scopes_both_sides() {
+    with_named_graph_scopes_both_sides::<HornBackend>()
 }
