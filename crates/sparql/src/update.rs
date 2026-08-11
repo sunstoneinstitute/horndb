@@ -35,7 +35,7 @@ use crate::algebra::translate::translate_where;
 use crate::algebra::Term;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::Runtime;
-use crate::exec::{Bindings, FullBackend};
+use crate::exec::{AlgebraQuad, Bindings, FullBackend};
 use crate::parser::ParsedUpdate;
 use crate::plan::planner;
 use crate::{DefaultGraphMode, SparqlConfig};
@@ -106,20 +106,27 @@ pub fn apply_update_with<B: FullBackend>(
     for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
+                // `validate_op` already rejected any named-graph quad
+                // (`require_default_graph_name`), so every quad here is
+                // default-graph scoped (`None`).
+                let mut adds: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
                 for q in data {
                     let s = subject_to_term(&q.subject);
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = object_to_term(&q.object)?;
-                    store.insert_triple(s, p, o);
+                    adds.push((None, s, p, o));
                 }
+                store.apply_quads(Vec::new(), adds)?;
             }
             GraphUpdateOperation::DeleteData { data } => {
+                let mut dels: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
                 for q in data {
                     let s = Term::Iri(q.subject.as_str().to_owned());
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = ground_term_to_term(&q.object)?;
-                    store.delete_triple(&s, &p, &o);
+                    dels.push((None, s, p, o));
                 }
+                store.apply_quads(dels, Vec::new())?;
             }
             GraphUpdateOperation::DeleteInsert {
                 delete,
@@ -174,12 +181,15 @@ fn apply_clear_drop<B: FullBackend>(
 ) -> Result<()> {
     use spargebra::algebra::GraphTarget;
     match graph {
-        // TODO(#267): DefaultGraph must not route to the whole-store clear_all
-        // once named-graph writes exist — `Store::clear_all` sweeps every
-        // graph (see `HornBackend::clear_all`), so `CLEAR DEFAULT` would
-        // silently destroy named-graph data too.
+        // `Store::clear_graph` CAN scope `DefaultGraph` to just the default
+        // graph now (SPEC-28 phase 4, #267) — but this call site keeps
+        // routing both `DEFAULT` and `ALL` to a whole-store sweep, matching
+        // Stage-1's pre-existing behaviour, since no write path here can yet
+        // put data in a named graph for `CLEAR DEFAULT` to wrongly reach.
+        // Scoping `DEFAULT` to just the default graph is SPARQL Update's
+        // named-graph rewrite (a separate task within this phase).
         GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
-            store.clear_all();
+            store.clear_graph(&GraphTarget::AllGraphs)?;
             Ok(())
         }
         // No named graphs exist in the Stage-1 store: a named target (or the
@@ -218,9 +228,11 @@ fn apply_load<B: FullBackend>(
     }
     match fetch_and_parse(source.as_str()) {
         Ok(triples) => {
-            for (s, p, o) in triples {
-                store.insert_triple(s, p, o);
-            }
+            let adds: Vec<AlgebraQuad> = triples
+                .into_iter()
+                .map(|(s, p, o)| (None, s, p, o))
+                .collect();
+            store.apply_quads(Vec::new(), adds)?;
             Ok(())
         }
         Err(e) => {
@@ -627,12 +639,18 @@ fn apply_delete_insert<B: FullBackend>(
         }
     }
 
-    for (s, p, o) in &deletions {
-        store.delete_triple(s, p, o);
-    }
-    for (s, p, o) in insertions {
-        store.insert_triple(s, p, o);
-    }
+    // One atomic batch (SPEC-28 S6): dels apply before adds, matching
+    // §3.1.3's "deletions, then insertions" ordering exactly, in a single
+    // store-level commit rather than two loops of single-quad writes.
+    let dels: Vec<AlgebraQuad> = deletions
+        .into_iter()
+        .map(|(s, p, o)| (None, s, p, o))
+        .collect();
+    let adds: Vec<AlgebraQuad> = insertions
+        .into_iter()
+        .map(|(s, p, o)| (None, s, p, o))
+        .collect();
+    store.apply_quads(dels, adds)?;
     Ok(())
 }
 

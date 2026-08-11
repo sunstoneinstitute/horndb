@@ -14,16 +14,15 @@
 //! (WCOJ) will replace this wholesale.
 
 use crate::algebra::{Term, TriplePattern};
-use crate::error::Result;
+use crate::error::{Result, SparqlError};
 use crate::exec::scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
 };
-use crate::exec::{unify_one, Bindings, Executor, Slot, Store};
+use crate::exec::{
+    classify_lexical, unify_one, AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor,
+    GraphName, Slot, Store,
+};
 use std::collections::{BTreeSet, HashMap, HashSet};
-
-/// The graph a quad lives in: `None` is the default-graph sentinel (which
-/// has no IRI), `Some(iri)` a named graph.
-type GraphName = Option<String>;
 
 /// In-memory quad store. Clone-on-write semantics — each
 /// `MemStore` is independent.
@@ -65,9 +64,8 @@ impl MemStore {
     /// no-op; inserting it in a *second* graph records the extra membership
     /// without duplicating the triple.
     ///
-    /// This is the seam SPEC-28 phase 3 needs to seed named graphs. The
-    /// write trait (`exec::Store`) stays triple-shaped and default-graph
-    /// scoped — the named-graph SPARQL Update path is phase 4 (#267).
+    /// This is the seam SPEC-28 phase 3 needs to seed named graphs, and the
+    /// insertion primitive phase 4's [`Store::apply_quads`] builds on.
     pub fn insert_quad(&mut self, graph: Option<&str>, triple: (String, String, String)) {
         let g = graph.map(str::to_owned);
         if let Some(&idx) = self.pos.get(&triple) {
@@ -91,8 +89,106 @@ impl MemStore {
         self.triples.push(triple);
     }
 
+    /// True if `triple` is currently live in `graph` (default graph if
+    /// `None`). The [`Store::apply_quads`] idempotency check: a triple not
+    /// yet stored at all, or stored but not in `graph`, is not live there.
+    fn quad_is_live(&self, graph: Option<&str>, triple: &(String, String, String)) -> bool {
+        match self.pos.get(triple) {
+            Some(&idx) => self.graphs[idx].contains(&graph.map(str::to_owned)),
+            None => false,
+        }
+    }
+
+    /// Remove `triple`'s membership in `graph` (default graph if `None`).
+    /// The triple itself — and its indexes — survive if another graph still
+    /// holds it; only when this was its last graph does the store drop it
+    /// entirely (a full-store rebuild: deletion is rare, so trading a little
+    /// work for trivially-correct index bookkeeping is the same call
+    /// [`Self::remove_graph_membership`] makes for a multi-triple sweep). A
+    /// no-op if `triple` was never in `graph`.
+    fn delete_quad(&mut self, graph: Option<&str>, triple: &(String, String, String)) {
+        let Some(&idx) = self.pos.get(triple) else {
+            return;
+        };
+        let g = graph.map(str::to_owned);
+        if !self.graphs[idx].remove(&g) {
+            return; // not in that graph — no-op
+        }
+        if !self.graphs[idx].is_empty() {
+            return; // still held by another graph
+        }
+        self.remove_triple_rebuild(triple);
+    }
+
+    /// Remove `graph` membership from every triple where `remove` returns
+    /// true; a triple left with no membership afterward is dropped from the
+    /// store. One full-store rebuild pass regardless of how many triples the
+    /// sweep touches — generalizes [`Self::delete_quad`]'s single-triple
+    /// rebuild to "every triple `remove` matches". Returns the number of
+    /// (graph, triple) memberships actually removed — [`Store::clear_graph`]'s
+    /// count.
+    fn remove_graph_membership(&mut self, remove: impl Fn(&GraphName) -> bool) -> usize {
+        let mut removed = 0usize;
+        let survivors: Vec<((String, String, String), HashSet<GraphName>)> =
+            std::mem::take(&mut self.triples)
+                .into_iter()
+                .zip(std::mem::take(&mut self.graphs))
+                .filter_map(|(t, mut gs)| {
+                    let before = gs.len();
+                    gs.retain(|g| !remove(g));
+                    removed += before - gs.len();
+                    if gs.is_empty() {
+                        None
+                    } else {
+                        Some((t, gs))
+                    }
+                })
+                .collect();
+        self.reset();
+        for (t, graphs) in survivors {
+            self.reinsert_with_graphs(t, graphs);
+        }
+        removed
+    }
+
+    /// Re-insert `t` under every graph in `graphs` (used to rebuild the
+    /// store from a filtered survivor list). Moves `t` into the last
+    /// membership so the common single-graph case costs no clone at all.
+    fn reinsert_with_graphs(&mut self, t: (String, String, String), graphs: HashSet<GraphName>) {
+        let mut rest = graphs.into_iter();
+        let mut cur = rest.next();
+        while let Some(g) = cur {
+            cur = rest.next();
+            match cur {
+                Some(_) => self.insert_quad(g.as_deref(), t.clone()),
+                None => {
+                    self.insert_quad(g.as_deref(), t);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Rebuild the store keeping every triple except `remove` — the
+    /// single-triple special case of [`Self::remove_graph_membership`]'s
+    /// rebuild, used once `delete_quad` has confirmed `remove`'s last
+    /// membership is already gone (so no membership filtering is needed
+    /// here, only dropping the triple itself).
+    fn remove_triple_rebuild(&mut self, remove: &(String, String, String)) {
+        let survivors: Vec<((String, String, String), HashSet<GraphName>)> =
+            std::mem::take(&mut self.triples)
+                .into_iter()
+                .zip(std::mem::take(&mut self.graphs))
+                .filter(|(t, _)| t != remove)
+                .collect();
+        self.reset();
+        for (t, graphs) in survivors {
+            self.reinsert_with_graphs(t, graphs);
+        }
+    }
+
     /// Drop every quad and every index — a structural reset, independent of
-    /// what the `Store` trait's `clear_all` means at any point in time.
+    /// what the `Store` trait's `clear_graph` means at any point in time.
     fn reset(&mut self) {
         self.triples.clear();
         self.graphs.clear();
@@ -335,72 +431,113 @@ impl MemStore {
 }
 
 impl Store for MemStore {
-    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term) {
-        self.insert((
-            term_to_lex(&subject),
-            term_to_lex(&predicate),
-            term_to_lex(&object),
-        ));
-    }
-    /// Retract the triple from the **default graph** only (the write trait
-    /// is default-graph scoped until SPEC-28 phase 4). A triple that also
-    /// lives in a named graph survives there.
-    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
-        let key = (
-            term_to_lex(subject),
-            term_to_lex(predicate),
-            term_to_lex(object),
-        );
-        let Some(&idx) = self.pos.get(&key) else {
-            return;
-        };
-        if !self.graphs[idx].remove(&None) {
-            return; // not in the default graph — no-op
-        }
-        if !self.graphs[idx].is_empty() {
-            return; // still held by a named graph; the triple stays
-        }
-        // Rebuild from the surviving quads. Deletion is rare (the server
-        // loads once then serves read-only; `DELETE DATA` exists but is not
-        // on a hot path), so a full rebuild keeps the index bookkeeping
-        // trivially correct rather than juggling positional tombstones.
-        let survivors: Vec<((String, String, String), HashSet<GraphName>)> =
-            std::mem::take(&mut self.triples)
-                .into_iter()
-                .zip(std::mem::take(&mut self.graphs))
-                .filter(|(t, _)| t != &key)
-                .collect();
-        // `reset`, not `clear_all`: the trait method's contract becomes
-        // default-graph-only in SPEC-28 phase 4 (see its TODO), at which
-        // point routing this rebuild through it would leave the indexes
-        // populated and corrupt the store.
-        self.reset();
-        for (t, graphs) in survivors {
-            // Re-insert once per graph the triple belongs to, moving the
-            // strings on the last one so the common single-graph survivor
-            // costs no clone at all.
-            let mut rest = graphs.into_iter();
-            let mut cur = rest.next();
-            while let Some(g) = cur {
-                cur = rest.next();
-                match cur {
-                    Some(_) => self.insert_quad(g.as_deref(), t.clone()),
-                    None => {
-                        self.insert_quad(g.as_deref(), t);
-                        break;
-                    }
-                }
+    /// Applies `dels` then `adds` over the quad-membership sets (SPEC-28
+    /// S6): each half is a plain idempotency-checked loop over
+    /// [`Self::quad_is_live`]/[`Self::delete_quad`]/[`Self::insert_quad`],
+    /// counting only the ones that actually change something. Dels run
+    /// first, so a quad deleted and re-added within one call ends present —
+    /// matching `horndb_storage::Tier::apply_quad_batch`'s documented
+    /// contract at this layer, even though `MemStore` has no storage crate
+    /// dependency to share the implementation with.
+    fn apply_quads(
+        &mut self,
+        dels: Vec<AlgebraQuad>,
+        adds: Vec<AlgebraQuad>,
+    ) -> Result<ApplyCounts> {
+        let mut retracted = 0usize;
+        for (g, s, p, o) in &dels {
+            let key = (term_to_lex(s), term_to_lex(p), term_to_lex(o));
+            if self.quad_is_live(g.as_deref(), &key) {
+                self.delete_quad(g.as_deref(), &key);
+                retracted += 1;
             }
         }
+        let mut inserted = 0usize;
+        for (g, s, p, o) in &adds {
+            let key = (term_to_lex(s), term_to_lex(p), term_to_lex(o));
+            if !self.quad_is_live(g.as_deref(), &key) {
+                self.insert_quad(g.as_deref(), key);
+                inserted += 1;
+            }
+        }
+        Ok(ApplyCounts {
+            retracted,
+            inserted,
+        })
     }
-    // TODO(#267): this sweeps every graph, named ones included. Once a
-    // public write path can put data in a named graph via SPARQL Update,
-    // `CLEAR DEFAULT`/`DROP DEFAULT` must stop routing here — same gap as
-    // `HornBackend::clear_all` and the TODO in `crate::update::apply_clear_drop`.
-    /// Whole-store wipe. Semantics are the `Store` trait's; internal callers
-    /// that just want an empty store must use [`MemStore::reset`].
-    fn clear_all(&mut self) {
-        self.reset();
+
+    /// Sweeps `graph` via [`Self::remove_graph_membership`] (a pure
+    /// membership-deletion pass — "via `apply_quads` internally" at this
+    /// backend's grain, matching the trait doc), except `AllGraphs`, which
+    /// is a straight [`Self::reset`] (equivalent, and avoids walking the
+    /// membership sets just to remove every entry from them).
+    fn clear_graph(&mut self, graph: &spargebra::algebra::GraphTarget) -> Result<usize> {
+        use spargebra::algebra::GraphTarget;
+        Ok(match graph {
+            GraphTarget::DefaultGraph => self.remove_graph_membership(|g| g.is_none()),
+            GraphTarget::NamedGraphs => self.remove_graph_membership(|g| g.is_some()),
+            GraphTarget::NamedNode(n) => {
+                let iri = n.as_str().to_owned();
+                self.remove_graph_membership(move |g| g.as_deref() == Some(iri.as_str()))
+            }
+            GraphTarget::AllGraphs => {
+                let removed: usize = self.graphs.iter().map(HashSet::len).sum();
+                self.reset();
+                removed
+            }
+        })
+    }
+
+    /// SPEC-28 D11: a named graph exists iff it holds at least one triple's
+    /// membership.
+    fn graph_exists(&self, graph: &str) -> bool {
+        self.graphs
+            .iter()
+            .any(|gs| gs.iter().any(|g| g.as_deref() == Some(graph)))
+    }
+
+    /// Every named graph (the default-graph sentinel excluded) holding at
+    /// least one triple's membership, sorted by IRI. See the trait doc for
+    /// why this is unfiltered by `FROM NAMED`/reserved-prefix rules, unlike
+    /// [`Executor::named_graphs`].
+    fn graphs(&self) -> Vec<String> {
+        let mut out: BTreeSet<&str> = BTreeSet::new();
+        for gs in &self.graphs {
+            out.extend(gs.iter().filter_map(|g| g.as_deref()));
+        }
+        out.into_iter().map(str::to_owned).collect()
+    }
+
+    /// The `ADD`/`MOVE`/`COPY` source read: every triple currently a member
+    /// of the one graph `graph` names. An unknown named graph reads as
+    /// empty, not an error (SPEC-28 S3's "unknown graph ⇒ zero rows" rule).
+    fn scan_graph_quads(
+        &self,
+        graph: &spargebra::algebra::GraphTarget,
+    ) -> Result<Vec<AlgebraTriple>> {
+        use spargebra::algebra::GraphTarget;
+        let want: GraphName = match graph {
+            GraphTarget::DefaultGraph => None,
+            GraphTarget::NamedNode(n) => Some(n.as_str().to_owned()),
+            GraphTarget::AllGraphs | GraphTarget::NamedGraphs => {
+                return Err(SparqlError::Executor(
+                    "scan_graph_quads: AllGraphs/NamedGraphs names no single source graph".into(),
+                ));
+            }
+        };
+        Ok(self
+            .triples
+            .iter()
+            .zip(&self.graphs)
+            .filter(|(_, gs)| gs.contains(&want))
+            .map(|((s, p, o), _)| {
+                (
+                    classify_lexical(s),
+                    classify_lexical(p),
+                    classify_lexical(o),
+                )
+            })
+            .collect())
     }
 }
 
@@ -408,6 +545,8 @@ impl Store for MemStore {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+    use spargebra::algebra::GraphTarget;
+    use spargebra::term::NamedNode;
 
     fn iri(s: &str) -> Term {
         Term::Iri(s.to_owned())
@@ -518,5 +657,168 @@ mod tests {
             .collect();
         assert!(!titles.contains(&"\"Second\"".to_owned()));
         assert!(titles.contains(&"\"First\"".to_owned()));
+    }
+
+    #[test]
+    fn apply_quads_routes_by_graph() {
+        let mut st = MemStore::default();
+        let default_add: AlgebraQuad = (None, iri("s1"), iri("p"), iri("o1"));
+        let named_add: AlgebraQuad = (Some("http://ex/g".into()), iri("s2"), iri("p"), iri("o2"));
+        let report = st
+            .apply_quads(Vec::new(), vec![default_add, named_add])
+            .unwrap();
+        assert_eq!(
+            report,
+            ApplyCounts {
+                retracted: 0,
+                inserted: 2
+            }
+        );
+
+        assert_eq!(
+            st.scan_graph_quads(&GraphTarget::DefaultGraph).unwrap(),
+            vec![(iri("s1"), iri("p"), iri("o1"))],
+            "the default-graph add must not land in the named graph"
+        );
+        assert_eq!(
+            st.scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/g"
+            )))
+            .unwrap(),
+            vec![(iri("s2"), iri("p"), iri("o2"))],
+            "the named-graph add must not land in the default graph"
+        );
+    }
+
+    #[test]
+    fn apply_counts_are_accurate() {
+        let mut st = MemStore::default();
+        let q = || -> AlgebraQuad { (None, iri("s"), iri("p"), iri("o")) };
+
+        assert_eq!(
+            st.apply_quads(Vec::new(), vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 1
+            },
+            "fresh insert"
+        );
+        assert_eq!(
+            st.apply_quads(Vec::new(), vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 0
+            },
+            "re-inserting an already-live quad is a counted no-op"
+        );
+        assert_eq!(
+            st.apply_quads(vec![q()], Vec::new()).unwrap(),
+            ApplyCounts {
+                retracted: 1,
+                inserted: 0
+            },
+            "deleting a live quad"
+        );
+        assert_eq!(
+            st.apply_quads(vec![q()], Vec::new()).unwrap(),
+            ApplyCounts {
+                retracted: 0,
+                inserted: 0
+            },
+            "deleting an absent quad is a counted no-op"
+        );
+
+        // Delete + re-add the same quad within one batch: dels apply before
+        // adds, so the quad ends present.
+        st.apply_quads(Vec::new(), vec![q()]).unwrap(); // resurrect for the next check
+        assert_eq!(
+            st.apply_quads(vec![q()], vec![q()]).unwrap(),
+            ApplyCounts {
+                retracted: 1,
+                inserted: 1
+            }
+        );
+        assert_eq!(st.len(), 1, "the quad ends present");
+    }
+
+    #[test]
+    fn clear_graph_and_exists() {
+        let mut st = MemStore::default();
+        st.apply_quads(
+            Vec::new(),
+            vec![
+                (None, iri("s0"), iri("p"), iri("o0")),
+                (Some("http://ex/g1".into()), iri("s1"), iri("p"), iri("o1")),
+                (Some("http://ex/g2".into()), iri("s2"), iri("p"), iri("o2")),
+            ],
+        )
+        .unwrap();
+
+        assert!(!st.graph_exists("http://ex/never-seen"));
+        assert!(st.graph_exists("http://ex/g1"));
+        assert!(st.graph_exists("http://ex/g2"));
+        assert_eq!(
+            st.graphs(),
+            vec!["http://ex/g1".to_owned(), "http://ex/g2".to_owned()]
+        );
+
+        let removed = st
+            .clear_graph(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/g1",
+            )))
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(
+            !st.graph_exists("http://ex/g1"),
+            "SPEC-28 D11: swept to zero quads, so it ceases to exist"
+        );
+        assert!(st.graph_exists("http://ex/g2"), "g2 is untouched");
+        assert_eq!(st.graphs(), vec!["http://ex/g2".to_owned()]);
+
+        let removed = st.clear_graph(&GraphTarget::AllGraphs).unwrap();
+        assert_eq!(removed, 2, "default graph's quad + g2's quad");
+        assert!(st.is_empty());
+        assert!(st.graphs().is_empty());
+    }
+
+    #[test]
+    fn scan_graph_quads_roundtrip() {
+        let mut st = MemStore::default();
+        let g = "http://ex/g";
+        st.apply_quads(
+            Vec::new(),
+            vec![
+                (Some(g.to_owned()), iri("s1"), iri("p"), iri("o1")),
+                (Some(g.to_owned()), iri("s2"), iri("p"), iri("o2")),
+                (None, iri("s3"), iri("p"), iri("o3")), // must not leak into the named graph
+            ],
+        )
+        .unwrap();
+
+        let got: HashSet<AlgebraTriple> = st
+            .scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(g)))
+            .unwrap()
+            .into_iter()
+            .collect();
+        let want: HashSet<AlgebraTriple> = [
+            (iri("s1"), iri("p"), iri("o1")),
+            (iri("s2"), iri("p"), iri("o2")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got, want);
+
+        // An unknown named graph reads as empty, not an error.
+        assert_eq!(
+            st.scan_graph_quads(&GraphTarget::NamedNode(NamedNode::new_unchecked(
+                "http://ex/nope"
+            )))
+            .unwrap(),
+            Vec::new()
+        );
+
+        // AllGraphs/NamedGraphs are not a single source — a caller error.
+        assert!(st.scan_graph_quads(&GraphTarget::AllGraphs).is_err());
+        assert!(st.scan_graph_quads(&GraphTarget::NamedGraphs).is_err());
     }
 }
