@@ -1,6 +1,7 @@
-> This file has two parts: the **OWL 2 RL** entailment cases the Stage-1
-> reasoner does not cover (below), and the **SPARQL query** cases the
-> SPEC-07/SPEC-28 engine does not cover (at the end). Both follow the same
+> This file has three parts: the **OWL 2 RL** entailment cases the Stage-1
+> reasoner does not cover (below), the **SPARQL query** cases the
+> SPEC-07/SPEC-28 engine does not cover, and the **SPARQL Update** cases the
+> SPEC-28 engine does not cover (both at the end). All three follow the same
 > rule — a W3C case that is not in `harness/selected.toml` must be listed
 > here with the specific missing capability that gates it.
 
@@ -396,3 +397,68 @@ evaluated rather than bound on the scan leaf: evaluate `P` per graph with
 `?g` free, then join `{?g → thatGraph}`. That is the per-graph block
 evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
 column), so it is a design change, not a bug fix.
+
+# Known-failing W3C SPARQL Update cases
+
+The SPARQL Update-evaluation gate is `harness/selected.toml`'s
+`[sparql_update]` section, run by `crates/sparql/tests/w3c_update_suite.rs`
+against both backends (`MemStore` and `HornBackend`), by full-store quad-set
+equality. SPEC-28 phase 4 (#267) added the W3C SPARQL 1.1 Update `add/`,
+`copy/`, `move/`, `clear/`, `drop/`, and `delete/` families to it. Fixtures
+for **every** case of all six families — selected or not — are checked in
+under `crates/harness/tests/fixtures/sparql11/update_selected_subset/`,
+mirrored from
+`https://www.w3.org/2009/sparql/docs/tests/sparql11-test-suite-20121023.tar.gz`
+(mirror rules: `crates/harness/scripts/fetch-w3c-suites.sh`).
+
+47 cases exist upstream across the six families; 45 are selected. The 2
+below are not.
+
+## Naming: `delete-insert/` vs. `delete/`
+
+SPEC-28 S7 and PLAN-28-04 both describe the sixth family as "graph-specific
+`delete-insert/`". That name does not match any upstream data: the
+`delete-insert/` directory's one case with a `GRAPH` clause
+(`dawg-delete-insert-04`, a `UNION` arm) never seeds named-graph data in its
+manifest entry, so it never actually exercises graph scoping, and the rest
+of that directory's entries are either default-graph-only
+(`dawg-delete-insert-01/01b/01c/02/04/04b/05b`) or `mf:NegativeSyntaxTest11`
+cases (illegal bnode-as-wildcard DELETE templates — SPARQL 1.1 dropped that
+syntax from the final REC, so these are non-conformance fixtures, not
+`UpdateEvaluationTest`s). The upstream directory that actually holds the
+"Graph-specific DELETE" cases — named that in their own `mf:name`, exercising
+ground `GRAPH` blocks, `WITH`, `USING`, and `USING NAMED` — is `delete/`.
+That is the directory mirrored under `update_selected_subset/` and listed in
+`selected.toml`'s `[sparql_update]` section as the sixth family; this is a
+fixture-naming correction, not a scope reduction (`delete/` gates the same
+S3/S4 dataset-scoping behaviour the plan intended `delete-insert/` to gate).
+
+## `WITH` wrongly zeroes named-graph visibility for a ground `GRAPH` block (2 cases)
+
+Per SPARQL 1.1 Update §3.1.2, a bare `WITH <g>` (no `USING`/`USING NAMED`)
+only sets the *default* graph for unqualified WHERE patterns and the target
+for unqualified DELETE/INSERT templates — WHERE is otherwise matched
+"against the Graph Store" (every graph stays visible to a ground `GRAPH <g>`
+block). `crates/sparql/src/algebra/translate.rs::dataset_spec_from` cannot
+tell apart two different-meaning inputs that both arrive as
+`QueryDataset { named: None, .. }`: a plain query's `FROM <d>` with no `FROM
+NAMED` (where `None` correctly means "no named graphs visible", per SPARQL
+query semantics) and spargebra's `Modify` rule's WITH-only synthesis
+(`QueryDataset { default: vec![with], named: None }`, where `None` means
+"unrestricted"). Both collapse to an explicit empty named-graph set today,
+so a ground `GRAPH` block inside a WITH-scoped WHERE clause matches nothing.
+`USING <g>` alone (no `USING NAMED`) is unaffected — spargebra already
+encodes that case as an explicit `named: Some(vec![])`, which is the correct
+"no named graphs" reading for USING-only.
+
+Tracked as [#281](https://github.com/sunstoneinstitute/horndb/issues/281),
+filed during PLAN-28-04 task 5. Out of scope for that task (it would touch
+`update.rs`/`translate.rs`, both frozen by task 4).
+
+- `dawg-delete-with-02` — "make sure the GRAPH clause overrides the WITH
+  clause": `WITH <g2> DELETE { GRAPH <g1> {?s ?p ?o} } WHERE { GRAPH <g1> {
+  :a foaf:knows ?s . ?s ?p ?o } }`. `g1` holds `:a foaf:knows :b`, so the
+  ground `GRAPH <g1>` block should match and delete `:b`'s properties from
+  `g1`. Today it is a no-op: `g1` is left completely untouched.
+- `dawg-delete-with-06` — same shape, `WITH <g3>`, ground `GRAPH <g2>` in
+  both DELETE and WHERE.

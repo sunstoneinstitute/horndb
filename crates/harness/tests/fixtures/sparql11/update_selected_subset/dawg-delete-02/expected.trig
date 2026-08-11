@@ -1,0 +1,5 @@
+GRAPH <http://example.org/g1> {
+    <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+    <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+    <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+}

@@ -77,6 +77,9 @@ pretty_assertions = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# `tests/update_feed_replay.rs`: the SPARQL-level twin of
+# `crates/storage/tests/feed_replay.rs`'s replay differential.
+proptest = { workspace = true }
 # `serve` binary integration tests (config-file/env/CLI bind precedence,
 # startup-fatal validation).
 assert_cmd = { workspace = true }

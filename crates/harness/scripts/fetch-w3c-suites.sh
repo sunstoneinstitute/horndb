@@ -186,4 +186,35 @@ fetch_sparql10() {
 fetch_sparql10 graph "${SPARQL10_GRAPH_FILES[@]}"
 fetch_sparql10 dataset "${SPARQL10_DATASET_FILES[@]}"
 
+# SPARQL 1.1 Update graph families (SPEC-28 S7 phase 4, #267): `add/`,
+# `copy/`, `move/`, `clear/`, `drop/`, `delete/`.
+#
+# Unlike the SPARQL 1.0 graph/dataset families above, these six manifests
+# already land in `$SPARQL_DIR` (i.e.
+# `crates/harness/data/w3c-sparql11-tests/sparql11-test-suite/{add,copy,
+# move,clear,drop,delete}/`) from the SPARQL_URL tarball extraction earlier
+# in this script — no separate fetch needed.
+#
+# The per-case fixture dirs under
+# `crates/harness/tests/fixtures/sparql11/update_selected_subset/<case>/`
+# are a checked-in mirror of those manifests (so CI needs no network),
+# derived the same way a manifest-driven W3C update runner would read them:
+# each case's `mf:action`/`mf:result` blank node is walked for its
+# `ut:request` (copied verbatim as `request.ru`), `ut:data` (the default
+# graph), and `ut:graphData` entries (one `GRAPH <rdfs:label> { ... }` block
+# per named graph, the label being the graph IRI the manifest assigns — NOT
+# a mirrored-file IRI, since these tests carry their own graph identities).
+# A graph named in `mf:action` but not repeated in `mf:result` is empty
+# afterward, same as an entirely absent `ut:data`/`ut:graphData` — the
+# fixtures simply omit it (SPEC-28 D11: empty and absent are the same fact
+# under quad-set comparison). None of these six manifests' data files
+# contain blank nodes, so no per-document blank-node scoping was needed.
+#
+# This script does NOT regenerate those fixtures. Which cases are graded is
+# `harness/selected.toml`'s `[sparql_update]` section; the upstream cases
+# left out are in `harness/KNOWN-MANIFEST-BUGS.md` — including a naming note
+# that the upstream `delete-insert/` directory (named in SPEC-28 S7 and
+# PLAN-28-04) has no graph-specific eval cases, and `delete/` is what is
+# actually mirrored as the sixth family.
+
 echo "done."

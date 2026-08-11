@@ -1,0 +1,14 @@
+<http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+<http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+<http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+<http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+<http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+
+GRAPH <http://example.org/g2> {
+    <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+    <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+    <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+    <http://example.org/c> <http://xmlns.com/foaf/0.1/name> "Chris" .
+    <http://example.org/c> <http://xmlns.com/foaf/0.1/mbox> "chris@example.org" .
+    <http://example.org/b> <http://xmlns.com/foaf/0.1/knows> <http://example.org/c> .
+}

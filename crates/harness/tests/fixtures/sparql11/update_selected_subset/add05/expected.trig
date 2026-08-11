@@ -1,0 +1,16 @@
+<http://example.org/william> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .
+<http://example.org/william> <http://xmlns.com/foaf/0.1/givenName> "William" .
+<http://example.org/william> <http://xmlns.com/foaf/0.1/mbox> <mailto:bill@example.org> .
+
+GRAPH <http://example.org/g1> {
+    <http://example.org/john> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .
+    <http://example.org/john> <http://xmlns.com/foaf/0.1/givenName> "John" .
+    <http://example.org/john> <http://xmlns.com/foaf/0.1/mbox> <mailto:johnny@example.org> .
+}
+
+GRAPH <http://example.org/g3> {
+    <http://example.org/john> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .
+    <http://example.org/john> <http://xmlns.com/foaf/0.1/givenName> "John" .
+    <http://example.org/john> <http://xmlns.com/foaf/0.1/mbox> <mailto:johnny@example.org> .
+    <http://example.org/john> <http://xmlns.com/foaf/0.1/knows> <http://example.org/sue> .
+}

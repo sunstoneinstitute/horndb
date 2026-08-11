@@ -1232,6 +1232,7 @@ dependencies = [
  "oxttl",
  "pin-project-lite",
  "pretty_assertions",
+ "proptest",
  "regex",
  "rustc-hash",
  "serde",

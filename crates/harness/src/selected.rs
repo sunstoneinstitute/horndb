@@ -28,6 +28,15 @@ pub struct Selected {
     /// SPARQL subset is empty.
     #[serde(default)]
     pub sparql_query: Option<SparqlQuerySection>,
+    /// SPEC-28 S7 SPARQL 1.1 Update graph-family subset (phase 4, #267).
+    /// Path-based selection of fixture directories under
+    /// `crates/harness/tests/fixtures/sparql11/update_selected_subset/`.
+    /// Consumed by `crates/sparql/tests/w3c_update_suite.rs`, not by the
+    /// manifest-driven harness runner above. Optional: absent when the
+    /// subset is empty; mirrors [`SparqlQuerySection`] so an older
+    /// `selected.toml` with no `[sparql_update]` section still parses.
+    #[serde(default)]
+    pub sparql_update: Option<SparqlUpdateSection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -50,6 +59,13 @@ pub struct Removed {
 pub struct SparqlQuerySection {
     /// Fixture directories relative to
     /// `crates/harness/tests/fixtures/sparql11/`.
+    pub tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SparqlUpdateSection {
+    /// Fixture directories relative to
+    /// `crates/harness/tests/fixtures/sparql11/update_selected_subset/`.
     pub tests: Vec<String>,
 }
 
@@ -157,6 +173,7 @@ include = ["file:///x#trivial-entail-true"]
         assert!(!sel.is_selected("owl2", "other"));
         assert!(!sel.is_selected("sparql11", "file:///x#trivial-entail-true"));
         assert!(sel.sparql_query.is_none());
+        assert!(sel.sparql_update.is_none());
     }
 
     #[test]
@@ -174,5 +191,22 @@ tests = ["selected_subset/basic-001", "selected_subset/basic-002"]
         let sq = sel.sparql_query.expect("sparql_query parsed");
         assert_eq!(sq.tests.len(), 2);
         assert_eq!(sq.tests[0], "selected_subset/basic-001");
+    }
+
+    #[test]
+    fn parses_sparql_update_section() {
+        let f = write_toml(
+            r#"version = 1
+[suites.owl2]
+manifest = "x"
+include = ["t"]
+[sparql_update]
+tests = ["add01", "dawg-clear-graph-01"]
+"#,
+        );
+        let sel = Selected::load(f.path()).unwrap();
+        let su = sel.sparql_update.expect("sparql_update parsed");
+        assert_eq!(su.tests.len(), 2);
+        assert_eq!(su.tests[0], "add01");
     }
 }

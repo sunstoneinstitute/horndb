@@ -326,3 +326,88 @@ tests = [
     "selected_subset/dataset-09b",
     "selected_subset/dataset-10b",
 ]
+
+# SPEC-28 S7 SPARQL 1.1 Update graph-family subset (phase 4, #267).
+#
+# Same shape as [sparql_query]: each entry names a directory under
+# `crates/harness/tests/fixtures/sparql11/update_selected_subset/<path>`
+# carrying `request.ru`, `data.trig` (every graph's initial content), and
+# `expected.trig` (every graph's final content). Consumed directly by
+# `crates/sparql/tests/w3c_update_suite.rs` (both backends, quad-set
+# equality) — the harness binary's manifest runner has no update-eval test
+# kind, so this section is the repo's real update-conformance gate.
+#
+# Mirrored from the W3C SPARQL 1.1 tarball's `add/`, `copy/`, `move/`,
+# `clear/`, `drop/`, and `delete/` manifests (mirror rules:
+# `crates/harness/scripts/fetch-w3c-suites.sh`). Note the last one: SPEC-28
+# S7 and PLAN-28-04 both call this family "graph-specific delete-insert/",
+# but no such graph-specific data exists under the upstream `delete-insert/`
+# directory — its one case with a `GRAPH` clause (`delete-insert-04`) never
+# seeds named-graph data, and the rest are default-graph-only or actually
+# `NegativeSyntaxTest11` cases (illegal bnode-as-wildcard syntax). The
+# upstream directory that actually holds the "Graph-specific DELETE"
+# `WITH`/`USING`/`USING NAMED` cases is `delete/`; that is what is mirrored
+# here.
+#
+# 47 of 47 upstream cases across the six families are mirrored as fixtures
+# (selected or not); 45 are selected below. The 2 excluded
+# (`dawg-delete-with-02`, `dawg-delete-with-06`) are not a D11 gap — they hit
+# a real dataset-scoping bug (a bare `WITH` wrongly zeroes named-graph
+# visibility for a ground `GRAPH` block in WHERE), tracked as issue #281 and
+# recorded in `harness/KNOWN-MANIFEST-BUGS.md`.
+[sparql_update]
+tests = [
+    # `add/` (8/8 selected) — `ADD [SILENT] src TO dst`.
+    "add01",
+    "add02",
+    "add03",
+    "add04",
+    "add05",
+    "add06",
+    "add07",
+    "add08",
+    # `copy/` (6/6 selected) — `COPY [SILENT] src TO dst`.
+    "copy01",
+    "copy02",
+    "copy03",
+    "copy04",
+    "copy06",
+    "copy07",
+    # `move/` (6/6 selected) — `MOVE [SILENT] src TO dst`.
+    "move01",
+    "move02",
+    "move03",
+    "move04",
+    "move06",
+    "move07",
+    # `clear/` (4/4 selected) — `CLEAR (DEFAULT|GRAPH g|NAMED|ALL)`.
+    "dawg-clear-default-01",
+    "dawg-clear-graph-01",
+    "dawg-clear-named-01",
+    "dawg-clear-all-01",
+    # `drop/` (4/4 selected) — `DROP (DEFAULT|GRAPH g|NAMED|ALL)`.
+    "dawg-drop-default-01",
+    "dawg-drop-graph-01",
+    "dawg-drop-named-01",
+    "dawg-drop-all-01",
+    # `delete/` (17/19 selected) — ground `GRAPH` blocks, `WITH`, `USING`,
+    # `USING NAMED` in DELETE/WHERE templates. `dawg-delete-with-02` and
+    # `dawg-delete-with-06` excluded (issue #281, see above).
+    "dawg-delete-01",
+    "dawg-delete-02",
+    "dawg-delete-03",
+    "dawg-delete-04",
+    "dawg-delete-05",
+    "dawg-delete-06",
+    "dawg-delete-07",
+    "dawg-delete-with-01",
+    "dawg-delete-with-03",
+    "dawg-delete-with-04",
+    "dawg-delete-with-05",
+    "dawg-delete-using-01",
+    "dawg-delete-using-02a",
+    "dawg-delete-using-03",
+    "dawg-delete-using-04",
+    "dawg-delete-using-05",
+    "dawg-delete-using-06a",
+]
