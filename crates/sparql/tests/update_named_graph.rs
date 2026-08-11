@@ -480,6 +480,121 @@ fn reserved_namespace_closed_to_writes_horn() {
     reserved_namespace_closed_to_writes::<HornBackend>();
 }
 
+fn reserved_namespace_closed_to_runtime_bound_graph_var<B: FullBackend + Default>() {
+    // The reserved-namespace closure must hold even when the target graph is a
+    // template variable that binds to a reserved IRI only at runtime (VALUES,
+    // BIND, or USING NAMED enumeration) — otherwise a `GRAPH ?g` template is a
+    // hole straight into the reserved namespace (SPEC-28 S4). The error is
+    // permission-shaped and raised before the operation's `apply_quads`, so the
+    // operation writes nothing.
+    const R: &str = "https://horndb.io/graph/secret";
+
+    // INSERT with `?g` bound to a reserved IRI via VALUES.
+    let mut store = B::default();
+    let err = run(
+        &format!(
+            "INSERT {{ GRAPH ?g {{ <http://ex/s> <http://ex/p> <http://ex/o> }} }} \
+             WHERE {{ VALUES ?g {{ <{R}> }} }}"
+        ),
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("reserved"),
+        "VALUES route: {err}"
+    );
+    assert_eq!(
+        count(&store, &tgt(R)),
+        0,
+        "nothing may land in the reserved graph"
+    );
+
+    // INSERT with `?g` bound to a reserved IRI via BIND.
+    let mut store = B::default();
+    let err = run(
+        &format!(
+            "INSERT {{ GRAPH ?g {{ <http://ex/s> <http://ex/p> <http://ex/o> }} }} \
+             WHERE {{ BIND(<{R}> AS ?g) }}"
+        ),
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("reserved"), "BIND route: {err}");
+    assert_eq!(count(&store, &tgt(R)), 0);
+
+    // DELETE into a reserved graph is a write too — seed the reserved graph and
+    // confirm a reserved-bound DELETE template errors and removes nothing.
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some(R),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    let err = run(
+        &format!(
+            "DELETE {{ GRAPH ?g {{ <http://ex/s> <http://ex/p> <http://ex/o> }} }} \
+             WHERE {{ VALUES ?g {{ <{R}> }} }}"
+        ),
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("reserved"),
+        "DELETE route: {err}"
+    );
+    assert_eq!(count(&store, &tgt(R)), 1, "the reserved quad must survive");
+
+    // USING NAMED <reserved> enumerates the reserved graph into `?g`; copying it
+    // into `GRAPH ?g` (itself) is still a write to the reserved namespace.
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some(R),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    let err = run(
+        &format!(
+            "INSERT {{ GRAPH ?g {{ ?s ?p ?o }} }} USING NAMED <{R}> \
+             WHERE {{ GRAPH ?g {{ ?s ?p ?o }} }}"
+        ),
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("reserved"),
+        "USING NAMED route: {err}"
+    );
+    assert_eq!(count(&store, &tgt(R)), 1);
+
+    // Regression guard: a `GRAPH ?g` template binding `?g` to a NON-reserved IRI
+    // still writes normally.
+    let mut store = B::default();
+    run(
+        "INSERT { GRAPH ?g { <http://ex/s> <http://ex/p> <http://ex/o> } } \
+         WHERE { VALUES ?g { <http://g/ok> } }",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count(&store, &tgt("http://g/ok")),
+        1,
+        "non-reserved ?g still works"
+    );
+}
+
+#[test]
+fn reserved_namespace_closed_to_runtime_bound_graph_var_mem() {
+    reserved_namespace_closed_to_runtime_bound_graph_var::<MemStore>();
+}
+#[test]
+fn reserved_namespace_closed_to_runtime_bound_graph_var_horn() {
+    reserved_namespace_closed_to_runtime_bound_graph_var::<HornBackend>();
+}
+
 // ── ADD / MOVE / COPY between named graphs ───────────────────────────────────
 
 fn add_move_copy_between_named_graphs<B: FullBackend + Default>() {

@@ -397,11 +397,13 @@ fn apply_delete_insert<B: FullBackend>(
         .run(&plan)?
         .collect();
 
-    // Deletions computed from the original bindings first.
+    // Deletions computed from the original bindings first. A DELETE into a
+    // reserved graph is a write too (a retraction), so `resolve_graph_name`
+    // rejects a reserved runtime binding here, before any `apply_quads`.
     let mut dels: Vec<crate::exec::AlgebraQuad> = Vec::new();
     for row in &rows {
         for q in delete {
-            let Some(graph) = resolve_graph_name(&q.graph_name, row) else {
+            let Some(graph) = resolve_graph_name(&q.graph_name, row)? else {
                 continue; // unbound / non-IRI graph variable: skip this quad
             };
             if let (Some(s), Some(p), Some(o)) = (
@@ -417,7 +419,7 @@ fn apply_delete_insert<B: FullBackend>(
     let mut adds: Vec<crate::exec::AlgebraQuad> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for q in insert {
-            let Some(graph) = resolve_graph_name(&q.graph_name, row) else {
+            let Some(graph) = resolve_graph_name(&q.graph_name, row)? else {
                 continue;
             };
             if let (Some(s), Some(p), Some(o)) = (
@@ -941,18 +943,34 @@ fn amc_skip_string(b: &[u8], start: usize) -> usize {
 // ── Template / quad slot resolution ──────────────────────────────────────────
 
 /// Resolve a template quad's `GRAPH` name to a quad graph slot. Returns
-/// `Some(None)` for the default graph, `Some(Some(iri))` for a named graph, and
-/// `None` to **skip the quad** (an unbound graph variable, or one bound to a
-/// non-IRI term — neither names a writable graph).
-fn resolve_graph_name(g: &GraphNamePattern, row: &Bindings) -> Option<Option<Term>> {
-    match g {
-        GraphNamePattern::DefaultGraph => Some(None),
-        GraphNamePattern::NamedNode(n) => Some(Some(Term::Iri(n.as_str().to_owned()))),
+/// `Ok(Some(None))` for the default graph, `Ok(Some(Some(iri)))` for a named
+/// graph, and `Ok(None)` to **skip the quad** (an unbound graph variable, or one
+/// bound to a non-IRI term — neither names a writable graph).
+///
+/// Reserved-namespace closure at the *runtime* boundary (SPEC-28 S4): a
+/// `GRAPH ?g` template whose `?g` binds to an IRI under [`RESERVED_GRAPH_PREFIX`]
+/// (via `VALUES`, `BIND`, or `USING NAMED` enumeration) is a write to the
+/// reserved namespace and errors — the same permission-shaped, **not**
+/// SILENT-suppressible error the static template path raises in `validate_op`.
+/// The binding is data-dependent, so it cannot be caught in the preflight; the
+/// error is raised here while a delete/insert list is being assembled, before
+/// that operation's single `apply_quads` call, so the operation writes nothing.
+/// A ground `NamedNode` target is already rejected in the preflight, but the
+/// check here covers it too so this is the one place the invariant lives.
+fn resolve_graph_name(g: &GraphNamePattern, row: &Bindings) -> Result<Option<Option<Term>>> {
+    let iri = match g {
+        GraphNamePattern::DefaultGraph => return Ok(Some(None)),
+        GraphNamePattern::NamedNode(n) => n.as_str(),
         GraphNamePattern::Variable(v) => match row.get(v.as_str()) {
-            Some(Term::Iri(iri)) => Some(Some(Term::Iri(iri.clone()))),
-            _ => None,
+            Some(Term::Iri(iri)) => iri.as_str(),
+            // Unbound, or bound to a literal/blank node: no writable graph.
+            _ => return Ok(None),
         },
+    };
+    if is_reserved_graph(iri) {
+        return Err(reserved_write(iri));
     }
+    Ok(Some(Some(Term::Iri(iri.to_owned()))))
 }
 
 /// The quad graph slot for a data quad's `GRAPH` name: `None` for the default
