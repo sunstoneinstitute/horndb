@@ -208,10 +208,20 @@ binary's `sparql11` key runs no real engine. Same route as PLAN-28-03:
 
 `crates/storage/tests/feed_replay.rs`: a proptest generating a quad-grain
 feed (batches of adds/dels over a small term space, including del+add of
-the same quad in one batch), applied (a) once cleanly, (b) with a random
-duplicated-batch replay from a stale point mid-stream. Assert quad-set
-equality of (a) and (b), zero-count no-ops on the replayed prefix, and the
-non-canonical-literal identity pin. This is storage-level; the
+the same quad in one batch), applied (a) once cleanly, (b) with two
+duplicate-delivery mechanisms: an immediate echo of each already-applied
+batch, and a stale-point mid-stream tail replay (redelivering the tail from
+a random checkpoint). Assert quad-set equality of (a) and (b) and the
+non-canonical-literal identity pin. Zero-count no-ops
+(`retracted==0 && inserted==0`) are asserted only on the immediate-echo
+redelivery — the mechanism under which they provably hold — and only for a
+batch whose dels and adds don't target the same quad (such a batch reports
+`{retracted:1, inserted:1}` on every application, by S6's
+dels-before-adds contract, replay included). On the stale-point tail
+replay, only net state convergence is asserted per batch: an interior
+batch replayed against a state that already reflects a later, colliding
+batch in the same tail can report a real transient non-zero count even
+though the tail's net effect stays a no-op. This is storage-level; the
 SPARQL-level version (same feed rendered as `DELETE DATA;INSERT DATA`
 requests) lives in `crates/sparql/tests/update_feed_replay.rs` and
 additionally pins one-batch-per-operation ordering (a request
