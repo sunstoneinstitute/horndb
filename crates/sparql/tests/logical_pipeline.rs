@@ -7,7 +7,7 @@ use horndb_sparql::algebra::translate::translate_query_with;
 use horndb_sparql::algebra::{Algebra, Term, TriplePattern, Var};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::runtime::Runtime;
-use horndb_sparql::exec::{Bindings, Store};
+use horndb_sparql::exec::{Bindings, StoreTestExt};
 use horndb_sparql::parser::{parse_query, ParsedQuery};
 use horndb_sparql::plan::lower::{lower_algebra, lower_physical};
 use horndb_sparql::plan::pass::{run_passes, standard_passes, PassId, PlanCtx};

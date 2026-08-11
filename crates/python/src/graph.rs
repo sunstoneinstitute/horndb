@@ -105,14 +105,17 @@ impl RdfGraph {
         Ok(())
     }
 
-    /// Remove a triple (no-op if absent, matching rdflib).
+    /// Remove a triple (no-op if absent, matching rdflib). Routes through
+    /// the quad-shaped `Store::apply_quads` (SPEC-28 S4/S6, #267) as a
+    /// single default-graph retraction — `MemStore` has no named-graph
+    /// surface exposed to this binding yet.
     pub fn remove(&mut self, s: &RdfTerm, p: &RdfTerm, o: &RdfTerm) {
         use horndb_sparql::algebra::Term as AlgTerm;
+        use horndb_sparql::exec::Store;
         let st = AlgTerm::from_lexical_kind(s);
         let pt = AlgTerm::from_lexical_kind(p);
         let ot = AlgTerm::from_lexical_kind(o);
-        use horndb_sparql::exec::Store;
-        self.store.delete_triple(&st, &pt, &ot);
+        let _ = self.store.apply_quads(vec![(None, st, pt, ot)], Vec::new());
     }
 
     /// True if the exact triple is asserted (rdflib `(s,p,o) in graph`).

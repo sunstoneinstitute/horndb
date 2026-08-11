@@ -8,7 +8,7 @@
 use crate::algebra::{AggFunc, Aggregate, Expr, OrderDir, Term, TriplePattern, Var};
 use crate::exec::horn::HornBackend;
 use crate::exec::runtime::Runtime;
-use crate::exec::Store;
+use crate::exec::StoreTestExt;
 use crate::plan::PhysicalPlan;
 
 // ---------------------------------------------------------------------------

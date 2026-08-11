@@ -18,6 +18,7 @@ pub use scope::{
 
 use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
+use spargebra::algebra::GraphTarget;
 use std::collections::BTreeMap;
 
 /// A single SPARQL solution mapping.
@@ -199,25 +200,113 @@ pub trait Executor {
     }
 }
 
+/// One RDF quad in algebra-[`Term`] form: `None` names the default graph,
+/// `Some(Term)` a named graph (the term is normally a [`Term::Iri`]). Mirrors
+/// the pre-existing `(Term, Term, Term)` triple convention used throughout
+/// `update.rs` — see [`AlgebraTriple`] — so callers build these directly from
+/// parsed quad patterns/templates without a separate encoding.
+pub type AlgebraQuad = (Option<Term>, Term, Term, Term);
+
+/// One RDF triple in algebra-[`Term`] form: `(subject, predicate, object)`.
+pub type AlgebraTriple = (Term, Term, Term);
+
+/// The result of one [`Store::apply_quads`] batch.
+///
+/// Reuses [`horndb_storage::ApplyReport`] verbatim rather than re-deriving an
+/// identically-shaped exec-layer struct: `HornBackend` returns storage's own
+/// report unchanged, and `MemStore` computes the same two counts by the same
+/// rule (SPEC-28 S6), so a separate type would carry nothing backend-specific.
+pub type ApplyCounts = horndb_storage::ApplyReport;
+
 /// A storage-side write seam used by [`crate::update`].
 ///
 /// `Store` is intentionally separate from `Executor` so that read-only
 /// backends (e.g. mmap'd HDT) can implement only the read side.
+///
+/// Quad-shaped (SPEC-28 S4/S6): every write names its graph explicitly, so a
+/// backend with named-graph data has one seam for every write, not a
+/// default-graph-only path plus ad hoc named-graph escape hatches. Phase 2
+/// deliberately left this triple-shaped (see `HornBackend`'s history); this
+/// phase (#267) re-cuts it.
 pub trait Store {
-    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term);
-    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term);
-    /// Remove every triple from every graph (default and named). Backs the
-    /// graph-management `CLEAR`/`DROP` verbs and the destination-clearing
-    /// step of `COPY`/`MOVE`. Implementations with no named-graph support
-    /// satisfy this trivially, since all their data lives in the default
-    /// graph. `CLEAR DEFAULT` must not route here once a backend has
-    /// named-graph data (see `HornBackend::clear_all`'s doc; #267).
-    fn clear_all(&mut self);
+    /// One atomic batch: `dels` take effect before `adds`, so a del+add of
+    /// the same quad within one batch ends the batch with that quad present.
+    /// Idempotent and counted (SPEC-28 S6): `retracted`/`inserted` count only
+    /// quads whose visibility actually changed — retracting an absent quad,
+    /// or inserting an already-visible one, changes neither count. Quad
+    /// identity is per-graph: the same triple in two different graphs is two
+    /// distinct quads.
+    fn apply_quads(
+        &mut self,
+        dels: Vec<AlgebraQuad>,
+        adds: Vec<AlgebraQuad>,
+    ) -> Result<ApplyCounts>;
+
+    /// `CLEAR`/`DROP` sweep of `graph`'s quads, implemented via
+    /// [`Self::apply_quads`] internally — never a structural unlink — so the
+    /// sweep is atomic and counted like any other write. Returns the number
+    /// of quads retracted. `graph` selects the target the same way SPARQL
+    /// Update's `CLEAR`/`DROP` grammar does: `DefaultGraph`, one
+    /// `NamedNode`, every named graph (`NamedGraphs`), or the whole store
+    /// (`AllGraphs`).
+    fn clear_graph(&mut self, graph: &GraphTarget) -> Result<usize>;
+
+    /// D11 existence: a graph exists if and only if it holds at least one
+    /// visible quad. An emptied graph does not exist.
+    fn graph_exists(&self, graph: &str) -> bool;
+
+    /// Every named graph currently holding at least one visible quad, for
+    /// `DROP ALL` / `ADD`/`MOVE`/`COPY` enumeration. Never includes the
+    /// default graph.
+    fn named_graphs(&self) -> Vec<String>;
+
+    /// Every visible triple in `graph` — the source read for
+    /// `ADD`/`MOVE`/`COPY`. `graph` is `DefaultGraph` or a single
+    /// `NamedNode`; `NamedGraphs`/`AllGraphs` name more than one graph and
+    /// have no single-triple-list reading, so implementations reject them.
+    fn scan_graph_quads(&self, graph: &GraphTarget) -> Result<Vec<AlgebraTriple>>;
 }
 
 /// Convenience: a backend that is both an `Executor` and a `Store`.
 pub trait FullBackend: Executor + Store {}
 impl<T: Executor + Store> FullBackend for T {}
+
+/// Test/fixture convenience layer over [`Store`], preserving the pre-SPEC-28
+/// phase-4 single-triple call shape (`insert_triple`/`delete_triple`/
+/// `clear_all`, all default-graph scoped).
+///
+/// The quad-shaped [`Store::apply_quads`]/[`Store::clear_graph`] are the real
+/// write seam (used by `update.rs` and `crates/python`'s `RdfGraph::remove`).
+/// This extension trait exists only because dozens of unrelated tests across
+/// this crate (SELECT/CONSTRUCT/DESCRIBE/join/aggregate fixtures, mostly)
+/// build a store with one-triple-at-a-time calls that have nothing to do
+/// with named-graph semantics; rewriting every call site to build
+/// `AlgebraQuad`s by hand would be pure churn. Blanket-implemented for every
+/// `Store`, so a type need only implement `Store` to get this for free.
+pub trait StoreTestExt: Store {
+    /// Insert one triple into the default graph. Errors from `apply_quads`
+    /// are swallowed (matches the old trait method's `()` return) — test
+    /// fixtures pass ground terms that always intern cleanly.
+    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term) {
+        let _ = self.apply_quads(Vec::new(), vec![(None, subject, predicate, object)]);
+    }
+
+    /// Delete one triple from the default graph (a no-op if absent, or if it
+    /// exists only in a named graph).
+    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
+        let _ = self.apply_quads(
+            vec![(None, subject.clone(), predicate.clone(), object.clone())],
+            Vec::new(),
+        );
+    }
+
+    /// Whole-store wipe (every graph, default and named) — the pre-#267
+    /// `clear_all` behaviour, via `clear_graph(&GraphTarget::AllGraphs)`.
+    fn clear_all(&mut self) {
+        let _ = self.clear_graph(&GraphTarget::AllGraphs);
+    }
+}
+impl<T: Store + ?Sized> StoreTestExt for T {}
 
 /// Classify a stored lexical value back into the term kind it encodes.
 ///

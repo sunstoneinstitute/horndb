@@ -2,7 +2,7 @@ use horndb_sparql::algebra::translate::translate_query;
 use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::runtime::Runtime;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::parser::{parse_query, ParsedQuery};
 use horndb_sparql::plan::planner;
 

@@ -6,7 +6,7 @@ use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::ScanScope;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
 use horndb_sparql::SparqlConfig;
@@ -748,9 +748,31 @@ mod streaming_error_semantics {
         }
     }
     impl horndb_sparql::exec::Store for FailingScan {
-        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
-        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
-        fn clear_all(&mut self) {}
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(Default::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn named_graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
     }
 
     #[tokio::test]
@@ -810,9 +832,31 @@ mod streaming_error_semantics {
         }
     }
     impl horndb_sparql::exec::Store for DecodeFailsLate {
-        fn insert_triple(&mut self, _s: Term, _p: Term, _o: Term) {}
-        fn delete_triple(&mut self, _s: &Term, _p: &Term, _o: &Term) {}
-        fn clear_all(&mut self) {}
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(Default::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn named_graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
     }
 
     #[tokio::test]

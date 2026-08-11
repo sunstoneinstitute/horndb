@@ -16,7 +16,7 @@ use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query_with, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::{FullBackend, Store};
+use horndb_sparql::exec::{FullBackend, StoreTestExt};
 use horndb_sparql::results::json::{write_ask_json, write_select_json};
 use horndb_sparql::{DefaultGraphMode, SparqlConfig};
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ fn fixtures_root() -> PathBuf {
     p
 }
 
-fn load_ntriples<S: Store + Default>(path: &Path) -> S {
+fn load_ntriples<S: StoreTestExt + Default>(path: &Path) -> S {
     let mut s = S::default();
     let body = std::fs::read_to_string(path).expect("read data.nt");
     for line in body.lines() {

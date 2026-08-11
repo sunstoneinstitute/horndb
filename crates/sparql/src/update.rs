@@ -110,7 +110,11 @@ pub fn apply_update_with<B: FullBackend>(
                     let s = subject_to_term(&q.subject);
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = object_to_term(&q.object)?;
-                    store.insert_triple(s, p, o);
+                    // `require_default_graph_name` (validate_op) already
+                    // rejected a named `q.graph_name`, so every quad here is
+                    // default-graph scoped (named-graph INSERT DATA routing
+                    // is a later task in SPEC-28 phase 4, #267).
+                    store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
                 }
             }
             GraphUpdateOperation::DeleteData { data } => {
@@ -118,7 +122,7 @@ pub fn apply_update_with<B: FullBackend>(
                     let s = Term::Iri(q.subject.as_str().to_owned());
                     let p = Term::Iri(q.predicate.as_str().to_owned());
                     let o = ground_term_to_term(&q.object)?;
-                    store.delete_triple(&s, &p, &o);
+                    store.apply_quads(vec![(None, s, p, o)], Vec::new())?;
                 }
             }
             GraphUpdateOperation::DeleteInsert {
@@ -174,12 +178,14 @@ fn apply_clear_drop<B: FullBackend>(
 ) -> Result<()> {
     use spargebra::algebra::GraphTarget;
     match graph {
-        // TODO(#267): DefaultGraph must not route to the whole-store clear_all
-        // once named-graph writes exist — `Store::clear_all` sweeps every
-        // graph (see `HornBackend::clear_all`), so `CLEAR DEFAULT` would
-        // silently destroy named-graph data too.
+        // TODO(#267): DefaultGraph must not route to the whole-store sweep
+        // once named-graph writes exist — `clear_graph(&GraphTarget::AllGraphs)`
+        // sweeps every graph (see the `Store` impls), so `CLEAR DEFAULT`
+        // would silently destroy named-graph data too. Splitting these two
+        // targets apart is a later task in SPEC-28 phase 4 (#267), not this
+        // change.
         GraphTarget::DefaultGraph | GraphTarget::AllGraphs => {
-            store.clear_all();
+            store.clear_graph(&GraphTarget::AllGraphs)?;
             Ok(())
         }
         // No named graphs exist in the Stage-1 store: a named target (or the
@@ -219,7 +225,7 @@ fn apply_load<B: FullBackend>(
     match fetch_and_parse(source.as_str()) {
         Ok(triples) => {
             for (s, p, o) in triples {
-                store.insert_triple(s, p, o);
+                store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
             }
             Ok(())
         }
@@ -628,10 +634,10 @@ fn apply_delete_insert<B: FullBackend>(
     }
 
     for (s, p, o) in &deletions {
-        store.delete_triple(s, p, o);
+        store.apply_quads(vec![(None, s.clone(), p.clone(), o.clone())], Vec::new())?;
     }
     for (s, p, o) in insertions {
-        store.insert_triple(s, p, o);
+        store.apply_quads(Vec::new(), vec![(None, s, p, o)])?;
     }
     Ok(())
 }

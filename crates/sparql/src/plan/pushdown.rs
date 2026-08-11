@@ -769,7 +769,7 @@ mod tests {
     use crate::algebra::translate::translate_query_with;
     use crate::exec::horn::HornBackend;
     use crate::exec::runtime::Runtime;
-    use crate::exec::{Bindings, Store};
+    use crate::exec::{Bindings, StoreTestExt};
     use crate::parser::parse_query;
     use crate::plan::planner;
     use crate::SparqlConfig;
