@@ -453,15 +453,19 @@ recovers the flag with a source-text pre-scan rather than accepting the loss:
   the text alone can't resolve it, e.g. a prefixed name), and whether the op is
   the W3C identity case (`source == destination`, which spargebra desugars to
   zero ops).
-- The hints drive the missing-source preflight **directly**, with no alignment
-  to the desugared op shapes: for each hint, a non-silent, non-identity op whose
-  `Named` source is absent is an error. This is why an identity op (one verb
-  token, zero desugared ops) and a user-written copy-shaped `DeleteInsert` can
-  no longer corrupt the check, and a user's `SILENT` is always honoured. An
-  `Unknown` source is never existence-checked — its desugared ops apply as-is (a
-  natural no-op on a missing source). The sweep runs before any mutation, so
-  e.g. `COPY <absent> TO DEFAULT` — which desugars to a destructive
-  `Drop{DEFAULT}` followed by a copy from a missing source — aborts before the
+- The hints drive the missing-source preflight: for each non-silent,
+  non-identity hint, an absent source graph is an error. The source IRI comes
+  from the hint's text-recovered operand when that resolved it (`Named`); a
+  `DEFAULT` source always exists and is skipped. When the text could not resolve
+  it (`Unknown`, e.g. a prefixed name `ex:g`), the check falls back to the
+  desugared copy-op's source IRI, which the parser has already expanded —
+  resolved structurally by `amc_copy_source`. Identity occurrences desugar to
+  zero ops, so excluding them lines the remaining hints up 1:1 with the copy-ops
+  by order: this is why an identity op (one verb token, zero desugared ops) no
+  longer miscounts the alignment (the original bug) and a user's `SILENT` is
+  always honoured. The sweep runs before any mutation, so e.g. a non-silent
+  `COPY <absent> TO DEFAULT` — or `COPY ex:absent TO <dst>` — which desugars to a
+  destructive `Drop` followed by a copy from a missing source, aborts before the
   `Drop` runs.
 
 This tokenizer is a documented stopgap, not a permanent design choice: an

@@ -38,7 +38,9 @@
 //!   `DeleteInsert` sequences and **drops the `SILENT` flag**. The desugared
 //!   ops execute; the flag — plus the source operand and whether the op is the
 //!   identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
-//!   source-text pre-scan (see [`recover_amc_hints`]).
+//!   source-text pre-scan (see [`recover_amc_hints`]). A source the text can't
+//!   resolve (a prefixed name) falls back to the desugared copy-op's already
+//!   resolved source IRI ([`amc_copy_source`]) for the existence check.
 //! * **The reserved namespace is closed to writes** (S4): every write form
 //!   touching `https://horndb.io/graph/…` is refused. This is a
 //!   permission-shaped error that `SILENT` does **not** suppress; it is
@@ -102,8 +104,8 @@ fn missing_graph_error(verb: &str, iri: &str) -> SparqlError {
     ))
 }
 
-/// `ADD`/`COPY` whose named source graph does not exist (D11) and whose
-/// recovered `SILENT` flag was not set (SPARQL 1.1 §3.2.3/§3.2.5).
+/// `ADD`/`MOVE`/`COPY` whose named source graph does not exist (D11) and whose
+/// recovered `SILENT` flag was not set (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5).
 fn amc_source_missing_error(iri: &str) -> SparqlError {
     SparqlError::Executor(format!(
         "source graph <{iri}> does not exist (use SILENT to make it a no-op)"
@@ -147,19 +149,37 @@ pub fn apply_update_with<B: FullBackend>(
     // desugaring (see [`recover_amc_hints`]).
     let amc_hints = recover_amc_hints(source);
 
+    // The structurally-resolved source of each desugared copy-op, in op order.
+    // spargebra has already expanded any prefix or base here, so this covers
+    // operands `recover_amc_hints` had to leave `Unknown` (e.g. `ex:g`). Each
+    // non-identity `ADD`/`MOVE`/`COPY` produces exactly one copy-op and an
+    // identity one produces none, so filtering identity hints out lines the two
+    // lists up 1:1 by occurrence order.
+    let copy_sources: Vec<Option<String>> = ops.iter().filter_map(amc_copy_source).collect();
+
     // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose named
     // source is absent is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5), caught
     // before any mutation. The identity case (`<g> TO <g>`) desugars to zero
-    // ops and is a no-op even when `<g>` is absent, so it never raises this. An
-    // operand that could not be resolved from text (an `Unknown` source) is not
-    // existence-checked; its desugared ops apply as-is (a natural no-op on a
-    // missing source).
-    for h in &amc_hints {
-        if !h.silent && !h.is_identity {
-            if let AmcSource::Named(g) = &h.source {
-                if !store.graph_exists(g) {
-                    return Err(amc_source_missing_error(g));
-                }
+    // ops and is a no-op even when `<g>` is absent, so it is excluded and never
+    // raises this. The source IRI comes from the text when resolvable there
+    // (`Named`), else from the desugared copy-op (`Unknown` → structural
+    // fallback); a `DEFAULT` source always exists and is skipped.
+    for (h, structural_source) in amc_hints
+        .iter()
+        .filter(|h| !h.is_identity)
+        .zip(&copy_sources)
+    {
+        if h.silent {
+            continue;
+        }
+        let source_iri = match &h.source {
+            AmcSource::Default => None,
+            AmcSource::Named(g) => Some(g.as_str()),
+            AmcSource::Unknown => structural_source.as_deref(),
+        };
+        if let Some(iri) = source_iri {
+            if !store.graph_exists(iri) {
+                return Err(amc_source_missing_error(iri));
             }
         }
     }
@@ -830,9 +850,10 @@ enum AmcSource {
     /// `[GRAPH] <iri>` — the named source graph.
     Named(String),
     /// The operand could not be resolved from the text alone (e.g. a prefixed
-    /// name, which needs the query prologue). No source-existence check runs on
-    /// it — the desugared ops apply as-is (a natural no-op on a missing source),
-    /// the honest, non-destructive outcome.
+    /// name, which needs the query prologue). The existence check then falls
+    /// back to the desugared copy-op's source IRI (which the parser has already
+    /// resolved) — see `amc_copy_source` and the preflight in
+    /// [`apply_update_with`].
     Unknown,
 }
 
@@ -861,13 +882,15 @@ struct AmcHint {
 /// <missing> TO <g>` must be a no-op and a non-silent one an error (SPEC-28
 /// S4), so the flag matters. Re-scan the source text — a small hand-written
 /// tokenizer (no regex) that skips comments, IRIs, and string literals — to
-/// recover it, plus the source operand and identity check so the missing-source
-/// preflight needs no fragile op-shape matching or token↔op alignment.
+/// recover it, plus the source operand and the identity check.
 ///
-/// The recovery drives the preflight directly (see [`apply_update_with`]): each
-/// hint is independent, so an identity op (zero desugared ops, one verb token)
-/// and a user-written copy-shaped `DeleteInsert` can no longer corrupt the
-/// alignment, and a user's `SILENT` is always honoured.
+/// The recovery drives the preflight (see [`apply_update_with`]). The `silent`
+/// and `is_identity` flags come from text; the source IRI comes from text when
+/// resolvable (`Named`), else from the desugared copy-op (`Unknown` →
+/// `amc_copy_source`). Excluding identity occurrences (which desugar to zero
+/// ops) lines the remaining hints up 1:1 with the copy-ops by order, so an
+/// identity op no longer miscounts the alignment and a user's `SILENT` is always
+/// honoured.
 ///
 /// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
 /// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
@@ -967,8 +990,14 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 }
             }
             b'<' => {
-                // IRIREF: no `>` or whitespace inside. If unterminated, stop at
-                // end (best-effort — the parser already accepted the update).
+                // Treat every `<` as an IRIREF open: no `>` or whitespace
+                // inside; if unterminated, stop at end (best-effort — the parser
+                // already accepted the update). A `<` used as a comparison
+                // operator (e.g. `FILTER(?x < 5)`) tokenizes to a short/empty
+                // `Iri`, but that is harmless: recovery only reads the fixed
+                // operand window right after each verb (`SILENT? src TO dst`),
+                // and that grammar has no comparison, so such a token never
+                // reaches an operand slot.
                 let start = i + 1;
                 let mut j = start;
                 while j < n && b[j] != b'>' && !b[j].is_ascii_whitespace() {
@@ -1055,6 +1084,64 @@ fn amc_skip_string(b: &[u8], start: usize) -> usize {
         i += 1;
     }
     n
+}
+
+/// The structurally-resolved source of a desugared `ADD`/`MOVE`/`COPY` copy-op.
+///
+/// spargebra rewrites every non-identity `ADD`/`MOVE`/`COPY` into (among other
+/// ops) one `copy_graph`-shaped `DeleteInsert`: empty delete, a single
+/// `(?s ?p ?o)` insert, no `USING`, and a WHERE of `{ ?s ?p ?o }` (default
+/// source) or `GRAPH <from> { ?s ?p ?o }` (named source). This recognises that
+/// shape and returns the source: `None` (not a copy-op), `Some(None)` (default
+/// source — always exists), or `Some(Some(iri))` (named source, prefix/base
+/// already expanded by the parser). Used as the fallback source for a hint the
+/// text scan left [`AmcSource::Unknown`].
+fn amc_copy_source(op: &GraphUpdateOperation) -> Option<Option<String>> {
+    let GraphUpdateOperation::DeleteInsert {
+        delete,
+        insert,
+        using,
+        pattern,
+    } = op
+    else {
+        return None;
+    };
+    if !delete.is_empty() || using.is_some() || insert.len() != 1 {
+        return None;
+    }
+    let q = &insert[0];
+    if !is_amc_term_var(&q.subject, "s")
+        || !is_amc_pred_var(&q.predicate, "p")
+        || !is_amc_term_var(&q.object, "o")
+    {
+        return None;
+    }
+    match pattern.as_ref() {
+        GraphPattern::Bgp { patterns } if is_amc_spo_bgp(patterns) => Some(None),
+        GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(from),
+            inner,
+        } => match inner.as_ref() {
+            GraphPattern::Bgp { patterns } if is_amc_spo_bgp(patterns) => {
+                Some(Some(from.as_str().to_owned()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_amc_term_var(t: &TermPattern, name: &str) -> bool {
+    matches!(t, TermPattern::Variable(v) if v.as_str() == name)
+}
+fn is_amc_pred_var(p: &NamedNodePattern, name: &str) -> bool {
+    matches!(p, NamedNodePattern::Variable(v) if v.as_str() == name)
+}
+fn is_amc_spo_bgp(patterns: &[spargebra::term::TriplePattern]) -> bool {
+    patterns.len() == 1
+        && is_amc_term_var(&patterns[0].subject, "s")
+        && is_amc_pred_var(&patterns[0].predicate, "p")
+        && is_amc_term_var(&patterns[0].object, "o")
 }
 
 // ── Small lowering helpers ───────────────────────────────────────────────────

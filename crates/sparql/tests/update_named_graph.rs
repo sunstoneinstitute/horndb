@@ -916,3 +916,115 @@ fn copy_nonsilent_missing_source_errors_no_wipe_mem() {
 fn copy_nonsilent_missing_source_errors_no_wipe_horn() {
     copy_nonsilent_missing_source_errors_no_wipe::<HornBackend>();
 }
+
+// ── SILENT recovery: a prefixed-name source needs structural resolution ──────
+//
+// `recover_amc_hints` reads operands from the raw text, so a *prefixed* source
+// (`ex:missing`) it cannot expand degrades to `AmcSource::Unknown` — the
+// preflight then falls back to the desugared copy-op's fully-resolved source
+// IRI (spargebra has already expanded the prefix). Without that fallback a
+// non-silent `COPY`/`MOVE` of an absent prefixed source would skip the
+// existence check and let the destructive `Drop(<dst>)` wipe the destination.
+
+/// Non-silent `COPY` of an absent *prefixed* source errors and leaves `<dst>`
+/// intact (I-1 regression — the source resolves structurally, not from text).
+fn copy_prefixed_missing_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://ex/dst"), 1);
+    let err = run(
+        "PREFIX ex: <http://ex/> COPY ex:missing TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("does not exist"), "{err}");
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "a failed COPY of a prefixed absent source must not wipe the destination"
+    );
+}
+
+#[test]
+fn copy_prefixed_missing_source_errors_no_wipe_mem() {
+    copy_prefixed_missing_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn copy_prefixed_missing_source_errors_no_wipe_horn() {
+    copy_prefixed_missing_source_errors_no_wipe::<HornBackend>();
+}
+
+/// Non-silent `MOVE` of an absent *prefixed* source errors and leaves `<dst>`
+/// intact (I-1 regression, MOVE variant).
+fn move_prefixed_missing_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://ex/dst"), 1);
+    let err = run(
+        "PREFIX ex: <http://ex/> MOVE ex:missing TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("does not exist"), "{err}");
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "a failed MOVE of a prefixed absent source must not wipe the destination"
+    );
+}
+
+#[test]
+fn move_prefixed_missing_source_errors_no_wipe_mem() {
+    move_prefixed_missing_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn move_prefixed_missing_source_errors_no_wipe_horn() {
+    move_prefixed_missing_source_errors_no_wipe::<HornBackend>();
+}
+
+/// Positive guard: a `SILENT COPY` of an absent *prefixed* source is a no-op
+/// that still clears `<dst>` (§3.2.4) — the structural fallback errors only in
+/// the non-silent case, so `SILENT` is still honoured for prefixed operands.
+fn copy_silent_prefixed_missing_source_clears_dst<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://ex/dst"), 1);
+    run(
+        "PREFIX ex: <http://ex/> COPY SILENT ex:missing TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        0,
+        "SILENT COPY still drops the destination before the (no-op) copy"
+    );
+    assert!(!store.graph_exists("http://ex/dst"));
+}
+
+#[test]
+fn copy_silent_prefixed_missing_source_clears_dst_mem() {
+    copy_silent_prefixed_missing_source_clears_dst::<MemStore>();
+}
+#[test]
+fn copy_silent_prefixed_missing_source_clears_dst_horn() {
+    copy_silent_prefixed_missing_source_clears_dst::<HornBackend>();
+}
