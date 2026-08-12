@@ -84,6 +84,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **LOW** · _Performance_ — SPEC-23 Phase 5: later optimizer work (stats sketches, runtime filters/SIP, ML `PlanAdvisor` loop) — after #203/#204 ([#205](https://github.com/sunstoneinstitute/horndb/issues/205))
 - [ ] **LOW** · _Completeness_ — SPEC-24 S8: intra-tick closure↔rule joint fixpoint + non-transitive closure shapes ([#217](https://github.com/sunstoneinstitute/horndb/issues/217))
 - [ ] **LOW** · _Maintainability_ — Extract shared `compile_bgp_patterns` helper in `crates/sparql/src/exec/horn.rs` (#TODO)
+- [ ] **LOW** · _Maintainability_ — Gate triple-shaped `Store` test helpers behind `test-util` so the production write trait stays quad-shaped ([#284](https://github.com/sunstoneinstitute/horndb/issues/284))
 
 Closed tasks are listed in [Done](#done-for-traceability).
 
@@ -736,6 +737,17 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   pattern-compilation prologue (building `WcojPattern`s, looking up dictionary
   IDs, etc.), kept in sync by a comment. Extract a `compile_bgp_patterns` helper
   to make this a single maintenance point. Low-risk, self-contained.
+
+- [ ] **Gate triple-shaped `Store` test helpers behind `test-util`.**
+  ([#284](https://github.com/sunstoneinstitute/horndb/issues/284))
+  SPEC-28 phase 4 (#280) gave `Store` a quad-shaped write API, but
+  `insert_triple`/`delete_triple`/`clear_all` remain as default methods on the
+  production trait (`crates/sparql/src/exec/mod.rs`) — default-graph-hardcoded and
+  error-swallowing. Move them onto a `#[cfg(any(test, feature = "test-util"))]`
+  `StoreTestExt` extension trait (with a `test-util` feature + dev self-dep so
+  `cargo nextest -p horndb-sparql --features server` still sees them) so the
+  production write seam stays purely quad-shaped. ~180 mechanical call-site edits
+  across ~27 files; no behaviour change. Deferred from the #283 follow-up.
 
 ## Done (for traceability)
 
