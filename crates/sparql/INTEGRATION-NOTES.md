@@ -444,35 +444,38 @@ Since `SILENT` changes observable behaviour here (an absent source graph is a
 no-op when silent, an error otherwise — SPARQL 1.1 §3.2.3/§3.2.5), `update.rs`
 recovers the flag with a source-text pre-scan rather than accepting the loss:
 
-- `scan_amc_silent_hints` is a hand-rolled tokenizer (no regex) over the raw
-  update text. It skips the three lexical contexts a bare keyword scan would
-  trip on — `# …` comments, `<…>` IRIs, and `"…"`/`'…'` string literals
-  (single- and triple-quoted) — and records a `(verb, silent)` hint for each
-  `ADD`/`MOVE`/`COPY` keyword it finds, in source order.
-- `align_amc_hints` pairs those hints positionally with the desugared
-  `copy_graph`-shaped `DeleteInsert` ops (detected structurally via
-  `as_copy_graph`). If the hint count does not match the detected op count —
-  e.g. an identity `ADD <g> TO <g>` is one source token but zero ops, or a
-  user-written `DeleteInsert` happens to match the copy shape — alignment
-  falls back to **no hints**: plain, non-silent execution, which for an
-  absent source is a no-op, never a silently wrong data change.
-- The recovered flag drives `amc_source_status` (absent source → no-op when
-  silent, error otherwise for `ADD`/`COPY`; `MOVE` uses its own preserved
-  source-`Drop` flag) and is mirrored in the `validate_op` preflight, so e.g.
-  `COPY <absent> TO DEFAULT` — which desugars to a destructive `Drop{DEFAULT}`
-  followed by a copy from a missing source — aborts before the `Drop` runs.
+- `recover_amc_hints` is a hand-rolled tokenizer (no regex) over the raw update
+  text. It skips the three lexical contexts a bare keyword scan would trip on —
+  `# …` comments, `<…>` IRIs, and `"…"`/`'…'` string literals (single- and
+  triple-quoted) — and records one hint per `ADD`/`MOVE`/`COPY` occurrence, in
+  source order. Each hint carries `(silent, source, is_identity)`: the recovered
+  `SILENT` flag, the source operand (`DEFAULT` / `Named(<iri>)` / `Unknown` when
+  the text alone can't resolve it, e.g. a prefixed name), and whether the op is
+  the W3C identity case (`source == destination`, which spargebra desugars to
+  zero ops).
+- The hints drive the missing-source preflight **directly**, with no alignment
+  to the desugared op shapes: for each hint, a non-silent, non-identity op whose
+  `Named` source is absent is an error. This is why an identity op (one verb
+  token, zero desugared ops) and a user-written copy-shaped `DeleteInsert` can
+  no longer corrupt the check, and a user's `SILENT` is always honoured. An
+  `Unknown` source is never existence-checked — its desugared ops apply as-is (a
+  natural no-op on a missing source). The sweep runs before any mutation, so
+  e.g. `COPY <absent> TO DEFAULT` — which desugars to a destructive
+  `Drop{DEFAULT}` followed by a copy from a missing source — aborts before the
+  `Drop` runs.
 
 This tokenizer is a documented stopgap, not a permanent design choice: an
 upstream issue is to be filed against the spargebra (oxigraph) tracker asking
 for a structured `Add`/`Move`/`Copy` op, or a preserved `silent` flag on the
-desugared ops, and linked from the doc comment on `scan_amc_silent_hints`;
+desugared ops, and linked from the doc comment on `recover_amc_hints`;
 the whole tokenizer is deletable the day that ships.
 
 **Atomicity.** A multi-operation update must not partially apply on failure
-(SPARQL 1.1 §3.1.3). `apply_update_with`'s `validate_op` preflights every
-operation against the **pre-update** store first — reserved-namespace checks,
-recovered-`SILENT` source existence, D11 existence, `LOAD` routing/fetch, and
-the WHERE-clause `translate_where`+`planner::plan` (so an unsupported algebra
+(SPARQL 1.1 §3.1.3). `apply_update_with` preflights the whole request against
+the **pre-update** store first — a recovered-`SILENT` source-existence sweep
+over the `recover_amc_hints` hints, then `validate_op` per operation
+(reserved-namespace checks, D11 existence, `LOAD` routing/fetch, and the
+WHERE-clause `translate_where`+`planner::plan` so an unsupported algebra
 construct like `SERVICE`/`MINUS` is caught) — and only mutates once the whole
 sequence is known-applyable. One store batch per operation, applied in
 request order, never collapsed.

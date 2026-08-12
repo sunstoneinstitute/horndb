@@ -36,21 +36,23 @@
 //!   undefined). `file:`-only (#189).
 //! * **`ADD`/`MOVE`/`COPY`** — spargebra desugars these into `Drop` +
 //!   `DeleteInsert` sequences and **drops the `SILENT` flag**. The desugared
-//!   ops execute; the flag is recovered by a source-text pre-scan (see
-//!   [`scan_amc_silent_hints`]).
+//!   ops execute; the flag — plus the source operand and whether the op is the
+//!   identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
+//!   source-text pre-scan (see [`recover_amc_hints`]).
 //! * **The reserved namespace is closed to writes** (S4): every write form
 //!   touching `https://horndb.io/graph/…` is refused. This is a
 //!   permission-shaped error that `SILENT` does **not** suppress; it is
 //!   checked before any silent/existence logic. Reads of reserved graphs stay
 //!   allowed.
 //!
-//! **Atomicity** (§3.1.3): a multi-operation update preflights every operation
-//! (`validate_op`) for the errors it would hit at apply time — reserved
-//! namespace, recovered-`SILENT` source existence, D11 existence, `LOAD`
-//! routing/fetch — before the first mutation, so a failing request mutates
-//! nothing (e.g. `COPY <absent> TO DEFAULT`, which desugars to a destructive
-//! `Drop{DEFAULT}` + a copy from a missing source, never clears the default
-//! graph). One store batch per operation, applied in request order.
+//! **Atomicity** (§3.1.3): a multi-operation update preflights the whole
+//! request against the pre-update store before the first mutation, so a failing
+//! request mutates nothing. Two checks run: a recovered-`SILENT` source
+//! existence sweep over the `ADD`/`MOVE`/`COPY` hints, then `validate_op` per
+//! operation (reserved namespace, D11 existence, `LOAD` routing/fetch). This is
+//! why `COPY <absent> TO DEFAULT` — which desugars to a destructive
+//! `Drop{DEFAULT}` + a copy from a missing source — never clears the default
+//! graph. One store batch per operation, applied in request order.
 
 use crate::algebra::translate::{dataset_spec_from, translate_where};
 use crate::algebra::{DatasetSpec, Term};
@@ -140,18 +142,36 @@ pub fn apply_update_with<B: FullBackend>(
         }
     };
 
-    // Recover the `SILENT` flag spargebra dropped from `ADD`/`MOVE`/`COPY` and
-    // align it with the desugared copy-graph ops by occurrence order.
-    let op_hints = align_amc_hints(ops, source);
+    // Recover the `SILENT` flag, source operand, and identity check of every
+    // `ADD`/`MOVE`/`COPY` from the raw text — spargebra drops all three on
+    // desugaring (see [`recover_amc_hints`]).
+    let amc_hints = recover_amc_hints(source);
 
-    // Atomicity (§3.1.3): preflight every op for the errors it would hit at
-    // apply time — using the pre-update store for D11 existence — so a failing
-    // multi-op request mutates nothing. See the module doc.
-    for (op, hint) in ops.iter().zip(&op_hints) {
-        validate_op(op, cfg, store, *hint)?;
+    // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose named
+    // source is absent is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5), caught
+    // before any mutation. The identity case (`<g> TO <g>`) desugars to zero
+    // ops and is a no-op even when `<g>` is absent, so it never raises this. An
+    // operand that could not be resolved from text (an `Unknown` source) is not
+    // existence-checked; its desugared ops apply as-is (a natural no-op on a
+    // missing source).
+    for h in &amc_hints {
+        if !h.silent && !h.is_identity {
+            if let AmcSource::Named(g) = &h.source {
+                if !store.graph_exists(g) {
+                    return Err(amc_source_missing_error(g));
+                }
+            }
+        }
     }
 
-    for (op, hint) in ops.iter().zip(&op_hints) {
+    // Atomicity part 2: preflight every op for the remaining errors it would
+    // hit at apply time — reserved namespace, D11 existence (against the
+    // pre-update store), `LOAD` routing/fetch. See the module doc.
+    for op in ops {
+        validate_op(op, cfg, store)?;
+    }
+
+    for op in ops {
         match op {
             GraphUpdateOperation::InsertData { data } => {
                 let mut adds: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
@@ -181,11 +201,9 @@ pub fn apply_update_with<B: FullBackend>(
                 using,
                 pattern,
             } => {
-                // ADD/COPY of an absent named source with the recovered SILENT
-                // flag is a no-op; without it, an error (caught in preflight).
-                if let AmcSourceStatus::Skip = amc_source_status(op, *hint, store) {
-                    continue;
-                }
+                // An `ADD`/`COPY` copy-op reading an absent named source binds
+                // zero rows, so it is a natural no-op; a non-silent absent
+                // source was already rejected in the preflight sweep above.
                 apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
             }
             GraphUpdateOperation::Clear { silent, graph } => {
@@ -211,7 +229,8 @@ pub fn apply_update_with<B: FullBackend>(
 
 /// Preflight one operation: return the error it *would* produce at apply time,
 /// without mutating (SPARQL Update atomicity, §3.1.3). Mirrors every rejecting
-/// path in the apply loop.
+/// path in the apply loop except the `ADD`/`MOVE`/`COPY` source-existence
+/// check, which runs once over the recovered hints in [`apply_update_with`].
 ///
 /// Two apply-time checks read state the preflight cannot see, so they cannot be
 /// mirrored exactly: (a) D11 existence (read here against the *pre-update*
@@ -227,7 +246,6 @@ fn validate_op<B: FullBackend>(
     op: &GraphUpdateOperation,
     cfg: &SparqlConfig,
     store: &B,
-    hint: Option<AmcHint>,
 ) -> Result<()> {
     match op {
         GraphUpdateOperation::InsertData { data } => {
@@ -249,16 +267,7 @@ fn validate_op<B: FullBackend>(
             insert,
             using: _,
             pattern,
-        } => {
-            validate_delete_insert(delete, insert, pattern, cfg)?;
-            // ADD/COPY source existence (SILENT-recoverable) — mirrored so the
-            // preflight aborts before any destructive pre-Drop runs. `Skip`
-            // (silent + absent) passes preflight; the apply loop then skips it.
-            if let AmcSourceStatus::Err(e) = amc_source_status(op, hint, store) {
-                return Err(e);
-            }
-            Ok(())
-        }
+        } => validate_delete_insert(delete, insert, pattern, cfg),
         GraphUpdateOperation::Clear { silent, graph } => {
             validate_clear_drop("CLEAR", *silent, graph, store)
         }
@@ -813,331 +822,239 @@ fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
 
 // ── ADD / MOVE / COPY: SILENT recovery ───────────────────────────────────────
 
-/// One of the three graph-management verbs spargebra desugars away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AmcVerb {
-    Add,
-    Move,
-    Copy,
+/// The source operand of an `ADD`/`MOVE`/`COPY`, recovered from raw text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmcSource {
+    /// `DEFAULT` — the default graph always exists, never a missing-source error.
+    Default,
+    /// `[GRAPH] <iri>` — the named source graph.
+    Named(String),
+    /// The operand could not be resolved from the text alone (e.g. a prefixed
+    /// name, which needs the query prologue). No source-existence check runs on
+    /// it — the desugared ops apply as-is (a natural no-op on a missing source),
+    /// the honest, non-destructive outcome.
+    Unknown,
 }
 
-/// A recovered `(verb, silent)` hint for one `ADD`/`MOVE`/`COPY` in the source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, source
+/// operand, and whether it is the W3C identity case (`source == destination`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AmcHint {
-    verb: AmcVerb,
     silent: bool,
+    source: AmcSource,
+    /// `true` when the recovered source and destination operands are equal —
+    /// spargebra's own identity check (`from == to`), which always desugars to
+    /// zero operations and is a no-op regardless of whether the graph exists
+    /// (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5). `false` whenever either operand cannot
+    /// be resolved from text alone: the conservative default keeps the
+    /// existence check enabled.
+    is_identity: bool,
 }
 
-/// The recognized shape of a spargebra `copy_graph` desugaring — the
-/// `DeleteInsert` that every non-identity `ADD`/`MOVE`/`COPY` produces.
-struct CopyGraph {
-    /// `None` = the default-graph source (always exists); `Some(iri)` = a named
-    /// source graph.
-    source: Option<String>,
+/// Recover the `SILENT` flag, source operand, and identity check
+/// (`source == destination`) of every `ADD`/`MOVE`/`COPY` in the raw update
+/// text, in source order.
+///
+/// **Why this exists.** spargebra 0.4.6 desugars `ADD`/`MOVE`/`COPY` into
+/// `Drop` + `DeleteInsert` pairs and **discards the `SILENT` flag**. That was
+/// harmless while named graphs were unrepresentable; now a `SILENT COPY
+/// <missing> TO <g>` must be a no-op and a non-silent one an error (SPEC-28
+/// S4), so the flag matters. Re-scan the source text — a small hand-written
+/// tokenizer (no regex) that skips comments, IRIs, and string literals — to
+/// recover it, plus the source operand and identity check so the missing-source
+/// preflight needs no fragile op-shape matching or token↔op alignment.
+///
+/// The recovery drives the preflight directly (see [`apply_update_with`]): each
+/// hint is independent, so an identity op (zero desugared ops, one verb token)
+/// and a user-written copy-shaped `DeleteInsert` can no longer corrupt the
+/// alignment, and a user's `SILENT` is always honoured.
+///
+/// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
+/// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
+/// number). Delete this whole machinery the day that ships.
+fn recover_amc_hints(src: &str) -> Vec<AmcHint> {
+    let toks = amc_tokenize(src);
+    let mut hints = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        if *tok != AmcTok::Amc {
+            continue;
+        }
+        // Grammar after the verb: `SILENT? GraphOrDefault TO GraphOrDefault`.
+        // Whitespace and comments are not emitted, so the tokens are
+        // consecutive and index arithmetic tracks the grammar.
+        let mut j = i + 1;
+        let silent = matches!(toks.get(j), Some(AmcTok::Silent));
+        if silent {
+            j += 1;
+        }
+        let (source, after_source) = amc_parse_operand(&toks, j);
+        // `after_source` is `None` only when the source itself could not be
+        // resolved (e.g. a prefixed name) — then the destination's token span
+        // can't be located either, so identity stays `false` (conservative).
+        // Otherwise skip one token for `TO` and parse the destination the same
+        // way.
+        let destination = after_source.map(|k| amc_parse_operand(&toks, k + 1).0);
+        let is_identity = matches!(
+            (&source, &destination),
+            (AmcSource::Default, Some(AmcSource::Default))
+        ) || matches!(
+            (&source, &destination),
+            (AmcSource::Named(a), Some(AmcSource::Named(b))) if a == b
+        );
+        hints.push(AmcHint {
+            silent,
+            source,
+            is_identity,
+        });
+    }
+    hints
 }
 
-/// Recognize the `DeleteInsert` that `ADD`/`MOVE`/`COPY` desugar to (spargebra
-/// `copy_graph`): empty delete, one `(?s ?p ?o)` insert quad, no `USING`, and a
-/// WHERE of either `{ ?s ?p ?o }` (default source) or
-/// `GRAPH <from> { ?s ?p ?o }` (named source). Only the shape identifies it;
-/// the aligned hint (below) supplies the verb and the recovered `SILENT` flag.
-fn as_copy_graph(op: &GraphUpdateOperation) -> Option<CopyGraph> {
-    let GraphUpdateOperation::DeleteInsert {
-        delete,
-        insert,
-        using,
-        pattern,
-    } = op
-    else {
-        return None;
-    };
-    if !delete.is_empty() || using.is_some() || insert.len() != 1 {
-        return None;
-    }
-    let q = &insert[0];
-    if !is_term_var(&q.subject, "s")
-        || !is_pred_var(&q.predicate, "p")
-        || !is_term_var(&q.object, "o")
-    {
-        return None;
-    }
-    match pattern.as_ref() {
-        GraphPattern::Bgp { patterns } if is_spo_bgp(patterns) => Some(CopyGraph { source: None }),
-        GraphPattern::Graph {
-            name: NamedNodePattern::NamedNode(from),
-            inner,
-        } => match inner.as_ref() {
-            GraphPattern::Bgp { patterns } if is_spo_bgp(patterns) => Some(CopyGraph {
-                source: Some(from.as_str().to_owned()),
-            }),
-            _ => None,
+/// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? <iri>`) starting at
+/// token index `k`. Returns the operand and the index of the first token after
+/// it. The index is `None` when the operand's span could not be determined (an
+/// unresolvable form, e.g. a prefixed name) — the caller then has no reliable
+/// way to locate whatever follows.
+fn amc_parse_operand(toks: &[AmcTok], k: usize) -> (AmcSource, Option<usize>) {
+    match toks.get(k) {
+        Some(AmcTok::Default) => (AmcSource::Default, Some(k + 1)),
+        Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 1)),
+        Some(AmcTok::Graph) => match toks.get(k + 1) {
+            Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 2)),
+            _ => (AmcSource::Unknown, None),
         },
-        _ => None,
+        _ => (AmcSource::Unknown, None),
     }
 }
 
-fn is_term_var(t: &TermPattern, name: &str) -> bool {
-    matches!(t, TermPattern::Variable(v) if v.as_str() == name)
-}
-fn is_pred_var(p: &NamedNodePattern, name: &str) -> bool {
-    matches!(p, NamedNodePattern::Variable(v) if v.as_str() == name)
-}
-fn is_spo_bgp(patterns: &[spargebra::term::TriplePattern]) -> bool {
-    patterns.len() == 1
-        && is_term_var(&patterns[0].subject, "s")
-        && is_pred_var(&patterns[0].predicate, "p")
-        && is_term_var(&patterns[0].object, "o")
-}
-
-/// Per-op recovered `SILENT` hints, indexed to line up with `ops`.
-///
-/// spargebra desugars each non-identity `ADD`/`MOVE`/`COPY` into exactly one
-/// `copy_graph` `DeleteInsert` (plus, for `MOVE`/`COPY`, `Drop` ops that keep
-/// their flags). [`scan_amc_silent_hints`] recovers `(verb, silent)` per source
-/// occurrence in order. Three cases:
-///
-/// * **Aligned** (hint count == copy-op count): attach each recovered hint to
-///   its copy-op positionally.
-/// * **Ambiguous** (≥1 `ADD`/`MOVE`/`COPY` token present, but the counts differ
-///   — an identity `ADD <g> TO <g>` is one token but zero ops, or a user
-///   `DeleteInsert` mimics the copy shape): the alignment cannot be trusted, so
-///   fall back to **non-silent** for every copy-op. This is
-///   deliberate — a `COPY`'s only absent-source guard is
-///   [`amc_source_status`] (its desugaring has a destination `Drop` but no
-///   source `Drop`), so a silent-equivalent `None` fallback here would let a
-///   non-silent `COPY <absent> TO <dst>` run the unconditional `Drop(<dst>)`
-///   and wipe an existing destination with no error, which SPARQL 1.1 §3.2.4
-///   forbids. Non-silent means an absent source errors in preflight, before any
-///   destructive `Drop` runs; a present source still copies. "An honest error,
-///   never a silent wrong outcome" (PLAN-28-04 §Design). `MOVE`'s own preserved
-///   source-`Drop` flag is an independent guard, and an identity case has no
-///   copy-op to error on, so both stay correct.
-/// * **No AMC tokens at all** (`hints` empty): every copy-shaped op is a genuine
-///   user `DeleteInsert`, never a desugared AMC — leave it plain (`None`). A
-///   user `INSERT { … } WHERE { GRAPH <absent> { … } }` reads zero rows and is a
-///   valid no-op; forcing it to error would violate SPARQL semantics, and it
-///   carries no destination `Drop`, so there is no data to lose.
-fn align_amc_hints(ops: &[GraphUpdateOperation], source: &str) -> Vec<Option<AmcHint>> {
-    let hints = scan_amc_silent_hints(source);
-    let copy_positions: Vec<usize> = ops
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| as_copy_graph(op).is_some())
-        .map(|(i, _)| i)
-        .collect();
-    let mut out = vec![None; ops.len()];
-    if copy_positions.is_empty() {
-        return out; // no copy-op to hint
-    }
-    if hints.len() == copy_positions.len() {
-        for (h, &pos) in hints.iter().zip(&copy_positions) {
-            out[pos] = Some(*h);
-        }
-    } else if !hints.is_empty() {
-        // Ambiguous: force the non-silent source-existence check on every
-        // copy-op. The verb is unknown here; `Copy` is the "run the check"
-        // marker — `Add` and `Copy` check identically, and `Move` keeps its own
-        // source-`Drop` guard, so forcing the check is safe for all three.
-        for &pos in &copy_positions {
-            out[pos] = Some(AmcHint {
-                verb: AmcVerb::Copy,
-                silent: false,
-            });
-        }
-    }
-    // else: no AMC tokens — leave every copy-shaped op plain (`None`).
-    out
+/// The token kinds the SILENT-recovery scan needs. Everything not one of the
+/// tracked keywords or an IRI is [`AmcTok::Other`] — kept (not dropped) so token
+/// adjacency mirrors the grammar and a non-keyword source operand (a prefixed
+/// name, a variable) reads as [`AmcSource::Unknown`], not the next IRI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AmcTok {
+    Amc,
+    Silent,
+    Default,
+    Graph,
+    Iri(String),
+    Other,
 }
 
-/// Outcome of an `ADD`/`COPY` source-existence test for one copy-op.
-enum AmcSourceStatus {
-    /// Not an aligned `ADD`/`COPY` copy-op, or its source exists — proceed.
-    Ok,
-    /// Aligned, silent, and the named source is absent — skip (a no-op).
-    Skip,
-    /// Aligned, non-silent, and the named source is absent — error.
-    Err(SparqlError),
+/// True for bytes that continue a word (keyword or name segment). Includes `-`
+/// so a hyphenated name segment is one token and cannot be mistaken for a
+/// trailing keyword.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
-/// Apply the recovered `SILENT` flag to an `ADD`/`COPY` copy-op: a missing
-/// named source is a no-op when silent, an error when not (SPARQL 1.1
-/// §3.2.3/§3.2.5). `MOVE` (verb `Move`) is handled by its own preserved
-/// source-`Drop` flag, so it falls through to `Ok` here. A copy-op with **no**
-/// hint (`None` — the token-free plain case, see [`align_amc_hints`]) also
-/// falls through: a user `DeleteInsert` that just reads an absent graph is a
-/// valid no-op, never an error.
-fn amc_source_status<B: FullBackend>(
-    op: &GraphUpdateOperation,
-    hint: Option<AmcHint>,
-    store: &B,
-) -> AmcSourceStatus {
-    let Some(hint) = hint else {
-        return AmcSourceStatus::Ok;
-    };
-    if !matches!(hint.verb, AmcVerb::Add | AmcVerb::Copy) {
-        return AmcSourceStatus::Ok;
-    }
-    let Some(cg) = as_copy_graph(op) else {
-        return AmcSourceStatus::Ok;
-    };
-    match cg.source {
-        // Default source always exists.
-        None => AmcSourceStatus::Ok,
-        Some(iri) => {
-            if store.graph_exists(&iri) {
-                AmcSourceStatus::Ok
-            } else if hint.silent {
-                AmcSourceStatus::Skip
-            } else {
-                AmcSourceStatus::Err(amc_source_missing_error(&iri))
-            }
-        }
-    }
-}
-
-/// Scan the raw update text for `ADD`/`MOVE`/`COPY` keywords and the `SILENT`
-/// modifier that spargebra's desugaring discards, in source order.
-///
-/// A small hand tokenizer (no regex) that skips the three lexical contexts a
-/// bare keyword scan would trip on: `# …` comments, `<…>` IRIs, and `"…"` /
-/// `'…'` string literals (single- and triple-quoted). Everything else is read
-/// as whitespace-delimited words; a word equal to `ADD`/`MOVE`/`COPY` (ASCII
-/// case-insensitive, not a prefixed name and not preceded by `:`/`?`/`$`)
-/// records a hint, whose `silent` is whether the next word is `SILENT`.
-///
-/// This is a stopgap: spargebra 0.4.6 drops the `SILENT` flag when it rewrites
-/// `ADD`/`MOVE`/`COPY` into `Drop`+`DeleteInsert` (its parser's `Add`/`Move`/
-/// `Copy` rules take `silent` but discard it for `ADD`, and keep it only on
-/// `MOVE`/`COPY`'s source-`Drop`). File an upstream issue on the spargebra
-/// (oxigraph) tracker asking for a structured Add/Move/Copy op — or a preserved
-/// `silent` flag on the desugared ops — and link it here; delete this whole
-/// tokenizer the day that ships. See PLAN-28-04 §Design (ADD/MOVE/COPY).
-fn scan_amc_silent_hints(src: &str) -> Vec<AmcHint> {
+/// Tokenize `src` for [`recover_amc_hints`]. Skips ASCII whitespace, `#`
+/// comments (to end of line), IRIs (`<…>`), and string literals (`'…'`, `"…"`,
+/// and their triple-quoted forms, honouring `\` escapes). Emits one token per
+/// keyword/IRI/other-run.
+fn amc_tokenize(src: &str) -> Vec<AmcTok> {
     let b = src.as_bytes();
     let n = b.len();
-    let mut i = 0;
     let mut out = Vec::new();
+    let mut i = 0;
     while i < n {
-        match b[i] {
+        let c = b[i];
+        match c {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
             b'#' => {
                 while i < n && b[i] != b'\n' {
                     i += 1;
                 }
             }
-            b'<' => i = skip_iri(b, i),
-            b'"' | b'\'' => i = skip_string(b, i),
-            c if is_word_char(c) => {
-                let start = i;
-                while i < n && is_word_char(b[i]) {
-                    i += 1;
+            b'<' => {
+                // IRIREF: no `>` or whitespace inside. If unterminated, stop at
+                // end (best-effort — the parser already accepted the update).
+                let start = i + 1;
+                let mut j = start;
+                while j < n && b[j] != b'>' && !b[j].is_ascii_whitespace() {
+                    j += 1;
                 }
-                // A prefixed name (`ex:ADD` or `ADD:foo`) or a variable
-                // (`?ADD`/`$ADD`) is not the keyword.
-                let prefixed_before = start > 0 && matches!(b[start - 1], b':' | b'?' | b'$');
-                let prefixed_after = i < n && b[i] == b':';
-                if !prefixed_before && !prefixed_after {
-                    if let Some(verb) = amc_verb(&src[start..i]) {
-                        out.push(AmcHint {
-                            verb,
-                            silent: next_word_is_silent(b, src, i),
-                        });
-                    }
-                }
+                out.push(AmcTok::Iri(
+                    String::from_utf8_lossy(&b[start..j]).into_owned(),
+                ));
+                i = if j < n && b[j] == b'>' { j + 1 } else { j };
             }
-            _ => i += 1,
+            b'"' | b'\'' => {
+                i = amc_skip_string(b, i);
+                out.push(AmcTok::Other);
+            }
+            _ if is_word_byte(c) => {
+                let start = i;
+                let mut j = i;
+                while j < n && is_word_byte(b[j]) {
+                    j += 1;
+                }
+                // A word is a keyword only when it is not part of a prefixed
+                // name (`ex:ADD`, `ADD:`) and not a variable (`?ADD`/`$ADD`).
+                let prev = if start > 0 { b[start - 1] } else { 0 };
+                let next = if j < n { b[j] } else { 0 };
+                let name_ctx = prev == b':' || prev == b'?' || prev == b'$' || next == b':';
+                let word = &src[start..j];
+                out.push(if name_ctx {
+                    AmcTok::Other
+                } else if word.eq_ignore_ascii_case("ADD")
+                    || word.eq_ignore_ascii_case("MOVE")
+                    || word.eq_ignore_ascii_case("COPY")
+                {
+                    AmcTok::Amc
+                } else if word.eq_ignore_ascii_case("SILENT") {
+                    AmcTok::Silent
+                } else if word.eq_ignore_ascii_case("DEFAULT") {
+                    AmcTok::Default
+                } else if word.eq_ignore_ascii_case("GRAPH") {
+                    AmcTok::Graph
+                } else {
+                    AmcTok::Other
+                });
+                i = j;
+            }
+            _ => {
+                out.push(AmcTok::Other);
+                i += 1;
+            }
         }
     }
     out
 }
 
-/// A word byte for keyword scanning: ASCII alphanumeric or `_`.
-fn is_word_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
-}
-
-fn amc_verb(word: &str) -> Option<AmcVerb> {
-    if word.eq_ignore_ascii_case("ADD") {
-        Some(AmcVerb::Add)
-    } else if word.eq_ignore_ascii_case("MOVE") {
-        Some(AmcVerb::Move)
-    } else if word.eq_ignore_ascii_case("COPY") {
-        Some(AmcVerb::Copy)
-    } else {
-        None
-    }
-}
-
-/// Skip a `<…>` IRI starting at `i` (a `<`). If the run to the next `>` looks
-/// like an IRI (no whitespace, no nested `<`), skip past the `>`; otherwise the
-/// `<` was a comparison operator — advance one byte.
-fn skip_iri(b: &[u8], i: usize) -> usize {
+/// Skip a SPARQL string literal starting at `b[start]` (`'` or `"`), including
+/// the triple-quoted forms, honouring `\` escapes. Returns the index just past
+/// the closing quote (or end of input if unterminated).
+fn amc_skip_string(b: &[u8], start: usize) -> usize {
+    let q = b[start];
     let n = b.len();
-    let mut j = i + 1;
-    while j < n {
-        match b[j] {
-            b'>' => return j + 1,
-            c if c.is_ascii_whitespace() || c == b'<' => return i + 1,
-            _ => j += 1,
-        }
-    }
-    i + 1
-}
-
-/// Skip a string literal starting at `i` (a `"` or `'`). Handles triple-quoted
-/// and single-quoted forms with `\` escapes; a single-quoted string ends at the
-/// closing quote or a newline (SPARQL single-line strings hold no raw newline).
-fn skip_string(b: &[u8], i: usize) -> usize {
-    let n = b.len();
-    let q = b[i];
-    // Triple-quoted?
-    if i + 2 < n && b[i + 1] == q && b[i + 2] == q {
-        let mut j = i + 3;
-        while j < n {
-            if b[j] == b'\\' {
-                j += 2;
+    // Triple-quoted (`"""` / `'''`)?
+    if start + 2 < n && b[start + 1] == q && b[start + 2] == q {
+        let mut i = start + 3;
+        while i < n {
+            if b[i] == b'\\' {
+                i += 2;
                 continue;
             }
-            if j + 2 < n && b[j] == q && b[j + 1] == q && b[j + 2] == q {
-                return j + 3;
+            if i + 2 < n && b[i] == q && b[i + 1] == q && b[i + 2] == q {
+                return i + 3;
             }
-            j += 1;
+            i += 1;
         }
         return n;
     }
-    let mut j = i + 1;
-    while j < n {
-        match b[j] {
-            b'\\' => j += 2,
-            c if c == q => return j + 1,
-            b'\n' => return j + 1,
-            _ => j += 1,
-        }
-    }
-    n
-}
-
-/// After a verb keyword ending at `i`, is the next word `SILENT`? Skips
-/// whitespace and `# …` comments between the two.
-fn next_word_is_silent(b: &[u8], src: &str, i: usize) -> bool {
-    let n = b.len();
-    let mut j = i;
-    loop {
-        while j < n && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if j < n && b[j] == b'#' {
-            while j < n && b[j] != b'\n' {
-                j += 1;
-            }
+    let mut i = start + 1;
+    while i < n {
+        if b[i] == b'\\' {
+            i += 2;
             continue;
         }
-        break;
+        if b[i] == q {
+            return i + 1;
+        }
+        i += 1;
     }
-    let start = j;
-    while j < n && is_word_char(b[j]) {
-        j += 1;
-    }
-    start < j && src[start..j].eq_ignore_ascii_case("SILENT")
+    n
 }
 
 // ── Small lowering helpers ───────────────────────────────────────────────────

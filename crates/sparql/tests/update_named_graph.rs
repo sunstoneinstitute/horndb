@@ -721,19 +721,16 @@ fn add_missing_source_errors_horn() {
     add_missing_source_errors::<HornBackend>();
 }
 
-/// Regression (whole-branch review): a non-silent `COPY <absent> TO <dest>` on
-/// the **ambiguous** SILENT-alignment path must error and leave `<dest>`
-/// intact. COPY desugars to `Drop(<dest>)` + a source-reading `DeleteInsert`
-/// with no source `Drop`, so its ONLY absent-source guard is the recovered
-/// SILENT check. A silent-equivalent fallback would run `Drop(<dest>)`, read
-/// zero rows, and wipe `<dest>` with no error (SPARQL 1.1 §3.2.4 forbids this).
-///
-/// The ambiguity is forced deterministically: an identity `ADD <g> TO <g>`
-/// (one source token, zero desugared ops) co-occurs with the COPY, so the hint
-/// count (2) ≠ the copy-op count (1) — the ambiguous branch — which now falls
-/// back to non-silent, so the absent source errors in preflight before the
-/// destructive `Drop` runs.
-fn copy_absent_source_ambiguous_alignment_errors_no_wipe<B: FullBackend + Default>() {
+/// Regression: an identity `ADD <g> TO <g>` (zero desugared ops, one verb
+/// token) co-occurring with a non-silent `COPY <absent> TO <dest>` must error
+/// and leave `<dest>` intact. `COPY` desugars to `Drop(<dest>)` + a
+/// source-reading `DeleteInsert` with no source `Drop`, so its only
+/// absent-source guard is the recovered-`SILENT` preflight. Per-occurrence text
+/// recovery (`recover_amc_hints`) recognises the identity op (skips it) and the
+/// non-silent absent-source `COPY` (errors it) independently, so the error is
+/// raised before the destructive `Drop(<dest>)` runs (SPARQL 1.1 §3.2.4 forbids
+/// wiping `<dest>` without an error).
+fn copy_absent_source_with_identity_coop_errors_no_wipe<B: FullBackend + Default>() {
     let mut store = B::default();
     // Seed the destination so a wrongful Drop would be observable.
     seed_quad(
@@ -760,10 +757,162 @@ fn copy_absent_source_ambiguous_alignment_errors_no_wipe<B: FullBackend + Defaul
 }
 
 #[test]
-fn copy_absent_source_ambiguous_alignment_errors_no_wipe_mem() {
-    copy_absent_source_ambiguous_alignment_errors_no_wipe::<MemStore>();
+fn copy_absent_source_with_identity_coop_errors_no_wipe_mem() {
+    copy_absent_source_with_identity_coop_errors_no_wipe::<MemStore>();
 }
 #[test]
-fn copy_absent_source_ambiguous_alignment_errors_no_wipe_horn() {
-    copy_absent_source_ambiguous_alignment_errors_no_wipe::<HornBackend>();
+fn copy_absent_source_with_identity_coop_errors_no_wipe_horn() {
+    copy_absent_source_with_identity_coop_errors_no_wipe::<HornBackend>();
+}
+
+// ── SILENT recovery: an identity op co-occurring with a SILENT op ────────────
+//
+// An identity `ADD`/`MOVE`/`COPY <g> TO <g>` desugars to *zero* operations but
+// still emits one verb token in the source text. A per-occurrence text recovery
+// (`recover_amc_hints`) handles this: it recovers `(silent, source,
+// is_identity)` for every verb occurrence and drives the missing-source
+// preflight straight off those hints, with no token-count↔op-count alignment to
+// go wrong. The identity op is recognised (`is_identity`) and skipped; a
+// following `SILENT` op keeps its flag, so an absent source stays a no-op.
+
+/// `ADD <g> TO <g> ; ADD SILENT <missing> TO <dst>` succeeds and changes
+/// nothing: the identity `ADD` is zero ops, and the `SILENT ADD` of an absent
+/// source is a no-op (SPARQL 1.1 §3.2.3).
+fn add_identity_then_silent_missing_source_ok<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    run(
+        "ADD <http://ex/g> TO <http://ex/g> ; \
+         ADD SILENT <http://ex/missing> TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count_default(&store),
+        1,
+        "the default triple survives unchanged"
+    );
+    assert!(
+        !store.graph_exists("http://ex/dst"),
+        "the SILENT ADD of an absent source wrote nothing"
+    );
+}
+
+#[test]
+fn add_identity_then_silent_missing_source_ok_mem() {
+    add_identity_then_silent_missing_source_ok::<MemStore>();
+}
+#[test]
+fn add_identity_then_silent_missing_source_ok_horn() {
+    add_identity_then_silent_missing_source_ok::<HornBackend>();
+}
+
+/// `COPY <g> TO <g> ; COPY SILENT <missing> TO <dst>` succeeds and clears
+/// `<dst>`: the identity `COPY` is zero ops; the `SILENT COPY` drops `<dst>`
+/// first (§3.2.4) and then copies from an absent source, a silent no-op — so
+/// `<dst>` ends empty.
+fn copy_identity_then_silent_missing_source_clears_dst<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://ex/dst"), 1);
+    run(
+        "COPY <http://ex/g> TO <http://ex/g> ; \
+         COPY SILENT <http://ex/missing> TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        0,
+        "COPY drops the destination before the (no-op) copy"
+    );
+    assert!(!store.graph_exists("http://ex/dst"));
+}
+
+#[test]
+fn copy_identity_then_silent_missing_source_clears_dst_mem() {
+    copy_identity_then_silent_missing_source_clears_dst::<MemStore>();
+}
+#[test]
+fn copy_identity_then_silent_missing_source_clears_dst_horn() {
+    copy_identity_then_silent_missing_source_clears_dst::<HornBackend>();
+}
+
+/// `MOVE <g> TO <g> ; MOVE SILENT <missing> TO <dst>` succeeds and clears
+/// `<dst>` (§3.2.5): the identity `MOVE` is zero ops; the `SILENT MOVE` drops
+/// `<dst>`, copies from an absent source (a no-op), and silently drops that
+/// absent source — so `<dst>` ends empty.
+fn move_identity_then_silent_missing_source_clears_dst<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    assert_eq!(count_graph(&store, "http://ex/dst"), 1);
+    run(
+        "MOVE <http://ex/g> TO <http://ex/g> ; \
+         MOVE SILENT <http://ex/missing> TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        0,
+        "MOVE drops the destination before the (no-op) move"
+    );
+    assert!(!store.graph_exists("http://ex/dst"));
+}
+
+#[test]
+fn move_identity_then_silent_missing_source_clears_dst_mem() {
+    move_identity_then_silent_missing_source_clears_dst::<MemStore>();
+}
+#[test]
+fn move_identity_then_silent_missing_source_clears_dst_horn() {
+    move_identity_then_silent_missing_source_clears_dst::<HornBackend>();
+}
+
+/// Guard (must hold both before and after this fix): a genuinely non-silent
+/// `COPY` of an absent source still errors, and the destination is not wiped —
+/// the preflight rejects it before the destructive `Drop(<dst>)` runs.
+fn copy_nonsilent_missing_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    let err = run("COPY <http://ex/missing> TO <http://ex/dst>", &mut store).unwrap_err();
+    assert!(err.to_lowercase().contains("does not exist"), "{err}");
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "a failed non-silent COPY must not wipe the destination"
+    );
+}
+
+#[test]
+fn copy_nonsilent_missing_source_errors_no_wipe_mem() {
+    copy_nonsilent_missing_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn copy_nonsilent_missing_source_errors_no_wipe_horn() {
+    copy_nonsilent_missing_source_errors_no_wipe::<HornBackend>();
 }
