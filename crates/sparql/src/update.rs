@@ -114,6 +114,19 @@ fn amc_source_missing_error(iri: &str) -> SparqlError {
     ))
 }
 
+/// A non-silent `ADD`/`MOVE`/`COPY` whose source graph IRI the SILENT-recovery
+/// scan cannot faithfully reproduce (it needs a `\uXXXX` UCHAR or a
+/// `PN_LOCAL_ESC` backslash escape). We fail closed rather than resolve it wrong
+/// and risk writing — or, for `COPY`/`MOVE`, wiping — the wrong graph.
+fn amc_source_unresolvable_error() -> SparqlError {
+    SparqlError::Executor(
+        "ADD/MOVE/COPY source graph uses an IRI escape (\\uXXXX or a PN_LOCAL_ESC backslash) that \
+         the SILENT-recovery scan cannot resolve; a non-silent op fails closed here to avoid \
+         writing the wrong graph (use SILENT to make it a no-op)"
+            .to_owned(),
+    )
+}
+
 /// `LOAD … INTO GRAPH` of a dataset format (`.nq`/`.trig`).
 fn load_dataset_into_graph_error(source: &str, dest: &str) -> SparqlError {
     SparqlError::UnsupportedAlgebra(format!(
@@ -154,20 +167,27 @@ pub fn apply_update_with<B: FullBackend>(
     // own `PREFIX`/`BASE` prologue (see [`recover_amc_hints`]).
     let amc_hints = recover_amc_hints(source, base_iri);
 
-    // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose named
-    // source is absent is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5), caught
-    // before any mutation. The identity case (`<g> TO <g>`) desugars to zero
-    // ops and is a no-op even when `<g>` is absent, so it is excluded. A
-    // `DEFAULT` source always exists and is skipped. This reads only the
-    // recovered hints — never the desugared ops — so it cannot collide with a
-    // user-written `DeleteInsert`.
+    // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose source
+    // is absent (or unresolvable) is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5),
+    // caught before any mutation. The identity case (`<g> TO <g>`) desugars to
+    // zero ops and is a no-op even when `<g>` is absent, so it is excluded. A
+    // `DEFAULT` source always exists. A source the scan could not resolve (an
+    // escaped IRI — see [`AmcSource::Unknown`]) **fails closed**: a non-silent op
+    // errors rather than fall through to a silent no-op that could wipe a
+    // destination. This reads only the recovered hints — never the desugared ops
+    // — so it cannot collide with a user-written `DeleteInsert`.
     for h in &amc_hints {
-        if !h.silent && !h.is_identity {
-            if let AmcSource::Named(g) = &h.source {
+        if h.silent || h.is_identity {
+            continue;
+        }
+        match &h.source {
+            AmcSource::Named(g) => {
                 if !store.graph_exists(g) {
                     return Err(amc_source_missing_error(g));
                 }
             }
+            AmcSource::Unknown => return Err(amc_source_unresolvable_error()),
+            AmcSource::Default => {}
         }
     }
 
@@ -838,12 +858,15 @@ enum AmcSource {
     /// `[GRAPH] iri` — the named source graph, as an absolute IRI (a prefixed
     /// name or a base-relative `<…>` is already expanded).
     Named(String),
-    /// The operand could not be resolved from text. For input spargebra accepted
-    /// this is unreachable — every prefix is declared and every IRI is valid, so
-    /// an `IRIREF`, a `PrefixedName`, or `DEFAULT` always resolves. It survives
-    /// only as a defensive fallback for an exotic `PN_LOCAL` form the simple
-    /// expander here does not reproduce (e.g. backslash-escaped locals); such a
-    /// source is left unchecked (no false error) rather than guessed at.
+    /// The operand could not be faithfully resolved from the raw text. This
+    /// arises only for a graph IRI that needs a `\uXXXX` (UCHAR) or a
+    /// `PN_LOCAL_ESC` backslash escape: the raw scan cannot reproduce the escape,
+    /// so it refuses to guess a (possibly wrong) IRI. Ordinary operands always
+    /// resolve to `Named`/`Default`. A non-silent `ADD`/`MOVE`/`COPY` with an
+    /// `Unknown` **source** fails closed — it errors before any mutation (see the
+    /// preflight in [`apply_update_with`]) rather than risk writing or wiping the
+    /// wrong graph. A `SILENT` op is still a no-op. Full unescape-parity
+    /// resolution is a possible future improvement.
     Unknown,
 }
 
@@ -884,6 +907,13 @@ struct AmcHint {
 /// (see [`apply_update_with`]) — no inspection of the desugared ops, so nothing
 /// can collide with a user-written `DeleteInsert` and a prefixed identity op is
 /// recognised like any other.
+///
+/// **Escapes fail closed.** An operand IRI that needs a `\uXXXX` (UCHAR) or a
+/// `PN_LOCAL_ESC` backslash escape can't be reproduced by the raw scan, so the
+/// tokenizer marks it unresolvable ([`AmcTok::Escaped`]) and it becomes
+/// [`AmcSource::Unknown`] rather than a wrong (truncated/partial) `Named`. The
+/// preflight then errors on a non-silent op with such a source instead of
+/// letting a wrong-graph or destructive write slip through.
 ///
 /// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
 /// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
@@ -966,9 +996,13 @@ fn amc_parse_operand(
         Some(AmcTok::Default) => (AmcSource::Default, Some(k + 1)),
         Some(AmcTok::Iri(raw)) => (resolve_named(raw, base), Some(k + 1)),
         Some(AmcTok::PName(name)) => (expand_pname(name, prefixes), Some(k + 1)),
+        // An operand carrying an escape the scan can't reproduce — the span is
+        // still one token, so advance past it, but it is unresolvable.
+        Some(AmcTok::Escaped) => (AmcSource::Unknown, Some(k + 1)),
         Some(AmcTok::Graph) => match toks.get(k + 1) {
             Some(AmcTok::Iri(raw)) => (resolve_named(raw, base), Some(k + 2)),
             Some(AmcTok::PName(name)) => (expand_pname(name, prefixes), Some(k + 2)),
+            Some(AmcTok::Escaped) => (AmcSource::Unknown, Some(k + 2)),
             _ => (AmcSource::Unknown, None),
         },
         _ => (AmcSource::Unknown, None),
@@ -1017,10 +1051,17 @@ enum AmcTok {
     Graph,
     Prefix,
     Base,
-    /// The raw inner text of a `<…>` IRIREF (may be relative).
+    /// The raw inner text of a `<…>` IRIREF (may be relative). Never contains a
+    /// backslash — an IRIREF with a `\uXXXX` escape is emitted as [`Self::Escaped`].
     Iri(String),
-    /// A prefixed name / namespace, raw (`ex:local`, `:local`, `ex:`).
+    /// A prefixed name / namespace, raw (`ex:local`, `:local`, `ex:`). Never
+    /// carries a `PN_LOCAL_ESC` backslash — such a name is [`Self::Escaped`].
     PName(String),
+    /// An operand IRI/prefixed-name that carries a `\` escape (`\uXXXX` UCHAR or
+    /// `PN_LOCAL_ESC`) the raw scan cannot reproduce. Held as one token so the
+    /// operand span is preserved, but it resolves to [`AmcSource::Unknown`] so a
+    /// non-silent op fails closed instead of resolving a wrong IRI.
+    Escaped,
     Other,
 }
 
@@ -1069,9 +1110,15 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 while j < n && b[j] != b'>' && !b[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                out.push(AmcTok::Iri(
-                    String::from_utf8_lossy(&b[start..j]).into_owned(),
-                ));
+                let inner = &b[start..j];
+                // A `\` in an IRIREF is a `\uXXXX`/`\UXXXXXXXX` UCHAR escape the
+                // raw scan can't expand — mark the operand unresolvable, don't
+                // pass the literal backslash on as an IRI.
+                out.push(if inner.contains(&b'\\') {
+                    AmcTok::Escaped
+                } else {
+                    AmcTok::Iri(String::from_utf8_lossy(inner).into_owned())
+                });
                 i = if j < n && b[j] == b'>' { j + 1 } else { j };
             }
             b'"' | b'\'' => {
@@ -1095,6 +1142,11 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 let prev = if start > 0 { b[start - 1] } else { 0 };
                 let tok = if prev == b'?' || prev == b'$' {
                     AmcTok::Other
+                } else if j < n && b[j] == b'\\' {
+                    // The name is interrupted by a `PN_LOCAL_ESC` backslash the
+                    // raw scan can't reproduce — mark it unresolvable rather than
+                    // emit the truncated prefix (`ex:a` for `ex:a\,b`).
+                    AmcTok::Escaped
                 } else if word.as_bytes().contains(&b':') {
                     AmcTok::PName(word.to_owned())
                 } else if word.eq_ignore_ascii_case("ADD")

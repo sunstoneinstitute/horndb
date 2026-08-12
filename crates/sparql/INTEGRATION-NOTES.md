@@ -467,11 +467,19 @@ recovers the flag with a source-text pre-scan rather than accepting the loss:
   excluded like any other. The sweep runs before any mutation, so a non-silent
   `COPY <absent> TO DEFAULT` — or `COPY ex:absent TO <dst>`, or a base-relative
   `COPY <absent> TO <dst>` — aborts before its destructive `Drop` runs.
-- `AmcSource::Unknown` is unreachable for input spargebra accepted (every prefix
-  is declared, every IRI valid/resolvable). It survives only as a defensive
-  fallback for an exotic `PN_LOCAL` form the simple expander doesn't reproduce
-  (e.g. a backslash-escaped local); such a source is left unchecked (no false
-  error) rather than guessed at.
+- **Escaped operands fail closed.** The one operand form the raw scan can't
+  reproduce is a graph IRI needing a `\uXXXX` (UCHAR) or `PN_LOCAL_ESC`
+  backslash escape — e.g. `<http://ex/s>` or `ex:a\,b`. The tokenizer marks
+  such an operand `AmcTok::Escaped`, which resolves to `AmcSource::Unknown`
+  (never a truncated/partial `Named`). A **non-silent** `ADD`/`MOVE`/`COPY` with
+  an `Unknown` source then **errors** in the preflight before any mutation
+  (`amc_source_unresolvable_error`) — it never falls through to a silent no-op
+  that could wipe a `COPY`/`MOVE` destination. A `SILENT` op with such a source
+  is still a no-op. This is a deliberate, documented known-limitation: a graph
+  IRI that needs escaping in an AMC source is rejected on a non-silent op rather
+  than resolved. Full unescape-parity resolution (making these resolve instead of
+  error) is a possible future improvement. Ordinary (non-escaped) operands always
+  resolve to `Named`/`Default`, so this path never touches them.
 
 This tokenizer is a documented stopgap, not a permanent design choice: an
 upstream issue is to be filed against the spargebra (oxigraph) tracker asking

@@ -1197,3 +1197,129 @@ fn base_relative_missing_source_errors_no_wipe_mem() {
 fn base_relative_missing_source_errors_no_wipe_horn() {
     base_relative_missing_source_errors_no_wipe::<HornBackend>();
 }
+
+// ── SILENT recovery: escaped source IRIs fail closed ─────────────────────────
+//
+// The recovery scans the raw text, so a source graph IRI that requires a
+// `\uXXXX` (UCHAR) or `PN_LOCAL_ESC` backslash escape cannot be faithfully
+// reproduced. Rather than resolve it wrong (and risk wiping the destination of a
+// non-silent COPY), the tokenizer marks such an operand unresolvable and the
+// preflight fails closed: a non-silent op with an unresolvable source errors
+// before any mutation. A SILENT op still no-ops.
+
+/// Vector 2 (UCHAR): a non-silent `COPY <http://ex/s> TO <dst>` — source
+/// `http://ex/s` absent — fails closed with an error and does not wipe `<dst>`.
+fn nonsilent_uchar_escaped_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    let err = run("COPY <http://ex/\\u0073> TO <http://ex/dst>", &mut store).unwrap_err();
+    assert!(
+        err.to_lowercase().contains("escape"),
+        "an unresolvable escaped source must fail closed: {err}"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "a non-silent COPY with an unresolvable source must not wipe the destination"
+    );
+}
+
+#[test]
+fn nonsilent_uchar_escaped_source_errors_no_wipe_mem() {
+    nonsilent_uchar_escaped_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn nonsilent_uchar_escaped_source_errors_no_wipe_horn() {
+    nonsilent_uchar_escaped_source_errors_no_wipe::<HornBackend>();
+}
+
+/// Vector 1 (PN_LOCAL_ESC): `COPY ex:a\,b TO <dst>` — the raw scan would
+/// truncate `ex:a\,b` to `ex:a`. The truncated graph `http://ex/a` is seeded
+/// present (so a wrong-graph check would pass and let a wipe through), while the
+/// real source `http://ex/a,b` is absent. The escaped operand fails closed, so
+/// the op errors and `<dst>` (and the seeded `http://ex/a`) are untouched.
+fn nonsilent_pn_local_esc_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/a"),
+        "http://ex/s1",
+        "http://ex/p",
+        "http://ex/o1",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    let err = run(
+        "PREFIX ex: <http://ex/> COPY ex:a\\,b TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_lowercase().contains("escape"),
+        "an escaped PN_LOCAL source must fail closed: {err}"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "dst must not be wiped by a truncated wrong-graph resolution"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/a"),
+        1,
+        "the truncated wrong graph is never touched"
+    );
+}
+
+#[test]
+fn nonsilent_pn_local_esc_source_errors_no_wipe_mem() {
+    nonsilent_pn_local_esc_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn nonsilent_pn_local_esc_source_errors_no_wipe_horn() {
+    nonsilent_pn_local_esc_source_errors_no_wipe::<HornBackend>();
+}
+
+/// Guard: fail-closed bites only the non-silent case. A `COPY SILENT
+/// <http://ex/s> TO <dst>` with an unresolvable source is still a no-op that
+/// clears `<dst>` (§3.2.4), with no error.
+fn silent_uchar_escaped_source_clears_dst<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    run(
+        "COPY SILENT <http://ex/\\u0073> TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        0,
+        "SILENT COPY still drops the destination before the (no-op) copy"
+    );
+    assert!(!store.graph_exists("http://ex/dst"));
+}
+
+#[test]
+fn silent_uchar_escaped_source_clears_dst_mem() {
+    silent_uchar_escaped_source_clears_dst::<MemStore>();
+}
+#[test]
+fn silent_uchar_escaped_source_clears_dst_horn() {
+    silent_uchar_escaped_source_clears_dst::<HornBackend>();
+}
