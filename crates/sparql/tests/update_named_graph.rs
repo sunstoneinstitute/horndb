@@ -687,10 +687,13 @@ fn add_move_copy_between_named_graphs_horn() {
 }
 
 fn add_silent_missing_source_is_noop<B: FullBackend + Default>() {
-    // SPEC-28 S4: a SILENT ADD/COPY/MOVE with a missing source is a no-op; a
-    // non-silent one is an error. spargebra drops the SILENT flag when it
-    // desugars these verbs, so the flag is recovered from the source text
-    // (PLAN-28-04); without recovery both cases would be silent no-ops.
+    // SPEC-28 S4: SILENT ADD with a missing source is a true no-op (ADD has no
+    // destination DROP in its desugaring); a non-silent ADD is an error. COPY
+    // and MOVE are different — see `copy_silent_missing_source_clears_destination`
+    // / `move_silent_missing_source_clears_destination` below. spargebra drops
+    // the SILENT flag when it desugars these verbs, so the flag is recovered
+    // from the source text (PLAN-28-04); without recovery both cases would be
+    // silent no-ops.
     let mut store = B::default();
     seed_quad(
         &mut store,
@@ -723,4 +726,79 @@ fn add_silent_missing_source_is_noop_mem() {
 #[test]
 fn add_silent_missing_source_is_noop_horn() {
     add_silent_missing_source_is_noop::<HornBackend>();
+}
+
+fn copy_silent_missing_source_clears_destination<B: FullBackend + Default>() {
+    // SPEC-28 S4: spargebra desugars COPY into a leading `Drop { silent: true,
+    // graph: <to> }` followed by a copy from <from>. So a SILENT COPY with a
+    // missing source is NOT a no-op: the destination is cleared by the leading
+    // drop, then nothing is copied in, leaving the destination empty. Only ADD
+    // (no leading drop in its desugaring) is a true no-op — see
+    // `add_silent_missing_source_is_noop` above.
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://g/dest"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+
+    run(
+        "COPY SILENT <http://g/missing> TO <http://g/dest>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count(&store, &tgt("http://g/dest")),
+        0,
+        "SILENT COPY from a missing source clears the destination"
+    );
+    assert!(!store.graph_exists("http://g/dest"));
+}
+
+#[test]
+fn copy_silent_missing_source_clears_destination_mem() {
+    copy_silent_missing_source_clears_destination::<MemStore>();
+}
+#[test]
+fn copy_silent_missing_source_clears_destination_horn() {
+    copy_silent_missing_source_clears_destination::<HornBackend>();
+}
+
+fn move_silent_missing_source_clears_destination<B: FullBackend + Default>() {
+    // SPEC-28 S4: spargebra desugars MOVE into `Drop { silent: true, graph:
+    // <to> }`, then a copy from <from>, then `Drop { silent, graph: <from> }`.
+    // The leading drop on the destination is unconditional (always silent),
+    // so a SILENT MOVE with a missing source clears the destination the same
+    // way COPY does — see `copy_silent_missing_source_clears_destination`.
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://g/dest"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+
+    run(
+        "MOVE SILENT <http://g/missing> TO <http://g/dest>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        count(&store, &tgt("http://g/dest")),
+        0,
+        "SILENT MOVE from a missing source clears the destination"
+    );
+    assert!(!store.graph_exists("http://g/dest"));
+}
+
+#[test]
+fn move_silent_missing_source_clears_destination_mem() {
+    move_silent_missing_source_clears_destination::<MemStore>();
+}
+#[test]
+fn move_silent_missing_source_clears_destination_horn() {
+    move_silent_missing_source_clears_destination::<HornBackend>();
 }

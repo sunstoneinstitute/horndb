@@ -31,9 +31,12 @@
 //! - **`ADD`/`MOVE`/`COPY`.** spargebra 0.4.6 desugars these into `Drop` +
 //!   `DeleteInsert` pairs and **drops the `SILENT` flag**; we recover it (and
 //!   the source operand) from the raw update text — see [`recover_amc_hints`].
-//!   With that flag, a `SILENT` op with a missing source is a no-op and a
-//!   non-silent one an error (S4). The same-graph identity case already
-//!   collapses to zero operations in the parser.
+//!   A non-silent op with a missing source is an error (S4). A silent one
+//!   never errors, but for `COPY`/`MOVE` that is not a no-op: their desugaring
+//!   leads with a silent `Drop` of the destination, so a missing source still
+//!   clears it. Only `ADD` (no destination `Drop` in its desugaring) is a true
+//!   no-op when silent. The same-graph identity case already collapses to zero
+//!   operations in the parser.
 //!
 //! **Atomicity.** A multi-operation update preflights every operation
 //! (`validate_op`, plus the `ADD`/`MOVE`/`COPY` source-existence check) against

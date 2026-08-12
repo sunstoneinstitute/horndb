@@ -311,10 +311,16 @@ with real named-graph operations.
   within-batch ordering rule, which does not extend across operations.
 - **`SILENT` fidelity.** `update.rs` today notes that spargebra's desugaring
   drops `SILENT` on `ADD`/`MOVE`/`COPY`, which was observationally harmless
-  while named graphs were unrepresentable. Once they are representable it is not:
-  a silent `COPY <missing> TO <g>` must be a no-op, and a non-silent one an
-  error. The plan re-derives the flag (re-parse the verb, or take it from the
-  operation before desugaring) rather than inheriting the current behaviour.
+  while named graphs were unrepresentable. Once they are representable it is
+  not: a non-silent `COPY`/`MOVE <missing> TO <g>` must error, and a silent one
+  must not. "Must not error" is not the same as "no-op", though. spargebra
+  desugars `COPY`/`MOVE` into a silent `DROP` of the destination graph followed
+  by a copy from the source, so a silent `COPY`/`MOVE` from a missing source
+  still empties `<g>` — it just does so without raising an error. `ADD`
+  desugars with no destination `DROP`, so a silent `ADD` from a missing source
+  is the one true no-op that leaves `<g>` untouched. The plan re-derives the
+  flag (re-parse the verb, or take it from the operation before desugaring)
+  rather than inheriting the current behaviour.
 - **`WITH` / `USING` / `USING NAMED`** (D10). `WITH <g>` scopes the templates and
   the `WHERE` clause to `g`. `USING` / `USING NAMED` build the `WHERE` clause's
   dataset with the same machinery as `FROM` / `FROM NAMED` (S3); the blanket
