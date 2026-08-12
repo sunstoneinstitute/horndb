@@ -495,6 +495,63 @@ fn add_silent_missing_source_is_noop() {
     assert_eq!(count_all(&store), 1);
 }
 
+fn copy_silent_missing_source_then_unrelated_drop_still_errors<B: FullBackend + Default>() {
+    // Correctness regression (comparison review, not caught by this branch's
+    // own whole-branch review): a SILENT COPY of an absent source must not
+    // suppress an unrelated, later, non-SILENT DROP of that same graph IRI.
+    // Per spargebra 0.4.6, COPY's own desugaring carries no source Drop at
+    // all (only a `Drop{silent:true}` of the *destination* plus the copy
+    // itself), so there is nothing legitimate to suppress here — the
+    // explicit `DROP GRAPH <x>` must see `x` as absent and fail the whole
+    // update (SPARQL 1.1 Update atomicity, D11).
+    let mut store: B = B::default();
+    let err = run(
+        "COPY SILENT <http://g/x> TO <http://g/y> ; DROP GRAPH <http://g/x>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("exist"), "{err}");
+}
+
+#[test]
+fn copy_silent_missing_source_then_unrelated_drop_still_errors_mem() {
+    copy_silent_missing_source_then_unrelated_drop_still_errors::<MemStore>();
+}
+#[test]
+fn copy_silent_missing_source_then_unrelated_drop_still_errors_horn() {
+    copy_silent_missing_source_then_unrelated_drop_still_errors::<HornBackend>();
+}
+
+fn add_move_copy_identity_of_missing_graph_is_noop<B: FullBackend + Default>() {
+    // W3C identity case: `ADD`/`MOVE`/`COPY <a> TO <a>` desugars (in
+    // spargebra) to zero operations regardless of whether `a` exists, so it
+    // must succeed as a no-op even when `a` is absent — never an
+    // amc-source-absent error.
+    for verb in ["ADD", "MOVE", "COPY"] {
+        let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+        let u = format!("{verb} <http://g/missing> TO <http://g/missing>");
+        run(&u, &mut store).unwrap_or_else(|e| panic!("{verb} identity: {e}"));
+        assert_eq!(
+            count_all(&store),
+            1,
+            "{verb} identity of a missing graph must be a pure no-op"
+        );
+        assert!(
+            !store.graph_exists("http://g/missing"),
+            "{verb}: no graph should be created"
+        );
+    }
+}
+
+#[test]
+fn add_move_copy_identity_of_missing_graph_is_noop_mem() {
+    add_move_copy_identity_of_missing_graph_is_noop::<MemStore>();
+}
+#[test]
+fn add_move_copy_identity_of_missing_graph_is_noop_horn() {
+    add_move_copy_identity_of_missing_graph_is_noop::<HornBackend>();
+}
+
 // ── Multi-operation update ──────────────────────────────────────────────────
 
 #[test]

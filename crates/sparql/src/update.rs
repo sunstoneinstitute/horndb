@@ -36,7 +36,9 @@
 //!   leads with a silent `Drop` of the destination, so a missing source still
 //!   clears it. Only `ADD` (no destination `Drop` in its desugaring) is a true
 //!   no-op when silent. The same-graph identity case already collapses to zero
-//!   operations in the parser.
+//!   operations in the parser; the missing-source preflight below also
+//!   recognizes it (from the same recovered text) and skips the check, so an
+//!   identity op is a true no-op even when the graph is absent.
 //!
 //! **Atomicity.** A multi-operation update preflights every operation
 //! (`validate_op`, plus the `ADD`/`MOVE`/`COPY` source-existence check) against
@@ -54,7 +56,6 @@ use spargebra::term::{
     GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern, NamedNodePattern,
     NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
 };
-use std::collections::HashSet;
 
 /// Lexical form for an RDF 1.2 triple term embedded in an update. The
 /// Stage-1 store carries `Term::Literal(String)` slots only, so there is
@@ -153,23 +154,15 @@ pub fn apply_update_with<B: FullBackend>(
     // `recover_amc_hints`). Only `DeleteInsert`/`GraphManagement` carry the raw
     // source; the pure-data variants never contain these verbs.
     let amc_hints = source.map(recover_amc_hints).unwrap_or_default();
-    // A silent `MOVE <missing> TO <g>` desugars to a trailing *non-silent*
-    // `Drop <missing>` (spargebra's quirk); collect the missing sources of
-    // silent verbs so that drop is not turned into a spurious existence error.
-    let silent_absent_sources: HashSet<&str> = amc_hints
-        .iter()
-        .filter(|h| h.silent)
-        .filter_map(|h| match &h.source {
-            AmcSource::Named(g) => Some(g.as_str()),
-            _ => None,
-        })
-        .collect();
 
     // Preflight (atomicity, SPARQL 1.1 §3.1.3): validate the whole request
     // against the store's current state before any mutation. A non-silent
-    // `ADD`/`MOVE`/`COPY` whose named source is absent is an error (S4).
+    // `ADD`/`MOVE`/`COPY` whose named source is absent is an error (S4) —
+    // except the W3C identity case (`<g> TO <g>`), which spargebra always
+    // desugars to zero operations and which is a no-op even when `<g>` is
+    // absent, so it must never raise this error.
     for h in &amc_hints {
-        if !h.silent {
+        if !h.silent && !h.is_identity {
             if let AmcSource::Named(g) = &h.source {
                 if !store.graph_exists(g) {
                     return Err(amc_source_absent(g));
@@ -178,7 +171,7 @@ pub fn apply_update_with<B: FullBackend>(
         }
     }
     for op in ops {
-        validate_op(op, store, cfg, &silent_absent_sources)?;
+        validate_op(op, store, cfg)?;
     }
 
     // Apply. `validate_op` has rejected every statically- and existence-checkable
@@ -237,14 +230,11 @@ pub fn apply_update_with<B: FullBackend>(
 /// Preflight one operation against `store`: return the error it would produce
 /// at apply time, without mutating (SPARQL Update atomicity, §3.1.3). Reserved
 /// namespace and existence (D11) are both mirrored here so a failing multi-op
-/// request mutates nothing. `silent_absent_sources` names the missing sources
-/// of silent `ADD`/`MOVE`/`COPY` verbs, whose desugared (non-silent) source
-/// drop must not raise an existence error.
+/// request mutates nothing.
 fn validate_op<B: FullBackend>(
     op: &spargebra::GraphUpdateOperation,
     store: &B,
     cfg: &SparqlConfig,
-    silent_absent_sources: &HashSet<&str>,
 ) -> Result<()> {
     use spargebra::algebra::GraphTarget;
     use spargebra::term::GraphName;
@@ -283,7 +273,7 @@ fn validate_op<B: FullBackend>(
                 }
                 GraphTarget::NamedNode(n) => {
                     let iri = n.as_str();
-                    if *silent || store.graph_exists(iri) || silent_absent_sources.contains(iri) {
+                    if *silent || store.graph_exists(iri) {
                         Ok(())
                     } else {
                         Err(graph_absent(iri))
@@ -762,15 +752,24 @@ enum AmcSource {
     Unknown,
 }
 
-/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag and source.
+/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, source,
+/// and whether it is the W3C identity case (`source == destination`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AmcHint {
     silent: bool,
     source: AmcSource,
+    /// `true` when the recovered source and destination operands are equal —
+    /// spargebra's own identity check (`from == to`), which always desugars
+    /// to zero operations and is a no-op regardless of whether the graph
+    /// exists (SPARQL 1.1 Update §3.2.3/§3.2.4/§3.2.5). `false` whenever
+    /// either operand can't be resolved from text alone: the conservative
+    /// default keeps the existence check enabled, matching prior behavior.
+    is_identity: bool,
 }
 
-/// Recover the `SILENT` flag (and the source operand) of every
-/// `ADD`/`MOVE`/`COPY` in the raw update text, in source order.
+/// Recover the `SILENT` flag, the source operand, and the identity check
+/// (`source == destination`) of every `ADD`/`MOVE`/`COPY` in the raw update
+/// text, in source order.
 ///
 /// **Why this exists.** spargebra 0.4.6 desugars `ADD`/`MOVE`/`COPY` into
 /// `Drop` + `DeleteInsert` pairs and **discards the `SILENT` flag**. That was
@@ -792,26 +791,54 @@ fn recover_amc_hints(src: &str) -> Vec<AmcHint> {
         if *tok != AmcTok::Amc {
             continue;
         }
-        // After the verb: an optional SILENT keyword, then the source operand
-        // `DEFAULT | GRAPH? <iri>`. The tokens are consecutive (whitespace and
-        // comments are not emitted), so index arithmetic tracks the grammar.
+        // After the verb: an optional SILENT keyword, then the source operand,
+        // the `TO` keyword, then the destination operand — grammar:
+        // `(ADD|MOVE|COPY) SILENT? GraphOrDefault TO GraphOrDefault`. The
+        // tokens are consecutive (whitespace and comments are not emitted),
+        // so index arithmetic tracks the grammar.
         let mut j = i + 1;
         let silent = matches!(toks.get(j), Some(AmcTok::Silent));
         if silent {
             j += 1;
         }
-        let source = match toks.get(j) {
-            Some(AmcTok::Default) => AmcSource::Default,
-            Some(AmcTok::Iri(s)) => AmcSource::Named(s.clone()),
-            Some(AmcTok::Graph) => match toks.get(j + 1) {
-                Some(AmcTok::Iri(s)) => AmcSource::Named(s.clone()),
-                _ => AmcSource::Unknown,
-            },
-            _ => AmcSource::Unknown,
-        };
-        hints.push(AmcHint { silent, source });
+        let (source, after_source) = amc_parse_operand(&toks, j);
+        // `after_source` is `None` only when the source itself could not be
+        // resolved (e.g. a prefixed name) — in that case the destination's
+        // token span can't be located either, so identity stays unknown
+        // (`false`, the conservative default). Otherwise skip exactly one
+        // token for `TO` and parse the destination the same way.
+        let destination = after_source.map(|k| amc_parse_operand(&toks, k + 1).0);
+        let is_identity = matches!(
+            (&source, &destination),
+            (AmcSource::Default, Some(AmcSource::Default))
+        ) || matches!(
+            (&source, &destination),
+            (AmcSource::Named(a), Some(AmcSource::Named(b))) if a == b
+        );
+        hints.push(AmcHint {
+            silent,
+            source,
+            is_identity,
+        });
     }
     hints
+}
+
+/// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? <iri>`) starting at
+/// token index `k`. Returns the operand and the index of the first token
+/// after it. The index is `None` when the operand's span could not be
+/// determined (an unresolvable form, e.g. a prefixed name) — the caller then
+/// has no reliable way to locate whatever follows.
+fn amc_parse_operand(toks: &[AmcTok], k: usize) -> (AmcSource, Option<usize>) {
+    match toks.get(k) {
+        Some(AmcTok::Default) => (AmcSource::Default, Some(k + 1)),
+        Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 1)),
+        Some(AmcTok::Graph) => match toks.get(k + 1) {
+            Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 2)),
+            _ => (AmcSource::Unknown, None),
+        },
+        _ => (AmcSource::Unknown, None),
+    }
 }
 
 /// The token kinds the SILENT-recovery scan needs. Everything not one of the
@@ -1085,7 +1112,8 @@ mod tests {
             h,
             vec![AmcHint {
                 silent: false,
-                source: AmcSource::Named("http://g/s".into())
+                source: AmcSource::Named("http://g/s".into()),
+                is_identity: false,
             }]
         );
     }
@@ -1096,14 +1124,16 @@ mod tests {
             recover_amc_hints("MOVE SILENT DEFAULT TO <http://g/d>"),
             vec![AmcHint {
                 silent: true,
-                source: AmcSource::Default
+                source: AmcSource::Default,
+                is_identity: false,
             }]
         );
         assert_eq!(
             recover_amc_hints("COPY SILENT GRAPH <http://g/s> TO DEFAULT"),
             vec![AmcHint {
                 silent: true,
-                source: AmcSource::Named("http://g/s".into())
+                source: AmcSource::Named("http://g/s".into()),
+                is_identity: false,
             }]
         );
     }
@@ -1118,6 +1148,26 @@ mod tests {
         assert!(!h[1].silent);
         assert_eq!(h[0].source, AmcSource::Named("http://g/a".into()));
         assert_eq!(h[1].source, AmcSource::Named("http://g/c".into()));
+        assert!(!h[0].is_identity);
+        assert!(!h[1].is_identity);
+    }
+
+    #[test]
+    fn amc_recover_identity_case() {
+        // `<g> TO <g>` (and `DEFAULT TO DEFAULT`) is spargebra's identity
+        // case — the fix-3 regression this pins at the recovery level.
+        let h = recover_amc_hints("COPY <http://g/a> TO <http://g/a>");
+        assert_eq!(h.len(), 1);
+        assert!(h[0].is_identity);
+
+        let h = recover_amc_hints("MOVE SILENT DEFAULT TO DEFAULT");
+        assert_eq!(h.len(), 1);
+        assert!(h[0].is_identity);
+
+        // Different graphs must not be mistaken for identity.
+        let h = recover_amc_hints("ADD <http://g/a> TO <http://g/b>");
+        assert_eq!(h.len(), 1);
+        assert!(!h[0].is_identity);
     }
 
     #[test]
