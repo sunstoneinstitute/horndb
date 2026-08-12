@@ -83,7 +83,7 @@ pub enum ParsedUpdate {
         source: String,
     },
     /// Any update form the executor cannot apply is parsed but flagged as
-    /// out-of-scope at runtime. With spargebra 0.3.5 every standard verb is
+    /// out-of-scope at runtime. With spargebra 0.4.6 every standard verb is
     /// executable, so this arm is reserved for forward-compatibility (a future
     /// spargebra variant) and is unreachable today.
     UnsupportedForm {
@@ -225,7 +225,7 @@ fn strip_keyword_ci<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
 /// `GraphManagement` update the executor walks in order. An empty operation
 /// list (the W3C identity-case rewrite of `ADD`/`MOVE`/`COPY <g> TO <g>`) is a
 /// valid no-op. The `UnsupportedForm` arm is reserved for a future spargebra
-/// variant the executor cannot apply; with spargebra 0.3.5 nothing reaches it.
+/// variant the executor cannot apply; with spargebra 0.4.6 nothing reaches it.
 pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
     let u = SparqlParser::new()
         .parse_update(input)
@@ -237,7 +237,7 @@ pub fn parse_update(input: &str) -> Result<ParsedUpdate> {
     // verb (`LOAD`/`CLEAR`/`DROP`/`CREATE`) or a multi-operation sequence
     // (which is also how spargebra desugars `ADD`/`MOVE`/`COPY`) — is a
     // `GraphManagement` update; the executor walks the whole sequence. With
-    // spargebra 0.3.5 every operation variant is executable, so no update
+    // spargebra 0.4.6 every operation variant is executable, so no update
     // degrades to `UnsupportedForm` here.
     use spargebra::GraphUpdateOperation;
     match u.operations.as_slice() {
