@@ -36,11 +36,11 @@
 //!   undefined). `file:`-only (#189).
 //! * **`ADD`/`MOVE`/`COPY`** — spargebra desugars these into `Drop` +
 //!   `DeleteInsert` sequences and **drops the `SILENT` flag**. The desugared
-//!   ops execute; the flag — plus the source operand and whether the op is the
-//!   identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
-//!   source-text pre-scan (see [`recover_amc_hints`]). A source the text can't
-//!   resolve (a prefixed name) falls back to the desugared copy-op's already
-//!   resolved source IRI ([`amc_copy_source`]) for the existence check.
+//!   ops execute; the flag — plus the source operand (resolved to an absolute
+//!   IRI against the update's own `PREFIX`/`BASE` prologue) and whether the op
+//!   is the identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
+//!   source-text pre-scan (see [`recover_amc_hints`]). The preflight reads only
+//!   those hints, never the desugared ops.
 //! * **The reserved namespace is closed to writes** (S4): every write form
 //!   touching `https://horndb.io/graph/…` is refused. This is a
 //!   permission-shaped error that `SILENT` does **not** suppress; it is
@@ -65,12 +65,14 @@ use crate::exec::{is_reserved_graph, AlgebraQuad, Bindings, FullBackend, GraphNa
 use crate::parser::ParsedUpdate;
 use crate::plan::planner;
 use crate::{DefaultGraphMode, SparqlConfig};
+use oxiri::Iri;
 use spargebra::algebra::{GraphPattern, GraphTarget, QueryDataset};
 use spargebra::term::{
     GraphName as SpgGraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern,
     NamedNodePattern, NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
 };
 use spargebra::GraphUpdateOperation;
+use std::collections::HashMap;
 
 /// Lexical form for an RDF 1.2 triple term embedded in an update. The
 /// Stage-1 store carries `Term::Literal(String)` slots only, so there is
@@ -132,11 +134,13 @@ pub fn apply_update_with<B: FullBackend>(
     store: &mut B,
     cfg: &SparqlConfig,
 ) -> Result<()> {
-    let (ops, source) = match u {
+    let (ops, source, base_iri) = match u {
         ParsedUpdate::InsertData { inner, source }
         | ParsedUpdate::DeleteData { inner, source }
         | ParsedUpdate::DeleteInsert { inner, source }
-        | ParsedUpdate::GraphManagement { inner, source } => (&inner.operations, source.as_str()),
+        | ParsedUpdate::GraphManagement { inner, source } => {
+            (&inner.operations, source.as_str(), inner.base_iri.as_ref())
+        }
         ParsedUpdate::UnsupportedForm { .. } => {
             return Err(SparqlError::UnsupportedAlgebra(
                 "update form not supported in Stage 1".into(),
@@ -144,42 +148,25 @@ pub fn apply_update_with<B: FullBackend>(
         }
     };
 
-    // Recover the `SILENT` flag, source operand, and identity check of every
-    // `ADD`/`MOVE`/`COPY` from the raw text — spargebra drops all three on
-    // desugaring (see [`recover_amc_hints`]).
-    let amc_hints = recover_amc_hints(source);
-
-    // The structurally-resolved source of each desugared copy-op, in op order.
-    // spargebra has already expanded any prefix or base here, so this covers
-    // operands `recover_amc_hints` had to leave `Unknown` (e.g. `ex:g`). Each
-    // non-identity `ADD`/`MOVE`/`COPY` produces exactly one copy-op and an
-    // identity one produces none, so filtering identity hints out lines the two
-    // lists up 1:1 by occurrence order.
-    let copy_sources: Vec<Option<String>> = ops.iter().filter_map(amc_copy_source).collect();
+    // Recover the `SILENT` flag, resolved source operand, and identity check of
+    // every `ADD`/`MOVE`/`COPY` from the raw text — spargebra drops all three on
+    // desugaring. Operands are resolved to absolute IRIs against the update's
+    // own `PREFIX`/`BASE` prologue (see [`recover_amc_hints`]).
+    let amc_hints = recover_amc_hints(source, base_iri);
 
     // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose named
     // source is absent is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5), caught
     // before any mutation. The identity case (`<g> TO <g>`) desugars to zero
-    // ops and is a no-op even when `<g>` is absent, so it is excluded and never
-    // raises this. The source IRI comes from the text when resolvable there
-    // (`Named`), else from the desugared copy-op (`Unknown` → structural
-    // fallback); a `DEFAULT` source always exists and is skipped.
-    for (h, structural_source) in amc_hints
-        .iter()
-        .filter(|h| !h.is_identity)
-        .zip(&copy_sources)
-    {
-        if h.silent {
-            continue;
-        }
-        let source_iri = match &h.source {
-            AmcSource::Default => None,
-            AmcSource::Named(g) => Some(g.as_str()),
-            AmcSource::Unknown => structural_source.as_deref(),
-        };
-        if let Some(iri) = source_iri {
-            if !store.graph_exists(iri) {
-                return Err(amc_source_missing_error(iri));
+    // ops and is a no-op even when `<g>` is absent, so it is excluded. A
+    // `DEFAULT` source always exists and is skipped. This reads only the
+    // recovered hints — never the desugared ops — so it cannot collide with a
+    // user-written `DeleteInsert`.
+    for h in &amc_hints {
+        if !h.silent && !h.is_identity {
+            if let AmcSource::Named(g) = &h.source {
+                if !store.graph_exists(g) {
+                    return Err(amc_source_missing_error(g));
+                }
             }
         }
     }
@@ -842,37 +829,41 @@ fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
 
 // ── ADD / MOVE / COPY: SILENT recovery ───────────────────────────────────────
 
-/// The source operand of an `ADD`/`MOVE`/`COPY`, recovered from raw text.
+/// The source operand of an `ADD`/`MOVE`/`COPY`, recovered and fully resolved
+/// from the raw update text (its own `PREFIX`/`BASE` prologue).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AmcSource {
     /// `DEFAULT` — the default graph always exists, never a missing-source error.
     Default,
-    /// `[GRAPH] <iri>` — the named source graph.
+    /// `[GRAPH] iri` — the named source graph, as an absolute IRI (a prefixed
+    /// name or a base-relative `<…>` is already expanded).
     Named(String),
-    /// The operand could not be resolved from the text alone (e.g. a prefixed
-    /// name, which needs the query prologue). The existence check then falls
-    /// back to the desugared copy-op's source IRI (which the parser has already
-    /// resolved) — see `amc_copy_source` and the preflight in
-    /// [`apply_update_with`].
+    /// The operand could not be resolved from text. For input spargebra accepted
+    /// this is unreachable — every prefix is declared and every IRI is valid, so
+    /// an `IRIREF`, a `PrefixedName`, or `DEFAULT` always resolves. It survives
+    /// only as a defensive fallback for an exotic `PN_LOCAL` form the simple
+    /// expander here does not reproduce (e.g. backslash-escaped locals); such a
+    /// source is left unchecked (no false error) rather than guessed at.
     Unknown,
 }
 
-/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, source
-/// operand, and whether it is the W3C identity case (`source == destination`).
+/// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, resolved
+/// source operand, and whether it is the W3C identity case (`source ==
+/// destination`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AmcHint {
     silent: bool,
     source: AmcSource,
-    /// `true` when the recovered source and destination operands are equal —
+    /// `true` when the resolved source and destination operands are equal —
     /// spargebra's own identity check (`from == to`), which always desugars to
     /// zero operations and is a no-op regardless of whether the graph exists
-    /// (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5). `false` whenever either operand cannot
-    /// be resolved from text alone: the conservative default keeps the
-    /// existence check enabled.
+    /// (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5). Because operands are resolved to
+    /// absolute IRIs first, `ex:g TO ex:g` is recognised as identity just like
+    /// `<http://ex/g> TO <http://ex/g>`.
     is_identity: bool,
 }
 
-/// Recover the `SILENT` flag, source operand, and identity check
+/// Recover the `SILENT` flag, resolved source operand, and identity check
 /// (`source == destination`) of every `ADD`/`MOVE`/`COPY` in the raw update
 /// text, in source order.
 ///
@@ -881,100 +872,175 @@ struct AmcHint {
 /// harmless while named graphs were unrepresentable; now a `SILENT COPY
 /// <missing> TO <g>` must be a no-op and a non-silent one an error (SPEC-28
 /// S4), so the flag matters. Re-scan the source text — a small hand-written
-/// tokenizer (no regex) that skips comments, IRIs, and string literals — to
-/// recover it, plus the source operand and the identity check.
+/// tokenizer (no regex) that skips comments, IRIs, and string literals.
 ///
-/// The recovery drives the preflight (see [`apply_update_with`]). The `silent`
-/// and `is_identity` flags come from text; the source IRI comes from text when
-/// resolvable (`Named`), else from the desugared copy-op (`Unknown` →
-/// `amc_copy_source`). Excluding identity occurrences (which desugar to zero
-/// ops) lines the remaining hints up 1:1 with the copy-ops by order, so an
-/// identity op no longer miscounts the alignment and a user's `SILENT` is always
-/// honoured.
+/// **How operands resolve.** The scan tracks the update's own prologue: it reads
+/// each `BASE <iri>` and `PREFIX pfx: <iri>` as it goes and resolves every
+/// operand to an absolute IRI against them — a prefixed name via the prefix map,
+/// a relative `<…>` against the current base (`base_iri` seeds the base with any
+/// externally supplied one, e.g. an HTTP request base). So both the source IRI
+/// **and** `is_identity` come purely from text, for every operand form. The
+/// preflight then checks each non-silent, non-identity `Named` source directly
+/// (see [`apply_update_with`]) — no inspection of the desugared ops, so nothing
+/// can collide with a user-written `DeleteInsert` and a prefixed identity op is
+/// recognised like any other.
 ///
 /// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
 /// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
 /// number). Delete this whole machinery the day that ships.
-fn recover_amc_hints(src: &str) -> Vec<AmcHint> {
+fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> Vec<AmcHint> {
     let toks = amc_tokenize(src);
+    let mut prefixes: HashMap<String, String> = HashMap::new();
+    let mut base: Option<Iri<String>> = base_iri.cloned();
     let mut hints = Vec::new();
-    for (i, tok) in toks.iter().enumerate() {
-        if *tok != AmcTok::Amc {
-            continue;
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i] {
+            // `BASE <iri>` — resolve against the current base, then adopt it.
+            AmcTok::Base => {
+                if let Some(AmcTok::Iri(raw)) = toks.get(i + 1) {
+                    if let Some(resolved) = resolve_iri(raw, base.as_ref()) {
+                        if let Ok(b) = Iri::parse(resolved) {
+                            base = Some(b);
+                        }
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            // `PREFIX pfx: <iri>` — record the (base-resolved) namespace.
+            AmcTok::Prefix => {
+                if let (Some(AmcTok::PName(ns)), Some(AmcTok::Iri(raw))) =
+                    (toks.get(i + 1), toks.get(i + 2))
+                {
+                    if let Some(resolved) = resolve_iri(raw, base.as_ref()) {
+                        let prefix = ns.split(':').next().unwrap_or("").to_owned();
+                        prefixes.insert(prefix, resolved);
+                    }
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            // A verb: `SILENT? GraphOrDefault TO GraphOrDefault`. Whitespace and
+            // comments are not emitted, so the operands are consecutive tokens.
+            AmcTok::Amc => {
+                let mut j = i + 1;
+                let silent = matches!(toks.get(j), Some(AmcTok::Silent));
+                if silent {
+                    j += 1;
+                }
+                let (source, after_source) = amc_parse_operand(&toks, j, &prefixes, base.as_ref());
+                let destination = after_source
+                    .map(|k| amc_parse_operand(&toks, k + 1, &prefixes, base.as_ref()).0);
+                let is_identity = match (&source, &destination) {
+                    (AmcSource::Default, Some(AmcSource::Default)) => true,
+                    (AmcSource::Named(a), Some(AmcSource::Named(b))) => a == b,
+                    _ => false,
+                };
+                hints.push(AmcHint {
+                    silent,
+                    source,
+                    is_identity,
+                });
+                i += 1;
+            }
+            _ => i += 1,
         }
-        // Grammar after the verb: `SILENT? GraphOrDefault TO GraphOrDefault`.
-        // Whitespace and comments are not emitted, so the tokens are
-        // consecutive and index arithmetic tracks the grammar.
-        let mut j = i + 1;
-        let silent = matches!(toks.get(j), Some(AmcTok::Silent));
-        if silent {
-            j += 1;
-        }
-        let (source, after_source) = amc_parse_operand(&toks, j);
-        // `after_source` is `None` only when the source itself could not be
-        // resolved (e.g. a prefixed name) — then the destination's token span
-        // can't be located either, so identity stays `false` (conservative).
-        // Otherwise skip one token for `TO` and parse the destination the same
-        // way.
-        let destination = after_source.map(|k| amc_parse_operand(&toks, k + 1).0);
-        let is_identity = matches!(
-            (&source, &destination),
-            (AmcSource::Default, Some(AmcSource::Default))
-        ) || matches!(
-            (&source, &destination),
-            (AmcSource::Named(a), Some(AmcSource::Named(b))) if a == b
-        );
-        hints.push(AmcHint {
-            silent,
-            source,
-            is_identity,
-        });
     }
     hints
 }
 
-/// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? <iri>`) starting at
-/// token index `k`. Returns the operand and the index of the first token after
-/// it. The index is `None` when the operand's span could not be determined (an
-/// unresolvable form, e.g. a prefixed name) — the caller then has no reliable
-/// way to locate whatever follows.
-fn amc_parse_operand(toks: &[AmcTok], k: usize) -> (AmcSource, Option<usize>) {
+/// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? iri`) starting at token
+/// index `k`, resolving it to an absolute IRI. Returns the operand and the index
+/// of the first token after it (`None` when the operand form is unrecognisable,
+/// so the caller can't locate what follows).
+fn amc_parse_operand(
+    toks: &[AmcTok],
+    k: usize,
+    prefixes: &HashMap<String, String>,
+    base: Option<&Iri<String>>,
+) -> (AmcSource, Option<usize>) {
     match toks.get(k) {
         Some(AmcTok::Default) => (AmcSource::Default, Some(k + 1)),
-        Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 1)),
+        Some(AmcTok::Iri(raw)) => (resolve_named(raw, base), Some(k + 1)),
+        Some(AmcTok::PName(name)) => (expand_pname(name, prefixes), Some(k + 1)),
         Some(AmcTok::Graph) => match toks.get(k + 1) {
-            Some(AmcTok::Iri(s)) => (AmcSource::Named(s.clone()), Some(k + 2)),
+            Some(AmcTok::Iri(raw)) => (resolve_named(raw, base), Some(k + 2)),
+            Some(AmcTok::PName(name)) => (expand_pname(name, prefixes), Some(k + 2)),
             _ => (AmcSource::Unknown, None),
         },
         _ => (AmcSource::Unknown, None),
     }
 }
 
-/// The token kinds the SILENT-recovery scan needs. Everything not one of the
-/// tracked keywords or an IRI is [`AmcTok::Other`] — kept (not dropped) so token
-/// adjacency mirrors the grammar and a non-keyword source operand (a prefixed
-/// name, a variable) reads as [`AmcSource::Unknown`], not the next IRI.
+/// Resolve an `<…>` operand (absolute or base-relative) to `Named(absolute)`.
+fn resolve_named(raw: &str, base: Option<&Iri<String>>) -> AmcSource {
+    match resolve_iri(raw, base) {
+        Some(iri) => AmcSource::Named(iri),
+        None => AmcSource::Unknown,
+    }
+}
+
+/// Expand a prefixed name `pfx:local` (split on the first `:`) against the
+/// prefix map to `Named(namespace + local)`. An undeclared prefix — which
+/// spargebra would have rejected — yields `Unknown`.
+fn expand_pname(name: &str, prefixes: &HashMap<String, String>) -> AmcSource {
+    match name.split_once(':') {
+        Some((prefix, local)) => match prefixes.get(prefix) {
+            Some(ns) => AmcSource::Named(format!("{ns}{local}")),
+            None => AmcSource::Unknown,
+        },
+        None => AmcSource::Unknown,
+    }
+}
+
+/// Resolve an IRIREF string to an absolute IRI: against `base` (RFC 3986) when
+/// one is in scope, else it must already be absolute. `None` if it is neither.
+fn resolve_iri(raw: &str, base: Option<&Iri<String>>) -> Option<String> {
+    match base {
+        Some(b) => b.resolve(raw).ok().map(|r| r.into_inner()),
+        None => Iri::parse(raw.to_owned()).ok().map(|i| i.into_inner()),
+    }
+}
+
+/// The token kinds the SILENT-recovery scan needs. Everything not a tracked
+/// keyword, an IRI, or a prefixed name is [`AmcTok::Other`] — kept (not dropped)
+/// so token adjacency mirrors the grammar and a non-operand word never slides
+/// into an operand slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AmcTok {
     Amc,
     Silent,
     Default,
     Graph,
+    Prefix,
+    Base,
+    /// The raw inner text of a `<…>` IRIREF (may be relative).
     Iri(String),
+    /// A prefixed name / namespace, raw (`ex:local`, `:local`, `ex:`).
+    PName(String),
     Other,
 }
 
-/// True for bytes that continue a word (keyword or name segment). Includes `-`
-/// so a hyphenated name segment is one token and cannot be mistaken for a
-/// trailing keyword.
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+/// A byte that can start a keyword or a prefixed name: ASCII alphanumeric, `_`,
+/// or `:` (an empty-prefix name like `:g`).
+fn is_pname_start(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b':'
+}
+
+/// A byte that continues a keyword or prefixed name. Adds `-`, `.`, `:`, and `%`
+/// to the start set so a hyphenated/dotted/prefixed/percent-encoded name is one
+/// token (a trailing `.` is trimmed by the caller).
+fn is_pname_cont(b: u8) -> bool {
+    is_pname_start(b) || b == b'-' || b == b'.' || b == b'%'
 }
 
 /// Tokenize `src` for [`recover_amc_hints`]. Skips ASCII whitespace, `#`
-/// comments (to end of line), IRIs (`<…>`), and string literals (`'…'`, `"…"`,
-/// and their triple-quoted forms, honouring `\` escapes). Emits one token per
-/// keyword/IRI/other-run.
+/// comments (to end of line), and string literals (`'…'`, `"…"`, and their
+/// triple-quoted forms, honouring `\` escapes). Emits one token per
+/// keyword / IRI / prefixed-name / other-run.
 fn amc_tokenize(src: &str) -> Vec<AmcTok> {
     let b = src.as_bytes();
     let n = b.len();
@@ -1012,20 +1078,25 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 i = amc_skip_string(b, i);
                 out.push(AmcTok::Other);
             }
-            _ if is_word_byte(c) => {
+            _ if is_pname_start(c) => {
                 let start = i;
                 let mut j = i;
-                while j < n && is_word_byte(b[j]) {
+                while j < n && is_pname_cont(b[j]) {
                     j += 1;
                 }
-                // A word is a keyword only when it is not part of a prefixed
-                // name (`ex:ADD`, `ADD:`) and not a variable (`?ADD`/`$ADD`).
+                // PN_PREFIX / PN_LOCAL cannot end in `.`; drop trailing dots
+                // (e.g. a statement-terminating `.` glued to a name).
+                let mut end = j;
+                while end > start && b[end - 1] == b'.' {
+                    end -= 1;
+                }
+                let word = &src[start..end];
+                // A variable (`?g`/`$g`) is not a keyword or a name.
                 let prev = if start > 0 { b[start - 1] } else { 0 };
-                let next = if j < n { b[j] } else { 0 };
-                let name_ctx = prev == b':' || prev == b'?' || prev == b'$' || next == b':';
-                let word = &src[start..j];
-                out.push(if name_ctx {
+                let tok = if prev == b'?' || prev == b'$' {
                     AmcTok::Other
+                } else if word.as_bytes().contains(&b':') {
+                    AmcTok::PName(word.to_owned())
                 } else if word.eq_ignore_ascii_case("ADD")
                     || word.eq_ignore_ascii_case("MOVE")
                     || word.eq_ignore_ascii_case("COPY")
@@ -1037,9 +1108,14 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                     AmcTok::Default
                 } else if word.eq_ignore_ascii_case("GRAPH") {
                     AmcTok::Graph
+                } else if word.eq_ignore_ascii_case("PREFIX") {
+                    AmcTok::Prefix
+                } else if word.eq_ignore_ascii_case("BASE") {
+                    AmcTok::Base
                 } else {
                     AmcTok::Other
-                });
+                };
+                out.push(tok);
                 i = j;
             }
             _ => {
@@ -1084,64 +1160,6 @@ fn amc_skip_string(b: &[u8], start: usize) -> usize {
         i += 1;
     }
     n
-}
-
-/// The structurally-resolved source of a desugared `ADD`/`MOVE`/`COPY` copy-op.
-///
-/// spargebra rewrites every non-identity `ADD`/`MOVE`/`COPY` into (among other
-/// ops) one `copy_graph`-shaped `DeleteInsert`: empty delete, a single
-/// `(?s ?p ?o)` insert, no `USING`, and a WHERE of `{ ?s ?p ?o }` (default
-/// source) or `GRAPH <from> { ?s ?p ?o }` (named source). This recognises that
-/// shape and returns the source: `None` (not a copy-op), `Some(None)` (default
-/// source — always exists), or `Some(Some(iri))` (named source, prefix/base
-/// already expanded by the parser). Used as the fallback source for a hint the
-/// text scan left [`AmcSource::Unknown`].
-fn amc_copy_source(op: &GraphUpdateOperation) -> Option<Option<String>> {
-    let GraphUpdateOperation::DeleteInsert {
-        delete,
-        insert,
-        using,
-        pattern,
-    } = op
-    else {
-        return None;
-    };
-    if !delete.is_empty() || using.is_some() || insert.len() != 1 {
-        return None;
-    }
-    let q = &insert[0];
-    if !is_amc_term_var(&q.subject, "s")
-        || !is_amc_pred_var(&q.predicate, "p")
-        || !is_amc_term_var(&q.object, "o")
-    {
-        return None;
-    }
-    match pattern.as_ref() {
-        GraphPattern::Bgp { patterns } if is_amc_spo_bgp(patterns) => Some(None),
-        GraphPattern::Graph {
-            name: NamedNodePattern::NamedNode(from),
-            inner,
-        } => match inner.as_ref() {
-            GraphPattern::Bgp { patterns } if is_amc_spo_bgp(patterns) => {
-                Some(Some(from.as_str().to_owned()))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn is_amc_term_var(t: &TermPattern, name: &str) -> bool {
-    matches!(t, TermPattern::Variable(v) if v.as_str() == name)
-}
-fn is_amc_pred_var(p: &NamedNodePattern, name: &str) -> bool {
-    matches!(p, NamedNodePattern::Variable(v) if v.as_str() == name)
-}
-fn is_amc_spo_bgp(patterns: &[spargebra::term::TriplePattern]) -> bool {
-    patterns.len() == 1
-        && is_amc_term_var(&patterns[0].subject, "s")
-        && is_amc_pred_var(&patterns[0].predicate, "p")
-        && is_amc_term_var(&patterns[0].object, "o")
 }
 
 // ── Small lowering helpers ───────────────────────────────────────────────────

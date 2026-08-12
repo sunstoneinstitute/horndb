@@ -447,26 +447,31 @@ recovers the flag with a source-text pre-scan rather than accepting the loss:
 - `recover_amc_hints` is a hand-rolled tokenizer (no regex) over the raw update
   text. It skips the three lexical contexts a bare keyword scan would trip on —
   `# …` comments, `<…>` IRIs, and `"…"`/`'…'` string literals (single- and
-  triple-quoted) — and records one hint per `ADD`/`MOVE`/`COPY` occurrence, in
-  source order. Each hint carries `(silent, source, is_identity)`: the recovered
-  `SILENT` flag, the source operand (`DEFAULT` / `Named(<iri>)` / `Unknown` when
-  the text alone can't resolve it, e.g. a prefixed name), and whether the op is
-  the W3C identity case (`source == destination`, which spargebra desugars to
-  zero ops).
-- The hints drive the missing-source preflight: for each non-silent,
-  non-identity hint, an absent source graph is an error. The source IRI comes
-  from the hint's text-recovered operand when that resolved it (`Named`); a
-  `DEFAULT` source always exists and is skipped. When the text could not resolve
-  it (`Unknown`, e.g. a prefixed name `ex:g`), the check falls back to the
-  desugared copy-op's source IRI, which the parser has already expanded —
-  resolved structurally by `amc_copy_source`. Identity occurrences desugar to
-  zero ops, so excluding them lines the remaining hints up 1:1 with the copy-ops
-  by order: this is why an identity op (one verb token, zero desugared ops) no
-  longer miscounts the alignment (the original bug) and a user's `SILENT` is
-  always honoured. The sweep runs before any mutation, so e.g. a non-silent
-  `COPY <absent> TO DEFAULT` — or `COPY ex:absent TO <dst>` — which desugars to a
-  destructive `Drop` followed by a copy from a missing source, aborts before the
-  `Drop` runs.
+  triple-quoted). It also tracks the update's own prologue: it reads each
+  `PREFIX pfx: <iri>` and `BASE <iri>` as it scans, and **resolves every operand
+  to an absolute IRI** against them — a prefixed name (`ex:g`, `:g`) via the
+  prefix map, a relative `<g>` against the current base (RFC 3986, via `oxiri`;
+  `spargebra::Update::base_iri` seeds any externally supplied base). It records
+  one hint per `ADD`/`MOVE`/`COPY` occurrence, in source order, carrying
+  `(silent, source, is_identity)`: the recovered `SILENT` flag, the resolved
+  source (`DEFAULT` / `Named(<absolute-iri>)`), and whether the op is the W3C
+  identity case (`source == destination`, compared on the resolved IRIs).
+- The hints drive the missing-source preflight **directly, off text alone**: for
+  each non-silent, non-identity hint whose `Named` source is absent, error; a
+  `DEFAULT` source always exists and is skipped. Because operands are resolved
+  from the prologue, both the source IRI and `is_identity` are text-determined
+  for every operand form — so the preflight never inspects the desugared ops.
+  That matters two ways: a user-written `{?s ?p ?o}` `DeleteInsert` (same var
+  names spargebra emits) can't be mistaken for a synthetic copy-op, and a
+  prefixed identity (`COPY ex:g TO ex:g`, zero desugared ops) is recognised and
+  excluded like any other. The sweep runs before any mutation, so a non-silent
+  `COPY <absent> TO DEFAULT` — or `COPY ex:absent TO <dst>`, or a base-relative
+  `COPY <absent> TO <dst>` — aborts before its destructive `Drop` runs.
+- `AmcSource::Unknown` is unreachable for input spargebra accepted (every prefix
+  is declared, every IRI valid/resolvable). It survives only as a defensive
+  fallback for an exotic `PN_LOCAL` form the simple expander doesn't reproduce
+  (e.g. a backslash-escaped local); such a source is left unchecked (no false
+  error) rather than guessed at.
 
 This tokenizer is a documented stopgap, not a permanent design choice: an
 upstream issue is to be filed against the spargebra (oxigraph) tracker asking

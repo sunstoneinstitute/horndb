@@ -1028,3 +1028,172 @@ fn copy_silent_prefixed_missing_source_clears_dst_mem() {
 fn copy_silent_prefixed_missing_source_clears_dst_horn() {
     copy_silent_prefixed_missing_source_clears_dst::<HornBackend>();
 }
+
+// ── SILENT recovery: prologue-resolved, no op-inspection ─────────────────────
+//
+// Operands are resolved to absolute IRIs from the update's own PREFIX/BASE
+// prologue, and the missing-source preflight reads only those recovered hints —
+// never the desugared ops. So a user-written `{?s ?p ?o}` DeleteInsert can't be
+// mistaken for a synthetic copy-op (Hole A), and a prefixed identity op is
+// recognised and excluded like any other (Hole B).
+
+/// Rows a `SELECT` returns (used to inspect exact graph contents).
+fn select_rows<B: FullBackend>(store: &B, query: &str) -> usize {
+    let QueryAnswer::Solutions { rows, .. } = execute_query(query, store).unwrap() else {
+        panic!("expected solutions");
+    };
+    rows.len()
+}
+
+/// Hole A: a user `INSERT {?s ?p ?o} WHERE { GRAPH ex:absent {…} }` sharing the
+/// s/p/o var names spargebra emits must NOT be treated as an AMC copy-op. The
+/// request succeeds; the following `COPY ex:present TO <dst>` copies normally,
+/// so `<dst>` ends holding ex:present's triple (neither falsely rejected nor
+/// wiped by a phantom source-existence check).
+fn user_deleteinsert_not_mistaken_for_copyop<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/present"),
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/x",
+        "http://ex/p",
+        "http://ex/y",
+    );
+    run(
+        "PREFIX ex: <http://ex/> \
+         INSERT { ?s ?p ?o } WHERE { GRAPH ex:absent { ?s ?p ?o } } ; \
+         COPY ex:present TO <http://ex/dst>",
+        &mut store,
+    )
+    .unwrap();
+    // dst was cleared then took ex:present's single triple.
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "dst holds one triple"
+    );
+    assert_eq!(
+        select_rows(
+            &store,
+            "SELECT ?x WHERE { GRAPH <http://ex/dst> { <http://ex/a> <http://ex/p> <http://ex/b> } }",
+        ),
+        1,
+        "dst now holds ex:present's triple",
+    );
+    assert_eq!(
+        select_rows(
+            &store,
+            "SELECT ?x WHERE { GRAPH <http://ex/dst> { <http://ex/x> <http://ex/p> <http://ex/y> } }",
+        ),
+        0,
+        "dst's original triple was overwritten by COPY, not kept",
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/present"),
+        1,
+        "COPY left the source intact",
+    );
+}
+
+#[test]
+fn user_deleteinsert_not_mistaken_for_copyop_mem() {
+    user_deleteinsert_not_mistaken_for_copyop::<MemStore>();
+}
+#[test]
+fn user_deleteinsert_not_mistaken_for_copyop_horn() {
+    user_deleteinsert_not_mistaken_for_copyop::<HornBackend>();
+}
+
+/// Hole B: a prefixed identity op (`COPY ex:g TO ex:g`, zero desugared ops)
+/// co-occurring with a SILENT op and a non-silent absent-source op. Prologue
+/// resolution recognises the identity (excluded) and honours the SILENT flag, so
+/// the real non-silent `COPY ex:missing TO <dC>` is checked and errors — `<dC>`
+/// is not silently wiped, and nothing else applies (atomicity).
+fn prefixed_identity_coop_does_not_drop_real_hint<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/present"),
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://ex/dC"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    let err = run(
+        "PREFIX ex: <http://ex/> \
+         COPY ex:g TO ex:g ; \
+         COPY SILENT ex:present TO <http://ex/dB> ; \
+         COPY ex:missing TO <http://ex/dC>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("http://ex/missing") && err.to_lowercase().contains("does not exist"),
+        "the real non-silent COPY of the absent source must error: {err}"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/dC"),
+        1,
+        "dC must not be wiped — the whole request aborts in preflight"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/dB"),
+        0,
+        "atomicity: the SILENT COPY never ran either",
+    );
+}
+
+#[test]
+fn prefixed_identity_coop_does_not_drop_real_hint_mem() {
+    prefixed_identity_coop_does_not_drop_real_hint::<MemStore>();
+}
+#[test]
+fn prefixed_identity_coop_does_not_drop_real_hint_horn() {
+    prefixed_identity_coop_does_not_drop_real_hint::<HornBackend>();
+}
+
+/// BASE/relative: a non-silent `COPY <missing> TO <dst>` under `BASE
+/// <http://ex/>` resolves the source to `http://ex/missing`; absent, so it
+/// errors (naming the resolved IRI) and leaves `<dst>` intact.
+fn base_relative_missing_source_errors_no_wipe<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://ex/dst"),
+        "http://ex/keep",
+        "http://ex/p",
+        "http://ex/v",
+    );
+    let err = run("BASE <http://ex/> COPY <missing> TO <dst>", &mut store).unwrap_err();
+    assert!(
+        err.contains("http://ex/missing"),
+        "the error must name the base-resolved source IRI: {err}"
+    );
+    assert_eq!(
+        count_graph(&store, "http://ex/dst"),
+        1,
+        "a failed COPY must not wipe the base-resolved destination"
+    );
+}
+
+#[test]
+fn base_relative_missing_source_errors_no_wipe_mem() {
+    base_relative_missing_source_errors_no_wipe::<MemStore>();
+}
+#[test]
+fn base_relative_missing_source_errors_no_wipe_horn() {
+    base_relative_missing_source_errors_no_wipe::<HornBackend>();
+}

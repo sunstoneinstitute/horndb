@@ -23,6 +23,7 @@ reasoner = ["dep:horndb-owlrl"]
 # default config rejects them so SPARQL 1.1 clients keep their semantics.
 spargebra = { workspace = true, features = ["sep-0006", "sparql-12"] }
 oxrdf = { workspace = true }
+oxiri = { workspace = true }
 sparesults = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
