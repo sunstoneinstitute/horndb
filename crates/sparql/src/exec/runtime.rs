@@ -80,6 +80,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         // Same debug-only postcondition the planner asserts, re-checked after
         // the pushdown rewrite — it is the other pass that inserts a
         // narrowing `Project` (SPEC-28 S3/D6). Free in release.
+        #[cfg(debug_assertions)]
         debug_assert!(
             crate::plan::lower::per_graph_columns_survive(&plan).is_ok(),
             "{:?}",

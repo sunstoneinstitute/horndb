@@ -34,6 +34,7 @@ pub fn plan_with_ctx(alg: &Algebra, ctx: &PlanCtx) -> Result<PhysicalPlan> {
     let physical = lower_physical(optimized);
     // Debug-only: no pass may narrow a `GRAPH ?g` scan's graph column away
     // while something above still reads it (SPEC-28 S3/D6). Free in release.
+    #[cfg(debug_assertions)]
     debug_assert!(
         crate::plan::lower::per_graph_columns_survive(&physical).is_ok(),
         "{:?}",
