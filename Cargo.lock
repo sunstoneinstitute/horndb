@@ -1227,6 +1227,7 @@ dependencies = [
  "http-body",
  "hyper",
  "insta",
+ "oxiri",
  "oxrdf",
  "oxttl",
  "pin-project-lite",

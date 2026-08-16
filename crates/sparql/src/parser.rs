@@ -51,8 +51,9 @@ pub enum ParsedQuery {
 /// Every variant carries the raw `source` text alongside the desugared
 /// `inner` algebra. spargebra rewrites `ADD`/`MOVE`/`COPY` into
 /// `Drop`+`DeleteInsert` sequences and **drops their `SILENT` flag** in the
-/// process; recovering that flag needs the original keywords, which only the
-/// source text still has (see `update::scan_amc_silent_hints`).
+/// process; recovering that flag (and the source operand) needs the original
+/// keywords, which only the source text still has (see
+/// `update::recover_amc_hints`).
 #[derive(Debug, Clone)]
 pub enum ParsedUpdate {
     InsertData {
