@@ -73,7 +73,7 @@ oxrdf = { version = "0.3", features = ["rdf-12"] }
 # RFC 3986 IRI resolution (BASE-relative + prefixed-name expansion) for the
 # ADD/MOVE/COPY SILENT-recovery prologue scan in horndb-sparql. Matches the
 # version spargebra already pulls in.
-oxiri = "0.2"
+oxiri = "0.3"
 oxrdfio = { version = "0.2", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxigraph = { version = "0.5", features = ["rdf-12"] }
