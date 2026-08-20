@@ -120,6 +120,126 @@ impl VecTripleSource {
     pub fn sorted_columns(&self, ord: Ordering) -> Option<SortedColumns<'_>> {
         self.sorted.get(&ord).map(TripleColumns::view)
     }
+
+    /// Apply a delta to every ordering in place, preserving the sorted+deduped
+    /// invariant. `dels` are removed if present, `adds` inserted if absent;
+    /// both are treated as sets. Cost is O(n + k log k) per ordering, against
+    /// `from_triples`'s O(n log n) — the point of the method.
+    ///
+    /// A `del` not present is a no-op. An `add` already present is a no-op — no
+    /// duplicate row results. A triple in both `dels` and `adds` ends up
+    /// present: delete applies before insert (SPARQL 1.1 §3.1.3, matching the
+    /// `apply_quads` batch contract). Duplicates within `dels`, or within
+    /// `adds`, are tolerated.
+    ///
+    /// Unlike `from_triples` (which sets `total` to the pre-dedup input count —
+    /// a documented quirk under a multi-graph union, see `union_triples` in
+    /// `crates/sparql/src/exec/horn.rs`), `total` after `apply_delta` is the
+    /// exact post-merge row count. It is only read by `total_triples()`.
+    pub fn apply_delta(&mut self, dels: &[Triple], adds: &[Triple]) {
+        if dels.is_empty() && adds.is_empty() {
+            return;
+        }
+        for &ord in &Ordering::ALL {
+            let mut dels_sorted: Vec<_> = dels.iter().map(|t| t.by_ordering(ord)).collect();
+            dels_sorted.sort_unstable();
+            dels_sorted.dedup();
+            let mut adds_sorted: Vec<_> = adds.iter().map(|t| t.by_ordering(ord)).collect();
+            adds_sorted.sort_unstable();
+            adds_sorted.dedup();
+
+            let cols = self.sorted.get_mut(&ord).expect("all six orderings exist");
+            let base_len = cols.levels[0].len();
+            let cap = base_len + adds_sorted.len();
+            let mut out = [
+                Vec::with_capacity(cap),
+                Vec::with_capacity(cap),
+                Vec::with_capacity(cap),
+            ];
+
+            let mut bi = 0usize; // base row index
+            let mut di = 0usize; // dels_sorted index
+            let mut ai = 0usize; // adds_sorted index
+            loop {
+                let base_row = if bi < base_len {
+                    Some((cols.levels[0][bi], cols.levels[1][bi], cols.levels[2][bi]))
+                } else {
+                    None
+                };
+
+                // Catch `di` up past any del entries strictly less than the
+                // current base row: those values are absent from the
+                // (increasing) base — nothing at or after `bi` can match them —
+                // so they are no-op deletes. Must run before the equality check
+                // below, or a no-op del sitting between two base rows would
+                // wedge `di` and hide a later, real match.
+                if let Some(b) = base_row {
+                    while di < dels_sorted.len() && dels_sorted[di] < b {
+                        di += 1;
+                    }
+                }
+
+                let add_row = adds_sorted.get(ai).copied();
+
+                match (base_row, add_row) {
+                    (None, None) => break,
+                    (Some(b), None) => {
+                        if di < dels_sorted.len() && dels_sorted[di] == b {
+                            di += 1;
+                        } else {
+                            push_row(&mut out, b);
+                        }
+                        bi += 1;
+                    }
+                    (None, Some(a)) => {
+                        push_row(&mut out, a);
+                        ai += 1;
+                    }
+                    (Some(b), Some(a)) => {
+                        if b < a {
+                            if di < dels_sorted.len() && dels_sorted[di] == b {
+                                di += 1;
+                            } else {
+                                push_row(&mut out, b);
+                            }
+                            bi += 1;
+                        } else if a < b {
+                            push_row(&mut out, a);
+                            ai += 1;
+                        } else {
+                            // b == a: the add wins — delete applies before
+                            // insert, so even a del matching this row (if
+                            // `dels_sorted[di] == b`, left untouched by the
+                            // catch-up above since it only skips values
+                            // strictly less than `b`) leaves the row present.
+                            // Consume both sides so it is not emitted twice.
+                            push_row(&mut out, a);
+                            bi += 1;
+                            ai += 1;
+                        }
+                    }
+                }
+            }
+
+            cols.levels = out;
+        }
+        self.total = self.sorted[&Ordering::Spo].levels[0].len();
+    }
+}
+
+/// Append `row` to `out`'s three columns, in `by_ordering`'s `(level0, level1,
+/// level2)` layout — unless it equals the previously emitted row (dedup guard
+/// for the `apply_delta` merge).
+#[inline]
+fn push_row(out: &mut [Vec<TermId>; 3], row: (TermId, TermId, TermId)) {
+    if let Some(&last) = out[0].last() {
+        if last == row.0 && out[1].last() == Some(&row.1) && out[2].last() == Some(&row.2) {
+            return;
+        }
+    }
+    out[0].push(row.0);
+    out[1].push(row.1);
+    out[2].push(row.2);
 }
 
 impl TripleSource for VecTripleSource {
@@ -573,5 +693,235 @@ mod tests {
         assert!(!src.contains(&Triple::new(1, 2, 5)));
         assert!(!src.contains(&Triple::new(1, 3, 4)));
         assert!(!src.contains(&Triple::new(9, 9, 9)));
+    }
+
+    // -- apply_delta ---------------------------------------------------
+
+    /// One ordering's three columns, snapshotted for comparison.
+    type OrderColumns = (Ordering, Vec<TermId>, Vec<TermId>, Vec<TermId>);
+
+    /// Every column of every ordering, for a byte-identical comparison between
+    /// `apply_delta`'s result and a full `from_triples` rebuild.
+    fn all_columns(src: &VecTripleSource) -> Vec<OrderColumns> {
+        Ordering::ALL
+            .iter()
+            .map(|&ord| {
+                let cols = src.sorted_columns(ord).expect("all six orderings exist");
+                (
+                    ord,
+                    cols.level(0).to_vec(),
+                    cols.level(1).to_vec(),
+                    cols.level(2).to_vec(),
+                )
+            })
+            .collect()
+    }
+
+    /// Small deterministic xorshift64 PRNG — no `rand` dependency, per the
+    /// task brief. Not cryptographic; only needs to be reproducible.
+    struct Xorshift64(u64);
+
+    impl Xorshift64 {
+        fn new(seed: u64) -> Self {
+            // xorshift64 is undefined at state 0; fold the seed away from it.
+            Self(seed | 1)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// Uniform value in `[0, n)`. `n` must be > 0.
+        fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+    }
+
+    /// A random triple drawn from a `[0, domain)` term-id domain, small enough
+    /// that collisions and duplicates actually occur.
+    fn random_triple(rng: &mut Xorshift64, domain: u64) -> Triple {
+        Triple::new(rng.below(domain), rng.below(domain), rng.below(domain))
+    }
+
+    #[test]
+    fn apply_delta_matches_full_rebuild() {
+        use std::collections::HashSet;
+
+        let mut rng = Xorshift64::new(0xC0FFEE_u64);
+        const DOMAIN: u64 = 8; // small domain: 512 possible triples
+
+        for iter in 0..200 {
+            let base_len = rng.below(201) as usize; // 0..=200
+            let base: Vec<Triple> = (0..base_len)
+                .map(|_| random_triple(&mut rng, DOMAIN))
+                .collect();
+            let base_set: Vec<Triple> = {
+                let mut seen = HashSet::new();
+                base.iter().copied().filter(|t| seen.insert(*t)).collect()
+            };
+
+            let del_len = rng.below(30) as usize;
+            let dels: Vec<Triple> = (0..del_len)
+                .map(|_| {
+                    // Biased ~half present in the base, ~half arbitrary.
+                    if !base_set.is_empty() && rng.below(2) == 0 {
+                        base_set[rng.below(base_set.len() as u64) as usize]
+                    } else {
+                        random_triple(&mut rng, DOMAIN)
+                    }
+                })
+                .collect();
+
+            let add_len = rng.below(30) as usize;
+            let adds: Vec<Triple> = (0..add_len)
+                .map(|_| {
+                    // Biased ~half already present in the base.
+                    if !base_set.is_empty() && rng.below(2) == 0 {
+                        base_set[rng.below(base_set.len() as u64) as usize]
+                    } else {
+                        random_triple(&mut rng, DOMAIN)
+                    }
+                })
+                .collect();
+
+            // Expected set, computed independently: delete before insert.
+            let mut expected: HashSet<Triple> = base_set.iter().copied().collect();
+            for d in &dels {
+                expected.remove(d);
+            }
+            for a in &adds {
+                expected.insert(*a);
+            }
+            let expected_vec: Vec<Triple> = expected.iter().copied().collect();
+
+            let mut src = VecTripleSource::from_triples(base.clone());
+            src.apply_delta(&dels, &adds);
+
+            let want = VecTripleSource::from_triples(expected_vec);
+
+            assert_eq!(
+                src.total_triples(),
+                expected.len(),
+                "iter {iter}: total mismatch"
+            );
+            for &ord in &Ordering::ALL {
+                let got_cols = src.sorted_columns(ord).expect("ordering exists");
+                let want_cols = want.sorted_columns(ord).expect("ordering exists");
+                assert_eq!(
+                    got_cols.level(0),
+                    want_cols.level(0),
+                    "iter {iter}, ord {ord:?}, level 0"
+                );
+                assert_eq!(
+                    got_cols.level(1),
+                    want_cols.level(1),
+                    "iter {iter}, ord {ord:?}, level 1"
+                );
+                assert_eq!(
+                    got_cols.level(2),
+                    want_cols.level(2),
+                    "iter {iter}, ord {ord:?}, level 2"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn apply_delta_empty_is_noop() {
+        let triples = vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ];
+        let mut src = VecTripleSource::from_triples(triples);
+        let before = all_columns(&src);
+        let before_total = src.total_triples();
+
+        src.apply_delta(&[], &[]);
+
+        assert_eq!(all_columns(&src), before);
+        assert_eq!(src.total_triples(), before_total);
+    }
+
+    #[test]
+    fn apply_delta_delete_absent_and_insert_present_are_noops() {
+        let triples = vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ];
+        let mut src = VecTripleSource::from_triples(triples);
+        let before = all_columns(&src);
+        let before_total = src.total_triples();
+
+        // Delete something never present, insert something already present.
+        src.apply_delta(&[Triple::new(9, 9, 9)], &[Triple::new(1, 2, 3)]);
+
+        assert_eq!(all_columns(&src), before);
+        assert_eq!(src.total_triples(), before_total);
+    }
+
+    #[test]
+    fn apply_delta_same_triple_deleted_and_added_stays_present() {
+        let t = Triple::new(1, 2, 3);
+        let mut src = VecTripleSource::from_triples(vec![t, Triple::new(5, 6, 7)]);
+
+        src.apply_delta(&[t], &[t]);
+
+        assert!(src.contains(&t));
+        assert_eq!(src.total_triples(), 2);
+        for &ord in &Ordering::ALL {
+            let cols = src.sorted_columns(ord).expect("ordering exists");
+            assert_eq!(cols.len(), 2, "ord {ord:?}");
+        }
+
+        // Also from an empty base: del-before-insert on a triple that was
+        // never there still leaves it present.
+        let mut empty = VecTripleSource::from_triples(vec![]);
+        empty.apply_delta(&[t], &[t]);
+        assert!(empty.contains(&t));
+        assert_eq!(empty.total_triples(), 1);
+    }
+
+    #[test]
+    fn apply_delta_to_empty_base_matches_from_triples() {
+        let adds = vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 3), // duplicate within adds, tolerated
+            Triple::new(4, 5, 6),
+        ];
+        let mut src = VecTripleSource::from_triples(vec![]);
+        src.apply_delta(&[], &adds);
+
+        let want = VecTripleSource::from_triples(vec![Triple::new(1, 2, 3), Triple::new(4, 5, 6)]);
+        assert_eq!(all_columns(&src), all_columns(&want));
+        assert_eq!(src.total_triples(), 2);
+    }
+
+    #[test]
+    fn apply_delta_removing_everything_leaves_all_orderings_empty() {
+        let triples = vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ];
+        let dels = triples.clone();
+        let mut src = VecTripleSource::from_triples(triples);
+
+        src.apply_delta(&dels, &[]);
+
+        assert_eq!(src.total_triples(), 0);
+        for &ord in &Ordering::ALL {
+            let cols = src.sorted_columns(ord).expect("ordering exists");
+            assert!(cols.is_empty(), "ord {ord:?}");
+            // No panic on iteration over an emptied ordering.
+            let it = src.iter(ord).expect("ordering exists");
+            assert_eq!(it.peek(0), None);
+        }
     }
 }
