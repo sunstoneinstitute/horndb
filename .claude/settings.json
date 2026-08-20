@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "worklode": {
+      "source": {
+        "source": "github",
+        "repo": "sunstoneinstitute/worklode"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "lode@worklode": true
+  }
+}
