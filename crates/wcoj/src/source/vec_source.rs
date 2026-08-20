@@ -138,6 +138,11 @@ impl VecTripleSource {
     /// exact post-merge row count. It is only read by `total_triples()`.
     pub fn apply_delta(&mut self, dels: &[Triple], adds: &[Triple]) {
         if dels.is_empty() && adds.is_empty() {
+            // No ordering to rebuild, but `total` can still be stale: it may
+            // carry `from_triples`'s pre-dedup over-count (see the doc above).
+            // Recompute it here too so "total is exact after apply_delta"
+            // holds unconditionally, not just when the delta does work.
+            self.total = self.sorted[&Ordering::Spo].levels[0].len();
             return;
         }
         for &ord in &Ordering::ALL {
@@ -748,6 +753,26 @@ mod tests {
         Triple::new(rng.below(domain), rng.below(domain), rng.below(domain))
     }
 
+    /// Random `dels`/`adds` for one delta round, biased so ~half draw from
+    /// the current expected set (present deletes, already-present adds are
+    /// the common real-world case) and ~half are arbitrary domain triples.
+    fn random_delta_half(
+        rng: &mut Xorshift64,
+        cur: &[Triple],
+        len: usize,
+        domain: u64,
+    ) -> Vec<Triple> {
+        (0..len)
+            .map(|_| {
+                if !cur.is_empty() && rng.below(2) == 0 {
+                    cur[rng.below(cur.len() as u64) as usize]
+                } else {
+                    random_triple(rng, domain)
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn apply_delta_matches_full_rebuild() {
         use std::collections::HashSet;
@@ -756,83 +781,85 @@ mod tests {
         const DOMAIN: u64 = 8; // small domain: 512 possible triples
 
         for iter in 0..200 {
-            let base_len = rng.below(201) as usize; // 0..=200
+            // Force the empty-base path on the first iteration: at this
+            // seed `rng.below(201)` never draws 0 in 200 rounds on its own,
+            // so the empty-base branch would otherwise go untested here (a
+            // dedicated test covers it too, but forcing it here keeps this
+            // test's coverage independent of seed luck).
+            let base_len = if iter == 0 {
+                0
+            } else {
+                rng.below(201) as usize
+            };
             let base: Vec<Triple> = (0..base_len)
                 .map(|_| random_triple(&mut rng, DOMAIN))
                 .collect();
-            let base_set: Vec<Triple> = {
-                let mut seen = HashSet::new();
-                base.iter().copied().filter(|t| seen.insert(*t)).collect()
-            };
 
-            let del_len = rng.below(30) as usize;
-            let dels: Vec<Triple> = (0..del_len)
-                .map(|_| {
-                    // Biased ~half present in the base, ~half arbitrary.
-                    if !base_set.is_empty() && rng.below(2) == 0 {
-                        base_set[rng.below(base_set.len() as u64) as usize]
-                    } else {
-                        random_triple(&mut rng, DOMAIN)
-                    }
-                })
-                .collect();
+            let mut expected: HashSet<Triple> = base.iter().copied().collect();
+            let mut src = VecTripleSource::from_triples(base);
 
-            let add_len = rng.below(30) as usize;
-            let adds: Vec<Triple> = (0..add_len)
-                .map(|_| {
-                    // Biased ~half already present in the base.
-                    if !base_set.is_empty() && rng.below(2) == 0 {
-                        base_set[rng.below(base_set.len() as u64) as usize]
-                    } else {
-                        random_triple(&mut rng, DOMAIN)
-                    }
-                })
-                .collect();
+            // Two delta rounds in sequence: the second lands on a source
+            // that is itself `apply_delta`'s own output, exercising the
+            // chained-delta shape production code hits on every mutation
+            // after the first (Task 3 wires this in behind every SPARQL
+            // Update). `cur` is a fresh snapshot of the *current* expected
+            // set each round, not the original base — later rounds bias
+            // toward triples the previous round just settled on.
+            for round in 0..2 {
+                let cur: Vec<Triple> = expected.iter().copied().collect();
+                let del_len = rng.below(30) as usize;
+                let dels = random_delta_half(&mut rng, &cur, del_len, DOMAIN);
+                let add_len = rng.below(30) as usize;
+                let adds = random_delta_half(&mut rng, &cur, add_len, DOMAIN);
 
-            // Expected set, computed independently: delete before insert.
-            let mut expected: HashSet<Triple> = base_set.iter().copied().collect();
-            for d in &dels {
-                expected.remove(d);
-            }
-            for a in &adds {
-                expected.insert(*a);
-            }
-            let expected_vec: Vec<Triple> = expected.iter().copied().collect();
+                // Expected set, computed independently: delete before insert.
+                for d in &dels {
+                    expected.remove(d);
+                }
+                for a in &adds {
+                    expected.insert(*a);
+                }
 
-            let mut src = VecTripleSource::from_triples(base.clone());
-            src.apply_delta(&dels, &adds);
+                src.apply_delta(&dels, &adds);
 
-            let want = VecTripleSource::from_triples(expected_vec);
+                let want = VecTripleSource::from_triples(expected.iter().copied().collect());
 
-            assert_eq!(
-                src.total_triples(),
-                expected.len(),
-                "iter {iter}: total mismatch"
-            );
-            for &ord in &Ordering::ALL {
-                let got_cols = src.sorted_columns(ord).expect("ordering exists");
-                let want_cols = want.sorted_columns(ord).expect("ordering exists");
                 assert_eq!(
-                    got_cols.level(0),
-                    want_cols.level(0),
-                    "iter {iter}, ord {ord:?}, level 0"
+                    src.total_triples(),
+                    expected.len(),
+                    "iter {iter} round {round}: total mismatch"
                 );
-                assert_eq!(
-                    got_cols.level(1),
-                    want_cols.level(1),
-                    "iter {iter}, ord {ord:?}, level 1"
-                );
-                assert_eq!(
-                    got_cols.level(2),
-                    want_cols.level(2),
-                    "iter {iter}, ord {ord:?}, level 2"
-                );
+                for &ord in &Ordering::ALL {
+                    let got_cols = src.sorted_columns(ord).expect("ordering exists");
+                    let want_cols = want.sorted_columns(ord).expect("ordering exists");
+                    assert_eq!(
+                        got_cols.level(0),
+                        want_cols.level(0),
+                        "iter {iter} round {round}, ord {ord:?}, level 0"
+                    );
+                    assert_eq!(
+                        got_cols.level(1),
+                        want_cols.level(1),
+                        "iter {iter} round {round}, ord {ord:?}, level 1"
+                    );
+                    assert_eq!(
+                        got_cols.level(2),
+                        want_cols.level(2),
+                        "iter {iter} round {round}, ord {ord:?}, level 2"
+                    );
+                }
             }
         }
     }
 
     #[test]
     fn apply_delta_empty_is_noop() {
+        // Distinct triples: `from_triples`'s `total` already equals the
+        // deduped count here, so recomputing `total` on the empty-delta
+        // early return happens to leave it unchanged too. That's incidental
+        // to *this* fixture, not a general guarantee — see
+        // `apply_delta_empty_delta_recomputes_total_for_duplicate_input` for
+        // the case where it does change.
         let triples = vec![
             Triple::new(1, 2, 3),
             Triple::new(1, 2, 4),
@@ -840,12 +867,36 @@ mod tests {
         ];
         let mut src = VecTripleSource::from_triples(triples);
         let before = all_columns(&src);
-        let before_total = src.total_triples();
 
         src.apply_delta(&[], &[]);
 
-        assert_eq!(all_columns(&src), before);
-        assert_eq!(src.total_triples(), before_total);
+        assert_eq!(all_columns(&src), before, "columns must be unchanged");
+    }
+
+    #[test]
+    fn apply_delta_empty_delta_recomputes_total_for_duplicate_input() {
+        // `from_triples` sets `total = triples.len()` before its internal
+        // dedup, so duplicate input over-counts (a documented quirk — see
+        // the `apply_delta` doc and `union_triples` in
+        // `crates/sparql/src/exec/horn.rs`). Even a no-op `apply_delta(&[],
+        // &[])` must still bring `total` down to the exact row count, since
+        // the doc promises "total after apply_delta is exact"
+        // unconditionally, not just when the delta does work.
+        let t = Triple::new(1, 2, 3);
+        let mut src = VecTripleSource::from_triples(vec![t, t]);
+        assert_eq!(
+            src.total_triples(),
+            2,
+            "from_triples over-counts duplicate input by design"
+        );
+
+        src.apply_delta(&[], &[]);
+
+        assert_eq!(
+            src.total_triples(),
+            1,
+            "apply_delta must recompute total exactly, even for an empty delta"
+        );
     }
 
     #[test]
