@@ -1227,7 +1227,7 @@ dependencies = [
  "http-body",
  "hyper",
  "insta",
- "oxiri",
+ "oxiri 0.3.1",
  "oxrdf",
  "oxttl",
  "pin-project-lite",
@@ -1735,7 +1735,7 @@ dependencies = [
  "dashmap",
  "getrandom 0.3.4",
  "libc",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "oxrdfio",
  "oxrocksdb-sys",
@@ -1765,13 +1765,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54b4ed3a7192fa19f5f48f99871f2755047fabefd7f222f12a1df1773796a102"
 
 [[package]]
+name = "oxiri"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6bd0ef560f078e41ce2ebf370cce217e7fb2c3695ffa87541151c9de94e83a"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "oxjsonld"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6e1380a504a8571763f13b8bcad629ff90d0300d47d8a519f3c6c599625840e"
 dependencies = [
  "json-event-parser",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "ryu-js",
  "thiserror",
@@ -1785,7 +1794,7 @@ checksum = "0afd5c28e4a399c57ee2bc3accd40c7b671fdc7b6537499f14e95b265af7d7e0"
 dependencies = [
  "hex",
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxsdatatypes",
  "rand",
  "sha2 0.10.9",
@@ -1812,7 +1821,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd5516ae083d09bc57ec65ed5ee97701481725de6ffaa83d968ab42a96157ba1"
 dependencies = [
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "quick-xml 0.37.5",
  "thiserror",
@@ -1845,7 +1854,7 @@ checksum = "f03fd471bd54c23d76631c0a2677aa4bb308d905f6e491ee35dcb0732b7c5c6c"
 dependencies = [
  "memchr",
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "thiserror",
 ]
@@ -2530,7 +2539,7 @@ dependencies = [
  "hex",
  "json-event-parser",
  "md-5",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "oxsdatatypes",
  "rand",
@@ -2551,7 +2560,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46715eb957d1fe960cbbc0b713da8f78e2cb19df315b48fb09c9467a1c84f656"
 dependencies = [
  "oxilangtag",
- "oxiri",
+ "oxiri 0.2.11",
  "oxrdf",
  "peg",
  "rand",
