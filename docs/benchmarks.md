@@ -336,6 +336,53 @@ Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
 memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
 duplication).
 
+#### Where bulk-load time actually goes (HDB-85, 2026-08-24)
+
+Measured with the `storage_load_phase_*` counters (SPEC-17 §5.4.1) on
+`hornbench`, trainmarks xlarge (9,995,000 triples), serial load, commit
+`25f4110`. Phases are listed in the order a load runs them.
+
+| phase | read_turtle | % | read_ntriples | % |
+|---|---|---|---|---|
+| `parse` | 10.176s | 43.5 | 6.455s | 31.7 |
+| `dedupe` | 6.150s | 26.3 | 5.855s | 28.8 |
+| `intern` | 1.909s | 8.2 | 1.823s | 9.0 |
+| `live_keys` | 1.448s | 6.2 | 1.397s | 6.9 |
+| `group` | 1.414s | 6.0 | 1.386s | 6.8 |
+| `build` | 1.292s | 5.5 | 1.287s | 6.3 |
+| `stage` | 0.308s | 1.3 | 0.303s | 1.5 |
+| `merge` | 0.140s | 0.6 | 0.137s | 0.7 |
+| `copy_forward` | ~0 | 0 | ~0 | 0 |
+| **accounted** | **22.837s** | **97.6** | **18.643s** | **91.7** |
+| **measured total** | 23.389s | | 20.342s | |
+
+Three things this overturns:
+
+- **Parsing is the largest single phase**, not a rounding error. HDB-83's
+  "parse only 5.41s" timed `oxttl` handing back triples; the driver's `parse`
+  phase also materialises them into a 10M-element
+  `Vec<(OxTerm, OxTerm, OxTerm)>`, where every term is a heap-allocated
+  `String`. That allocation is the difference. It also explains the flat
+  thread-count sweep above: extra parse threads feed one allocation-bound
+  consumer on the calling thread.
+- **The tier is 12–14% of a load, not ~80%.** `group` + `copy_forward` +
+  `merge` + `build` total 2.85s of 23.39s (Turtle) and 2.81s of 20.34s
+  (N-Triples). The index build is not the bottleneck, and `copy_forward` is
+  free on a load into an empty store.
+- **Every term is interned twice, costing 8.06s (34%).** `dedupe`
+  (`HornBackend::insert_oxrdf_batch_in_graph`) interns all three terms to build
+  a `QuadKey`, then `intern` (`Store::apply_quads`) interns them all again for
+  storage's own ids. `dedupe` is the dearer of the two because it also does a
+  `live_keys` lookup and an `intra_batch` insert per triple.
+
+`live_keys` adds a further 1.45s building a 10M-entry `HashSet<QuadKey>` that
+exists for `INSERT DATA` idempotency and cannot hit on a load into an empty
+store.
+
+Ranked targets, all of them above the tier: the `Vec<(OxTerm, …)>`
+materialisation (10.2s), the duplicate intern (8.1s across two phases), and the
+`live_keys` build (1.4s). Together they are ~84% of a Turtle load.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page
