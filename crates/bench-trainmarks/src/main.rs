@@ -116,13 +116,20 @@ fn read_existing(path: &Path) -> Vec<Value> {
 fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
+    let t_parse = std::time::Instant::now();
     let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
+    // Time only the materialisation into `batch`, so `parse` minus this is
+    // oxttl tokenisation. The closure runs once per chunk batch, not per
+    // triple, and accumulates into a local (SPEC-17 §5.4).
+    let mut materialize_ns = 0u64;
     let mut push = |triples: Vec<Triple>| {
+        let t = std::time::Instant::now();
         batch.extend(
             triples
                 .into_iter()
                 .map(|t| (t.subject.into(), t.predicate.into(), t.object)),
         );
+        materialize_ns += t.elapsed().as_nanos() as u64;
         Ok(())
     };
     if turtle {
@@ -130,6 +137,16 @@ fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
     } else {
         for_each_ntriples_batch(&bytes, threads, &mut push)?;
     }
+    horndb_metrics::metrics().storage.record_load_phase(
+        horndb_metrics::labels::LoadPhase::Parse,
+        t_parse.elapsed(),
+        batch.len() as u64,
+    );
+    horndb_metrics::metrics().storage.record_load_phase(
+        horndb_metrics::labels::LoadPhase::Materialize,
+        std::time::Duration::from_nanos(materialize_ns),
+        batch.len() as u64,
+    );
     let mut backend = HornBackend::new();
     backend
         .insert_oxrdf_batch(batch)
@@ -212,6 +229,20 @@ fn run_read_timed(
     rx.recv_timeout(timeout).ok()
 }
 
+/// Print the cumulative `storage_load_phase_*` counters (SPEC-17 §5.4.1) after
+/// a load, so a trainmarks run reports where bulk-load time actually went.
+/// Counters are cumulative across the process; subtract successive dumps to get
+/// a single load's share.
+fn dump_load_phases(label: &str) {
+    let encoded = horndb_metrics::encode_metrics();
+    eprintln!("  [load-phases after {label}]");
+    for line in encoded.lines() {
+        if line.starts_with("horndb_storage_load_phase") {
+            eprintln!("    {line}");
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let timeout = Duration::from_secs(cli.timeout_secs);
@@ -234,6 +265,7 @@ fn main() -> Result<()> {
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_turtle: {secs:.4}s ({} triples)", backend.len());
     results.record("read_turtle", json!(secs));
+    dump_load_phases("read_turtle");
 
     // --- write Turtle ---
     let t = Instant::now();
@@ -257,6 +289,7 @@ fn main() -> Result<()> {
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_ntriples: {secs:.4}s");
     results.record("read_ntriples", json!(secs));
+    dump_load_phases("read_ntriples");
 
     eprintln!("  queries:");
 

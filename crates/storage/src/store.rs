@@ -149,9 +149,19 @@ impl Store {
             del_ids.push((*g, s_id, p_id, o_id));
         }
         let mut add_ids = Vec::with_capacity(adds.len());
+        // One clock read on each side of the loop; the loop body touches no
+        // metric handle (SPEC-17 §5.4).
+        let t_intern = std::time::Instant::now();
         for (g, s, p, o) in adds {
             let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
             add_ids.push((*g, s_id, p_id, o_id));
+        }
+        if !adds.is_empty() {
+            horndb_metrics::metrics().storage.record_load_phase(
+                horndb_metrics::labels::LoadPhase::Intern,
+                t_intern.elapsed(),
+                adds.len() as u64,
+            );
         }
         self.tier.apply_quad_batch(&del_ids, &add_ids)
     }

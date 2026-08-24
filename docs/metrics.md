@@ -89,11 +89,33 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 |---|---|---|---|---|
 | `horndb_storage_load_duration_seconds` | histogram | — | s `(1e-3 ×3 ×12)` | RDF load wall-clock (per file, or per batch when `--materialize`) |
 | `horndb_storage_load_bytes_total` | counter | — | bytes | bytes read during RDF load |
+| `horndb_storage_load_phase_nanoseconds_total` | counter | `phase` | ns | nanoseconds spent in each bulk-load phase |
+| `horndb_storage_load_phase_rows_total` | counter | `phase` | count | rows each bulk-load phase handled |
 | `horndb_storage_triples` | gauge | — | count | live triples in the store **(scrape-time)** |
 | `horndb_storage_graphs` | gauge | — | count | distinct named graphs **(scrape-time)** |
 | `horndb_storage_predicates` | gauge | — | count | distinct predicates **(scrape-time)** |
 | `horndb_storage_dictionary_terms` | gauge | — | count | interned dictionary terms **(scrape-time)** |
 | `horndb_storage_tier_bytes_estimated` | gauge | `tier` | bytes | estimated bytes per memory tier **(scrape-time)** |
+
+`phase` values, in the order a bulk load runs them:
+
+| `phase` | Emitted from | What it covers |
+|---|---|---|
+| `parse` | `crates/bench-trainmarks/src/main.rs` | tokenising the document **and** materialising the triple batch (`materialize` is the second half) |
+| `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
+| `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping already-live / intra-batch-duplicate triples |
+| `stage` | `crates/sparql/src/exec/horn.rs` | building the key and `to_store` vectors handed to storage |
+| `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms a second time, for storage's own ids |
+| `group` | `crates/storage/src/memory_tier.rs` | grouping the batch by graph then predicate into per-predicate `(s, o)` sets |
+| `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps |
+| `merge` | `crates/storage/src/memory_tier.rs` | appending new rows, skipping ones still visible after the deletes |
+| `build` | `crates/storage/src/memory_tier.rs` | sorting the partition and materialising its Arrow columns |
+| `live_keys` | `crates/sparql/src/exec/horn.rs` | recording the inserted quad keys in the backend's live-key set |
+| `invalidate` | `crates/sparql/src/exec/horn.rs` | dropping the cached WCOJ snapshots after the write |
+
+The pair is a count+sum summary per SPEC-17 §5.4.1 — mean cost per row for a
+phase is `rate(nanoseconds) / rate(rows)`. Each phase accumulates in locals and
+touches its counters once per batch, never per row.
 
 ## Closure / GraphBLAS (`crates/metrics/src/closure.rs`)
 

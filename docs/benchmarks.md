@@ -336,6 +336,91 @@ Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
 memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
 duplication).
 
+#### Where bulk-load time actually goes (HDB-85, 2026-08-24)
+
+Measured with the `storage_load_phase_*` counters (SPEC-17 §5.4.1) on
+`hornbench`, trainmarks xlarge (9,995,000 triples), serial load, commit
+`25f4110`. Phases are listed in the order a load runs them.
+
+| phase | read_turtle | % | read_ntriples | % |
+|---|---|---|---|---|
+| `parse` | 10.176s | 43.5 | 6.455s | 31.7 |
+| `dedupe` | 6.150s | 26.3 | 5.855s | 28.8 |
+| `intern` | 1.909s | 8.2 | 1.823s | 9.0 |
+| `live_keys` | 1.448s | 6.2 | 1.397s | 6.9 |
+| `group` | 1.414s | 6.0 | 1.386s | 6.8 |
+| `build` | 1.292s | 5.5 | 1.287s | 6.3 |
+| `stage` | 0.308s | 1.3 | 0.303s | 1.5 |
+| `merge` | 0.140s | 0.6 | 0.137s | 0.7 |
+| `copy_forward` | ~0 | 0 | ~0 | 0 |
+| **accounted** | **22.837s** | **97.6** | **18.643s** | **91.7** |
+| **measured total** | 23.389s | | 20.342s | |
+
+Three things this overturns:
+
+- **Parsing is the largest single phase**, not a rounding error — and it is
+  tokenisation, not the batch build. Timing the `Vec<(OxTerm, …)>`
+  materialisation on its own (`materialize` phase) splits `parse` as:
+
+  | | read_turtle | | read_ntriples | |
+  |---|---|---|---|---|
+  | tokenisation | 9.627s | 94.5% | 5.885s | 90.0% |
+  | `materialize` | 0.565s | 5.5% | 0.657s | 10.0% |
+  | **`parse`** | **10.192s** | | **6.542s** | |
+
+  An earlier revision of this section blamed the materialisation for the whole
+  phase, by comparing HDB-83's *N-Triples* "parse only 5.41s" against the
+  *Turtle* `parse` phase. Wrong: HDB-83 measured Turtle separately at 8.34s,
+  which agrees with the 9.627s tokenisation figure above. The allocation costs
+  0.57s, not ~4.8s.
+- **The tier is 12–14% of a load, not ~80%.** `group` + `copy_forward` +
+  `merge` + `build` total 2.85s of 23.39s (Turtle) and 2.81s of 20.34s
+  (N-Triples). The index build is not the bottleneck, and `copy_forward` is
+  free on a load into an empty store.
+- **Every term is interned twice, costing 8.06s (34%).** `dedupe`
+  (`HornBackend::insert_oxrdf_batch_in_graph`) interns all three terms to build
+  a `QuadKey`, then `intern` (`Store::apply_quads`) interns them all again for
+  storage's own ids. `dedupe` is the dearer of the two because it also does a
+  `live_keys` lookup and an `intra_batch` insert per triple.
+
+`live_keys` adds a further 1.45s building a 10M-entry `HashSet<QuadKey>` that
+exists for `INSERT DATA` idempotency and cannot hit on a load into an empty
+store.
+
+Ranked targets, all of them above the tier: tokenisation (9.6s), the duplicate
+intern (8.1s across two phases), and the `live_keys` build (1.4s).
+
+#### Parse does not parallelise, and the phase counters say where it goes
+
+Same host and data, `HORNDB_LOAD_THREADS=16` against the serial run:
+
+| phase (read_turtle) | 1 thread | 16 threads | change |
+|---|---|---|---|
+| `parse` | 10.192s | 9.874s | −3.1% |
+| `materialize` | 0.565s | 0.770s | **+36%** |
+| `dedupe` | 6.058s | 6.098s | +0.7% |
+| `intern` | 1.851s | 1.843s | −0.4% |
+
+HDB-83 measured *chunk-local* parsing scaling 8.34s → 0.91s on 16 threads. The
+whole of that win is consumed inside `for_each_*_batch`. HDB-83's own wording
+names the reason — its figure was "chunk-local, **nothing crosses threads**",
+while the real loader ships every parsed triple across a channel to a sink on
+the calling thread. `materialize` getting *worse* with more threads is the
+tell: the sink is touching memory allocated on other cores.
+
+The mechanism is `oxttl`'s API. `SliceTurtleParser::Item = Result<Triple, _>`
+and `oxrdf::Triple` owns its `String`s, so the parser allocates a copy of every
+term even though the source slice outlives the parse. At xlarge that is 30M
+allocations made on the parse threads and freed on the main thread — the case
+glibc `malloc` handles worst, since a cross-thread free takes the owning
+arena's lock. The workspace sets no `#[global_allocator]`.
+
+Term reuse is the lever: a 2M-triple sample of `xlarge.nt` holds 6M term
+occurrences but only **577,706 distinct terms** (10.4:1). Interning from `&str`
+borrowed out of the source slice would allocate only on a dictionary miss,
+cutting allocations roughly 10× — and every survivor is a real dictionary
+entry rather than transient churn. Tracked in HDB-86.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page

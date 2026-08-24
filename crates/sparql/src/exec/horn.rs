@@ -162,6 +162,7 @@ use crate::exec::{
     AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, GroupCount, Slot, Store,
 };
 use arrow::array::UInt64Array;
+use horndb_metrics::labels::LoadPhase;
 use horndb_storage::{GraphId, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
@@ -324,6 +325,14 @@ fn union_triples(snap: &StoreSnapshot<'_>, graphs: &[GraphId]) -> Vec<WTriple> {
 /// dictionary identities and round-trip their exact lexical form.
 /// Matching is therefore term-based (lexical form + datatype), as
 /// SPARQL BGP semantics require.
+/// Merge one bulk-load phase into the shared counters (SPEC-17 §5.4.1). Called
+/// once per phase per batch, never from inside a loop.
+fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) {
+    horndb_metrics::metrics()
+        .storage
+        .record_load_phase(phase, elapsed, rows);
+}
+
 pub struct HornBackend {
     store: ColumnStore,
     /// Mirror of every `(graph, s, p, o)` TermId key currently LIVE in
@@ -677,6 +686,8 @@ impl HornBackend {
         }
         let mut entries: Vec<Entry> = Vec::with_capacity(triples.len());
         let mut intra_batch: HashSet<QuadKey> = HashSet::new();
+        let n_in = triples.len() as u64;
+        let t_dedupe = std::time::Instant::now();
         {
             let d = self.store.dictionary();
             for (s, p, o) in triples {
@@ -695,6 +706,8 @@ impl HornBackend {
             }
         }
 
+        record_load_phase(LoadPhase::Dedupe, t_dedupe.elapsed(), n_in);
+
         if entries.is_empty() {
             return Ok(0);
         }
@@ -703,19 +716,28 @@ impl HornBackend {
         // is dead after the move below except for `e.key` (already extracted
         // into `keys`, and `Copy`), so this moves each triple's terms into
         // the storage call instead of cloning them.
+        let t_stage = std::time::Instant::now();
         let keys: Vec<QuadKey> = entries.iter().map(|e| e.key).collect();
         let to_store: Vec<(GraphId, oxrdf::Term, oxrdf::Term, oxrdf::Term)> = entries
             .into_iter()
             .map(|e| (g, e.ox.0, e.ox.1, e.ox.2))
             .collect();
+        record_load_phase(LoadPhase::Stage, t_stage.elapsed(), to_store.len() as u64);
+
         self.store
             .insert_quads(&to_store)
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
 
+        let t_live = std::time::Instant::now();
+        let n_keys = keys.len() as u64;
         for key in keys {
             self.live_keys.insert(key);
         }
+        record_load_phase(LoadPhase::LiveKeys, t_live.elapsed(), n_keys);
+
+        let t_inv = std::time::Instant::now();
         self.invalidate();
+        record_load_phase(LoadPhase::Invalidate, t_inv.elapsed(), n_keys);
 
         Ok(to_store.len() as u64)
     }
