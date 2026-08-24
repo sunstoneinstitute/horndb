@@ -19,6 +19,17 @@ Leapfrog Triejoin executor, trie iterators, planner.
   regression**. No column is built now, so `seek` can take the SIMD `lower_bound`
   path at every depth. **Still re-measure `four_cycle` before touching the seek
   path.**
+- **`VecTripleSource` supports in-place delta maintenance (HDB-82).**
+  `apply_delta(dels, adds)` merges a batch of retracted and inserted triples
+  into all six orderings, leaving each one sorted and deduplicated — the same
+  state `from_triples` produces. Cost is O(n + k log k) per ordering for a
+  delta of k rows against a base of n, against O(n log n) for a rebuild.
+  `horndb-sparql`'s `HornBackend` uses it to keep its memoised snapshot warm
+  across a small `SPARQL Update` instead of re-indexing the whole store; that
+  caller falls back to a full rebuild whenever the merge is not provably
+  correct or not profitable. If you change the sorted-and-deduplicated
+  invariant, leapfrog correctness breaks — `apply_delta_matches_full_rebuild`
+  is the guard.
 - **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
   production executor (`executor/wcoj.rs::BatchIter`) has a k==2
   `horndb_simd::intersect` fast path: at prime time, if both contributing iters
