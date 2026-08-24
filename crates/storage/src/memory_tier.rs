@@ -538,6 +538,7 @@ impl Tier for MemoryTier {
         // Group each side by graph, then predicate, as a set of (s, o)
         // payload pairs — a `HashSet` absorbs in-batch duplicate targets so
         // they are not double-counted.
+        let t_group = Instant::now();
         let mut del_by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> =
             HashMap::new();
         for &(g, s, p, o) in dels {
@@ -558,6 +559,19 @@ impl Tier for MemoryTier {
                 .or_default()
                 .insert((s.0, o.0));
         }
+        record_phase(
+            LoadPhase::Group,
+            t_group.elapsed(),
+            (dels.len() + adds.len()) as u64,
+        );
+
+        // Per-partition accumulators, merged into the counters once at the end.
+        let mut copy_ns = 0u64;
+        let mut copy_rows = 0u64;
+        let mut merge_ns = 0u64;
+        let mut merge_rows = 0u64;
+        let mut build_ns = 0u64;
+        let mut build_rows = 0u64;
 
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
@@ -606,8 +620,11 @@ impl Tier for MemoryTier {
                 // below knows what is genuinely new.
                 let mut builder = PartitionBuilder::default();
                 let mut still_visible: HashSet<(u64, u64)> = HashSet::new();
+                let mut carried = 0u64;
+                let t_copy = Instant::now();
                 if let Some(existing) = new_partitions.get(&p) {
                     let n = existing.len();
+                    carried = n as u64;
                     for i in 0..n {
                         let s = existing.subjects().value(i);
                         let o = existing.objects().value(i);
@@ -624,7 +641,13 @@ impl Tier for MemoryTier {
                         builder.append_stamped(TermId(s), TermId(o), begin, end);
                     }
                 }
+                copy_ns += t_copy.elapsed().as_nanos() as u64;
+                copy_rows += carried;
+
+                let mut added = 0u64;
+                let t_merge = Instant::now();
                 if let Some(targets) = add_targets {
+                    added = targets.len() as u64;
                     for &(s, o) in targets {
                         // Visible "after the dels" — a quad ended above by
                         // this same batch is not in `still_visible`, so a
@@ -636,10 +659,16 @@ impl Tier for MemoryTier {
                         }
                     }
                 }
+                merge_ns += t_merge.elapsed().as_nanos() as u64;
+                merge_rows += added;
+
+                let t_build = Instant::now();
                 new_partitions.insert(
                     p,
                     Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
                 );
+                build_ns += t_build.elapsed().as_nanos() as u64;
+                build_rows += carried + added;
             }
 
             if new_partitions.is_empty() && !graph_existed {
@@ -664,6 +693,14 @@ impl Tier for MemoryTier {
             });
             *self.current.write() = next;
         }
+
+        record_phase(
+            LoadPhase::CopyForward,
+            Duration::from_nanos(copy_ns),
+            copy_rows,
+        );
+        record_phase(LoadPhase::Merge, Duration::from_nanos(merge_ns), merge_rows);
+        record_phase(LoadPhase::Build, Duration::from_nanos(build_ns), build_rows);
 
         Ok(ApplyReport {
             retracted,

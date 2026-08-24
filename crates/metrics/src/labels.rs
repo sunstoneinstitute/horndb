@@ -110,6 +110,7 @@ label_value_enum!(LoadPhase {
     Intern => "intern",
     Group => "group",
     CopyForward => "copy_forward",
+    Merge => "merge",
     Build => "build",
 });
 
