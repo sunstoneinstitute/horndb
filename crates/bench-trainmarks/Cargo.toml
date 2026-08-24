@@ -17,6 +17,16 @@ publish = false
 name = "bench-trainmarks"
 path = "src/main.rs"
 
+[features]
+# E1 of HDB-86: A/B the process-wide allocator against the default system one.
+# `parse` ships ~30M oxrdf terms allocated on parse threads and freed on the
+# main thread; glibc malloc takes the owning arena's lock for every such
+# cross-thread free. mimalloc and snmalloc both keep per-thread free lists and
+# service remote frees without that lock. Off by default so the baseline is
+# still measurable from the same tree; pick exactly one.
+mimalloc = ["dep:mimalloc"]
+snmalloc = ["dep:snmalloc-rs"]
+
 [dependencies]
 horndb-metrics.workspace = true
 anyhow = { workspace = true }
@@ -26,3 +36,5 @@ oxrdf = { workspace = true }
 oxttl = { workspace = true }
 horndb-sparql = { path = "../sparql", default-features = false }
 horndb-storage = { path = "../storage" }
+mimalloc = { version = "0.1", optional = true }
+snmalloc-rs = { version = "0.3", optional = true }

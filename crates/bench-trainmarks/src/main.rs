@@ -20,6 +20,32 @@
 //! into the same `--out`). `scripts/bench/trainmarks.sh` drives the three
 //! scales, one process each (bounded peak memory).
 
+// HDB-86 E1: process-wide allocator A/B. Compiled in only with `--features
+// mimalloc` / `--features snmalloc`; the default build keeps the system
+// allocator so the baseline comes from the same tree. Both alternatives keep
+// per-thread free lists and service a remote free without taking the owning
+// arena's lock, which is the pattern a parallel parse hits hardest.
+#[cfg(all(feature = "mimalloc", feature = "snmalloc"))]
+compile_error!("enable at most one of the `mimalloc` / `snmalloc` features");
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "snmalloc")]
+#[global_allocator]
+static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
+/// Name of the allocator this binary was built with, printed with the results
+/// so a recorded number is never ambiguous about which A/B leg produced it.
+const ALLOCATOR: &str = if cfg!(feature = "mimalloc") {
+    "mimalloc"
+} else if cfg!(feature = "snmalloc") {
+    "snmalloc"
+} else {
+    "system"
+};
+
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -58,6 +84,11 @@ struct Cli {
     /// Per-(read-)query timeout in seconds.
     #[arg(long, default_value_t = 600)]
     timeout_secs: u64,
+    /// Stop after the two read (load) operations, skipping writes and queries.
+    /// For load-path work, where only the `storage_load_phase_*` counters are
+    /// wanted and the query suite is minutes of irrelevant runtime.
+    #[arg(long, default_value_t = false)]
+    load_only: bool,
 }
 
 const FRAMEWORK: &str = "horndb";
@@ -257,7 +288,7 @@ fn main() -> Result<()> {
     let tmp_ttl = cli.data_dir.join(format!("{}_horndb_out.ttl", cli.scale));
     let tmp_nt = cli.data_dir.join(format!("{}_horndb_out.nt", cli.scale));
 
-    eprintln!("=== horndb — {} ===", cli.scale);
+    eprintln!("=== horndb — {} (allocator: {ALLOCATOR}) ===", cli.scale);
 
     // --- read Turtle (this backend feeds the queries) ---
     let t = Instant::now();
@@ -267,21 +298,23 @@ fn main() -> Result<()> {
     results.record("read_turtle", json!(secs));
     dump_load_phases("read_turtle");
 
-    // --- write Turtle ---
-    let t = Instant::now();
-    write_turtle(&backend, &tmp_ttl)?;
-    let secs = t.elapsed().as_secs_f64();
-    eprintln!("  write_turtle: {secs:.4}s");
-    results.record("write_turtle", json!(secs));
-    let _ = std::fs::remove_file(&tmp_ttl);
+    // --- write Turtle / N-Triples --- (both skipped under --load-only; the
+    // read_ntriples leg below reads the source file, not what these produce)
+    if !cli.load_only {
+        let t = Instant::now();
+        write_turtle(&backend, &tmp_ttl)?;
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("  write_turtle: {secs:.4}s");
+        results.record("write_turtle", json!(secs));
+        let _ = std::fs::remove_file(&tmp_ttl);
 
-    // --- write N-Triples ---
-    let t = Instant::now();
-    write_ntriples(&backend, &tmp_nt)?;
-    let secs = t.elapsed().as_secs_f64();
-    eprintln!("  write_ntriples: {secs:.4}s");
-    results.record("write_ntriples", json!(secs));
-    let _ = std::fs::remove_file(&tmp_nt);
+        let t = Instant::now();
+        write_ntriples(&backend, &tmp_nt)?;
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("  write_ntriples: {secs:.4}s");
+        results.record("write_ntriples", json!(secs));
+        let _ = std::fs::remove_file(&tmp_nt);
+    }
 
     // --- read N-Triples (discarded; just I/O timing) ---
     let t = Instant::now();
@@ -290,6 +323,11 @@ fn main() -> Result<()> {
     eprintln!("  read_ntriples: {secs:.4}s");
     results.record("read_ntriples", json!(secs));
     dump_load_phases("read_ntriples");
+
+    if cli.load_only {
+        eprintln!("  load-only: skipping writes and queries");
+        return Ok(());
+    }
 
     eprintln!("  queries:");
 
