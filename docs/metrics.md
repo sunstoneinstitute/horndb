@@ -101,7 +101,8 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 
 | `phase` | Emitted from | What it covers |
 |---|---|---|
-| `parse` | `crates/bench-trainmarks/src/main.rs` | parsing the document into an in-memory triple batch |
+| `parse` | `crates/bench-trainmarks/src/main.rs` | tokenising the document **and** materialising the triple batch (`materialize` is the second half) |
+| `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
 | `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping already-live / intra-batch-duplicate triples |
 | `stage` | `crates/sparql/src/exec/horn.rs` | building the key and `to_store` vectors handed to storage |
 | `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms a second time, for storage's own ids |

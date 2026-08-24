@@ -108,6 +108,7 @@ pub struct PhaseLabel {
 // the rest are inside `MemoryTier::insert_quad_batch`.
 label_value_enum!(LoadPhase {
     Parse => "parse",
+    Materialize => "materialize",
     Dedupe => "dedupe",
     Stage => "stage",
     LiveKeys => "live_keys",
