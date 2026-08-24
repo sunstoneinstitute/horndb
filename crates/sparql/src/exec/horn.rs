@@ -2194,6 +2194,206 @@ mod tests {
         );
     }
 
+    /// A small update must keep the memoised snapshot ALIVE (merged in place)
+    /// rather than silently rotting into "always fall back to a full
+    /// rebuild" -- which would still pass every correctness test above while
+    /// throwing away the whole point of PLAN-03-03. Same test-only
+    /// `memo_len` window `graph_scoped_snapshots_are_not_memoised` uses,
+    /// plus `Arc::ptr_eq` to prove the *same* snapshot object was mutated in
+    /// place, not dropped and rebuilt as a fresh `Arc`.
+    #[test]
+    fn small_update_retains_and_merges_the_snapshot_cache() {
+        let mut b = HornBackend::new();
+        for i in 0..10 {
+            b.insert_triple(
+                Term::Iri(format!("http://ex/s{i}")),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri(format!("http://ex/o{i}")),
+            );
+        }
+
+        // Warm the one memoisable entry a bare BGP hits (`SnapshotScope::
+        // DefaultUnion`, see `resolve_scope`).
+        let patterns = vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: Term::Iri("http://ex/p".into()),
+            object: Term::Var(Var::new("o")),
+        }];
+        let _ = b.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
+        assert_eq!(b.memo_len(), 1, "warm-up: one memoised scope");
+        // Capture the snapshot's identity as a raw pointer, then drop the
+        // `Arc` clone: `apply_delta_to_snapshots` needs `Arc::get_mut` to
+        // succeed, which requires the cache to hold the only strong
+        // reference -- a clone kept alive here would force the fallback and
+        // defeat the point of this test.
+        let before_ptr = {
+            let snap = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+            assert_eq!(snap.total_triples(), 10);
+            Arc::as_ptr(&snap)
+        };
+
+        // One more matching triple: well under the `SNAPSHOT_DELTA_REBUILD_
+        // DIVISOR` threshold (1 <= 10 / 2), so the fast path applies.
+        b.insert_triple(
+            Term::Iri("http://ex/s10".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/o10".into()),
+        );
+
+        assert_eq!(
+            b.memo_len(),
+            1,
+            "a small delta must merge in place, not drop the memo"
+        );
+        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        assert_eq!(
+            Arc::as_ptr(&after),
+            before_ptr,
+            "the fast path mutates the existing Arc rather than rebuilding a fresh one"
+        );
+        assert_eq!(
+            after.total_triples(),
+            11,
+            "the merged snapshot reflects the new row"
+        );
+    }
+
+    /// Every `(?s, ?p, ?o)` row over the default-union scope, independent of
+    /// row order. Mirrors `tests/incremental_snapshot_delta.rs`'s `all_spo`.
+    fn all_spo(b: &HornBackend) -> HashSet<(Term, Term, Term)> {
+        let crate::api::QueryAnswer::Solutions { rows, .. } =
+            crate::api::execute_query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", b).unwrap()
+        else {
+            panic!("expected solutions");
+        };
+        rows.iter()
+            .map(|r| {
+                (
+                    r.get("s").unwrap().clone(),
+                    r.get("p").unwrap().clone(),
+                    r.get("o").unwrap().clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Warm the memoised `DefaultUnion` snapshot, apply `update`, then assert
+    /// the cache took the merge path -- same `memo_len` + `Arc::as_ptr`
+    /// identity check as `small_update_retains_and_merges_the_snapshot_cache`.
+    fn assert_update_merges_in_place(b: &mut HornBackend, update: &str) {
+        let before_ptr = Arc::as_ptr(&b.wcoj_snapshot(&SnapshotScope::DefaultUnion));
+        crate::update::apply_update(&crate::parser::parse_update(update).unwrap(), b).unwrap();
+        assert_eq!(
+            b.memo_len(),
+            1,
+            "a warmed cache must survive the update via the merge path, not be dropped"
+        );
+        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        assert_eq!(
+            Arc::as_ptr(&after),
+            before_ptr,
+            "the update must merge into the existing Arc, not fall back to invalidate+rebuild"
+        );
+    }
+
+    /// Mirrors `tests/incremental_snapshot_delta.rs`'s
+    /// `update_then_query_matches_fresh_backend_insert_data`. That test can
+    /// only prove behavioural equivalence; `memo_len`/`Arc::as_ptr` are
+    /// test-only and not reachable from an integration test in `tests/`, so
+    /// the claim that the merge path (not a silent fallback) actually fired
+    /// is checked here instead.
+    #[test]
+    fn update_then_query_matches_fresh_backend_insert_data_merges_in_place() {
+        // Two seed rows, not one: the fast path only fires when the delta is
+        // at most `base_rows / SNAPSHOT_DELTA_REBUILD_DIVISOR` (== 2 here), so
+        // a single-row base would force the correct-but-uninteresting
+        // fallback and this test would prove nothing about the merge path.
+        let mut b = HornBackend::new();
+        for (s, p, o) in [
+            ("http://ex/a", "http://ex/p", "http://ex/b"),
+            ("http://ex/other", "http://ex/p", "http://ex/o"),
+        ] {
+            b.insert_triple(
+                Term::Iri(s.into()),
+                Term::Iri(p.into()),
+                Term::Iri(o.into()),
+            );
+        }
+        assert_update_merges_in_place(
+            &mut b,
+            "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/c> }",
+        );
+
+        let mut fresh = HornBackend::new();
+        for (s, p, o) in [
+            ("http://ex/a", "http://ex/p", "http://ex/b"),
+            ("http://ex/other", "http://ex/p", "http://ex/o"),
+            ("http://ex/a", "http://ex/p", "http://ex/c"),
+        ] {
+            fresh.insert_triple(
+                Term::Iri(s.into()),
+                Term::Iri(p.into()),
+                Term::Iri(o.into()),
+            );
+        }
+        assert_eq!(all_spo(&b), all_spo(&fresh));
+    }
+
+    /// Mirrors `update_then_query_matches_fresh_backend_delete_data`. See
+    /// `update_then_query_matches_fresh_backend_insert_data_merges_in_place`.
+    #[test]
+    fn update_then_query_matches_fresh_backend_delete_data_merges_in_place() {
+        let mut b = HornBackend::new();
+        for (s, p, o) in [
+            ("http://ex/a", "http://ex/p", "http://ex/b"),
+            ("http://ex/a", "http://ex/p", "http://ex/c"),
+        ] {
+            b.insert_triple(
+                Term::Iri(s.into()),
+                Term::Iri(p.into()),
+                Term::Iri(o.into()),
+            );
+        }
+        assert_update_merges_in_place(
+            &mut b,
+            "DELETE DATA { <http://ex/a> <http://ex/p> <http://ex/b> }",
+        );
+
+        let mut fresh = HornBackend::new();
+        fresh.insert_triple(
+            Term::Iri("http://ex/a".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/c".into()),
+        );
+        assert_eq!(all_spo(&b), all_spo(&fresh));
+    }
+
+    /// Mirrors `update_then_query_matches_fresh_backend_delete_absent_triple`.
+    /// The delete targets a triple the store never held: the delta resolves
+    /// to empty, and the merge path must still fire (not error, not drop the
+    /// cache). See `update_then_query_matches_fresh_backend_insert_data_merges_in_place`.
+    #[test]
+    fn update_then_query_matches_fresh_backend_delete_absent_triple_merges_in_place() {
+        let mut b = HornBackend::new();
+        b.insert_triple(
+            Term::Iri("http://ex/a".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/b".into()),
+        );
+        assert_update_merges_in_place(
+            &mut b,
+            "DELETE DATA { <http://ex/a> <http://ex/p> <http://ex/nope> }",
+        );
+
+        let mut fresh = HornBackend::new();
+        fresh.insert_triple(
+            Term::Iri("http://ex/a".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/b".into()),
+        );
+        assert_eq!(all_spo(&b), all_spo(&fresh));
+    }
+
     #[test]
     fn count_bgp_grouped_matches_scan_grouping() {
         use crate::algebra::TriplePattern;
