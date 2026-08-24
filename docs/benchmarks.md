@@ -247,21 +247,21 @@ with **no DeWitt clause**, so these numbers may be recorded and published.
 
 Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
 `scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
-below: **`hornbench`, release, 2026-08-24** (commit `583cc47`, post delta-merge
+below: **`hornbench`, release, 2026-08-24** (commit `b020f53`, post delta-merge
 snapshot reuse), best-of-3 warm per upstream protocol.
 
 | operation | medium (~100K) | large (~1M) | xlarge (~10M) |
 |---|---|---|---|
-| read_turtle | 0.177s | 2.027s | 23.44s |
-| write_turtle | 0.034s | 0.359s | 3.64s |
-| write_ntriples | 0.028s | 0.335s | 3.44s |
-| read_ntriples | 0.135s | 1.733s | 20.63s |
-| q1 `COUNT(*)` | 0.005s | 0.046s | 0.709s |
-| q2 group/sum/limit | 0.014s | 0.211s | 3.70s |
+| read_turtle | 0.180s | 2.076s | 22.92s |
+| write_turtle | 0.035s | 0.370s | 3.73s |
+| write_ntriples | 0.026s | 0.338s | 3.54s |
+| read_ntriples | 0.139s | 1.730s | 20.21s |
+| q1 `COUNT(*)` | 0.004s | 0.044s | 0.705s |
+| q2 group/sum/limit | 0.014s | 0.214s | 3.73s |
 | q3 3-join + filter + limit | 0.006s | 0.076s | 1.23s |
-| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.016s | 0.251s | 4.69s |
-| q5 `CONSTRUCT` | 0.002s | 0.030s | 0.589s |
-| q6 conditional `DELETE`/`INSERT` | 0.003s | 0.037s | 0.346s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.016s | 0.249s | 4.72s |
+| q5 `CONSTRUCT` | 0.002s | 0.030s | 0.587s |
+| q6 conditional `DELETE`/`INSERT` | 0.003s | 0.036s | 0.452s |
 
 **Status — GREEN: all six queries complete at every scale, no timeouts.**
 
@@ -276,7 +276,7 @@ cold q1@10M is ~3.7s). The driver's per-query watchdog (records `TIMEOUT`,
 continues to the next query, matching upstream's rdflib behaviour) is retained
 but no longer triggers.
 
-q6 (`DELETE`/`INSERT … WHERE`) dropped 11.52s → **0.346s @10M (33×)** with
+q6 (`DELETE`/`INSERT … WHERE`) dropped 11.52s → **0.452s @10M (25×)** with
 HDB-82: a small quad delta is now merged into the cached WCOJ snapshot instead
 of forcing a full re-index of all six orderings. Its cold run still pays the
 first snapshot build (2.59s @10M).
@@ -351,16 +351,16 @@ upstream:
 
 | operation | HornDB | oxigraph | maplib | qlever | jena | rdf4j | graphdb | rdflib |
 |---|---|---|---|---|---|---|---|---|
-| read_turtle | 23.44 | 15.25 | 9.53 | 8.75 | 16.72 | 24.90 | 57.10 | 191.6 |
-| read_ntriples | 20.63 | 13.13 | 9.36 | 8.65 | 16.49 | 13.88 | 54.21 | 154.6 |
-| write_turtle | 3.64 | 3.58 | 1.34 | — | 6.74 | 19.34 | — | 134.7 |
-| write_ntriples | 3.44 | 3.46 | 0.72 | — | 3.89 | 13.18 | — | 17.51 |
-| q1 `COUNT(*)` | 0.709 | 0.786 | 0.073 | 0.002 | 1.837 | 0.678 | 1.414 | 37.0 |
-| q2 group/sum/limit | 3.70 | 2.11 | 0.019 | 0.002 | 3.28 | 0.900 | 2.86 | 32.7 |
+| read_turtle | 22.92 | 15.25 | 9.53 | 8.75 | 16.72 | 24.90 | 57.10 | 191.6 |
+| read_ntriples | 20.21 | 13.13 | 9.36 | 8.65 | 16.49 | 13.88 | 54.21 | 154.6 |
+| write_turtle | 3.73 | 3.58 | 1.34 | — | 6.74 | 19.34 | — | 134.7 |
+| write_ntriples | 3.54 | 3.46 | 0.72 | — | 3.89 | 13.18 | — | 17.51 |
+| q1 `COUNT(*)` | 0.705 | 0.786 | 0.073 | 0.002 | 1.837 | 0.678 | 1.414 | 37.0 |
+| q2 group/sum/limit | 3.73 | 2.11 | 0.019 | 0.002 | 3.28 | 0.900 | 2.86 | 32.7 |
 | q3 3-join + filter | 1.23 | 0.390 | 0.040 | 0.005 | 0.329 | 0.165 | 0.616 | 7.60 |
-| q4 `OPTIONAL` + `COUNT DISTINCT` | 4.69 | 1.72 | 0.031 | 0.003 | 3.09 | 1.16 | 3.66 | 48.1 |
-| q5 `CONSTRUCT` | 0.589 | 0.754 | 0.081 | 0.592 | 0.377 | 0.269 | 4.38 | 9.00 |
-| q6 `DELETE`/`INSERT` | 0.346 | 0.035 | 0.020 | — | 0.028 | 0.022 | 0.174 | 0.787 |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 4.72 | 1.72 | 0.031 | 0.003 | 3.09 | 1.16 | 3.66 | 48.1 |
+| q5 `CONSTRUCT` | 0.587 | 0.754 | 0.081 | 0.592 | 0.377 | 0.269 | 4.38 | 9.00 |
+| q6 `DELETE`/`INSERT` | 0.452 | 0.035 | 0.020 | — | 0.028 | 0.022 | 0.174 | 0.787 |
 
 Reading it:
 
@@ -379,7 +379,7 @@ Reading it:
   aggregations over all 10M triples. The weakness is bulk aggregate throughput,
   not join shape — the same gap SPEC-23 Phase 4 cost-based planning targets.
 - **q6 after HDB-82** is 7th of 8 rather than last by 400×: a real win, still
-  10× behind Oxigraph.
+  13× behind Oxigraph.
 
 Two caveats on the upstream column. QLever's 2–5 ms for q1–q4 at 10M and
 Neo4j's 11 ms for q4 are result-cache hits under best-of-3 warm, not query
