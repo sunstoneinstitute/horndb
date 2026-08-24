@@ -249,6 +249,12 @@ impl SnapshotScope {
 /// `EMPTY_GRAPH_SET`, which is the *name* list this resolves from.)
 const EMPTY_GRAPH_SCOPE: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
 
+/// A delta touching more than `1 / SNAPSHOT_DELTA_REBUILD_DIVISOR` of a cached
+/// snapshot's rows is not worth merging in place: at that size a full rebuild
+/// from the store costs about the same and is simpler, so the memo is dropped
+/// instead. See [`HornBackend::apply_delta_to_snapshots`].
+const SNAPSHOT_DELTA_REBUILD_DIVISOR: usize = 2;
+
 /// True if `g` is a HornDB-internal graph (SPEC-27 F6 / SPEC-29 D4). The
 /// default-graph sentinel has no IRI (`graph_uri` errors on it) and is never
 /// reserved, so it stays in the union default graph.
@@ -302,8 +308,10 @@ fn union_triples(snap: &StoreSnapshot<'_>, graphs: &[GraphId]) -> Vec<WTriple> {
 ///
 /// * Term identity: `horndb_storage::Dictionary` (kind-tagged TermIds).
 /// * Reads: Leapfrog Triejoin over a lazily-built [`VecTripleSource`]
-///   snapshot (all six orderings, rebuilt after any mutation — a
-///   documented Stage-1 cost; see INTEGRATION-NOTES.md).
+///   snapshot (all six orderings). A small `apply_quads` delta is merged
+///   into the cached snapshot in place; every other write drops the memo
+///   and the next read rebuilds it — a documented Stage-1 cost, see
+///   INTEGRATION-NOTES.md and [`HornBackend::apply_delta_to_snapshots`].
 /// * Writes: `DELETE DATA` and `CLEAR`/`DROP` retract through
 ///   `horndb_storage::Store`'s native per-tuple MVCC delete path
 ///   (SPEC-25 S1) — a retracted tuple's `end` stamp is set, and every
@@ -327,16 +335,25 @@ pub struct HornBackend {
     /// `insert_oxrdf_in_graph` for the write funnel's current graph scope.
     live_keys: HashSet<QuadKey>,
     /// Lazily-built WCOJ sources, one per [`SnapshotScope`] a query has
-    /// asked for. Cleared wholesale after any mutation. Most workloads use
-    /// one entry (the unqualified default graph); a query mixing `GRAPH`
-    /// scopes adds one per distinct scope.
+    /// asked for. A small `apply_quads` delta is merged into these in place
+    /// ([`Self::apply_delta_to_snapshots`]); every other write clears them
+    /// wholesale ([`Self::invalidate`]). Most workloads use one entry (the
+    /// unqualified default graph); a query mixing `GRAPH` scopes adds one
+    /// per distinct scope.
     snapshots: Mutex<HashMap<SnapshotScope, Arc<VecTripleSource>>>,
     /// Cached statistics summary derived from a specific snapshot, used by
     /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
-    /// stats were built from alongside the stats themselves. The cache
-    /// self-invalidates: any write rebuilds the snapshot into a fresh `Arc`
-    /// (see `invalidate` + `wcoj_snapshot`), so a stale entry never passes the
-    /// `Arc::ptr_eq` identity check against the current snapshot.
+    /// stats were built from alongside the stats themselves, and is reused only
+    /// while that `Arc` is still the current snapshot (`Arc::ptr_eq`).
+    ///
+    /// **Pointer identity alone does not prove freshness.** A delta merge
+    /// mutates a snapshot through `Arc::get_mut`, which keeps the same pointer,
+    /// so a stale entry would still pass the `ptr_eq` check. The invariant is
+    /// therefore held by explicit clearing, not by identity: every write path
+    /// clears this cache unconditionally — [`Self::invalidate`] and
+    /// [`Self::apply_delta_to_snapshots`] both do. Clearing it *before* a merge
+    /// is also what lets `Arc::get_mut` succeed at all: the cached `Arc` is a
+    /// second strong reference to the very snapshot being merged into.
     stats_cache: Mutex<Option<(Arc<VecTripleSource>, Arc<SnapshotStats>)>>,
 }
 
@@ -394,6 +411,169 @@ impl HornBackend {
             .stats_cache
             .get_mut()
             .expect("stats_cache lock poisoned") = None;
+    }
+
+    /// Push a committed quad delta into every memoised snapshot, falling back
+    /// to a full [`Self::invalidate`] whenever the delta cannot be applied
+    /// safely or profitably.
+    ///
+    /// Rebuilding a whole-store snapshot means six sort passes over every
+    /// triple, which dominates the cost of a small `SPARQL Update`. Merging the
+    /// delta into the sorted orderings instead is `O(n + k log k)` per ordering
+    /// and keeps the cache warm ([`VecTripleSource::apply_delta`]).
+    ///
+    /// Falling back is always correct, so every case this cannot *prove* is a
+    /// fallback. The delta path is taken only when all of these hold:
+    ///
+    /// 1. The delta is small — no more than `1 /
+    ///    SNAPSHOT_DELTA_REBUILD_DIVISOR` of the snapshot's rows. A bigger one
+    ///    is no cheaper to merge than to rebuild.
+    /// 2. Nobody else holds the snapshot, so `Arc::get_mut` can hand out the
+    ///    `&mut` an in-place merge needs.
+    /// 3. Every add interns. (It already did inside `apply_quads`, so this is a
+    ///    dictionary hit; a failure would silently drop a row from the delta.)
+    /// 4. For [`SnapshotScope::DefaultUnion`], the union covers exactly one
+    ///    non-reserved graph *and* the whole delta lands in that graph. Two
+    ///    conditions ride on this. The union default graph is a **set** union
+    ///    (SPEC-28 S3), so with several graphs a delete from one must not drop
+    ///    the union row while another graph still holds the same triple — the
+    ///    per-row delta carries no such multiplicity. And a write to a graph
+    ///    outside the union changes *which* graphs the union covers, which no
+    ///    row-level delta can express. One graph — the shape of every
+    ///    default-graph-only workload — has neither problem.
+    ///
+    /// [`SnapshotScope::DefaultStrict`] needs no such check: it reads one fixed
+    /// graph, so rows in any other graph simply do not apply to it and are
+    /// filtered out.
+    fn apply_delta_to_snapshots(
+        &mut self,
+        del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+        add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+    ) {
+        // First, unconditionally: the stats cache holds a second `Arc` to a live
+        // snapshot and reuses its entry on pointer identity. An in-place merge
+        // breaks both halves of that — the extra strong reference would fail
+        // `Arc::get_mut` below, and the pointer does not change, so a stale
+        // entry would still pass `Arc::ptr_eq`. See the field's doc.
+        *self
+            .stats_cache
+            .get_mut()
+            .expect("stats_cache lock poisoned") = None;
+
+        // Each memoised scope with the row count it currently holds.
+        let cached: Vec<(SnapshotScope, usize)> = {
+            let guard = self.snapshots.lock().expect("snapshot lock poisoned");
+            guard
+                .iter()
+                .map(|(scope, src)| (scope.clone(), src.total_triples()))
+                .collect()
+        };
+        if cached.is_empty() {
+            return;
+        }
+
+        // Resolve both sides to (graph, id-triple). A del row carrying a term
+        // the dictionary has never seen cannot be live anywhere, so it drops
+        // out of the delta; an add row that failed to intern would leave the
+        // delta incomplete, so it forces the rebuild instead.
+        let dels: Vec<(GraphId, WTriple)> = del_rows
+            .iter()
+            .filter_map(|(g, s, p, o)| {
+                self.lookup_key(*g, s, p, o)
+                    .map(|k| (*g, WTriple::new(k.s, k.p, k.o)))
+            })
+            .collect();
+        let mut adds: Vec<(GraphId, WTriple)> = Vec::with_capacity(add_rows.len());
+        for (g, s, p, o) in add_rows {
+            let Ok(k) = self.intern_key(*g, s, p, o) else {
+                self.invalidate();
+                return;
+            };
+            adds.push((*g, WTriple::new(k.s, k.p, k.o)));
+        }
+
+        // The one graph the union default graph covers, or `None` if it covers
+        // zero or several. Mirrors `scope_triples`'s `DefaultUnion` arm.
+        let union_graph: Option<GraphId> = if cached
+            .iter()
+            .any(|(scope, _)| matches!(scope, SnapshotScope::DefaultUnion))
+        {
+            let snap = self.store.snapshot();
+            let mut graphs = snap
+                .graphs()
+                .into_iter()
+                .filter(|g| !reserved_graph(&snap, *g));
+            match (graphs.next(), graphs.next()) {
+                (Some(g), None) => Some(g),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        /// The delta rows that apply to a snapshot over graph `g` alone.
+        fn rows_in(rows: &[(GraphId, WTriple)], g: GraphId) -> Vec<WTriple> {
+            rows.iter()
+                .filter(|(rg, _)| *rg == g)
+                .map(|(_, t)| *t)
+                .collect()
+        }
+
+        // Decide every scope before mutating any of them.
+        let mut plans: Vec<(SnapshotScope, Vec<WTriple>, Vec<WTriple>)> =
+            Vec::with_capacity(cached.len());
+        for (scope, base_rows) in cached {
+            let g = match scope {
+                SnapshotScope::DefaultStrict => DEFAULT_GRAPH,
+                SnapshotScope::DefaultUnion => {
+                    let Some(g) = union_graph else {
+                        self.invalidate();
+                        return;
+                    };
+                    // A row outside the union's single graph either changes the
+                    // graph set or retracts from a graph this snapshot merged —
+                    // neither is expressible as a delta on the merged rows.
+                    if dels.iter().chain(adds.iter()).any(|(rg, _)| *rg != g) {
+                        self.invalidate();
+                        return;
+                    }
+                    g
+                }
+                // Nothing else is memoisable (`SnapshotScope::memoisable`); if
+                // that ever changes, a rebuild stays correct.
+                _ => {
+                    self.invalidate();
+                    return;
+                }
+            };
+            let (d, a) = (rows_in(&dels, g), rows_in(&adds, g));
+            if d.len() + a.len() > base_rows / SNAPSHOT_DELTA_REBUILD_DIVISOR {
+                self.invalidate();
+                return;
+            }
+            plans.push((scope, d, a));
+        }
+
+        let merged = {
+            let snapshots = self.snapshots.get_mut().expect("snapshot lock poisoned");
+            plans.iter().all(|(scope, d, a)| {
+                match snapshots.get_mut(scope).and_then(Arc::get_mut) {
+                    Some(src) => {
+                        src.apply_delta(d, a);
+                        true
+                    }
+                    // A concurrent reader still holds this snapshot, so it
+                    // cannot be mutated in place. Rare; just rebuild.
+                    None => false,
+                }
+            })
+        };
+        // `all` short-circuits, so an earlier scope may already carry the delta.
+        // Each merged snapshot is correct on its own, and `invalidate` drops
+        // them all anyway, so a partial merge cannot leave a stale entry.
+        if !merged {
+            self.invalidate();
+        }
     }
 
     /// Insert one oxrdf triple into the default graph. Returns true if it was
@@ -719,7 +899,9 @@ impl HornBackend {
     /// anything). A client walking `GRAPH <g1>`…`GRAPH <gN>` would pin ~6×
     /// the store. See `graph_scoped_snapshots_are_not_memoised`.
     ///
-    /// The memo is dropped wholesale on any write ([`Self::invalidate`]).
+    /// A small write merges its delta into the memoised entries in place
+    /// ([`Self::apply_delta_to_snapshots`]); every other write drops the memo
+    /// wholesale ([`Self::invalidate`]).
     fn wcoj_snapshot(&self, scope: &SnapshotScope) -> Arc<VecTripleSource> {
         if !scope.memoisable() {
             return Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
@@ -752,8 +934,11 @@ impl HornBackend {
             SnapshotScope::OneGraph(g) => graph_triples(&snap, *g),
             SnapshotScope::FromUnion(graphs) => union_triples(&snap, graphs),
             SnapshotScope::DefaultUnion => {
-                // Recomputed on each memo miss, which is exactly when the
-                // graph set may have changed (a write clears the memo).
+                // Recomputed on each memo miss. A memo *hit* is safe too:
+                // the only write that leaves a `DefaultUnion` entry alive is
+                // a delta confined to the one graph the union already covers,
+                // so the graph set cannot change underneath it (see
+                // `apply_delta_to_snapshots`).
                 let graphs: Vec<GraphId> = snap
                     .graphs()
                     .into_iter()
@@ -774,9 +959,10 @@ impl HornBackend {
     /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
     /// against the snapshot's `Arc` identity. Reuses the cached stats when they
     /// were built from the same snapshot `Arc`; otherwise rebuilds (a full
-    /// snapshot scan) and replaces the cache. Correct across writes with no
-    /// explicit invalidation: any mutation rebuilds the snapshot into a new
-    /// `Arc`, which fails `Arc::ptr_eq` against the cached one.
+    /// snapshot scan) and replaces the cache. Correct across writes because
+    /// every write path clears `stats_cache` explicitly (see the field's doc):
+    /// a delta merge keeps the snapshot's `Arc` pointer, so `Arc::ptr_eq` on
+    /// its own could not tell a stale entry from a fresh one.
     fn snapshot_stats(&self, snapshot: &Arc<VecTripleSource>) -> Arc<SnapshotStats> {
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
         if let Some((cached_snap, cached_stats)) = guard.as_ref() {
@@ -913,7 +1099,7 @@ impl Store for HornBackend {
             }
         }
         if report.retracted > 0 || report.inserted > 0 {
-            self.invalidate();
+            self.apply_delta_to_snapshots(&del_rows, &add_rows);
         }
         Ok(ApplyCounts {
             retracted: report.retracted,
@@ -1458,8 +1644,8 @@ impl Executor for HornBackend {
         // layered estimator. Building `SnapshotStats` scans the whole snapshot,
         // so cache it keyed on the snapshot's `Arc` identity: an `EXPLAIN` with
         // many BgpScan/GroupCountScan nodes calls this once per node, and every
-        // node shares one snapshot. The cache self-invalidates because a write
-        // rebuilds the snapshot into a new `Arc` that fails the `ptr_eq` check.
+        // node shares one snapshot. Every write path clears the cache, so no
+        // stale entry can survive a mutation — see the `stats_cache` field.
         let stats = self.snapshot_stats(&snapshot);
         let est = StatsEstimator::new(stats.as_ref());
         let e = est.estimate_bgp(&wpatterns);
