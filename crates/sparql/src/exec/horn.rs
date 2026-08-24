@@ -333,6 +333,55 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
         .record_load_phase(phase, elapsed, rows);
 }
 
+/// Local nanosecond accumulators for the `dedupe` sub-phase split (HDB-90),
+/// merged into the shared counters once per batch (SPEC-17 §5.4.1).
+///
+/// `clock_ns` is the cost of the instrumentation itself, measured in situ: one
+/// empty interval per iteration. Each of the other four intervals carries the
+/// same one-clock-read cost, so the corrected value of a sub-phase is
+/// `<phase>_ns - clock_ns`. Both are exported; the subtraction is left to the
+/// reader so the raw numbers stay auditable.
+#[derive(Default)]
+struct DedupeSubPhases {
+    intern_ns: u64,
+    contains_ns: u64,
+    intra_ns: u64,
+    rest_ns: u64,
+    clock_ns: u64,
+}
+
+impl DedupeSubPhases {
+    /// Merge into the shared counters. `rows` is the batch's input triple
+    /// count for every sub-phase, so a per-triple mean divides by the same
+    /// denominator throughout (the `continue` paths mean the later sub-phases
+    /// ran over fewer triples than that, which only matters on a load into a
+    /// non-empty store).
+    fn record(&self, rows: u64) {
+        use std::time::Duration;
+        for (phase, ns) in [
+            (LoadPhase::DedupeIntern, self.intern_ns),
+            (LoadPhase::DedupeContains, self.contains_ns),
+            (LoadPhase::DedupeIntra, self.intra_ns),
+            (LoadPhase::DedupeRest, self.rest_ns),
+            (LoadPhase::DedupeClock, self.clock_ns),
+        ] {
+            record_load_phase(phase, Duration::from_nanos(ns), rows);
+        }
+    }
+}
+
+/// Is the `dedupe` sub-phase split switched on (`HORNDB_DEDUPE_SUBPHASES=1`)?
+/// Read once per process; it costs the `dedupe` phase 15-25%, so it is a
+/// diagnostic, never the default.
+fn dedupe_subphases_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("HORNDB_DEDUPE_SUBPHASES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
 pub struct HornBackend {
     store: ColumnStore,
     /// Mirror of every `(graph, s, p, o)` TermId key currently LIVE in
@@ -690,19 +739,61 @@ impl HornBackend {
         let t_dedupe = std::time::Instant::now();
         {
             let d = self.store.dictionary();
-            for (s, p, o) in triples {
-                let (si, pi, oi) = match (d.intern(&s), d.intern(&p), d.intern(&o)) {
-                    (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                    _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
-                };
-                let key = QuadKey::new(g, si, pi, oi);
-                if self.live_keys.contains(&key) {
-                    continue; // already live — no-op
+            if dedupe_subphases_enabled() {
+                // Measurement variant (HDB-90). Splitting this loop needs a
+                // clock read between each step, which costs ~15-25% of the
+                // phase — so it is a deliberate second copy of the loop below,
+                // off by default, rather than a branch in the hot path.
+                let mut sub = DedupeSubPhases::default();
+                for (s, p, o) in triples {
+                    // Empty interval between two adjacent reads: what one
+                    // `Instant::now()` pair costs in this exact loop. Every
+                    // interval below carries the same cost, so subtracting
+                    // this from each of the four recovers the real split.
+                    let t_cal = std::time::Instant::now();
+                    let t0 = std::time::Instant::now();
+                    let interned = (d.intern(&s), d.intern(&p), d.intern(&o));
+                    let t1 = std::time::Instant::now();
+                    sub.clock_ns += t0.duration_since(t_cal).as_nanos() as u64;
+                    sub.intern_ns += t1.duration_since(t0).as_nanos() as u64;
+                    let (si, pi, oi) = match interned {
+                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                        _ => continue,
+                    };
+                    // `QuadKey::new` and the match above are a handful of ALU
+                    // ops; they land in the `contains` interval.
+                    let key = QuadKey::new(g, si, pi, oi);
+                    let live = self.live_keys.contains(&key);
+                    let t2 = std::time::Instant::now();
+                    sub.contains_ns += t2.duration_since(t1).as_nanos() as u64;
+                    if live {
+                        continue;
+                    }
+                    let fresh = intra_batch.insert(key);
+                    let t3 = std::time::Instant::now();
+                    sub.intra_ns += t3.duration_since(t2).as_nanos() as u64;
+                    if !fresh {
+                        continue;
+                    }
+                    entries.push(Entry { key, ox: (s, p, o) });
+                    sub.rest_ns += t3.elapsed().as_nanos() as u64;
                 }
-                if !intra_batch.insert(key) {
-                    continue; // duplicate within this batch; first occurrence wins
+                sub.record(n_in);
+            } else {
+                for (s, p, o) in triples {
+                    let (si, pi, oi) = match (d.intern(&s), d.intern(&p), d.intern(&o)) {
+                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+                        _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
+                    };
+                    let key = QuadKey::new(g, si, pi, oi);
+                    if self.live_keys.contains(&key) {
+                        continue; // already live — no-op
+                    }
+                    if !intra_batch.insert(key) {
+                        continue; // duplicate within this batch; first occurrence wins
+                    }
+                    entries.push(Entry { key, ox: (s, p, o) });
                 }
-                entries.push(Entry { key, ox: (s, p, o) });
             }
         }
 

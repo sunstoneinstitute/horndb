@@ -104,6 +104,11 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 | `parse` | `crates/bench-trainmarks/src/main.rs` | tokenising the document **and** materialising the triple batch (`materialize` is the second half) |
 | `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
 | `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping already-live / intra-batch-duplicate triples |
+| `dedupe_intern` | `crates/sparql/src/exec/horn.rs` | the three `Dictionary::intern` calls inside `dedupe` (opt-in, see below) |
+| `dedupe_contains` | `crates/sparql/src/exec/horn.rs` | the `live_keys.contains` probe, plus the `QuadKey` build (opt-in) |
+| `dedupe_intra` | `crates/sparql/src/exec/horn.rs` | the `intra_batch.insert` probe (opt-in) |
+| `dedupe_rest` | `crates/sparql/src/exec/horn.rs` | `entries.push` and the term moves (opt-in) |
+| `dedupe_clock` | `crates/sparql/src/exec/horn.rs` | cost of the instrumentation itself (opt-in) |
 | `stage` | `crates/sparql/src/exec/horn.rs` | building the key and `to_store` vectors handed to storage |
 | `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms a second time, for storage's own ids |
 | `group` | `crates/storage/src/memory_tier.rs` | grouping the batch by graph then predicate into per-predicate `(s, o)` sets |
@@ -116,6 +121,15 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 The pair is a count+sum summary per SPEC-17 §5.4.1 — mean cost per row for a
 phase is `rate(nanoseconds) / rate(rows)`. Each phase accumulates in locals and
 touches its counters once per batch, never per row.
+
+The five `dedupe_*` sub-phases are **off by default**; set
+`HORNDB_DEDUPE_SUBPHASES=1` to emit them. Splitting a per-triple loop needs a
+clock read between each step, which costs the `dedupe` phase 15-25%, so this is
+a diagnostic and not the production path. `dedupe_clock` measures one such read
+in situ (an empty interval per iteration); every other interval carries the same
+cost, so a corrected sub-phase is `dedupe_<x> - dedupe_clock`. With the flag on,
+`dedupe` itself reports the inflated total; compare against a run with the flag
+off for the real one. `rows` is the batch's input triple count for all five.
 
 ## Closure / GraphBLAS (`crates/metrics/src/closure.rs`)
 

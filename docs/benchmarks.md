@@ -377,18 +377,84 @@ Three things this overturns:
   `merge` + `build` total 2.85s of 23.39s (Turtle) and 2.81s of 20.34s
   (N-Triples). The index build is not the bottleneck, and `copy_forward` is
   free on a load into an empty store.
-- **Every term is interned twice, costing 8.06s (34%).** `dedupe`
+- **Every term is interned twice.** `dedupe`
   (`HornBackend::insert_oxrdf_batch_in_graph`) interns all three terms to build
   a `QuadKey`, then `intern` (`Store::apply_quads`) interns them all again for
-  storage's own ids. `dedupe` is the dearer of the two because it also does a
-  `live_keys` lookup and an `intra_batch` insert per triple.
+  storage's own ids. This section originally read the two phases together as
+  "8.06s (34%) of interning"; HDB-90 split `dedupe` with counters and the real
+  figure is **4.77s (20%)** — the rest of `dedupe` is `intra_batch.insert` and
+  the term moves. `dedupe` is the dearer of the two passes because it takes
+  every dictionary *miss*, not because of its `live_keys` lookup, which is free
+  here. See the sub-phase table below.
 
 `live_keys` adds a further 1.45s building a 10M-entry `HashSet<QuadKey>` that
 exists for `INSERT DATA` idempotency and cannot hit on a load into an empty
 store.
 
 Ranked targets, all of them above the tier: tokenisation (9.6s), the duplicate
-intern (8.1s across two phases), and the `live_keys` build (1.4s).
+intern (1.9s recoverable, see below), the term moves inside `dedupe` (1.5s),
+`intra_batch.insert` (1.4s), and the `live_keys` build (1.4s).
+
+#### Inside `dedupe`: interning is half of it, `live_keys.contains` is free (HDB-90, 2026-08-24)
+
+`dedupe`'s 26% was never split by a counter — HDB-57 R2 inferred it by assuming
+the three `d.intern()` calls in the loop cost what the separately-instrumented
+`intern` phase costs (1.909s). They do not. Measured with the opt-in
+`dedupe_*` sub-counters (`HORNDB_DEDUPE_SUBPHASES=1`, see `docs/metrics.md`) on
+`hornbench`, trainmarks xlarge, serial, commit `66e3302`; each column is the
+mean of two runs that agreed within 2%. These runs predate the snmalloc swap
+(#293): the split is a share of `dedupe`, so it holds, but the absolute seconds
+are glibc-allocator numbers and the intern column — which allocates on every
+dictionary miss — is the one most likely to move when they are re-measured.
+
+| sub-phase | read_turtle | % of `dedupe` | read_ntriples | % of `dedupe` |
+|---|---|---|---|---|
+| the three `d.intern()` calls | 2.893s | 46.7 | 2.707s | 45.9 |
+| `entries.push` + the term moves | 1.540s | 24.9 | 1.520s | 25.8 |
+| `intra_batch.insert` | 1.421s | 22.9 | 1.390s | 23.6 |
+| `live_keys.contains` | 0.042s | 0.7 | 0.041s | 0.7 |
+| **accounted** | **5.896s** | **95.2** | **5.658s** | **95.9** |
+| `dedupe`, uninstrumented | 6.195s | | 5.899s | |
+
+Three findings:
+
+- **Interning is 47% of `dedupe`, not the ~31% the 1.909s assumption implies.**
+  The two passes are not symmetric: `dedupe` runs first, so every term is a
+  dictionary *miss* (hash, allocate, insert, push to the reverse `Vec`), while
+  `Store::apply_quads` re-interns the same terms as pure *hits*. A miss costs
+  ~1.55x a hit here. Strings → ids therefore costs 2.893s + 1.879s = **4.77s
+  (20.1% of the 23.74s Turtle load)**, against HDB-57 R2's inferred 3.8s / 16%.
+- **`live_keys.contains` costs nothing on a bulk load** — 0.7% of `dedupe`, 42ms
+  for 10M probes. A bulk load is one `insert_oxrdf_batch` call, and `live_keys`
+  is only populated in phase 2, *after* the loop. So the set is empty for every
+  probe and the lookup returns on the capacity check. The cost R2 budgeted to it
+  does not exist on this path; it appears only on `INSERT DATA` into a populated
+  store.
+- **A quarter of `dedupe` is `entries.push` and the term moves** — 1.540s, a
+  sub-phase R2 did not account for at all. It hashes nothing. `entries` is a
+  10M-element `Vec<(QuadKey, 3 × oxrdf::Term)>` — about 1 GB — that phase 2 then
+  re-copies into `to_store`.
+
+So quad-level dedup does **not** cost 1.9x string interning. Counting hash-set
+work on both sides: strings 4.77s against quads 2.88s (`intra_batch` 1.421s +
+`live_keys` 1.422s + `contains` 0.042s). Interning leads by 1.7x, the opposite
+of R2's direction. Folding `group`'s 1.418s into the quad side still leaves
+strings ahead (4.77s vs 4.30s).
+
+What this does *not* change: **HDB-87 is still worth ~1.9s.** Removing the
+duplicate intern leaves whichever pass survives doing the misses, so the saving
+is the hit pass — the 1.879s `intern` row, 7.9% of the Turtle load. R2 reached
+the same figure from the wrong premise (that both passes cost ~1.9s).
+
+Method and its limits: splitting a per-triple loop needs a clock read between
+each step, which inflates `dedupe` by 13-16%. The `dedupe_clock` counter times
+an empty interval per iteration (16.5 ns on this host), and each sub-phase above
+has one subtracted; the raw counters are exported unadjusted. The corrected
+figures land 4-5% under the uninstrumented `dedupe`, and that residue is the
+loop-iterator advance plus the part of each `Instant::now()` that falls outside
+the measured intervals — it is instrumentation, not a missing sub-phase. The
+same procedure on a synthetic 1.2M-triple corpus reproduced the uninstrumented
+total to within 2%.
 
 #### Parse does not parallelise, and the phase counters say where it goes
 
