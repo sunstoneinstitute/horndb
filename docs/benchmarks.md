@@ -542,6 +542,24 @@ makes the swap a clean win rather than a wash.
 bulk-load path — the nightly is the gate on the query path, and disabling the
 feature is the revert.
 
+Verified on the shipped build against its own revert switch (same binary source,
+`--no-default-features` for the system-allocator leg, so both preallocate and
+only the allocator differs; one run per cell, quiet host):
+
+| xlarge, end-to-end | shipped (snmalloc) | revert (system) | change |
+|---|---|---|---|
+| read_turtle, 1 thread | 21.999s | 23.543s | **−6.6%** |
+| read_turtle, 16 threads | 21.630s | 23.221s | −6.9% |
+| read_ntriples, 1 thread | 17.733s | 19.969s | **−11.2%** |
+| read_ntriples, 16 threads | 17.980s | 19.290s | −6.8% |
+
+Against the pre-E1 baseline (system allocator, grow-on-demand batch, median of
+3) the combined change is read_turtle 23.658s → 21.999s (−7.0%) and
+read_ntriples 20.693s → 17.733s (−14.3%). Preallocation alone accounts for
+little of that on glibc (23.658s → 23.543s), which is expected — `mremap` was
+already cheap; it earns its place by removing the penalty snmalloc would
+otherwise pay.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page
