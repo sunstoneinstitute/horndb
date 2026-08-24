@@ -99,7 +99,7 @@ jobs:
   # fmt + clippy in their own job so linting runs in PARALLEL with the test and
   # conformance jobs instead of serially in front of them. Clippy still runs
   # every build script (the vendored GraphBLAS and oxrocksdb-sys C/C++ builds
-  # included), so this job needs the submodules and the GraphBLAS cache; all
+  # included), so this job needs the GraphBLAS build cache; all
   # build jobs share the same GraphBLAS cache key, and rust-cache keys per job
   # so their cargo caches don't clobber each other.
   #
@@ -119,7 +119,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          submodules: recursive
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -128,10 +127,13 @@ jobs:
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: resolve GraphBLAS submodule sha + build target
+      - name: resolve vendored GraphBLAS tree hash + build target
         id: graphblas
         run: |
-          echo "sha=$(git -C crates/closure/vendor/GraphBLAS rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Tree hash of the vendored subset: changes on a version bump AND on a
+          # graphblas-keep.txt change, so the cache invalidates exactly when the
+          # sources that feed the build change.
+          echo "sha=$(git rev-parse HEAD:crates/closure/vendor/GraphBLAS)" >> "$GITHUB_OUTPUT"
           echo "triple=$(rustc -vV | awk '/^host:/ { print $2 }')" >> "$GITHUB_OUTPUT"
 
       - name: cache vendored GraphBLAS build
@@ -166,7 +168,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          submodules: recursive
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -185,12 +186,16 @@ jobs:
 
       # The vendored GraphBLAS builds into crates/closure/vendor/.shared-build/,
       # which lives outside target/ and so is NOT covered by rust-cache above.
-      # Cache it explicitly, keyed on the submodule SHA so it invalidates exactly
-      # when the GraphBLAS pin moves — otherwise CI recompiles GraphBLAS every run.
-      - name: resolve GraphBLAS submodule sha + build target
+      # Cache it explicitly, keyed on the vendored tree hash so it invalidates
+      # exactly when the vendored sources change — otherwise CI recompiles
+      # GraphBLAS every run.
+      - name: resolve vendored GraphBLAS tree hash + build target
         id: graphblas
         run: |
-          echo "sha=$(git -C crates/closure/vendor/GraphBLAS rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Tree hash of the vendored subset: changes on a version bump AND on a
+          # graphblas-keep.txt change, so the cache invalidates exactly when the
+          # sources that feed the build change.
+          echo "sha=$(git rev-parse HEAD:crates/closure/vendor/GraphBLAS)" >> "$GITHUB_OUTPUT"
           echo "triple=$(rustc -vV | awk '/^host:/ { print $2 }')" >> "$GITHUB_OUTPUT"
 
       - name: cache vendored GraphBLAS build
@@ -236,7 +241,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          submodules: recursive
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
@@ -244,10 +248,13 @@ jobs:
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: resolve GraphBLAS submodule sha + build target
+      - name: resolve vendored GraphBLAS tree hash + build target
         id: graphblas
         run: |
-          echo "sha=$(git -C crates/closure/vendor/GraphBLAS rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Tree hash of the vendored subset: changes on a version bump AND on a
+          # graphblas-keep.txt change, so the cache invalidates exactly when the
+          # sources that feed the build change.
+          echo "sha=$(git rev-parse HEAD:crates/closure/vendor/GraphBLAS)" >> "$GITHUB_OUTPUT"
           echo "triple=$(rustc -vV | awk '/^host:/ { print $2 }')" >> "$GITHUB_OUTPUT"
 
       - name: cache vendored GraphBLAS build
@@ -298,7 +305,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
-          submodules: recursive
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:

@@ -66,7 +66,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
 
       - name: Set version
         id: ver
@@ -167,7 +166,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -272,7 +270,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
 
       - name: Download bottles
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -288,13 +285,11 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          # Self-contained source tarball: tracked files plus the vendored
-          # GraphBLAS submodule (a plain tag tarball omits submodules).
+          # Self-contained source tarball. GraphBLAS is vendored as tracked
+          # files, so `git archive` alone carries it.
           SRC="horndb-${VERSION}"
-          mkdir -p "${SRC}/crates/closure/vendor/GraphBLAS"
+          mkdir -p "${SRC}"
           git archive HEAD | tar -x -C "${SRC}"
-          git -C crates/closure/vendor/GraphBLAS archive HEAD \
-            | tar -x -C "${SRC}/crates/closure/vendor/GraphBLAS"
           tar czf "dist/${SRC}.tar.gz" "${SRC}"
 
           source_sha=$(sha256sum "dist/${SRC}.tar.gz" | awk '{print $1}')

@@ -13,7 +13,7 @@ scope: "Shared, lock-guarded GraphBLAS build across worktrees"
 ## Problem
 
 `crates/closure/build.rs::build_vendored()` compiles SuiteSparse:GraphBLAS
-(vendored submodule, currently `v10.3.0`) from source into the per-crate
+(vendored sources, currently `v10.3.0`) from source into the per-crate
 `OUT_DIR`. `OUT_DIR` lives under the invoking target directory, which is
 **per-worktree** by default. The multi-agent Stage-1 workflow runs several git
 worktrees under `.claude/worktrees/`, so the same GraphBLAS gets recompiled once
@@ -146,7 +146,7 @@ too, because linking happens regardless of who compiled:
 2. The `PKG_CONFIG_PATH` setup pointing at the install (now the shared install).
 
 Also add `cargo:rerun-if-changed=vendor/GraphBLAS/cmake_modules/GraphBLAS_version.cmake`
-so a submodule version bump retriggers `build.rs`.
+so a re-vendored version bump retriggers `build.rs`.
 
 `probe_graphblas()`, the `regen-bindings` path, and the `--no-default-features`
 (system GraphBLAS) path are unchanged.
@@ -174,9 +174,11 @@ concerns); the helper isolates everything that benefits from a unit test.
   builds, but `.shared-build` must not be pointed at a network mount. One
   sentence to this effect goes in `INTEGRATION-NOTES.md`.
 - Reuse key is **version only within a target** (`<target>/<ver>`): if someone
-  moves the submodule to a *different commit that still reports the same version
+  re-vendors a *different upstream commit that still reports the same version
   string*, the stale build is reused until `.shared-build/<target>/<ver>/` is
-  cleared by hand. Accepted — release tags are immutable in practice.
+  cleared by hand. `refresh-graphblas.sh` clears it for the version it vendors,
+  so this only bites a hand-edited tree. Accepted — release tags are immutable
+  in practice.
 
 ## Docs to update in the same change
 

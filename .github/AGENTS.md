@@ -28,7 +28,7 @@ release-like but cheaply optimized, see root `Cargo.toml` — then the real-engi
 conformance run + junit report). The tests job compiles with
 `RUSTFLAGS=-D warnings`, so plain rustc warnings still fail it even without
 clippy. All three run every build script, so all three carry the
-vendored-GraphBLAS cache (same key — first run after a submodule bump builds it
+vendored-GraphBLAS cache (same key — first run after a GraphBLAS re-vendor builds it
 in each job, then all hit). If branch protection lists required checks, it must
 name **all** jobs (`lint`, `tests`, `conformance`, `python-rdflib-compat`); jobs
 skipped by the gate count as satisfied. `workflows/nightly.yml` runs LDBC

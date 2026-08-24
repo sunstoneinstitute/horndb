@@ -1,0 +1,5 @@
+# cmake regenerates these into the vendored source tree during the build. They
+# are build outputs, not part of the upstream subset, so they stay untracked.
+# (GraphBLAS's own nested .gitignore files already cover Config/GB_config.h and
+# JITpackage/GB_JITpackage.c.)
+GraphBLAS/Doc/

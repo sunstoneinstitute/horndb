@@ -7,11 +7,11 @@ use std::path::PathBuf;
 #[cfg(feature = "vendored")]
 use std::process::Command;
 
-/// Directory of the vendored SuiteSparse:GraphBLAS submodule headers.
+/// Directory of the vendored SuiteSparse:GraphBLAS headers.
 #[cfg(feature = "regen-bindings")]
 const VENDOR_INCLUDE: &str = "vendor/GraphBLAS/Include";
 
-/// Path to the submodule's cmake version file (relative to this crate).
+/// Path to the vendored cmake version file (relative to this crate).
 #[cfg(feature = "vendored")]
 const VERSION_CMAKE: &str = "vendor/GraphBLAS/cmake_modules/GraphBLAS_version.cmake";
 
@@ -24,7 +24,7 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
 
-    // 1. Build (or reuse) the vendored submodule. Sets PKG_CONFIG_PATH so the
+    // 1. Build (or reuse) the vendored sources. Sets PKG_CONFIG_PATH so the
     //    shared probe below finds the freshly built (or cached) lib.
     #[cfg(feature = "vendored")]
     build_vendored();
@@ -48,7 +48,7 @@ fn build_vendored() {
     use std::fs;
     use std::time::{Duration, Instant};
 
-    // A version bump (submodule move) must retrigger the build.
+    // A version bump (re-vendor) must retrigger the build.
     println!("cargo:rerun-if-changed={VERSION_CMAKE}");
 
     let ver = read_graphblas_version();
@@ -173,7 +173,7 @@ fn main_worktree_root() -> Option<PathBuf> {
     common.parent().map(Path::to_path_buf)
 }
 
-/// Read and parse the pinned GraphBLAS version from the submodule's cmake file.
+/// Read and parse the pinned GraphBLAS version from the vendored cmake file.
 #[cfg(feature = "vendored")]
 fn read_graphblas_version() -> String {
     let contents = std::fs::read_to_string(VERSION_CMAKE)
@@ -302,7 +302,7 @@ fn probe_graphblas() -> pkg_config::Library {
                 horndb-closure: SuiteSparse:GraphBLAS not found.\n\
                 pkg-config error: {e}\n\n\
                 Either build the bundled copy (default features build the\n\
-                vendored submodule) or install GraphBLAS and re-run with\n\
+                vendored sources) or install GraphBLAS and re-run with\n\
                 --no-default-features:\n  \
                   macOS:         brew install suite-sparse pkg-config\n  \
                   Debian/Ubuntu: sudo apt-get install libsuitesparse-dev pkg-config\n\n\

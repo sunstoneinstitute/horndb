@@ -66,8 +66,8 @@ starts — do **not** re-do any of these steps by hand:
    `tasks.sh` (locked, pushed to `main`); on a lost race it automatically
    retries the next candidate. `--issue N` forces a specific task.
 4. **Worktree** — creates `.worktrees/task-<N>-<slug>` forked from the exact
-   claim commit, initialises the GraphBLAS submodule, symlinks
-   `.claude/CLAUDE.local.md`, renames the cmux tab to `[v] #<N>`.
+   claim commit, symlinks `.claude/CLAUDE.local.md`, renames the cmux tab to
+   `[v] #<N>`.
 
 Its output ends with a `=== next-task: claimed ===` block —
 `issue`/`priority`/`category`/`title`/`issue_url`/`branch`/`claim_sha`/

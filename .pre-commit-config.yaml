@@ -12,6 +12,13 @@
 # Long-running checks (cargo clippy --workspace) are wired to pre-push instead
 # of pre-commit so day-to-day commits stay fast.
 
+# The vendored SuiteSparse:GraphBLAS subset is exempt from every hook. It must
+# stay a byte-exact copy of an upstream tag (that is the drift check — see
+# crates/closure/vendor/GraphBLAS.vendor.md), so trailing-whitespace and
+# end-of-file-fixer must not rewrite it, and two of its generated headers exceed
+# the check-added-large-files limit.
+exclude: '^crates/closure/vendor/GraphBLAS/'
+
 repos:
   - repo: meta
     hooks:

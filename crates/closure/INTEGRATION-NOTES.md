@@ -2,21 +2,34 @@
 
 ## Build: vendored SuiteSparse:GraphBLAS
 
-`horndb-closure` builds **SuiteSparse:GraphBLAS from a vendored git
-submodule** (`vendor/GraphBLAS`, pinned to tag `v10.3.0`) rather than a
-system install. After cloning the workspace:
+`horndb-closure` builds **SuiteSparse:GraphBLAS from vendored sources**
+(`vendor/GraphBLAS`, a trimmed subset of upstream tag `v10.3.0`) rather than a
+system install. The sources are checked in, so a plain clone is enough:
 
 ```bash
-git submodule update --init --recursive
 cargo build -p horndb-closure
 ```
 
+- **What is vendored:** only what the cmake build reads — `Source/`,
+  `FactoryKernels/`, `Config/`, `Include/`, `cmake_modules/`, the bundled
+  `lz4`/`xxHash`/`zstd`/`cpu_features`, and the few directories on the include
+  path. Upstream's docs, tests, MATLAB interface, logo, and demos are not.
+  `CUDA/` is kept (unbuilt) so a future GPU configuration needs no re-vendor.
+  The exact list is `vendor/graphblas-keep.txt`; provenance (tag, upstream
+  commit, file count) is `vendor/GraphBLAS.vendor.md`.
+- **Upgrading:** `vendor/refresh-graphblas.sh v10.4.0` re-clones upstream at
+  that tag, replaces `vendor/GraphBLAS` with a fresh subset, rewrites the
+  provenance file, and rebuilds + tests the crate. Nothing is patched, so
+  re-running with the recorded tag must leave `git diff` empty — that is the
+  drift check. The keep-list is an allowlist: if a new upstream version needs a
+  directory that is not listed, the script's verify build fails during the
+  upgrade. Add the path and re-run.
 - **Requirements:** `cmake` + a C compiler, and — for the default
   `openmp` feature — an OpenMP runtime (`libomp` on macOS via
   `brew install libomp cmake`; `libgomp`, shipped with gcc, on Linux).
   **No** system GraphBLAS and **no** libclang are required for a normal
   build.
-- **Cargo features:** `vendored` *(default)* compiles the submodule via
+- **Cargo features:** `vendored` *(default)* compiles the vendored sources via
   the `cmake` crate into the shared `.shared-build/` dir (see *First build
   cost* below) and links it **statically**; `openmp`
   *(default)* builds GraphBLAS with OpenMP; `regen-bindings` *(off)*
@@ -39,7 +52,8 @@ cargo build -p horndb-closure
   mount. If git is unavailable (e.g. a source tarball), the build falls back to
   a crate-local `vendor/.shared-build/<target>/<version>/` (no cross-worktree
   sharing). CI caches the shared dir (`.github/workflows/ci.yml`) keyed on the
-  submodule SHA.
+  git tree hash of `vendor/GraphBLAS`, which changes on both a version bump and
+  a keep-list change.
 - **JIT:** built with `GRAPHBLAS_USE_JIT=OFF`. Standard semirings hit
   GraphBLAS's precompiled FactoryKernels, so no runtime C compiler is
   needed. If valued-closure custom semirings are ever required, PreJIT

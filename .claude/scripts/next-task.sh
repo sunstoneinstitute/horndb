@@ -26,9 +26,9 @@
 #         3. select the top open task (or --issue N), derive
 #            branch `task-<N>-<slug>`, claim via tasks.sh (retry next
 #            candidate on exit 9);
-#         4. create `.worktrees/<branch>` forked from the claim commit, init
-#            the GraphBLAS submodule, symlink .claude/CLAUDE.local.md if the
-#            main worktree has one, rename the cmux tab (no-op outside cmux);
+#         4. create `.worktrees/<branch>` forked from the claim commit,
+#            symlink .claude/CLAUDE.local.md if the main worktree has one,
+#            rename the cmux tab (no-op outside cmux);
 #         5. print a machine-readable context block (issue/priority/category/
 #            title/branch/claim_sha/worktree/issue_url) followed by the
 #            task's body section from TASKS.md.
@@ -260,12 +260,6 @@ case "$CMD" in
         echo "next-task.sh: worktree add FAILED — claim #$PICK_ISSUE is still held ($CLAIM_SHA)." >&2
         echo "next-task.sh: retry the worktree by hand, or release with: $0 abandon --issue $PICK_ISSUE --branch $PICK_BRANCH --reason 'worktree add failed'" >&2
         exit 2
-      fi
-      # GraphBLAS submodule is not checked out in a fresh worktree; closure's
-      # build.rs panics without it.
-      if git -C "$REPO_ROOT" config -f "$REPO_ROOT/.gitmodules" --get-regexp 'submodule\..*\.path' 2>/dev/null \
-           | grep -q 'crates/closure/vendor/GraphBLAS'; then
-        git -C "$WT_DIR" submodule update --init --recursive crates/closure/vendor/GraphBLAS
       fi
       # Share the one canonical gitignored local-instructions file, if present.
       if [ -f "$REPO_ROOT/.claude/CLAUDE.local.md" ]; then

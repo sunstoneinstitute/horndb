@@ -39,10 +39,11 @@ mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
 | [0012](0012-ml-is-advisor-not-source-of-truth.md) | Symbolic reasoner is the source of truth; ML is an opt-in advisor | SPEC-08 |
 | [0013](0013-provenance-correctability-hard-requirement.md) | Provenance / correctability as a hard requirement | SPEC-00, SPEC-04, SPEC-07 |
 | [0014](0014-track-rdf12-not-rdf-star.md) | Track W3C RDF 1.2 (not RDF-star), gated behind config | SPEC-00, SPEC-07 |
-| [0015](0015-vendor-graphblas-static-submodule.md) | Vendor SuiteSparse:GraphBLAS as a static git submodule | SPEC-05 |
+| [0015](0015-vendor-graphblas-static-submodule.md) | ~~Vendor SuiteSparse:GraphBLAS as a static git submodule~~ (superseded by 0019) | SPEC-05 |
 | [0016](0016-embeddable-reasoning-view-for-external-sor.md) | Consumed as an embeddable reasoning view over an external system-of-record | SPEC-02, SPEC-06, SPEC-10 |
 | [0017](0017-exactmatch-is-crosswalk-not-identity.md) | `skos:exactMatch` is a crosswalk edge, not OWL identity | SPEC-11 (forthcoming) |
 | [0018](0018-single-typed-wal-storage-commit-clock.md) | One typed WAL (Input / BaseBatch / TickCommit records, two replay roles); the storage commit version is the engine's logical clock | SPEC-24, SPEC-25 |
+| [0019](0019-vendor-graphblas-trimmed-source-subset.md) | Vendor a trimmed SuiteSparse:GraphBLAS source subset, not a submodule | SPEC-05, SPEC-13 |
 
 ## Adding a new ADR
 

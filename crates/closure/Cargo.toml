@@ -8,7 +8,7 @@ links = "graphblas"
 
 [features]
 default = ["vendored", "openmp"]
-# Build the vendored SuiteSparse:GraphBLAS submodule from source.
+# Build the vendored SuiteSparse:GraphBLAS sources from source.
 vendored = ["dep:cmake", "dep:fs4"]
 # Build GraphBLAS with OpenMP support.
 openmp = []

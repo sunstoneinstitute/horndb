@@ -1,0 +1,4 @@
+# Vendored SuiteSparse:GraphBLAS subset — see crates/closure/vendor/GraphBLAS.vendor.md.
+# Keep it out of GitHub's language stats and out of diff output; it is only ever
+# replaced wholesale by refresh-graphblas.sh, never edited.
+crates/closure/vendor/GraphBLAS/** linguist-vendored -diff

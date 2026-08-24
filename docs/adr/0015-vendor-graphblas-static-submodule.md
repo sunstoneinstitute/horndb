@@ -1,6 +1,6 @@
 # ADR-0015: Vendor SuiteSparse:GraphBLAS as a static git submodule
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0019](0019-vendor-graphblas-trimmed-source-subset.md)
 
 **Date:** 2026-06-02
 
