@@ -24,3 +24,4 @@ serde_json = { workspace = true }
 oxrdf = { workspace = true }
 oxttl = { workspace = true }
 horndb-sparql = { path = "../sparql", default-features = false }
+horndb-storage = { path = "../storage" }
