@@ -89,6 +89,16 @@ struct Cli {
     /// wanted and the query suite is minutes of irrelevant runtime.
     #[arg(long, default_value_t = false)]
     load_only: bool,
+    /// Preallocate the parse batch for this many triples (0 = grow on demand).
+    ///
+    /// The batch reaches ~1 GB at xlarge, so growing it means a handful of
+    /// reallocs of a very large block. glibc serves those from `mmap` and
+    /// grows them with `mremap`, which only edits page tables; mimalloc and
+    /// snmalloc copy instead. That difference lands entirely in the
+    /// `materialize` phase and would otherwise confound an allocator A/B, so
+    /// allow it to be taken out of the comparison.
+    #[arg(long, default_value_t = 0)]
+    reserve_triples: usize,
 }
 
 const FRAMEWORK: &str = "horndb";
@@ -144,11 +154,11 @@ fn read_existing(path: &Path) -> Vec<Value> {
 /// baseline. Turtle only splits when the document clears
 /// `turtle_split_is_safe`; trainmarks files declare every prefix up front, so
 /// it does.
-fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
+fn load(path: &Path, turtle: bool, reserve_triples: usize) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
     let t_parse = std::time::Instant::now();
-    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(reserve_triples);
     // Time only the materialisation into `batch`, so `parse` minus this is
     // oxttl tokenisation. The closure runs once per chunk batch, not per
     // triple, and accumulates into a local (SPEC-17 §5.4).
@@ -292,7 +302,7 @@ fn main() -> Result<()> {
 
     // --- read Turtle (this backend feeds the queries) ---
     let t = Instant::now();
-    let mut backend = load(&ttl, true)?;
+    let mut backend = load(&ttl, true, cli.reserve_triples)?;
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_turtle: {secs:.4}s ({} triples)", backend.len());
     results.record("read_turtle", json!(secs));
@@ -318,7 +328,7 @@ fn main() -> Result<()> {
 
     // --- read N-Triples (discarded; just I/O timing) ---
     let t = Instant::now();
-    drop(load(&nt, false)?);
+    drop(load(&nt, false, cli.reserve_triples)?);
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_ntriples: {secs:.4}s");
     results.record("read_ntriples", json!(secs));
