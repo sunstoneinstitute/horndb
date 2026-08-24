@@ -548,10 +548,74 @@ rather than the channel. Peak RSS, same host and data, 16 threads, default
 **+13% peak memory for a 5.1× `parse` and −35% end-to-end.** Depth 32 is free
 in memory terms and still worth 1.6×.
 
-Not yet decided: what the default should be, and whether the bound should be
-expressed in triples rather than batches so it does not scale with thread
-count. Both are follow-up work — this section records the measurement, and the
-shipped default is unchanged at 2.
+Both open questions — what the default should be, and whether the bound
+belongs in triples rather than batches — are settled in HDB-94 below.
+
+#### The buffer is now a triple budget, and `parse` scales (HDB-94, 2026-08-24)
+
+The per-chunk `CHANNEL_DEPTH` is replaced by a **total** in-flight budget in
+triples, shared out across the chunks
+(`load_buffer_triples()`, `HORNDB_LOAD_BUFFER_TRIPLES`, default
+**8,388,608**). Two things follow from making it a total:
+
+- Peak buffer memory no longer grows with `HORNDB_LOAD_THREADS`. More threads
+  split the same budget more ways. Under the old per-chunk constant both the
+  cost and the benefit scaled with the thread count, which is why neither was
+  legible in the constant.
+- The number states what it buys. `8 << 20` triples against a 9,995,000-triple
+  document says "buffer most of it"; `CHANNEL_DEPTH = 2` said nothing without
+  first working out the chunk size.
+
+`hornbench`, trainmarks xlarge (9,995,000 triples), commit `76d8b0a`,
+`--load-only --reserve-triples 10000000`, one run per cell. Peak RSS is
+`VmHWM` sampled at 5 Hz; the preallocated 10M-triple batch is in every cell,
+so compare the deltas, not the absolute figure (the HDB-86 table above was
+taken without the preallocation and starts ~4 GiB lower).
+
+Budget sweep, 16 threads:
+
+| budget | per-chunk lookahead | `parse` (ttl) | vs 262 k | `parse` (nt) | read_turtle | peak RSS |
+|---|---|---|---|---|---|---|
+| 262,144 (old bound at 16 threads) | 16,384 | 8.677s | — | 5.640s | 21.368s | 13,719 MiB |
+| 1,048,576 | 65,536 | 8.014s | 1.08× | 5.364s | 20.793s | 13,824 MiB |
+| 2,097,152 | 131,072 | 7.175s | 1.21× | 4.700s | 19.890s | 13,797 MiB |
+| 4,194,304 | 262,144 | 5.506s | 1.58× | 3.632s | 18.187s | 13,675 MiB |
+| **8,388,608 (default)** | 524,288 | **2.381s** | **3.64×** | **1.481s** | **15.002s** | 14,424 MiB (**+5.1%**) |
+| 16,777,216 | 1,048,576 | 1.743s | 4.98× | 0.930s | 14.513s | 14,893 MiB (+8.6%) |
+
+Thread sweep at the default budget — this is the property that was missing:
+
+| threads | `parse` (ttl) | vs 1 thread | `parse` (nt) | read_turtle | read_ntriples |
+|---|---|---|---|---|---|
+| 1 (no channel — one chunk runs inline) | 9.126s | — | 6.348s | 21.920s | 18.623s |
+| 2 | 5.470s | 1.67× | 3.842s | 17.959s | 15.947s |
+| 4 | 3.738s | 2.44× | 2.302s | 16.208s | 14.679s |
+| 8 | 2.676s | 3.41× | 1.670s | 15.260s | 13.966s |
+| 16 | 2.381s | 3.83× | 1.481s | 15.002s | 13.748s |
+
+Second runs of three cells agree to within 5% on `parse` and 0.1% end-to-end
+(262 k: 8.690s / 21.386s; 8M: 2.498s / 15.019s; 1 thread: 9.182s / 21.971s).
+
+**Why 8M and not 16M.** 8M is the knee. The step from 4M to 8M is worth 2.3× on
+`parse`; the step from 8M to 16M is worth 1.37× on `parse` but only 3% more
+end-to-end, and costs another 3.5 points of peak memory. Worst case the budget
+holds ~1 GiB of parsed terms (~134 B/triple measured), and only for a document
+big enough to fill it.
+
+SPEC-02 NF1 (≤50 B/triple) bounds the **warm tier**, so it does not bound this
+buffer — the buffered terms are transient parse output, freed as the drain
+consumes them, and none of them survive into the store. The relevant guard is
+that the budget is absolute: it caps at ~1 GiB whatever the corpus and whatever
+the thread count, where the old constant had no corpus-independent cap at all.
+
+At the shipped `HORNDB_LOAD_THREADS=1` the buffer costs exactly nothing: one
+chunk skips the channel and parses inline.
+
+**Still open: the parse-thread default.** The thread sweep above is the bench
+driver's path (parse → `Vec` → `HornBackend::insert_oxrdf_batch`), where 16
+threads is now a 32% end-to-end win rather than HDB-83's 16% loss. Flipping
+`HORNDB_LOAD_THREADS` to `auto` needs the same sweep against a real `Store`
+load, whose tier insert is what regressed in HDB-83. Tracked separately.
 
 #### Swapping the allocator moves `parse` ~10% (HDB-86 E1, 2026-08-24)
 
