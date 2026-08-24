@@ -421,6 +421,145 @@ borrowed out of the source slice would allocate only on a dictionary miss,
 cutting allocations roughly 10× — and every survivor is a real dictionary
 entry rather than transient churn. Tracked in HDB-86.
 
+**The allocation story above is real but it is not why `parse` fails to
+scale.** The next two sections measure both: swapping the allocator moves
+`parse` ~10%, while the channel lookahead bound moves it 5×.
+
+#### The parse channel starves its own producers (HDB-86, 2026-08-24)
+
+`parse_chunks_ordered` drains the per-chunk receivers strictly in document
+order (`for rx in receivers`), and each chunk's channel holds
+`CHANNEL_DEPTH * BATCH` = 2 × 8,192 = **16,384 triples**. At xlarge with 16
+threads a chunk is 624,687 triples, so a parse thread can run **2.6% of its
+chunk** ahead before it blocks on `send`.
+
+The consequence is that the parse is serial by construction: while the consumer
+works through chunk 0, threads 1–15 each fill 16,384 triples and park. Exactly
+one producer makes progress at a time. The predicted gain from 16 threads is
+just the one-time head start of 15 × 16,384 = 245,760 triples, **2.5% of the
+document** — against the 4.8% measured above.
+
+`HORNDB_LOAD_CHANNEL_DEPTH` (diagnostic knob) confirms it directly. Same host
+and data, 16 threads, `--reserve-triples 10000000`, one run per cell:
+
+| depth | lookahead/thread | `parse` (ttl) | vs depth 2 | `parse` (nt) | read_turtle | read_ntriples |
+|---|---|---|---|---|---|---|
+| **2** (default) | 16,384 | 10.068s | — | 5.432s | 23.245s | 19.113s |
+| 8 | 65,536 | 9.274s | 1.09× | 5.037s | 22.415s | 18.642s |
+| 32 | 262,144 | 6.294s | 1.60× | 3.514s | 19.656s | 17.178s |
+| 128 | 1,048,576 | **1.960s** | **5.14×** | **1.345s** | **15.038s** | **14.857s** |
+
+snmalloc shows the same curve (8.605s → 1.716s, 5.02×), so the effect is the
+channel bound, not the allocator.
+
+At depth 128 the Turtle tokenise half is **1.319s**, against the 0.91s HDB-83
+measured for chunk-local parsing with nothing crossing threads. The parallel
+parse win was never lost to the thread boundary — it was lost to a buffer two
+batches deep.
+
+Two properties make this cheap:
+
+- **Term ids stay deterministic.** Only buffering changes; the drain order is
+  untouched, so triples, dictionary contents, and term ids are unchanged.
+  `tests/parallel_loader.rs` compares interned ids directly
+  (`assert_same_store`) and passes at depths 1, 2, 7 and 64.
+- **It is a constant, not a design.** None of HDB-86's gating decision about
+  document-order id assignment has to be settled to take this win.
+
+The cost is memory, and it is modest — the buffered batches are bounded by the
+document, and the load's peak is dominated by the store and the batch `Vec`
+rather than the channel. Peak RSS, same host and data, 16 threads, default
+(grow-on-demand) batch:
+
+| depth | peak RSS | vs depth 2 | read_turtle |
+|---|---|---|---|
+| 2 | 9,596 MiB | — | 23.274s |
+| 8 | 9,595 MiB | −0.0% | 22.435s |
+| 32 | 9,591 MiB | −0.1% | 19.613s |
+| 64 | 10,482 MiB | +9.2% | 15.858s |
+| 128 | 10,875 MiB | **+13.3%** | **15.041s** |
+
+**+13% peak memory for a 5.1× `parse` and −35% end-to-end.** Depth 32 is free
+in memory terms and still worth 1.6×.
+
+Not yet decided: what the default should be, and whether the bound should be
+expressed in triples rather than batches so it does not scale with thread
+count. Both are follow-up work — this section records the measurement, and the
+shipped default is unchanged at 2.
+
+#### Swapping the allocator moves `parse` ~10% (HDB-86 E1, 2026-08-24)
+
+E1 asked how much of `parse` is allocator policy. `hornbench`, trainmarks
+xlarge (9,995,000 triples), commit `00b9203`, median of 3 runs per cell,
+`--load-only`. Host confirmed quiet for every leg; the reps are interleaved by
+allocator and time-separated, and per-cell spread is ≤3.6% on 11 of 12 cells.
+
+Measured on the **shipped** grow-on-demand path, `parse` looks inert — but that
+is two effects cancelling:
+
+| read_turtle | `parse` 1 thr | `parse` 16 thr | `materialize` 1 thr |
+|---|---|---|---|
+| system (glibc) | 10.449s | 9.918s | 0.592s |
+| mimalloc | 10.798s | 9.692s | 1.641s |
+| snmalloc | 10.268s | 9.658s | 1.771s |
+
+`materialize` triples because the parse batch reaches ~1 GB and growing it is a
+few reallocs of one very large block: glibc serves those from `mmap` and grows
+them with `mremap` (page-table edits only), while mimalloc and snmalloc copy.
+That is a genuine cost of swapping the allocator, but it belongs to the `Vec`,
+not the parse, and it masks the tokenise win.
+
+With the batch preallocated (`--reserve-triples 10000000`, one run per cell)
+`materialize` returns to ~0.6s for all three and the real effect shows:
+
+| read_turtle, reserved | `parse` 1 thr | `parse` 16 thr | end-to-end 1 thr |
+|---|---|---|---|
+| system (glibc) | 10.269s | 9.945s | 23.418s |
+| mimalloc | 9.407s (−8.4%) | 8.725s (−12.3%) | 22.070s (−5.8%) |
+| snmalloc | 9.185s (−10.6%) | 8.622s (−13.3%) | 21.948s (−6.3%) |
+
+read_ntriples behaves the same: `parse` 6.032s → 5.583s (snmalloc, −7.4%),
+end-to-end 20.090s → 18.081s (−10.0%).
+
+Conclusions:
+
+1. **The allocator is worth ~10% of `parse` and ~6–10% end-to-end**, snmalloc
+   ahead of mimalloc, and it does not require any design commitment.
+2. **It does not fix scaling.** 1→16 threads stays within −3% to −13% whichever
+   allocator is used. The channel depth above is what fixes that.
+3. **The realloc regression was the bench driver's, not the engine's.** Only
+   the driver accumulates a whole document into one `Vec`; the engine's loaders
+   batch at `BATCH = 8192` and never build a block that large.
+
+**Outcome: snmalloc adopted.** All four shipped binaries (`bench-trainmarks`,
+`harness`, `serve`, `bench-rdfox`) set the `#[global_allocator]`, each behind a
+default-on `snmalloc` feature that is the revert switch. mimalloc lost the A/B
+and is not carried. The driver now preallocates its parse batch by estimating
+the triple count from the mean line length of a 1 MiB prefix, which is what
+makes the swap a clean win rather than a wash.
+
+`serve` is what the LDBC SPB-256 nightly measures, and E1 only measured the
+bulk-load path — the nightly is the gate on the query path, and disabling the
+feature is the revert.
+
+Verified on the shipped build against its own revert switch (same binary source,
+`--no-default-features` for the system-allocator leg, so both preallocate and
+only the allocator differs; one run per cell, quiet host):
+
+| xlarge, end-to-end | shipped (snmalloc) | revert (system) | change |
+|---|---|---|---|
+| read_turtle, 1 thread | 21.999s | 23.543s | **−6.6%** |
+| read_turtle, 16 threads | 21.630s | 23.221s | −6.9% |
+| read_ntriples, 1 thread | 17.733s | 19.969s | **−11.2%** |
+| read_ntriples, 16 threads | 17.980s | 19.290s | −6.8% |
+
+Against the pre-E1 baseline (system allocator, grow-on-demand batch, median of
+3) the combined change is read_turtle 23.658s → 21.999s (−7.0%) and
+read_ntriples 20.693s → 17.733s (−14.3%). Preallocation alone accounts for
+little of that on glibc (23.658s → 23.543s), which is expected — `mremap` was
+already cheap; it earns its place by removing the penalty snmalloc would
+otherwise pay.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page

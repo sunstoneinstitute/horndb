@@ -7,11 +7,18 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["server", "reasoner"]
+default = ["server", "reasoner", "snmalloc"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite"]
 reasoner = ["dep:horndb-owlrl"]
+# HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
+# Measured on the trainmarks bulk load (hornbench, xlarge): -10.6% on the
+# `parse` phase, -6.3% end-to-end, because a cross-thread free no longer takes
+# the owning arena's lock. Default-on; disabling it restores the system
+# allocator and is the revert path.
+snmalloc = ["dep:snmalloc-rs"]
 
 [dependencies]
+snmalloc-rs = { workspace = true, optional = true }
 # `sep-0006` enables spargebra's `GraphPattern::Lateral` variant. The
 # workspace's oxigraph dependency activates it transitively elsewhere,
 # so requesting it here keeps `-p horndb-sparql` matches exhaustive

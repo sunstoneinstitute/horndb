@@ -152,7 +152,7 @@ foundation every other crate reads/writes through.
 | Persistent on-disk dictionary (Marisa-trie / FST) | **planned** | `SPEC-25` S2 ([#226](https://github.com/sunstoneinstitute/horndb/issues/226) in `TASKS.md`): durable append-only id assignments, mmap base + in-memory overlay; reopen without re-interning. |
 | Write-ahead log + crash recovery | **planned** | `SPEC-25` S3 ([#227](https://github.com/sunstoneinstitute/horndb/issues/227) in `TASKS.md`): sequenced checksummed batch records (incl. dictionary appends), configurable fsync, checkpoint + replay bit-identical modulo timestamps; upgrades NF5. SPEC-24 S5 ([#214](https://github.com/sunstoneinstitute/horndb/issues/214)) layers the DeltaLog contract on this format. |
 | Turtle / N-Quads bulk-import paths (SPEC-02 F8) | **implemented** | `loader/turtle.rs`, `loader/nquads.rs` (streaming, via `oxttl`); N-Quads routes each quad to the graph named by its fourth term (F7), default-graph triples to the reserved sentinel. Shared `LoadStats`/`BATCH_SIZE`/`subject_to_term` hoisted to `loader/mod.rs`; N-Triples path unchanged. Fixtures `tests/fixtures/{tiny.ttl, with_literals.ttl, named_graphs.nq}`. [#18](https://github.com/sunstoneinstitute/horndb/issues/18). |
-| Parallel chunked parsing in the bulk loaders | **implemented, off by default** | HDB-83. `loader/parallel.rs` plus `load_*_slice` beside each streaming loader: `oxttl`'s `split_slice_for_parallel_parsing` cuts the document into N chunks, one thread each, and the calling thread interns in document order so the parallel and serial paths produce identical stores (term ids included). N-Triples/N-Quads split unconditionally; Turtle is opt-in and additionally gated on `turtle_split_is_safe` (no `@base` anywhere — `oxttl` propagates leading prefixes into chunks but not the base — and no `@prefix` after the leading directive block), falling back to serial otherwise. **Default is serial** (`HORNDB_LOAD_THREADS=auto` enables it): measured on hornbench, parsing is ~13% of a bulk load and interning ~7%, with ~80% in `Tier::insert_quad_batch`'s six-ordering build, so chunking the parse buys nothing end-to-end. Numbers and phase breakdown in `docs/benchmarks.md`. |
+| Parallel chunked parsing in the bulk loaders | **implemented, off by default** | HDB-83. `loader/parallel.rs` plus `load_*_slice` beside each streaming loader: `oxttl`'s `split_slice_for_parallel_parsing` cuts the document into N chunks, one thread each, and the calling thread interns in document order so the parallel and serial paths produce identical stores (term ids included). N-Triples/N-Quads split unconditionally; Turtle is opt-in and additionally gated on `turtle_split_is_safe` (no `@base` anywhere — `oxttl` propagates leading prefixes into chunks but not the base — and no `@prefix` after the leading directive block), falling back to serial otherwise. **Default is serial** (`HORNDB_LOAD_THREADS=auto` enables it). The original HDB-83 rationale — that parsing is only ~13% of a load and ~80% sits in `Tier::insert_quad_batch` — was **overturned by HDB-85**: the tier is 12–14% and `parse` is the largest single phase (43.5% of a Turtle load). HDB-86 then found why enabling threads did not help: `parse_chunks_ordered` drains the chunk receivers in document order with only `CHANNEL_DEPTH * BATCH` = 16,384 triples buffered per chunk, so every producer but the one being drained parks on `send` and the "parallel" parse runs at one-thread speed. Raising that bound (`HORNDB_LOAD_CHANNEL_DEPTH`, a diagnostic knob) takes `parse` from 10.068s to **1.960s** (5.1×) at xlarge/16 threads, end-to-end 23.245s → 15.038s, with term ids unchanged (`tests/parallel_loader.rs` compares interned ids and passes at depths 1–64). **The default is still serial and the depth is still 2** — raising it trades memory for the win and the sizing is not settled. Numbers and phase breakdown in `docs/benchmarks.md`. |
 | HDT bulk-import path | **planned** | Tracked under SPEC-02 completeness ([#3](https://github.com/sunstoneinstitute/horndb/issues/3)); add when a consumer needs HDT ingest (export side ships, row above). |
 
 > **Note:** SPEC-03's 4-cycle ≥10× performance gate was first hypothesised to
@@ -658,6 +658,20 @@ compile pipeline waits behind another. Docs-only PRs skip the build via the
 gate job; the cargo cache is saved only from `main` (see `.github/AGENTS.md`).
 The closure crate needs SuiteSparse:GraphBLAS locally (being moved to a
 vendored submodule — §7).
+
+### Memory allocator (snmalloc)
+**Status: implemented** (HDB-86 E1). The four shipped binaries —
+`bench-trainmarks`, `harness`, `serve` (SPARQL HTTP), `bench-rdfox` — set
+`#[global_allocator]` to snmalloc. A library cannot set one, so each binary
+declares it itself, behind a **default-on `snmalloc` cargo feature** that is
+both the revert switch and the way to re-run the A/B; CI builds both paths via
+`clippy --all-targets`. Rationale: a bulk load frees ~30M oxrdf terms on the
+main thread that were allocated on parse threads, and glibc `malloc` takes the
+owning arena's lock for every such cross-thread free. Measured on hornbench at
+trainmarks xlarge: **−10.6% on the `parse` phase, −6.3% end-to-end**; mimalloc
+lost the same A/B and is not carried. Numbers in `docs/benchmarks.md`.
+Caveat: E1 measured only the bulk-load path, while `serve` is what the LDBC
+SPB-256 nightly measures — the nightly is the gate on the query path.
 
 ### Integration-test runner (cargo nextest)
 **Status: implemented.** The workspace builds ~90 separate `crates/*/tests/*.rs`

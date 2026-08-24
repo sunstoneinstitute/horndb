@@ -31,6 +31,24 @@ const BATCH: usize = 8_192;
 /// Batches a parse thread may run ahead of the consumer, per chunk.
 const CHANNEL_DEPTH: usize = 2;
 
+/// Per-chunk channel depth, overridable with `HORNDB_LOAD_CHANNEL_DEPTH`.
+///
+/// This is a diagnostic knob for HDB-86, not a tuning surface. The consumer
+/// drains the chunk receivers strictly in document order, so a parse thread
+/// can only run `CHANNEL_DEPTH * BATCH` items ahead before it blocks on
+/// `send`. At trainmarks xlarge that lookahead is 16,384 triples against a
+/// 624,687-triple chunk — 2.6% — which means every thread but the one being
+/// drained is parked, and the "parallel" parse runs at one-thread speed.
+/// Raising the depth trades memory for real overlap and shows how much of the
+/// missing scaling is this bound rather than the term copying.
+fn channel_depth() -> usize {
+    std::env::var("HORNDB_LOAD_CHANNEL_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(CHANNEL_DEPTH)
+}
+
 /// Below this document size the `load_*_slice` entry points parse on one
 /// thread: spawning threads, and (for Turtle) the chunker's prefix prescan and
 /// per-boundary probe, cost more than the parse itself. `oxttl` applies its own
@@ -106,10 +124,11 @@ where
         return Ok(());
     }
 
+    let depth = channel_depth();
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {
-        let (tx, rx) = sync_channel::<Result<Vec<T>>>(CHANNEL_DEPTH);
+        let (tx, rx) = sync_channel::<Result<Vec<T>>>(depth);
         senders.push(tx);
         receivers.push(rx);
     }

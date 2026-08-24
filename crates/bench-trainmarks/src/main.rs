@@ -20,6 +20,24 @@
 //! into the same `--out`). `scripts/bench/trainmarks.sh` drives the three
 //! scales, one process each (bounded peak memory).
 
+// HDB-86 E1: snmalloc is the process-wide allocator. The bulk load frees ~30M
+// oxrdf terms on the main thread that were allocated on parse threads, and
+// glibc malloc takes the owning arena's lock for every such cross-thread free;
+// snmalloc keeps per-thread free lists and services a remote free without it.
+// Disable the `snmalloc` feature to fall back to the system allocator — that
+// is both the revert path and how the A/B is re-run.
+#[cfg(feature = "snmalloc")]
+#[global_allocator]
+static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
+/// Name of the allocator this binary was built with, printed with the results
+/// so a recorded number is never ambiguous about which build produced it.
+const ALLOCATOR: &str = if cfg!(feature = "snmalloc") {
+    "snmalloc"
+} else {
+    "system"
+};
+
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -58,6 +76,21 @@ struct Cli {
     /// Per-(read-)query timeout in seconds.
     #[arg(long, default_value_t = 600)]
     timeout_secs: u64,
+    /// Stop after the two read (load) operations, skipping writes and queries.
+    /// For load-path work, where only the `storage_load_phase_*` counters are
+    /// wanted and the query suite is minutes of irrelevant runtime.
+    #[arg(long, default_value_t = false)]
+    load_only: bool,
+    /// Preallocate the parse batch for this many triples. 0 (the default)
+    /// estimates the count from the file instead; pass a value only to pin it.
+    ///
+    /// The batch reaches ~1 GB at xlarge, so growing it on demand means a
+    /// handful of reallocs of one very large block. glibc serves those from
+    /// `mmap` and grows them with `mremap`, which only edits page tables,
+    /// whereas snmalloc copies — which is why the allocator swap tripled the
+    /// `materialize` phase (0.59s -> 1.77s) until the batch was preallocated.
+    #[arg(long, default_value_t = 0)]
+    reserve_triples: usize,
 }
 
 const FRAMEWORK: &str = "horndb";
@@ -113,11 +146,41 @@ fn read_existing(path: &Path) -> Vec<Value> {
 /// baseline. Turtle only splits when the document clears
 /// `turtle_split_is_safe`; trainmarks files declare every prefix up front, so
 /// it does.
-fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
+/// Estimate the triple count of a document from its bytes, for preallocating
+/// the parse batch.
+///
+/// Both formats this driver reads put one triple per line, so the mean line
+/// length over a sample gives the count directly. Sampling a prefix rather than
+/// scanning the whole file keeps this off the measured path; the estimate only
+/// has to be within a factor or so of the truth to remove the repeated doubling
+/// of a ~1 GB `Vec`, and `Vec` still grows if it is short.
+fn estimate_triples(bytes: &[u8]) -> usize {
+    const SAMPLE: usize = 1 << 20;
+    let sample = &bytes[..bytes.len().min(SAMPLE)];
+    let lines = count_newlines(sample);
+    if lines == 0 {
+        return 0;
+    }
+    let mean_line = (sample.len() as f64) / (lines as f64);
+    // +10% headroom: undershooting costs a realloc of the whole block, while
+    // overshooting costs only untouched virtual address space.
+    (((bytes.len() as f64) / mean_line) * 1.1) as usize
+}
+
+fn count_newlines(b: &[u8]) -> usize {
+    b.iter().filter(|&&c| c == b'\n').count()
+}
+
+fn load(path: &Path, turtle: bool, reserve_triples: usize) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
+    let reserve = if reserve_triples > 0 {
+        reserve_triples
+    } else {
+        estimate_triples(&bytes)
+    };
     let t_parse = std::time::Instant::now();
-    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(reserve);
     // Time only the materialisation into `batch`, so `parse` minus this is
     // oxttl tokenisation. The closure runs once per chunk batch, not per
     // triple, and accumulates into a local (SPEC-17 §5.4).
@@ -257,39 +320,46 @@ fn main() -> Result<()> {
     let tmp_ttl = cli.data_dir.join(format!("{}_horndb_out.ttl", cli.scale));
     let tmp_nt = cli.data_dir.join(format!("{}_horndb_out.nt", cli.scale));
 
-    eprintln!("=== horndb — {} ===", cli.scale);
+    eprintln!("=== horndb — {} (allocator: {ALLOCATOR}) ===", cli.scale);
 
     // --- read Turtle (this backend feeds the queries) ---
     let t = Instant::now();
-    let mut backend = load(&ttl, true)?;
+    let mut backend = load(&ttl, true, cli.reserve_triples)?;
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_turtle: {secs:.4}s ({} triples)", backend.len());
     results.record("read_turtle", json!(secs));
     dump_load_phases("read_turtle");
 
-    // --- write Turtle ---
-    let t = Instant::now();
-    write_turtle(&backend, &tmp_ttl)?;
-    let secs = t.elapsed().as_secs_f64();
-    eprintln!("  write_turtle: {secs:.4}s");
-    results.record("write_turtle", json!(secs));
-    let _ = std::fs::remove_file(&tmp_ttl);
+    // --- write Turtle / N-Triples --- (both skipped under --load-only; the
+    // read_ntriples leg below reads the source file, not what these produce)
+    if !cli.load_only {
+        let t = Instant::now();
+        write_turtle(&backend, &tmp_ttl)?;
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("  write_turtle: {secs:.4}s");
+        results.record("write_turtle", json!(secs));
+        let _ = std::fs::remove_file(&tmp_ttl);
 
-    // --- write N-Triples ---
-    let t = Instant::now();
-    write_ntriples(&backend, &tmp_nt)?;
-    let secs = t.elapsed().as_secs_f64();
-    eprintln!("  write_ntriples: {secs:.4}s");
-    results.record("write_ntriples", json!(secs));
-    let _ = std::fs::remove_file(&tmp_nt);
+        let t = Instant::now();
+        write_ntriples(&backend, &tmp_nt)?;
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("  write_ntriples: {secs:.4}s");
+        results.record("write_ntriples", json!(secs));
+        let _ = std::fs::remove_file(&tmp_nt);
+    }
 
     // --- read N-Triples (discarded; just I/O timing) ---
     let t = Instant::now();
-    drop(load(&nt, false)?);
+    drop(load(&nt, false, cli.reserve_triples)?);
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_ntriples: {secs:.4}s");
     results.record("read_ntriples", json!(secs));
     dump_load_phases("read_ntriples");
+
+    if cli.load_only {
+        eprintln!("  load-only: skipping writes and queries");
+        return Ok(());
+    }
 
     eprintln!("  queries:");
 

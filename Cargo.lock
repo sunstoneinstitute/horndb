@@ -1063,6 +1063,7 @@ dependencies = [
  "horndb-storage",
  "oxrdf",
  "oxttl",
+ "snmalloc-rs",
 ]
 
 [[package]]
@@ -1077,6 +1078,7 @@ dependencies = [
  "oxrdf",
  "oxttl",
  "serde_json",
+ "snmalloc-rs",
 ]
 
 [[package]]
@@ -1133,6 +1135,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "snmalloc-rs",
  "sparesults",
  "spargebra",
  "tempfile",
@@ -1239,6 +1242,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
+ "snmalloc-rs",
  "sparesults",
  "spargebra",
  "tempfile",
@@ -2500,6 +2504,24 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "snmalloc-rs"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb317153089fdfa4d8a2eec059d40a5a23c3bde43995ea23b19121c3f621e74a"
+dependencies = [
+ "snmalloc-sys",
+]
+
+[[package]]
+name = "snmalloc-sys"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "065fea53d32bb77bc36cca466cb191f2e5216ebfd0ed360b1d64889ee6e559ea"
+dependencies = [
+ "cmake",
+]
 
 [[package]]
 name = "socket2"

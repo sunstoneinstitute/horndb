@@ -1,6 +1,15 @@
 //! `harness` — entrypoint for the SPEC-01 conformance & benchmark
 //! harness. Used both locally and from GitHub Actions.
 
+// HDB-86 E1: snmalloc as the process-wide allocator. Measured on the trainmarks
+// bulk load (hornbench, xlarge): -10.6% on the `parse` phase and -6.3%
+// end-to-end, because freeing on a different thread than allocated no longer
+// takes the owning arena's lock. Build without the `snmalloc` feature to fall
+// back to the system allocator.
+#[cfg(feature = "snmalloc")]
+#[global_allocator]
+static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

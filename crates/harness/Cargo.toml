@@ -10,6 +10,7 @@ name = "harness"
 path = "src/bin/harness.rs"
 
 [dependencies]
+snmalloc-rs = { workspace = true, optional = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -42,8 +43,14 @@ path = "../owlrl"
 optional = true
 
 [features]
-default = []
+default = ["snmalloc"]
 real-engine = ["dep:horndb-owlrl"]
+# HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
+# Measured on the trainmarks bulk load (hornbench, xlarge): -10.6% on the
+# `parse` phase, -6.3% end-to-end, because a cross-thread free no longer takes
+# the owning arena's lock. Default-on; disabling it restores the system
+# allocator and is the revert path.
+snmalloc = ["dep:snmalloc-rs"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
