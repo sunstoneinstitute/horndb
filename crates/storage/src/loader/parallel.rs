@@ -19,34 +19,84 @@
 //! term ids depend on thread scheduling, and it does not help the number that
 //! matters — see [`load_threads`] for why the whole thing is off by default.
 //!
-//! The bounded channels cap memory: at most `CHANNEL_DEPTH * BATCH` parsed
-//! items are in flight per chunk.
+//! The bounded channels cap memory: at most [`load_buffer_triples`] parsed
+//! items are in flight across all chunks (see [`channel_depth`]).
 
 use crate::error::Result;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 
 /// Items per batch handed from a parse thread to the consumer.
 const BATCH: usize = 8_192;
 
-/// Batches a parse thread may run ahead of the consumer, per chunk.
-const CHANNEL_DEPTH: usize = 2;
-
-/// Per-chunk channel depth, overridable with `HORNDB_LOAD_CHANNEL_DEPTH`.
+/// Default for [`load_buffer_triples`]: parsed triples that may sit in the
+/// chunk channels at once, summed over every chunk.
 ///
-/// This is a diagnostic knob for HDB-86, not a tuning surface. The consumer
-/// drains the chunk receivers strictly in document order, so a parse thread
-/// can only run `CHANNEL_DEPTH * BATCH` items ahead before it blocks on
-/// `send`. At trainmarks xlarge that lookahead is 16,384 triples against a
-/// 624,687-triple chunk — 2.6% — which means every thread but the one being
-/// drained is parked, and the "parallel" parse runs at one-thread speed.
-/// Raising the depth trades memory for real overlap and shows how much of the
-/// missing scaling is this bound rather than the term copying.
-fn channel_depth() -> usize {
-    std::env::var("HORNDB_LOAD_CHANNEL_DEPTH")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(CHANNEL_DEPTH)
+/// The consumer drains the chunk receivers strictly in document order, so a
+/// parse thread stops as soon as its own channel is full and cannot restart
+/// until the drain reaches it. The buffer is therefore not an optimisation
+/// detail — it is how much of the document the parse is allowed to run in
+/// parallel. Too small and every producer but one is parked, which is what
+/// made the "parallel" parse run at one-thread speed (HDB-86).
+///
+/// Measured on hornbench, trainmarks xlarge (9,995,000 triples), 16 threads —
+/// full table in `docs/benchmarks.md`:
+///
+/// | budget | `parse` (turtle) | vs 262 k | peak RSS |
+/// |---|---|---|---|
+/// | 262,144 (the old 2-batch-per-chunk bound) | 10.068s | — | 9,596 MiB |
+/// | 4,194,304 | 6.294s | 1.60x | 9,591 MiB |
+/// | 8,388,608 | 3.xxxs | x.xx | 10,482 MiB |
+/// | 16,777,216 | 1.960s | 5.14x | 10,875 MiB |
+///
+/// The budget is a **total**, not per chunk, so peak in-flight memory does not
+/// grow with `HORNDB_LOAD_THREADS`; more threads split the same budget more
+/// ways. That is the whole reason the old per-chunk constant hid the problem:
+/// its real cost and its real benefit both scaled with the thread count.
+pub const DEFAULT_LOAD_BUFFER_TRIPLES: usize = 8 << 20;
+
+/// Resolved once, then cached: `HORNDB_LOAD_BUFFER_TRIPLES` if set and
+/// parseable, else [`DEFAULT_LOAD_BUFFER_TRIPLES`]. `0` means "not yet read".
+static LOAD_BUFFER_TRIPLES: AtomicUsize = AtomicUsize::new(0);
+
+/// Total parsed triples allowed in the chunk channels at once.
+///
+/// Set it with `HORNDB_LOAD_BUFFER_TRIPLES=<n>`, or from code with
+/// [`set_load_buffer_triples`]. Raising it buys parse overlap and costs
+/// transient memory; the trade is measured in `docs/benchmarks.md`.
+pub fn load_buffer_triples() -> usize {
+    match LOAD_BUFFER_TRIPLES.load(Ordering::Relaxed) {
+        0 => {
+            let v = std::env::var("HORNDB_LOAD_BUFFER_TRIPLES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n >= 1)
+                .unwrap_or(DEFAULT_LOAD_BUFFER_TRIPLES);
+            LOAD_BUFFER_TRIPLES.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
+    }
+}
+
+/// Override [`load_buffer_triples`] for this process, ignoring the environment.
+///
+/// The buffer size cannot change what a load produces — only how much of the
+/// parse overlaps — so this is safe to move around. The determinism tests use
+/// it to prove exactly that.
+pub fn set_load_buffer_triples(triples: usize) {
+    LOAD_BUFFER_TRIPLES.store(triples.max(1), Ordering::Relaxed);
+}
+
+/// Batches one parse thread may run ahead of the consumer, for a run split
+/// into `chunks` chunks: the total budget shared out evenly, at least one
+/// batch so every producer can always make progress.
+///
+/// Peak in-flight items are a little above the budget — each producer also
+/// holds a partly-filled batch, and the consumer holds one — so the true cap
+/// is `chunks * (depth + 2) * BATCH`.
+fn channel_depth(chunks: usize) -> usize {
+    (load_buffer_triples() / (chunks.max(1) * BATCH)).max(1)
 }
 
 /// Below this document size the `load_*_slice` entry points parse on one
@@ -124,7 +174,7 @@ where
         return Ok(());
     }
 
-    let depth = channel_depth();
+    let depth = channel_depth(chunks.len());
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {

@@ -17,6 +17,9 @@ use horndb_storage::loader::ntriples::{load_ntriples_reader, load_ntriples_slice
 use horndb_storage::loader::turtle::{
     load_turtle_reader_with_base, load_turtle_slice_with_threads, turtle_split_is_safe,
 };
+use horndb_storage::loader::{
+    load_buffer_triples, set_load_buffer_triples, DEFAULT_LOAD_BUFFER_TRIPLES,
+};
 use horndb_storage::{Store, DEFAULT_GRAPH};
 use oxrdf::{NamedNode, Term};
 
@@ -517,4 +520,53 @@ fn every_fixture_corpus_loads_identically() {
         }
     }
     assert!(compared > 20, "only {compared} corpora compared");
+}
+
+/// The in-flight buffer bound (HDB-94) is a throughput knob, never a
+/// correctness one: it changes only how far a parse thread may run ahead of
+/// the document-order drain, so every budget must produce the same store.
+///
+/// The budgets below are chosen to land on per-chunk depths 1, 2, 7 and 64 at
+/// `THREADS` chunks, including the pre-HDB-94 default (2 batches per chunk)
+/// and a budget so small it clamps to one batch.
+#[test]
+fn buffer_budget_does_not_change_the_store() {
+    const PER_CHUNK_BATCH: usize = 8_192 * THREADS;
+    let doc = ntriples_corpus(6_000);
+    let mut ttl = String::from("@prefix ex: <http://ex.org/> .\n");
+    for i in 0..48_000 {
+        ttl.push_str(&format!("ex:subject{i} ex:predicate ex:object{i} .\n"));
+    }
+    assert!(ttl.len() > 1 << 20);
+    assert!(turtle_split_is_safe(ttl.as_bytes()));
+
+    let serial = Store::in_memory();
+    load_ntriples_reader(&serial, doc.as_bytes()).unwrap();
+    let serial_ttl = Store::in_memory();
+    load_turtle_reader_with_base(&serial_ttl, ttl.as_bytes(), None).unwrap();
+
+    for budget in [
+        1,
+        2 * PER_CHUNK_BATCH,
+        7 * PER_CHUNK_BATCH,
+        64 * PER_CHUNK_BATCH,
+        DEFAULT_LOAD_BUFFER_TRIPLES,
+    ] {
+        set_load_buffer_triples(budget);
+        assert!(load_buffer_triples() >= 1);
+
+        let parallel = Store::in_memory();
+        load_ntriples_slice_with_threads(&parallel, doc.as_bytes(), THREADS).unwrap();
+        assert_same_store(&serial, &parallel, &format!("n-triples @ budget {budget}"));
+
+        let parallel_ttl = Store::in_memory();
+        load_turtle_slice_with_threads(&parallel_ttl, ttl.as_bytes(), None, THREADS).unwrap();
+        assert_same_store(
+            &serial_ttl,
+            &parallel_ttl,
+            &format!("turtle @ budget {budget}"),
+        );
+    }
+
+    set_load_buffer_triples(DEFAULT_LOAD_BUFFER_TRIPLES);
 }

@@ -9,7 +9,9 @@ pub mod ntriples;
 pub mod parallel;
 pub mod turtle;
 
-pub use parallel::load_threads;
+pub use parallel::{
+    load_buffer_triples, load_threads, set_load_buffer_triples, DEFAULT_LOAD_BUFFER_TRIPLES,
+};
 
 use crate::error::Result;
 use crate::store::Store;
