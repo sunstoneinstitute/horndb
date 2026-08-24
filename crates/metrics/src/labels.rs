@@ -107,6 +107,11 @@ pub struct PhaseLabel {
 // (SPEC-17 §5.4.1). `Intern` is dictionary interning in `Store::apply_quads`;
 // the rest are inside `MemoryTier::insert_quad_batch`.
 label_value_enum!(LoadPhase {
+    Parse => "parse",
+    Dedupe => "dedupe",
+    Stage => "stage",
+    LiveKeys => "live_keys",
+    Invalidate => "invalidate",
     Intern => "intern",
     Group => "group",
     CopyForward => "copy_forward",

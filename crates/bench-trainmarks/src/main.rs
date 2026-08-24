@@ -116,6 +116,7 @@ fn read_existing(path: &Path) -> Vec<Value> {
 fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
+    let t_parse = std::time::Instant::now();
     let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
     let mut push = |triples: Vec<Triple>| {
         batch.extend(
@@ -130,6 +131,11 @@ fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
     } else {
         for_each_ntriples_batch(&bytes, threads, &mut push)?;
     }
+    horndb_metrics::metrics().storage.record_load_phase(
+        horndb_metrics::labels::LoadPhase::Parse,
+        t_parse.elapsed(),
+        batch.len() as u64,
+    );
     let mut backend = HornBackend::new();
     backend
         .insert_oxrdf_batch(batch)
