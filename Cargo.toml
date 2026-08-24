@@ -71,9 +71,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
 # RFC 3986 IRI resolution (BASE-relative + prefixed-name expansion) for the
-# ADD/MOVE/COPY SILENT-recovery prologue scan in horndb-sparql. Matches the
-# version spargebra already pulls in.
-oxiri = "0.3"
+# ADD/MOVE/COPY SILENT-recovery prologue scan in horndb-sparql.
+#
+# Pinned exactly to the version spargebra 0.4.6 pulls in. It must match: we pass
+# spargebra's `Iri<String>` straight into our own code, so two oxiri versions in
+# the graph make that a type mismatch, not a coexistence. 0.3 also renamed
+# `Iri::resolve` to take `&IriRef<_>` instead of `&str`. Dependabot bumped this
+# to 0.3.1 in #286 and broke the build on main; `.github/dependabot.yml` now
+# ignores it. Unpin once oxigraph/spargebra move to 0.3.
+oxiri = "=0.2.11"
 oxrdfio = { version = "0.2", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
 oxigraph = { version = "0.5", features = ["rdf-12"] }

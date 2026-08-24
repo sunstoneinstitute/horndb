@@ -22,6 +22,11 @@ updates:
     commit-message:
       prefix: chore
     open-pull-requests-limit: 10
+    ignore:
+      # oxiri must stay on the exact version spargebra pulls in — two versions
+      # in the graph is a type mismatch, not a coexistence. #286 bumped it to
+      # 0.3.1 and broke the build. Drop this once oxigraph/spargebra move to 0.3.
+      - dependency-name: "oxiri"
     groups:
       cargo-minor-patch:
         update-types:
