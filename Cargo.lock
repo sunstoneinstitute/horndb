@@ -1072,6 +1072,7 @@ dependencies = [
  "anyhow",
  "clap",
  "horndb-sparql",
+ "horndb-storage",
  "oxrdf",
  "oxttl",
  "serde_json",

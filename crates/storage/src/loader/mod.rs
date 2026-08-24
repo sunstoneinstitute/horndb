@@ -6,7 +6,10 @@
 //! its fourth term (SPEC-02 F7); N-Triples and Turtle load the default graph.
 pub mod nquads;
 pub mod ntriples;
+pub mod parallel;
 pub mod turtle;
+
+pub use parallel::load_threads;
 
 use crate::error::Result;
 use crate::store::Store;
@@ -35,30 +38,57 @@ pub(crate) fn load_quads<I>(store: &Store, quads: I) -> Result<LoadStats>
 where
     I: Iterator<Item = Result<(GraphId, Term, Term, Term)>>,
 {
-    let start = Instant::now();
-    let mut batch: Vec<(GraphId, TermId, TermId, TermId)> = Vec::with_capacity(BATCH_SIZE);
-    let mut total: u64 = 0;
-
+    let mut sink = QuadSink::new(store);
     for quad in quads {
         let (g, s, p, o) = quad?;
-        let (s_id, p_id, o_id) = store.dictionary().intern_triple(&s, &p, &o)?;
-        batch.push((g, s_id, p_id, o_id));
-        total += 1;
-        if batch.len() >= BATCH_SIZE {
-            store.tier().insert_quad_batch(&batch)?;
-            batch.clear();
+        sink.push(g, &s, &p, &o)?;
+    }
+    sink.finish()
+}
+
+/// Intern + batch + flush, shared by the streaming (`load_quads`) and the
+/// slice/parallel loaders. Both drive it from a single thread in document
+/// order, so a document loaded either way gets the same term ids.
+pub(crate) struct QuadSink<'a> {
+    store: &'a Store,
+    batch: Vec<(GraphId, TermId, TermId, TermId)>,
+    total: u64,
+    start: Instant,
+}
+
+impl<'a> QuadSink<'a> {
+    pub(crate) fn new(store: &'a Store) -> Self {
+        Self {
+            store,
+            batch: Vec::with_capacity(BATCH_SIZE),
+            total: 0,
+            start: Instant::now(),
         }
     }
-    if !batch.is_empty() {
-        store.tier().insert_quad_batch(&batch)?;
+
+    pub(crate) fn push(&mut self, g: GraphId, s: &Term, p: &Term, o: &Term) -> Result<()> {
+        let (s_id, p_id, o_id) = self.store.dictionary().intern_triple(s, p, o)?;
+        self.batch.push((g, s_id, p_id, o_id));
+        self.total += 1;
+        if self.batch.len() >= BATCH_SIZE {
+            self.store.tier().insert_quad_batch(&self.batch)?;
+            self.batch.clear();
+        }
+        Ok(())
     }
 
-    Ok(LoadStats {
-        triples: total,
-        bytes_read: 0, // file-level caller overwrites this
-        elapsed_ms: start.elapsed().as_millis() as u64,
-        dictionary_size: store.dictionary().len() as u64,
-    })
+    pub(crate) fn finish(mut self) -> Result<LoadStats> {
+        if !self.batch.is_empty() {
+            self.store.tier().insert_quad_batch(&self.batch)?;
+            self.batch.clear();
+        }
+        Ok(LoadStats {
+            triples: self.total,
+            bytes_read: 0, // file-level caller overwrites this
+            elapsed_ms: self.start.elapsed().as_millis() as u64,
+            dictionary_size: self.store.dictionary().len() as u64,
+        })
+    }
 }
 
 /// RDF 1.2's data model (oxrdf 0.3 with `rdf-12`) keeps subjects as the

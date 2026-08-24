@@ -276,6 +276,54 @@ effect — cold q1@10M is ~4.0s). The driver's per-query watchdog (records
 `TIMEOUT`, continues to the next query, matching upstream's rdflib behaviour)
 is retained but no longer triggers.
 
+#### Parallel chunked parsing does not move the read columns (HDB-83, 2026-08-24)
+
+`oxttl` can split a document into N independently parseable chunks, so the
+bulk loaders gained a slice-based parallel entry point beside the streaming
+one (`crates/storage/src/loader/parallel.rs`). It does **not** pay, and the
+default is serial (`HORNDB_LOAD_THREADS=auto` turns it on). Measured on
+`hornbench` (16 cores, release, commit `49ddaf3`, trainmarks xlarge ≈10M
+triples):
+
+| operation | 1 thread | 16 threads | change |
+|---|---|---|---|
+| `read_turtle` (driver, end-to-end) | 23.60s | 22.72s | −3.7% |
+| `read_ntriples` (driver, end-to-end) | 20.08s | 18.97s | −5.5% |
+
+Best of two runs each; the other columns of the trainmarks table are
+unaffected. A few percent, against a parser that on its own runs 9× faster on
+16 threads.
+
+The phase breakdown says why. Same host, same data, N-Triples:
+
+| phase | 1 thread | 4 | 16 |
+|---|---|---|---|
+| parse only (chunk-local, nothing crosses threads) | 5.41s | 1.65s | 0.67s |
+| parse + intern (both on the chunk threads) | 8.08s | 2.96s | 2.06s |
+| full `Store` load (parse + intern + tier insert) | 40.1s | 43.4s | 46.6s |
+
+Turtle behaves the same, shifted up: parse only 8.34s → 0.91s at 16 threads.
+
+Three findings, in order of usefulness:
+
+1. **The index build, not the parse, owns the load.** Parsing is ~13% of a
+   `Store` load and interning ~7%; the remaining ~80% is
+   `Tier::insert_quad_batch` building six trie orderings per predicate. Even a
+   free parser would leave a 10M-triple load above 32s.
+2. **Interning is not the serialisation point.** The dictionary's reverse-map
+   `RwLock<Vec<Term>>` was the suspected bottleneck; it is not. Parse+intern
+   scales 3.9× from 1 to 16 threads. The follow-up idea of thread-local
+   dictionaries with a parallel merge is therefore not worth filing.
+3. **More parse threads make the full load slower** (40.1s → 46.6s), because
+   the serial tier insert has to free terms allocated on 16 other threads
+   while those threads keep allocating.
+
+The shipped design keeps interning on the calling thread in document order, so
+a parallel load produces the same term ids as a serial one and the two are
+byte-for-byte interchangeable; it measured 48.2s vs 49.4s (1 vs 16 threads) on
+the same corpus. Re-measure with `HORNDB_LOAD_THREADS=auto` once the ordering
+build is cheaper — that is where the load-path work belongs.
+
 Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
 `xsd:decimal` (value correct, datatype deviates from SPARQL type promotion);
 (b) no `LIMIT` pushdown. See the `HornBackend` scale notes

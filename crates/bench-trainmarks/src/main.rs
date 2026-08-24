@@ -20,7 +20,7 @@
 //! into the same `--out`). `scripts/bench/trainmarks.sh` drives the three
 //! scales, one process each (bounded peak memory).
 
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -30,8 +30,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use horndb_sparql::api::{execute_query, execute_update, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
+use horndb_storage::loader::load_threads;
+use horndb_storage::loader::ntriples::for_each_ntriples_batch;
+use horndb_storage::loader::turtle::for_each_turtle_batch;
 use oxrdf::{NamedNode, NamedOrBlankNode, Term as OxTerm, Triple};
-use oxttl::{NTriplesParser, NTriplesSerializer, TurtleParser, TurtleSerializer};
+use oxttl::{NTriplesSerializer, TurtleSerializer};
 use serde_json::{json, Value};
 
 #[derive(Parser, Debug)]
@@ -102,20 +105,30 @@ fn read_existing(path: &Path) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// Parse a document and bulk-insert it.
+///
+/// Parsing runs on `horndb_storage::loader::load_threads()` threads via the
+/// shared parallel-chunking primitives (HDB-83); interning and index build
+/// stay where they were. Set `HORNDB_LOAD_THREADS=1` to measure the serial
+/// baseline. Turtle only splits when the document clears
+/// `turtle_split_is_safe`; trainmarks files declare every prefix up front, so
+/// it does.
 fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
-    let reader =
-        BufReader::new(std::fs::File::open(path).with_context(|| format!("open {path:?}"))?);
+    let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
+    let threads = load_threads();
     let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
+    let mut push = |triples: Vec<Triple>| {
+        batch.extend(
+            triples
+                .into_iter()
+                .map(|t| (t.subject.into(), t.predicate.into(), t.object)),
+        );
+        Ok(())
+    };
     if turtle {
-        for t in TurtleParser::new().for_reader(reader) {
-            let t = t?;
-            batch.push((t.subject.into(), t.predicate.into(), t.object));
-        }
+        for_each_turtle_batch(&bytes, None, threads, &mut push)?;
     } else {
-        for t in NTriplesParser::new().for_reader(reader) {
-            let t = t?;
-            batch.push((t.subject.into(), t.predicate.into(), t.object));
-        }
+        for_each_ntriples_batch(&bytes, threads, &mut push)?;
     }
     let mut backend = HornBackend::new();
     backend
