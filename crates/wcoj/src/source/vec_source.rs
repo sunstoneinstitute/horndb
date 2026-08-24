@@ -1,7 +1,10 @@
 //! `VecTripleSource` — sorted, column-major test double for `TripleSource`.
 //!
 //! All six orderings are materialised eagerly; suitable for tests and small
-//! benches up to a few million triples.
+//! benches up to a few million triples. They can also be maintained in place:
+//! [`VecTripleSource::apply_delta`] merges a batch of retracted and inserted
+//! triples into every ordering, so a caller holding a cached source need not
+//! rebuild it after a small write.
 //!
 //! Each ordering is stored **column-major** (struct-of-arrays): three
 //! `Vec<TermId>`, one per trie level, instead of one `Vec<(TermId, TermId,

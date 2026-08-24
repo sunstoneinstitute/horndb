@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-08-20
 scope: "HDB-82 — incremental delta maintenance for the cached WCOJ snapshot, so a small SPARQL Update costs O(delta) merge work instead of a full six-ordering rebuild of the whole store"
 ---
