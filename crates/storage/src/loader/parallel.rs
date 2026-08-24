@@ -39,20 +39,29 @@ const BATCH: usize = 8_192;
 /// parallel. Too small and every producer but one is parked, which is what
 /// made the "parallel" parse run at one-thread speed (HDB-86).
 ///
-/// Measured on hornbench, trainmarks xlarge (9,995,000 triples), 16 threads —
-/// full table in `docs/benchmarks.md`:
+/// Measured on hornbench, trainmarks xlarge (9,995,000 triples), 16 threads,
+/// Turtle — full table, conditions, and the memory trade in
+/// `docs/benchmarks.md`:
 ///
-/// | budget | `parse` (turtle) | vs 262 k | peak RSS |
+/// | budget | `parse` | vs 262 k | peak RSS |
 /// |---|---|---|---|
-/// | 262,144 (the old 2-batch-per-chunk bound) | 10.068s | — | 9,596 MiB |
-/// | 4,194,304 | 6.294s | 1.60x | 9,591 MiB |
-/// | 8,388,608 | 3.xxxs | x.xx | 10,482 MiB |
-/// | 16,777,216 | 1.960s | 5.14x | 10,875 MiB |
+/// | 262,144 (the old 2-batches-per-chunk bound) | 8.677s | — | 13,719 MiB |
+/// | 4,194,304 | 5.506s | 1.58x | 13,675 MiB |
+/// | **8,388,608 (this default)** | **2.381s** | **3.64x** | 14,424 MiB (+5.1%) |
+/// | 16,777,216 | 1.743s | 4.98x | 14,893 MiB (+8.6%) |
+///
+/// 8M is the knee: doubling it again buys 3% more end-to-end for another 3.5
+/// points of peak memory. Worst case it holds ~1 GiB of parsed terms, and only
+/// for a document large enough to fill it.
 ///
 /// The budget is a **total**, not per chunk, so peak in-flight memory does not
 /// grow with `HORNDB_LOAD_THREADS`; more threads split the same budget more
-/// ways. That is the whole reason the old per-chunk constant hid the problem:
-/// its real cost and its real benefit both scaled with the thread count.
+/// ways. That is what the old per-chunk constant got wrong: its cost and its
+/// benefit both scaled with the thread count, so neither was visible in the
+/// constant itself.
+///
+/// It costs nothing at the shipped default of one parse thread — a single
+/// chunk skips the channel entirely.
 pub const DEFAULT_LOAD_BUFFER_TRIPLES: usize = 8 << 20;
 
 /// Resolved once, then cached: `HORNDB_LOAD_BUFFER_TRIPLES` if set and
@@ -115,24 +124,24 @@ pub(crate) const MIN_PARALLEL_BYTES: usize = 1 << 20;
 /// `HORNDB_LOAD_THREADS=<n>` sets it explicitly; `HORNDB_LOAD_THREADS=auto`
 /// uses [`std::thread::available_parallelism`].
 ///
-/// The default is 1 because chunking does not currently pay. Measured on
-/// hornbench (16 cores, trainmarks xlarge, ~10M triples, N-Triples):
+/// The default is 1 because the *whole load* has not been shown to get faster
+/// with more parse threads, not because the parse does not scale — since
+/// HDB-94 it does. Measured on hornbench (16 cores, trainmarks xlarge,
+/// 9,995,000 triples, Turtle, default buffer budget):
 ///
-/// | phase | 1 thread | 4 | 16 |
+/// | | 1 thread | 4 | 16 |
 /// |---|---|---|---|
-/// | parse only | 5.41s | 1.65s | 0.67s |
-/// | parse + intern | 8.08s | 2.96s | 2.06s |
-/// | full `Store` load | 40.1s | 43.4s | 46.6s |
+/// | `parse` phase | 9.126s | 3.738s | 2.381s |
+/// | parse -> `Vec` -> `HornBackend` insert (bench driver) | 21.920s | 16.208s | 15.002s |
 ///
-/// Parsing scales 8x and interning scales 4x, but both together are ~20% of a
-/// bulk load: the rest is `Tier::insert_quad_batch` building the six trie
-/// orderings per predicate, which is serial and unaffected. Making the parse
-/// concurrent therefore buys single-digit percent at best, and the extra
-/// threads contend enough to lose it again.
+/// What is still unmeasured is the same sweep against a real `Store` load.
+/// HDB-83 measured that path getting *slower* with threads (40.1s -> 46.6s),
+/// because the serial `Tier::insert_quad_batch` has to free terms allocated on
+/// the parse threads while those threads keep allocating. Two things have
+/// changed under it since — snmalloc (HDB-86 E1) and the buffer budget — so
+/// the number needs re-taking before the default flips. See
+/// `docs/benchmarks.md`.
 ///
-/// The machinery stays because it is correct, tested, and free at
-/// `threads == 1` — re-measure with `HORNDB_LOAD_THREADS=auto` once the index
-/// build stops dominating. See `docs/benchmarks.md`.
 pub fn load_threads() -> usize {
     match std::env::var("HORNDB_LOAD_THREADS").as_deref() {
         Ok("auto") => std::thread::available_parallelism()
