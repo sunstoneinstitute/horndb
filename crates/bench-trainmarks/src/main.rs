@@ -20,27 +20,19 @@
 //! into the same `--out`). `scripts/bench/trainmarks.sh` drives the three
 //! scales, one process each (bounded peak memory).
 
-// HDB-86 E1: process-wide allocator A/B. Compiled in only with `--features
-// mimalloc` / `--features snmalloc`; the default build keeps the system
-// allocator so the baseline comes from the same tree. Both alternatives keep
-// per-thread free lists and service a remote free without taking the owning
-// arena's lock, which is the pattern a parallel parse hits hardest.
-#[cfg(all(feature = "mimalloc", feature = "snmalloc"))]
-compile_error!("enable at most one of the `mimalloc` / `snmalloc` features");
-
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
+// HDB-86 E1: snmalloc is the process-wide allocator. The bulk load frees ~30M
+// oxrdf terms on the main thread that were allocated on parse threads, and
+// glibc malloc takes the owning arena's lock for every such cross-thread free;
+// snmalloc keeps per-thread free lists and services a remote free without it.
+// Disable the `snmalloc` feature to fall back to the system allocator — that
+// is both the revert path and how the A/B is re-run.
 #[cfg(feature = "snmalloc")]
 #[global_allocator]
 static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 
 /// Name of the allocator this binary was built with, printed with the results
-/// so a recorded number is never ambiguous about which A/B leg produced it.
-const ALLOCATOR: &str = if cfg!(feature = "mimalloc") {
-    "mimalloc"
-} else if cfg!(feature = "snmalloc") {
+/// so a recorded number is never ambiguous about which build produced it.
+const ALLOCATOR: &str = if cfg!(feature = "snmalloc") {
     "snmalloc"
 } else {
     "system"
@@ -89,14 +81,14 @@ struct Cli {
     /// wanted and the query suite is minutes of irrelevant runtime.
     #[arg(long, default_value_t = false)]
     load_only: bool,
-    /// Preallocate the parse batch for this many triples (0 = grow on demand).
+    /// Preallocate the parse batch for this many triples. 0 (the default)
+    /// estimates the count from the file instead; pass a value only to pin it.
     ///
-    /// The batch reaches ~1 GB at xlarge, so growing it means a handful of
-    /// reallocs of a very large block. glibc serves those from `mmap` and
-    /// grows them with `mremap`, which only edits page tables; mimalloc and
-    /// snmalloc copy instead. That difference lands entirely in the
-    /// `materialize` phase and would otherwise confound an allocator A/B, so
-    /// allow it to be taken out of the comparison.
+    /// The batch reaches ~1 GB at xlarge, so growing it on demand means a
+    /// handful of reallocs of one very large block. glibc serves those from
+    /// `mmap` and grows them with `mremap`, which only edits page tables,
+    /// whereas snmalloc copies — which is why the allocator swap tripled the
+    /// `materialize` phase (0.59s -> 1.77s) until the batch was preallocated.
     #[arg(long, default_value_t = 0)]
     reserve_triples: usize,
 }
@@ -154,11 +146,41 @@ fn read_existing(path: &Path) -> Vec<Value> {
 /// baseline. Turtle only splits when the document clears
 /// `turtle_split_is_safe`; trainmarks files declare every prefix up front, so
 /// it does.
+/// Estimate the triple count of a document from its bytes, for preallocating
+/// the parse batch.
+///
+/// Both formats this driver reads put one triple per line, so the mean line
+/// length over a sample gives the count directly. Sampling a prefix rather than
+/// scanning the whole file keeps this off the measured path; the estimate only
+/// has to be within a factor or so of the truth to remove the repeated doubling
+/// of a ~1 GB `Vec`, and `Vec` still grows if it is short.
+fn estimate_triples(bytes: &[u8]) -> usize {
+    const SAMPLE: usize = 1 << 20;
+    let sample = &bytes[..bytes.len().min(SAMPLE)];
+    let lines = count_newlines(sample);
+    if lines == 0 {
+        return 0;
+    }
+    let mean_line = (sample.len() as f64) / (lines as f64);
+    // +10% headroom: undershooting costs a realloc of the whole block, while
+    // overshooting costs only untouched virtual address space.
+    (((bytes.len() as f64) / mean_line) * 1.1) as usize
+}
+
+fn count_newlines(b: &[u8]) -> usize {
+    b.iter().filter(|&&c| c == b'\n').count()
+}
+
 fn load(path: &Path, turtle: bool, reserve_triples: usize) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
+    let reserve = if reserve_triples > 0 {
+        reserve_triples
+    } else {
+        estimate_triples(&bytes)
+    };
     let t_parse = std::time::Instant::now();
-    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(reserve_triples);
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(reserve);
     // Time only the materialisation into `batch`, so `parse` minus this is
     // oxttl tokenisation. The closure runs once per chunk batch, not per
     // triple, and accumulates into a local (SPEC-17 §5.4).

@@ -17,6 +17,15 @@
 //! phase only (parsing is reported separately from reasoning where the API
 //! allows). Numbers are emitted in milliseconds.
 
+// HDB-86 E1: snmalloc as the process-wide allocator. Measured on the trainmarks
+// bulk load (hornbench, xlarge): -10.6% on the `parse` phase and -6.3%
+// end-to-end, because freeing on a different thread than allocated no longer
+// takes the owning arena's lock. Build without the `snmalloc` feature to fall
+// back to the system allocator.
+#[cfg(feature = "snmalloc")]
+#[global_allocator]
+static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;

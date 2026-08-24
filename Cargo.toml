@@ -90,6 +90,10 @@ sha2 = "0.11"
 hex = "0.4"
 time = { version = "0.3", features = ["formatting", "serde", "macros"] }
 serde_json = "1"
+# Process-wide allocator for the shipped binaries (HDB-86 E1). Each binary
+# crate sets the #[global_allocator] itself — a library cannot — behind a
+# default-on `snmalloc` feature that doubles as the revert switch.
+snmalloc-rs = "0.3"
 assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["yaml"] }

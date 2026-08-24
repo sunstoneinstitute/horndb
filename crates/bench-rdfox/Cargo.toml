@@ -13,7 +13,14 @@ publish = false
 name = "horndb-bench"
 path = "src/main.rs"
 
+[features]
+default = ["snmalloc"]
+# HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
+# Default-on; disabling it restores the system allocator (revert path).
+snmalloc = ["dep:snmalloc-rs"]
+
 [dependencies]
+snmalloc-rs = { workspace = true, optional = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 oxrdf = { workspace = true }
