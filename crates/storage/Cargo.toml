@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+horndb-metrics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 arrow.workspace = true

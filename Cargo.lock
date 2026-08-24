@@ -1071,6 +1071,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "horndb-metrics",
  "horndb-sparql",
  "horndb-storage",
  "oxrdf",
@@ -1255,6 +1256,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "dashmap",
+ "horndb-metrics",
  "horndb-simd",
  "oxrdf",
  "oxttl",

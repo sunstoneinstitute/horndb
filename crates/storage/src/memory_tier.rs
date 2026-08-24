@@ -5,9 +5,11 @@ use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHO
 use crate::term::{GraphId, TermId};
 use crate::tier::{ApplyReport, Tier, TierStats};
 use crate::visibility::UNSET_END;
+use horndb_metrics::labels::LoadPhase;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// One graph's predicate partitions. Immutable once built; copy-on-write
 /// replaces the whole map (sharing untouched partitions by `Arc`) on each write.
@@ -348,12 +350,22 @@ impl Drop for PinnedSnapshot {
     }
 }
 
+/// Merge one bulk-load phase into the shared counters. Called once per phase
+/// per batch, never from inside a loop (SPEC-17 §5.4).
+fn record_phase(phase: LoadPhase, elapsed: Duration, rows: u64) {
+    horndb_metrics::metrics()
+        .storage
+        .record_load_phase(phase, elapsed, rows);
+}
+
 impl Tier for MemoryTier {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
         if quads.is_empty() {
             return Ok(());
         }
-        // Group incoming pairs by graph, then predicate.
+        // Group incoming pairs by graph, then predicate. One clock read on each
+        // side of the loop; nothing inside it touches a metric (SPEC-17 §5.4).
+        let t_group = Instant::now();
         let mut by_graph: HashMap<GraphId, HashMap<TermId, Vec<(TermId, TermId)>>> = HashMap::new();
         for &(g, s, p, o) in quads {
             by_graph
@@ -363,6 +375,14 @@ impl Tier for MemoryTier {
                 .or_default()
                 .push((s, o));
         }
+        record_phase(LoadPhase::Group, t_group.elapsed(), quads.len() as u64);
+
+        // Nanoseconds and rows accumulated in locals across every partition
+        // touched by this batch, merged into the counters once on the way out.
+        let mut copy_ns = 0u64;
+        let mut copy_rows = 0u64;
+        let mut build_ns = 0u64;
+        let mut build_rows = 0u64;
 
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
@@ -382,6 +402,8 @@ impl Tier for MemoryTier {
                 // Carry existing rows forward WITH their visibility stamps
                 // (history preserved) — reading indexed columns, not `scan()`,
                 // which would silently drop retraction stamps.
+                let mut carried = 0u64;
+                let t_copy = Instant::now();
                 if let Some(existing) = new_partitions.get(&p) {
                     let n = existing.len();
                     for i in 0..n {
@@ -392,15 +414,25 @@ impl Tier for MemoryTier {
                             existing.ends().value(i),
                         );
                     }
+                    carried = n as u64;
                 }
                 // New rows: live from this version.
+                let added = rows.len() as u64;
                 for (s, o) in rows {
                     builder.append_stamped(s, o, new_version, UNSET_END);
                 }
+                copy_ns += t_copy.elapsed().as_nanos() as u64;
+                copy_rows += carried;
+
+                // `build` sorts and materialises the whole partition, so its
+                // row count is what it built: carried-forward plus new.
+                let t_build = Instant::now();
                 new_partitions.insert(
                     p,
                     Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
                 );
+                build_ns += t_build.elapsed().as_nanos() as u64;
+                build_rows += carried + added;
             }
             graphs.insert(
                 g,
@@ -415,6 +447,14 @@ impl Tier for MemoryTier {
             graphs,
         });
         *self.current.write() = next;
+
+        // Single merge point for the per-partition accumulators.
+        record_phase(
+            LoadPhase::CopyForward,
+            Duration::from_nanos(copy_ns),
+            copy_rows,
+        );
+        record_phase(LoadPhase::Build, Duration::from_nanos(build_ns), build_rows);
         Ok(())
     }
 

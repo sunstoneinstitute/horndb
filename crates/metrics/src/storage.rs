@@ -3,24 +3,34 @@
 //! SCRAPE TIME via [`StorageCollector`], which reads a cheap stats snapshot
 //! through a closure the server installs over a `Weak` ref to the live store.
 //! Steady-state cost is therefore zero.
-use crate::labels::{MemTier, TierLabel};
+use crate::labels::{LoadPhase, LoadPhaseLabel, MemTier, TierLabel};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
 use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::ConstGauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct StorageMetrics {
     pub load_duration_seconds: Histogram,
     pub load_bytes: Counter,
+    /// Nanoseconds spent in each bulk-load phase, and rows each phase handled.
+    /// A count+sum pair per SPEC-17 §5.4.1: the mean phase cost per row is
+    /// `rate(nanoseconds) / rate(rows)`. Written once per phase per batch by
+    /// [`StorageMetrics::record_load_phase`], never from inside a loop.
+    pub load_phase_nanoseconds: Family<LoadPhaseLabel, Counter>,
+    pub load_phase_rows: Family<LoadPhaseLabel, Counter>,
 }
 
 impl StorageMetrics {
     pub fn register(reg: &mut Registry) -> Self {
         let load_duration_seconds = Histogram::new(exponential_buckets(1e-3, 3.0, 12));
         let load_bytes = Counter::default();
+        let load_phase_nanoseconds = Family::<LoadPhaseLabel, Counter>::default();
+        let load_phase_rows = Family::<LoadPhaseLabel, Counter>::default();
         reg.register(
             "storage_load_duration_seconds",
             "RDF load duration",
@@ -31,10 +41,36 @@ impl StorageMetrics {
             "Bytes read during RDF load",
             load_bytes.clone(),
         );
+        reg.register(
+            "storage_load_phase_nanoseconds",
+            "Nanoseconds spent in each bulk-load phase",
+            load_phase_nanoseconds.clone(),
+        );
+        reg.register(
+            "storage_load_phase_rows",
+            "Rows handled by each bulk-load phase",
+            load_phase_rows.clone(),
+        );
         Self {
             load_duration_seconds,
             load_bytes,
+            load_phase_nanoseconds,
+            load_phase_rows,
         }
+    }
+
+    /// Record one bulk-load phase: its elapsed time and the rows it handled.
+    ///
+    /// Call this **once per phase per batch**, after the loop has finished —
+    /// never per row (SPEC-17 §5.4). The caller accumulates in locals and takes
+    /// one `Instant::now()` on each side of the loop; this is the single point
+    /// where a shared metric handle is touched.
+    pub fn record_load_phase(&self, phase: LoadPhase, elapsed: Duration, rows: u64) {
+        let label = LoadPhaseLabel { phase };
+        self.load_phase_nanoseconds
+            .get_or_create(&label)
+            .inc_by(elapsed.as_nanos() as u64);
+        self.load_phase_rows.get_or_create(&label).inc_by(rows);
     }
 }
 

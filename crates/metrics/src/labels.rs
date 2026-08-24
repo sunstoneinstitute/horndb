@@ -103,6 +103,21 @@ pub struct PhaseLabel {
     pub phase: Phase,
 }
 
+// Phases of a bulk load, timed separately so a slow load can be attributed
+// (SPEC-17 §5.4.1). `Intern` is dictionary interning in `Store::apply_quads`;
+// the rest are inside `MemoryTier::insert_quad_batch`.
+label_value_enum!(LoadPhase {
+    Intern => "intern",
+    Group => "group",
+    CopyForward => "copy_forward",
+    Build => "build",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LoadPhaseLabel {
+    pub phase: LoadPhase,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RuleLabel {
     pub rule: String,
