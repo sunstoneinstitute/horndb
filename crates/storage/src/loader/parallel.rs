@@ -40,22 +40,37 @@ const CHANNEL_DEPTH: usize = 2;
 /// differential tests use to exercise the split on small documents.
 pub(crate) const MIN_PARALLEL_BYTES: usize = 1 << 20;
 
-/// Parse-thread count for the slice loaders. `HORNDB_LOAD_THREADS` overrides;
-/// otherwise `available_parallelism`, falling back to 1.
+/// Parse-thread count for the slice loaders. **Defaults to 1 — serial.**
 ///
-/// Set `HORNDB_LOAD_THREADS=1` to force the serial path (useful for A/B
-/// measurement and for reproducing a load exactly).
+/// `HORNDB_LOAD_THREADS=<n>` sets it explicitly; `HORNDB_LOAD_THREADS=auto`
+/// uses [`std::thread::available_parallelism`].
+///
+/// The default is 1 because chunking does not currently pay. Measured on
+/// hornbench (16 cores, trainmarks xlarge, ~10M triples, N-Triples):
+///
+/// | phase | 1 thread | 4 | 16 |
+/// |---|---|---|---|
+/// | parse only | 5.41s | 1.65s | 0.67s |
+/// | parse + intern | 8.08s | 2.96s | 2.06s |
+/// | full `Store` load | 40.1s | 43.4s | 46.6s |
+///
+/// Parsing scales 8x and interning scales 4x, but both together are ~20% of a
+/// bulk load: the rest is `Tier::insert_quad_batch` building the six trie
+/// orderings per predicate, which is serial and unaffected. Making the parse
+/// concurrent therefore buys single-digit percent at best, and the extra
+/// threads contend enough to lose it again.
+///
+/// The machinery stays because it is correct, tested, and free at
+/// `threads == 1` — re-measure with `HORNDB_LOAD_THREADS=auto` once the index
+/// build stops dominating. See `docs/benchmarks.md`.
 pub fn load_threads() -> usize {
-    if let Ok(v) = std::env::var("HORNDB_LOAD_THREADS") {
-        if let Ok(n) = v.parse::<usize>() {
-            if n >= 1 {
-                return n;
-            }
-        }
+    match std::env::var("HORNDB_LOAD_THREADS").as_deref() {
+        Ok("auto") => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+        Ok(v) => v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1),
+        Err(_) => 1,
     }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
 }
 
 /// Run `chunks` on one thread each and feed `sink` their batches in document
@@ -72,6 +87,23 @@ where
     T: Send,
     F: FnMut(Vec<T>) -> Result<()>,
 {
+    // One chunk means there is nothing to overlap. Run it inline rather than
+    // paying for a thread and a channel — and, more to the point, so terms are
+    // freed on the thread that allocated them.
+    if chunks.len() == 1 {
+        let mut batch = Vec::with_capacity(BATCH);
+        for item in chunks.into_iter().next().expect("one chunk") {
+            batch.push(item?);
+            if batch.len() >= BATCH {
+                sink(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))?;
+            }
+        }
+        if !batch.is_empty() {
+            sink(batch)?;
+        }
+        return Ok(());
+    }
+
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {
