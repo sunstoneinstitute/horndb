@@ -232,7 +232,7 @@ Honest accounting. Updated when a bench moves.
 | `partition_scan` — `rdf:type` partition scan bandwidth (`crates/storage/benches/partition_scan.rs`) | `horndb-storage` | ≥**80% STREAM Triad** (SPEC-12 / SPEC-02 NF2) | hornbench (Ryzen 7 7700, dual-channel DDR5, 2026-07-07, `numactl --cpunodebind=0 --membind=0`, 80 MB object column): scan **34.5 GB/s** (32.12 GiB/s, 2.32 ms/iter). STREAM-Triad baseline on the same host/pin: **33.1 GB/s** full-socket (8 threads), 30.2 GB/s single-thread → scan reaches **~104% of device Triad**. A read-only scan legitimately exceeds read+write Triad; on this box a single Zen4 core already nears the dual-channel ceiling (1-thread Triad 30.2 vs 8-thread 33.1 GB/s). | **GREEN — NF2 met (~104% of STREAM-Triad ≥ 80%).** Jointly satisfies SPEC-02 acceptance #4 |
 | `valued_readiness` — valued-reasoning readiness ([#11](https://github.com/sunstoneinstitute/horndb/issues/11)) | `horndb-closure` | instrument valued `(max,×)` closure to decide when custom-semiring/JIT work pays off | hornbench, 2026-06-18, weighted n-chain: valued `(max,×)` costs **~5.5×** boolean at N=500 growing to **~69×** at N=2,500 (the penalty is the scalar carrier itself — boolean's iso/bitmap closure parallelises, FP64 accumulation doesn't). Generic-kernel (UDF) penalty vs built-in FactoryKernel: **~1.0×**. | **GREEN — decision recorded:** built-in semirings suffice for a scalar carrier; PreJIT buys ≈0; custom semiring only for a structured carrier (Fork B, deferred) |
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
-| LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 36.16 qps** (Zen4 hornbench, 2026-07-01, all-scalar SIMD table) vs **GraphDB Free ~153 qps** → **~4.2× gap**; Intel SPR hel01: 34.4 (don't compare qps across hosts — measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2; the step was bisected to the native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → 36.16 (SIMD known-CPU table replacing the net-harmful calibrated kernels). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **[#128](https://github.com/sunstoneinstitute/horndb/issues/128) delivered — still ~4.2× behind GraphDB Free.** The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have since landed and did not close the gap further. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
+| LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 50.25 qps** (Zen4 hornbench, nightly 2026-08-24, commit `8a5ed81`) vs **GraphDB Free 151.96 qps** → **3.02× gap**; the same night's Oxigraph legs: 38.08 as-loaded / 38.05 optimized, so HornDB leads its closest architectural peer by **~1.32×**. Don't compare qps across hosts (Intel SPR hel01 measured 34.4 on the older code; measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2, native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → ~36 (SIMD known-CPU table replacing the net-harmful calibrated kernels) → ~43 on 2026-07-20 (WCOJ galloping descent + bulk leaf materialization [#237](https://github.com/sunstoneinstitute/horndb/issues/237) and SPEC-23 Phase 2 heuristic rewrites [#202](https://github.com/sunstoneinstitute/horndb/issues/202) landed together — not bisected) → ~45.7 on 07-27 (columnar SoA `VecTripleSource`, [#257](https://github.com/sunstoneinstitute/horndb/issues/257)) → **~50 since 08-14** (SPEC-28 named-graph phases 1–4; the 07-31→08-13 nightly gap means this step is not bisected). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Ahead of Oxigraph, 3.02× behind GraphDB Free** — gap down from ~4.2× (2026-07-01) but still outside the ≤2× NF1 target. The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have all landed and did not close it. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
 | `graph_scan` — graph-scoped access paths (`crates/storage/benches/graph_scan.rs`) | `horndb-storage` | `scan_graph` cost tracks the graph, not the store (SPEC-28 S2 acceptance #4); warm footprint ≤**50 B/triple** (SPEC-02 NF1) | hornbench (16-core Debian 6.12, rustc 1.90.0, 2026-07-30, commit `abadb4b`): scanning the **same** 10-triple graph costs **1.113 µs** in a 1,000-graph / 1M-quad store and **1.145 µs** in a 2,000-graph / 2M-quad store — **+2.9% for a doubled store**, i.e. flat in store size. `graph_len` on that graph: **13.35 ns** (it sums a cached per-partition live count, so it is O(predicates in graph) with no row scan). Partition overhead at 1,000 triples/graph (5 predicates, so ~200 rows/partition): **32.08 B/quad**, identical across both corpora. | **GREEN — O(graph)-not-O(store) confirmed; 32.08 B/quad within the ≤50 B/triple NF1 budget.** Note the corpus is 1,000 triples *per graph*: this measures scan cost against graph **count**, and does **not** yet answer SPEC-28's "thousands of **small** graphs vs per-partition overhead" risk, where each graph holds a handful of triples and the ~16 B/partition constant dominates. That shape needs its own corpus ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) |
 | `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
@@ -247,21 +247,21 @@ with **no DeWitt clause**, so these numbers may be recorded and published.
 
 Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
 `scripts/bench/trainmarks/`; native driver `crates/bench-trainmarks`). Numbers
-below: **`hornbench`, release, 2026-07-06** (commit `c4645f0`, post hash
-`LeftJoin`), best-of-3 warm per upstream protocol.
+below: **`hornbench`, release, 2026-08-24** (commit `583cc47`, post delta-merge
+snapshot reuse), best-of-3 warm per upstream protocol.
 
 | operation | medium (~100K) | large (~1M) | xlarge (~10M) |
 |---|---|---|---|
-| read_turtle | 0.183s | 2.068s | 23.12s |
-| write_turtle | 0.030s | 0.363s | 3.94s |
-| write_ntriples | 0.027s | 0.341s | 3.76s |
-| read_ntriples | 0.139s | 1.746s | 19.69s |
-| q1 `COUNT(*)` | 0.006s | 0.069s | 1.24s |
-| q2 group/sum/limit | 0.016s | 0.245s | 4.99s |
-| q3 3-join + filter + limit | 0.008s | 0.133s | 2.39s |
-| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.021s | 0.334s | 6.80s |
-| q5 `CONSTRUCT` | 0.002s | 0.038s | 1.16s |
-| q6 conditional `DELETE`/`INSERT` | 0.024s | 0.682s | 11.52s |
+| read_turtle | 0.177s | 2.027s | 23.44s |
+| write_turtle | 0.034s | 0.359s | 3.64s |
+| write_ntriples | 0.028s | 0.335s | 3.44s |
+| read_ntriples | 0.135s | 1.733s | 20.63s |
+| q1 `COUNT(*)` | 0.005s | 0.046s | 0.709s |
+| q2 group/sum/limit | 0.014s | 0.211s | 3.70s |
+| q3 3-join + filter + limit | 0.006s | 0.076s | 1.23s |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 0.016s | 0.251s | 4.69s |
+| q5 `CONSTRUCT` | 0.002s | 0.030s | 0.589s |
+| q6 conditional `DELETE`/`INSERT` | 0.003s | 0.037s | 0.346s |
 
 **Status — GREEN: all six queries complete at every scale, no timeouts.**
 
@@ -270,11 +270,16 @@ The q4 `OPTIONAL` cliff from the first baseline (2026-06-20: 1.45s@100K →
 a nested loop) is gone: the slot hash-probe `LeftJoin`
 ([#116](https://github.com/sunstoneinstitute/horndb/issues/116),
 [#128](https://github.com/sunstoneinstitute/horndb/issues/128) Slice 2) brings
-q4 to **0.334s@1M (~690×) and 6.80s@10M**. The #128 aggregation rework also
-moved q1 (7.92s → 1.24s @10M warm; the warm/cold split is a `COUNT`-pushdown
-effect — cold q1@10M is ~4.0s). The driver's per-query watchdog (records
-`TIMEOUT`, continues to the next query, matching upstream's rdflib behaviour)
-is retained but no longer triggers.
+q4 to **0.251s@1M and 4.69s@10M**. The #128 aggregation rework also moved q1
+(7.92s → 0.709s @10M warm; the warm/cold split is a `COUNT`-pushdown effect —
+cold q1@10M is ~3.7s). The driver's per-query watchdog (records `TIMEOUT`,
+continues to the next query, matching upstream's rdflib behaviour) is retained
+but no longer triggers.
+
+q6 (`DELETE`/`INSERT … WHERE`) dropped 11.52s → **0.346s @10M (33×)** with
+HDB-82: a small quad delta is now merged into the cached WCOJ snapshot instead
+of forcing a full re-index of all six orderings. Its cold run still pays the
+first snapshot build (2.59s @10M).
 
 #### Parallel chunked parsing does not move the read columns (HDB-83, 2026-08-24)
 
@@ -330,6 +335,57 @@ Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
 (`crates/sparql/tests/horn_load_hammer.rs`) for the companion ~10M load-path
 memory findings (transient load-copy + 6-ordering snapshot + `stored_keys`
 duplication).
+
+#### Where HornDB sits against the other eleven engines
+
+Upstream publishes its own numbers in the report page
+(<https://datatreehouse.github.io/trainmarks/> — the values are embedded in
+`index.html` as a `DATA` constant; the repo tree carries no `results/` dir).
+Eleven engines, August 2026, **Apple M3 Max / 36 GB**, best-of-3 warm — the same
+protocol, generator seed, and query files we run, on different hardware from our
+**hornbench** (Ryzen 7 7700, 16 threads, 124 GB). Treat the comparison as
+directional, not as a controlled A/B: only a same-host run settles a close call.
+
+Seconds at xlarge (~10M triples); HornDB from the run above, the rest from
+upstream:
+
+| operation | HornDB | oxigraph | maplib | qlever | jena | rdf4j | graphdb | rdflib |
+|---|---|---|---|---|---|---|---|---|
+| read_turtle | 23.44 | 15.25 | 9.53 | 8.75 | 16.72 | 24.90 | 57.10 | 191.6 |
+| read_ntriples | 20.63 | 13.13 | 9.36 | 8.65 | 16.49 | 13.88 | 54.21 | 154.6 |
+| write_turtle | 3.64 | 3.58 | 1.34 | — | 6.74 | 19.34 | — | 134.7 |
+| write_ntriples | 3.44 | 3.46 | 0.72 | — | 3.89 | 13.18 | — | 17.51 |
+| q1 `COUNT(*)` | 0.709 | 0.786 | 0.073 | 0.002 | 1.837 | 0.678 | 1.414 | 37.0 |
+| q2 group/sum/limit | 3.70 | 2.11 | 0.019 | 0.002 | 3.28 | 0.900 | 2.86 | 32.7 |
+| q3 3-join + filter | 1.23 | 0.390 | 0.040 | 0.005 | 0.329 | 0.165 | 0.616 | 7.60 |
+| q4 `OPTIONAL` + `COUNT DISTINCT` | 4.69 | 1.72 | 0.031 | 0.003 | 3.09 | 1.16 | 3.66 | 48.1 |
+| q5 `CONSTRUCT` | 0.589 | 0.754 | 0.081 | 0.592 | 0.377 | 0.269 | 4.38 | 9.00 |
+| q6 `DELETE`/`INSERT` | 0.346 | 0.035 | 0.020 | — | 0.028 | 0.022 | 0.174 | 0.787 |
+
+Reading it:
+
+- **Writes are our strongest showing.** 3rd of 7 on both serialization paths at
+  10M, level with Oxigraph.
+- **Parsing is mid-pack** — 1.5× behind Oxigraph, 2.7× behind QLever, but 2.4×
+  ahead of GraphDB and 8× ahead of rdflib.
+- **Queries degrade with scale.** At medium HornDB is mid-pack and fastest of
+  all eleven on q5; at 10M it is 10th of 11 on q2, q3, and q4 — the
+  aggregation- and join-heavy queries. Our scaling curve is steeper than the
+  field's.
+- **Oxigraph beats us here**, the opposite of the LDBC SPB-256 nightly where
+  HornDB leads it 50.25 vs 38.08 qps on identical hardware. Hardware alone does
+  not explain the flip: SPB is `OPTIONAL`-heavy with small result sets (where
+  the hash-probe `LeftJoin` pays), while trainmarks q2/q4 are full-scan
+  aggregations over all 10M triples. The weakness is bulk aggregate throughput,
+  not join shape — the same gap SPEC-23 Phase 4 cost-based planning targets.
+- **q6 after HDB-82** is 7th of 8 rather than last by 400×: a real win, still
+  10× behind Oxigraph.
+
+Two caveats on the upstream column. QLever's 2–5 ms for q1–q4 at 10M and
+Neo4j's 11 ms for q4 are result-cache hits under best-of-3 warm, not query
+execution — read them as an upper bound on caching, not as a target. And the
+benchmark is authored by DataTreehouse, the vendor of maplib, which wins most
+rows.
 
 ### Scaffolded but not yet evaluated against targets
 
