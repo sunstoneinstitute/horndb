@@ -659,6 +659,20 @@ gate job; the cargo cache is saved only from `main` (see `.github/AGENTS.md`).
 The closure crate needs SuiteSparse:GraphBLAS locally (being moved to a
 vendored submodule — §7).
 
+### Memory allocator (snmalloc)
+**Status: implemented** (HDB-86 E1). The four shipped binaries —
+`bench-trainmarks`, `harness`, `serve` (SPARQL HTTP), `bench-rdfox` — set
+`#[global_allocator]` to snmalloc. A library cannot set one, so each binary
+declares it itself, behind a **default-on `snmalloc` cargo feature** that is
+both the revert switch and the way to re-run the A/B; CI builds both paths via
+`clippy --all-targets`. Rationale: a bulk load frees ~30M oxrdf terms on the
+main thread that were allocated on parse threads, and glibc `malloc` takes the
+owning arena's lock for every such cross-thread free. Measured on hornbench at
+trainmarks xlarge: **−10.6% on the `parse` phase, −6.3% end-to-end**; mimalloc
+lost the same A/B and is not carried. Numbers in `docs/benchmarks.md`.
+Caveat: E1 measured only the bulk-load path, while `serve` is what the LDBC
+SPB-256 nightly measures — the nightly is the gate on the query path.
+
 ### Integration-test runner (cargo nextest)
 **Status: implemented.** The workspace builds ~90 separate `crates/*/tests/*.rs`
 binaries; cargo's built-in runner executes them serially per binary, which

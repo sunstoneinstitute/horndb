@@ -527,8 +527,20 @@ Conclusions:
    ahead of mimalloc, and it does not require any design commitment.
 2. **It does not fix scaling.** 1→16 threads stays within −3% to −13% whichever
    allocator is used. The channel depth above is what fixes that.
-3. **Adopting one workspace-wide needs the realloc regression handled** — any
-   hot path that grows a very large `Vec` pays it unless it preallocates.
+3. **The realloc regression was the bench driver's, not the engine's.** Only
+   the driver accumulates a whole document into one `Vec`; the engine's loaders
+   batch at `BATCH = 8192` and never build a block that large.
+
+**Outcome: snmalloc adopted.** All four shipped binaries (`bench-trainmarks`,
+`harness`, `serve`, `bench-rdfox`) set the `#[global_allocator]`, each behind a
+default-on `snmalloc` feature that is the revert switch. mimalloc lost the A/B
+and is not carried. The driver now preallocates its parse batch by estimating
+the triple count from the mean line length of a 1 MiB prefix, which is what
+makes the swap a clean win rather than a wash.
+
+`serve` is what the LDBC SPB-256 nightly measures, and E1 only measured the
+bulk-load path — the nightly is the gate on the query path, and disabling the
+feature is the revert.
 
 #### Where HornDB sits against the other eleven engines
 
