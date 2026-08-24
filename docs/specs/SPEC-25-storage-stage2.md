@@ -159,8 +159,14 @@ produce a multi-GB dictionary") settled.
 
 - **Durable id assignments.** Term → id assignments survive restart; ids stay
   append-only and never re-bind (the property pinned snapshots and the WAL
-  both rely on). A reopened store resolves both directions — id → term and
-  term → id — without re-interning the corpus.
+  both rely on). Entries are also never removed: retraction and compaction
+  (S1) do not touch the dictionary, so an id keeps resolving even when only a
+  not-yet-compacted dead row, a pinned snapshot, or a WAL record still names
+  it — dictionary GC is out of scope. Graph names are terms in this same
+  dictionary (`Store::intern_graph_uri`, SPEC-28): a `GraphId` *is* a
+  dictionary id, so durable ids also keep every graph's partition identity
+  stable across reopen. A reopened store resolves both directions — id →
+  term and term → id — without re-interning the corpus.
 - **Candidate structures** (settled by the implementation plan with bench
   evidence, per the SPEC-02 open question): FST / Marisa-trie for the
   term → id direction plus an offset table for id → term; or sorted-string-
@@ -184,8 +190,10 @@ produce a multi-GB dictionary") settled.
 Durability between checkpoints — the SPEC-02 "Stage 2 may add a
 per-predicate-partition WAL" open question, resolved affirmatively.
 
-- **What is logged.** Every committed batch (insert or retract, S1) appends
-  one sequenced WAL record before the commit version becomes visible.
+- **What is logged.** Every committed batch (insert, retract, or combined
+  dels-then-adds apply — S1, SPEC-28 S6) appends one sequenced WAL record
+  before its commit version becomes visible. A batch whose net effect is
+  empty mints no commit version (S1, SPEC-28 S6) and so needs no record.
   Dictionary appends made by the batch are part of the record (or a
   preceding record in the same atomic append), so replay never sees an id
   without its term — the dictionary is at least as durable as the log that
@@ -201,12 +209,19 @@ per-predicate-partition WAL" open question, resolved affirmatively.
 - **Replay.** Recovery = load the last checkpoint (snapshot, S4), then replay
   WAL records since its recorded commit version, arriving at a state
   bit-identical to the pre-crash committed state modulo wall-clock
-  timestamps. Replay is idempotent (records carry commit versions; applying
-  an already-applied record is a no-op).
+  timestamps. Compaction (S1) is a physical rewrite the log does not
+  record, so the equivalence is at the committed *visible* state and its
+  stamps: a store compacted before the crash may recover with dead
+  (already-retracted) rows the compaction had reclaimed. Replay is
+  idempotent (records carry commit versions; applying an already-applied
+  record is a no-op).
 - **Checkpoint + truncation.** A successful checkpoint records its commit
-  version and truncates the log up to it. Checkpoint *scheduling* cadence is
-  SPEC-24 S5's requirement; the truncation and version-recording machinery
-  is this spec's.
+  version and truncates the log up to it. A checkpoint needs no prior
+  compaction: snapshot export reads one pinned view through the S1
+  visibility filter, so dead rows never reach the checkpoint regardless of
+  when `compact()` last ran. Checkpoint *scheduling* cadence is SPEC-24 S5's
+  requirement; the truncation and version-recording machinery is this
+  spec's.
 - **NF5 upgraded.** SPEC-02 NF5's "lost updates between checkpoints are
   acceptable" clause is retired for stores opened with a WAL: after recovery,
   every batch whose WAL record was durably appended (per the configured fsync
@@ -259,9 +274,14 @@ moves data between the two — the seam SPEC-09 later plugs hardware into.
   the same commit per the root sync rule. HBM/CXL label values stay reserved
   for SPEC-09.
 - **MVCC interplay.** Cold partitions hold only tuples whose visibility is
-  settled (live, with no pinned snapshot preceding their `begin`); demotion
-  is a compaction product (S1). This keeps visibility evaluation off the
-  cold-scan hot path.
+  settled (live, with no pinned snapshot preceding their `begin`). S1
+  shipped compaction as explicit-only (`Store::compact()`; the trigger
+  policy is an open follow-up,
+  [#242](https://github.com/sunstoneinstitute/horndb/issues/242)), so
+  nothing guarantees a partition has been compacted before demotion —
+  demotion must itself run (or require) a compaction pass over the
+  partition it demotes before encoding it cold. This keeps visibility
+  evaluation off the cold-scan hot path.
 
 ### S6. Deferred Stage-1 acceptance benches
 
@@ -270,7 +290,12 @@ NUMA-pinned host and record them — closing the Stage-1 ledger this epic
 inherited.
 
 - **Acceptance 2:** LUBM-8000 (1.1 B triples) N-Triples import wall-clock,
-  target ≤30 min.
+  target ≤30 min. (A 2026-08-24 hornbench measurement — HDB-83, commit
+  `9116874` — loaded ~10 M triples in 40.1 s, ~80% of it in the serial
+  `Tier::insert_quad_batch`; parallel parsing did not help and ships off by
+  default. Scaled roughly, that is ~73 min for 1.1 B triples — expect a
+  miss on today's insert path, to be reported under the honesty clause
+  below.)
 - **Acceptance 3:** LUBM-8000 fully-warm footprint via
   `Store::report_footprint()`, target ≤55 GB (50 B/triple budget).
 - **Acceptance 4:** `rdf:type` partition scan on the LUBM-8000 store vs.
@@ -316,8 +341,9 @@ snapshot tests — extend rather than regress). Implementation plans
    stores, but landable in any order relative to S1–S3.
 5. **S5 — HDT cold tier + tiering seam**
    ([#229](https://github.com/sunstoneinstitute/horndb/issues/229)).
-   Consumes the S4 encoding and S1 compaction; delivers the #148 tier-bytes
-   metric deferral.
+   Consumes the S4 encoding and S1 compaction (explicit-only; S5 supplies
+   the demotion-time trigger); delivers the #148 tier-bytes metric
+   deferral.
 6. **S6 — deferred Stage-1 acceptance benches**
    ([#230](https://github.com/sunstoneinstitute/horndb/issues/230)).
    Rows 2/3/4 can run immediately on today's store; re-run any row whose
@@ -338,16 +364,18 @@ phases.
    interleaved writes. The sparql `DELETE DATA` overlay is retired or
    reduced to a shim.
 2. **Restart without re-import (S2).** A store closed and reopened from disk
-   resolves id → term and term → id for the full LUBM-100 dictionary without
-   re-interning; reopen time is I/O-bound (mmap + header validation), not
-   proportional to corpus re-parse. Measured probe costs are recorded next
-   to the S2 budgets.
+   resolves id → term and term → id for the full LUBM-100 dictionary — plus
+   the graph name and `GraphId` binding of at least one named graph —
+   without re-interning; reopen time is I/O-bound (mmap + header
+   validation), not proportional to corpus re-parse. Measured probe costs
+   are recorded next to the S2 budgets.
 3. **Kill-and-replay is bit-identical (S3).** A crash test — commit batches,
    kill the process without checkpoint, recover — reproduces the exact
    committed state (triples, quads, dictionary, visibility stamps)
-   bit-identical modulo wall-clock timestamps, under each fsync policy's
-   documented window. Torn-tail truncation is exercised. SPEC-24 S5's
-   contract tests pass against this log.
+   bit-identical modulo wall-clock timestamps and any dead rows an explicit
+   compaction had reclaimed (compaction is not logged), under each fsync
+   policy's documented window. Torn-tail truncation is exercised. SPEC-24
+   S5's contract tests pass against this log.
 4. **Quad stores checkpoint (S4).** A store holding named-graph data
    exports and re-imports to exact quad-set equality; a Stage-1
    default-graph snapshot still imports; a version-bumped snapshot is
@@ -385,11 +413,11 @@ phases.
   heavy IRI corpora; SSTable-with-front-coding is simpler and mirrors the
   snapshot encoding. The multi-GB-at-10B-triples sizing means the loser may
   differ by memory, not speed. Bench on real corpora before committing.
-- **hornbench capacity.** LUBM-8000 at ≤50 B/triple needs ~55 GB resident;
-  if hornbench's DRAM cannot hold it fully warm, acceptance 3 cannot run as
-  written on that host. The honesty clause covers reporting, but a capacity
-  miss may force either a bigger host or an explicitly rescaled criterion —
-  surfaced early in S6, not discovered at the end.
+- **hornbench capacity — resolved.** hornbench has 124 GB DRAM
+  (`docs/benchmarks.md`, trainmarks reference-hardware note), so a ~55 GB
+  fully-warm LUBM-8000 store fits with headroom and acceptance 3 can run as
+  written on that host. Residual risk is only a footprint miss far past the
+  55 GB budget, which the honesty clause covers.
 - **Cold-scan decompression vs. NF4.** The ≤2× read-amplification bound over
   a contiguous encoded scan assumes cheap front-coding/VByte decode;
   visibility filtering or ordering materialization on cold data could blow
