@@ -33,7 +33,8 @@ lazily at scrape time rather than maintained continuously.
   running an OpenTelemetry Collector that **scrapes** the `/metrics` endpoint
   (Prometheus receiver) and re-exports over OTLP off-box. Nothing in HornDB changes
   for that path.
-- No per-tuple / per-`seek()` timing (see §5.3 — the histogram cost boundary).
+- No per-tuple / per-`seek()` **timing histograms** (see §5.3 — the timing-histogram
+  cost boundary). Tight loops are measured with count+sum counters instead (§5.4).
 
 ## 3. Library decision
 
@@ -127,17 +128,112 @@ scrape-time `Collector` that reads the live struct (`TierStats`, etc.) on demand
 Steady-state cost is zero; the numbers materialize only when Prometheus scrapes
 (typically every 15–60 s).
 
-### 5.3 The histogram cost boundary
+### 5.3 The timing-histogram cost boundary
 
-A timing histogram costs an `Instant::now()` (~20 ns `clock_gettime`) plus a bucket
-atomic. That is fine **around a whole query, a fixpoint round, a closure call, or an
-HTTP request**. It is **too expensive per-tuple** in the leapfrog inner loop. The design
-draws the line explicitly:
+A timing histogram costs an `Instant::now()` (~20 ns `clock_gettime` through the vDSO)
+plus the `observe` itself. **In the library we use, `observe` is not a single atomic.**
+`prometheus_client::Histogram` is an `Arc<Mutex<Inner>>` — a `parking_lot` mutex around
+a `Vec<(f64, u64)>` of buckets that `observe` walks linearly. One observation runs well
+over 100 ns uncontended, and it serializes across threads.
+
+**This is a property of `prometheus_client`, not of histograms.** A histogram observe can
+be made to run in ~50 ns: integer (not `f64`) bucket bounds, a binary search rather than
+a linear walk, two relaxed atomic `fetch_add`s rather than a mutex, and the sum kept on
+its own cache line. `github.com/stigsb/prometheus-cpp` — already cited in §3 for its
+typed-label philosophy — implements exactly that, and §5.4 uses its local-accumulator
+design. So the boundary below is a limit of the current dependency, and replacing that
+`Histogram` is a legitimate way to move it rather than work around it.
+
+That is fine **around a whole query, a fixpoint round, a closure call, or an HTTP
+request**. It is **far too expensive per-tuple** in the leapfrog inner loop, where the
+instrument would cost more than the work it measures. The design draws the line
+explicitly:
 
 - **Yes:** per-query, per-update-tick, per-fixpoint-round, per-closure-call,
   per-HTTP-request, per-load.
 - **No:** per-`seek()`, per-`next()`, per-tuple. wcoj inner-loop counters (e.g. seeks per
   query) are plain counters incremented and read once at query completion, not timed.
+
+This rules out **touching a shared histogram** inside a tight loop. It rules out neither
+measuring those loops nor keeping their distribution — see §5.4.
+
+### 5.4 Local accumulation, merged once — measuring inside tight loops
+
+The rule for any loop below the §5.3 boundary is the same regardless of instrument:
+**touch no shared metric handle while the loop runs.** Accumulate in local state, merge
+once on the way out. Two shapes, picked by whether the distribution is worth keeping.
+
+**Take the clock outside the loop either way.** One `Instant::now()` before and one
+after. The ~20 ns read amortizes to nothing across the iterations; never call it per
+iteration.
+
+#### 5.4.1 Count + sum, when the mean is enough
+
+A pair of counters — `..._total` for operations or bytes, `..._nanoseconds_total` for
+elapsed time. Prometheus recovers the mean as `rate(sum) / rate(count)`. In the loop this
+is a `u64 +=` on a local: a register add, no atomic, no cache traffic.
+
+This is the right instrument where per-iteration cost is close to uniform, which is the
+normal case here — HornDB has no garbage collector to inject pauses and processes
+columnar data with regular per-tuple work. What it gives up is the shape: no P99, no
+visible bimodality.
+
+#### 5.4.2 Local bucket array, when the shape matters
+
+Keeping the distribution does **not** require paying a histogram's cost in the loop.
+Mirror `LocalHistogram` from `stigsb/prometheus-cpp`: hold a plain, non-atomic bucket
+array plus a sum alongside the real histogram, binary-search the bounds and bump a local
+`counts[idx]` per observation, then merge into the shared histogram once at the end. The
+merge skips empty buckets, so it costs one atomic per *occupied* bucket plus one for the
+sum — not one per observation.
+
+The loop pays a binary search and two local increments. The distribution survives intact.
+
+Prefer this over 5.4.1 wherever a loop is genuinely spiky and the spike is the thing worth
+seeing: allocation-bound sinks, or partition builds crossing `DEFAULT_HOT_THRESHOLD`,
+where the eager/lazy object-major decision makes per-partition cost bimodal by
+construction. A mean hides exactly the effect you are looking for there.
+
+A Rust equivalent needs integer bounds (nanoseconds are integers — comparing them as
+`f64` buys nothing and costs conversions), `partition_point` for the search, a
+`[u64; N]` local, and `[AtomicU64; N]` in the shared histogram. None of that exists in
+`prometheus_client` today; building it is the §5.3 escape route.
+
+#### 5.4.3 Flush cadence
+
+- **Bounded, known iteration count** — merge once after the loop. A loop over one
+  partition, one batch, or one chunk touches its metrics exactly once, on the way out.
+- **Unbounded stream** — merge every 100–1000 iterations so a long-running loop still
+  reports progress between scrapes. The tighter the body, the larger the interval.
+
+### 5.5 Concurrent accumulators must not share a cache line
+
+This applies the moment a parallel loop flushes into counters — for example the chunked
+bulk loaders, where several parse threads run at once.
+
+A `prometheus_client::Counter` is an `Arc<AtomicU64>`. Each counter is its own heap
+allocation and `AtomicU64` is 8-byte aligned, so **no single counter can straddle two
+64-byte L1 cache lines**. That failure mode does not exist with these types.
+
+The hazard that does exist is **false sharing**: two independently allocated counters can
+land in the same 64-byte line, and two threads incrementing them then bounce that line
+between cores. The counts stay correct, but each increment pays a cache-coherence round
+trip — tens to hundreds of cycles instead of a few. Rules:
+
+- **Flush once per thread, at the end of its work**, whenever the thread count is bounded
+  and known. One atomic add per thread cannot contend meaningfully, whatever the layout.
+- **If a parallel loop must flush repeatedly**, give each thread its own accumulator
+  padded to a full cache line (a `#[repr(align(64))]` wrapper around the value), sum them
+  once at the end, and touch the shared counter once. Never let N threads `fetch_add` the
+  same counter from inside a loop.
+- **Do not assume you control placement.** With `Arc<AtomicU64>` the allocator decides
+  where counters land, so two "independent" hot counters may share a line. Padding is
+  only available to you on accumulators you own — which is another reason to keep the
+  hot path on local or per-thread state and touch the registry once.
+- **Inside a metric, separate the contended fields.** `stigsb/prometheus-cpp` puts its
+  histogram's `sum_` on its own cache line (`alignas(cache_line_size)`) so the running
+  sum does not share a line with the bucket array every observation also touches. Any
+  replacement histogram we build should do the same.
 
 ## 6. Export
 
