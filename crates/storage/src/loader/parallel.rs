@@ -9,13 +9,15 @@
 //! * the caller's thread drains the chunk channels **in document order** and
 //!   does all interning and tier insertion itself.
 //!
-//! Keeping the intern step on one thread in document order is deliberate. It
+//! Keeping the intern step on one thread in document order is deliberate: it
 //! makes the parallel path produce byte-identical store contents to the serial
 //! path — same triples, same dictionary, same term ids — so the two are
-//! interchangeable and the differential test can compare them exactly. It also
-//! sidesteps the dictionary's reverse-map write lock
-//! (`RwLock<Vec<Term>>`, `crate::dictionary`), which every *new* term takes and
-//! which would serialise a parallel-intern design anyway.
+//! interchangeable and the differential tests can compare them exactly.
+//! Interning on the chunk threads instead would be a little faster in
+//! isolation (it scales ~3.9× on 16 cores, so the dictionary's reverse-map
+//! write lock is *not* the bottleneck it was assumed to be) but it would make
+//! term ids depend on thread scheduling, and it does not help the number that
+//! matters — see [`load_threads`] for why the whole thing is off by default.
 //!
 //! The bounded channels cap memory: at most `CHANNEL_DEPTH * BATCH` parsed
 //! items are in flight per chunk.

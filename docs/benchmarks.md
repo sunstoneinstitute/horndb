@@ -282,16 +282,17 @@ is retained but no longer triggers.
 bulk loaders gained a slice-based parallel entry point beside the streaming
 one (`crates/storage/src/loader/parallel.rs`). It does **not** pay, and the
 default is serial (`HORNDB_LOAD_THREADS=auto` turns it on). Measured on
-`hornbench` (16 cores, release, commit `a0771e7`, trainmarks xlarge ≈10M
+`hornbench` (16 cores, release, commit `49ddaf3`, trainmarks xlarge ≈10M
 triples):
 
-| operation | 1 thread | 16 threads |
-|---|---|---|
-| `read_turtle` (driver, end-to-end) | 23.06s | 23.04s |
-| `read_ntriples` (driver, end-to-end) | 19.57s | 18.77s |
+| operation | 1 thread | 16 threads | change |
+|---|---|---|---|
+| `read_turtle` (driver, end-to-end) | 23.60s | 22.72s | −3.7% |
+| `read_ntriples` (driver, end-to-end) | 20.08s | 18.97s | −5.5% |
 
-Best of two runs each. Turtle gains nothing; N-Triples gains ~4%, which is
-inside run-to-run noise.
+Best of two runs each; the other columns of the trainmarks table are
+unaffected. A few percent, against a parser that on its own runs 9× faster on
+16 threads.
 
 The phase breakdown says why. Same host, same data, N-Triples:
 

@@ -21,15 +21,22 @@
 //! copies them into every chunk parser; a `@prefix` or `@base` declared later
 //! is invisible to the chunks after it.
 //!
+//! There is a second gap the docs do not mention: the chunker copies the
+//! leading prefixes into each chunk parser but **not** the base IRI. A base
+//! the caller passes in survives (it is set before the split); a `@base`
+//! *directive* does not, even a leading one.
+//!
 //! So the parallel path is reached only by asking for it —
-//! [`load_turtle_slice`], [`for_each_turtle_batch`], or setting
-//! `HORNDB_PARALLEL_TURTLE=1` for [`load_turtle_file`] — and even then
-//! [`turtle_split_is_safe`] must clear the document first. It rejects any
-//! document with a directive after the leading directive block, and such a
-//! document falls back to a serial parse of the same bytes. The residual risk
-//! `oxttl` names — a literal that itself contains three parseable triples,
-//! which could fool the chunker's boundary heuristic — is not detectable
-//! without parsing, and is the reason the opt-in exists.
+//! [`load_turtle_slice`], [`for_each_turtle_batch`], or setting **both**
+//! `HORNDB_PARALLEL_TURTLE=1` and `HORNDB_LOAD_THREADS` for
+//! [`load_turtle_file`]. Two knobs, because Turtle's split carries a soundness
+//! caveat that the line-based N-Triples/N-Quads split does not. Even then
+//! [`turtle_split_is_safe`] must clear the document; a rejected one falls back
+//! to a serial parse of the same bytes.
+//!
+//! The residual risk `oxttl` names — a literal that itself contains three
+//! parseable triples, which could fool the chunker's boundary heuristic — is
+//! not detectable without parsing, and is the reason the opt-in exists.
 
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
