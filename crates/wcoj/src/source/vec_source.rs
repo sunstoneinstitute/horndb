@@ -20,6 +20,7 @@ use crate::source::{OrderedTripleIter, TripleSource};
 
 /// One ordering's sorted rows, column-major. `levels[d][row]` is that row's
 /// value at trie depth `d`; all three columns have the same length.
+#[derive(Clone)]
 struct TripleColumns {
     levels: [Vec<TermId>; 3],
 }
@@ -75,6 +76,10 @@ impl<'a> SortedColumns<'a> {
     }
 }
 
+// `Clone` lets `HornBackend` pre-warm the `DefaultStrict`/`DefaultUnion` twin
+// scope from an already-built source (an O(n) copy) instead of a second
+// O(n log n) `from_triples` rebuild — see `wcoj_snapshot` in horn.rs.
+#[derive(Clone)]
 pub struct VecTripleSource {
     /// One sorted, column-major index per ordering.
     sorted: HashMap<Ordering, TripleColumns>,
