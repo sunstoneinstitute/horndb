@@ -30,6 +30,12 @@ Leapfrog Triejoin executor, trie iterators, planner.
   correct or not profitable. If you change the sorted-and-deduplicated
   invariant, leapfrog correctness breaks — `apply_delta_matches_full_rebuild`
   is the guard.
+- **`VecTripleSource` is `Clone` (HDB-97).** An `O(n)` deep copy of the
+  already-sorted orderings, against `from_triples`'s `O(n log n)` rebuild.
+  `horndb-sparql`'s `HornBackend` uses it to clone its memoised
+  `DefaultStrict` snapshot into `DefaultUnion` (or vice versa) when a store's
+  graph shape makes the two read the same triples, instead of paying a second
+  six-sort-pass build for an identical source.
 - **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
   production executor (`executor/wcoj.rs::BatchIter`) has a k==2
   `horndb_simd::intersect` fast path: at prime time, if both contributing iters

@@ -286,6 +286,20 @@ the graph it names, through `Store::apply_quads`/`clear_graph`. See "GRAPH
 patterns and the query dataset" above for the read side and "Named-graph
 Update" below for the write side.
 
+Of the two memoized default-graph scopes, `DefaultStrict` (what SPARQL
+Update's WHERE clause resolves, absent `USING`/`WITH`) and `DefaultUnion`
+(what plain `SELECT`/`CONSTRUCT` resolve) read the *same* triples whenever no
+named graph besides the default one holds data — a single-tenant store. HDB-97
+found this meant a fresh store's first update and first query each paid a full
+six-sort-pass rebuild for what was, in that common shape, an identical source
+(the trainmarks cold-start regression: `q6`'s WHERE evaluation built
+`DefaultStrict`, then `q1` immediately rebuilt `DefaultUnion` from scratch).
+`wcoj_snapshot` now clones an already-cached twin's sorted data (`O(n)`,
+against the `O(n log n)` rebuild) once the second scope is actually asked for
+— lazily, so a workload that only ever touches one of the two pays nothing
+extra, and each scope keeps its own `Arc` so a later small write can still
+merge into either in place (`apply_delta_to_snapshots`).
+
 ### Non-recursive property paths (#49)
 
 `translate.rs::translate_path` lowers the non-recursive path operators to

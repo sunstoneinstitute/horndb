@@ -279,7 +279,39 @@ but no longer triggers.
 q6 (`DELETE`/`INSERT … WHERE`) dropped 11.52s → **0.452s @10M (25×)** with
 HDB-82: a small quad delta is now merged into the cached WCOJ snapshot instead
 of forcing a full re-index of all six orderings. Its cold run still pays the
-first snapshot build (2.59s @10M).
+first snapshot build.
+
+#### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
+
+`q6` always runs first in the driver, and its `WHERE` clause resolves the
+`DefaultStrict` scope (SPARQL Update reads the store's default graph, absent
+`USING`/`WITH`); `q1`-`q5` are plain `SELECT`/`CONSTRUCT` and resolve
+`DefaultUnion`. Both are whole-store WCOJ snapshots, each memoised
+independently — so on trainmarks' single-default-graph data (where the two
+scopes read the exact same triples), `q6`'s cold run built one full
+six-sort-pass snapshot and `q1`'s cold run — the first `SELECT` to run —
+built a second one from scratch for what was, in substance, identical data.
+That second build *was* `q1`'s entire cold-start cost.
+
+`wcoj_snapshot` now clones an already-cached twin scope's sorted data
+(`O(n)`) instead of rebuilding (`O(n log n)`) once the second scope is
+actually asked for — see `crates/sparql/INTEGRATION-NOTES.md`'s "GRAPH
+patterns" section. Controlled A/B on `hornbench` (commit `e2b290e` with and
+without the fix, back-to-back, xlarge/10M):
+
+| operation | before | after | change |
+|---|---|---|---|
+| `q1_count_cold` | 3.684s | 0.655s | **−82%** |
+| `q1_count` (warm) | 0.409s | 0.407s | ~0 |
+| `q6_delete_insert_cold` | 4.533s | 4.390s | ~0 |
+| `q6_delete_insert` (warm) | 1.244s | 1.300s | ~0 |
+| q2/q3/q4/q5, cold and warm | — | — | ~0 (±2%, noise) |
+
+No other query moved outside noise in either direction — the fix is scoped
+to exactly the redundant-build cost it targets. (The warm-path `q6`/`q1`
+absolute values here are higher than the `b020f53` table above; that drift
+predates this change — see the commits between the two on `main` — and is
+out of this fix's scope.)
 
 #### Parallel chunked parsing does not move the read columns (HDB-83, 2026-08-24)
 
