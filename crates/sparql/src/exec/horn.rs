@@ -244,6 +244,17 @@ impl SnapshotScope {
             SnapshotScope::DefaultUnion | SnapshotScope::DefaultStrict
         )
     }
+
+    /// The other whole-store scope, when a store shaped like
+    /// [`HornBackend::default_scopes_coincide`] makes it read the exact same
+    /// triples as this one. `None` for every other scope.
+    fn default_twin(&self) -> Option<SnapshotScope> {
+        match self {
+            SnapshotScope::DefaultStrict => Some(SnapshotScope::DefaultUnion),
+            SnapshotScope::DefaultUnion => Some(SnapshotScope::DefaultStrict),
+            _ => None,
+        }
+    }
 }
 
 /// The empty graph: zero rows, no error. (Distinct from `scope.rs`'s
@@ -1019,21 +1030,62 @@ impl HornBackend {
         if !scope.memoisable() {
             return Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
         }
-        {
+        // Hit, or a twin worth cloning from, decided under one lock
+        // acquisition so it is atomic with whatever is cached right now.
+        // `DefaultStrict` and `DefaultUnion` read the same triples whenever
+        // no named graph besides the default-graph sentinel holds data
+        // (HDB-97): a single-tenant store, and trainmarks-shaped workloads
+        // generally. SPARQL Update's WHERE clause resolves `DefaultStrict`
+        // while plain `SELECT`/`CONSTRUCT` resolve `DefaultUnion` (see
+        // `apply_delete_insert` / `ScanScope::DEFAULT`), so a fresh store's
+        // first update and first query used to each pay a full six-sort-pass
+        // build for what is, in that common shape, the identical source.
+        //
+        // The clone only happens once *this* scope is actually asked for and
+        // a same-content twin is already cached — never eagerly when the
+        // twin itself is built. Deferring it this way means a workload that
+        // only ever touches one of the two scopes (e.g. `q6`'s three warm
+        // re-runs, which precede any `SELECT` in the trainmarks driver) never
+        // pays to keep an unused twin's delta merged; it starts paying only
+        // once a second scope is actually read.
+        let twin_src: Option<Arc<VecTripleSource>> = {
             let guard = self.snapshots.lock().expect("snapshot lock poisoned");
             if let Some(s) = guard.get(scope) {
                 return Arc::clone(s);
             }
-        }
-        // Build with the lock RELEASED: six sort passes over the whole store
-        // must not stall a concurrent reader whose own scope is already
-        // cached (readers do run concurrently — `server/query.rs`). A race
-        // duplicates the build and `or_insert` keeps the first result; the
+            scope
+                .default_twin()
+                .and_then(|twin| guard.get(&twin).cloned())
+        };
+        // Build (or clone) with the lock RELEASED: neither a six-sort-pass
+        // rebuild nor an O(n) clone of the twin's already-sorted data must
+        // stall a concurrent reader whose own scope is already cached
+        // (readers do run concurrently — `server/query.rs`). A race
+        // duplicates the work and `or_insert` keeps the first result; the
         // two are interchangeable, since a write needs `&mut self` and so
-        // cannot interleave with any read.
-        let built = Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
+        // cannot interleave with any read. The equivalence is checked here,
+        // not assumed from when the twin was built — needed to still hold at
+        // this instant, not merely at some earlier one (though in practice
+        // any write that would break it invalidates the whole memo, so there
+        // is never a stale twin to clone from in the first place).
+        let built = match twin_src {
+            Some(twin) if self.default_scopes_coincide() => (*twin).clone(),
+            _ => VecTripleSource::from_triples(self.scope_triples(scope)),
+        };
         let mut guard = self.snapshots.lock().expect("snapshot lock poisoned");
-        Arc::clone(guard.entry(scope.clone()).or_insert(built))
+        Arc::clone(guard.entry(scope.clone()).or_insert(Arc::new(built)))
+    }
+
+    /// True when [`SnapshotScope::DefaultStrict`] and [`SnapshotScope::DefaultUnion`]
+    /// cover the exact same triples for the store's current graph shape: no
+    /// non-reserved named graph holds data besides the default-graph sentinel
+    /// itself. See [`Self::wcoj_snapshot`]'s twin pre-warm.
+    fn default_scopes_coincide(&self) -> bool {
+        let snap = self.store.snapshot();
+        snap.graphs()
+            .into_iter()
+            .filter(|g| !reserved_graph(&snap, *g))
+            .all(|g| g == DEFAULT_GRAPH)
     }
 
     /// Every `(s, p, o)` id-triple visible in `scope`, from one pinned store
@@ -2326,7 +2378,9 @@ mod tests {
         }
 
         // Warm the one memoisable entry a bare BGP hits (`SnapshotScope::
-        // DefaultUnion`, see `resolve_scope`).
+        // DefaultUnion`, see `resolve_scope`). Nothing has asked for the
+        // `DefaultStrict` twin yet, so it is not cloned in eagerly (HDB-97's
+        // twin-clone-on-miss is lazy — see `wcoj_snapshot`).
         let patterns = vec![TriplePattern {
             subject: Term::Var(Var::new("s")),
             predicate: Term::Iri("http://ex/p".into()),
@@ -2368,6 +2422,83 @@ mod tests {
             after.total_triples(),
             11,
             "the merged snapshot reflects the new row"
+        );
+    }
+
+    /// HDB-97: a store with only the default graph makes `DefaultStrict` and
+    /// `DefaultUnion` read the same triples (SPARQL Update's WHERE clause
+    /// resolves `DefaultStrict`, plain `SELECT`/`CONSTRUCT` resolve
+    /// `DefaultUnion` -- see `apply_delete_insert` / `ScanScope::DEFAULT`).
+    /// Once one is built, asking for the other must clone it (cheap) rather
+    /// than pay its own six-sort-pass rebuild -- but only once it is
+    /// actually asked for; building the first one alone must not eagerly
+    /// warm the second (see `wcoj_snapshot`'s lazy clone-on-miss).
+    #[test]
+    fn default_scope_twin_clones_instead_of_rebuilding_once_asked_for() {
+        let mut b = HornBackend::new();
+        for i in 0..10 {
+            b.insert_triple(
+                Term::Iri(format!("http://ex/s{i}")),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri(format!("http://ex/o{i}")),
+            );
+        }
+
+        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
+        assert_eq!(
+            b.memo_len(),
+            1,
+            "building DefaultStrict alone must not eagerly warm its twin"
+        );
+
+        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        assert_eq!(
+            b.memo_len(),
+            2,
+            "asking for the twin now caches it too (via clone, not rebuild)"
+        );
+        assert_eq!(union.total_triples(), 10, "twin has the same rows");
+        assert!(
+            !Arc::ptr_eq(&strict, &union),
+            "each scope must own an independent Arc, so a later delta merge \
+             can `Arc::get_mut` one without the other's strong ref blocking it"
+        );
+    }
+
+    /// The twin clone must not fire when a named graph holds data besides
+    /// the default graph: there `DefaultStrict` and `DefaultUnion` genuinely
+    /// read different triples, so cloning one into the other would cache a
+    /// wrong answer.
+    #[test]
+    fn default_scope_twin_clone_skipped_when_graphs_diverge() {
+        let mut b = HornBackend::new();
+        b.insert_triple(
+            Term::Iri("http://ex/s".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/default".into()),
+        );
+        let iri = |v: &str| OxTerm::NamedNode(NamedNode::new_unchecked(v));
+        b.insert_oxrdf_in_named_graph(
+            &iri("http://ex/g0"),
+            &iri("http://ex/s"),
+            &iri("http://ex/p"),
+            &iri("http://ex/named"),
+        )
+        .unwrap();
+
+        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
+        assert_eq!(b.memo_len(), 1, "only DefaultStrict is cached so far");
+        assert_eq!(
+            strict.total_triples(),
+            1,
+            "DefaultStrict sees only the default graph"
+        );
+
+        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        assert_eq!(
+            union.total_triples(),
+            2,
+            "DefaultUnion sees both graphs -- genuinely not DefaultStrict's twin here"
         );
     }
 
