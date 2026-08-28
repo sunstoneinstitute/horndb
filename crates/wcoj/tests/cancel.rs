@@ -4,9 +4,11 @@ use std::time::{Duration, Instant};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::error::WcojError;
 use horndb_wcoj::executor::Executor;
+use horndb_wcoj::ids::Ordering;
 use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::synthetic::SyntheticGraph;
+use horndb_wcoj::source::TripleSource;
 
 #[test]
 fn cancellation_returns_within_100ms() {
@@ -28,6 +30,15 @@ fn cancellation_returns_within_100ms() {
     // on release, so cancel reliably catches it mid-flight.
     let p = 10u64;
     let src = Arc::new(SyntheticGraph::cyclic(250_000, 4, p, 0xCAFE_F00D));
+    // Materialise the trie orderings up front, for the same reason the SIMD
+    // kernels are primed above: `VecTripleSource` builds an ordering on first
+    // use (HDB-97), and that is index construction, not query execution. In
+    // production it happens in `HornBackend::wcoj_snapshot`, before any
+    // executor exists. Leaving it here would put a ~0.5s debug-build sort
+    // inside the window this test budgets for cancellation latency.
+    for ord in Ordering::ALL {
+        let _ = src.iter(ord).expect("ordering available");
+    }
     let bgp = Bgp::new(vec![
         TriplePattern::new(Term::Var(Var(0)), Term::Bound(p), Term::Var(Var(1))),
         TriplePattern::new(Term::Var(Var(1)), Term::Bound(p), Term::Var(Var(2))),

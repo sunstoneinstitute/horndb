@@ -278,8 +278,8 @@ but no longer triggers.
 
 q6 (`DELETE`/`INSERT … WHERE`) dropped 11.52s → **0.452s @10M (25×)** with
 HDB-82: a small quad delta is now merged into the cached WCOJ snapshot instead
-of forcing a full re-index of all six orderings. Its cold run still pays the
-first snapshot build.
+of forcing a full re-index of all six orderings. Its cold run paid the first
+snapshot build until HDB-97 made that build lazy (below).
 
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 
@@ -312,6 +312,46 @@ to exactly the redundant-build cost it targets. (The warm-path `q6`/`q1`
 absolute values here are higher than the `b020f53` table above; that drift
 predates this change — see the commits between the two on `main` — and is
 out of this fix's scope.)
+
+#### `q6`'s cold start built five trie orderings nobody read (HDB-97, 2026-08-28)
+
+`VecTripleSource` materialised all six trie orderings when a snapshot was
+built. Instrumenting a whole trainmarks run showed only **three** are ever
+requested (`Spo`, `Pso`, `Pos`) and `q6`'s cold run requests **one** — so five
+of the six sort passes, and ~1.2 GB of index at 10M triples, were built for
+nobody.
+
+Orderings are now built on first use. One — the *anchor*, `Pso` — is built
+with the snapshot; the rest derive from it when something asks. `Pso` is the
+anchor because `horndb-storage`'s snapshot scan already yields
+predicate-major, subject-major order, so building it is a linear pass rather
+than a sort. Cost shifts from "six sorts before the first query" to "one sort
+per ordering a query actually reads, when it reads it". The warm path gets the
+same treatment for free: `apply_delta` merges a delta into the orderings that
+exist, not all six.
+
+Controlled A/B on `hornbench` (`419f921` with and without the change,
+back-to-back, xlarge/10M; the "after" column is the mean of two runs that
+agreed within 1% except `q6_cold`, which spanned 1.71–2.00s):
+
+| operation | before | after | change |
+|---|---|---|---|
+| `q6_delete_insert_cold` | 5.039s | 1.859s | **−63%** |
+| `q6_delete_insert` (warm) | 1.314s | 0.521s | **−60%** |
+| `q1_count_cold` | 0.629s | 0.465s | −26% |
+| `q3_join_3_entities_cold` | 1.163s | 1.773s | **+52%** |
+| q2/q4/q5 cold, all six warm | — | — | ~0 (±2%, noise) |
+| the four I/O rows | — | — | ~0 (±2%, noise) |
+
+`q3` is the honest other side of the trade: it is the only query that reads
+`Pos`, and it now pays that one sort itself instead of finding it prebuilt.
+Summed over the six cold runs the suite is **2.6s faster**, and no warm number
+regressed. A cheaper derive for `q3` — `Pos` from `Pso` is a per-predicate
+re-sort of an already predicate-major index, not a global sort — is the
+follow-up, tracked as `HDB-98`.
+
+Memory falls with the sort passes: a 10M-triple snapshot holds one ordering
+(~240 MB) plus whatever queries ask for, against six (~1.4 GB) before.
 
 #### Parallel chunked parsing does not move the read columns (HDB-83, 2026-08-24)
 

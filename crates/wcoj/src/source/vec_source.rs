@@ -1,10 +1,20 @@
-//! `VecTripleSource` — sorted, column-major test double for `TripleSource`.
+//! `VecTripleSource` — sorted, column-major triple source for the executor.
 //!
-//! All six orderings are materialised eagerly; suitable for tests and small
-//! benches up to a few million triples. They can also be maintained in place:
-//! [`VecTripleSource::apply_delta`] merges a batch of retracted and inserted
-//! triples into every ordering, so a caller holding a cached source need not
-//! rebuild it after a small write.
+//! One ordering — the **anchor**, [`ANCHOR_ORDERING`] — is materialised when the
+//! source is built. The other five are built on first use, each derived from the
+//! anchor. Nothing pays to index an ordering no query asks for (HDB-97): a whole
+//! benchmark suite typically touches two or three of the six, and at 10M triples
+//! one ordering is ~240 MB and one sort pass.
+//!
+//! The anchor is `Pso` because that is the order `horndb-storage` already scans
+//! in — predicate-major, subject-major — so building it from a store snapshot is
+//! a linear pass, not a sort. Any other input order costs one ordinary sort.
+//!
+//! Orderings can also be maintained in place: [`VecTripleSource::apply_delta`]
+//! merges a batch of retracted and inserted triples into the anchor and into
+//! whichever other orderings are already built, so a caller holding a cached
+//! source need not rebuild it after a small write. An ordering built *after* a
+//! delta derives from the already-updated anchor, so both paths agree.
 //!
 //! Each ordering is stored **column-major** (struct-of-arrays): three
 //! `Vec<TermId>`, one per trie level, instead of one `Vec<(TermId, TermId,
@@ -12,9 +22,9 @@
 //! SIMD primitives (`horndb_simd::lower_bound`, `horndb_simd::intersect`) read
 //! them directly — no per-level copy out of a strided row layout (SPEC-03 NF2).
 
-use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use crate::error::{Result, WcojError};
+use crate::error::Result;
 use crate::ids::{Ordering, TermId, Triple};
 use crate::source::{OrderedTripleIter, TripleSource};
 
@@ -26,6 +36,28 @@ struct TripleColumns {
 }
 
 impl TripleColumns {
+    /// Sort `rows` (already in the target ordering's axis order), drop
+    /// duplicates, and split them into three contiguous columns.
+    fn build(mut rows: Vec<(TermId, TermId, TermId)>) -> Self {
+        rows.sort_unstable();
+        rows.dedup();
+        let mut levels = [
+            Vec::with_capacity(rows.len()),
+            Vec::with_capacity(rows.len()),
+            Vec::with_capacity(rows.len()),
+        ];
+        for (l0, l1, l2) in rows {
+            levels[0].push(l0);
+            levels[1].push(l1);
+            levels[2].push(l2);
+        }
+        Self { levels }
+    }
+
+    fn len(&self) -> usize {
+        self.levels[0].len()
+    }
+
     fn view(&self) -> SortedColumns<'_> {
         debug_assert!(
             self.levels[0].len() == self.levels[1].len()
@@ -76,63 +108,100 @@ impl<'a> SortedColumns<'a> {
     }
 }
 
+/// The ordering every `VecTripleSource` materialises up front and derives the
+/// other five from. `Pso` because `horndb_storage`'s snapshot scan already
+/// yields `(predicate, subject, object)` order, so building it is a linear pass.
+pub const ANCHOR_ORDERING: Ordering = Ordering::Pso;
+
 // `Clone` lets `HornBackend` pre-warm the `DefaultStrict`/`DefaultUnion` twin
-// scope from an already-built source (an O(n) copy) instead of a second
-// O(n log n) `from_triples` rebuild — see `wcoj_snapshot` in horn.rs.
+// scope from an already-built source (an O(n) copy of whatever that source has
+// materialised) instead of a second `from_triples` rebuild — see
+// `wcoj_snapshot` in horn.rs.
 #[derive(Clone)]
 pub struct VecTripleSource {
-    /// One sorted, column-major index per ordering.
-    sorted: HashMap<Ordering, TripleColumns>,
+    /// [`ANCHOR_ORDERING`]'s sorted, column-major index. Always present; every
+    /// other ordering is derived from it.
+    anchor: TripleColumns,
+    /// The other five orderings, built on first request. Indexed by
+    /// [`Ordering::index`]; the anchor's own slot is never filled.
+    derived: [OnceLock<TripleColumns>; 6],
     total: usize,
 }
 
 impl VecTripleSource {
     pub fn from_triples(triples: Vec<Triple>) -> Self {
         let total = triples.len();
-        let mut sorted = HashMap::with_capacity(6);
-        for &ord in &Ordering::ALL {
-            let mut v: Vec<_> = triples.iter().map(|t| t.by_ordering(ord)).collect();
-            v.sort_unstable();
-            v.dedup();
-            // Split the deduplicated rows into three contiguous columns.
-            let mut levels = [
-                Vec::with_capacity(v.len()),
-                Vec::with_capacity(v.len()),
-                Vec::with_capacity(v.len()),
-            ];
-            for (l0, l1, l2) in v {
-                levels[0].push(l0);
-                levels[1].push(l1);
-                levels[2].push(l2);
-            }
-            sorted.insert(ord, TripleColumns { levels });
+        let rows = triples
+            .iter()
+            .map(|t| t.by_ordering(ANCHOR_ORDERING))
+            .collect();
+        Self {
+            anchor: TripleColumns::build(rows),
+            derived: std::array::from_fn(|_| OnceLock::new()),
+            total,
         }
-        Self { sorted, total }
     }
 
-    /// O(log n) membership test against the SPO-sorted ordering: narrow to the
-    /// subject's row range, then to the predicate's, then look for the object.
+    /// `ord`'s sorted rows, building them from the anchor on first request.
+    ///
+    /// Concurrent callers racing on the same ordering build it once; the losers
+    /// block on `get_or_init` and take the winner's result. Deriving reads only
+    /// `anchor`, which is never behind a `OnceLock`, so two threads building
+    /// two different orderings cannot deadlock on each other.
+    fn columns(&self, ord: Ordering) -> &TripleColumns {
+        if ord == ANCHOR_ORDERING {
+            return &self.anchor;
+        }
+        self.derived[ord.index()].get_or_init(|| {
+            let a = &self.anchor;
+            let rows = (0..a.len())
+                .map(|i| {
+                    let [s, p, o] =
+                        ANCHOR_ORDERING.unpermute(a.levels[0][i], a.levels[1][i], a.levels[2][i]);
+                    Triple::new(s, p, o).by_ordering(ord)
+                })
+                .collect();
+            TripleColumns::build(rows)
+        })
+    }
+
+    /// O(log n) membership test against the anchor ordering: narrow to the
+    /// predicate's row range, then to the subject's, then look for the object.
     pub fn contains(&self, t: &Triple) -> bool {
-        let cols = &self.sorted[&Ordering::Spo];
-        let (s_col, p_col, o_col) = (&cols.levels[0], &cols.levels[1], &cols.levels[2]);
-        let s_lo = s_col.partition_point(|&v| v < t.s);
-        let s_hi = s_lo + s_col[s_lo..].partition_point(|&v| v <= t.s);
-        let p_lo = s_lo + p_col[s_lo..s_hi].partition_point(|&v| v < t.p);
-        let p_hi = p_lo + p_col[p_lo..s_hi].partition_point(|&v| v <= t.p);
-        o_col[p_lo..p_hi].binary_search(&t.o).is_ok()
+        debug_assert_eq!(ANCHOR_ORDERING, Ordering::Pso, "column roles below");
+        let cols = &self.anchor;
+        let (p_col, s_col, o_col) = (&cols.levels[0], &cols.levels[1], &cols.levels[2]);
+        let p_lo = p_col.partition_point(|&v| v < t.p);
+        let p_hi = p_lo + p_col[p_lo..].partition_point(|&v| v <= t.p);
+        let s_lo = p_lo + s_col[p_lo..p_hi].partition_point(|&v| v < t.s);
+        let s_hi = s_lo + s_col[s_lo..p_hi].partition_point(|&v| v <= t.s);
+        o_col[s_lo..s_hi].binary_search(&t.o).is_ok()
     }
 
-    /// The snapshot's triples sorted in `ord`, or `None` if that ordering is
-    /// unavailable. Read-only view used by `SnapshotStats` to compute statistics
-    /// by a single linear scan. See [`SortedColumns`] for the axis order.
-    pub fn sorted_columns(&self, ord: Ordering) -> Option<SortedColumns<'_>> {
-        self.sorted.get(&ord).map(TripleColumns::view)
+    /// The snapshot's triples sorted in `ord`, building that ordering if this is
+    /// its first use. Read-only view used by `SnapshotStats` to compute
+    /// statistics by a single linear scan. See [`SortedColumns`] for the axis
+    /// order.
+    pub fn sorted_columns(&self, ord: Ordering) -> SortedColumns<'_> {
+        self.columns(ord).view()
     }
 
-    /// Apply a delta to every ordering in place, preserving the sorted+deduped
-    /// invariant. `dels` are removed if present, `adds` inserted if absent;
-    /// both are treated as sets. Cost is O(n + k log k) per ordering, against
-    /// `from_triples`'s O(n log n) — the point of the method.
+    /// Which orderings are materialised right now. Test-only window on the
+    /// laziness [`Self::columns`] provides.
+    #[cfg(test)]
+    fn materialised(&self) -> Vec<Ordering> {
+        Ordering::ALL
+            .into_iter()
+            .filter(|&ord| ord == ANCHOR_ORDERING || self.derived[ord.index()].get().is_some())
+            .collect()
+    }
+
+    /// Apply a delta in place to the anchor and to every other ordering already
+    /// materialised, preserving the sorted+deduped invariant. `dels` are removed
+    /// if present, `adds` inserted if absent; both are treated as sets. Cost is
+    /// O(n + k log k) per materialised ordering, against `from_triples`'s
+    /// O(n log n) — the point of the method. An ordering built later derives
+    /// from the updated anchor, so it sees the delta too.
     ///
     /// A `del` not present is a no-op. An `add` already present is a no-op — no
     /// duplicate row results. A triple in both `dels` and `adds` ends up
@@ -150,94 +219,105 @@ impl VecTripleSource {
             // carry `from_triples`'s pre-dedup over-count (see the doc above).
             // Recompute it here too so "total is exact after apply_delta"
             // holds unconditionally, not just when the delta does work.
-            self.total = self.sorted[&Ordering::Spo].levels[0].len();
+            self.total = self.anchor.len();
             return;
         }
+        merge_delta(&mut self.anchor, ANCHOR_ORDERING, dels, adds);
         for &ord in &Ordering::ALL {
-            let mut dels_sorted: Vec<_> = dels.iter().map(|t| t.by_ordering(ord)).collect();
-            dels_sorted.sort_unstable();
-            dels_sorted.dedup();
-            let mut adds_sorted: Vec<_> = adds.iter().map(|t| t.by_ordering(ord)).collect();
-            adds_sorted.sort_unstable();
-            adds_sorted.dedup();
+            if ord == ANCHOR_ORDERING {
+                continue;
+            }
+            if let Some(cols) = self.derived[ord.index()].get_mut() {
+                merge_delta(cols, ord, dels, adds);
+            }
+        }
+        self.total = self.anchor.len();
+    }
+}
 
-            let cols = self.sorted.get_mut(&ord).expect("all six orderings exist");
-            let base_len = cols.levels[0].len();
-            let cap = base_len + adds_sorted.len();
-            let mut out = [
-                Vec::with_capacity(cap),
-                Vec::with_capacity(cap),
-                Vec::with_capacity(cap),
-            ];
+/// Merge `dels`/`adds` into one already-sorted ordering, in place. See
+/// [`VecTripleSource::apply_delta`], the only caller, for the contract.
+fn merge_delta(cols: &mut TripleColumns, ord: Ordering, dels: &[Triple], adds: &[Triple]) {
+    let mut dels_sorted: Vec<_> = dels.iter().map(|t| t.by_ordering(ord)).collect();
+    dels_sorted.sort_unstable();
+    dels_sorted.dedup();
+    let mut adds_sorted: Vec<_> = adds.iter().map(|t| t.by_ordering(ord)).collect();
+    adds_sorted.sort_unstable();
+    adds_sorted.dedup();
 
-            let mut bi = 0usize; // base row index
-            let mut di = 0usize; // dels_sorted index
-            let mut ai = 0usize; // adds_sorted index
-            loop {
-                let base_row = if bi < base_len {
-                    Some((cols.levels[0][bi], cols.levels[1][bi], cols.levels[2][bi]))
+    let base_len = cols.levels[0].len();
+    let cap = base_len + adds_sorted.len();
+    let mut out = [
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+        Vec::with_capacity(cap),
+    ];
+
+    let mut bi = 0usize; // base row index
+    let mut di = 0usize; // dels_sorted index
+    let mut ai = 0usize; // adds_sorted index
+    loop {
+        let base_row = if bi < base_len {
+            Some((cols.levels[0][bi], cols.levels[1][bi], cols.levels[2][bi]))
+        } else {
+            None
+        };
+
+        // Catch `di` up past any del entries strictly less than the
+        // current base row: those values are absent from the
+        // (increasing) base — nothing at or after `bi` can match them —
+        // so they are no-op deletes. Must run before the equality check
+        // below, or a no-op del sitting between two base rows would
+        // wedge `di` and hide a later, real match.
+        if let Some(b) = base_row {
+            while di < dels_sorted.len() && dels_sorted[di] < b {
+                di += 1;
+            }
+        }
+
+        let add_row = adds_sorted.get(ai).copied();
+
+        match (base_row, add_row) {
+            (None, None) => break,
+            (Some(b), None) => {
+                if di < dels_sorted.len() && dels_sorted[di] == b {
+                    di += 1;
                 } else {
-                    None
-                };
-
-                // Catch `di` up past any del entries strictly less than the
-                // current base row: those values are absent from the
-                // (increasing) base — nothing at or after `bi` can match them —
-                // so they are no-op deletes. Must run before the equality check
-                // below, or a no-op del sitting between two base rows would
-                // wedge `di` and hide a later, real match.
-                if let Some(b) = base_row {
-                    while di < dels_sorted.len() && dels_sorted[di] < b {
-                        di += 1;
-                    }
+                    push_row(&mut out, b);
                 }
-
-                let add_row = adds_sorted.get(ai).copied();
-
-                match (base_row, add_row) {
-                    (None, None) => break,
-                    (Some(b), None) => {
-                        if di < dels_sorted.len() && dels_sorted[di] == b {
-                            di += 1;
-                        } else {
-                            push_row(&mut out, b);
-                        }
-                        bi += 1;
+                bi += 1;
+            }
+            (None, Some(a)) => {
+                push_row(&mut out, a);
+                ai += 1;
+            }
+            (Some(b), Some(a)) => {
+                if b < a {
+                    if di < dels_sorted.len() && dels_sorted[di] == b {
+                        di += 1;
+                    } else {
+                        push_row(&mut out, b);
                     }
-                    (None, Some(a)) => {
-                        push_row(&mut out, a);
-                        ai += 1;
-                    }
-                    (Some(b), Some(a)) => {
-                        if b < a {
-                            if di < dels_sorted.len() && dels_sorted[di] == b {
-                                di += 1;
-                            } else {
-                                push_row(&mut out, b);
-                            }
-                            bi += 1;
-                        } else if a < b {
-                            push_row(&mut out, a);
-                            ai += 1;
-                        } else {
-                            // b == a: the add wins — delete applies before
-                            // insert, so even a del matching this row (if
-                            // `dels_sorted[di] == b`, left untouched by the
-                            // catch-up above since it only skips values
-                            // strictly less than `b`) leaves the row present.
-                            // Consume both sides so it is not emitted twice.
-                            push_row(&mut out, a);
-                            bi += 1;
-                            ai += 1;
-                        }
-                    }
+                    bi += 1;
+                } else if a < b {
+                    push_row(&mut out, a);
+                    ai += 1;
+                } else {
+                    // b == a: the add wins — delete applies before
+                    // insert, so even a del matching this row (if
+                    // `dels_sorted[di] == b`, left untouched by the
+                    // catch-up above since it only skips values
+                    // strictly less than `b`) leaves the row present.
+                    // Consume both sides so it is not emitted twice.
+                    push_row(&mut out, a);
+                    bi += 1;
+                    ai += 1;
                 }
             }
-
-            cols.levels = out;
         }
-        self.total = self.sorted[&Ordering::Spo].levels[0].len();
     }
+
+    cols.levels = out;
 }
 
 /// Append `row` to `out`'s three columns, in `by_ordering`'s `(level0, level1,
@@ -259,11 +339,9 @@ impl TripleSource for VecTripleSource {
     type Iter<'a> = VecIter<'a>;
 
     fn iter(&self, ord: Ordering) -> Result<VecIter<'_>> {
-        let cols = self
-            .sorted
-            .get(&ord)
-            .ok_or(WcojError::OrderingUnavailable(ord))?;
-        Ok(VecIter::new(cols.view()))
+        // Infallible: every ordering is derivable from the anchor, so this
+        // source never reports `WcojError::OrderingUnavailable`.
+        Ok(VecIter::new(self.columns(ord).view()))
     }
 
     fn total_triples(&self) -> usize {
@@ -596,7 +674,7 @@ mod tests {
         for depth in 0..3u8 {
             let d = depth as usize;
             let src = VecTripleSource::from_triples(oracle_triples(depth));
-            let cols = src.sorted_columns(Ordering::Spo).expect("Spo ordering");
+            let cols = src.sorted_columns(Ordering::Spo);
             let (col, n) = (cols.level(d), cols.len());
             let max_key = col[n - 1];
             // For every starting cursor and every target, the post-seek cursor
@@ -719,7 +797,7 @@ mod tests {
         Ordering::ALL
             .iter()
             .map(|&ord| {
-                let cols = src.sorted_columns(ord).expect("all six orderings exist");
+                let cols = src.sorted_columns(ord);
                 (
                     ord,
                     cols.level(0).to_vec(),
@@ -838,8 +916,8 @@ mod tests {
                     "iter {iter} round {round}: total mismatch"
                 );
                 for &ord in &Ordering::ALL {
-                    let got_cols = src.sorted_columns(ord).expect("ordering exists");
-                    let want_cols = want.sorted_columns(ord).expect("ordering exists");
+                    let got_cols = src.sorted_columns(ord);
+                    let want_cols = want.sorted_columns(ord);
                     assert_eq!(
                         got_cols.level(0),
                         want_cols.level(0),
@@ -858,6 +936,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_the_anchor_ordering_is_built_up_front() {
+        let src = VecTripleSource::from_triples(vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ]);
+        assert_eq!(src.materialised(), vec![ANCHOR_ORDERING]);
+    }
+
+    #[test]
+    fn an_ordering_is_built_on_first_request_and_then_reused() {
+        let src = VecTripleSource::from_triples(vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ]);
+
+        let first = src.sorted_columns(Ordering::Ops).level(0).as_ptr();
+        assert_eq!(src.materialised(), vec![ANCHOR_ORDERING, Ordering::Ops]);
+
+        // Same allocation on the second request: `get_or_init` built it once.
+        assert_eq!(src.sorted_columns(Ordering::Ops).level(0).as_ptr(), first);
+        assert_eq!(src.materialised(), vec![ANCHOR_ORDERING, Ordering::Ops]);
+    }
+
+    #[test]
+    fn an_ordering_built_after_a_delta_matches_one_merged_through_it() {
+        let base = vec![
+            Triple::new(1, 2, 3),
+            Triple::new(1, 2, 4),
+            Triple::new(5, 6, 7),
+        ];
+        let dels = [Triple::new(1, 2, 4)];
+        let adds = [Triple::new(9, 2, 1), Triple::new(1, 2, 3)];
+
+        // `merged` has every ordering built before the delta, so each one is
+        // updated in place. `derived` has none, so each is built afterwards
+        // from the already-updated anchor. The two must agree.
+        let mut merged = VecTripleSource::from_triples(base.clone());
+        let _ = all_columns(&merged);
+        merged.apply_delta(&dels, &adds);
+
+        let mut derived = VecTripleSource::from_triples(base);
+        derived.apply_delta(&dels, &adds);
+
+        assert_eq!(derived.materialised(), vec![ANCHOR_ORDERING]);
+        assert_eq!(all_columns(&derived), all_columns(&merged));
+        assert_eq!(derived.total_triples(), merged.total_triples());
     }
 
     #[test]
@@ -935,7 +1064,7 @@ mod tests {
         assert!(src.contains(&t));
         assert_eq!(src.total_triples(), 2);
         for &ord in &Ordering::ALL {
-            let cols = src.sorted_columns(ord).expect("ordering exists");
+            let cols = src.sorted_columns(ord);
             assert_eq!(cols.len(), 2, "ord {ord:?}");
         }
 
@@ -976,7 +1105,7 @@ mod tests {
 
         assert_eq!(src.total_triples(), 0);
         for &ord in &Ordering::ALL {
-            let cols = src.sorted_columns(ord).expect("ordering exists");
+            let cols = src.sorted_columns(ord);
             assert!(cols.is_empty(), "ord {ord:?}");
             // No panic on iteration over an emptied ordering.
             let it = src.iter(ord).expect("ordering exists");
