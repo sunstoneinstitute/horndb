@@ -76,6 +76,21 @@ impl Ordering {
         }
     }
 
+    /// Which of `s`/`p`/`o` sits at trie level 0, as its index in `[s, p, o]`.
+    ///
+    /// Two orderings with the same level-0 axis group their rows into the same
+    /// contiguous blocks and differ only *within* a block — `Pso` and `Pos` are
+    /// both predicate-major. `VecTripleSource` uses that to derive one from the
+    /// other by sorting each block on its own instead of sorting all n rows.
+    #[inline]
+    pub const fn level0_axis(self) -> usize {
+        match self {
+            Ordering::Spo | Ordering::Sop => 0,
+            Ordering::Pso | Ordering::Pos => 1,
+            Ordering::Osp | Ordering::Ops => 2,
+        }
+    }
+
     /// This ordering's position in [`Ordering::ALL`] — the index to use for a
     /// fixed-size per-ordering side table.
     #[inline]

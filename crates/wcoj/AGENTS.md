@@ -38,9 +38,13 @@ Leapfrog Triejoin executor, trie iterators, planner.
     its SIMD prime.
   - `supports(ord)` is true for all six and `iter` never returns
     `OrderingUnavailable`: every ordering is derivable.
-  - Deriving is a global sort of all n rows today. For an ordering that
-    shares the anchor's level-0 axis (`Pos` from `Pso`) it need only re-sort
-    within each predicate block — `HDB-98`.
+  - Deriving an ordering that **shares the anchor's level-0 axis** (`Pos`
+    from `Pso` — both predicate-major) sorts each level-0 block on its own
+    rather than all n rows, since no row crosses a block boundary:
+    `TripleColumns::derive_blockwise`, O(n log(n/b)) for b blocks (HDB-98).
+    The anchor is deduplicated, so a block's rows are already distinct as a
+    pair and the derive needs no dedup pass. Any other ordering (`Spo`,
+    `Sop`, `Osp`, `Ops` from `Pso`) still costs a global sort.
 - **`VecTripleSource` supports in-place delta maintenance (HDB-82).**
   `apply_delta(dels, adds)` merges a batch of retracted and inserted triples
   into the anchor and into every other ordering already materialised, leaving
