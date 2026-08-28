@@ -353,6 +353,45 @@ follow-up, tracked as `HDB-98`.
 Memory falls with the sort passes: a 10M-triple snapshot holds one ordering
 (~240 MB) plus whatever queries ask for, against six (~1.4 GB) before.
 
+#### `Pos` derives from the `Pso` anchor by block sort, not a global sort (HDB-98, 2026-08-28)
+
+HDB-97 (above) left `q3` paying a full global sort of all n rows to derive
+`Pos`. It does not need one. The anchor is `Pso` and `Pos` is `(predicate,
+object, subject)` — both predicate-major, so the two orderings group rows into
+the *same* contiguous predicate blocks and differ only *within* a block. No row
+crosses a block boundary.
+
+`TripleColumns::derive_blockwise` therefore sorts each predicate block on its
+own two remaining columns: O(n log(n/b)) for b blocks against O(n log n), with a
+per-block working set small enough to stay in cache. The anchor is already
+deduplicated, so a block's rows are distinct as a pair and no dedup pass is
+needed. Only `Pos` qualifies from a `Pso` anchor; `Spo`, `Sop`, `Osp` and `Ops`
+do not share its level-0 axis and still take the global sort.
+
+Isolated derive, 10M rows over 12 predicates (laptop, release): **339ms →
+224ms (−34%)**.
+
+End-to-end A/B on `hornbench` (`19d035b` vs `889193c`, trainmarks xlarge/10M,
+the two sides interleaved over two rounds, best of two each):
+
+| operation | before | after | change |
+|---|---|---|---|
+| `q3_join_3_entities_cold` | 1.665s | 1.500s | **−9.9%** |
+| `q3_join_3_entities` (warm) | 1.181s | 1.137s | −3.8% |
+| every other query, cold and warm | — | — | ~0 (±2%, noise) |
+| the four I/O rows | — | — | ~0 (±2%, noise) |
+
+`q3` is the suite's only `Pos` reader, so it is the only row that can move —
+which is what the table shows. The derive cost isolates cleanly as cold minus
+warm: **484ms → 363ms (−25%)**, tracking the isolated figure.
+
+`q3` cold does **not** return to its pre-HDB-97 1.163s, and cannot: back then
+all six orderings were built eagerly at snapshot time, so `q3`'s cold run found
+`Pos` prebuilt and `q6` paid for it. HDB-97 moved that build into whichever
+query reads `Pos` first; HDB-98 makes the build itself a quarter cheaper. The
+work is real and someone has to pay it — the suite total is the number that
+matters, and it improved under both changes.
+
 #### Parallel chunked parsing does not move the read columns (HDB-83, 2026-08-24)
 
 `oxttl` can split a document into N independently parseable chunks, so the
