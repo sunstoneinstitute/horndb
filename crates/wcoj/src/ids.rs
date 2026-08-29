@@ -59,4 +59,34 @@ impl Ordering {
             Ordering::Ops => [o, p, s],
         }
     }
+
+    /// Inverse of [`Ordering::permute`]: map this ordering's `(level0, level1,
+    /// level2)` back to `[s, p, o]`. Lets a caller holding rows in one
+    /// ordering's axis order re-derive another ordering from them without
+    /// knowing which ordering it started from.
+    #[inline]
+    pub fn unpermute<T>(self, l0: T, l1: T, l2: T) -> [T; 3] {
+        match self {
+            Ordering::Spo => [l0, l1, l2],
+            Ordering::Sop => [l0, l2, l1],
+            Ordering::Pso => [l1, l0, l2],
+            Ordering::Pos => [l2, l0, l1],
+            Ordering::Osp => [l1, l2, l0],
+            Ordering::Ops => [l2, l1, l0],
+        }
+    }
+
+    /// This ordering's position in [`Ordering::ALL`] — the index to use for a
+    /// fixed-size per-ordering side table.
+    #[inline]
+    pub const fn index(self) -> usize {
+        match self {
+            Ordering::Spo => 0,
+            Ordering::Sop => 1,
+            Ordering::Pso => 2,
+            Ordering::Pos => 3,
+            Ordering::Osp => 4,
+            Ordering::Ops => 5,
+        }
+    }
 }

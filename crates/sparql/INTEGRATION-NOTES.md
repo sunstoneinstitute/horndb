@@ -300,6 +300,16 @@ against the `O(n log n)` rebuild) once the second scope is actually asked for
 extra, and each scope keeps its own `Arc` so a later small write can still
 merge into either in place (`apply_delta_to_snapshots`).
 
+Building a snapshot no longer means indexing all six trie orderings. HDB-97
+made `VecTripleSource` materialise one — the anchor, `Pso`, which is the order
+`horndb-storage`'s scan already yields, so it costs a linear pass — and derive
+the other five on first use. A trainmarks run reads three of the six and `q6`
+reads one, so a cold `q6` went 5.04s → ~1.9s at 10M. Two things follow for
+this crate: the derive happens inside the executor's first `iter(ord)`, which
+`wcoj_snapshot` still runs off the cancellable path; and a query reading an
+ordering no earlier query touched pays that one sort itself (measured: `q3`,
+the suite's only `Pos` reader, +0.6s cold — see `docs/benchmarks.md`).
+
 ### Non-recursive property paths (#49)
 
 `translate.rs::translate_path` lowers the non-recursive path operators to

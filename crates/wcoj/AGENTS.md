@@ -19,23 +19,47 @@ Leapfrog Triejoin executor, trie iterators, planner.
   regression**. No column is built now, so `seek` can take the SIMD `lower_bound`
   path at every depth. **Still re-measure `four_cycle` before touching the seek
   path.**
+- **`VecTripleSource` builds orderings on first use (HDB-97).**
+  `from_triples` materialises exactly one ordering — the **anchor**,
+  `ANCHOR_ORDERING` — and the other five are derived from it the first time
+  something asks for them (`iter`, `sorted_columns`). A whole trainmarks run
+  touches three of the six, and `q6`'s cold run touches one, so eager
+  six-ordering construction was building five indexes for nobody: at 10M
+  triples one ordering is ~240 MB and one sort pass.
+  The anchor is **`Pso`** because `horndb-storage`'s snapshot scan already
+  yields `(predicate, subject, object)` order (predicate-major,
+  subject-major), so building it from a store snapshot is a linear pass, not
+  a sort. Any other input order costs one ordinary sort.
+  Two consequences to keep in mind:
+  - The build now happens **inside** the first `iter(ord)` call rather than
+    before the executor starts. In production `HornBackend::wcoj_snapshot`
+    still runs it off the cancellable path, but a test that clocks executor
+    latency must prime the orderings first — `tests/cancel.rs` does, next to
+    its SIMD prime.
+  - `supports(ord)` is true for all six and `iter` never returns
+    `OrderingUnavailable`: every ordering is derivable.
+  - Deriving is a global sort of all n rows today. For an ordering that
+    shares the anchor's level-0 axis (`Pos` from `Pso`) it need only re-sort
+    within each predicate block — `HDB-98`.
 - **`VecTripleSource` supports in-place delta maintenance (HDB-82).**
   `apply_delta(dels, adds)` merges a batch of retracted and inserted triples
-  into all six orderings, leaving each one sorted and deduplicated — the same
-  state `from_triples` produces. Cost is O(n + k log k) per ordering for a
-  delta of k rows against a base of n, against O(n log n) for a rebuild.
+  into the anchor and into every other ordering already materialised, leaving
+  each sorted and deduplicated — the same state `from_triples` produces. Cost
+  is O(n + k log k) per materialised ordering for a delta of k rows against a
+  base of n, against O(n log n) for a rebuild. An ordering built *after* a
+  delta derives from the already-updated anchor, so the two paths agree.
   `horndb-sparql`'s `HornBackend` uses it to keep its memoised snapshot warm
   across a small `SPARQL Update` instead of re-indexing the whole store; that
   caller falls back to a full rebuild whenever the merge is not provably
   correct or not profitable. If you change the sorted-and-deduplicated
   invariant, leapfrog correctness breaks — `apply_delta_matches_full_rebuild`
   is the guard.
-- **`VecTripleSource` is `Clone` (HDB-97).** An `O(n)` deep copy of the
-  already-sorted orderings, against `from_triples`'s `O(n log n)` rebuild.
+- **`VecTripleSource` is `Clone` (HDB-97).** An `O(n)` deep copy of whatever
+  orderings the source has materialised, against a `from_triples` rebuild.
   `horndb-sparql`'s `HornBackend` uses it to clone its memoised
   `DefaultStrict` snapshot into `DefaultUnion` (or vice versa) when a store's
   graph shape makes the two read the same triples, instead of paying a second
-  six-sort-pass build for an identical source.
+  build for an identical source.
 - **SIMD intersect lives in `BatchIter`, and `active_run` must dedup.** The
   production executor (`executor/wcoj.rs::BatchIter`) has a k==2
   `horndb_simd::intersect` fast path: at prime time, if both contributing iters

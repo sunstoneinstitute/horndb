@@ -216,10 +216,7 @@ impl SnapshotStats {
         // pre-dedup input length). Self-consistency: `total` must equal the rows
         // the executor can produce and the sum of the exact per-predicate counts,
         // so duplicate input triples never inflate unbound-predicate estimates.
-        let total = src
-            .sorted_columns(Ordering::Spo)
-            .map(|r| r.len() as u64)
-            .unwrap_or(0);
+        let total = src.sorted_columns(Ordering::Spo).len() as u64;
 
         let mut predicate_count: HashMap<TermId, u64> = HashMap::new();
         let mut ndv_subject: HashMap<TermId, u64> = HashMap::new();
@@ -229,7 +226,8 @@ impl SnapshotStats {
         // key), subject = level 1 (the value we dedup within a run). One pass
         // yields both the per-predicate triple count and the distinct-subject
         // count.
-        if let Some(cols) = src.sorted_columns(Ordering::Pso) {
+        {
+            let cols = src.sorted_columns(Ordering::Pso);
             let (preds, subjects) = (cols.level(0), cols.level(1));
             let n = cols.len();
             let mut i = 0;
@@ -253,7 +251,8 @@ impl SnapshotStats {
         }
 
         // Pos: (predicate, object, subject). Predicate = level 0, object = level 1.
-        if let Some(cols) = src.sorted_columns(Ordering::Pos) {
+        {
+            let cols = src.sorted_columns(Ordering::Pos);
             let (preds, objects) = (cols.level(0), cols.level(1));
             let n = cols.len();
             let mut i = 0;
@@ -306,9 +305,8 @@ impl SnapshotStats {
     pub fn with_sampling(mut self, src: &VecTripleSource, enabled: bool) -> Self {
         self.sampling_enabled = enabled;
         self.sample_rows = if enabled {
-            src.sorted_columns(Ordering::Spo)
-                .map(|cols| (0..cols.len()).map(|i| cols.row(i)).collect())
-                .unwrap_or_default()
+            let cols = src.sorted_columns(Ordering::Spo);
+            (0..cols.len()).map(|i| cols.row(i)).collect()
         } else {
             Vec::new()
         };
@@ -326,10 +324,7 @@ impl SnapshotStats {
     /// mean objects-per-subject for `p` within the set, used by the star
     /// estimator.
     fn build_characteristic_sets(src: &VecTripleSource) -> CharacteristicSetIndex {
-        match src.sorted_columns(Ordering::Spo) {
-            Some(cols) => Self::build_characteristic_sets_with_k(cols, CS_TOP_K),
-            None => CharacteristicSetIndex::empty(),
-        }
+        Self::build_characteristic_sets_with_k(src.sorted_columns(Ordering::Spo), CS_TOP_K)
     }
 
     /// Core of [`SnapshotStats::build_characteristic_sets`], parameterised by the
@@ -438,7 +433,8 @@ impl SnapshotStats {
         let mut max_degree: HashMap<TermId, (u64, u64)> = HashMap::new();
 
         // Pso: max object fan-out per subject → the Subject-role degree (.0).
-        if let Some(cols) = src.sorted_columns(Ordering::Pso) {
+        {
+            let cols = src.sorted_columns(Ordering::Pso);
             let (preds, subjects) = (cols.level(0), cols.level(1));
             let n = cols.len();
             let mut i = 0;
@@ -461,7 +457,8 @@ impl SnapshotStats {
         }
 
         // Pos: max subject fan-out per object → the Object-role degree (.1).
-        if let Some(cols) = src.sorted_columns(Ordering::Pos) {
+        {
+            let cols = src.sorted_columns(Ordering::Pos);
             let (preds, objects) = (cols.level(0), cols.level(1));
             let n = cols.len();
             let mut i = 0;
@@ -859,7 +856,7 @@ mod tests {
             Triple::new(99, 40, 401),
         ];
         let src = VecTripleSource::from_triples(triples);
-        let cols = src.sorted_columns(Ordering::Spo).expect("Spo ordering");
+        let cols = src.sorted_columns(Ordering::Spo);
         let cs = SnapshotStats::build_characteristic_sets_with_k(cols, 2);
 
         // Exactly the two highest-count sets are retained, most-frequent first.
