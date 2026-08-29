@@ -54,6 +54,62 @@ impl TripleColumns {
         Self { levels }
     }
 
+    /// Derive `to`'s columns from `from`'s already-sorted rows, given the two
+    /// orderings share a level-0 axis (`from_ord.level0_axis() ==
+    /// to.level0_axis()`).
+    ///
+    /// Sharing level 0 means the two orderings group rows into the *same*
+    /// contiguous blocks — `Pso` and `Pos` are both predicate-major — and differ
+    /// only in how rows are ordered inside one. No row crosses a block boundary,
+    /// so each block is re-sorted on its own two remaining columns instead of
+    /// sorting all n rows: O(n log(n/b)) for b blocks against O(n log n), and a
+    /// per-block working set small enough to stay in cache where the global sort
+    /// misses (HDB-98).
+    ///
+    /// `from` is deduplicated, so within one block the remaining two components
+    /// are already distinct as a pair — no dedup pass, and the output has
+    /// exactly as many rows as the input.
+    fn derive_blockwise(from: &TripleColumns, from_ord: Ordering, to: Ordering) -> Self {
+        debug_assert_eq!(
+            from_ord.level0_axis(),
+            to.level0_axis(),
+            "blockwise derive needs a shared level-0 axis"
+        );
+        let n = from.len();
+        let mut levels = [
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        ];
+        let l0 = &from.levels[0];
+        let mut block: Vec<(TermId, TermId)> = Vec::new();
+        let mut lo = 0usize;
+        while lo < n {
+            let key = l0[lo];
+            // `l0` is sorted, so the run of rows equal to `key` starts at `lo`
+            // and the predicate is monotone over `l0[lo..]` — true then false.
+            let hi = lo + l0[lo..].partition_point(|&v| v == key);
+
+            block.clear();
+            block.reserve(hi - lo);
+            block.extend((lo..hi).map(|i| {
+                let [s, p, o] = from_ord.unpermute(l0[i], from.levels[1][i], from.levels[2][i]);
+                let [t0, t1, t2] = to.permute(s, p, o);
+                debug_assert_eq!(t0, key, "shared level-0 axis must reproduce the block key");
+                (t1, t2)
+            }));
+            block.sort_unstable();
+
+            for &(t1, t2) in &block {
+                levels[0].push(key);
+                levels[1].push(t1);
+                levels[2].push(t2);
+            }
+            lo = hi;
+        }
+        Self { levels }
+    }
+
     fn len(&self) -> usize {
         self.levels[0].len()
     }
@@ -154,6 +210,11 @@ impl VecTripleSource {
         }
         self.derived[ord.index()].get_or_init(|| {
             let a = &self.anchor;
+            // `Pos` from a `Pso` anchor: same predicate-major blocks, so sort
+            // each block instead of all n rows. See `derive_blockwise`.
+            if ord.level0_axis() == ANCHOR_ORDERING.level0_axis() {
+                return TripleColumns::derive_blockwise(a, ANCHOR_ORDERING, ord);
+            }
             let rows = (0..a.len())
                 .map(|i| {
                     let [s, p, o] =
@@ -1089,6 +1150,47 @@ mod tests {
         let want = VecTripleSource::from_triples(vec![Triple::new(1, 2, 3), Triple::new(4, 5, 6)]);
         assert_eq!(all_columns(&src), all_columns(&want));
         assert_eq!(src.total_triples(), 2);
+    }
+
+    // -- blockwise derive (HDB-98) -------------------------------------
+
+    /// The shared-level-0 fast path must produce byte-identical columns to the
+    /// global-sort derive it replaces, over a domain dense enough to give many
+    /// multi-row predicate blocks and many duplicate triples.
+    #[test]
+    fn blockwise_derive_matches_global_sort_derive() {
+        let mut rng = Xorshift64::new(0xB10C_5017);
+        const DOMAIN: u64 = 6; // 216 possible triples, ~6 rows per predicate
+
+        for iter in 0..50 {
+            let n = 1 + rng.below(400) as usize;
+            let triples: Vec<Triple> = (0..n).map(|_| random_triple(&mut rng, DOMAIN)).collect();
+            let anchor = TripleColumns::build(
+                triples
+                    .iter()
+                    .map(|t| t.by_ordering(ANCHOR_ORDERING))
+                    .collect(),
+            );
+
+            for &ord in &Ordering::ALL {
+                if ord.level0_axis() != ANCHOR_ORDERING.level0_axis() {
+                    continue;
+                }
+                let want =
+                    TripleColumns::build(triples.iter().map(|t| t.by_ordering(ord)).collect());
+                let got = TripleColumns::derive_blockwise(&anchor, ANCHOR_ORDERING, ord);
+                assert_eq!(got.levels, want.levels, "iter {iter}, ord {ord:?}");
+            }
+        }
+    }
+
+    /// An empty anchor derives to an empty ordering rather than panicking on
+    /// the block scan.
+    #[test]
+    fn blockwise_derive_of_empty_anchor_is_empty() {
+        let anchor = TripleColumns::build(vec![]);
+        let got = TripleColumns::derive_blockwise(&anchor, ANCHOR_ORDERING, Ordering::Pos);
+        assert_eq!(got.len(), 0);
     }
 
     #[test]
