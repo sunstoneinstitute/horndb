@@ -1,7 +1,3 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 It is the **always-loaded** tier: project identity, hard constraints, and pointers.
 Task-specific detail lives one tier deeper, in nested `CLAUDE.md` files that load
 only when you work in the relevant directory — see [Where deeper guidance
@@ -212,3 +208,18 @@ every bit of the original precision — simpler words, not a simpler meaning.**
 
 Quick test: *could a smart colleague from a different discipline follow this without a glossary,
 and does it still say exactly what it said before?* If yes to both, the balance is right.
+
+<!-- worklode:begin — managed by `lode install`; edits inside are overwritten -->
+## Worklode
+
+This repository is tracked by Worklode (`lode`). Work is entered by
+claiming a task, which also creates the worktree the work happens in:
+
+- `lode next` claims the highest-ranked ready task and creates its worktree.
+- `lode task claim <id>` claims one specific task instead.
+- `lode resume <dir>` re-enters a worktree that already exists.
+- `lode status` reports the current worktree's task and lease.
+
+The claimed task's brief carries the work itself; this block only says how to
+reach it.
+<!-- worklode:end -->

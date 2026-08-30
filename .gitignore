@@ -35,3 +35,4 @@ graphify-out/
 /_site/
 /.quarto/
 **/*.quarto_ipynb
+CLAUDE.local.md
