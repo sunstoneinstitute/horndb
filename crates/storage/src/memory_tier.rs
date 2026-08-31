@@ -144,6 +144,9 @@ impl TierSnapshot {
         counts
     }
 
+    /// Point-in-time counts and footprint. Bounded by the number of
+    /// partitions, except that reading a partition written in batches merges
+    /// its runs first (HDB-84) — once, and any other read would pay it too.
     pub fn stats(&self) -> TierStats {
         // Live counts: only graphs/predicates with at least one tuple visible
         // at the pinned version, consistent with `triples` (also version-

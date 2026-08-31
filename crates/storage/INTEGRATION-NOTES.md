@@ -86,6 +86,32 @@ checkpoint taken under concurrent writes is internally consistent (NF5).
 Per-tuple visibility (row-level delete) is the next section, delivered under
 `SPEC-25` S1.
 
+## Partition runs and deferred merge (HDB-84, delivered)
+
+A `PredicatePartition` holds a list of sorted **runs** — blocks of rows whose
+concatenation is the partition — plus a `OnceLock` cache of the merged view.
+`insert_quad_batch` appends one run per batch: it sorts only that batch and
+shares the rows already stored by `Arc`. Every read path (`subjects()`,
+`ordered_at()`, `live_len()`, `stats()`, and the rest) goes through the merged
+view, which is built on first read by the same sort-and-dedup a single-shot
+build always used — so the columns, side-sets, visibility stamps and live count
+are identical however the rows arrived.
+
+What this changes for callers:
+
+- Repeated small writes cost the rows they carry, not the rows already stored.
+  Before, N batches into one predicate paid O(existing) N times.
+- The first read after a batched write is O(rows in that partition), once. Any
+  read pays it; `MemoryTier::stats()` and `HornBackend::storage_stats()` count
+  as reads here, so neither is strictly O(partitions) any more.
+- `retract_quad_batch`, `apply_quad_batch` and `compact()` still rebuild a
+  partition row by row — they have to touch every row anyway — so they force
+  the merge first.
+
+The bulk loaders' batch size is `HORNDB_LOAD_BATCH_TRIPLES`
+(`loader::load_batch_triples`, default 65,536). It is a memory knob now, not an
+index-rebuild knob: measured load cost is flat in it (`docs/benchmarks.md`).
+
 ## Per-tuple MVCC (SPEC-25 S1, delivered)
 
 Substrate: two stamp columns, `begin`/`end` (`CommitVersion = u64`, `visibility.rs`),
