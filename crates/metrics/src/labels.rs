@@ -104,8 +104,10 @@ pub struct PhaseLabel {
 }
 
 // Phases of a bulk load, timed separately so a slow load can be attributed
-// (SPEC-17 §5.4.1). `Intern` is dictionary interning in `Store::apply_quads`;
-// the rest are inside `MemoryTier::insert_quad_batch`.
+// (SPEC-17 §5.4.1). `Intern` is dictionary interning in `Store::apply_quads`
+// — the term-based write path only; the id-based `Store::apply_quad_ids` the
+// bulk loader uses interns nothing. The rest are inside
+// `MemoryTier::insert_quad_batch`.
 //
 // The five `Dedupe*` values split the `Dedupe` phase into its per-triple steps.
 // They are emitted only when `HORNDB_DEDUPE_SUBPHASES=1` is set, because the
@@ -121,7 +123,6 @@ label_value_enum!(LoadPhase {
     DedupeIntra => "dedupe_intra",
     DedupeRest => "dedupe_rest",
     DedupeClock => "dedupe_clock",
-    Stage => "stage",
     LiveKeys => "live_keys",
     Invalidate => "invalidate",
     Intern => "intern",

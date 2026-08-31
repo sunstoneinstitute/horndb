@@ -111,13 +111,12 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 | `parse` | `crates/bench-trainmarks/src/main.rs` | tokenising the document **and** materialising the triple batch (`materialize` is the second half) |
 | `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
 | `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping already-live / intra-batch-duplicate triples |
-| `dedupe_intern` | `crates/sparql/src/exec/horn.rs` | the three `Dictionary::intern` calls inside `dedupe` (opt-in, see below) |
+| `dedupe_intern` | `crates/sparql/src/exec/horn.rs` | the `Dictionary::intern_quad` call inside `dedupe` (opt-in, see below) |
 | `dedupe_contains` | `crates/sparql/src/exec/horn.rs` | the `live_keys.contains` probe, plus the `QuadKey` build (opt-in) |
 | `dedupe_intra` | `crates/sparql/src/exec/horn.rs` | the `intra_batch.insert` probe (opt-in) |
-| `dedupe_rest` | `crates/sparql/src/exec/horn.rs` | `entries.push` and the term moves (opt-in) |
+| `dedupe_rest` | `crates/sparql/src/exec/horn.rs` | `entries.push` (opt-in) |
 | `dedupe_clock` | `crates/sparql/src/exec/horn.rs` | cost of the instrumentation itself (opt-in) |
-| `stage` | `crates/sparql/src/exec/horn.rs` | building the key and `to_store` vectors handed to storage |
-| `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms a second time, for storage's own ids |
+| `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms for storage's own ids. Zero on the bulk-load path since HDB-87: `HornBackend` passes the ids it already resolved (`Store::apply_quad_ids`), so only the term-based write path interns here |
 | `group` | `crates/storage/src/memory_tier.rs` | grouping the batch by graph then predicate into per-predicate `(s, o)` sets |
 | `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps. `apply_quad_batch` only — `insert_quad_batch` stopped carrying rows forward in HDB-84 and no longer emits this |
 | `merge` | `crates/storage/src/memory_tier.rs` | appending new rows, skipping ones still visible after the deletes (`apply_quad_batch`) |

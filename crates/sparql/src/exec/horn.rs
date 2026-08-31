@@ -163,7 +163,9 @@ use crate::exec::{
 };
 use arrow::array::UInt64Array;
 use horndb_metrics::labels::LoadPhase;
-use horndb_storage::{GraphId, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH};
+use horndb_storage::{
+    GraphId, InternedQuad, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH,
+};
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -207,6 +209,13 @@ impl QuadKey {
             p: p.0,
             o: o.0,
         }
+    }
+
+    /// The key of an already-interned quad. Four field reads — the bulk path
+    /// keeps the `InternedQuad` and derives the key from it rather than
+    /// carrying both.
+    fn of(q: InternedQuad) -> Self {
+        Self::new(q.graph(), q.subject(), q.predicate(), q.object())
     }
 }
 
@@ -692,12 +701,18 @@ impl HornBackend {
         p: &oxrdf::Term,
         o: &oxrdf::Term,
     ) -> Result<bool> {
-        let key = self.intern_key(g, s, p, o)?;
+        let quad = self
+            .store
+            .dictionary()
+            .intern_quad(g, s, p, o)
+            .map_err(|e| SparqlError::Executor(format!("intern: {e}")))?;
+        let key = QuadKey::of(quad);
         if self.live_keys.contains(&key) {
             return Ok(false); // SPARQL INSERT DATA is idempotent on an already-live triple
         }
+        // Ids, not terms: the intern above is the only dictionary pass.
         self.store
-            .insert_quads(&[(g, s.clone(), p.clone(), o.clone())])
+            .insert_quad_ids(&[quad])
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
         self.live_keys.insert(key);
         self.invalidate();
@@ -727,9 +742,15 @@ impl HornBackend {
     /// * Phase 1 (read-only): intern all terms and drop any triple already
     ///   live (via `live_keys`, an O(1) check) or repeated within this batch.
     ///   Any intern failure skips that triple.
-    /// * Phase 2 (write): call `store.insert_quads` once for the surviving
+    /// * Phase 2 (write): call `store.insert_quad_ids` once for the surviving
     ///   entries, then mark them live only on success. Propagates storage
     ///   errors.
+    ///
+    /// Phase 1 keeps the [`InternedQuad`]s it built, so storage does not
+    /// intern the same terms a second time (HDB-87). That also makes the
+    /// surviving-entry buffer four ids per row instead of a `QuadKey` plus
+    /// three heap-backed `oxrdf::Term`s, and removes the copy that used to
+    /// stage those terms for the storage call.
     fn insert_oxrdf_batch_in_graph(
         &mut self,
         g: GraphId,
@@ -741,12 +762,9 @@ impl HornBackend {
 
         // Phase 1 (read-only): intern and drop already-live/intra-batch-duplicate
         // triples. `intra_batch` deduplicates within the batch itself in O(1)
-        // per triple.
-        struct Entry {
-            key: QuadKey,
-            ox: (oxrdf::Term, oxrdf::Term, oxrdf::Term),
-        }
-        let mut entries: Vec<Entry> = Vec::with_capacity(triples.len());
+        // per triple. `entries` holds the interned ids — it is the buffer
+        // phase 2 hands straight to storage.
+        let mut entries: Vec<InternedQuad> = Vec::with_capacity(triples.len());
         let mut intra_batch: HashSet<QuadKey> = HashSet::new();
         let n_in = triples.len() as u64;
         let t_dedupe = std::time::Instant::now();
@@ -765,17 +783,16 @@ impl HornBackend {
                     // this from each of the four recovers the real split.
                     let t_cal = std::time::Instant::now();
                     let t0 = std::time::Instant::now();
-                    let interned = (d.intern(&s), d.intern(&p), d.intern(&o));
+                    let interned = d.intern_quad(g, &s, &p, &o);
                     let t1 = std::time::Instant::now();
                     sub.clock_ns += t0.duration_since(t_cal).as_nanos() as u64;
                     sub.intern_ns += t1.duration_since(t0).as_nanos() as u64;
-                    let (si, pi, oi) = match interned {
-                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                        _ => continue,
+                    let Ok(quad) = interned else {
+                        continue;
                     };
-                    // `QuadKey::new` and the match above are a handful of ALU
+                    // `QuadKey::of` and the match above are a handful of ALU
                     // ops; they land in the `contains` interval.
-                    let key = QuadKey::new(g, si, pi, oi);
+                    let key = QuadKey::of(quad);
                     let live = self.live_keys.contains(&key);
                     let t2 = std::time::Instant::now();
                     sub.contains_ns += t2.duration_since(t1).as_nanos() as u64;
@@ -788,24 +805,23 @@ impl HornBackend {
                     if !fresh {
                         continue;
                     }
-                    entries.push(Entry { key, ox: (s, p, o) });
+                    entries.push(quad);
                     sub.rest_ns += t3.elapsed().as_nanos() as u64;
                 }
                 sub.record(n_in);
             } else {
                 for (s, p, o) in triples {
-                    let (si, pi, oi) = match (d.intern(&s), d.intern(&p), d.intern(&o)) {
-                        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
-                        _ => continue, // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
+                    let Ok(quad) = d.intern_quad(g, &s, &p, &o) else {
+                        continue; // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
                     };
-                    let key = QuadKey::new(g, si, pi, oi);
+                    let key = QuadKey::of(quad);
                     if self.live_keys.contains(&key) {
                         continue; // already live — no-op
                     }
                     if !intra_batch.insert(key) {
                         continue; // duplicate within this batch; first occurrence wins
                     }
-                    entries.push(Entry { key, ox: (s, p, o) });
+                    entries.push(quad);
                 }
             }
         }
@@ -817,25 +833,16 @@ impl HornBackend {
         }
 
         // Phase 2 (write): storage insert first, then bookkeeping. `entries`
-        // is dead after the move below except for `e.key` (already extracted
-        // into `keys`, and `Copy`), so this moves each triple's terms into
-        // the storage call instead of cloning them.
-        let t_stage = std::time::Instant::now();
-        let keys: Vec<QuadKey> = entries.iter().map(|e| e.key).collect();
-        let to_store: Vec<(GraphId, oxrdf::Term, oxrdf::Term, oxrdf::Term)> = entries
-            .into_iter()
-            .map(|e| (g, e.ox.0, e.ox.1, e.ox.2))
-            .collect();
-        record_load_phase(LoadPhase::Stage, t_stage.elapsed(), to_store.len() as u64);
-
+        // is already in the shape storage wants, so there is nothing to stage
+        // and nothing to re-intern.
         self.store
-            .insert_quads(&to_store)
+            .insert_quad_ids(&entries)
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
 
         let t_live = std::time::Instant::now();
-        let n_keys = keys.len() as u64;
-        for key in keys {
-            self.live_keys.insert(key);
+        let n_keys = entries.len() as u64;
+        for quad in &entries {
+            self.live_keys.insert(QuadKey::of(*quad));
         }
         record_load_phase(LoadPhase::LiveKeys, t_live.elapsed(), n_keys);
 
@@ -843,7 +850,7 @@ impl HornBackend {
         self.invalidate();
         record_load_phase(LoadPhase::Invalidate, t_inv.elapsed(), n_keys);
 
-        Ok(to_store.len() as u64)
+        Ok(n_keys)
     }
 
     /// Bulk-insert algebra triples in one pass — O(n) cost versus O(n²) for

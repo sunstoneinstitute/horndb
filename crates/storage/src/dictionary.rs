@@ -4,7 +4,7 @@
 //! Reverse map: `RwLock<Vec<Term>>` indexed by `payload - 1`.
 
 use crate::error::{Result, StorageError};
-use crate::term::{TermId, TermKind, MAX_DICT_INDEX};
+use crate::term::{GraphId, InternedQuad, TermId, TermKind, KIND_SHIFT, MAX_DICT_INDEX};
 use dashmap::DashMap;
 use oxrdf::{Literal, NamedNodeRef, Term};
 use parking_lot::RwLock;
@@ -61,6 +61,30 @@ impl Dictionary {
     /// the bulk loaders and [`crate::Store`]'s insert paths.
     pub fn intern_triple(&self, s: &Term, p: &Term, o: &Term) -> Result<(TermId, TermId, TermId)> {
         Ok((self.intern(s)?, self.intern(p)?, self.intern(o)?))
+    }
+
+    /// Intern a quad's subject/predicate/object against an already-resolved
+    /// `GraphId`, returning the [`InternedQuad`] the id-based store entry
+    /// points require. Interns in subject, predicate, object order — the same
+    /// order, and the same one-intern-per-new-term, as
+    /// [`Dictionary::intern_triple`], so a document interned through this path
+    /// gets exactly the ids the term-based path would have assigned.
+    pub fn intern_quad(&self, g: GraphId, s: &Term, p: &Term, o: &Term) -> Result<InternedQuad> {
+        let (s_id, p_id, o_id) = self.intern_triple(s, p, o)?;
+        Ok(InternedQuad::from_ids(g, s_id, p_id, o_id))
+    }
+
+    /// True if this dictionary could have issued `id`: an inline-int id (value
+    /// encoded, never allocated) or an index it has actually handed out. The
+    /// dictionary is append-only, so an id it issued stays issued. Backs the
+    /// `debug_assert!` on the id-based store entry points; not a security
+    /// boundary — a foreign dictionary of the same size passes.
+    pub(crate) fn issued(&self, id: TermId) -> bool {
+        match TermKind::from_tag((id.bits() >> KIND_SHIFT) as u8) {
+            None => false,
+            Some(TermKind::InlineInt) => true,
+            Some(_) => (1..=self.len() as u64).contains(&id.payload()),
+        }
     }
 
     /// Resolve a term to its `TermId` **without** interning it. Returns

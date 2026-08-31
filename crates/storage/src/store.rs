@@ -8,7 +8,7 @@ use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
-use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
+use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
 use crate::tier::{ApplyReport, Tier, TierStats};
 use oxrdf::Term;
 
@@ -146,15 +146,14 @@ impl Store {
             ) else {
                 continue;
             };
-            del_ids.push((*g, s_id, p_id, o_id));
+            del_ids.push(InternedQuad::from_ids(*g, s_id, p_id, o_id));
         }
         let mut add_ids = Vec::with_capacity(adds.len());
         // One clock read on each side of the loop; the loop body touches no
         // metric handle (SPEC-17 §5.4).
         let t_intern = std::time::Instant::now();
         for (g, s, p, o) in adds {
-            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
-            add_ids.push((*g, s_id, p_id, o_id));
+            add_ids.push(self.dictionary.intern_quad(*g, s, p, o)?);
         }
         if !adds.is_empty() {
             horndb_metrics::metrics().storage.record_load_phase(
@@ -163,7 +162,63 @@ impl Store {
                 adds.len() as u64,
             );
         }
-        self.tier.apply_quad_batch(&del_ids, &add_ids)
+        self.apply_quad_ids(&del_ids, &add_ids)
+    }
+
+    /// [`Store::apply_quads`] for callers that already hold interned ids.
+    ///
+    /// A bulk loader that has to intern anyway — to deduplicate before the
+    /// write, as `HornBackend` does — would otherwise hand the terms back for
+    /// a second, identical dictionary lookup (HDB-87). Passing
+    /// [`InternedQuad`]s skips that pass and the term buffer behind it. Same
+    /// commit semantics as [`Store::apply_quads`]: deletions before
+    /// insertions, one commit version, a net-empty batch does not bump it.
+    /// Nothing is interned here, so no `intern` load phase is recorded.
+    ///
+    /// **Caller requirement: every id must come from *this* store's
+    /// dictionary** — `self.dictionary().intern_quad(..)`, and a `GraphId`
+    /// from `self.intern_graph_uri(..)`. [`InternedQuad`] proves an id was
+    /// interned, not *where*, and ids are only meaningful against the
+    /// dictionary that issued them; a quad interned against another store
+    /// writes rows naming whatever terms those indices happen to hold here.
+    /// Staleness is not a concern in the other direction — the dictionary is
+    /// append-only, so an id it issued stays valid. A `debug_assert!` catches
+    /// the obvious violations (see [`Dictionary::issued`]); the release path
+    /// pays nothing, which is the point of this entry point.
+    pub fn apply_quad_ids(
+        &self,
+        dels: &[InternedQuad],
+        adds: &[InternedQuad],
+    ) -> Result<ApplyReport> {
+        debug_assert!(
+            dels.iter().chain(adds).all(|q| self.issued_here(*q)),
+            "apply_quad_ids: quad carries ids this store's dictionary never issued"
+        );
+        self.tier.apply_quad_batch(
+            InternedQuad::peel_slice(dels),
+            InternedQuad::peel_slice(adds),
+        )
+    }
+
+    /// Every id in `q` is one this store's dictionary issued. Debug-only
+    /// guard for [`Store::apply_quad_ids`] — it cannot distinguish two
+    /// dictionaries that both hold the index, so it catches mistakes, not
+    /// adversaries.
+    fn issued_here(&self, q: InternedQuad) -> bool {
+        let g = q.graph();
+        (g == DEFAULT_GRAPH || self.dictionary.issued(TermId(g.0)))
+            && self.dictionary.issued(q.subject())
+            && self.dictionary.issued(q.predicate())
+            && self.dictionary.issued(q.object())
+    }
+
+    /// Insert already-interned quads (SPEC-28 S6): a thin wrapper over
+    /// [`Store::apply_quad_ids`] with no deletions, and the id-based twin of
+    /// [`Store::insert_quads`]. Returns the number of quads actually inserted.
+    /// Carries the same caller requirement: the ids must come from this
+    /// store's dictionary.
+    pub fn insert_quad_ids(&self, adds: &[InternedQuad]) -> Result<usize> {
+        Ok(self.apply_quad_ids(&[], adds)?.inserted)
     }
 
     /// Reclaim physically-dead rows (`end <= min pinned version`) across the

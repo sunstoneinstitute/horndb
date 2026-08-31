@@ -511,15 +511,17 @@ Three things this overturns:
   figure is **4.77s (20%)** — the rest of `dedupe` is `intra_batch.insert` and
   the term moves. `dedupe` is the dearer of the two passes because it takes
   every dictionary *miss*, not because of its `live_keys` lookup, which is free
-  here. See the sub-phase table below.
+  here. See the sub-phase table below. **Fixed in HDB-87** (two sections down):
+  `intern` is now zero on this path and the `stage` phase no longer exists.
 
 `live_keys` adds a further 1.45s building a 10M-entry `HashSet<QuadKey>` that
 exists for `INSERT DATA` idempotency and cannot hit on a load into an empty
 store.
 
 Ranked targets, all of them above the tier: tokenisation (9.6s), the duplicate
-intern (1.9s recoverable, see below), the term moves inside `dedupe` (1.5s),
-`intra_batch.insert` (1.4s), and the `live_keys` build (1.4s).
+intern (1.9s — recovered by HDB-87), the term moves inside `dedupe` (1.5s, half
+recovered with it), `intra_batch.insert` (1.4s), and the `live_keys` build
+(1.4s).
 
 #### Inside `dedupe`: interning is half of it, `live_keys.contains` is free (HDB-90, 2026-08-24)
 
@@ -570,7 +572,9 @@ strings ahead (4.77s vs 4.30s).
 What this does *not* change: **HDB-87 is still worth ~1.9s.** Removing the
 duplicate intern leaves whichever pass survives doing the misses, so the saving
 is the hit pass — the 1.879s `intern` row, 7.9% of the Turtle load. R2 reached
-the same figure from the wrong premise (that both passes cost ~1.9s).
+the same figure from the wrong premise (that both passes cost ~1.9s). Measured
+outcome: 2.5-2.8s, because carrying ids instead of terms also shrinks `dedupe`
+and deletes `stage` — next section.
 
 Method and its limits: splitting a per-triple loop needs a clock read between
 each step, which inflates `dedupe` by 13-16%. The `dedupe_clock` counter times
@@ -581,6 +585,60 @@ loop-iterator advance plus the part of each `Instant::now()` that falls outside
 the measured intervals — it is instrumentation, not a missing sub-phase. The
 same procedure on a synthetic 1.2M-triple corpus reproduced the uninstrumented
 total to within 2%.
+
+#### Interning once removes the second pass and the term buffer (HDB-87, 2026-08-31)
+
+`HornBackend::insert_oxrdf_batch_in_graph` now keeps the ids it interned in
+phase 1 and hands them to `Store::insert_quad_ids`, instead of handing the
+terms back for a second dictionary pass. Three costs go with it: the `intern`
+phase, the `stage` phase, and part of `dedupe` — the surviving-entry buffer is
+four ids per row (32 B) instead of a `QuadKey` plus three heap-backed
+`oxrdf::Term`s (~1 GB at this scale).
+
+Controlled A/B on `hornbench`, trainmarks xlarge (9,995,000 triples), release
++ snmalloc, `--load-only --reserve-triples 10000000`, serial parse (the shipped
+`HORNDB_LOAD_THREADS` default of 1). Before `4d8d2b9`, after `ac4fd5b`; three
+runs of each, interleaved before/after, median reported. Host confirmed quiet
+(load average 0.00 at start).
+
+| | before (ttl) | after (ttl) | before (nt) | after (nt) |
+|---|---|---|---|---|
+| **read_turtle / read_ntriples** | **21.630s** | **19.087s** (**-11.8%**) | **18.275s** | **15.511s** (**-15.1%**) |
+| `parse` | 9.108s | 9.465s | 5.925s | 5.976s |
+| ` ` of which `materialize` | 0.592s | 0.602s | 0.489s | 0.509s |
+| `dedupe` | 5.876s | 5.327s | 5.603s | 5.010s |
+| `intern` | 1.927s | **0** | 1.864s | **0** |
+| `stage` | 0.267s | **gone** | 0.214s | **gone** |
+| `live_keys` | 1.280s | 1.285s | 1.298s | 1.274s |
+| `group` | 1.383s | 1.391s | 1.384s | 1.363s |
+| `build` | 1.192s | 1.227s | 1.207s | 1.225s |
+| `merge` | 0.087s | 0.162s | 0.117s | 0.119s |
+| `copy_forward` / `invalidate` | ~0 | ~0 | ~0 | ~0 |
+| **accounted** | 21.121s | 18.857s | 17.611s | 14.967s |
+
+Run spread: read_turtle 21.630 / 21.619 / 21.890 before, 19.165 / 18.709 /
+19.087 after; read_ntriples 18.275 / 18.052 / 18.299 before, 15.524 / 15.511 /
+15.501 after. The two distributions do not overlap on either leg.
+
+- **`intern` is zero**, which is the acceptance criterion: the phase is emitted
+  only by the term-based `Store::apply_quads`, and the bulk path no longer
+  reaches it. `stage` is not zero but removed — it covered building the key and
+  `to_store` vectors, and there is nothing left to stage.
+- **`dedupe` drops 0.55s (ttl) / 0.59s (nt)**, roughly a third of the 1.54s
+  HDB-90 attributed to `entries.push` and the term moves. The rest stays: phase
+  1 still consumes the incoming `Vec<(Term, Term, Term)>`, so the terms are
+  still dropped, just one buffer earlier.
+- **End-to-end beats the phase deltas** by 0.16s (ttl) and 0.09s (nt). That is
+  the teardown of the ~1 GB `entries` buffer, which no counter covered.
+- Turtle `parse` reads 0.36s higher after the change and N-Triples `parse` is
+  flat (+0.05s). This cannot be an effect of the change: the driver closes the
+  `parse` phase before it constructs the `HornBackend` and calls
+  `insert_oxrdf_batch`, so no code touched here runs inside that interval. And
+  `read_turtle` is whole-function wall clock, so the reading is already inside
+  the -11.8% — if it were real it would mean the headline understates the win.
+
+Predicted 1.9s plus "most of" 1.54s; delivered 2.5-2.8s. The prediction that
+the term moves would largely vanish was too strong — half of them did.
 
 #### Parse does not parallelise, and the phase counters say where it goes
 
