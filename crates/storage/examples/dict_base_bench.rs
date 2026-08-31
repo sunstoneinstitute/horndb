@@ -297,7 +297,7 @@ fn synth_keys(n: usize) -> Keys {
 /// and replay its term stream over the result.
 ///
 /// Every LUBM key that names a university carries it as `University{k}`.
-/// Rewriting `k` to `k + 100*r` for `r` in `0..factor` produces the
+/// Rewriting `k` to `k + stride*r` for `r` in `0..factor` produces the
 /// distinct-term set the real generator emits for `100*factor` universities,
 /// with the real per-department irregularity, the real literal mix and the
 /// real length tail. Keys naming no university (the ontology, shared names,
@@ -307,6 +307,11 @@ fn synth_keys(n: usize) -> Keys {
 /// by adding its copy's base. The replayed stream switches copy every
 /// `COPY_CHUNK` occurrences, which is what a real LUBM document stream looks
 /// like: one university's file at a time, over a dictionary holding them all.
+///
+/// The stride is one past the largest university number in the source, not the
+/// university count. LUBM-100 names universities well outside the 100 it
+/// generates — `undergraduateDegreeFrom` points at `University975` and the
+/// like — so a stride of 100 makes copy 9 collide with copy 0.
 ///
 /// This is how the 10M and 100M scale points are built. Nothing is invented —
 /// the shape comes from the measured LUBM-100 set.
@@ -349,6 +354,19 @@ fn scale_keys(src: &Keys, src_stream: &[u32], factor: usize, cap: usize) -> (Key
         }
         univ_at.push(at);
     }
+    // One past the largest university number seen, so the copies' number
+    // ranges do not overlap.
+    let mut stride = 1usize;
+    for i in 0..src.n() {
+        if let Some((ds, de)) = univ_at[i] {
+            let k = src.get(i);
+            let num: usize = std::str::from_utf8(&k[ds as usize..de as usize])
+                .unwrap()
+                .parse()
+                .unwrap();
+            stride = stride.max(num + 1);
+        }
+    }
     let ns = n_shared as usize;
     let nu = n_univ as usize;
     let want = cap.min(ns + nu * factor);
@@ -389,10 +407,27 @@ fn scale_keys(src: &Keys, src_stream: &[u32], factor: usize, cap: usize) -> (Key
             let num: usize = std::str::from_utf8(&k[ds..de]).unwrap().parse().unwrap();
             buf.clear();
             buf.extend_from_slice(&k[..ds]);
-            buf.extend_from_slice((num + 100 * r).to_string().as_bytes());
+            buf.extend_from_slice((num + stride * r).to_string().as_bytes());
             buf.extend_from_slice(&k[de..]);
             emit(&mut arena, id, &buf);
         }
+    }
+
+    // Distinctness is what the MPHF needs and what a dictionary key set means.
+    // Check it here, where the message can name the cause, rather than letting
+    // PtrHash fail with "hashes are not distinct" ten seeds later.
+    {
+        let mut h: Vec<u64> = (0..off.len())
+            .map(|i| {
+                let o = off[i] as usize;
+                hash64(&arena[o..o + len[i] as usize])
+            })
+            .collect();
+        h.sort_unstable();
+        assert!(
+            h.windows(2).all(|w| w[0] != w[1]),
+            "scaled key set has duplicates (stride {stride} too small?)"
+        );
     }
 
     let mut stream = Vec::with_capacity(src_stream.len());
