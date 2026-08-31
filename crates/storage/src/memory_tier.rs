@@ -382,7 +382,9 @@ impl Tier for MemoryTier {
 
         // Nanoseconds and rows accumulated in locals across every partition
         // touched by this batch, merged into the counters once on the way out.
-        let mut copy_ns = 0u64;
+        // No `copy_forward`: this path no longer carries existing rows forward
+        // (HDB-84). The cost it used to cover is now `merge_runs`, emitted
+        // once per partition from `PredicatePartition::cols`.
         let mut build_ns = 0u64;
         let mut build_rows = 0u64;
 
@@ -400,20 +402,16 @@ impl Tier for MemoryTier {
                 .map(|gs| gs.partitions.clone())
                 .unwrap_or_default();
             for (p, rows) in pred_rows {
-                // New rows: live from this version.
+                // New rows: live from this version. The existing rows are
+                // shared by `Arc` as an untouched run; only these are sorted
+                // here, and the merged view is built once, on the first read
+                // (HDB-84) — so `build` covers this batch, not the partition.
                 let added = rows.len() as u64;
-                let t_copy = Instant::now();
+                let t_build = Instant::now();
                 let new_rows: Vec<_> = rows
                     .into_iter()
                     .map(|(s, o)| (s.0, o.0, new_version, UNSET_END))
                     .collect();
-                copy_ns += t_copy.elapsed().as_nanos() as u64;
-
-                // The existing rows are shared by `Arc` as an untouched run;
-                // only the new rows are sorted here. The merged view is built
-                // once, on the first read (HDB-84) — so `build` is the new
-                // rows, not the whole partition.
-                let t_build = Instant::now();
                 let part = match new_partitions.get(&p) {
                     Some(existing) => existing.with_appended_rows(new_rows),
                     None => PartitionBuilder::from_rows(new_rows)
@@ -437,14 +435,7 @@ impl Tier for MemoryTier {
         });
         *self.current.write() = next;
 
-        // Single merge point for the per-partition accumulators. Nothing is
-        // carried forward any more, so `copy_forward` covers only staging the
-        // new rows and its row count is the new rows.
-        record_phase(
-            LoadPhase::CopyForward,
-            Duration::from_nanos(copy_ns),
-            build_rows,
-        );
+        // Single merge point for the per-partition accumulator.
         record_phase(LoadPhase::Build, Duration::from_nanos(build_ns), build_rows);
         Ok(())
     }
@@ -886,9 +877,10 @@ mod tests {
         }
     }
 
-    /// Retractions and re-inserts land on a partition that is still a list of
-    /// unmerged runs. The visible rows must match the same operations replayed
-    /// one batch at a time on a fully merged partition.
+    /// Retract and re-insert against a partition that is still a list of
+    /// unmerged runs: the retraction has to see rows spread across 13 runs,
+    /// and re-inserting a retracted quad has to make it live again. Asserts
+    /// the live count after each step.
     #[test]
     fn retraction_after_batched_inserts_sees_every_run() {
         let pred = id(100);
@@ -911,6 +903,49 @@ mod tests {
             tier.triple_count(),
             (quads.len() - targets.len() + 4) as u64
         );
+    }
+
+    /// The run cap (HDB-84 `MAX_RUNS`) forces a merge mid-write so neither the
+    /// run-list clone nor the per-run overhead grows without bound. Drive it
+    /// the way that reaches it — one quad per call, no read in between — and
+    /// check the store is still exactly what one call would have produced.
+    #[test]
+    fn run_cap_forces_a_merge_without_changing_contents() {
+        use crate::ordering::Ordering;
+        use crate::partition::MAX_RUNS;
+
+        let pred = id(100);
+        let n = (MAX_RUNS + 8) as u64;
+        let quads: Vec<_> = (0..n)
+            .map(|i| (DEFAULT_GRAPH, id(i % 997), pred, id(i % 31)))
+            .collect();
+
+        let one = MemoryTier::new();
+        one.insert_quad_batch(&quads).unwrap();
+
+        let many = MemoryTier::new();
+        for q in &quads {
+            many.insert_quad_batch(std::slice::from_ref(q)).unwrap();
+        }
+
+        let (a, b) = (one.snapshot(), many.snapshot());
+        let read = |snap: &crate::memory_tier::TierSnapshot| {
+            snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
+                (
+                    p.len(),
+                    p.live_len(),
+                    p.ordered(Ordering::Spo)
+                        .subject_object()
+                        .collect::<Vec<_>>(),
+                    p.ordered(Ordering::Pos)
+                        .subject_object()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(read(&a), read(&b));
+        assert_eq!(a.triple_count(), b.triple_count());
     }
 
     #[test]

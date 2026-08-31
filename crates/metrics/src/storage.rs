@@ -74,9 +74,15 @@ impl StorageMetrics {
     }
 }
 
-/// A cheap, O(1)-ish point-in-time snapshot of store size quantities, read at
-/// scrape time. "Cheap" means bounded by the number of distinct predicates /
-/// graphs — never an O(triples) traversal.
+/// A point-in-time snapshot of store size quantities, read at scrape time.
+///
+/// Normally bounded by the number of distinct predicates / graphs. **One
+/// exception, since HDB-84:** reading a partition that has been written in
+/// batches merges its runs first, which is O(rows in that partition). A scrape
+/// is a read like any other, so a scrape that lands after a bulk load — or
+/// after any batched write nothing has read yet — pays that merge, once per
+/// affected partition. On a 10M-triple store that is order of a second. Every
+/// later scrape is bounded again.
 #[derive(Clone, Copy, Default)]
 pub struct StorageSnapshot {
     pub triples: i64,

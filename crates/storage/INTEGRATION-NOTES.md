@@ -99,14 +99,37 @@ are identical however the rows arrived.
 
 What this changes for callers:
 
-- Repeated small writes cost the rows they carry, not the rows already stored.
-  Before, N batches into one predicate paid O(existing) N times.
+- Repeated small writes cost the rows they carry plus the run list they clone,
+  not the rows already stored. Before, N batches into one predicate paid
+  O(existing) N times.
 - The first read after a batched write is O(rows in that partition), once. Any
-  read pays it; `MemoryTier::stats()` and `HornBackend::storage_stats()` count
-  as reads here, so neither is strictly O(partitions) any more.
+  read pays it; `MemoryTier::stats()`, `HornBackend::storage_stats()` and a
+  Prometheus scrape all count as reads here, so none of them is strictly
+  O(partitions) any more. It emits a `merge_runs` load phase.
 - `retract_quad_batch`, `apply_quad_batch` and `compact()` still rebuild a
   partition row by row — they have to touch every row anyway — so they force
   the merge first.
+
+**A read can now stall a write.** The merging thread is a reader. It holds no
+writer lock, and it holds the partition's `runs` mutex for the whole merge — a
+sort of every row, plus a second sort for the object-major layout above
+`hot_threshold`. A concurrent `with_appended_rows` on that same partition waits
+it out: on a 10M-row predicate, order of seconds. The work is not new (the
+pre-HDB-84 tier charged the same sort to the writer, on *every* batch) and it
+runs once per partition version, but the direction is: reader-blocks-writer did
+not exist before. `MemoryTier`'s writer mutex does not bound it, because the
+merging thread never takes that mutex.
+
+**Run count is capped** at `partition::MAX_RUNS` (4,096). Two costs grow with
+it — a write clones the run list, and each run carries ~1 KiB of fixed Arrow +
+Roaring overhead however few rows it holds — so on reaching the cap the write
+merges instead of appending. A batched bulk load does not get near it (10M
+triples in 8,192-triple batches is 1,221 runs). The pattern that does is
+`Store::insert_triples` called one triple at a time with no read in between:
+that caller now pays a full O(rows) merge every 4,096 inserts, against the
+pre-HDB-84 tier's merge on *every* insert. Bounded, and strictly better than
+before, but single-triple insert into a columnar partition is still the wrong
+shape — batch it.
 
 The bulk loaders' batch size is `HORNDB_LOAD_BATCH_TRIPLES`
 (`loader::load_batch_triples`, default 65,536). It is a memory knob now, not an

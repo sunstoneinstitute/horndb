@@ -47,9 +47,16 @@ curl -s http://127.0.0.1:3840/metrics
 
 The storage size gauges (`horndb_storage_triples`, …) are computed **at scrape
 time** by a `StorageCollector` the server installs over a `Weak` ref to the live
-store — they cost nothing in steady state and only appear when the server has
-registered the collector. In tests, read the registry directly with
-`horndb_metrics::encode_metrics()`.
+store, and only appear when the server has registered the collector. In tests,
+read the registry directly with `horndb_metrics::encode_metrics()`.
+
+They are cheap in steady state, with one exception worth knowing about. Since
+HDB-84 the tier appends a write as a sorted run and merges a partition's runs
+on the **first read**, and a scrape is a read: the first scrape after a bulk
+load (or any batched write nothing has read yet) pays that merge, once per
+affected partition — order of a second on a 10M-triple store, and it emits a
+`merge_runs` phase sample. Later scrapes are bounded by the partition count
+again.
 
 ## Labels
 
@@ -112,9 +119,10 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 | `stage` | `crates/sparql/src/exec/horn.rs` | building the key and `to_store` vectors handed to storage |
 | `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms a second time, for storage's own ids |
 | `group` | `crates/storage/src/memory_tier.rs` | grouping the batch by graph then predicate into per-predicate `(s, o)` sets |
-| `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps |
-| `merge` | `crates/storage/src/memory_tier.rs` | appending new rows, skipping ones still visible after the deletes |
-| `build` | `crates/storage/src/memory_tier.rs` | sorting the partition and materialising its Arrow columns |
+| `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps. `apply_quad_batch` only — `insert_quad_batch` stopped carrying rows forward in HDB-84 and no longer emits this |
+| `merge` | `crates/storage/src/memory_tier.rs` | appending new rows, skipping ones still visible after the deletes (`apply_quad_batch`) |
+| `build` | `crates/storage/src/memory_tier.rs` | sorting rows and materialising their Arrow columns: the whole partition in `apply_quad_batch`, only the batch's own new run in `insert_quad_batch` |
+| `merge_runs` | `crates/storage/src/partition.rs` | merging a partition's sorted runs into the columns readers use. Emitted on the **first read** after batched writes, once per partition, not during the write. This is where `insert_quad_batch`'s former `copy_forward` + whole-partition `build` cost went (HDB-84) |
 | `live_keys` | `crates/sparql/src/exec/horn.rs` | recording the inserted quad keys in the backend's live-key set |
 | `invalidate` | `crates/sparql/src/exec/horn.rs` | dropping the cached WCOJ snapshots after the write |
 

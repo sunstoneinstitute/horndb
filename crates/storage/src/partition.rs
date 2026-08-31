@@ -24,20 +24,54 @@
 //! re-sort), so N batches into one predicate paid `O(existing)` N times —
 //! quadratic in the number of calls. A bulk load driven in batches now pays one
 //! sort at the end instead of one per batch.
+//!
+//! A write still clones the run *list*, and each run carries fixed per-run
+//! overhead, so the run count is capped at [`MAX_RUNS`]; reaching it makes the
+//! write merge rather than append. The merge itself blocks writers to that
+//! partition for its duration — see [`PredicatePartition::cols`].
 
 use crate::ordering::{Ordering, PartitionAxis};
 use crate::term::TermId;
 use crate::visibility::{visible, CommitVersion, LATEST, UNSET_END};
 use arrow::array::{ArrayRef, UInt64Array};
+use horndb_metrics::labels::LoadPhase;
 use parking_lot::Mutex;
 use roaring::RoaringTreemap;
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Default hot-predicate threshold: predicates with at least this many triples
 /// eagerly materialise all six orderings; smaller ones materialise the
 /// object-major layout lazily on first request. Configurable per tier — see
 /// [`crate::MemoryTier::with_hot_threshold`].
 pub const DEFAULT_HOT_THRESHOLD: usize = 1_000_000;
+
+/// Runs a partition may accumulate before a write merges them instead of
+/// appending another one.
+///
+/// Two costs grow with the run count, and this caps both. A write clones the
+/// run list, so it is O(runs); and every run carries its own four Arrow arrays
+/// and two `RoaringTreemap`s, roughly 1 KiB of fixed overhead however few rows
+/// it holds. At this cap that is ~4 MiB of overhead and ~4 k `Arc` clones per
+/// write, both negligible.
+///
+/// It exists for the write pattern that would otherwise be pathological:
+/// `Store::insert_triples` called one triple at a time with no read in
+/// between, which without a cap builds one run per triple. With the cap such a
+/// caller pays a full O(rows) merge every `MAX_RUNS` inserts — bounded memory,
+/// and 4,096× less rebuilding than the pre-HDB-84 tier, which merged on every
+/// single insert.
+///
+/// A batched bulk load does not reach it at realistic corpus sizes: 10M
+/// triples in 8,192-triple batches is 1,221 runs.
+pub(crate) const MAX_RUNS: usize = 4096;
+
+/// Merge one phase into the shared load counters (SPEC-17 §5.4).
+fn record_phase(phase: LoadPhase, elapsed: Duration, rows: u64) {
+    horndb_metrics::metrics()
+        .storage
+        .record_load_phase(phase, elapsed, rows);
+}
 
 /// The object-major `(object, subject)` columns, sorted by `(object, subject)`.
 struct ObjectMajor {
@@ -78,9 +112,10 @@ struct Columns {
 }
 
 impl Columns {
-    /// Sort `rows` into SPO order, collapse exact-duplicate live rows, and
-    /// materialise the Arrow columns and side-sets.
-    fn from_rows(mut rows: Vec<Row>) -> Self {
+    /// Sort `rows` into SPO order and collapse exact-duplicate live rows.
+    /// Split from [`Columns::from_sorted_rows`] so a caller merging runs can
+    /// release them between the two steps.
+    fn sort_dedup(rows: &mut Vec<Row>) {
         // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
         // order for trie iteration; begin orders a tuple's history.
         rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
@@ -88,7 +123,17 @@ impl Columns {
         // repeated insert is a no-op, and the earliest `begin` wins. Dead rows
         // (end set) are history and are kept until compaction.
         rows.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.3 == UNSET_END && b.3 == UNSET_END);
+    }
 
+    /// Sort, dedup, and materialise the Arrow columns and side-sets.
+    fn from_rows(mut rows: Vec<Row>) -> Self {
+        Self::sort_dedup(&mut rows);
+        Self::from_sorted_rows(rows)
+    }
+
+    /// Materialise columns and side-sets from rows already sorted and
+    /// deduplicated by [`Columns::sort_dedup`].
+    fn from_sorted_rows(rows: Vec<Row>) -> Self {
         let n = rows.len();
         let mut subject_set = RoaringTreemap::new();
         let mut object_set = RoaringTreemap::new();
@@ -204,21 +249,38 @@ impl PredicatePartition {
 
     /// The merged view, building it on first call. Every read path goes
     /// through here; after the first call it is an atomic load.
+    ///
+    /// **This can block a writer.** The merging thread is a reader; it holds
+    /// no writer lock, and it holds the `runs` mutex for the whole merge — a
+    /// sort of every row in the partition, plus a second sort for the
+    /// object-major layout above `hot_threshold`. A concurrent
+    /// [`Self::with_appended_rows`] on this same partition waits that out: on
+    /// a 10M-row predicate, order of seconds. The work itself is not new (the
+    /// pre-HDB-84 tier charged the same sort to the writer on every batch) and
+    /// it runs once per partition version, but the thread that pays it has
+    /// changed, so a read can now stall a write.
     fn cols(&self) -> &Columns {
         self.cols.get_or_init(|| {
             let mut runs = self.runs.lock();
             let merged = if runs.len() == 1 {
                 runs[0].clone()
             } else {
+                let t_merge = Instant::now();
                 let total: usize = runs.iter().map(|r| r.len()).sum();
                 let mut rows: Vec<Row> = Vec::with_capacity(total);
-                // Drain as we go: a run whose only other holder was an older
-                // snapshot is freed here, so the merge peaks at roughly one
-                // extra copy rather than two.
-                for run in runs.drain(..) {
+                for run in runs.iter() {
                     run.extend_rows(&mut rows);
                 }
-                Arc::new(Columns::from_rows(rows))
+                Columns::sort_dedup(&mut rows);
+                // Every row now lives in `rows`, so releasing the runs here
+                // caps the peak at two copies instead of three. Do it *after*
+                // the sort: dropping them earlier would leave `runs` empty if
+                // the merge unwound, and a retry would then build an empty
+                // partition rather than fail.
+                runs.clear();
+                let merged = Arc::new(Columns::from_sorted_rows(rows));
+                record_phase(LoadPhase::MergeRuns, t_merge.elapsed(), merged.len() as u64);
+                merged
             };
             runs.clear();
             runs.push(merged.clone());
@@ -230,18 +292,26 @@ impl PredicatePartition {
     }
 
     /// A new partition holding this one's rows plus `new_rows`, as one extra
-    /// run. `O(new_rows)`: the rows already here are shared by `Arc`, not
-    /// copied or re-sorted. The result is unmaterialised — the first read
-    /// merges it (see the module docs).
+    /// run. `O(new_rows + runs)`: the rows already here are shared by `Arc`,
+    /// not copied or re-sorted, but the run *list* is cloned. The result is
+    /// normally unmaterialised — the first read merges it (see the module
+    /// docs) — unless the run count reaches [`MAX_RUNS`], which forces the
+    /// merge here so neither the list clone nor the per-run overhead can grow
+    /// without bound.
     pub(crate) fn with_appended_rows(&self, new_rows: Vec<Row>) -> PredicatePartition {
         let mut runs = self.runs.lock().clone();
         runs.push(Arc::new(Columns::from_rows(new_rows)));
-        PredicatePartition {
+        let at_cap = runs.len() >= MAX_RUNS;
+        let part = PredicatePartition {
             runs: Mutex::new(runs),
             cols: OnceLock::new(),
             hot_threshold: self.hot_threshold,
             object_major: OnceLock::new(),
+        };
+        if at_cap {
+            part.cols();
         }
+        part
     }
 
     pub fn len(&self) -> usize {
