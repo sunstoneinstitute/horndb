@@ -841,6 +841,12 @@ sampled at 5 Hz on a separate single run per cell. Driver:
 Run-to-run spread is under 1% on every cell except 65,536-after (9.70–10.13s,
 4.4%); the three before/after pairs never overlap.
 
+The review follow-ups (`e274ebb` — the `merge_runs` phase, the `MAX_RUNS` cap,
+releasing the runs after the sort) were re-confirmed against `548e850` on the
+same host, two interleaved reps per cell: every cell within 1% and peak RSS
+within 1 MiB, so the table stands. The cap is not reached here — 8,192-triple
+batches produce 1,221 runs against a cap of 4,096.
+
 Read the "after" column downwards, not across: it is flat. Load cost no longer
 depends on how the input was chunked, and the batched path now costs what the
 one-call path costs. Before, the same 10M triples spanned 9.7s to 315s on
