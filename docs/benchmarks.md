@@ -850,11 +850,19 @@ sampled at 5 Hz on a separate single run per cell. Driver:
 Run-to-run spread is under 1% on every cell except 65,536-after (9.70–10.13s,
 4.4%); the three before/after pairs never overlap.
 
-The review follow-ups (`e274ebb` — the `merge_runs` phase, the `MAX_RUNS` cap,
-releasing the runs after the sort) were re-confirmed against `548e850` on the
-same host, two interleaved reps per cell: every cell within 1% and peak RSS
-within 1 MiB, so the table stands. The cap is not reached here — 8,192-triple
-batches produce 1,221 runs against a cap of 4,096.
+The review follow-ups were re-confirmed against `548e850` on the same host,
+two interleaved reps per cell. `e274ebb` (the `merge_runs` phase and the
+`MAX_RUNS` cap) landed within 1% on every cell, peak RSS within 1 MiB.
+`2aeac6e` then stopped releasing the runs before the merged columns are built —
+closing an unwind window at the cost of one transient copy of the rows — and
+measured **1–2% slower in all four pairs**: 9.94s vs 9.82s at 65,536 and
+10.12s vs 9.92s at 8,192. Small, inside the spread the table already reports,
+and consistent enough in direction to be real rather than noise. Peak RSS did
+not move (1,537–1,594 MiB against 1,543–1,597 MiB), which says the load's peak
+sits somewhere other than the merge, not that the merge peak is unchanged.
+
+The cap is not reached by any of this: 8,192-triple batches produce 1,221 runs
+against a cap of 4,096.
 
 Read the "after" column downwards, not across: it is flat. Load cost no longer
 depends on how the input was chunked, and the batched path now costs what the
