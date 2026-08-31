@@ -2,7 +2,7 @@
 //!
 //! See SPEC-02 F1/F2: high 4 bits encode `TermKind`, low 60 bits are payload.
 
-use bytemuck::{Pod, TransparentWrapper, Zeroable};
+use bytemuck::{Pod, Zeroable};
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Pod, Zeroable, Debug)]
@@ -94,20 +94,24 @@ pub const DEFAULT_GRAPH: GraphId = GraphId(0);
 /// The id-based store entry points ([`Store::insert_quad_ids`] and
 /// [`Store::apply_quad_ids`](crate::Store::apply_quad_ids)) take this instead
 /// of a bare `(GraphId, TermId, TermId, TermId)` tuple. Its field is private
-/// and the only public constructor is [`Dictionary::intern_quad`], so a caller
-/// outside this crate cannot reach storage with ids that were never interned.
+/// and it implements no trait that can construct one, so
+/// [`Dictionary::intern_quad`] is the only way to obtain one outside this
+/// crate: a caller cannot reach storage with ids that were never interned.
 /// The dictionary contract — intern exactly once per new term, in document
 /// order — is therefore carried by the type, not by a comment.
 ///
+/// It does **not** say *which* dictionary. See [`Store::apply_quad_ids`] for
+/// the requirement the caller still owns.
+///
 /// `repr(transparent)` over the tuple the [`Tier`](crate::Tier) API already
-/// speaks, so a batch converts to that shape with no copy
-/// (`TransparentWrapper::peel_slice`).
+/// speaks, so a batch converts to that shape with no copy — see
+/// [`InternedQuad::peel_slice`].
 ///
 /// [`Store::insert_quad_ids`]: crate::Store::insert_quad_ids
+/// [`Store::apply_quad_ids`]: crate::Store::apply_quad_ids
 /// [`Dictionary::intern_quad`]: crate::Dictionary::intern_quad
 #[repr(transparent)]
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, TransparentWrapper)]
-#[transparent((GraphId, TermId, TermId, TermId))]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct InternedQuad((GraphId, TermId, TermId, TermId));
 
 impl InternedQuad {
@@ -116,6 +120,19 @@ impl InternedQuad {
     /// [`Dictionary::intern_quad`](crate::Dictionary::intern_quad).
     pub(crate) fn from_ids(g: GraphId, s: TermId, p: TermId, o: TermId) -> Self {
         Self((g, s, p, o))
+    }
+
+    /// View a batch as the tuple slice [`Tier`](crate::Tier) takes, with no
+    /// copy.
+    ///
+    /// Hand-written rather than derived from `bytemuck::TransparentWrapper`:
+    /// that trait's `wrap`/`wrap_slice` are safe provided methods, so deriving
+    /// it would hand every crate with `bytemuck` in scope a public constructor
+    /// and undo the guard above.
+    pub(crate) fn peel_slice(quads: &[Self]) -> &[(GraphId, TermId, TermId, TermId)] {
+        // SAFETY: `InternedQuad` is `repr(transparent)` over exactly this
+        // tuple, so the two have identical layout and validity.
+        unsafe { std::slice::from_raw_parts(quads.as_ptr().cast(), quads.len()) }
     }
 
     pub fn graph(self) -> GraphId {

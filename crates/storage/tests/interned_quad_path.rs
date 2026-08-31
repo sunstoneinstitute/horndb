@@ -6,6 +6,12 @@
 //! stores must end with the same dictionary mapping and the same stored ids.
 //! Without that the bulk loader's ids would drift from what the serial loader
 //! assigns for the same input.
+//!
+//! Scope: this pins the two *paths* against each other. Since `apply_quads`
+//! also routes through `intern_quad`, both sides share one interning routine,
+//! so a change to the order *inside* `intern_triple` would move both sides
+//! alike and still pass here. The independent order guard is
+//! `parallel_loader.rs`, whose loader calls `intern_triple` directly.
 
 use horndb_storage::{InternedQuad, Store, DEFAULT_GRAPH};
 use oxrdf::{BlankNode, Literal, NamedNode, Term};
@@ -102,4 +108,27 @@ fn interned_quad_carries_the_ids_it_was_built_from() {
     assert_eq!(d.lookup(q.object()).as_ref(), Some(&o));
     // Re-interning the same terms is a hit, not a new id.
     assert_eq!(q, d.intern_quad(DEFAULT_GRAPH, &s, &p, &o).unwrap());
+}
+
+/// The debug-only guard on the id-based entry point fires when a quad interned
+/// against one store is handed to another. Release builds skip the check, so
+/// the test does too.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "never issued")]
+fn quad_from_another_stores_dictionary_trips_the_debug_guard() {
+    let a = Store::in_memory();
+    let b = Store::in_memory();
+    let iri = |s: &str| Term::NamedNode(NamedNode::new(s).unwrap());
+    let q = a
+        .dictionary()
+        .intern_quad(
+            DEFAULT_GRAPH,
+            &iri("http://example.org/s"),
+            &iri("http://example.org/p"),
+            &iri("http://example.org/o"),
+        )
+        .unwrap();
+    // `b` has interned nothing, so none of those indices exist there.
+    let _ = b.insert_quad_ids(&[q]);
 }

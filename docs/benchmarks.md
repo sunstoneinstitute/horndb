@@ -616,9 +616,11 @@ Run spread: read_turtle 21.630 / 21.619 / 21.890 before, 19.165 / 18.709 /
 - **End-to-end beats the phase deltas** by 0.16s (ttl) and 0.09s (nt). That is
   the teardown of the ~1 GB `entries` buffer, which no counter covered.
 - Turtle `parse` reads 0.36s higher after the change and N-Triples `parse` is
-  flat (+0.05s). Nothing here touches the parser; the Turtle figure is within
-  this bench's parse spread (HDB-94 records ±5% run to run) and the N-Triples
-  leg is the control.
+  flat (+0.05s). This cannot be an effect of the change: the driver closes the
+  `parse` phase before it constructs the `HornBackend` and calls
+  `insert_oxrdf_batch`, so no code touched here runs inside that interval. And
+  `read_turtle` is whole-function wall clock, so the reading is already inside
+  the -11.8% — if it were real it would mean the headline understates the win.
 
 Predicted 1.9s plus "most of" 1.54s; delivered 2.5-2.8s. The prediction that
 the term moves would largely vanish was too strong — half of them did.
