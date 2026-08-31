@@ -14,6 +14,12 @@
 //!   /tmp/corpus_term_stats --name lubm-100 file.nt [more.nt ...]
 //!   bzip2 -dc big.ttl.bz2 | /tmp/corpus_term_stats --name dbpedia -
 //!
+//! `--emit-keys DIR` additionally dumps the term stream in the form HDB-93's
+//! base-structure bench consumes: `DIR/keys.bin` is every distinct dictionary
+//! key in first-seen (document) order as `u32 len` + bytes, and
+//! `DIR/stream.bin` is one `u32` id per dictionary call, also in document
+//! order. Together they replay exactly what `Dictionary::intern` saw.
+//!
 //! What counts as a "term" here is what `Dictionary::intern` keys on: an
 //! `oxrdf::Term`. So the measured bytes are the *contents* — the IRI text, the
 //! blank-node label, or a literal's lexical form plus its language tag or
@@ -603,6 +609,7 @@ fn main() {
     let mut name = String::from("corpus");
     let mut files: Vec<String> = Vec::new();
     let mut limit_lines: u64 = u64::MAX;
+    let mut emit_keys: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -612,6 +619,10 @@ fn main() {
             }
             "--max-lines" => {
                 limit_lines = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--emit-keys" => {
+                emit_keys = Some(args[i + 1].clone());
                 i += 2;
             }
             other => {
@@ -642,6 +653,8 @@ fn main() {
 
     let mut lines: u64 = 0;
     let mut skipped: u64 = 0;
+    // Only populated with --emit-keys: one id per dictionary call.
+    let mut stream: Vec<u32> = Vec::new();
 
     for f in &files {
         let reader: Box<dyn Read> = if f == "-" {
@@ -688,6 +701,9 @@ fn main() {
                             }
                             let fh = hash_bytes(&t.key);
                             let (id, _new) = ids.intern(&t.key, fh, t.kind, t.lexical_len);
+                            if emit_keys.is_some() {
+                                stream.push(id);
+                            }
                             pos_distinct[pos.idx()].insert(id, ());
                             let sk = short_key(&t.key);
                             for c in caches.iter_mut() {
@@ -715,6 +731,29 @@ fn main() {
         if lines >= limit_lines {
             break;
         }
+    }
+
+    if let Some(dir) = &emit_keys {
+        std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("mkdir {dir}: {e}"));
+        let kp = format!("{dir}/keys.bin");
+        let mut w = BufWriter::with_capacity(1 << 22, std::fs::File::create(&kp).unwrap());
+        for id in 0..ids.len() as u32 {
+            let b = ids.bytes(id);
+            w.write_all(&(b.len() as u32).to_le_bytes()).unwrap();
+            w.write_all(b).unwrap();
+        }
+        w.flush().unwrap();
+        let sp = format!("{dir}/stream.bin");
+        let mut w = BufWriter::with_capacity(1 << 22, std::fs::File::create(&sp).unwrap());
+        for id in &stream {
+            w.write_all(&id.to_le_bytes()).unwrap();
+        }
+        w.flush().unwrap();
+        eprintln!(
+            "   emitted {} distinct keys and {} stream entries to {dir}",
+            ids.len(),
+            stream.len()
+        );
     }
 
     // ---- distinct-side histograms
