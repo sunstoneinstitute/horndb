@@ -1652,15 +1652,12 @@ fn do_query(dir: &Path, probes: usize, reps: usize, zipf: f64, arm: &str) {
     let n = keys.n();
     let misses = miss_keys(&keys, 1 << 20, 0x5eed_0001);
 
-    // A corpus stream, when the corpus emitted one; otherwise a Zipf stream
-    // tuned to the repeat-cache hit rate HDB-92 F4 measured.
+    // The corpus stream when there is one — the realistic access pattern, and
+    // the only one under which the repeat cache means anything. A Zipf stream
+    // stands in when there is no corpus stream.
     let sp = dir.join("stream.bin");
     if sp.exists() {
-        let raw = std::fs::read(&sp).unwrap();
-        let full: Vec<u32> = raw
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
+        let full = read_stream(&sp);
         let take = probes.min(full.len());
         run_matrix(
             &keys,
@@ -1671,19 +1668,30 @@ fn do_query(dir: &Path, probes: usize, reps: usize, zipf: f64, arm: &str) {
             arm,
             "corpus document-order stream",
         );
+    } else {
+        let z = zipf_stream(n, probes, zipf, 0x5eed_0002);
+        run_matrix(
+            &keys,
+            dir,
+            &z,
+            &misses,
+            reps,
+            arm,
+            &format!("zipf s={zipf} stream"),
+        );
     }
-    let z = zipf_stream(n, probes, zipf, 0x5eed_0002);
-    run_matrix(
-        &keys,
-        dir,
-        &z,
-        &misses,
-        reps,
-        arm,
-        &format!("zipf s={zipf} stream"),
-    );
+    // Uniform: no locality at all, so every probe is a genuine random access
+    // into the whole structure. The pessimistic bound at this scale.
     let u = uniform_stream(n, probes, 0x5eed_0003);
     run_matrix(&keys, dir, &u, &misses, reps, arm, "uniform stream");
+}
+
+fn read_stream(path: &Path) -> Vec<u32> {
+    std::fs::read(path)
+        .unwrap()
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 /// One cold-page-cache measurement. The caller drops the page cache before
@@ -1692,10 +1700,12 @@ fn do_query(dir: &Path, probes: usize, reps: usize, zipf: f64, arm: &str) {
 fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64) {
     let keys = Keys::read(&dir.join("keys.bin"));
     let n = keys.n();
-    let stream = if zipf > 0.0 {
-        zipf_stream(n, probes, zipf, 0x5eed_0002)
-    } else {
+    let sp = dir.join("stream.bin");
+    let stream = if zipf < 0.0 || !sp.exists() {
         uniform_stream(n, probes, 0x5eed_0003)
+    } else {
+        let full = read_stream(&sp);
+        full[..probes.min(full.len())].to_vec()
     };
     let hit_keys: Vec<&[u8]> = stream.iter().map(|&i| keys.get(i as usize)).collect();
     let hit_hash: Vec<u64> = hit_keys.iter().map(|k| hash64(k)).collect();
