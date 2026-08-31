@@ -473,6 +473,13 @@ Measured with the `storage_load_phase_*` counters (SPEC-17 §5.4.1) on
 | **accounted** | **22.837s** | **97.6** | **18.643s** | **91.7** |
 | **measured total** | 23.389s | | 20.342s | |
 
+Phase names as of the measured commit. HDB-84 has since changed two of them on
+the write path this table covers: `copy_forward` is no longer emitted at all
+(nothing is carried forward), and `build` now covers only the batch's own rows,
+with the rest of the work moving to a new `merge_runs` phase on the first read.
+The numbers below are correct for `25f4110` and are not re-stated —
+`docs/metrics.md` has the current definitions.
+
 Three things this overturns:
 
 - **Parsing is the largest single phase**, not a rounding error — and it is
@@ -493,7 +500,9 @@ Three things this overturns:
 - **The tier is 12–14% of a load, not ~80%.** `group` + `copy_forward` +
   `merge` + `build` total 2.85s of 23.39s (Turtle) and 2.81s of 20.34s
   (N-Triples). The index build is not the bottleneck, and `copy_forward` is
-  free on a load into an empty store.
+  free on a load into an empty store. (`copy_forward` being free here is what
+  the one-shot path looks like; on the batched path it was the whole cost, which
+  is HDB-84 below.)
 - **Every term is interned twice.** `dedupe`
   (`HornBackend::insert_oxrdf_batch_in_graph`) interns all three terms to build
   a `QuadKey`, then `intern` (`Store::apply_quads`) interns them all again for

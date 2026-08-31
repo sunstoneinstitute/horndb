@@ -114,7 +114,7 @@ struct Columns {
 impl Columns {
     /// Sort `rows` into SPO order and collapse exact-duplicate live rows.
     /// Split from [`Columns::from_sorted_rows`] so a caller merging runs can
-    /// release them between the two steps.
+    /// sort once across all of them and materialise once.
     fn sort_dedup(rows: &mut Vec<Row>) {
         // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
         // order for trie iteration; begin orders a tuple's history.
@@ -261,34 +261,47 @@ impl PredicatePartition {
     /// changed, so a read can now stall a write.
     fn cols(&self) -> &Columns {
         self.cols.get_or_init(|| {
+            let t = Instant::now();
             let mut runs = self.runs.lock();
+            let mut worked = runs.len() != 1;
             let merged = if runs.len() == 1 {
                 runs[0].clone()
             } else {
-                let t_merge = Instant::now();
                 let total: usize = runs.iter().map(|r| r.len()).sum();
                 let mut rows: Vec<Row> = Vec::with_capacity(total);
                 for run in runs.iter() {
                     run.extend_rows(&mut rows);
                 }
                 Columns::sort_dedup(&mut rows);
-                // Every row now lives in `rows`, so releasing the runs here
-                // caps the peak at two copies instead of three. Do it *after*
-                // the sort: dropping them earlier would leave `runs` empty if
-                // the merge unwound, and a retry would then build an empty
-                // partition rather than fail.
-                runs.clear();
-                let merged = Arc::new(Columns::from_sorted_rows(rows));
-                record_phase(LoadPhase::MergeRuns, t_merge.elapsed(), merged.len() as u64);
-                merged
+                Arc::new(Columns::from_sorted_rows(rows))
             };
-            runs.clear();
-            runs.push(merged.clone());
+            // The runs stay alive until the merged columns exist. Releasing
+            // them earlier would save one transient copy of the rows, but an
+            // unwind between the two would leave `runs` empty with `cols`
+            // still uninitialised, and the next reader would then build an
+            // *empty* partition instead of failing — silent data loss for a
+            // transient allocation.
+            *runs = vec![merged.clone()];
             if merged.live_len >= self.hot_threshold {
+                // Above the threshold this is a second n log n sort, and it
+                // belongs inside the same bracket: before HDB-84 it ran inside
+                // `build_with_hot_threshold`, so leaving it outside would drop
+                // instrumentation the tier used to have.
                 let _ = self.object_major.set(merged.build_object_major());
+                worked = true;
+            }
+            if worked {
+                record_phase(LoadPhase::MergeRuns, t.elapsed(), merged.len() as u64);
             }
             merged
         })
+    }
+
+    /// Runs not yet merged into the readable columns. Test-only observation of
+    /// the [`MAX_RUNS`] cap; every read path collapses this to 1.
+    #[cfg(test)]
+    pub(crate) fn run_count(&self) -> usize {
+        self.runs.lock().len()
     }
 
     /// A new partition holding this one's rows plus `new_rows`, as one extra
@@ -309,6 +322,10 @@ impl PredicatePartition {
             object_major: OnceLock::new(),
         };
         if at_cap {
+            // Forces the merge on the writer's thread. Note this nests one
+            // `merge_runs` sample inside `insert_quad_batch`'s `build` window,
+            // so at the cap those nanoseconds are counted in both phases —
+            // see `docs/metrics.md`.
             part.cols();
         }
         part

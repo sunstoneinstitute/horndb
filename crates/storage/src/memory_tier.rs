@@ -928,6 +928,17 @@ mod tests {
             many.insert_quad_batch(std::slice::from_ref(q)).unwrap();
         }
 
+        // The cap must have fired, and this is the only assertion that sees
+        // it: read the run count *before* anything else, because every read
+        // path collapses the runs. Insert k leaves k runs until insert 4,096
+        // trips the cap and merges to 1; the last 8 inserts then rebuild to 9.
+        // Without the cap this would be all 4,104.
+        let runs = many
+            .snapshot()
+            .with_predicate(DEFAULT_GRAPH, pred, |p| p.run_count())
+            .unwrap();
+        assert_eq!(runs, 9, "cap did not fire: {runs} runs after {n} inserts");
+
         let (a, b) = (one.snapshot(), many.snapshot());
         let read = |snap: &crate::memory_tier::TierSnapshot| {
             snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
