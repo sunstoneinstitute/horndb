@@ -369,6 +369,18 @@ phases.
    without re-interning; reopen time is I/O-bound (mmap + header
    validation), not proportional to corpus re-parse. Measured probe costs
    are recorded next to the S2 budgets.
+
+   **Amended 2026-09-01 (HDB-91).** The reopen test above grades durability and
+   stands. It does not grade what the dictionary is *worth*, and the obvious
+   way to do that — a load into an empty store — overstates it. Grade the
+   dictionary against a **reopen-and-append through the bulk loader**
+   (`Tier::insert_quad_batch`): reopen a store holding LUBM-100, append 10%
+   more, report the dictionary's share of that append. Measured ceiling on
+   trainmarks: **9–12%**, against 20.1% on an empty-store load. The full
+   restatement — four items, including the ceiling to print beside the
+   ns/lookup matrix and the tier fix (HDB-102) that gates the SPARQL ingest
+   path — is in `docs/benchmarks.md`, "Appending to a loaded store: the
+   incremental phase table (HDB-91)".
 3. **Kill-and-replay is bit-identical (S3).** A crash test — commit batches,
    kill the process without checkpoint, recover — reproduces the exact
    committed state (triples, quads, dictionary, visibility stamps)

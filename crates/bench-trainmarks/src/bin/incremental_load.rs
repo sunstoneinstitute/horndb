@@ -16,14 +16,18 @@
 //! them:
 //!
 //! * `insert` — `HornBackend::insert_oxrdf_batch` -> `Store::insert_quads` ->
-//!   `Tier::insert_quad_batch`. What a SPARQL-side bulk ingest uses, and the
-//!   path HDB-85's table covers. No `copy_forward` since HDB-84; the carried
-//!   rows show up as `merge_runs` on the first read.
-//! * `load` — `loader::load_ntriples_file` -> `Tier::insert_quad_batch`, i.e.
-//!   the storage bulk loader with no `HornBackend` dedupe/`live_keys` above it.
-//! * `apply` — `Store::apply_quads` -> `Tier::apply_quad_batch`, the
-//!   `INSERT DATA` / SPARQL-update path, which HDB-84 did not touch and which
-//!   still emits `copy_forward`.
+//!   `Store::apply_quads` -> `Tier::apply_quad_batch`. What every SPARQL-side
+//!   ingest uses, and the path HDB-85's table covers. `Store::insert_quads` is
+//!   a wrapper over `apply_quads` (SPEC-28 S6), so this does **not** reach the
+//!   entry point HDB-84 rewrote: it still carries the partition forward and
+//!   still emits `copy_forward` — 30% of an append (HDB-91, HDB-102).
+//! * `load` — `loader::load_ntriples_file` -> `Tier::insert_quad_batch`, the
+//!   storage bulk loader with no `HornBackend` dedupe/`live_keys` above it.
+//!   This is the path HDB-84 fixed: no `copy_forward`, and the carried rows
+//!   show up as `merge_runs` on the first read.
+//! * `apply` — `Store::apply_quads` -> `Tier::apply_quad_batch` on a bare
+//!   `Store`. Same tier path as `insert`, without the `HornBackend` layers, so
+//!   the two together separate the tier's cost from the SPARQL layer's.
 //!
 //! Counters are cumulative per process, so each stage is reported as the delta
 //! across it. Run one stage combination per process.

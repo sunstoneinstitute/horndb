@@ -923,7 +923,13 @@ already interned:
   contains. 167,000 new dictionary entries.
 - **fresh** — identical shape and identical predicates, but the entity IRIs sit
   in a second namespace and the literal values come from disjoint ranges.
-  501,426 new dictionary entries.
+  501,426 new dictionary entries. That figure is both counted by the driver and
+  reproducible from the generator: 167,000 order IRIs + 167,000 customers +
+  167,000 products + 1 class + 5 statuses + 420 dates (the date grid is
+  `lcm(5, 12, 28)`, not 5x12x28). The 20 new quantity literals add nothing —
+  `xsd:integer` literals are value-encoded inline (`TermKind::InlineInt`) and
+  never allocate a dictionary entry. For the same reason the append makes
+  2,839,000 dictionary probes, not 3,006,000: the quantity column never probes.
 
 Both are produced by `scripts/bench/trainmarks/generate_append.py`. Predicates
 are the same in both on purpose: they decide which tier partitions the append
@@ -964,24 +970,29 @@ Append of 1,002,000 triples at the shipped 65,536-triple batch, into the loaded
 
 The loader has no `intern` counter, so the dictionary line is the residual
 after the counted phases and a separately-measured parse of the same file. It
-is a derived number, not a counted one — see "What this does not settle".
+is a derived number, not a counted one, and the subtraction crosses two parse
+pipelines: the parse figure comes from the driver's own `parse_file`, which
+materialises a `Vec<(OxTerm, OxTerm, OxTerm)>` the bulk loader never builds. So
+it over-subtracts, making the residual an *under*-estimate of interning. The
+`HornBackend` `intern` row (0.189-0.201s for the same corpus) bounds the error
+at well under 0.05s. See "What this does not settle".
 
 `merge_runs` re-merged **9,122,000 rows to add 1,002,000** — the six touched
 partitions in full. That is the successor to `copy_forward`: the carry is
 deferred to the first read and paid once per partition version instead of once
 per batch, but it is still O(partition), not O(batch). Chunking no longer
 matters (one call for the whole append: 1.732s overlap / 1.818s fresh, within
-the spread of the 15-call numbers), which is HDB-84 working as designed.
+the spread of the 16-call numbers), which is HDB-84 working as designed.
 
 Throughput: the base loads at 1.01 M triples/s, the 10%-append at 0.57 M
 triples/s. The gap is `merge_runs`, and it widens as the store grows.
 
-##### SPARQL ingest (`apply_quad_batch`) — `copy_forward` is 30% and the rebuild is 95%
+##### SPARQL ingest (`apply_quad_batch`) — `copy_forward` is 30% and the rebuild is 94%
 
 Same append through `HornBackend::insert_oxrdf_batch`, the path HDB-85's
 empty-store table covers:
 
-| phase | one call, overlap | % | 15 calls, overlap | % | 15 calls, fresh | % |
+| phase | one call, overlap | % | 16 calls, overlap | % | 16 calls, fresh | % |
 |---|---|---|---|---|---|---|
 | `build` | 1.049s | 42.7 | 15.816s | 64.5 | 15.978s | 64.7 |
 | `copy_forward` | 0.447s | 18.2 | 7.351s | 30.0 | 7.391s | 29.9 |
@@ -991,15 +1002,22 @@ empty-store table covers:
 | `group` | 0.077s | 3.1 | 0.057s | 0.2 | 0.056s | 0.2 |
 | `merge` | 0.017s | 0.7 | 0.017s | 0.1 | 0.017s | 0.1 |
 | `stage` | 0.021s | 0.9 | 0.016s | 0.1 | 0.016s | 0.1 |
+| `invalidate` | 0.000s | 0.0 | 0.000s | 0.0 | 0.000s | 0.0 |
 | **accounted** | **2.423s** | **98.7** | **24.248s** | **98.8** | **24.425s** | **98.8** |
 | **append total** | **2.456s** | | **24.534s** | | **24.712s** | |
 
+Every cell is the median of its own three reps, so a column need not add up to
+its `accounted` median — the 16-call columns are 0.05s short of it, 0.2%. Each
+individual run does add up exactly. `invalidate` is listed to make the phase
+set complete; it clears a snapshot cache and costs under a millisecond.
+
 Read the two right-hand blocks against the left one. **Appending 1M triples in
-15 calls costs 24.5s — twice what loading the entire 10M base costs (12.3s),
+16 calls costs 24.5s — twice what loading the entire 10M base costs (12.3s),
 and 10x what the same 1M costs in a single call.** `copy_forward` plus `build`
-are 95% of it, and both are the same per-batch partition rebuild HDB-84 removed
-from the other path: each of the 15 calls carried the whole partition forward
-(137,784,320 rows carried to add 1,002,000) and rebuilt its columns.
+are 94% of it, and both are the same per-batch partition rebuild HDB-84 removed
+from the other path: each of the 16 calls (15 full 65,536-triple chunks plus an
+18,960 remainder) carried the whole partition forward (137,784,320 rows carried
+to add 1,002,000) and rebuilt its columns.
 
 `Store::apply_quads` on a bare `Store`, with no `HornBackend` above it, gives
 the same tier numbers (`copy_forward` 7.51s, `build` 16.14s of a 24.26s
@@ -1016,12 +1034,23 @@ Dictionary work as a share of the load:
 | load | dictionary work | share |
 |---|---|---|
 | empty store, 10M, `HornBackend` (HDB-90) | 4.77s of 23.74s | **20.1%** |
-| append 1M, `HornBackend`, one call | `dedupe` + `intern` = 0.696s of 2.456s | **≤28%** |
-| append 1M, `HornBackend`, 15 calls | `dedupe` + `intern` = 0.764s of 24.534s | **≤3.1%** |
+| append 1M, `HornBackend`, one call | `dedupe` + `intern` = 0.696s of 2.456s | **≤28%** (~17% real, see below) |
+| append 1M, `HornBackend`, 16 calls | `dedupe` + `intern` = 0.764s of 24.534s | **≤3.1%** |
 | append 1M, bulk loader, any chunking | 0.153–0.216s of 1.750–1.850s | **8.7–11.7%** |
 
 (`dedupe` also contains `intra_batch.insert` and the term moves, so the
 `HornBackend` rows are upper bounds on the dictionary's share, not its cost.)
+
+**The one-call row needs its bound tightened before it reads as a
+counter-example.** At ≤28% it sits *above* the empty-store 20.1% R7 calls
+inflated. It is an upper bound over a phase that is only about half dictionary
+work: HDB-90 measured `dedupe` as 46.7% interning, the rest `intra_batch`
+inserts and term moves. Applying that split puts the real one-call share at
+`0.527s x 0.467 + 0.169s = 0.415s of 2.456s` = **~16.9%**, below 20.1%. The
+split was measured on an all-miss empty-store load, so it is imported, not
+re-measured — treat ~17% as an estimate inside a 6.9-28% bracket. Even the
+bracket's top is reached only by chunking the whole append into a single tier
+call, which no real ingest does. The chunked rows are the ones to plan against.
 
 The correction: on the path S2 should be graded against — the bulk loader —
 `copy_forward` **is not emitted at all**, so R7's stated term is measured at
@@ -1032,7 +1061,7 @@ on the SPARQL ingest path `copy_forward` really is still there, at 30%.
 The vocabulary experiment settles a second question. Tripling the miss count
 (167,000 → 501,426 new terms) moved the append by 0.10s on the loader path and
 by 0.18s — under the noise of `copy_forward` — on the ingest path. Misses are
-not where the dictionary's time goes on an append; the ~3M lookups are, and
+not where the dictionary's time goes on an append; the 2.84M probes are, and
 almost all of them are hits. That is what R3's repeat cache targets, and it
 argues for aiming S2's structure choice at hit latency, not at miss handling —
 consistent with R4's rejection of the binary fuse filter, and it closes the
@@ -1055,20 +1084,21 @@ number cannot repay. Add:
    ~3% faster on the chunked ingest path. R8's matrix should carry that ceiling
    so a 2x lookup win is not read as a 2x load win.
 3. **Report hits and misses separately**, and weight them by the measured
-   ~90% hit rate on an append (HDB-92 R9 F1, reconfirmed here: 3.0M lookups,
+   ~90% hit rate on an append (HDB-92 R9 F1, reconfirmed here: 2.84M probes,
    167K–501K misses). Miss cost is third-order.
 4. **Fix the tier first.** On the ingest path the dictionary cannot be worth
    more than 3% until `apply_quad_batch` stops carrying the partition forward
-   per batch. That is a tier task, not an S2 task, and it gates whether S2's
-   load-path argument is worth making at all.
+   per batch (HDB-102). That is a tier task, not an S2 task, and it gates
+   whether S2's load-path argument is worth making on that path at all.
 
 ##### What this does not settle
 
 - **The bulk loader has no `intern` counter.** Its dictionary line above is
-  wall minus counted phases minus a separately-measured parse. Good enough for
-  a share (the two derivations agree with the `HornBackend` `intern` row to
-  within 0.05s), not good enough to plan against. Instrumenting `QuadSink`
-  needs a per-chunk bracket, not a per-triple one.
+  wall minus counted phases minus a parse measured through a different
+  pipeline, so it under-estimates. Good enough for a share (both derivations
+  land within 0.05s of the `HornBackend` `intern` row), not good enough to plan
+  against. Instrumenting `QuadSink` needs a per-chunk bracket, not a per-triple
+  one.
 - **`merge_runs` is one bracket over three jobs** — the merge sort, the column
   materialisation, and the object-major sort above `hot_threshold`. Coarse
   enough to name it the dominant term, too coarse to say which of the three to
@@ -1076,7 +1106,11 @@ number cannot repay. Add:
 - **One corpus, one append ratio.** 10% into 10M on a 6-predicate append. The
   merge is O(partition), so both the loader's 0.57 M triples/s and the
   `merge_runs` share get worse as the base grows or the append shrinks;
-  neither curve was measured.
+  neither curve was measured. N-Triples only; Turtle differs in `parse` and in
+  nothing else.
+- **Only this summary survives.** The raw per-rep driver output was not kept.
+  Re-derive it with the commands under *Reproducing the numbers* — the corpora
+  are deterministic, one command per mode.
 
 #### Where HornDB sits against the other eleven engines
 
