@@ -217,10 +217,15 @@ async fn main() -> Result<()> {
         cfg: sparql_cfg,
     };
 
-    // Scrape-time storage size collector: reads a cheap stats snapshot through
-    // a `Weak` ref to the live store. Steady-state cost is zero; the gauges are
-    // computed only when /metrics is scraped (and report nothing once the store
-    // is dropped).
+    // Scrape-time storage size collector: reads a stats snapshot through a
+    // `Weak` ref to the live store. Nothing is paid between scrapes; the gauges
+    // are computed only when /metrics is scraped (and report nothing once the
+    // store is dropped). The scrape is not always cheap, though: it takes the
+    // store's read guard for the whole snapshot, and since HDB-84 the first
+    // read after a batched write merges that partition's runs. So a scrape
+    // landing just after a bulk load can hold this guard — and therefore block
+    // every other reader and writer of the store — for the merge. See
+    // `horndb_metrics::storage::StorageSnapshot`.
     let store_weak = Arc::downgrade(&state.store);
     horndb_metrics::register_collector(Box::new(horndb_metrics::storage::StorageCollector::new(
         move || {

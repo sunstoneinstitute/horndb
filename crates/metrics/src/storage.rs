@@ -1,8 +1,9 @@
 //! Storage metrics. Load-path counters here; expensive size quantities
 //! (triple/graph/predicate counts, dictionary size, tier bytes) are read at
-//! SCRAPE TIME via [`StorageCollector`], which reads a cheap stats snapshot
-//! through a closure the server installs over a `Weak` ref to the live store.
-//! Steady-state cost is therefore zero.
+//! SCRAPE TIME via [`StorageCollector`], which reads a stats snapshot through a
+//! closure the server installs over a `Weak` ref to the live store. Nothing is
+//! paid between scrapes. What a scrape itself costs is no longer always small —
+//! see [`StorageSnapshot`].
 use crate::labels::{LoadPhase, LoadPhaseLabel, MemTier, TierLabel};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
@@ -74,9 +75,19 @@ impl StorageMetrics {
     }
 }
 
-/// A cheap, O(1)-ish point-in-time snapshot of store size quantities, read at
-/// scrape time. "Cheap" means bounded by the number of distinct predicates /
-/// graphs — never an O(triples) traversal.
+/// A point-in-time snapshot of store size quantities, read at scrape time.
+///
+/// Normally bounded by the number of distinct predicates / graphs. **One
+/// exception, since HDB-84:** reading a partition that has been written in
+/// batches merges its runs first, which is O(rows in that partition). A scrape
+/// is a read like any other, so a scrape that lands after a bulk load — or
+/// after any batched write nothing has read yet — pays that merge, once per
+/// affected partition. On a 10M-triple store that is order of a second. Every
+/// later scrape is bounded again.
+///
+/// The server's collector reads this under the store's read guard, held for the
+/// whole snapshot, so that first scrape stalls **every** reader and writer of
+/// the store, not just the partitions being merged.
 #[derive(Clone, Copy, Default)]
 pub struct StorageSnapshot {
     pub triples: i64,

@@ -128,6 +128,7 @@ label_value_enum!(LoadPhase {
     Group => "group",
     CopyForward => "copy_forward",
     Merge => "merge",
+    MergeRuns => "merge_runs",
     Build => "build",
 });
 

@@ -451,8 +451,10 @@ impl HornBackend {
     /// Cheap point-in-time size stats for scrape-time metrics: live triple
     /// count plus the tier's already-tracked graph/predicate/byte estimates and
     /// the dictionary term count. Bounded by the number of distinct
-    /// predicates/graphs — never an O(triples) traversal. `tier.triples` is
-    /// visibility-filtered by the tier itself, so no adjustment is needed here.
+    /// predicates/graphs, with one exception: the first read after a batched
+    /// write merges each touched partition's runs (HDB-84), which is O(rows in
+    /// that partition) and happens once. `tier.triples` is visibility-filtered
+    /// by the tier itself, so no adjustment is needed here.
     pub fn storage_stats(&self) -> HornStorageStats {
         let tier = self.store.stats();
         HornStorageStats {

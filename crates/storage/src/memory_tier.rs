@@ -144,6 +144,9 @@ impl TierSnapshot {
         counts
     }
 
+    /// Point-in-time counts and footprint. Bounded by the number of
+    /// partitions, except that reading a partition written in batches merges
+    /// its runs first (HDB-84) — once, and any other read would pay it too.
     pub fn stats(&self) -> TierStats {
         // Live counts: only graphs/predicates with at least one tuple visible
         // at the pinned version, consistent with `triples` (also version-
@@ -379,8 +382,9 @@ impl Tier for MemoryTier {
 
         // Nanoseconds and rows accumulated in locals across every partition
         // touched by this batch, merged into the counters once on the way out.
-        let mut copy_ns = 0u64;
-        let mut copy_rows = 0u64;
+        // No `copy_forward`: this path no longer carries existing rows forward
+        // (HDB-84). The cost it used to cover is now `merge_runs`, emitted
+        // once per partition from `PredicatePartition::cols`.
         let mut build_ns = 0u64;
         let mut build_rows = 0u64;
 
@@ -398,41 +402,24 @@ impl Tier for MemoryTier {
                 .map(|gs| gs.partitions.clone())
                 .unwrap_or_default();
             for (p, rows) in pred_rows {
-                let mut builder = PartitionBuilder::default();
-                // Carry existing rows forward WITH their visibility stamps
-                // (history preserved) — reading indexed columns, not `scan()`,
-                // which would silently drop retraction stamps.
-                let mut carried = 0u64;
-                let t_copy = Instant::now();
-                if let Some(existing) = new_partitions.get(&p) {
-                    let n = existing.len();
-                    for i in 0..n {
-                        builder.append_stamped(
-                            TermId(existing.subjects().value(i)),
-                            TermId(existing.objects().value(i)),
-                            existing.begins().value(i),
-                            existing.ends().value(i),
-                        );
-                    }
-                    carried = n as u64;
-                }
-                // New rows: live from this version.
+                // New rows: live from this version. The existing rows are
+                // shared by `Arc` as an untouched run; only these are sorted
+                // here, and the merged view is built once, on the first read
+                // (HDB-84) — so `build` covers this batch, not the partition.
                 let added = rows.len() as u64;
-                for (s, o) in rows {
-                    builder.append_stamped(s, o, new_version, UNSET_END);
-                }
-                copy_ns += t_copy.elapsed().as_nanos() as u64;
-                copy_rows += carried;
-
-                // `build` sorts and materialises the whole partition, so its
-                // row count is what it built: carried-forward plus new.
                 let t_build = Instant::now();
-                new_partitions.insert(
-                    p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
-                );
+                let new_rows: Vec<_> = rows
+                    .into_iter()
+                    .map(|(s, o)| (s.0, o.0, new_version, UNSET_END))
+                    .collect();
+                let part = match new_partitions.get(&p) {
+                    Some(existing) => existing.with_appended_rows(new_rows),
+                    None => PartitionBuilder::from_rows(new_rows)
+                        .build_with_hot_threshold(self.hot_threshold),
+                };
+                new_partitions.insert(p, Arc::new(part));
                 build_ns += t_build.elapsed().as_nanos() as u64;
-                build_rows += carried + added;
+                build_rows += added;
             }
             graphs.insert(
                 g,
@@ -448,12 +435,7 @@ impl Tier for MemoryTier {
         });
         *self.current.write() = next;
 
-        // Single merge point for the per-partition accumulators.
-        record_phase(
-            LoadPhase::CopyForward,
-            Duration::from_nanos(copy_ns),
-            copy_rows,
-        );
+        // Single merge point for the per-partition accumulator.
         record_phase(LoadPhase::Build, Duration::from_nanos(build_ns), build_rows);
         Ok(())
     }
@@ -846,6 +828,135 @@ mod tests {
         // SPO sort: subject 1 < subject 3.
         assert_eq!(pairs[0].0, id(1));
         assert_eq!(pairs[1].0, id(3));
+    }
+
+    /// HDB-84: the tier appends each batch as its own run and merges them on
+    /// first read, so the same rows split N ways must produce a partition no
+    /// reader can tell from the one-batch build — every column, both axes,
+    /// both side-sets, and the live count.
+    #[test]
+    fn batching_does_not_change_the_partition() {
+        use crate::ordering::Ordering;
+
+        let pred = id(100);
+        // Deliberate repeats: (s, o) pairs recur across chunk boundaries, so
+        // cross-run dedup has to behave like the single-build dedup.
+        let quads: Vec<_> = (0..500u64)
+            .map(|i| (DEFAULT_GRAPH, id(i % 97), pred, id(i % 31)))
+            .collect();
+
+        let one = MemoryTier::new();
+        one.insert_quad_batch(&quads).unwrap();
+
+        for chunk in [1usize, 3, 7, 64, 499] {
+            let many = MemoryTier::new();
+            for part in quads.chunks(chunk) {
+                many.insert_quad_batch(part).unwrap();
+            }
+            let (a, b) = (one.snapshot(), many.snapshot());
+            let read = |snap: &crate::memory_tier::TierSnapshot| {
+                snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
+                    (
+                        p.len(),
+                        p.live_len(),
+                        p.has_retractions(),
+                        p.subject_set().clone(),
+                        p.object_set().clone(),
+                        p.ordered(Ordering::Spo)
+                            .subject_object()
+                            .collect::<Vec<_>>(),
+                        p.ordered(Ordering::Pos)
+                            .subject_object()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap()
+            };
+            assert_eq!(read(&a), read(&b), "chunk size {chunk}");
+            assert_eq!(a.triple_count(), b.triple_count(), "chunk size {chunk}");
+        }
+    }
+
+    /// Retract and re-insert against a partition that is still a list of
+    /// unmerged runs: the retraction has to see rows spread across 13 runs,
+    /// and re-inserting a retracted quad has to make it live again. Asserts
+    /// the live count after each step.
+    #[test]
+    fn retraction_after_batched_inserts_sees_every_run() {
+        let pred = id(100);
+        let quads: Vec<_> = (0..64u64)
+            .map(|i| (DEFAULT_GRAPH, id(i), pred, id(i + 1000)))
+            .collect();
+
+        let tier = MemoryTier::new();
+        for part in quads.chunks(5) {
+            tier.insert_quad_batch(part).unwrap();
+        }
+        // Retract every fourth row, spread across the runs.
+        let targets: Vec<_> = quads.iter().step_by(4).copied().collect();
+        assert_eq!(tier.retract_quad_batch(&targets).unwrap(), targets.len());
+        assert_eq!(tier.triple_count(), (quads.len() - targets.len()) as u64);
+
+        // Re-inserting a retracted quad makes it live again, still in batches.
+        tier.insert_quad_batch(&targets[..4]).unwrap();
+        assert_eq!(
+            tier.triple_count(),
+            (quads.len() - targets.len() + 4) as u64
+        );
+    }
+
+    /// The run cap (HDB-84 `MAX_RUNS`) forces a merge mid-write so neither the
+    /// run-list clone nor the per-run overhead grows without bound. Drive it
+    /// the way that reaches it — one quad per call, no read in between — and
+    /// check the store is still exactly what one call would have produced.
+    #[test]
+    fn run_cap_forces_a_merge_without_changing_contents() {
+        use crate::ordering::Ordering;
+        use crate::partition::MAX_RUNS;
+
+        let pred = id(100);
+        let n = (MAX_RUNS + 8) as u64;
+        let quads: Vec<_> = (0..n)
+            .map(|i| (DEFAULT_GRAPH, id(i % 997), pred, id(i % 31)))
+            .collect();
+
+        let one = MemoryTier::new();
+        one.insert_quad_batch(&quads).unwrap();
+
+        let many = MemoryTier::new();
+        for q in &quads {
+            many.insert_quad_batch(std::slice::from_ref(q)).unwrap();
+        }
+
+        // The cap must have fired, and this is the only assertion that sees
+        // it: read the run count *before* anything else, because every read
+        // path collapses the runs. Insert k leaves k runs until insert 4,096
+        // trips the cap and merges to 1; the last 8 inserts then rebuild to 9.
+        // Without the cap this would be all 4,104.
+        let runs = many
+            .snapshot()
+            .with_predicate(DEFAULT_GRAPH, pred, |p| p.run_count())
+            .unwrap();
+        assert_eq!(runs, 9, "cap did not fire: {runs} runs after {n} inserts");
+
+        let (a, b) = (one.snapshot(), many.snapshot());
+        let read = |snap: &crate::memory_tier::TierSnapshot| {
+            snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
+                (
+                    p.len(),
+                    p.live_len(),
+                    p.ordered(Ordering::Spo)
+                        .subject_object()
+                        .collect::<Vec<_>>(),
+                    p.ordered(Ordering::Pos)
+                        .subject_object()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap()
+        };
+        assert_eq!(read(&a), read(&b));
+        assert_eq!(a.triple_count(), b.triple_count());
     }
 
     #[test]

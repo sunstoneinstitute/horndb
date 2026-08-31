@@ -2,7 +2,7 @@
 //!
 //! Stage-1 streaming loaders for N-Triples, Turtle, and N-Quads (SPEC-02 F8),
 //! all built on `oxttl` streaming parsers feeding the dictionary + tier in
-//! batches of [`BATCH_SIZE`]. N-Quads routes each quad to the graph named by
+//! batches of [`load_batch_triples`]. N-Quads routes each quad to the graph named by
 //! its fourth term (SPEC-02 F7); N-Triples and Turtle load the default graph.
 pub mod nquads;
 pub mod ntriples;
@@ -17,10 +17,44 @@ use crate::error::Result;
 use crate::store::Store;
 use crate::term::{GraphId, TermId};
 use oxrdf::{NamedOrBlankNode, Term};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// Batch size for dictionary interning + tier insertion across all loaders.
-pub(crate) const BATCH_SIZE: usize = 65_536;
+/// Default triples per tier insert across all loaders. The tier appends a
+/// batch as one sorted run and merges the runs once, on the first read
+/// (HDB-84), so this is a memory-vs-call-overhead knob, not an index-rebuild
+/// knob: cost is near-flat in the batch size.
+pub const DEFAULT_LOAD_BATCH_TRIPLES: usize = 65_536;
+
+/// Resolved once, then cached: `HORNDB_LOAD_BATCH_TRIPLES` if set and
+/// parseable, else [`DEFAULT_LOAD_BATCH_TRIPLES`]. `0` means "not yet read".
+static LOAD_BATCH_TRIPLES: AtomicUsize = AtomicUsize::new(0);
+
+/// Triples buffered before each tier insert.
+///
+/// Set it with `HORNDB_LOAD_BATCH_TRIPLES=<n>`, or from code with
+/// [`set_load_batch_triples`]. It cannot change what a load produces — only
+/// how the same rows are handed to the tier — which is what the batch-size
+/// determinism test proves.
+pub fn load_batch_triples() -> usize {
+    match LOAD_BATCH_TRIPLES.load(Ordering::Relaxed) {
+        0 => {
+            let v = std::env::var("HORNDB_LOAD_BATCH_TRIPLES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n >= 1)
+                .unwrap_or(DEFAULT_LOAD_BATCH_TRIPLES);
+            LOAD_BATCH_TRIPLES.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
+    }
+}
+
+/// Override [`load_batch_triples`] for this process, ignoring the environment.
+pub fn set_load_batch_triples(triples: usize) {
+    LOAD_BATCH_TRIPLES.store(triples.max(1), Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadStats {
@@ -31,7 +65,7 @@ pub struct LoadStats {
 }
 
 /// Drive a stream of parsed quads into the store: intern each term, batch into
-/// chunks of [`BATCH_SIZE`], and flush to the tier. Shared by every loader; each
+/// chunks of [`load_batch_triples`], and flush to the tier. Shared by every loader; each
 /// format only differs in how it turns a parser item into a
 /// `(graph, subject, predicate, object)` tuple (`bytes_read` is filled in by the
 /// file-level entry points). The default graph uses
@@ -54,15 +88,20 @@ where
 pub(crate) struct QuadSink<'a> {
     store: &'a Store,
     batch: Vec<(GraphId, TermId, TermId, TermId)>,
+    batch_size: usize,
     total: u64,
     start: Instant,
 }
 
 impl<'a> QuadSink<'a> {
     pub(crate) fn new(store: &'a Store) -> Self {
+        let batch_size = load_batch_triples();
         Self {
             store,
-            batch: Vec::with_capacity(BATCH_SIZE),
+            // Cap the preallocation: a very large batch size is a "flush once"
+            // request, not a request to reserve that much up front.
+            batch: Vec::with_capacity(batch_size.min(1 << 20)),
+            batch_size,
             total: 0,
             start: Instant::now(),
         }
@@ -72,7 +111,7 @@ impl<'a> QuadSink<'a> {
         let (s_id, p_id, o_id) = self.store.dictionary().intern_triple(s, p, o)?;
         self.batch.push((g, s_id, p_id, o_id));
         self.total += 1;
-        if self.batch.len() >= BATCH_SIZE {
+        if self.batch.len() >= self.batch_size {
             self.store.tier().insert_quad_batch(&self.batch)?;
             self.batch.clear();
         }

@@ -18,7 +18,8 @@ use horndb_storage::loader::turtle::{
     load_turtle_reader_with_base, load_turtle_slice_with_threads, turtle_split_is_safe,
 };
 use horndb_storage::loader::{
-    load_buffer_triples, set_load_buffer_triples, DEFAULT_LOAD_BUFFER_TRIPLES,
+    load_buffer_triples, set_load_batch_triples, set_load_buffer_triples,
+    DEFAULT_LOAD_BATCH_TRIPLES, DEFAULT_LOAD_BUFFER_TRIPLES,
 };
 use horndb_storage::{Store, DEFAULT_GRAPH};
 use oxrdf::{NamedNode, Term};
@@ -569,4 +570,32 @@ fn buffer_budget_does_not_change_the_store() {
     }
 
     set_load_buffer_triples(DEFAULT_LOAD_BUFFER_TRIPLES);
+}
+
+/// The tier batch size (HDB-84) is a throughput knob, never a correctness one.
+/// The tier now appends each batch as its own run and merges the runs on first
+/// read, so a document split into many small inserts must produce exactly the
+/// store one big insert produces — same triples, same dictionary, same term
+/// ids.
+#[test]
+fn batch_size_does_not_change_the_store() {
+    let doc = ntriples_corpus(6_000);
+
+    set_load_batch_triples(DEFAULT_LOAD_BATCH_TRIPLES);
+    let one_shot = Store::in_memory();
+    load_ntriples_reader(&one_shot, doc.as_bytes()).unwrap();
+
+    for batch in [1usize, 7, 1_024, 8_192, 1 << 20] {
+        set_load_batch_triples(batch);
+
+        let streamed = Store::in_memory();
+        load_ntriples_reader(&streamed, doc.as_bytes()).unwrap();
+        assert_same_store(&one_shot, &streamed, &format!("streamed @ batch {batch}"));
+
+        let parallel = Store::in_memory();
+        load_ntriples_slice_with_threads(&parallel, doc.as_bytes(), THREADS).unwrap();
+        assert_same_store(&one_shot, &parallel, &format!("parallel @ batch {batch}"));
+    }
+
+    set_load_batch_triples(DEFAULT_LOAD_BATCH_TRIPLES);
 }

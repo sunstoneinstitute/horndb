@@ -234,6 +234,7 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 50.25 qps** (Zen4 hornbench, nightly 2026-08-24, commit `8a5ed81`) vs **GraphDB Free 151.96 qps** → **3.02× gap**; the same night's Oxigraph legs: 38.08 as-loaded / 38.05 optimized, so HornDB leads its closest architectural peer by **~1.32×**. Don't compare qps across hosts (Intel SPR hel01 measured 34.4 on the older code; measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2, native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → ~36 (SIMD known-CPU table replacing the net-harmful calibrated kernels) → ~43 on 2026-07-20 (WCOJ galloping descent + bulk leaf materialization [#237](https://github.com/sunstoneinstitute/horndb/issues/237) and SPEC-23 Phase 2 heuristic rewrites [#202](https://github.com/sunstoneinstitute/horndb/issues/202) landed together — not bisected) → ~45.7 on 07-27 (columnar SoA `VecTripleSource`, [#257](https://github.com/sunstoneinstitute/horndb/issues/257)) → **~50 since 08-14** (SPEC-28 named-graph phases 1–4; the 07-31→08-13 nightly gap means this step is not bisected). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Ahead of Oxigraph, 3.02× behind GraphDB Free** — gap down from ~4.2× (2026-07-01) but still outside the ≤2× NF1 target. The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have all landed and did not close it. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
 | `graph_scan` — graph-scoped access paths (`crates/storage/benches/graph_scan.rs`) | `horndb-storage` | `scan_graph` cost tracks the graph, not the store (SPEC-28 S2 acceptance #4); warm footprint ≤**50 B/triple** (SPEC-02 NF1) | hornbench (16-core Debian 6.12, rustc 1.90.0, 2026-07-30, commit `abadb4b`): scanning the **same** 10-triple graph costs **1.113 µs** in a 1,000-graph / 1M-quad store and **1.145 µs** in a 2,000-graph / 2M-quad store — **+2.9% for a doubled store**, i.e. flat in store size. `graph_len` on that graph: **13.35 ns** (it sums a cached per-partition live count, so it is O(predicates in graph) with no row scan). Partition overhead at 1,000 triples/graph (5 predicates, so ~200 rows/partition): **32.08 B/quad**, identical across both corpora. | **GREEN — O(graph)-not-O(store) confirmed; 32.08 B/quad within the ≤50 B/triple NF1 budget.** Note the corpus is 1,000 triples *per graph*: this measures scan cost against graph **count**, and does **not** yet answer SPEC-28's "thousands of **small** graphs vs per-partition overhead" risk, where each graph holds a handful of triples and the ~16 B/partition constant dominates. That shape needs its own corpus ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) |
+| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0, 2026-08-31, commit `548e850`), trainmarks xlarge (9,995,000 triples), **one thread**, load plus a first read, median of 3: **9.71s = 1.03 M triples/s** at the shipped 65,536-triple batch — parse, interning and index build included. The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it. Cost is now flat in the batch size (full curve below). | **GREEN on this corpus — F8 met (1.03 M/s ≥ 1 M/s).** Scope: in-memory tier, one parse thread, a 10M-triple synthetic e-commerce graph. The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
 | `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
 ### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
@@ -425,7 +426,11 @@ Three findings, in order of usefulness:
 1. **The index build, not the parse, owns the load.** Parsing is ~13% of a
    `Store` load and interning ~7%; the remaining ~80% is
    `Tier::insert_quad_batch` building six trie orderings per predicate. Even a
-   free parser would leave a 10M-triple load above 32s.
+   free parser would leave a 10M-triple load above 32s. *Two corrections since:
+   the tier writes two physical layouts per predicate, not six (HDB-88), and
+   the ~80% was the per-batch partition rebuild, which HDB-84 removed — see
+   the batch-size curve below. It was also specific to the batched `Store`
+   loader; on the one-shot path HDB-85 measured the tier at 12-14%.*
 2. **Interning is not the serialisation point.** The dictionary's reverse-map
    `RwLock<Vec<Term>>` was the suspected bottleneck; it is not. Parse+intern
    scales 3.9× from 1 to 16 threads. The follow-up idea of thread-local
@@ -438,7 +443,8 @@ The shipped design keeps interning on the calling thread in document order, so
 a parallel load produces the same term ids as a serial one and the two are
 byte-for-byte interchangeable; it measured 48.2s vs 49.4s (1 vs 16 threads) on
 the same corpus. Re-measure with `HORNDB_LOAD_THREADS=auto` once the ordering
-build is cheaper — that is where the load-path work belongs.
+build is cheaper — that is where the load-path work belongs. HDB-84 has since
+made it cheaper (below), so that re-measurement is now worth doing.
 
 Two smaller follow-ups remain open: (a) `SUM` over `xsd:double` yields
 `xsd:decimal` (value correct, datatype deviates from SPARQL type promotion);
@@ -467,6 +473,13 @@ Measured with the `storage_load_phase_*` counters (SPEC-17 §5.4.1) on
 | **accounted** | **22.837s** | **97.6** | **18.643s** | **91.7** |
 | **measured total** | 23.389s | | 20.342s | |
 
+Phase names as of the measured commit. HDB-84 has since changed two of them on
+the write path this table covers: `copy_forward` is no longer emitted at all
+(nothing is carried forward), and `build` now covers only the batch's own rows,
+with the rest of the work moving to a new `merge_runs` phase on the first read.
+The numbers below are correct for `25f4110` and are not re-stated —
+`docs/metrics.md` has the current definitions.
+
 Three things this overturns:
 
 - **Parsing is the largest single phase**, not a rounding error — and it is
@@ -487,7 +500,9 @@ Three things this overturns:
 - **The tier is 12–14% of a load, not ~80%.** `group` + `copy_forward` +
   `merge` + `build` total 2.85s of 23.39s (Turtle) and 2.81s of 20.34s
   (N-Triples). The index build is not the bottleneck, and `copy_forward` is
-  free on a load into an empty store.
+  free on a load into an empty store. (`copy_forward` being free here is what
+  the one-shot path looks like; on the batched path it was the whole cost, which
+  is HDB-84 below.)
 - **Every term is interned twice.** `dedupe`
   (`HornBackend::insert_oxrdf_batch_in_graph`) interns all three terms to build
   a `QuadKey`, then `intern` (`Store::apply_quads`) interns them all again for
@@ -801,6 +816,93 @@ little of that on glibc (23.658s → 23.543s), which is expected — `mremap` wa
 already cheap; it earns its place by removing the penalty snmalloc would
 otherwise pay.
 
+#### Repeated small batches into the tier were quadratic in the call count (HDB-84, 2026-08-31)
+
+`Tier::insert_quad_batch` rebuilt every predicate partition a batch touched:
+copy each existing row into a builder, append the batch's rows, sort the lot,
+then materialise fresh Arrow columns and Roaring side-sets — and, above the
+1M-row hot threshold, sort again for the object-major layout. N batches into
+one predicate paid O(existing) N times, so the tier's cost tracked **how the
+caller chunked its input**, not how many triples it inserted.
+
+A partition is now a list of sorted **runs** — blocks of rows whose
+concatenation is the partition. A batch appends one run: only that batch is
+sorted, and the rows already stored are shared by `Arc`, neither copied nor
+re-sorted. The merged columns every read path needs are built once, on the
+first read, by the same sort-and-dedup the single-shot build always used. A
+batched load pays one sort at the end instead of one per batch.
+
+`hornbench`, trainmarks xlarge N-Triples (9,995,000 triples) loaded through
+`Store::load_ntriples_file`, serial parse, system allocator, commits `e6b6836`
+(before) and `548e850` (after). The same two binaries, the two sides
+interleaved, median of 3. The reported time is the load **plus a first read**,
+which is what forces the merge — a load nobody reads leaves work undone, so
+the loader call on its own is not a comparable number. Peak RSS is `VmHWM`
+sampled at 5 Hz on a separate single run per cell. Driver:
+`cargo run --release -p horndb-storage --example load_curve -- <file> <batch>`.
+
+| triples per insert call | calls | before | after | change | peak RSS before → after |
+|---|---|---|---|---|---|
+| 8,192 | 1,221 | 315.31s | 9.95s | **31.7×** | 2,638 → 1,600 MiB (−39%) |
+| 65,536 (the loader default) | 153 | 48.21s | 9.71s | **4.97×** | 2,205 → 1,547 MiB (−30%) |
+| one call for the whole document | 1 | 9.74s | 9.45s | 1.03× | 1,566 → 1,534 MiB (−2%) |
+
+Run-to-run spread is under 1% on every cell except 65,536-after (9.70–10.13s,
+4.4%); the three before/after pairs never overlap.
+
+The review follow-ups were re-confirmed against `548e850` on the same host,
+two interleaved reps per cell. `e274ebb` (the `merge_runs` phase and the
+`MAX_RUNS` cap) landed within 1% on every cell, peak RSS within 1 MiB.
+`2aeac6e` then stopped releasing the runs before the merged columns are built —
+closing an unwind window at the cost of one transient copy of the rows — and
+measured **1–2% slower in all four pairs**: 9.94s vs 9.82s at 65,536 and
+10.12s vs 9.92s at 8,192. Small, inside the spread the table already reports,
+and consistent enough in direction to be real rather than noise. Peak RSS did
+not move (1,537–1,594 MiB against 1,543–1,597 MiB), which says the load's peak
+sits somewhere other than the merge, not that the merge peak is unchanged.
+
+The cap is not reached by any of this: 8,192-triple batches produce 1,221 runs
+against a cap of 4,096.
+
+Read the "after" column downwards, not across: it is flat. Load cost no longer
+depends on how the input was chunked, and the batched path now costs what the
+one-call path costs. Before, the same 10M triples spanned 9.7s to 315s on
+chunking alone. At the shipped 65,536 that is **48.2s → 9.7s**, which is
+**1.03 M triples/s** end to end on one thread — parse, intern and index build
+included. It is also the figure HDB-83 reported as "full `Store` load 40.1s"
+against a parse of 5.41s: the gap was the rebuild.
+
+Peak memory drops for the same reason. The old rebuild held the outgoing
+partition and its replacement at once, so a batched load peaked at roughly two
+copies of the largest partition on top of the store; appending a run does not.
+
+The batch size is now settable — `HORNDB_LOAD_BATCH_TRIPLES`, default 65,536 —
+so the curve is reproducible on any commit carrying the knob.
+`crates/storage/tests/parallel_loader.rs::batch_size_does_not_change_the_store`
+pins that it is a throughput knob only: five batch sizes, streaming and
+parallel, each producing an identical store down to the interned term ids.
+
+**This does not move trainmarks `read_turtle` / `read_ntriples`, and cannot.**
+Those legs do not use the batched loader. The driver parses into one `Vec` and
+calls `HornBackend::insert_oxrdf_batch`, which reaches the tier **once** with
+all 10M rows — the one-call row above, where there is nothing to amortise.
+HDB-85 measured that path's whole tier share at 12–14%. Measured anyway, same
+host, same commits, `--load-only --reserve-triples 10000000`, median of 3
+interleaved runs:
+
+| operation | before | after | change |
+|---|---|---|---|
+| `read_turtle` | 21.618s | 21.586s | −0.1% (noise) |
+| `read_ntriples` | 18.083s | 18.161s | +0.4% (noise) |
+
+The path this fixes is `Store::load_ntriples_file` / `load_turtle_file`, which
+the harness and the SPARQL server use to load a document into a `Store`.
+
+It also unblocks the parse-thread default. HDB-94 left "flipping
+`HORNDB_LOAD_THREADS` to `auto` needs the same sweep against a real `Store`
+load, whose tier insert is what regressed in HDB-83" open. That tier insert is
+no longer what regressed, so the sweep is now worth running.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page
@@ -939,6 +1041,10 @@ cargo bench -p horndb-incremental --bench insert_throughput
 
 # SPEC-02 storage — LUBM load throughput
 cargo bench -p horndb-storage --bench load_lubm
+
+# SPEC-02 F8 — bulk-load wall time vs tier batch size (HDB-84). Not criterion:
+# one load per invocation, so sweep the batch size yourself. 0 = one insert call.
+cargo run --release -p horndb-storage --example load_curve -- data/xlarge.nt 65536 3
 
 # SPEC-28 S2 storage — graph-scoped access paths (also prints B/quad to stderr)
 cargo bench -p horndb-storage --bench graph_scan
