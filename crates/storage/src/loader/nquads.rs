@@ -1,7 +1,7 @@
 //! N-Quads bulk loader — streaming and parallel-chunked.
 //!
 //! Routes each quad to the graph named by its fourth term (SPEC-02 F7) and
-//! batches into the dictionary + tier in chunks of [`crate::loader::BATCH_SIZE`].
+//! batches into the dictionary + tier in chunks of [`crate::loader::load_batch_triples`].
 //! A quad with no graph term lands in the default graph (the reserved
 //! [`DEFAULT_GRAPH`] sentinel); a named (IRI or blank-node) graph term is
 //! interned and used as the graph id, so triples with the same graph label
