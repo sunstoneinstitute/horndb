@@ -10,11 +10,26 @@
 //! predicates keep only the subject-major layout and materialise the
 //! object-major one lazily, on first request, via an internally-synchronised
 //! [`OnceLock`].
+//!
+//! # Runs, and why a partition is not always materialised (HDB-84)
+//!
+//! A partition is held as a list of **runs** — each run a sorted, deduplicated
+//! block of rows — whose concatenation is the partition's row multiset. The
+//! merged [`Columns`] every read path needs are built once, on first read, and
+//! cached.
+//!
+//! This is what makes repeated small writes cheap. Appending a batch adds one
+//! run and costs `O(batch)`; it does not touch the rows already there. Without
+//! it, each write rebuilt the whole partition (copy every existing row forward,
+//! re-sort), so N batches into one predicate paid `O(existing)` N times —
+//! quadratic in the number of calls. A bulk load driven in batches now pays one
+//! sort at the end instead of one per batch.
 
 use crate::ordering::{Ordering, PartitionAxis};
 use crate::term::TermId;
 use crate::visibility::{visible, CommitVersion, LATEST, UNSET_END};
 use arrow::array::{ArrayRef, UInt64Array};
+use parking_lot::Mutex;
 use roaring::RoaringTreemap;
 use std::sync::{Arc, OnceLock};
 
@@ -32,7 +47,12 @@ struct ObjectMajor {
     end: Arc<UInt64Array>,
 }
 
-pub struct PredicatePartition {
+/// One row: `(subject payload, object payload, begin, end)`.
+type Row = (u64, u64, CommitVersion, CommitVersion);
+
+/// A sorted, deduplicated block of rows plus everything derived from them.
+/// Serves both as a partition's merged view and as one of its runs.
+struct Columns {
     // Subject-major (SPO) columns: rows sorted by (subject, object).
     subjects: Arc<UInt64Array>,
     objects: Arc<UInt64Array>,
@@ -55,6 +75,123 @@ pub struct PredicatePartition {
     // `len_at(v)` for the version `v` that owns this partition object — see
     // `live_len()` for why that equivalence holds.
     live_len: usize,
+}
+
+impl Columns {
+    /// Sort `rows` into SPO order, collapse exact-duplicate live rows, and
+    /// materialise the Arrow columns and side-sets.
+    fn from_rows(mut rows: Vec<Row>) -> Self {
+        // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
+        // order for trie iteration; begin orders a tuple's history.
+        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        // Collapse only exact-duplicate *live* rows for the same (s, o): a
+        // repeated insert is a no-op, and the earliest `begin` wins. Dead rows
+        // (end set) are history and are kept until compaction.
+        rows.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.3 == UNSET_END && b.3 == UNSET_END);
+
+        let n = rows.len();
+        let mut subject_set = RoaringTreemap::new();
+        let mut object_set = RoaringTreemap::new();
+        let mut s_col = Vec::with_capacity(n);
+        let mut o_col = Vec::with_capacity(n);
+        let mut begin_col = Vec::with_capacity(n);
+        let mut end_col = Vec::with_capacity(n);
+        let mut has_retractions = false;
+        let mut max_begin: CommitVersion = 0;
+        let mut live_len = 0usize;
+        for (s, o, begin, end) in &rows {
+            s_col.push(*s);
+            o_col.push(*o);
+            begin_col.push(*begin);
+            end_col.push(*end);
+            if *end != UNSET_END {
+                has_retractions = true;
+            } else {
+                live_len += 1;
+            }
+            if *begin > max_begin {
+                max_begin = *begin;
+            }
+            // Side-sets are supersets across all versions; version-exact sets
+            // are computed on demand (Task 4).
+            subject_set.insert(TermId(*s).payload());
+            object_set.insert(TermId(*o).payload());
+        }
+        Columns {
+            subjects: Arc::new(UInt64Array::from(s_col)),
+            objects: Arc::new(UInt64Array::from(o_col)),
+            begin: Arc::new(UInt64Array::from(begin_col)),
+            end: Arc::new(UInt64Array::from(end_col)),
+            has_retractions,
+            max_begin,
+            subject_set,
+            object_set,
+            live_len,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.subjects.len()
+    }
+
+    /// Append this block's rows to `out`, in stored order.
+    fn extend_rows(&self, out: &mut Vec<Row>) {
+        for i in 0..self.len() {
+            out.push((
+                self.subjects.value(i),
+                self.objects.value(i),
+                self.begin.value(i),
+                self.end.value(i),
+            ));
+        }
+    }
+
+    /// Build the object-major `(object, subject)` columns by re-sorting the
+    /// existing subject-major rows by `(object, subject)`.
+    fn build_object_major(&self) -> ObjectMajor {
+        let n = self.len();
+        // `usize` indices, not `u32`: a single hot predicate on LUBM-8000-scale
+        // data can exceed `u32::MAX` rows, and narrowing here would silently
+        // drop rows from the object-major layout while the subject-major
+        // columns still report the full partition.
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_unstable_by(|&a, &b| {
+            self.objects
+                .value(a)
+                .cmp(&self.objects.value(b))
+                .then_with(|| self.subjects.value(a).cmp(&self.subjects.value(b)))
+        });
+        let mut o_col = Vec::with_capacity(n);
+        let mut s_col = Vec::with_capacity(n);
+        let mut b_col = Vec::with_capacity(n);
+        let mut e_col = Vec::with_capacity(n);
+        for &i in &idx {
+            o_col.push(self.objects.value(i));
+            s_col.push(self.subjects.value(i));
+            b_col.push(self.begin.value(i));
+            e_col.push(self.end.value(i));
+        }
+        ObjectMajor {
+            objects: Arc::new(UInt64Array::from(o_col)),
+            subjects: Arc::new(UInt64Array::from(s_col)),
+            begin: Arc::new(UInt64Array::from(b_col)),
+            end: Arc::new(UInt64Array::from(e_col)),
+        }
+    }
+}
+
+pub struct PredicatePartition {
+    // Sorted runs whose concatenation is this partition's rows. Collapsed to a
+    // single run — the one shared with `cols` — once `cols` is materialised.
+    // The lock is only taken to append a run or to merge; every read path goes
+    // through `cols`, which is lock-free after the first read.
+    runs: Mutex<Vec<Arc<Columns>>>,
+    // The merged, deduplicated view of `runs`. Built on first read.
+    cols: OnceLock<Arc<Columns>>,
+    // Threshold at which the object-major layout is built eagerly rather than
+    // on first object-major request. Carried so a partition grown by
+    // `with_appended_rows` keeps its tier's policy.
+    hot_threshold: usize,
     // Object-major columns: rows sorted by (object, subject). Eager for hot
     // predicates, otherwise materialised on first `ordered(ObjectMajor)` call.
     object_major: OnceLock<ObjectMajor>,
@@ -65,8 +202,50 @@ impl PredicatePartition {
         PartitionBuilder::default()
     }
 
+    /// The merged view, building it on first call. Every read path goes
+    /// through here; after the first call it is an atomic load.
+    fn cols(&self) -> &Columns {
+        self.cols.get_or_init(|| {
+            let mut runs = self.runs.lock();
+            let merged = if runs.len() == 1 {
+                runs[0].clone()
+            } else {
+                let total: usize = runs.iter().map(|r| r.len()).sum();
+                let mut rows: Vec<Row> = Vec::with_capacity(total);
+                // Drain as we go: a run whose only other holder was an older
+                // snapshot is freed here, so the merge peaks at roughly one
+                // extra copy rather than two.
+                for run in runs.drain(..) {
+                    run.extend_rows(&mut rows);
+                }
+                Arc::new(Columns::from_rows(rows))
+            };
+            runs.clear();
+            runs.push(merged.clone());
+            if merged.live_len >= self.hot_threshold {
+                let _ = self.object_major.set(merged.build_object_major());
+            }
+            merged
+        })
+    }
+
+    /// A new partition holding this one's rows plus `new_rows`, as one extra
+    /// run. `O(new_rows)`: the rows already here are shared by `Arc`, not
+    /// copied or re-sorted. The result is unmaterialised — the first read
+    /// merges it (see the module docs).
+    pub(crate) fn with_appended_rows(&self, new_rows: Vec<Row>) -> PredicatePartition {
+        let mut runs = self.runs.lock().clone();
+        runs.push(Arc::new(Columns::from_rows(new_rows)));
+        PredicatePartition {
+            runs: Mutex::new(runs),
+            cols: OnceLock::new(),
+            hot_threshold: self.hot_threshold,
+            object_major: OnceLock::new(),
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.subjects.len()
+        self.cols().len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -74,27 +253,27 @@ impl PredicatePartition {
     }
 
     pub fn subjects(&self) -> &UInt64Array {
-        &self.subjects
+        &self.cols().subjects
     }
 
     pub fn objects(&self) -> &UInt64Array {
-        &self.objects
+        &self.cols().objects
     }
 
     pub fn subjects_arrow(&self) -> ArrayRef {
-        self.subjects.clone()
+        self.cols().subjects.clone()
     }
 
     pub fn objects_arrow(&self) -> ArrayRef {
-        self.objects.clone()
+        self.cols().objects.clone()
     }
 
     pub fn subject_set(&self) -> &RoaringTreemap {
-        &self.subject_set
+        &self.cols().subject_set
     }
 
     pub fn object_set(&self) -> &RoaringTreemap {
-        &self.object_set
+        &self.cols().object_set
     }
 
     /// Distinct subject payloads with at least one row visible at `at`.
@@ -102,13 +281,14 @@ impl PredicatePartition {
     /// every row's `begin` is already `<= at` (so the superset needs no
     /// filtering); otherwise computes the version-exact set.
     pub fn subject_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
-        if !self.has_retractions && at >= self.max_begin {
-            return std::borrow::Cow::Borrowed(&self.subject_set);
+        let c = self.cols();
+        if !c.has_retractions && at >= c.max_begin {
+            return std::borrow::Cow::Borrowed(&c.subject_set);
         }
         let mut set = RoaringTreemap::new();
-        for i in 0..self.len() {
-            if visible(self.begin.value(i), self.end.value(i), at) {
-                set.insert(TermId(self.subjects.value(i)).payload());
+        for i in 0..c.len() {
+            if visible(c.begin.value(i), c.end.value(i), at) {
+                set.insert(TermId(c.subjects.value(i)).payload());
             }
         }
         std::borrow::Cow::Owned(set)
@@ -119,13 +299,14 @@ impl PredicatePartition {
     /// every row's `begin` is already `<= at`; otherwise computes the
     /// version-exact set.
     pub fn object_set_at(&self, at: CommitVersion) -> std::borrow::Cow<'_, RoaringTreemap> {
-        if !self.has_retractions && at >= self.max_begin {
-            return std::borrow::Cow::Borrowed(&self.object_set);
+        let c = self.cols();
+        if !c.has_retractions && at >= c.max_begin {
+            return std::borrow::Cow::Borrowed(&c.object_set);
         }
         let mut set = RoaringTreemap::new();
-        for i in 0..self.len() {
-            if visible(self.begin.value(i), self.end.value(i), at) {
-                set.insert(TermId(self.objects.value(i)).payload());
+        for i in 0..c.len() {
+            if visible(c.begin.value(i), c.end.value(i), at) {
+                set.insert(TermId(c.objects.value(i)).payload());
             }
         }
         std::borrow::Cow::Owned(set)
@@ -134,26 +315,22 @@ impl PredicatePartition {
     /// True if any row in this partition has been retracted (`end` set). When
     /// false, every version-aware read returns the raw columns with no filter.
     pub fn has_retractions(&self) -> bool {
-        self.has_retractions
+        self.cols().has_retractions
     }
 
     /// The `begin`/`end` stamp columns (subject-major order), for the WAL and
     /// compaction. Aligned 1:1 with `subjects()`/`objects()`.
     pub fn begins(&self) -> &UInt64Array {
-        &self.begin
+        &self.cols().begin
     }
     pub fn ends(&self) -> &UInt64Array {
-        &self.end
+        &self.cols().end
     }
 
     /// Scan the partition in subject-major (SPO) order.
     pub fn scan(&self) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        (0..self.len()).map(move |i| {
-            (
-                TermId(self.subjects.value(i)),
-                TermId(self.objects.value(i)),
-            )
-        })
+        let c = self.cols();
+        (0..c.len()).map(move |i| (TermId(c.subjects.value(i)), TermId(c.objects.value(i))))
     }
 
     /// Scan `(subject, object)` rows visible at `at`, in subject-major order.
@@ -161,30 +338,30 @@ impl PredicatePartition {
     /// row's `begin` is already `<= at`; otherwise each row is checked
     /// against [`visible`] individually.
     pub fn scan_at(&self, at: CommitVersion) -> impl Iterator<Item = (TermId, TermId)> + '_ {
-        let filtered = self.has_retractions || at < self.max_begin;
-        (0..self.len()).filter_map(move |i| {
-            if filtered && !visible(self.begin.value(i), self.end.value(i), at) {
+        let c = self.cols();
+        let filtered = c.has_retractions || at < c.max_begin;
+        (0..c.len()).filter_map(move |i| {
+            if filtered && !visible(c.begin.value(i), c.end.value(i), at) {
                 None
             } else {
-                Some((
-                    TermId(self.subjects.value(i)),
-                    TermId(self.objects.value(i)),
-                ))
+                Some((TermId(c.subjects.value(i)), TermId(c.objects.value(i))))
             }
         })
     }
 
     /// Count of rows visible at `at`.
     pub fn len_at(&self, at: CommitVersion) -> usize {
-        if !self.has_retractions && at >= self.max_begin {
-            return self.len();
+        let c = self.cols();
+        if !c.has_retractions && at >= c.max_begin {
+            return c.len();
         }
-        (0..self.len())
-            .filter(|&i| visible(self.begin.value(i), self.end.value(i), at))
+        (0..c.len())
+            .filter(|&i| visible(c.begin.value(i), c.end.value(i), at))
             .count()
     }
 
-    /// Number of live rows (`end == UNSET_END`), counted at build time. O(1).
+    /// Number of live rows (`end == UNSET_END`), counted at build time. O(1)
+    /// once the partition is materialised.
     ///
     /// Equal to `len_at(at)` only when `at` is the version that built this
     /// partition object or later — which is what a snapshot holding this object
@@ -193,7 +370,7 @@ impl PredicatePartition {
     /// `visible(begin, end, at) <=> end == UNSET_END`. For an earlier `at`, use
     /// `len_at`.
     pub fn live_len(&self) -> usize {
-        self.live_len
+        self.cols().live_len
     }
 
     /// Latest-live ordered access (all rows not yet retracted). Convenience for
@@ -209,16 +386,17 @@ impl PredicatePartition {
     /// already `<= at` (raw columns shared by `Arc`); otherwise the visible
     /// subset is materialized once for this call.
     pub fn ordered_at(&self, ord: Ordering, at: CommitVersion) -> OrderedColumns {
+        let c = self.cols();
         let (level0, level1, begin, end, axis) = match ord.axis() {
             PartitionAxis::SubjectMajor => (
-                self.subjects.clone(),
-                self.objects.clone(),
-                self.begin.clone(),
-                self.end.clone(),
+                c.subjects.clone(),
+                c.objects.clone(),
+                c.begin.clone(),
+                c.end.clone(),
                 PartitionAxis::SubjectMajor,
             ),
             PartitionAxis::ObjectMajor => {
-                let om = self.object_major.get_or_init(|| self.build_object_major());
+                let om = self.object_major.get_or_init(|| c.build_object_major());
                 (
                     om.objects.clone(),
                     om.subjects.clone(),
@@ -228,7 +406,7 @@ impl PredicatePartition {
                 )
             }
         };
-        if !self.has_retractions && at >= self.max_begin {
+        if !c.has_retractions && at >= c.max_begin {
             return OrderedColumns {
                 axis,
                 level0,
@@ -276,39 +454,6 @@ impl PredicatePartition {
         }
     }
 
-    /// Build the object-major `(object, subject)` columns by re-sorting the
-    /// existing subject-major rows by `(object, subject)`.
-    fn build_object_major(&self) -> ObjectMajor {
-        let n = self.len();
-        // `usize` indices, not `u32`: a single hot predicate on LUBM-8000-scale
-        // data can exceed `u32::MAX` rows, and narrowing here would silently
-        // drop rows from the object-major layout while the subject-major
-        // columns still report the full partition.
-        let mut idx: Vec<usize> = (0..n).collect();
-        idx.sort_unstable_by(|&a, &b| {
-            self.objects
-                .value(a)
-                .cmp(&self.objects.value(b))
-                .then_with(|| self.subjects.value(a).cmp(&self.subjects.value(b)))
-        });
-        let mut o_col = Vec::with_capacity(n);
-        let mut s_col = Vec::with_capacity(n);
-        let mut b_col = Vec::with_capacity(n);
-        let mut e_col = Vec::with_capacity(n);
-        for &i in &idx {
-            o_col.push(self.objects.value(i));
-            s_col.push(self.subjects.value(i));
-            b_col.push(self.begin.value(i));
-            e_col.push(self.end.value(i));
-        }
-        ObjectMajor {
-            objects: Arc::new(UInt64Array::from(o_col)),
-            subjects: Arc::new(UInt64Array::from(s_col)),
-            begin: Arc::new(UInt64Array::from(b_col)),
-            end: Arc::new(UInt64Array::from(e_col)),
-        }
-    }
-
     /// Subjects whose object column equals `object`, in physical (SPO) order.
     /// Vectorised: the object column is scanned with
     /// [`horndb_simd::filter_indices_eq`] over the contiguous Arrow buffer to
@@ -321,8 +466,9 @@ impl PredicatePartition {
     /// version-aware read path without first adding a `subjects_with_object_at`
     /// variant.
     pub fn subjects_with_object(&self, object: u64) -> Vec<u64> {
-        let objs: &[u64] = self.objects.values();
-        let subs: &[u64] = self.subjects.values();
+        let c = self.cols();
+        let objs: &[u64] = c.objects.values();
+        let subs: &[u64] = c.subjects.values();
         let mut positions: Vec<u32> = Vec::new();
         horndb_simd::filter_indices_eq(objs, object, &mut positions);
         let mut subjects = Vec::with_capacity(positions.len());
@@ -390,8 +536,7 @@ impl OrderedColumns {
 
 #[derive(Default)]
 pub struct PartitionBuilder {
-    // (subject, object, begin, end) rows.
-    rows: Vec<(u64, u64, CommitVersion, CommitVersion)>,
+    rows: Vec<Row>,
 }
 
 impl PartitionBuilder {
@@ -420,6 +565,11 @@ impl PartitionBuilder {
         self.rows.is_empty()
     }
 
+    /// A builder pre-loaded with `(subject, object, begin, end)` rows.
+    pub(crate) fn from_rows(rows: Vec<Row>) -> Self {
+        Self { rows }
+    }
+
     /// Finalize the partition, eagerly materialising the object-major layout for
     /// a hot predicate (triple count ≥ [`DEFAULT_HOT_THRESHOLD`]).
     pub fn build(self) -> PredicatePartition {
@@ -430,61 +580,20 @@ impl PartitionBuilder {
     /// `hot_threshold`, the object-major layout is materialised eagerly so all
     /// six orderings are immediately queryable; otherwise it is left for lazy
     /// materialisation on first object-major request.
-    pub fn build_with_hot_threshold(mut self, hot_threshold: usize) -> PredicatePartition {
-        // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
-        // order for trie iteration; begin orders a tuple's history.
-        self.rows
-            .sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        // Collapse only exact-duplicate *live* rows for the same (s, o): a
-        // repeated insert is a no-op. Dead rows (end set) are history and are
-        // kept until compaction.
-        self.rows
-            .dedup_by(|a, b| a.0 == b.0 && a.1 == b.1 && a.3 == UNSET_END && b.3 == UNSET_END);
-
-        let n = self.rows.len();
-        let mut subj_set = RoaringTreemap::new();
-        let mut obj_set = RoaringTreemap::new();
-        let mut s_col = Vec::with_capacity(n);
-        let mut o_col = Vec::with_capacity(n);
-        let mut begin_col = Vec::with_capacity(n);
-        let mut end_col = Vec::with_capacity(n);
-        let mut has_retractions = false;
-        let mut max_begin: CommitVersion = 0;
-        let mut live_len = 0usize;
-        for (s, o, begin, end) in &self.rows {
-            s_col.push(*s);
-            o_col.push(*o);
-            begin_col.push(*begin);
-            end_col.push(*end);
-            if *end != UNSET_END {
-                has_retractions = true;
-            } else {
-                live_len += 1;
-            }
-            if *begin > max_begin {
-                max_begin = *begin;
-            }
-            // Side-sets are supersets across all versions; version-exact sets
-            // are computed on demand (Task 4).
-            subj_set.insert(TermId(*s).payload());
-            obj_set.insert(TermId(*o).payload());
+    pub fn build_with_hot_threshold(self, hot_threshold: usize) -> PredicatePartition {
+        let cols = Arc::new(Columns::from_rows(self.rows));
+        let object_major = OnceLock::new();
+        if cols.live_len >= hot_threshold {
+            let _ = object_major.set(cols.build_object_major());
         }
-        let partition = PredicatePartition {
-            subjects: Arc::new(UInt64Array::from(s_col)),
-            objects: Arc::new(UInt64Array::from(o_col)),
-            begin: Arc::new(UInt64Array::from(begin_col)),
-            end: Arc::new(UInt64Array::from(end_col)),
-            has_retractions,
-            max_begin,
-            subject_set: subj_set,
-            object_set: obj_set,
-            live_len,
-            object_major: OnceLock::new(),
-        };
-        if partition.live_len >= hot_threshold {
-            let _ = partition.object_major.set(partition.build_object_major());
+        let once = OnceLock::new();
+        let _ = once.set(cols.clone());
+        PredicatePartition {
+            runs: Mutex::new(vec![cols]),
+            cols: once,
+            hot_threshold,
+            object_major,
         }
-        partition
     }
 }
 

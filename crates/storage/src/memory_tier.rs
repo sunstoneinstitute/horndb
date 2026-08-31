@@ -380,7 +380,6 @@ impl Tier for MemoryTier {
         // Nanoseconds and rows accumulated in locals across every partition
         // touched by this batch, merged into the counters once on the way out.
         let mut copy_ns = 0u64;
-        let mut copy_rows = 0u64;
         let mut build_ns = 0u64;
         let mut build_rows = 0u64;
 
@@ -398,41 +397,28 @@ impl Tier for MemoryTier {
                 .map(|gs| gs.partitions.clone())
                 .unwrap_or_default();
             for (p, rows) in pred_rows {
-                let mut builder = PartitionBuilder::default();
-                // Carry existing rows forward WITH their visibility stamps
-                // (history preserved) — reading indexed columns, not `scan()`,
-                // which would silently drop retraction stamps.
-                let mut carried = 0u64;
-                let t_copy = Instant::now();
-                if let Some(existing) = new_partitions.get(&p) {
-                    let n = existing.len();
-                    for i in 0..n {
-                        builder.append_stamped(
-                            TermId(existing.subjects().value(i)),
-                            TermId(existing.objects().value(i)),
-                            existing.begins().value(i),
-                            existing.ends().value(i),
-                        );
-                    }
-                    carried = n as u64;
-                }
                 // New rows: live from this version.
                 let added = rows.len() as u64;
-                for (s, o) in rows {
-                    builder.append_stamped(s, o, new_version, UNSET_END);
-                }
+                let t_copy = Instant::now();
+                let new_rows: Vec<_> = rows
+                    .into_iter()
+                    .map(|(s, o)| (s.0, o.0, new_version, UNSET_END))
+                    .collect();
                 copy_ns += t_copy.elapsed().as_nanos() as u64;
-                copy_rows += carried;
 
-                // `build` sorts and materialises the whole partition, so its
-                // row count is what it built: carried-forward plus new.
+                // The existing rows are shared by `Arc` as an untouched run;
+                // only the new rows are sorted here. The merged view is built
+                // once, on the first read (HDB-84) — so `build` is the new
+                // rows, not the whole partition.
                 let t_build = Instant::now();
-                new_partitions.insert(
-                    p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
-                );
+                let part = match new_partitions.get(&p) {
+                    Some(existing) => existing.with_appended_rows(new_rows),
+                    None => PartitionBuilder::from_rows(new_rows)
+                        .build_with_hot_threshold(self.hot_threshold),
+                };
+                new_partitions.insert(p, Arc::new(part));
                 build_ns += t_build.elapsed().as_nanos() as u64;
-                build_rows += carried + added;
+                build_rows += added;
             }
             graphs.insert(
                 g,
@@ -448,11 +434,13 @@ impl Tier for MemoryTier {
         });
         *self.current.write() = next;
 
-        // Single merge point for the per-partition accumulators.
+        // Single merge point for the per-partition accumulators. Nothing is
+        // carried forward any more, so `copy_forward` covers only staging the
+        // new rows and its row count is the new rows.
         record_phase(
             LoadPhase::CopyForward,
             Duration::from_nanos(copy_ns),
-            copy_rows,
+            build_rows,
         );
         record_phase(LoadPhase::Build, Duration::from_nanos(build_ns), build_rows);
         Ok(())
@@ -846,6 +834,80 @@ mod tests {
         // SPO sort: subject 1 < subject 3.
         assert_eq!(pairs[0].0, id(1));
         assert_eq!(pairs[1].0, id(3));
+    }
+
+    /// HDB-84: the tier appends each batch as its own run and merges them on
+    /// first read, so the same rows split N ways must produce a partition no
+    /// reader can tell from the one-batch build — every column, both axes,
+    /// both side-sets, and the live count.
+    #[test]
+    fn batching_does_not_change_the_partition() {
+        use crate::ordering::Ordering;
+
+        let pred = id(100);
+        // Deliberate repeats: (s, o) pairs recur across chunk boundaries, so
+        // cross-run dedup has to behave like the single-build dedup.
+        let quads: Vec<_> = (0..500u64)
+            .map(|i| (DEFAULT_GRAPH, id(i % 97), pred, id(i % 31)))
+            .collect();
+
+        let one = MemoryTier::new();
+        one.insert_quad_batch(&quads).unwrap();
+
+        for chunk in [1usize, 3, 7, 64, 499] {
+            let many = MemoryTier::new();
+            for part in quads.chunks(chunk) {
+                many.insert_quad_batch(part).unwrap();
+            }
+            let (a, b) = (one.snapshot(), many.snapshot());
+            let read = |snap: &crate::memory_tier::TierSnapshot| {
+                snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
+                    (
+                        p.len(),
+                        p.live_len(),
+                        p.has_retractions(),
+                        p.subject_set().clone(),
+                        p.object_set().clone(),
+                        p.ordered(Ordering::Spo)
+                            .subject_object()
+                            .collect::<Vec<_>>(),
+                        p.ordered(Ordering::Pos)
+                            .subject_object()
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .unwrap()
+            };
+            assert_eq!(read(&a), read(&b), "chunk size {chunk}");
+            assert_eq!(a.triple_count(), b.triple_count(), "chunk size {chunk}");
+        }
+    }
+
+    /// Retractions and re-inserts land on a partition that is still a list of
+    /// unmerged runs. The visible rows must match the same operations replayed
+    /// one batch at a time on a fully merged partition.
+    #[test]
+    fn retraction_after_batched_inserts_sees_every_run() {
+        let pred = id(100);
+        let quads: Vec<_> = (0..64u64)
+            .map(|i| (DEFAULT_GRAPH, id(i), pred, id(i + 1000)))
+            .collect();
+
+        let tier = MemoryTier::new();
+        for part in quads.chunks(5) {
+            tier.insert_quad_batch(part).unwrap();
+        }
+        // Retract every fourth row, spread across the runs.
+        let targets: Vec<_> = quads.iter().step_by(4).copied().collect();
+        assert_eq!(tier.retract_quad_batch(&targets).unwrap(), targets.len());
+        assert_eq!(tier.triple_count(), (quads.len() - targets.len()) as u64);
+
+        // Re-inserting a retracted quad makes it live again, still in batches.
+        tier.insert_quad_batch(&targets[..4]).unwrap();
+        assert_eq!(
+            tier.triple_count(),
+            (quads.len() - targets.len() + 4) as u64
+        );
     }
 
     #[test]
