@@ -956,6 +956,7 @@ fn main() {
     let mut zipf = 0.92f64;
     let mut src_dir = String::new();
     let mut factor = 1usize;
+    let mut drop_first = false;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -986,6 +987,10 @@ fn main() {
             "--factor" => {
                 factor = args[i + 1].parse().unwrap();
                 i += 2;
+            }
+            "--drop-caches" => {
+                drop_first = true;
+                i += 1;
             }
             "--zipf" => {
                 zipf = args[i + 1].parse().unwrap();
@@ -1023,7 +1028,7 @@ fn main() {
         }
         "build" => do_build(&dir),
         "query" => do_query(&dir, probes, reps, zipf, &arm),
-        "cold" => do_cold(&dir, probes, &arm, zipf),
+        "cold" => do_cold(&dir, probes, &arm, zipf, drop_first),
         o => panic!("unknown mode {o}"),
     }
 }
@@ -1065,6 +1070,54 @@ fn key_stats(keys: &Keys, sorted: &[u32]) {
         lcp_total as f64 / (sorted.len() - 1) as f64,
         100.0 * lcp_total as f64 / keys.bytes() as f64,
     );
+}
+
+/// Fill and persist the mapped record array for `mph`.
+///
+/// This has to be redone by whichever process queries, not read from an
+/// earlier `build`: PtrHash construction is deterministic in its seed but not
+/// in its pilot search, which uses rayon, so two processes over the same keys
+/// produce different — individually correct — slot assignments. Writing the
+/// records next to the MPHF that will be queried keeps the two in step. A
+/// shipped implementation would persist the MPHF itself instead.
+fn write_recs(dir: &Path, keys: &Keys, mph: &Mph) {
+    let n = keys.n();
+    let mut recs = vec![
+        Rec {
+            fp: 0,
+            id: u32::MAX,
+            _pad: 0
+        };
+        n
+    ];
+    for i in 0..n {
+        let k = keys.get(i);
+        recs[mph.index(&k)] = Rec {
+            fp: hash64(k),
+            id: i as u32,
+            _pad: 0,
+        };
+    }
+    assert_eq!(
+        recs.iter().filter(|r| r.id != u32::MAX).count(),
+        n,
+        "MPHF is not a bijection - duplicate keys?"
+    );
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(recs.as_ptr() as *const u8, std::mem::size_of_val(&recs[..]))
+    };
+    std::fs::write(dir.join("ptrhash_recs.bin"), bytes).unwrap();
+}
+
+/// Flush dirty pages and drop the whole page cache, so the next probe of a
+/// mapped file is a real fault to disk. Needs passwordless sudo; the caller
+/// asks for it explicitly with `--drop-caches`.
+fn drop_caches() {
+    let st = std::process::Command::new("sudo")
+        .args(["-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"])
+        .status()
+        .expect("spawn sudo");
+    assert!(st.success(), "drop_caches failed");
 }
 
 fn do_build(dir: &Path) {
@@ -1113,32 +1166,9 @@ fn do_build(dir: &Path) {
 
     // --- the mapped record array for the balanced MPHF
     let t = Instant::now();
-    let mut recs = vec![
-        Rec {
-            fp: 0,
-            id: u32::MAX,
-            _pad: 0
-        };
-        n
-    ];
-    for i in 0..n {
-        let k = keys.get(i);
-        let slot = mph.index(&k);
-        recs[slot] = Rec {
-            fp: hash64(k),
-            id: i as u32,
-            _pad: 0,
-        };
-    }
-    let rec_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(recs.as_ptr() as *const u8, std::mem::size_of_val(&recs[..]))
-    };
-    std::fs::write(dir.join("ptrhash_recs.bin"), rec_bytes).unwrap();
-    // The MPHF itself is small and stays resident; persist the key order it
-    // was built from so `query` can rebuild it deterministically.
+    write_recs(dir, &keys, &mph);
     let t_recs = t.elapsed().as_secs_f64();
     println!("build ptrhash-records          {t_recs:8.2}s   {REC_SIZE} B/key mapped");
-    drop(recs);
     drop(refs);
 
     // --- front-coded
@@ -1402,8 +1432,16 @@ fn run_matrix(
         let t = Instant::now();
         let mph = load_mph(&refs);
         eprintln!("  [mph rebuilt in {:.2}s]", t.elapsed().as_secs_f64());
+        write_recs(dir, keys, &mph);
         let m = map(&dir.join("ptrhash_recs.bin"));
         let recs: &[Rec] = unsafe { std::slice::from_raw_parts(m.as_ptr() as *const Rec, n) };
+        for j in 0..probes.min(200_000) {
+            let r = &recs[mph.index(&hit_keys[j])];
+            assert!(
+                r.fp == hit_hash[j] && r.id == stream[j],
+                "ptrhash record array disagrees with the MPHF at probe {j}"
+            );
+        }
         cell!("ptrhash/single/hit/nocache", |_c: &mut RepeatCache| {
             let mut s = 0u64;
             for j in 0..probes {
@@ -1697,7 +1735,7 @@ fn read_stream(path: &Path) -> Vec<u32> {
 /// One cold-page-cache measurement. The caller drops the page cache before
 /// each invocation; this process maps the arm's file and probes it once, so
 /// every probe that misses the cache is a real page fault to disk.
-fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64) {
+fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64, drop_first: bool) {
     let keys = Keys::read(&dir.join("keys.bin"));
     let n = keys.n();
     let sp = dir.join("stream.bin");
@@ -1715,6 +1753,10 @@ fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64) {
             let t = Instant::now();
             let mph = load_mph(&refs);
             let t_mph = t.elapsed().as_secs_f64();
+            write_recs(dir, &keys, &mph);
+            if drop_first {
+                drop_caches();
+            }
             let m = map(&dir.join("ptrhash_recs.bin"));
             let recs: &[Rec] = unsafe { std::slice::from_raw_parts(m.as_ptr() as *const Rec, n) };
             let t = Instant::now();
@@ -1732,6 +1774,9 @@ fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64) {
             );
         }
         "frontcoded" => {
+            if drop_first {
+                drop_caches();
+            }
             let m = map(&dir.join("frontcoded.bin"));
             let fc = FrontCoded::open(&m);
             let mut buf = Vec::with_capacity(512);
@@ -1747,6 +1792,9 @@ fn do_cold(dir: &Path, probes: usize, arm: &str, zipf: f64) {
             );
         }
         "fst" => {
+            if drop_first {
+                drop_caches();
+            }
             let m = map(&dir.join("map.fst"));
             let fm = fst::Map::new(&m[..]).unwrap();
             let t = Instant::now();
