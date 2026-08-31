@@ -837,6 +837,29 @@ impl<'a> FrontCoded<'a> {
         }
         None
     }
+    /// id -> term: decode the `r`-th key in sorted order. R3 calls this the
+    /// "O(1) id -> term probe"; it is O(1) *blocks*, but inside the block it
+    /// is a sequential decode of up to `BLOCK` front-coded entries.
+    #[inline]
+    fn nth(&self, r: usize, buf: &mut Vec<u8>) {
+        let b = r / BLOCK;
+        let within = r % BLOCK;
+        buf.clear();
+        buf.extend_from_slice(self.head(b));
+        if within == 0 {
+            return;
+        }
+        let mut i = self.body_off[b] as usize;
+        let k = self.bodies[i] as usize;
+        i += 1 + k * 4;
+        for _ in 1..=within {
+            let lcp = get_varint(self.bodies, &mut i) as usize;
+            let sl = get_varint(self.bodies, &mut i) as usize;
+            buf.truncate(lcp);
+            buf.extend_from_slice(&self.bodies[i..i + sl]);
+            i += sl;
+        }
+    }
     #[inline]
     fn get(&self, key: &[u8], buf: &mut Vec<u8>) -> Option<u32> {
         let b = self.locate(key)?;
@@ -1181,6 +1204,17 @@ fn do_build(dir: &Path) {
         fc.len() as f64 / n as f64
     );
     drop(fc);
+
+    // --- id -> sorted rank, so the front-coded base can answer id -> term
+    let mut rank: Vec<u32> = vec![0; n];
+    for (r, &id) in sorted.iter().enumerate() {
+        rank[id as usize] = r as u32;
+    }
+    let rb: &[u8] = unsafe {
+        std::slice::from_raw_parts(rank.as_ptr() as *const u8, std::mem::size_of_val(&rank[..]))
+    };
+    std::fs::write(dir.join("fc_rank.bin"), rb).unwrap();
+    drop(rank);
 
     // --- fst
     let t = Instant::now();
@@ -1661,6 +1695,35 @@ fn run_matrix(
                     }
                 };
                 s += v as u64;
+            }
+            s
+        });
+    }
+
+    // ---------------- id -> term, both mapped
+    if want("id2term") {
+        let am = map(&dir.join("arena.bin"));
+        let om = map(&dir.join("arena_off.bin"));
+        let aoff: &[u64] = unsafe { std::slice::from_raw_parts(om.as_ptr() as *const u64, n + 1) };
+        cell!("arena/id2term", |_c: &mut RepeatCache| {
+            let mut s = 0u64;
+            for j in 0..probes {
+                let id = stream[j] as usize;
+                let (a, b) = (aoff[id] as usize, aoff[id + 1] as usize);
+                s += am[a] as u64 + (b - a) as u64;
+            }
+            s
+        });
+        let fm = map(&dir.join("frontcoded.bin"));
+        let fc = FrontCoded::open(&fm);
+        let rm = map(&dir.join("fc_rank.bin"));
+        let rank: &[u32] = unsafe { std::slice::from_raw_parts(rm.as_ptr() as *const u32, n) };
+        let mut buf = Vec::with_capacity(512);
+        cell!("frontcoded/id2term", |_c: &mut RepeatCache| {
+            let mut s = 0u64;
+            for j in 0..probes {
+                fc.nth(rank[stream[j] as usize] as usize, &mut buf);
+                s += buf[0] as u64 + buf.len() as u64;
             }
             s
         });
