@@ -2,7 +2,7 @@
 //!
 //! See SPEC-02 F1/F2: high 4 bits encode `TermKind`, low 60 bits are payload.
 
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{Pod, TransparentWrapper, Zeroable};
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd, Pod, Zeroable, Debug)]
@@ -87,6 +87,53 @@ pub struct GraphId(pub u64);
 /// Reserved sentinel for the default graph. Never collides with a `Uri`/`Blank`
 /// dictionary index because the dictionary numbers terms starting from 1.
 pub const DEFAULT_GRAPH: GraphId = GraphId(0);
+
+/// A `(graph, subject, predicate, object)` quad of ids that came out of a
+/// [`Dictionary`](crate::Dictionary).
+///
+/// The id-based store entry points ([`Store::insert_quad_ids`] and
+/// [`Store::apply_quad_ids`](crate::Store::apply_quad_ids)) take this instead
+/// of a bare `(GraphId, TermId, TermId, TermId)` tuple. Its field is private
+/// and the only public constructor is [`Dictionary::intern_quad`], so a caller
+/// outside this crate cannot reach storage with ids that were never interned.
+/// The dictionary contract — intern exactly once per new term, in document
+/// order — is therefore carried by the type, not by a comment.
+///
+/// `repr(transparent)` over the tuple the [`Tier`](crate::Tier) API already
+/// speaks, so a batch converts to that shape with no copy
+/// (`TransparentWrapper::peel_slice`).
+///
+/// [`Store::insert_quad_ids`]: crate::Store::insert_quad_ids
+/// [`Dictionary::intern_quad`]: crate::Dictionary::intern_quad
+#[repr(transparent)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, TransparentWrapper)]
+#[transparent((GraphId, TermId, TermId, TermId))]
+pub struct InternedQuad((GraphId, TermId, TermId, TermId));
+
+impl InternedQuad {
+    /// Pair a graph id with three term ids that already exist in a dictionary.
+    /// Crate-internal on purpose: outside `horndb-storage` the only way in is
+    /// [`Dictionary::intern_quad`](crate::Dictionary::intern_quad).
+    pub(crate) fn from_ids(g: GraphId, s: TermId, p: TermId, o: TermId) -> Self {
+        Self((g, s, p, o))
+    }
+
+    pub fn graph(self) -> GraphId {
+        self.0 .0
+    }
+
+    pub fn subject(self) -> TermId {
+        self.0 .1
+    }
+
+    pub fn predicate(self) -> TermId {
+        self.0 .2
+    }
+
+    pub fn object(self) -> TermId {
+        self.0 .3
+    }
+}
 
 #[cfg(test)]
 mod tests {

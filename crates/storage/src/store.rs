@@ -8,8 +8,9 @@ use crate::dictionary::Dictionary;
 use crate::error::Result;
 use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
-use crate::term::{GraphId, TermId, DEFAULT_GRAPH};
+use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
 use crate::tier::{ApplyReport, Tier, TierStats};
+use bytemuck::TransparentWrapper;
 use oxrdf::Term;
 
 #[derive(Debug, Clone, Copy)]
@@ -146,15 +147,14 @@ impl Store {
             ) else {
                 continue;
             };
-            del_ids.push((*g, s_id, p_id, o_id));
+            del_ids.push(InternedQuad::from_ids(*g, s_id, p_id, o_id));
         }
         let mut add_ids = Vec::with_capacity(adds.len());
         // One clock read on each side of the loop; the loop body touches no
         // metric handle (SPEC-17 §5.4).
         let t_intern = std::time::Instant::now();
         for (g, s, p, o) in adds {
-            let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
-            add_ids.push((*g, s_id, p_id, o_id));
+            add_ids.push(self.dictionary.intern_quad(*g, s, p, o)?);
         }
         if !adds.is_empty() {
             horndb_metrics::metrics().storage.record_load_phase(
@@ -163,7 +163,34 @@ impl Store {
                 adds.len() as u64,
             );
         }
-        self.tier.apply_quad_batch(&del_ids, &add_ids)
+        self.apply_quad_ids(&del_ids, &add_ids)
+    }
+
+    /// [`Store::apply_quads`] for callers that already hold interned ids.
+    ///
+    /// A bulk loader that has to intern anyway — to deduplicate before the
+    /// write, as `HornBackend` does — would otherwise hand the terms back for
+    /// a second, identical dictionary lookup (HDB-87). Passing
+    /// [`InternedQuad`]s skips that pass and the term buffer behind it. Same
+    /// commit semantics as [`Store::apply_quads`]: deletions before
+    /// insertions, one commit version, a net-empty batch does not bump it.
+    /// Nothing is interned here, so no `intern` load phase is recorded.
+    pub fn apply_quad_ids(
+        &self,
+        dels: &[InternedQuad],
+        adds: &[InternedQuad],
+    ) -> Result<ApplyReport> {
+        self.tier.apply_quad_batch(
+            InternedQuad::peel_slice(dels),
+            InternedQuad::peel_slice(adds),
+        )
+    }
+
+    /// Insert already-interned quads (SPEC-28 S6): a thin wrapper over
+    /// [`Store::apply_quad_ids`] with no deletions, and the id-based twin of
+    /// [`Store::insert_quads`]. Returns the number of quads actually inserted.
+    pub fn insert_quad_ids(&self, adds: &[InternedQuad]) -> Result<usize> {
+        Ok(self.apply_quad_ids(&[], adds)?.inserted)
     }
 
     /// Reclaim physically-dead rows (`end <= min pinned version`) across the
