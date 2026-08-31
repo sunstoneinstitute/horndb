@@ -293,6 +293,122 @@ fn synth_keys(n: usize) -> Keys {
     Keys { arena, off, len }
 }
 
+/// Re-instantiate a real LUBM key set at `factor` times as many universities,
+/// and replay its term stream over the result.
+///
+/// Every LUBM key that names a university carries it as `University{k}`.
+/// Rewriting `k` to `k + 100*r` for `r` in `0..factor` produces the
+/// distinct-term set the real generator emits for `100*factor` universities,
+/// with the real per-department irregularity, the real literal mix and the
+/// real length tail. Keys naming no university (the ontology, shared names,
+/// research interests) are emitted once, in a shared block up front.
+///
+/// Layout: `[shared][copy 0][copy 1]...`, so a source id maps to a scaled id
+/// by adding its copy's base. The replayed stream switches copy every
+/// `COPY_CHUNK` occurrences, which is what a real LUBM document stream looks
+/// like: one university's file at a time, over a dictionary holding them all.
+///
+/// This is how the 10M and 100M scale points are built. Nothing is invented —
+/// the shape comes from the measured LUBM-100 set.
+const COPY_CHUNK: usize = 1_000_000;
+
+fn scale_keys(src: &Keys, src_stream: &[u32], factor: usize, cap: usize) -> (Keys, Vec<u32>) {
+    let needle = b"University";
+    // Classify each source key and record its position within its block.
+    let mut univ_at: Vec<Option<(u32, u32)>> = Vec::with_capacity(src.n());
+    let mut pos: Vec<u32> = vec![0; src.n()];
+    let mut n_shared = 0u32;
+    let mut n_univ = 0u32;
+    for i in 0..src.n() {
+        let k = src.get(i);
+        let mut at = None;
+        let mut p = 0usize;
+        while p + needle.len() <= k.len() {
+            if &k[p..p + needle.len()] == needle {
+                let ds = p + needle.len();
+                let mut de = ds;
+                while de < k.len() && k[de].is_ascii_digit() {
+                    de += 1;
+                }
+                if de > ds {
+                    at = Some((ds as u32, de as u32));
+                    break;
+                }
+            }
+            p += 1;
+        }
+        match at {
+            None => {
+                pos[i] = n_shared;
+                n_shared += 1;
+            }
+            Some(_) => {
+                pos[i] = n_univ;
+                n_univ += 1;
+            }
+        }
+        univ_at.push(at);
+    }
+    let ns = n_shared as usize;
+    let nu = n_univ as usize;
+    let want = cap.min(ns + nu * factor);
+    let scaled_id = |src_id: u32, r: usize| -> usize {
+        if univ_at[src_id as usize].is_none() {
+            pos[src_id as usize] as usize
+        } else {
+            ns + r * nu + pos[src_id as usize] as usize
+        }
+    };
+
+    let mut arena: Vec<u8> = Vec::with_capacity(want * 60);
+    let mut off = vec![0u64; want];
+    let mut len = vec![0u32; want];
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut emit = |arena: &mut Vec<u8>, id: usize, bytes: &[u8]| {
+        off[id] = arena.len() as u64;
+        len[id] = bytes.len() as u32;
+        arena.extend_from_slice(bytes);
+    };
+    for i in 0..src.n() {
+        if univ_at[i].is_none() {
+            let id = pos[i] as usize;
+            if id < want {
+                emit(&mut arena, id, src.get(i));
+            }
+        }
+    }
+    'copies: for r in 0..factor {
+        for i in 0..src.n() {
+            let Some((ds, de)) = univ_at[i] else { continue };
+            let id = scaled_id(i as u32, r);
+            if id >= want {
+                continue 'copies;
+            }
+            let k = src.get(i);
+            let (ds, de) = (ds as usize, de as usize);
+            let num: usize = std::str::from_utf8(&k[ds..de]).unwrap().parse().unwrap();
+            buf.clear();
+            buf.extend_from_slice(&k[..ds]);
+            buf.extend_from_slice((num + 100 * r).to_string().as_bytes());
+            buf.extend_from_slice(&k[de..]);
+            emit(&mut arena, id, &buf);
+        }
+    }
+
+    let mut stream = Vec::with_capacity(src_stream.len());
+    let mut r = 0usize;
+    for (j, &sid) in src_stream.iter().enumerate() {
+        if j % COPY_CHUNK == 0 && j > 0 {
+            r = (r + 1) % factor;
+        }
+        let id = scaled_id(sid, r);
+        if id < want {
+            stream.push(id as u32);
+        }
+    }
+    (Keys { arena, off, len }, stream)
+}
+
 // ----------------------------------------------------------- probe streams
 
 /// Build a hit stream over `n` keys with a Zipf-like popularity skew, then
@@ -838,6 +954,8 @@ fn main() {
     let mut reps = 3usize;
     let mut arm = String::from("all");
     let mut zipf = 0.92f64;
+    let mut src_dir = String::new();
+    let mut factor = 1usize;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
@@ -861,6 +979,14 @@ fn main() {
                 arm = args[i + 1].clone();
                 i += 2;
             }
+            "--src" => {
+                src_dir = args[i + 1].clone();
+                i += 2;
+            }
+            "--factor" => {
+                factor = args[i + 1].parse().unwrap();
+                i += 2;
+            }
             "--zipf" => {
                 zipf = args[i + 1].parse().unwrap();
                 i += 2;
@@ -871,6 +997,30 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     match mode.as_str() {
         "synth" => do_synth(&dir, n_keys),
+        "scale" => {
+            let sd = PathBuf::from(&src_dir);
+            let src = Keys::read(&sd.join("keys.bin"));
+            let raw = std::fs::read(sd.join("stream.bin")).unwrap();
+            let src_stream: Vec<u32> = raw
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let (k, stream) = scale_keys(&src, &src_stream, factor, n_keys);
+            eprintln!(
+                "scale: {} keys x{factor} -> {} keys, {:.1} B/key, {} stream entries",
+                src.n(),
+                k.n(),
+                k.bytes() as f64 / k.n() as f64,
+                stream.len()
+            );
+            k.write(&dir.join("keys.bin"));
+            let mut w =
+                BufWriter::with_capacity(1 << 22, File::create(dir.join("stream.bin")).unwrap());
+            for id in &stream {
+                w.write_all(&id.to_le_bytes()).unwrap();
+            }
+            w.flush().unwrap();
+        }
         "build" => do_build(&dir),
         "query" => do_query(&dir, probes, reps, zipf, &arm),
         "cold" => do_cold(&dir, probes, &arm, zipf),
