@@ -38,3 +38,8 @@ oxttl = { workspace = true }
 horndb-sparql = { path = "../sparql", default-features = false }
 horndb-storage = { path = "../storage" }
 snmalloc-rs = { workspace = true, optional = true }
+
+# HDB-91: incremental (non-empty store) bulk-load phase table.
+[[bin]]
+name = "incremental_load"
+path = "src/bin/incremental_load.rs"
