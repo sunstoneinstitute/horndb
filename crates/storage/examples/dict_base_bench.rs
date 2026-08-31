@@ -37,6 +37,12 @@
 //! dict_base_bench cold    --dir DIR --arm ptrhash --probes 2000000
 //! ```
 
+// Every probe loop indexes several parallel arrays at once — the key, its
+// precomputed hash, and the id the stream says to expect — and the batched
+// arms index a fixed window. Rewriting them as iterator chains would change
+// the code under measurement, which is the thing being measured.
+#![allow(clippy::needless_range_loop)]
+
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -562,7 +568,7 @@ impl RepeatCache {
                 for kk in 0..4 {
                     let w = (ord >> (2 * kk)) & 3;
                     if kk != k {
-                        new |= (w as u8) << (2 * (if kk < k { kk + 1 } else { kk }));
+                        new |= w << (2 * (if kk < k { kk + 1 } else { kk }));
                     }
                 }
                 self.order[set] = new;
@@ -584,7 +590,7 @@ impl RepeatCache {
         let mut new = victim as u8;
         for kk in 0..3 {
             let w = (ord >> (2 * kk)) & 3;
-            new |= (w as u8) << (2 * (kk + 1));
+            new |= w << (2 * (kk + 1));
         }
         self.order[set] = new;
     }
@@ -1766,8 +1772,8 @@ fn run_matrix(
 
     println!("\n== {label}: {probes} probes, {reps} reps, {n} keys");
     println!(
-        "{:<34} {:>9} {:>9} {:>9} {:>9}  {}",
-        "cell", "ns/lookup", "min", "max", "cache-hit", "checksum"
+        "{:<34} {:>9} {:>9} {:>9} {:>9}  checksum",
+        "cell", "ns/lookup", "min", "max", "cache-hit"
     );
     for (name, c) in &rows {
         println!(
