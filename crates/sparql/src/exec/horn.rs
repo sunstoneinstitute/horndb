@@ -1613,6 +1613,27 @@ impl Executor for HornBackend {
         self.store.dictionary().get(&ox)
     }
 
+    /// HDB-100: reads the dictionary's stored `oxrdf::Literal` value in
+    /// place under one lock — no `Term` clone, no `to_string`, no unescape,
+    /// no re-parse. See `Dictionary::numeric_value`.
+    fn decode_numeric(&self, id: TermId) -> Result<Option<f64>> {
+        Ok(self.store.dictionary().numeric_value(id))
+    }
+
+    /// HDB-100: batches through `Dictionary::lookup_batch`, which already
+    /// takes the reverse map's read lock once for the whole slice.
+    fn decode_terms(&self, ids: &[TermId]) -> Result<Vec<Term>> {
+        let dict = self.store.dictionary();
+        dict.lookup_batch(ids)
+            .into_iter()
+            .zip(ids)
+            .map(|(t, id)| {
+                t.map(|t| oxrdf_to_algebra(&t))
+                    .ok_or_else(|| SparqlError::Executor(format!("dangling TermId {id:?}")))
+            })
+            .collect()
+    }
+
     /// Scan a BGP returning id-carrying slot rows without decoding TermId → String.
     /// The diagonal filter is applied inline by comparing raw ids; aliases are
     /// excluded from the output schema.

@@ -289,6 +289,47 @@ HDB-82: a small quad delta is now merged into the cached WCOJ snapshot instead
 of forcing a full re-index of all six orderings. Its cold run paid the first
 snapshot build until HDB-97 made that build lazy (below).
 
+#### GROUP BY fast paths cut q2/q4 by ~40% (HDB-100, 2026-09-01)
+
+q2 (`COUNT(?order)` + `SUM(?amount)` GROUP BY name) and q4 (two
+`COUNT(DISTINCT …)` + `SUM`) both fail `plan::pushdown`'s count-only test
+(mixed COUNT+value aggregates, `COUNT(DISTINCT …)`) and run the general
+`exec/runtime.rs::eval_group_native` path, which used to decode every group
+member into a `Bindings` — one `TermId → oxrdf::Term` clone, `to_string()`,
+N-Triples reparse round trip per row — even when the aggregate never needed a
+`String` (`COUNT(?v)`) or only needed the numeric value (`SUM`/`AVG`/`MIN`/`MAX`).
+`Executor::decode_numeric`/`decode_terms` plus per-aggregate fast paths in
+`eval_group_native` skip that round trip for a bare scan-column aggregate
+(see `docs/architecture.md`'s aggregation row for the design).
+
+Controlled A/B on `hornbench` (AMD Ryzen 7 7700, Debian 6.12, rustc 1.90.0),
+trainmarks xlarge (9,995,000 triples), commit `9eb2fa1` (before) vs `30a77f9`
+(after, HDB-100), same generated dataset, best-of-3 warm per upstream protocol:
+
+| query | before | after | change | target |
+|---|---|---|---|---|
+| q2 `COUNT`+`SUM` GROUP BY | 2.167s | 1.303s | **−40%** | ≤2.0s ✅ |
+| q4 `OPTIONAL` + 2×`COUNT DISTINCT` + `SUM` | 2.894s | 1.536s | **−47%** | ≤2.5s ✅ |
+| q1 `COUNT(*)` | 0.404s | 0.403s | ~0 | — |
+| q3 3-join + filter + limit | 1.172s | 1.170s | ~0 | — |
+| q5 `CONSTRUCT` | 0.379s | 0.371s | ~0 | — |
+| q6 conditional `DELETE`/`INSERT` | 0.501s | 0.499s | ~0 | — |
+
+q1/q3/q5/q6 are unaffected (as expected — none of them exercise
+`eval_group_native`'s fast paths), confirming the win is localized to the
+GROUP BY aggregation path. Both targets are met. Note the `before` figure here
+(2.167s / 2.894s, measured at the exact pre-HDB-100 commit) is faster than the
+2026-08-24 baseline row above (3.73s / 4.72s) — intervening perf work
+(HDB-88/95/96/99/102) already moved q2/q4 before this task started; HDB-100's
+own contribution is the further 40-47% cut measured here, not the full gap to
+the 2026-08-24 baseline.
+
+**SPB-256 nightly `aggregation-qps`:** pre-merge baseline (2026-09-01 run,
+commit `4459be9`) is **56.50 qps** for HornDB (`gh run download`, the live
+`hornbench` SQLite being permission-denied — same workaround HDB-99 used).
+A post-merge comparison cannot exist until this PR merges and the next
+nightly run completes; that check is an open item, not verified here.
+
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 
 `q6` always runs first in the driver, and its `WHERE` clause resolves the

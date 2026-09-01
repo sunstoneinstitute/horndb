@@ -13,6 +13,7 @@ use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, ScanScope, Slot};
 use crate::plan::{GraphScope, PhysicalPlan};
 use crate::DefaultGraphMode;
 use horndb_metrics::labels::ExecPhase;
+use horndb_storage::TermId;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
 
@@ -306,61 +307,149 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             key_slots: Vec<Slot>,
             members: Vec<Row>,
         }
+
+        // HDB-100 Do-3 "narrow": a single-column GROUP BY over an id-keyed
+        // column (the common case — grouping by a scanned column, not a
+        // computed one) keys the group map on a raw `u64`/`Option<u64>`
+        // instead of allocating a `Vec<KeyPart>` per row. Id-vs-Term mixing
+        // within one column cannot happen (join/union operators normalize it
+        // away before `Group` ever sees the batch — see `exec::batch`'s
+        // within-column homogeneity docs), so peeking any one *bound* row is
+        // enough to know every bound row's kind; `Unbound` may still appear
+        // in the same column (e.g. grouping on an `OPTIONAL` variable) and is
+        // handled as its own bucket (`None`), not folded into the peek.
+        let scalar_col: Option<usize> = if keys.len() == 1 {
+            key_idx[0].filter(|&idx| {
+                matches!(
+                    b.rows.iter().find_map(|r| match &r.0[idx] {
+                        Slot::Unbound => None,
+                        other => Some(other),
+                    }),
+                    Some(Slot::Id(_))
+                )
+            })
+        } else {
+            None
+        };
+
         let group_key_rows = b.rows.len() as u64;
-        let mut groups: FxHashMap<Vec<KeyPart>, Grp> = FxHashMap::default();
-        phases::timed(ExecPhase::GroupKey, group_key_rows, || {
-            for r in b.rows {
-                let gkey: Vec<KeyPart> = key_idx
-                    .iter()
-                    .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
-                    .collect();
-                let entry = groups.entry(gkey).or_insert_with(|| Grp {
-                    key_slots: key_idx
-                        .iter()
-                        .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
-                        .collect(),
-                    members: Vec::new(),
-                });
-                entry.members.push(r);
-            }
-        });
+        // A modest, always-safe reserve that skips the first several hashmap
+        // growth doublings without guessing at the eventual group count. We
+        // deliberately do NOT size this from `Executor::cardinality_estimate`
+        // (HDB-100 brief): that estimates the *input row* count of the
+        // underlying BGP, not the number of distinct *groups* — for exactly
+        // the aggregation shape this task targets (q2/q4 fold ~1.3M rows into
+        // 50 groups), reserving to the row estimate would over-allocate by
+        // four orders of magnitude and pay for it in allocation + zeroing
+        // cost on every query, hurting the very queries this task speeds up.
+        // No group/NDV cardinality estimator exists in this codebase to give
+        // a better number, so we cap the hint instead of guessing high.
+        let reserve_hint = (group_key_rows as usize).min(1024);
+
+        let mut groups: Vec<Grp> =
+            phases::timed(ExecPhase::GroupKey, group_key_rows, || match scalar_col {
+                Some(idx) => {
+                    let mut map: FxHashMap<Option<u64>, Grp> = FxHashMap::default();
+                    map.reserve(reserve_hint);
+                    for r in b.rows {
+                        let k = match &r.0[idx] {
+                            Slot::Id(id) => Some(id.0),
+                            Slot::Unbound => None,
+                            Slot::Term(_) => unreachable!(
+                                "within-column homogeneity: a column peeked as \
+                                 Slot::Id cannot also hold Slot::Term"
+                            ),
+                        };
+                        map.entry(k)
+                            .or_insert_with(|| Grp {
+                                key_slots: vec![match k {
+                                    Some(id) => Slot::Id(TermId(id)),
+                                    None => Slot::Unbound,
+                                }],
+                                members: Vec::new(),
+                            })
+                            .members
+                            .push(r);
+                    }
+                    map.into_values().collect()
+                }
+                None => {
+                    let mut map: FxHashMap<Vec<KeyPart>, Grp> = FxHashMap::default();
+                    map.reserve(reserve_hint);
+                    for r in b.rows {
+                        let gkey: Vec<KeyPart> = key_idx
+                            .iter()
+                            .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
+                            .collect();
+                        let entry = map.entry(gkey).or_insert_with(|| Grp {
+                            key_slots: key_idx
+                                .iter()
+                                .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
+                                .collect(),
+                            members: Vec::new(),
+                        });
+                        entry.members.push(r);
+                    }
+                    map.into_values().collect()
+                }
+            });
 
         // Implicit grouping with no input rows still yields one empty group
         // (SPARQL §11.2: COUNT(*) of nothing is one row with 0).
         if keys.is_empty() && groups.is_empty() {
-            groups.insert(
-                Vec::new(),
-                Grp {
-                    key_slots: Vec::new(),
-                    members: Vec::new(),
-                },
-            );
+            groups.push(Grp {
+                key_slots: Vec::new(),
+                members: Vec::new(),
+            });
         }
 
         // Output schema = keys ++ aggregate output vars (via group_output_schema
         // so the two cannot drift apart).
         let schema = self.group_output_schema(keys, aggregates);
 
-        // The union of input columns referenced by all aggregates' inner
-        // expressions. Decoding this union once per group (below) lets
-        // aggregates over the same column share a single decode pass instead of
-        // each re-decoding its own subset. `eval_aggregate` reads only its own
+        // HDB-100 Do-2: which aggregates can fold straight off raw slots —
+        // no `Bindings` decode at all — because their inner expression is a
+        // bare scan-column variable. `None` means the general
+        // `eval_aggregate` path over decoded members is still needed for
+        // that aggregate (a computed expression, GROUP_CONCAT, SAMPLE, or a
+        // DISTINCT SUM/AVG/MIN/MAX, none of which this task's fast paths
+        // cover). `CountStar` is always `None` here — it already has its own
+        // no-decode branch below and never reaches `detect_fast_agg`.
+        let fast_aggs: Vec<Option<FastAgg>> = aggregates
+            .iter()
+            .map(|agg| {
+                if matches!(agg.func, AggFunc::CountStar) {
+                    None
+                } else {
+                    detect_fast_agg(agg, &b.schema)
+                }
+            })
+            .collect();
+
+        // The union of input columns referenced by aggregates that still need
+        // the general decode path. Aggregates with a fast path never touch
+        // this — decoding it is exactly the per-row string round trip
+        // HDB-100 exists to skip. `eval_aggregate` reads only its own
         // inner-expression vars, so extra keys in the shared `Bindings` are
         // inert; the `CountStar` arms never take the decode path.
         let mut union_want: HashSet<String> = HashSet::new();
-        for agg in aggregates {
-            for e in agg_inner_exprs(agg) {
-                referenced_vars(e, &mut union_want);
+        for (agg, fast) in aggregates.iter().zip(&fast_aggs) {
+            if fast.is_none() {
+                for e in agg_inner_exprs(agg) {
+                    referenced_vars(e, &mut union_want);
+                }
             }
         }
-        // COUNT(*) / COUNT(DISTINCT *) are answered without decoding; any other
+        // COUNT(*) / COUNT(DISTINCT *) are answered without decoding; a
+        // fast-pathed aggregate is answered off raw slots; any other
         // aggregate needs the decoded members.
         let needs_decode = aggregates
             .iter()
-            .any(|agg| !matches!(agg.func, AggFunc::CountStar));
+            .zip(&fast_aggs)
+            .any(|(agg, fast)| !matches!(agg.func, AggFunc::CountStar) && fast.is_none());
 
         let mut out: Vec<(Vec<Option<String>>, Row)> = Vec::with_capacity(groups.len());
-        for grp in groups.into_values() {
+        for grp in groups {
             let Grp { key_slots, members } = grp;
             let member_rows = members.len() as u64;
 
@@ -376,9 +465,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             // the pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering
             // exactly (None < Some(...) in BTreeMap order is the same as
             // Option<String> Ord ordering used in sort_by), plus the union of
-            // referenced columns every decoding aggregate shares. Computed
-            // before `key_slots` is moved into `slots`, which lets us avoid
-            // cloning it.
+            // referenced columns every decoding aggregate shares — empty,
+            // and so free, when every aggregate has a fast path (HDB-100).
+            // Computed before `key_slots` is moved into `slots`, which lets
+            // us avoid cloning it.
             let (sort_key, members_decoded): (Vec<Option<String>>, Vec<Bindings>) =
                 phases::timed(ExecPhase::GroupDecode, member_rows, || -> Result<_> {
                     let sort_key: Vec<Option<String>> = key_slots
@@ -402,7 +492,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
             let mut slots: Vec<Slot> = key_slots;
             phases::timed(ExecPhase::AggFold, member_rows, || -> Result<()> {
-                for agg in aggregates {
+                for (i, agg) in aggregates.iter().enumerate() {
                     let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
                         // COUNT(*) fast path: member count needs no decode at all.
                         Some(integer_literal(members.len() as i64))
@@ -420,6 +510,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                             .map(|r| r.0.iter().map(|s| s.key_part()).collect())
                             .collect();
                         Some(integer_literal(distinct.len() as i64))
+                    } else if let Some(fast) = &fast_aggs[i] {
+                        // HDB-100 Do-2: COUNT/COUNT(DISTINCT)/SUM/AVG/MIN/MAX
+                        // over a bare scan-column var, folded off raw slots.
+                        self.eval_fast_agg(fast, &members)?
                     } else {
                         eval_aggregate(agg, &members_decoded)?
                     };
@@ -442,6 +536,168 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             schema,
             rows: out.into_iter().map(|(_, r)| r).collect(),
         })
+    }
+
+    /// One member slot's numeric value for a fast-path aggregate fold
+    /// (HDB-100 Do-2): `Slot::Id` reads through [`Executor::decode_numeric`]
+    /// (skips the `Term` clone + N-Triples round trip), `Slot::Term` calls
+    /// [`numeric_value`] directly, `Slot::Unbound` contributes nothing —
+    /// matching `eval_aggregate`'s `collect_values`, which likewise drops
+    /// unbound members before any numeric coercion.
+    fn fast_numeric(&self, slot: &Slot) -> Result<Option<f64>> {
+        match slot {
+            Slot::Unbound => Ok(None),
+            Slot::Id(id) => self.exec.decode_numeric(*id),
+            Slot::Term(t) => Ok(numeric_value(t)),
+        }
+    }
+
+    /// Full term decode of one member slot. Used only on the rare path where
+    /// a fast MIN/MAX cannot stay numeric (`eval_fast_extreme`'s fallback)
+    /// and by the fast path's own winner recovery, so the returned `Term` is
+    /// byte-identical to what `decode_subset` + `eval_expr_to_term` would
+    /// have produced for the same slot.
+    fn decode_slot_term(&self, slot: &Slot) -> Result<Term> {
+        match slot {
+            Slot::Id(id) => self.exec.decode_term(*id),
+            Slot::Term(t) => Ok(t.clone()),
+            Slot::Unbound => Err(SparqlError::Executor(
+                "decode_slot_term called on an Unbound slot".into(),
+            )),
+        }
+    }
+
+    /// Evaluate one column-bound fast aggregate over a group's raw member
+    /// rows (HDB-100 Do-2). `COUNT`/`COUNT(DISTINCT)` never decode at all;
+    /// `SUM`/`AVG` fold through [`Executor::decode_numeric`]; `MIN`/`MAX`
+    /// delegate to [`Self::eval_fast_extreme`], which stays numeric-only
+    /// when it safely can and otherwise falls back to full decode.
+    fn eval_fast_agg(&self, fast: &FastAgg, members: &[Row]) -> Result<Option<Term>> {
+        Ok(match fast {
+            FastAgg::Count(col) => {
+                let n = members
+                    .iter()
+                    .filter(|r| !matches!(r.0[*col], Slot::Unbound))
+                    .count();
+                Some(integer_literal(n as i64))
+            }
+            FastAgg::CountDistinct(col) => {
+                // Raw KeyPart identity, not a decoded Term set: TermIds are
+                // term identity (SPEC-21), so this dedupes exactly like
+                // `dedup_terms` over the decoded values, without decoding.
+                let set: FxHashSet<KeyPart> = members
+                    .iter()
+                    .filter_map(|r| match &r.0[*col] {
+                        Slot::Unbound => None,
+                        s => Some(s.key_part()),
+                    })
+                    .collect();
+                Some(integer_literal(set.len() as i64))
+            }
+            FastAgg::Sum(col) => {
+                let mut sum = 0.0_f64;
+                for r in members {
+                    if let Some(v) = self.fast_numeric(&r.0[*col])? {
+                        sum += v;
+                    }
+                }
+                Some(numeric_term(sum))
+            }
+            FastAgg::Avg(col) => {
+                let mut sum = 0.0_f64;
+                let mut n = 0usize;
+                for r in members {
+                    if let Some(v) = self.fast_numeric(&r.0[*col])? {
+                        sum += v;
+                        n += 1;
+                    }
+                }
+                if n == 0 {
+                    Some(integer_literal(0))
+                } else {
+                    Some(decimal_literal(sum / n as f64))
+                }
+            }
+            FastAgg::Min(col) => self.eval_fast_extreme(*col, members, true)?,
+            FastAgg::Max(col) => self.eval_fast_extreme(*col, members, false)?,
+        })
+    }
+
+    /// MIN (`min == true`) / MAX over one column's bound members. Stays
+    /// numeric-only (one [`Executor::decode_numeric`] call per bound member,
+    /// then one [`Self::decode_slot_term`] call for just the winner) as long
+    /// as every bound member parses as a number — the common case (e.g.
+    /// `xsd:double` amounts). The winner is the *original* term, matching
+    /// `aggregate_extreme`'s `vals[best_idx].clone()` exactly, not a
+    /// recomputed numeric literal, and ties keep the first occurrence in
+    /// member order, same as `aggregate_extreme`'s linear scan.
+    ///
+    /// The rare time a bound member is not numeric, falls back to decoding
+    /// every bound member's term (batched through [`Executor::decode_terms`]
+    /// when the column is `Slot::Id`, one dictionary lock instead of one per
+    /// member) and running [`aggregate_extreme`] itself, so the lexical-order
+    /// rule for mixed-type columns matches the general path exactly.
+    fn eval_fast_extreme(&self, col: usize, members: &[Row], min: bool) -> Result<Option<Term>> {
+        let mut best_idx: Option<usize> = None;
+        let mut best_val = 0.0_f64;
+        let mut any_bound = false;
+        let mut all_numeric = true;
+        for (i, r) in members.iter().enumerate() {
+            let slot = &r.0[col];
+            if matches!(slot, Slot::Unbound) {
+                continue;
+            }
+            any_bound = true;
+            match self.fast_numeric(slot)? {
+                Some(v) => {
+                    if best_idx.is_none() || (min && v < best_val) || (!min && v > best_val) {
+                        best_idx = Some(i);
+                        best_val = v;
+                    }
+                }
+                None => {
+                    all_numeric = false;
+                    break;
+                }
+            }
+        }
+        if !any_bound {
+            return Ok(None);
+        }
+        if all_numeric {
+            let winner = best_idx.expect("any_bound + all_numeric implies a winner was set");
+            return Ok(Some(self.decode_slot_term(&members[winner].0[col])?));
+        }
+
+        // Rare mixed-type fallback: matches `aggregate_extreme`'s lexical
+        // rule exactly. Within-column homogeneity means the bound slots here
+        // are either all `Id` or all `Term` (see `exec::batch` docs), so the
+        // `Id` case batches through one dictionary lock via `decode_terms`
+        // instead of one `decode_term` per member.
+        let bound_slots: Vec<&Slot> = members
+            .iter()
+            .map(|r| &r.0[col])
+            .filter(|s| !matches!(s, Slot::Unbound))
+            .collect();
+        let vals: Vec<Term> = if let Some(Slot::Id(_)) = bound_slots.first() {
+            let ids: Vec<TermId> = bound_slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Id(id) => *id,
+                    _ => unreachable!("within-column homogeneity checked above"),
+                })
+                .collect();
+            self.exec.decode_terms(&ids)?
+        } else {
+            bound_slots
+                .iter()
+                .map(|s| match s {
+                    Slot::Term(t) => t.clone(),
+                    _ => unreachable!("within-column homogeneity checked above"),
+                })
+                .collect()
+        };
+        Ok(aggregate_extreme(&vals, min))
     }
 
     /// Merged UNION schema: left schema followed by right-only vars. Also the
@@ -1100,6 +1356,52 @@ pub(crate) fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// An aggregate `eval_group_native` can fold directly off raw slots, with no
+/// `Bindings` decode (HDB-100 Do-2). Detected only for a bare scan-column
+/// inner expression (`Expr::Term(Term::Var(_))`, see [`detect_fast_agg`]);
+/// `SUM`/`AVG`/`MIN`/`MAX` further require `!agg.distinct` — the DISTINCT
+/// variants keep the general decode path.
+enum FastAgg {
+    /// `COUNT(?v)` — count of bound (non-`Unbound`) slots.
+    Count(usize),
+    /// `COUNT(DISTINCT ?v)` — count of distinct `KeyPart`s among bound slots.
+    CountDistinct(usize),
+    Sum(usize),
+    Avg(usize),
+    Min(usize),
+    Max(usize),
+}
+
+/// The batch column `e` resolves to when it is exactly a bare variable
+/// (`?v`, not a computed expression) that names one of `schema`'s columns.
+fn bare_var_col(e: &Expr, schema: &[Var]) -> Option<usize> {
+    match e {
+        Expr::Term(Term::Var(v)) => schema.iter().position(|c| c.name() == v.name()),
+        _ => None,
+    }
+}
+
+/// Whether `agg` qualifies for a [`FastAgg`] fold over `schema` (the input
+/// batch's schema, before grouping). `None` means `eval_group_native` must
+/// use the general `eval_aggregate` path for this aggregate.
+fn detect_fast_agg(agg: &Aggregate, schema: &[Var]) -> Option<FastAgg> {
+    match &agg.func {
+        AggFunc::Count(e) => {
+            let col = bare_var_col(e, schema)?;
+            Some(if agg.distinct {
+                FastAgg::CountDistinct(col)
+            } else {
+                FastAgg::Count(col)
+            })
+        }
+        AggFunc::Sum(e) if !agg.distinct => Some(FastAgg::Sum(bare_var_col(e, schema)?)),
+        AggFunc::Avg(e) if !agg.distinct => Some(FastAgg::Avg(bare_var_col(e, schema)?)),
+        AggFunc::Min(e) if !agg.distinct => Some(FastAgg::Min(bare_var_col(e, schema)?)),
+        AggFunc::Max(e) if !agg.distinct => Some(FastAgg::Max(bare_var_col(e, schema)?)),
+        _ => None,
+    }
+}
+
 /// The inner expression(s) an aggregate evaluates over its members.
 pub(crate) fn agg_inner_exprs(agg: &Aggregate) -> Vec<&Expr> {
     match &agg.func {
@@ -1213,8 +1515,11 @@ fn literal_lexical(raw: &str) -> String {
     raw.to_owned()
 }
 
-/// Best-effort numeric coercion of a term for SUM/AVG/MIN/MAX.
-fn numeric_value(t: &Term) -> Option<f64> {
+/// Best-effort numeric coercion of a term for SUM/AVG/MIN/MAX. `pub(crate)`
+/// so [`Executor::decode_numeric`](crate::exec::Executor::decode_numeric)'s
+/// default implementation can define "not a number" identically to the
+/// general aggregate path (HDB-100).
+pub(crate) fn numeric_value(t: &Term) -> Option<f64> {
     literal_value(t).trim().parse::<f64>().ok()
 }
 
