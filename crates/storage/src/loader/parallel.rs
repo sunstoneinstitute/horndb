@@ -16,8 +16,9 @@
 //! Interning on the chunk threads instead would be a little faster in
 //! isolation (it scales ~3.9× on 16 cores, so the dictionary's reverse-map
 //! write lock is *not* the bottleneck it was assumed to be) but it would make
-//! term ids depend on thread scheduling, and it does not help the number that
-//! matters — see [`load_threads`] for why the whole thing is off by default.
+//! term ids depend on thread scheduling. Since HDB-96 the serial intern is the
+//! largest phase of a load — see [`load_threads`] for the sweep that made the
+//! parse threads the default and left interning where it is.
 //!
 //! The bounded channels cap memory: at most [`load_buffer_triples`] parsed
 //! items are in flight across all chunks (see [`channel_depth`]).
@@ -56,12 +57,14 @@ const BATCH: usize = 8_192;
 ///
 /// The budget is a **total**, not per chunk, so peak in-flight memory does not
 /// grow with `HORNDB_LOAD_THREADS`; more threads split the same budget more
-/// ways. That is what the old per-chunk constant got wrong: its cost and its
+/// ways. It is still the bulk of what the threaded default costs in memory
+/// (HDB-96: peak RSS 2,207 -> 3,851 MiB at trainmarks xlarge Turtle). That is what the old per-chunk constant got wrong: its cost and its
 /// benefit both scaled with the thread count, so neither was visible in the
 /// constant itself.
 ///
-/// It costs nothing at the shipped default of one parse thread — a single
-/// chunk skips the channel entirely.
+/// A one-chunk load never allocates it at all — a single chunk skips the
+/// channel entirely — so `HORNDB_LOAD_THREADS=1` is also how to get the
+/// pre-HDB-96 memory footprint back.
 pub const DEFAULT_LOAD_BUFFER_TRIPLES: usize = 8 << 20;
 
 /// Resolved once, then cached: `HORNDB_LOAD_BUFFER_TRIPLES` if set and
@@ -119,37 +122,78 @@ fn channel_depth(chunks: usize) -> usize {
 /// differential tests use to exercise the split on small documents.
 pub(crate) const MIN_PARALLEL_BYTES: usize = 1 << 20;
 
-/// Parse-thread count for the slice loaders. **Defaults to 1 — serial.**
+/// Ceiling on what `auto` resolves to, and therefore on the shipped default.
 ///
-/// `HORNDB_LOAD_THREADS=<n>` sets it explicitly; `HORNDB_LOAD_THREADS=auto`
-/// uses [`std::thread::available_parallelism`].
+/// The measured knee (HDB-96, table in [`load_threads`]): the fourth and
+/// eighth threads still pay, the ninth onwards does not. By 8 threads `parse`
+/// is 14% of a Turtle load and 4% of an N-Triples one, so even driving it to
+/// zero could not buy another 15% — what is left is interning and the tier,
+/// both of which run on the calling thread by design.
 ///
-/// The default is 1 because the *whole load* has not been shown to get faster
-/// with more parse threads, not because the parse does not scale — since
-/// HDB-94 it does. Measured on hornbench (16 cores, trainmarks xlarge,
-/// 9,995,000 triples, Turtle, default buffer budget):
+/// It is also a guard on a default nobody sets: without a cap, a 64-core host
+/// would spawn 64 parse threads for a leg that stopped scaling at 8, and pay
+/// for all of them in scheduler pressure and per-thread parser state. An
+/// explicit `HORNDB_LOAD_THREADS=<n>` is not capped — that is the escape hatch,
+/// and how the sweep was taken.
+const AUTO_THREAD_CAP: usize = 8;
+
+/// Parse-thread count for the slice loaders. **Defaults to `auto`** — see
+/// [`AUTO_THREAD_CAP`] for what `auto` resolves to.
 ///
-/// | | 1 thread | 4 | 16 |
-/// |---|---|---|---|
-/// | `parse` phase | 9.126s | 3.738s | 2.381s |
-/// | parse -> `Vec` -> `HornBackend` insert (bench driver) | 21.920s | 16.208s | 15.002s |
+/// `HORNDB_LOAD_THREADS=<n>` sets it explicitly and is not capped;
+/// `HORNDB_LOAD_THREADS=1` restores the pre-HDB-96 serial behaviour.
 ///
-/// What is still unmeasured is the same sweep against a real `Store` load.
-/// HDB-83 measured that path getting *slower* with threads (40.1s -> 46.6s),
-/// because the serial `Tier::insert_quad_batch` has to free terms allocated on
-/// the parse threads while those threads keep allocating. Two things have
-/// changed under it since — snmalloc (HDB-86 E1) and the buffer budget — so
-/// the number needs re-taking before the default flips. See
-/// `docs/benchmarks.md`.
+/// Measured on hornbench (Ryzen 7 7700, 8 cores / 16 threads, 124 GB, Debian
+/// 6.12, rustc 1.90.0), commit `c6da644`, trainmarks xlarge (9,995,000
+/// triples) loaded into a fresh `Store` through `load_turtle_slice` /
+/// `load_ntriples_slice` plus a first read to force HDB-84's deferred merge.
+/// Median of 3 interleaved runs; full table and phase split in
+/// `docs/benchmarks.md`:
 ///
+/// | threads | Turtle wall | N-Triples wall | `parse` (ttl) | peak RSS (ttl) |
+/// |---|---|---|---|---|
+/// | 1 | 12.926s | 9.672s | 8.479s | 2,207 MiB |
+/// | 2 | 7.388s | 5.926s | 2.613s | 3,210 MiB |
+/// | 4 | 6.255s | 5.199s | 1.535s | 3,698 MiB |
+/// | **8 (the cap)** | **5.581s** | **4.903s** | **0.780s** | 3,851 MiB |
+/// | 16 | 5.499s | 4.956s | 0.777s | 3,915 MiB |
+///
+/// **HDB-83's reason for the serial default no longer holds.** It measured a
+/// real `Store` load getting *slower* with threads (40.1s -> 46.6s) because
+/// `Tier::insert_quad_batch` had to free terms allocated on the parse threads
+/// while rebuilding every partition it touched. HDB-84 replaced that rebuild
+/// with an appended run, and the tier phases are now flat in the thread count:
+/// `group` + `build` + `merge_runs` total 1.65s at 1 thread and 1.70s at 16.
+/// What is left of the cross-thread free cost shows up in interning, which
+/// rises 2.78s -> 3.05s (+10%) from 1 to 2 threads and is flat above that.
+///
+/// The cost of the default is memory: peak RSS rises 78% on Turtle
+/// (2,207 -> 3,851 MiB) and 57% on N-Triples. Most of it is the 8M-triple
+/// in-flight parse budget, which a one-chunk load never allocates. Lower it
+/// with [`load_buffer_triples`], or set `HORNDB_LOAD_THREADS=1` to get the old
+/// footprint back.
+///
+/// Turtle *files* are not affected: `load_turtle_file` needs
+/// `HORNDB_PARALLEL_TURTLE=1` as well, because splitting Turtle carries a
+/// soundness caveat the line-based formats do not.
 pub fn load_threads() -> usize {
     match std::env::var("HORNDB_LOAD_THREADS").as_deref() {
-        Ok("auto") => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
-        Ok(v) => v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1),
-        Err(_) => 1,
+        Ok("auto") => auto_load_threads(),
+        Ok(v) => v
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .unwrap_or_else(auto_load_threads),
+        Err(_) => auto_load_threads(),
     }
+}
+
+/// `available_parallelism()` clamped to [`AUTO_THREAD_CAP`], 1 if the platform
+/// will not say.
+fn auto_load_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(AUTO_THREAD_CAP))
+        .unwrap_or(1)
 }
 
 /// Run `chunks` on one thread each and feed `sink` their batches in document
@@ -235,5 +279,21 @@ pub(crate) fn slice_threads(len: usize) -> usize {
         load_threads()
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped default resolves inside the cap on every host. Pins
+    /// [`AUTO_THREAD_CAP`] against an accidental "just use every core".
+    #[test]
+    fn auto_load_threads_stays_inside_the_cap() {
+        let n = auto_load_threads();
+        assert!(
+            (1..=AUTO_THREAD_CAP).contains(&n),
+            "auto resolved to {n}, outside 1..={AUTO_THREAD_CAP}"
+        );
     }
 }

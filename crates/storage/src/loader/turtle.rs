@@ -51,9 +51,11 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-/// Load a Turtle file. Serial by default; set `HORNDB_PARALLEL_TURTLE=1` to
-/// let it take the parallel-chunked path when the file is large enough and
-/// [`turtle_split_is_safe`] clears it.
+/// Load a Turtle file. Serial unless `HORNDB_PARALLEL_TURTLE=1` is set — the
+/// [`load_threads`] default going threaded (HDB-96) does not reach here,
+/// because splitting Turtle carries a soundness caveat the line-based formats
+/// do not. With the opt-in it takes the parallel-chunked path when the file is
+/// large enough and [`turtle_split_is_safe`] clears it.
 pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
