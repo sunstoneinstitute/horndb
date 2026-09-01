@@ -1829,6 +1829,15 @@ tables below show no `live_keys` or `dedupe*` row at all — the storage bulk-lo
 path never reaches that code. Its 1.81 GiB peak-RSS win is on the `HornBackend`
 path, so the RSS column here is unaffected either way.
 
+It also predates **HDB-95** (`4459be9`, the section above), which merged after
+the sweep and shrank the dictionary key. That one *is* on this path — it is what
+the `intern` row below measures — so read these numbers with its measured effect
+applied: **−1.8% load time and −209.6 MiB peak RSS** at one thread. Too small to
+change the decision or the shape of the curve (1.8% off the whole load takes the
+Turtle `intern` row from 3.105s to about 3.05s, and its share from 56% to 55%),
+but it does mean the absolute RSS figures below sit ~200 MiB high and the
++78% / +57% deltas a little wide. The sweep was not re-run across HDB-95.
+
 Peak RSS is `VmHWM` read at process exit, one process per cell. The 386 MB /
 1.17 GB source document is in memory in every cell (the driver reads it before
 the timer starts), so it is a constant, not part of the delta.
@@ -1864,7 +1873,8 @@ that is the inline parse; above one it is what the consumer still waits for
 after the parse threads have run ahead.
 
 **This flip moves the bottleneck to `intern`**, which is now 56% of a Turtle
-load and 61% of an N-Triples one — larger than `parse` and the tier together.
+load and 61% of an N-Triples one — larger than `parse` and the tier together,
+and still the largest phase after HDB-95 took 1.8% off the whole load.
 It is serial by construction: interning runs on the calling thread in document
 order so term ids do not depend on thread scheduling, which is what makes a
 parallel load produce a byte-identical store (pinned by
