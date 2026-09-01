@@ -174,6 +174,17 @@ produce a multi-GB dictionary") settled.
   section. Either way: an immutable memory-mapped base plus a small mutable
   in-memory overlay for terms interned since the last flush, merged on
   checkpoint.
+  **The bench evidence is in
+  [`docs/benchmarks.md`](../benchmarks.md), "Which structure backs the mapped
+  dictionary base (HDB-93)"** — five candidates over four key sets up to
+  99,082,405 real LUBM terms, warm and with a cold page cache, plus build time
+  at checkpoint scale. Its findings for the plan: put the repeat cache in
+  first, because it collapses the spread between the mapped structures from
+  178 ns to 24 ns and turns this into a space and cold-start choice; take FST
+  for term → id (24x smaller and 11.6x faster cold than an MPHF plus
+  fingerprint array, 11.8 ns slower warm behind the cache); and a full base
+  rebuild at 100M keys is 20-50s, so the merge cadence does not need to
+  change.
 - **Budgets restated honestly.** NF3's "O(1), single cacheline" holds for the
   in-memory overlay and inline terms (which never probe). For the mapped base
   the budget is: id → term in O(1) probes (one offset indirection, page-cache
