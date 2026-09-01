@@ -4,21 +4,37 @@
 //! (`split_slice_for_parallel_parsing`). This module turns those chunks into a
 //! **parse-parallel, intern-serial** pipeline:
 //!
-//! * one OS thread per chunk runs the parser and pushes fixed-size batches of
-//!   parsed items down a bounded channel;
+//! * one OS thread per chunk runs the parser, **probes** each term against the
+//!   dictionary read-only (from [`MIN_PROBE_CHUNKS`] chunks up), and pushes
+//!   fixed-size batches of parsed items down a bounded channel;
 //! * the caller's thread drains the chunk channels **in document order** and
-//!   does all interning and tier insertion itself.
+//!   allocates ids for whatever the probes did not resolve, then does the tier
+//!   insertion.
 //!
-//! Keeping the intern step on one thread in document order is deliberate: it
+//! Keeping *id allocation* on one thread in document order is deliberate: it
 //! makes the parallel path produce byte-identical store contents to the serial
 //! path — same triples, same dictionary, same term ids — so the two are
 //! interchangeable and the differential tests can compare them exactly.
-//! Interning on the chunk threads instead would be a little faster in
+//! Allocating ids on the chunk threads instead would be a little faster in
 //! isolation (it scales ~3.9× on 16 cores, so the dictionary's reverse-map
 //! write lock is *not* the bottleneck it was assumed to be) but it would make
-//! term ids depend on thread scheduling. Since HDB-96 the serial intern is the
-//! largest phase of a load — see [`load_threads`] for the sweep that made the
-//! parse threads the default and left interning where it is.
+//! term ids depend on thread scheduling.
+//!
+//! **The probe is the way round that (HDB-106).** After HDB-96 made parse
+//! threads the default, interning became the largest phase of a load — 56–61%
+//! of trainmarks xlarge — while the parse threads sat idle waiting on the
+//! channel. A corpus has far more term *occurrences* than distinct terms
+//! (trainmarks xlarge: 9,995,000 triples over 1,919,818 distinct terms, ~15.6
+//! occurrences each), so the overwhelming majority of intern calls are lookups
+//! that find an existing id. Those lookups allocate nothing, so they can run
+//! anywhere; only the misses have to be serialised. The parse threads do the
+//! lookups, the consumer allocates. See [`crate::loader::Probed`] and
+//! [`crate::dictionary::Dictionary::get`] for why racing the consumer is safe.
+//!
+//! It is **not** unconditional. Moving the lookups pays only where the parse
+//! threads have spare capacity to absorb them, which is from 4 chunks up; at 2
+//! it is a 4–5% loss even though the probe resolves *more* there.
+//! [`MIN_PROBE_CHUNKS`] carries the measurements and the reasoning.
 //!
 //! The bounded channels cap memory: at most [`load_buffer_triples`] parsed
 //! items are in flight across all chunks (see [`channel_depth`]).
@@ -27,8 +43,9 @@ use crate::error::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 
-/// Items per batch handed from a parse thread to the consumer.
-const BATCH: usize = 8_192;
+/// Items per batch handed from a parse thread to the consumer, and the
+/// granularity every load-phase clock on this path is taken at.
+pub(crate) const BATCH: usize = 8_192;
 
 /// Default for [`load_buffer_triples`]: parsed triples that may sit in the
 /// chunk channels at once, summed over every chunk.
@@ -109,6 +126,52 @@ pub fn set_load_buffer_triples(triples: usize) {
 /// is `chunks * (depth + 2) * BATCH`.
 fn channel_depth(chunks: usize) -> usize {
     (load_buffer_triples() / (chunks.max(1) * BATCH)).max(1)
+}
+
+/// Fewest parse chunks that make the dictionary probe worth doing.
+///
+/// The probe moves ~1.5s of lookup work (trainmarks xlarge) off the consumer
+/// and **onto the parse threads**. That is a win only where the parse threads
+/// have idle capacity to absorb it, and below 4 chunks they do not. Measured on
+/// hornbench, base `60b300a` vs the probe, median of 3 interleaved reps, full
+/// table in `docs/benchmarks.md`:
+///
+/// | chunks | Turtle wall | N-Triples wall |
+/// |---|---|---|
+/// | 1 | +0.6% | −3.7% |
+/// | **2** | **+4.1%** | **+5.4%** |
+/// | 4 | −4.9% | −5.2% |
+/// | 8 (the `auto` cap) | −9.0% | −7.9% |
+///
+/// At 2 chunks the probe *works better* than at 8 — `intern` falls to 1.79s,
+/// its best figure at any chunk count, because two slow producers cannot run as
+/// far ahead of the consumer as eight fast ones, so the probe sees a warmer
+/// dictionary. It loses anyway: the parse is already close to the critical path
+/// there (2.76s of a 7.47s Turtle load), so work added to it lands on the wall
+/// clock roughly one-for-one, while the `intern` saving comes off the consumer,
+/// which is not the constraint.
+///
+/// `HORNDB_LOAD_THREADS` defaults to `auto` = `available_parallelism()` capped
+/// at 8, so a 2-core VM, container or CI runner reaches this path *by default*.
+/// Regressing the default on the smallest shipped configuration is not
+/// something a documentation note can buy off — hence the gate.
+///
+/// **4 because that is the line the measurements draw**, not a tuned threshold:
+/// 1, 2, 4 and 8 were measured, the sign flips between 2 and 4, and nothing was
+/// measured in between to justify anything finer. Below the gate the loaders
+/// take the pre-HDB-106 path exactly (`Batch::Raw`), which costs nothing.
+pub(crate) const MIN_PROBE_CHUNKS: usize = 4;
+
+/// Should the parse threads probe the dictionary for a run split into `chunks`
+/// chunks? See [`MIN_PROBE_CHUNKS`].
+///
+/// Keyed on the **actual chunk count**, not on `HORNDB_LOAD_THREADS`: `oxttl`
+/// applies its own 16 KiB-per-chunk floor and may hand back fewer chunks than
+/// the thread count asked for, and a Turtle document `turtle_split_is_safe`
+/// rejects comes back as one chunk whatever the setting. The chunk count is
+/// what decides how much parse capacity there actually is.
+pub(crate) fn should_probe(chunks: usize) -> bool {
+    chunks >= MIN_PROBE_CHUNKS
 }
 
 /// Below this document size the `load_*_slice` entry points parse on one
@@ -311,11 +374,40 @@ fn auto_load_threads() -> usize {
 /// next `send` and exit, and the scope joins them before returning.
 pub(crate) fn parse_chunks_ordered<T, F>(
     chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
-    mut sink: F,
+    sink: F,
 ) -> Result<()>
 where
     T: Send,
     F: FnMut(Vec<T>) -> Result<()>,
+{
+    parse_chunks_mapped(chunks, |batch| batch, sink)
+}
+
+/// [`parse_chunks_ordered`], with `map` applied to each **whole batch** on the
+/// parse thread that produced it, before the batch is handed down the channel.
+///
+/// This is where the loaders put the dictionary probe (HDB-106): with enough
+/// chunks the parse threads are idle most of a load — at 8 threads `parse` is
+/// 14% of a Turtle load — while the consumer is saturated by interning, so
+/// read-only work the consumer would otherwise do serially is close to free
+/// here. Only with enough chunks, though: see [`MIN_PROBE_CHUNKS`]. `map` must
+/// not allocate term ids; see [`crate::loader::Probed`] for the determinism
+/// argument.
+///
+/// Per batch and not per item so the map can decide *once*, for 8,192 rows,
+/// whether to probe at all — a run below [`MIN_PROBE_CHUNKS`] chunks hands the
+/// rows through untouched and pays nothing, in time or in bytes, for a probe
+/// that would not pay for itself.
+pub(crate) fn parse_chunks_mapped<T, U, M, F>(
+    chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
+    map: M,
+    mut sink: F,
+) -> Result<()>
+where
+    T: Send,
+    U: Send,
+    M: Fn(Vec<T>) -> U + Sync,
+    F: FnMut(U) -> Result<()>,
 {
     // One chunk means there is nothing to overlap. Run it inline rather than
     // paying for a thread and a channel — and, more to the point, so terms are
@@ -325,11 +417,14 @@ where
         for item in chunks.into_iter().next().expect("one chunk") {
             batch.push(item?);
             if batch.len() >= BATCH {
-                sink(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))?;
+                sink(map(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(BATCH),
+                )))?;
             }
         }
         if !batch.is_empty() {
-            sink(batch)?;
+            sink(map(batch))?;
         }
         return Ok(());
     }
@@ -338,11 +433,12 @@ where
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {
-        let (tx, rx) = sync_channel::<Result<Vec<T>>>(depth);
+        let (tx, rx) = sync_channel::<Result<U>>(depth);
         senders.push(tx);
         receivers.push(rx);
     }
 
+    let map = &map;
     std::thread::scope(|scope| -> Result<()> {
         for (chunk, tx) in chunks.into_iter().zip(senders) {
             scope.spawn(move || {
@@ -353,7 +449,7 @@ where
                             batch.push(v);
                             if batch.len() >= BATCH {
                                 let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH));
-                                if tx.send(Ok(full)).is_err() {
+                                if tx.send(Ok(map(full))).is_err() {
                                     return; // consumer gave up
                                 }
                             }
@@ -365,7 +461,7 @@ where
                     }
                 }
                 if !batch.is_empty() {
-                    let _ = tx.send(Ok(batch));
+                    let _ = tx.send(Ok(map(batch)));
                 }
             });
         }
@@ -392,6 +488,25 @@ pub(crate) fn slice_threads(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The probe gate is a throughput switch with a measured boundary, so pin
+    /// the boundary: 2 and 3 chunks are the cells where the probe measured as a
+    /// loss, 4 is where it turned into a win. A change here is a claim about
+    /// numbers, and needs new ones (`docs/benchmarks.md`).
+    ///
+    /// `parallel_loader.rs::both_sides_of_the_probe_gate_produce_the_same_store`
+    /// covers the other half: whichever side the gate picks, the store is the
+    /// same.
+    #[test]
+    fn the_probe_gate_turns_on_at_four_chunks() {
+        assert_eq!(MIN_PROBE_CHUNKS, 4);
+        for chunks in [0usize, 1, 2, 3] {
+            assert!(!should_probe(chunks), "{chunks} chunks must not probe");
+        }
+        for chunks in [4usize, 8, 16, 64] {
+            assert!(should_probe(chunks), "{chunks} chunks must probe");
+        }
+    }
 
     /// The shipped default resolves inside the cap on every host. Pins
     /// [`AUTO_THREAD_CAP`] against an accidental "just use every core".

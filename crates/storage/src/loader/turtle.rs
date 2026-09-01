@@ -38,11 +38,13 @@
 //! parseable triples, which could fool the chunker's boundary heuristic — is
 //! not detectable without parsing, and is the reason the opt-in exists.
 
+use crate::dictionary::Dictionary;
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
+    load_threads, parse_chunks_mapped, parse_chunks_ordered, should_probe, should_read_whole_file,
+    slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
+use crate::loader::{load_quads, subject_to_term, Batch, LoadStats, Probed, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -127,21 +129,71 @@ pub fn load_turtle_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_turtle_batch(bytes, base_iri, threads, |triples| {
+    for_each_turtle_probed(bytes, base_iri, threads, store.dictionary(), |batch| {
         timer.sink(|| {
-            for t in triples {
-                sink.push(
-                    DEFAULT_GRAPH,
-                    &subject_to_term(t.subject),
-                    &Term::NamedNode(t.predicate),
-                    &t.object,
-                )?;
-            }
-            Ok(())
+            sink.intern_batch(|s| match batch {
+                Batch::Raw(rows) => {
+                    for t in rows {
+                        s.push(
+                            DEFAULT_GRAPH,
+                            &subject_to_term(t.subject),
+                            &Term::NamedNode(t.predicate),
+                            &t.object,
+                        )?;
+                    }
+                    Ok(())
+                }
+                Batch::Probed(rows) => {
+                    for row in rows {
+                        s.push_probed(DEFAULT_GRAPH, row)?;
+                    }
+                    Ok(())
+                }
+            })
         })
     })?;
     timer.record_parse(sink.total);
     sink.finish()
+}
+
+/// [`for_each_turtle_batch`], with each row's terms probed against `dict` on
+/// the parse thread that produced it (HDB-106). Skipped below
+/// [`crate::loader::parallel::MIN_PROBE_CHUNKS`] chunks ([`should_probe`]) — which
+/// includes every document [`turtle_split_is_safe`] rejects, since those come
+/// back as one chunk whatever the thread count.
+pub(crate) fn for_each_turtle_probed<F>(
+    bytes: &[u8],
+    base_iri: Option<&str>,
+    threads: usize,
+    dict: &Dictionary,
+    sink: F,
+) -> Result<()>
+where
+    F: FnMut(Batch<Triple, Probed>) -> Result<()>,
+{
+    let chunks = turtle_chunks(bytes, base_iri, threads)?;
+    let probe = should_probe(chunks.len());
+    parse_chunks_mapped(
+        chunks,
+        move |rows: Vec<Triple>| {
+            if !probe {
+                return Batch::Raw(rows);
+            }
+            Batch::Probed(
+                rows.into_iter()
+                    .map(|t| {
+                        Probed::probe(
+                            dict,
+                            subject_to_term(t.subject),
+                            Term::NamedNode(t.predicate),
+                            t.object,
+                        )
+                    })
+                    .collect(),
+            )
+        },
+        sink,
+    )
 }
 
 /// Parse an in-memory Turtle document on `threads` threads, handing `sink`
@@ -160,6 +212,17 @@ pub fn for_each_turtle_batch<F>(
 where
     F: FnMut(Vec<Triple>) -> Result<()>,
 {
+    parse_chunks_ordered(turtle_chunks(bytes, base_iri, threads)?, sink)
+}
+
+/// One independently parseable chunk iterator per parse thread, or a single
+/// serial one when `threads <= 1` or [`turtle_split_is_safe`] rejects the
+/// document.
+fn turtle_chunks<'a>(
+    bytes: &'a [u8],
+    base_iri: Option<&str>,
+    threads: usize,
+) -> Result<Vec<Box<dyn Iterator<Item = Result<Triple>> + Send + 'a>>> {
     let parser = turtle_parser(base_iri)?;
     let parallel = threads > 1 && turtle_split_is_safe(bytes);
     let parsers = if parallel {
@@ -167,14 +230,13 @@ where
     } else {
         vec![parser.for_slice(bytes)]
     };
-    let chunks = parsers
+    Ok(parsers
         .into_iter()
         .map(|p| {
             Box::new(p.map(|t| t.map_err(|e| StorageError::TurtleParse(format!("{e}")))))
-                as Box<dyn Iterator<Item = Result<Triple>> + Send + '_>
+                as Box<dyn Iterator<Item = Result<Triple>> + Send + 'a>
         })
-        .collect();
-    parse_chunks_ordered(chunks, sink)
+        .collect())
 }
 
 fn turtle_parser(base_iri: Option<&str>) -> Result<TurtleParser> {

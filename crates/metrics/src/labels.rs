@@ -104,10 +104,19 @@ pub struct PhaseLabel {
 }
 
 // Phases of a bulk load, timed separately so a slow load can be attributed
-// (SPEC-17 §5.4.1). `Intern` is dictionary interning in `Store::apply_quads`
-// — the term-based write path only; the id-based `Store::apply_quad_ids` the
-// bulk loader uses interns nothing. The rest are inside
+// (SPEC-17 §5.4.1). `Intern` is dictionary interning on both term-based write
+// paths: `Store::apply_quads`, and the bulk loaders' `QuadSink` (HDB-106,
+// which made it a counter instead of the residue it used to be reported as).
+// The id-based `Store::apply_quad_ids` interns nothing and emits nothing.
+// `Group`, `CopyForward`, `Merge`, `MergeRuns` and `Build` are inside
 // `MemoryTier::insert_quad_batch`.
+//
+// `Intern*` are a sub-phase split of `Intern` inside `Dictionary::intern`,
+// emitted only when `HORNDB_INTERN_PHASES=1` (HDB-106). They nest:
+// `InternEncode` + `InternProbe` is the hit path, `InternMiss` is the whole
+// slow path a failed probe falls into, and `InternReverse` is the reverse-map
+// write inside it. Timing them costs two clock pairs on every intern call, so
+// they are off by default — see `docs/metrics.md`.
 //
 // `Dedupe` covers `HornBackend::insert_oxrdf_batch_in_graph`'s interning
 // loop. It used to split into four `Dedupe*` sub-phases behind
@@ -122,6 +131,10 @@ label_value_enum!(LoadPhase {
     Dedupe => "dedupe",
     Invalidate => "invalidate",
     Intern => "intern",
+    InternEncode => "intern_encode",
+    InternProbe => "intern_probe",
+    InternMiss => "intern_miss",
+    InternReverse => "intern_reverse",
     Group => "group",
     CopyForward => "copy_forward",
     Merge => "merge",
