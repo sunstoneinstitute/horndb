@@ -1169,6 +1169,464 @@ number cannot repay. Add:
 - **Only this summary survives.** The raw per-rep driver output was not kept.
   Re-derive it with the commands under *Reproducing the numbers* — the corpora
   are deterministic, one command per mode.
+#### Which structure backs the mapped dictionary base (HDB-93, 2026-09-01)
+
+SPEC-25 §S2 leaves the base structure "settled by the implementation plan with
+bench evidence". HDB-57 R3 recommends a **minimal perfect hash function (MPHF)
+plus a 64-bit fingerprint array** for term → id and **front-coded sorted blocks
+plus an offset table** for id → term; R4 rejects FST (a finite-state transducer,
+the Lucene-style compressed string map the `fst` crate implements) and ART/HOT
+radix trees. Those calls came from published numbers on other people's
+workloads. This is the matrix HDB-57 R8 asked for, measured on RDF terms here.
+
+**Headline: with the repeat cache in front, the base structure stops being a
+latency decision and becomes a space and cold-start decision — and on those
+two axes the matrix picks FST, not the MPHF.**
+
+`hornbench` (Ryzen 7 7700, 16 threads, 124 GB, Debian 6.12, rustc 1.90.0),
+commit `d9d357c`, median of 3 reps per cell with the min–max range. The reps of
+one cell run back to back inside one process rather than interleaved across
+cells — this is a microbenchmark of five structures in one binary, not an A/B
+of two builds. Spread is under 2% on every cell but three. Driver:
+`cargo run --release -p horndb-storage --example dict_base_bench`.
+
+##### The key sets
+
+"Dictionary key" means what `Dictionary::intern` keys on — the IRI text, the
+blank-node label, or a literal's lexical form plus its language tag or datatype
+IRI. Key sets and their document-order term streams come out of HDB-92's
+`scripts/bench/corpus_term_stats.rs`, which grew an `--emit-keys` mode for this,
+so both tools use one definition of a key.
+
+| key set | distinct keys | key bytes | mean key | mean shared prefix over sorted keys | source |
+|---|---:|---:|---:|---:|---|
+| trainmarks xlarge | 1,919,818 | 72.1 MB | 37.5 B | 26.8 B | real corpus |
+| LUBM-100 | 3,303,902 | 196.8 MB | 59.6 B | 56.5 B | real corpus (UBA 1.7, 13,880,276 triples) |
+| LUBM-scaled 10M | 9,909,316 | 604.2 MB | 61.0 B | 57.9 B | LUBM-100 re-instantiated at 3× universities |
+| LUBM-scaled 100M | 99,082,405 | 6.17 GB | 62.3 B | 59.2 B | LUBM-100 re-instantiated at 30× universities |
+
+The two real sets reproduce HDB-92's counts exactly — 1,919,818 and 3,303,902
+distinct terms, 93.30% and 92.07% repeat rate — which is the check that this is
+the same measurement.
+
+The 10M and 100M sets are **not synthesised text**. They are the real LUBM-100
+key set re-instantiated at more universities: every LUBM key naming a university
+carries it as `University{k}`, and rewriting `k` to `k + stride·r` for `r` in
+`0..factor` gives the distinct-term set the real generator would emit for
+`100·factor` universities, keeping the real per-department irregularity, the
+real literal mix and the real length tail. The stride is one past the largest
+university number *present*, not the university count: LUBM-100 names
+universities well outside the 100 it generates (`undergraduateDegreeFrom`
+reaches `University975`), so a stride of 100 makes copy 9 collide with copy 0.
+
+**Where that scaling is not neutral.** The key *text* is real, but the copies
+are exact replicas differing in one number, where a real LUBM-3000 would jitter
+per-department counts per university. That flatters `fst` alone, because a
+constant id delta factors onto the university-number transition and the suffix
+subtree is shared across all 30 copies. It costs the FST 34% of its bytes —
+1.02 B/key on the real LUBM-100 set, 0.67 on the replication — and moves
+nothing else. Every FST size ratio in this record is therefore quoted at the
+**real-corpus** rate, and the per-key-set table under *Space and build* shows
+both. The latency columns are unaffected: no arm's ns/lookup reorders across the
+four key sets.
+
+Two probe streams, because they answer different questions.
+
+- **Corpus stream** — the real document-order term stream, replayed against the
+  scaled sets one university block at a time. This is what a reopen-and-load
+  sees, and the only stream under which the repeat cache means anything. Its
+  measured 4,096-entry 4-way repeat-cache hit rate is 90.1% at 100M and 80.0% on
+  trainmarks, bracketing HDB-92 F4's 78.5–84.3%.
+- **Uniform stream** — every probe an independent uniform draw over the whole
+  key set. Nothing is cached, every probe is a genuine random access. The
+  pessimistic bound.
+
+Misses are an existing key with a `0x01` byte appended: that byte cannot occur
+in a key, so non-membership is guaranteed, and the miss still sorts next to a
+real key, which is the worst case for the sorted structures.
+
+##### The arms
+
+| arm | what it is | resident or mapped |
+|---|---|---|
+| `hashbrown` | `hashbrown::HashTable<u32>` over the key arena. R8's control | resident |
+| `openaddr` | open-addressed table, 32-bit tag cached per slot, explicit prefetch. The batch-32 control — `hashbrown` exposes no prefetch hook | resident |
+| `ptrhash` | PtrHash MPHF (`ptr_hash` 2.1.1, `default_balanced`) plus a 16-byte record per slot: 64-bit fingerprint + id. HDB-57 R3's recommendation | MPHF resident (0.33 B/key), records mapped |
+| `frontcoded` | front-coded sorted blocks of 16, binary search over block heads | mapped |
+| `fst` | `fst` 0.4.7 `Map` over the sorted keys | mapped |
+
+##### Warm matrix at 100M keys — ns/lookup
+
+5,000,000 probes, 3 reps, median (min–max). "cache" is the 4,096-entry 4-way
+LRU repeat cache from HDB-57 R3/R9 F4, indexed and tagged by the full term hash.
+
+Hits, corpus document-order stream (repeat-cache hit rate 90.1%):
+
+| structure | single | batch-32 | single + cache |
+|---|---:|---:|---:|
+| `openaddr` (resident) | 11.71 (11.53–12.26) | **6.84 (6.73–7.12)** | 11.55 |
+| `hashbrown` (resident) | 21.52 (20.85–22.98) | 21.28 (20.79–22.85) | 18.37 |
+| `ptrhash` + fingerprint | 45.14 (34.25–54.19) | 21.05 (21.05–21.33) | **17.01** |
+| `frontcoded` | 152.75 (148.71–229.96) | 201.63 | 40.87 |
+| `fst` | 223.02 (222.94–224.49) | 223.52 | 28.85 |
+
+Hits, uniform stream (repeat-cache hit rate 0.0%):
+
+| structure | single | batch-32 | single + cache |
+|---|---:|---:|---:|
+| `openaddr` | 72.20 | **60.25** | 94.26 |
+| `hashbrown` | 86.55 | 87.40 | 129.48 |
+| `ptrhash` + fingerprint | 181.09 | 134.70 | 202.32 |
+| `fst` | 689.05 | 681.75 | 691.77 |
+| `frontcoded` | 1223.80 | 657.38 | 1231.85 |
+
+Misses, uniform stream:
+
+| structure | single | batch-32 |
+|---|---:|---:|
+| `hashbrown` | **25.71** | — |
+| `ptrhash` + fingerprint | 156.65 | **31.81** |
+| `openaddr` | 90.65 | 55.86 |
+| `fst` | 488.62 | — |
+| `frontcoded` | 1020.90 | 626.35 |
+
+Two cells to read carefully. **`ptrhash/single/hit/verify` costs 463.00 ns on
+the uniform stream against 181.09 for the fingerprint-only path**: comparing the
+key bytes after a fingerprint match adds two more random accesses (offset table,
+then arena). R3's design skips that compare and accepts a 2⁻⁶⁴ chance of
+returning a wrong id, which is the right call — but the fingerprint is doing
+real work, not saving a few nanoseconds. And **the repeat cache is not free
+where it does not hit**: on the uniform stream it costs `hashbrown` 50% (86.55 →
+129.48). It is only right on a workload with repeats, which HDB-92 says every
+corpus has (89.8–93.3% of calls).
+
+##### How single-lookup hit cost scales
+
+ns/lookup, single, hits, corpus stream / uniform stream:
+
+| structure | 1.9M | 3.3M | 9.9M | 99M |
+|---|---|---|---|---|
+| `openaddr` | 10.50 / 41.41 | 7.05 / 56.61 | 11.32 / 59.17 | 11.71 / 72.20 |
+| `hashbrown` | 18.99 / 46.16 | 7.76 / 51.60 | 14.86 / 69.32 | 21.52 / 86.55 |
+| `ptrhash` | 27.69 / 97.47 | 24.25 / 117.48 | 27.20 / 132.43 | 45.14 / 181.09 |
+| `frontcoded` | 141.98 / 419.18 | 130.90 / 503.36 | 129.22 / 716.93 | 152.75 / 1223.80 |
+| `fst` | 158.48 / 307.04 | 210.73 / 407.73 | 219.02 / 452.13 | 223.02 / 689.05 |
+
+Nothing reorders as the key set grows 52×. The corpus-stream column barely
+moves for any structure — locality, not size, is what it is measuring.
+
+##### Cold page cache — the reopen case
+
+The page cache is flushed and dropped (`sync; echo 3 > /proc/sys/vm/drop_caches`)
+immediately before each mapped probe loop, from inside the bench process, so the
+key set stays on the heap and only the structure under test is evicted. Every
+probe that misses is then a real fault to disk. 200,000 probes, 3 drop-and-probe
+reps, median (min–max). "first touch" is the same loop with a warm page cache
+but no page-table entries yet; "steady" is the matrix figure above.
+
+100M keys:
+
+| structure | cold, corpus stream | cold, uniform | first touch | steady | mapped size |
+|---|---:|---:|---:|---:|---:|
+| `fst` | **313.8 (309.4–325.9)** | **886.8 (886.8–904.7)** | 218.2 | 223.0 | 66.1 MB |
+| `frontcoded` | 1713.7 (1648.2–1729.6) | 4591.7 (4567.2–4610.2) | 228.9 | 152.8 | 1.36 GB |
+| `ptrhash` + fingerprint | 3648.8 (3642.7–3670.5) | 4025.2 (3963.1–4050.7) | 215.1 | 45.1 | 1.59 GB |
+
+10M keys:
+
+| structure | cold, corpus stream | cold, uniform | first touch | steady |
+|---|---:|---:|---:|---:|
+| `fst` | **220.8 (220.6–221.4)** | **488.7 (486.2–489.7)** | 210.0 | 219.0 |
+| `frontcoded` | 342.7 (337.7–343.4) | 1056.6 (1053.6–1060.1) | 144.3 | 129.2 |
+| `ptrhash` + fingerprint | 384.5 (374.0–389.1) | 500.2 (490.6–506.8) | 53.1 | 27.2 |
+
+**The cold column reverses the warm one, but read it as a one-time cost, not a
+standing latency.** At 100M the MPHF plus fingerprint array is the fastest mapped
+structure warm (45.1 ns) and the slowest cold (3,648.8 ns). That ratio is not a
+per-lookup penalty a server keeps paying: a cold cell is one file read amortised
+over 200,000 probes, and it falls as the probe count rises. Multiply it out
+instead.
+
+| structure | mapped size | cold excess over its own steady state, uniform stream | implied read rate |
+|---|---:|---:|---:|
+| `fst` | 66.1 MB | (886.8 − 689.1) ns × 200k = **0.040s** | 1.67 GB/s |
+| `frontcoded` | 1.36 GB | (4591.7 − 1223.8) ns × 200k = **0.674s** | 2.02 GB/s |
+| `ptrhash` + fingerprint | 1.59 GB | (4025.2 − 181.1) ns × 200k = **0.769s** | 2.06 GB/s |
+
+The three implied rates agree to within 20%, which says what the cold column is
+actually measuring: **the time to pull the structure off this host's disk once,
+at roughly 2 GB/s.** It therefore tracks file size, it is bounded by it, and it
+cannot exceed it however many probes follow. The whole cold argument for FST is
+**~0.73s of one-time faults avoided** at 100M keys.
+
+Against that, FST costs 11.8 ns more per base lookup than the MPHF behind the
+repeat cache (28.85 vs 17.01). The MPHF repays 0.73s after roughly **62M base
+lookups — about 620M dictionary calls** at the measured 90.1% cache hit rate.
+**A reopen-and-reload never reaches that and FST wins outright; a long-lived
+server does reach it, and there the MPHF is ahead.** S2 should choose knowing
+which of the two it is optimising, and the record recommends FST because reopen
+is the case SPEC-25 §S2 exists for.
+
+Two properties of the cold measurement that bound how far these ratios travel:
+
+- **The corpus-stream cold column exercises 1/30 of the key space.** The
+  replayed stream switches university block every 1,000,000 occurrences, so all
+  200,000 cold probes fall in copy 0 — 17,878 distinct keys drive them, a 91.1%
+  repeat rate. That is prefix-clustered and favours the FST beyond the size
+  effect. **The locality-neutral uniform column is the one to quote downstream:
+  FST is 4.5× better cold than the MPHF there (886.8 vs 4,025.2), against 11.6×
+  on the corpus stream.** Downstream documents carry 4.5×.
+- The cold loop has no repeat cache in front of it, but the corpus stream is
+  ~90% repeats regardless, so far fewer than 200,000 distinct pages are faulted —
+  17,878 distinct keys at 100M. The per-lookup figure is the file read spread
+  over the repeats, not one fault per probe.
+
+The "first touch" column isolates a cost that is easy to miss: **215–229 ns/
+lookup with the data already in RAM**, purely from populating page-table entries
+for a multi-GB mapping. A reopen pays it whether or not the file is on disk.
+
+##### Space and build
+
+Per key at 100M. "stores keys" says whether the structure can answer a lookup
+without a separate copy of the key bytes.
+
+| structure | B/key | stores keys | resident or mapped |
+|---|---:|---|---|
+| `fst` map | **0.67** | yes | mapped (66.1 MB) |
+| PtrHash MPHF, `default_compact` (multi-threaded build) | 0.27 | no | resident |
+| PtrHash MPHF, `default_balanced` | 0.33 | no | resident |
+| front-coded blocks | 13.72 | yes | mapped (1.36 GB) |
+| fingerprint + id records | 16.00 | no | mapped (1.59 GB) |
+| `hashbrown` table | 5.93 | no | resident |
+| `openaddr` table | 10.84 | no | resident |
+| flat arena + offset table | 70.28 | yes | mapped (6.57 GB) |
+
+PtrHash's own size matches its published 2.4 bits/key closely — 2.609 bits/key
+balanced, 2.143 bits/key compact, constant across all four key sets. The
+fingerprint array beside it is 49× larger than the MPHF, and that array, not the
+MPHF, is what a lookup touches.
+
+**`fst` size is corpus-dependent, and the 100M point overstates it.** The
+per-key-set rates, which the single-scale table above cannot show:
+
+| key set | `fst` | front-coded | fingerprint + id records | flat arena + offsets |
+|---|---:|---:|---:|---:|
+| trainmarks xlarge, 1.9M (real) | 2.36 | 19.38 | 16.00 | 45.54 |
+| LUBM-100, 3.3M (real) | **1.02** | 13.58 | 16.00 | 67.57 |
+| LUBM-scaled 10M | 0.82 | 13.65 | 16.00 | 68.98 |
+| LUBM-scaled 100M | 0.67 | 13.72 | 16.00 | 70.28 |
+
+Only the FST rate moves with the scaling, and it moves the wrong way: **1.02
+B/key on the real LUBM-100 set against 0.67 on its 30× replication, a 34% drop
+from copying alone.** The replicated copies differ only in one number, so a
+constant id delta factors onto the university-number transition and the suffix
+subtree is shared across all 30 — exactly the mechanism the FST minimises best.
+Front-coding, the records and the arena are all flat across the same scaling, so
+the effect is specific to this arm.
+
+**Quote the real-corpus rate: the FST is 15.7× smaller than the fingerprint
+array on real LUBM-100 and 6.8× smaller on trainmarks, not the 24× the 100M
+scale point suggests.** Downstream documents carry 15.7×. Even at the trainmarks
+rate a 100M-key FST is 234 MB against the fingerprint array's 1.59 GB.
+
+Build time, single invocation, from an in-memory key set:
+
+| step | 10M keys | 100M keys |
+|---|---:|---:|
+| sort the keys (needed by `fst` and front-coding, not by the MPHF) | 1.65s | 26.69s |
+| MPHF, `default_balanced` (1 thread) | 1.29s | 15.92s |
+| MPHF, `default_compact` (16 threads) | **0.30s** | **3.22s** |
+| fill and write the fingerprint + id records | 1.25s | 16.26s |
+| build and write the front-coded base | 0.68s | 9.28s |
+| build and write the `fst` map | 1.93s | 21.93s |
+| every structure above, one process | 10.66s | 141.30s |
+| peak RSS for that process | 1,210 MiB | 11,272 MiB |
+
+**Checkpoint cost is seconds, not minutes, and the merge cadence does not need
+to change.** A realistic base rebuild at 100M keys is 19.5s for the MPHF path
+(compact MPHF 3.22s + records 16.26s, no sort needed) or 48.6s for the FST path
+(sort 26.69s + FST 21.93s). If the design keeps front-coded id → term the sort
+is paid either way, and the two paths are within 10% of each other.
+
+##### id → term
+
+R3 calls the front-coded base plus an offset table "the O(1) id → term probe".
+It is O(1) *blocks*; inside the block it is a sequential decode of up to 16
+front-coded entries. Measured at 100M, ns/lookup, corpus stream / uniform:
+
+| structure | 100M | 10M | B/key |
+|---|---|---|---:|
+| flat offset table + mapped arena | **0.76 / 19.95** | 0.76 / 17.60 | 70.28 |
+| front-coded blocks + id → rank table | 36.50 / 381.36 | 34.70 / 269.83 | 17.72 |
+
+Front-coding costs **48× the latency to save 4.0× the bytes**. Both halves are
+real; the plan should pick knowingly rather than assume front-coding is free.
+
+##### The total mapped base, which is not 66 MB
+
+The 15.7× term → id ratio above is one component. A base has to answer both
+directions, and the id → term half dominates the footprint. Both recommendations
+of this record, added up at 100M keys:
+
+| design | term → id | id → term | total B/key | total at 99,082,405 keys |
+|---|---:|---:|---:|---:|
+| **recommended**: `fst` + flat offset table | 0.67 | 70.28 | **70.95** | **7.03 GB** |
+| R3 as written: MPHF + fingerprint + flat offset table | 16.33 | 70.28 | 86.61 | 8.58 GB |
+| `fst` + front-coded id → term | 0.67 | 17.72 | **18.39** | **1.82 GB** |
+| R3 as written, front-coded id → term | 16.33 | 17.72 | 34.05 | 3.37 GB |
+
+The MPHF rows use **16.33** B/key — the 16.00 B/key fingerprint + id records plus
+the 0.33 B/key MPHF that has to be resident beside them — because a total budget
+has to count both. The 15.7× ratio elsewhere in this record divides by **16.00**,
+the mapped array alone, because that is the component being compared against the
+mapped FST. Both are right for their own question; neither is a typo.
+
+**Read the total, not the term → id column.** Choosing FST over MPHF plus
+fingerprint shrinks the whole mapped base by **1.2×** if id → term stays a flat
+offset table over the arena, or 1.9× if id → term is front-coded. The 15.7× is
+real but applies to a component that is under 1% of the recommended design's
+bytes. Anyone sizing an S2 base from this record should budget **~7 GB at 100M
+keys**, not 66 MB.
+
+##### Verdicts
+
+**R1 — confirmed.** Probe count and locality dominate key length. Over one key
+set with one length distribution, the structures differ 30× warm on nothing but
+probes per lookup (1–2 hashing, ~23 for the front-coded binary search, one per
+byte for the FST); and one structure varies 4× on nothing but locality (ptrhash
+45.1 → 181.1 ns, corpus stream to uniform). Key length explains none of it.
+
+**R3 term → id — replaced.** MPHF plus fingerprint is not the fastest term → id
+structure at any scale measured: `openaddr` batched is 3.1× faster warm at 100M
+(6.84 vs 21.05 ns) and `hashbrown` beats it on single lookups. Its real
+advantages are that it stores no key bytes and that its miss path is cheap when
+batched (31.81 ns). Against the two other *mapped* candidates it is the largest
+(16.3 vs 13.7 vs 0.67 B/key) and the worst cold (3,648.8 vs 1,713.7 vs
+313.8 ns). **Take FST for the mapped term → id base.** With the repeat cache in
+front — which R3 already requires — FST costs 28.85 ns against the MPHF's 17.01,
+a 11.8 ns difference on the ~10% of calls that reach the base at all, in
+exchange for a term → id structure **15.7× smaller on real-corpus rates** (6.8×
+on trainmarks), **4.5× better cold on the locality-neutral stream**, and ordered,
+prefix and automaton search that SPEC-25 will want for `STRSTARTS` and
+regex-over-dictionary. Two bounds on that trade, both from the sections above:
+the whole mapped base shrinks **1.2×**, not 15.7×, because id → term dominates
+the footprint; and the cold advantage is **~0.73s of one-time faults**, which the
+MPHF repays after ~620M dictionary calls. Reopen never reaches that, a
+long-lived server does.
+
+**R3 id → term — confirmed with its cost named.** Front-coded blocks plus an
+offset table work, and save 4.0× the bytes, but cost 48× the latency of a flat
+offset table over a mapped arena (36.50 vs 0.76 ns at 100M). Not O(1) in
+practice.
+
+**R3 repeat cache — confirmed, and it is the largest lever in the dictionary.**
+At its measured 90.1% hit rate on the 100M corpus stream it cuts `fst` 223.02 →
+28.85 (7.7×), `frontcoded` 152.75 → 40.87 (3.7×) and `ptrhash` 45.14 → 17.01
+(2.7×), and collapses the spread between the three mapped structures from 178 ns
+to 24 ns. That collapse is the result that decides the shape of S2: put the
+cache in first, and the base structure is chosen on size and cold start.
+
+**R4's FST rejection — overturned.** R4 rejected FST as "the worst latency
+profile of the three for point lookups on a multi-GB map". The premise is wrong:
+the FST is not multi-GB. It is 66 MB for 99,082,405 LUBM keys and 4.5 MB for
+1,919,818 trainmarks keys — **15.7× smaller than the fingerprint array at
+real-corpus rates**, 6.8× on trainmarks (the 24× at the 100M scale point is
+inflated by the replication; see *Space and build*). Warm, R4's latency claim
+holds (223.0 vs 45.1 ns, and 28.85 vs 17.01 with the cache). Cold, it is
+backwards: 886.8 vs 4,025.2 ns on the locality-neutral stream, a **4.5×** FST
+advantage worth ~0.73s of one-time faults at 100M keys. For a structure whose
+whole purpose is reopen, that is the column that decides — and the reversal
+survives at the conservative ratio, which is why the rejection does not.
+
+**R4's ART/HOT rejection — still unmeasured.** No ART or HOT arm was built, so
+this spike does not confirm it. What it does show is that R4's stated
+mechanism — 3–6 *dependent* random accesses per lookup — is what dominates:
+the front-coded arm's ~23 dependent probes cost 152.8 ns warm and 1,713.7 ns
+cold at 100M, against 1–2 probes for the hash-shaped arms. The reasoning is
+supported; the measurement R4 was asked for is not in hand. Filed as HDB-103,
+which reuses this harness and these key sets, rather than claimed here.
+
+**R5 batch-32 with software prefetch — confirmed for hash-shaped probes only.**
+At 100M, corpus stream: `openaddr` 11.71 → 6.84 (1.7×), `ptrhash` 45.14 → 21.05
+(2.1×), `ptrhash` misses 156.65 → 31.81 (4.9×). Caveat on the `ptrhash` ratio:
+`ptrhash/single/hit` on that stream is the one noisy cell in the matrix, 45.14
+over a 34.25–54.19 range (±22% on 3 reps), so its batching ratio spans
+1.6–2.6×, and the 81× cold-to-warm figure quoted above spans 67–107×. Neither
+range changes a verdict, but do not quote either ratio to three digits.
+
+It does nothing for `hashbrown` (21.52 → 21.28 — the crate exposes no prefetch
+hook), nothing for `fst` (223.02 → 223.52), and on the locality-rich corpus
+stream it makes the front-coded base *worse* (152.75 → 201.63) while helping it
+on the uniform stream (1223.80 → 657.38). Batching pays where the lookup is one
+or two independent random probes and the queries are independent; it does not
+rescue a dependent chain.
+
+##### What a win here is worth end to end
+
+HDB-91 measured the dictionary at **9–12% of a bulk-loader append** (1.85s for
+1,002,000 triples over a 10M-triple base, ~2.84M dictionary probes). Applying
+this matrix's spread to that:
+
+- With the repeat cache, best to worst mapped structure at 100M is 17.01 →
+  40.87 ns. Over 2.84M probes that is **0.068s, 3.7% of the append**.
+- Without the cache the spread is 45.14 → 223.02 ns, i.e. 0.51s, 27% of the
+  append.
+
+So the cache is where the load-path money is, and the base structure is a
+single-digit-percent decision on top of a 9–12% share. Do not present ns/lookup
+as the bottom line. The reason S2 exists is that a reopened store must resolve
+both directions without re-interning the corpus — LUBM-100's 3.3M distinct terms
+come out of a 2.4 GB N-Triples document, and skipping that parse is worth far
+more than any cell in this table. The cold column is the one that speaks to it.
+
+**Scope of the bits/key numbers.** They are measured against the *current* key
+encoding, where a typed literal's key is its lexical form plus a NUL plus the
+full datatype IRI. HDB-95 proposes keying typed literals on
+`(lexical, datatype-id)`, which HDB-92 F3 sizes at roughly 80% of that column's
+key bytes. Do not grade HDB-95 against a baseline that already assumes its own
+change.
+
+##### Reproducing
+
+```bash
+# 1. corpus -> distinct keys + document-order term stream
+rustc --edition 2021 -O -o /tmp/cts scripts/bench/corpus_term_stats.rs
+/tmp/cts --name lubm-100 --emit-keys keys/lubm100 tbox.nt abox.nt
+
+# 2. re-instantiate the real key set at 30x universities (~100M keys)
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  scale --src keys/lubm100 --dir keys/lubm-100M --factor 30 --keys 100000000
+
+# 3. build every structure; prints build time and bits/key
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  build --dir keys/lubm-100M
+
+# 4. the warm matrix
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  query --dir keys/lubm-100M --probes 5000000 --reps 3
+
+# 5. one cold cell (needs passwordless sudo for drop_caches)
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  cold --dir keys/lubm-100M --arm fst --probes 200000 --drop-caches
+
+# 6. the same loop without the drop -- the "first touch" column
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  cold --dir keys/lubm-100M --arm fst --probes 200000
+
+# add --zipf -1 to either cold command for the uniform-stream column
+```
+
+**The probe counts are part of the result.** A cold cell is one file read
+amortised over the probe count, so raising `--probes` lowers the cold ns/lookup
+without anything having changed. Use 5,000,000 for `query` and 200,000 for
+`cold` to reproduce the tables above. The example's module doc carries the same
+values.
+
+`ptr_hash`, `fst`, `hashbrown` and `memmap2` are dev-dependencies of
+`horndb-storage`, reachable only from this example. They stay for as long as the
+S2 plan cites this record; if S2 adopts a structure they should become real
+dependencies of the crate, and if it adopts none of them they go with the
+example.
 
 #### Where HornDB sits against the other eleven engines
 
@@ -1308,6 +1766,13 @@ cargo bench -p horndb-incremental --bench insert_throughput
 
 # SPEC-02 storage — LUBM load throughput
 cargo bench -p horndb-storage --bench load_lubm
+
+# SPEC-25 S2 — dictionary base-structure matrix (HDB-93). Not criterion: a
+# spike driver with its own modes. Full protocol and the probe counts the
+# published tables use are in "Which structure backs the mapped dictionary
+# base (HDB-93)" above.
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  query --dir keys/lubm-100M --probes 5000000 --reps 3
 
 # SPEC-02 F8 — bulk-load wall time vs tier batch size (HDB-84). Not criterion:
 # one load per invocation, so sweep the batch size yourself. 0 = one insert call.

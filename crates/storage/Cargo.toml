@@ -22,6 +22,11 @@ horndb-simd = { workspace = true }
 tempfile.workspace = true
 proptest.workspace = true
 criterion.workspace = true
+# HDB-93 spike: candidate term->id base structures (examples/dict_base_bench.rs).
+ptr_hash.workspace = true
+fst.workspace = true
+memmap2.workspace = true
+hashbrown.workspace = true
 
 [[bench]]
 name = "load_lubm"

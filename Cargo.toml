@@ -110,6 +110,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = "0.5"
 hyper = "1"
 pretty_assertions = "1"
+# HDB-93 spike only (SPEC-25 S2 base-structure bench). Dev-dependencies of
+# `horndb-storage`'s `dict_base_bench` example; never a library dependency.
+# Remove with the example if S2 does not adopt the structure it picked.
+ptr_hash = "2.1.1"
+fst = "0.4.7"
+memmap2 = "0.9.8"
+hashbrown = "0.16.0"
 bytes = "1"
 http-body = "1"
 pin-project-lite = "0.2"
