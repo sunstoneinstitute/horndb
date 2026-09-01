@@ -1184,7 +1184,7 @@ latency decision and becomes a space and cold-start decision — and on those
 two axes the matrix picks FST, not the MPHF.**
 
 `hornbench` (Ryzen 7 7700, 16 threads, 124 GB, Debian 6.12, rustc 1.90.0),
-commit `781cd37`, median of 3 reps per cell with the min–max range. The reps of
+commit `d9d357c`, median of 3 reps per cell with the min–max range. The reps of
 one cell run back to back inside one process rather than interleaved across
 cells — this is a microbenchmark of five structures in one binary, not an A/B
 of two builds. Spread is under 2% on every cell but three. Driver:
@@ -1218,6 +1218,17 @@ real literal mix and the real length tail. The stride is one past the largest
 university number *present*, not the university count: LUBM-100 names
 universities well outside the 100 it generates (`undergraduateDegreeFrom`
 reaches `University975`), so a stride of 100 makes copy 9 collide with copy 0.
+
+**Where that scaling is not neutral.** The key *text* is real, but the copies
+are exact replicas differing in one number, where a real LUBM-3000 would jitter
+per-department counts per university. That flatters `fst` alone, because a
+constant id delta factors onto the university-number transition and the suffix
+subtree is shared across all 30 copies. It costs the FST 34% of its bytes —
+1.02 B/key on the real LUBM-100 set, 0.67 on the replication — and moves
+nothing else. Every FST size ratio in this record is therefore quoted at the
+**real-corpus** rate, and the per-key-set table under *Space and build* shows
+both. The latency columns are unaffected: no arm's ns/lookup reorders across the
+four key sets.
 
 Two probe streams, because they answer different questions.
 
@@ -1329,12 +1340,46 @@ but no page-table entries yet; "steady" is the matrix figure above.
 | `frontcoded` | 342.7 (337.7–343.4) | 1056.6 (1053.6–1060.1) | 144.3 | 129.2 |
 | `ptrhash` + fingerprint | 384.5 (374.0–389.1) | 500.2 (490.6–506.8) | 53.1 | 27.2 |
 
-**The cold column reverses the warm one.** At 100M the MPHF plus fingerprint
-array is the fastest mapped structure warm (45.1 ns) and the slowest cold
-(3,648.8 ns) — an 81× penalty, because every probe lands on a fresh random page
-of a 1.59 GB file. The FST pays 1.4× (223.0 → 313.8) for the opposite reason:
-at 66 MB it is 24× smaller, so the same 200,000 probes touch far fewer distinct
-pages and the file is effectively resident within a few thousand faults.
+**The cold column reverses the warm one, but read it as a one-time cost, not a
+standing latency.** At 100M the MPHF plus fingerprint array is the fastest mapped
+structure warm (45.1 ns) and the slowest cold (3,648.8 ns). That ratio is not a
+per-lookup penalty a server keeps paying: a cold cell is one file read amortised
+over 200,000 probes, and it falls as the probe count rises. Multiply it out
+instead.
+
+| structure | mapped size | cold excess over its own steady state, uniform stream | implied read rate |
+|---|---:|---:|---:|
+| `fst` | 66.1 MB | (886.8 − 689.1) ns × 200k = **0.040s** | 1.67 GB/s |
+| `frontcoded` | 1.36 GB | (4591.7 − 1223.8) ns × 200k = **0.674s** | 2.02 GB/s |
+| `ptrhash` + fingerprint | 1.59 GB | (4025.2 − 181.1) ns × 200k = **0.769s** | 2.06 GB/s |
+
+The three implied rates agree to within 20%, which says what the cold column is
+actually measuring: **the time to pull the structure off this host's disk once,
+at roughly 2 GB/s.** It therefore tracks file size, it is bounded by it, and it
+cannot exceed it however many probes follow. The whole cold argument for FST is
+**~0.73s of one-time faults avoided** at 100M keys.
+
+Against that, FST costs 11.8 ns more per base lookup than the MPHF behind the
+repeat cache (28.85 vs 17.01). The MPHF repays 0.73s after roughly **62M base
+lookups — about 620M dictionary calls** at the measured 90.1% cache hit rate.
+**A reopen-and-reload never reaches that and FST wins outright; a long-lived
+server does reach it, and there the MPHF is ahead.** S2 should choose knowing
+which of the two it is optimising, and the record recommends FST because reopen
+is the case SPEC-25 §S2 exists for.
+
+Two properties of the cold measurement that bound how far these ratios travel:
+
+- **The corpus-stream cold column exercises 1/30 of the key space.** The
+  replayed stream switches university block every 1,000,000 occurrences, so all
+  200,000 cold probes fall in copy 0 — 17,878 distinct keys drive them, a 91.1%
+  repeat rate. That is prefix-clustered and favours the FST beyond the size
+  effect. **The locality-neutral uniform column is the one to quote downstream:
+  FST is 4.5× better cold than the MPHF there (886.8 vs 4,025.2), against 11.6×
+  on the corpus stream.** Downstream documents carry 4.5×.
+- The cold loop has no repeat cache in front of it, but the corpus stream is
+  ~90% repeats regardless, so far fewer than 200,000 distinct pages are faulted —
+  17,878 distinct keys at 100M. The per-lookup figure is the file read spread
+  over the repeats, not one fault per probe.
 
 The "first touch" column isolates a cost that is easy to miss: **215–229 ns/
 lookup with the data already in RAM**, purely from populating page-table entries
@@ -1361,10 +1406,28 @@ balanced, 2.143 bits/key compact, constant across all four key sets. The
 fingerprint array beside it is 49× larger than the MPHF, and that array, not the
 MPHF, is what a lookup touches.
 
-`fst` size is corpus-dependent: 0.67 B/key on the templated LUBM vocabulary,
-**2.36 B/key on trainmarks**, which is real and less regular. Read the LUBM
-figure as the optimistic end. Even at the trainmarks rate the FST would be
-234 MB at 100M keys — still 6.8× smaller than the fingerprint array.
+**`fst` size is corpus-dependent, and the 100M point overstates it.** The
+per-key-set rates, which the single-scale table above cannot show:
+
+| key set | `fst` | front-coded | fingerprint + id records | flat arena + offsets |
+|---|---:|---:|---:|---:|
+| trainmarks xlarge, 1.9M (real) | 2.36 | 19.38 | 16.00 | 45.54 |
+| LUBM-100, 3.3M (real) | **1.02** | 13.58 | 16.00 | 67.57 |
+| LUBM-scaled 10M | 0.82 | 13.65 | 16.00 | 68.98 |
+| LUBM-scaled 100M | 0.67 | 13.72 | 16.00 | 70.28 |
+
+Only the FST rate moves with the scaling, and it moves the wrong way: **1.02
+B/key on the real LUBM-100 set against 0.67 on its 30× replication, a 34% drop
+from copying alone.** The replicated copies differ only in one number, so a
+constant id delta factors onto the university-number transition and the suffix
+subtree is shared across all 30 — exactly the mechanism the FST minimises best.
+Front-coding, the records and the arena are all flat across the same scaling, so
+the effect is specific to this arm.
+
+**Quote the real-corpus rate: the FST is 16× smaller than the fingerprint array
+on real LUBM-100 and 6.8× smaller on trainmarks, not the 24× the 100M scale
+point suggests.** Downstream documents carry 16×. Even at the trainmarks rate a
+100M-key FST is 234 MB against the fingerprint array's 1.59 GB.
 
 Build time, single invocation, from an in-memory key set:
 
@@ -1399,6 +1462,26 @@ front-coded entries. Measured at 100M, ns/lookup, corpus stream / uniform:
 Front-coding costs **48× the latency to save 4.0× the bytes**. Both halves are
 real; the plan should pick knowingly rather than assume front-coding is free.
 
+##### The total mapped base, which is not 66 MB
+
+The 16× term → id ratio above is one component. A base has to answer both
+directions, and the id → term half dominates the footprint. Both recommendations
+of this record, added up at 100M keys:
+
+| design | term → id | id → term | total B/key | total at 99,082,405 keys |
+|---|---:|---:|---:|---:|
+| **recommended**: `fst` + flat offset table | 0.67 | 70.28 | **70.95** | **7.03 GB** |
+| R3 as written: MPHF + fingerprint + flat offset table | 16.33 | 70.28 | 86.61 | 8.58 GB |
+| `fst` + front-coded id → term | 0.67 | 17.72 | **18.39** | **1.82 GB** |
+| R3 as written, front-coded id → term | 16.33 | 17.72 | 34.05 | 3.37 GB |
+
+**Read the total, not the term → id column.** Choosing FST over MPHF plus
+fingerprint shrinks the whole mapped base by **1.2×** if id → term stays a flat
+offset table over the arena, or 1.9× if id → term is front-coded. The 16× is
+real but applies to a component that is under 1% of the recommended design's
+bytes. Anyone sizing an S2 base from this record should budget **~7 GB at 100M
+keys**, not 66 MB.
+
 ##### Verdicts
 
 **R1 — confirmed.** Probe count and locality dominate key length. Over one key
@@ -1416,9 +1499,14 @@ batched (31.81 ns). Against the two other *mapped* candidates it is the largest
 313.8 ns). **Take FST for the mapped term → id base.** With the repeat cache in
 front — which R3 already requires — FST costs 28.85 ns against the MPHF's 17.01,
 a 11.8 ns difference on the ~10% of calls that reach the base at all, in
-exchange for 24× less mapped state, 11.6× better cold start, and ordered,
+exchange for a term → id structure **16× smaller on real-corpus rates** (6.8× on
+trainmarks), **4.5× better cold on the locality-neutral stream**, and ordered,
 prefix and automaton search that SPEC-25 will want for `STRSTARTS` and
-regex-over-dictionary.
+regex-over-dictionary. Two bounds on that trade, both from the sections above:
+the whole mapped base shrinks **1.2×**, not 16×, because id → term dominates the
+footprint; and the cold advantage is **~0.73s of one-time faults**, which the
+MPHF repays after ~620M dictionary calls. Reopen never reaches that, a
+long-lived server does.
 
 **R3 id → term — confirmed with its cost named.** Front-coded blocks plus an
 offset table work, and save 4.0× the bytes, but cost 48× the latency of a flat
@@ -1435,11 +1523,14 @@ cache in first, and the base structure is chosen on size and cold start.
 **R4's FST rejection — overturned.** R4 rejected FST as "the worst latency
 profile of the three for point lookups on a multi-GB map". The premise is wrong:
 the FST is not multi-GB. It is 66 MB for 99,082,405 LUBM keys and 4.5 MB for
-1,919,818 trainmarks keys — 24× smaller than the fingerprint array it was
-compared against. Warm, R4's latency claim holds (223.0 vs 45.1 ns, and 28.85
-vs 17.01 with the cache). Cold, it is exactly backwards: 313.8 vs 3,648.8 ns.
-For a structure whose whole purpose is reopen, the cold column is the one that
-decides.
+1,919,818 trainmarks keys — **16× smaller than the fingerprint array at
+real-corpus rates**, 6.8× on trainmarks (the 24× at the 100M scale point is
+inflated by the replication; see *Space and build*). Warm, R4's latency claim
+holds (223.0 vs 45.1 ns, and 28.85 vs 17.01 with the cache). Cold, it is
+backwards: 886.8 vs 4,025.2 ns on the locality-neutral stream, a **4.5×** FST
+advantage worth ~0.73s of one-time faults at 100M keys. For a structure whose
+whole purpose is reopen, that is the column that decides — and the reversal
+survives at the conservative ratio, which is why the rejection does not.
 
 **R4's ART/HOT rejection — still unmeasured.** No ART or HOT arm was built, so
 this spike does not confirm it. What it does show is that R4's stated
@@ -1451,7 +1542,11 @@ which reuses this harness and these key sets, rather than claimed here.
 
 **R5 batch-32 with software prefetch — confirmed for hash-shaped probes only.**
 At 100M, corpus stream: `openaddr` 11.71 → 6.84 (1.7×), `ptrhash` 45.14 → 21.05
-(2.1×), `ptrhash` misses 156.65 → 31.81 (4.9×). It does nothing for `hashbrown`
+(2.1×), `ptrhash` misses 156.65 → 31.81 (4.9×). Caveat on the `ptrhash` ratio:
+`ptrhash/single/hit` on that stream is the one noisy cell in the matrix, 45.14
+over a 34.25–54.19 range (±22% on 3 reps), so its batching ratio spans
+1.6–2.6×, and the 81× cold-to-warm figure quoted above spans 67–107×. Neither
+range changes a verdict, but do not quote either ratio to three digits. It does nothing for `hashbrown`
 (21.52 → 21.28 — the crate exposes no prefetch hook), nothing for `fst` (223.02
 → 223.52), and on the locality-rich corpus stream it makes the front-coded base
 *worse* (152.75 → 201.63) while helping it on the uniform stream (1223.80 →
@@ -1505,7 +1600,19 @@ cargo run --release -p horndb-storage --example dict_base_bench -- \
 # 5. one cold cell (needs passwordless sudo for drop_caches)
 cargo run --release -p horndb-storage --example dict_base_bench -- \
   cold --dir keys/lubm-100M --arm fst --probes 200000 --drop-caches
+
+# 6. the same loop without the drop -- the "first touch" column
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  cold --dir keys/lubm-100M --arm fst --probes 200000
+
+# add --zipf -1 to either cold command for the uniform-stream column
 ```
+
+**The probe counts are part of the result.** A cold cell is one file read
+amortised over the probe count, so raising `--probes` lowers the cold ns/lookup
+without anything having changed. Use 5,000,000 for `query` and 200,000 for
+`cold` to reproduce the tables above. The example's module doc carries the same
+values.
 
 `ptr_hash`, `fst`, `hashbrown` and `memmap2` are dev-dependencies of
 `horndb-storage`, reachable only from this example. They stay for as long as the
@@ -1651,6 +1758,13 @@ cargo bench -p horndb-incremental --bench insert_throughput
 
 # SPEC-02 storage — LUBM load throughput
 cargo bench -p horndb-storage --bench load_lubm
+
+# SPEC-25 S2 — dictionary base-structure matrix (HDB-93). Not criterion: a
+# spike driver with its own modes. Full protocol and the probe counts the
+# published tables use are in "Which structure backs the mapped dictionary
+# base (HDB-93)" above.
+cargo run --release -p horndb-storage --example dict_base_bench -- \
+  query --dir keys/lubm-100M --probes 5000000 --reps 3
 
 # SPEC-02 F8 — bulk-load wall time vs tier batch size (HDB-84). Not criterion:
 # one load per invocation, so sweep the batch size yourself. 0 = one insert call.

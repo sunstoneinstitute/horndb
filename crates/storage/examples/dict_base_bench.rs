@@ -25,16 +25,25 @@
 //!
 //! Usage:
 //!
+//! The probe counts below are the ones `docs/benchmarks.md` publishes. Change
+//! them and you get different numbers, most sharply in the cold cells: a cold
+//! figure is a one-time file read amortised over the probe count, so it falls
+//! as the count rises.
+//!
 //! ```text
-//! # 1. corpus -> (keys.bin, stream.bin): scripts/bench/corpus_term_stats.rs --emit-keys
-//! # 2. or synthesize a LUBM-shaped distinct-term set at a chosen scale
-//! dict_base_bench synth   --keys 100000000 --dir DIR
+//! # 1. corpus -> (keys.bin, stream.bin)
+//! rustc --edition 2021 -O -o /tmp/cts scripts/bench/corpus_term_stats.rs
+//! /tmp/cts --name lubm-100 --emit-keys DIR tbox.nt abox.nt
+//! # 2. re-instantiate that real key set at 30x universities (~100M keys)
+//! dict_base_bench scale --src DIR --dir DIR100 --factor 30 --keys 100000000
 //! # 3. build every structure, printing build time and bits/key
-//! dict_base_bench build   --dir DIR
+//! dict_base_bench build --dir DIR100
 //! # 4. the warm matrix
-//! dict_base_bench query   --dir DIR --probes 10000000 --reps 3
-//! # 5. one cold-page-cache cell (run once per drop_caches)
-//! dict_base_bench cold    --dir DIR --arm ptrhash --probes 2000000
+//! dict_base_bench query --dir DIR100 --probes 5000000 --reps 3
+//! # 5. one cold-page-cache cell (needs passwordless sudo for drop_caches)
+//! dict_base_bench cold  --dir DIR100 --arm fst --probes 200000 --drop-caches
+//! # 6. the same loop with a warm page cache -- the "first touch" column
+//! dict_base_bench cold  --dir DIR100 --arm fst --probes 200000
 //! ```
 
 // Every probe loop indexes several parallel arrays at once — the key, its
@@ -162,143 +171,6 @@ impl Keys {
     }
 }
 
-// ------------------------------------------------------- LUBM-shaped synth
-
-/// Generate `n` distinct LUBM-shaped dictionary keys.
-///
-/// LUBM's vocabulary is templated, so its distinct-term set can be produced
-/// without generating triples — which matters, because the real UBA generator
-/// cannot reach 100M distinct terms on this hardware in reasonable time or
-/// disk. The shape targets what HDB-92 F3/F5 measured on the real LUBM-100
-/// set: roughly two thirds IRIs and one third plain literals, IRI keys around
-/// 64 B, literal keys around 45 B, and a mean shared prefix over sorted IRIs
-/// near 62 B. `build` prints the achieved profile so it can be checked against
-/// the real set, which is also measured here at its own scale.
-///
-/// Per-department entity counts are jittered by a small LCG. Without the
-/// jitter every department carries an identical dense id range, the suffix
-/// automaton behind `fst` shares almost everything, and the FST comes out
-/// three orders of magnitude smaller than on real data — an artifact that
-/// would have flattered exactly the arm HDB-57 R4 rejects.
-fn synth_keys(n: usize) -> Keys {
-    const CLASSES: [&str; 8] = [
-        "GraduateStudent",
-        "UndergraduateStudent",
-        "AssistantProfessor",
-        "AssociateProfessor",
-        "FullProfessor",
-        "Lecturer",
-        "ResearchAssistant",
-        "TeachingAssistant",
-    ];
-    const BASE: [usize; 8] = [180, 540, 12, 14, 10, 8, 24, 20];
-    const ONTO: &str = "http://www.lehigh.edu/~zhp2/2004/0401/univ-bench.owl#";
-    let mut arena: Vec<u8> = Vec::with_capacity(n * 60);
-    let mut off = Vec::with_capacity(n);
-    let mut len = Vec::with_capacity(n);
-    let push = |arena: &mut Vec<u8>, off: &mut Vec<u64>, len: &mut Vec<u32>, s: &str| {
-        off.push(arena.len() as u64);
-        len.push(s.len() as u32);
-        arena.extend_from_slice(s.as_bytes());
-    };
-    // TBox vocabulary.
-    for c in CLASSES.iter() {
-        push(&mut arena, &mut off, &mut len, &format!("{ONTO}{c}"));
-    }
-    for p in [
-        "advisor",
-        "teacherOf",
-        "takesCourse",
-        "memberOf",
-        "subOrganizationOf",
-        "publicationAuthor",
-        "undergraduateDegreeFrom",
-        "mastersDegreeFrom",
-        "doctoralDegreeFrom",
-        "worksFor",
-        "name",
-        "emailAddress",
-        "telephone",
-        "researchInterest",
-        "headOf",
-    ] {
-        push(&mut arena, &mut off, &mut len, &format!("{ONTO}{p}"));
-    }
-    // Names and research interests repeat across departments, so the distinct
-    // set holds one copy each. A plain literal's key is `lexical` followed by a
-    // NUL and an empty tag, matching what `corpus_term_stats.rs` emits.
-    for c in CLASSES.iter() {
-        for i in 0..600usize {
-            push(&mut arena, &mut off, &mut len, &format!("{c}{i}\u{0}"));
-        }
-    }
-    for i in 0..40usize {
-        push(&mut arena, &mut off, &mut len, &format!("Research{i}\u{0}"));
-    }
-    let mut rng = Rng(0x1b3f_0000_0000_0001u64);
-    let mut u = 0usize;
-    'outer: loop {
-        for d in 0..15usize {
-            let dept = format!("http://www.Department{d}.University{u}.edu");
-            push(&mut arena, &mut off, &mut len, &dept);
-            for (ci, c) in CLASSES.iter().enumerate() {
-                // +-25% jitter, so no two departments share an id range.
-                let j = (rng.next() % 51) as i64 - 25;
-                let per = ((BASE[ci] as i64) * (100 + j) / 100).max(1) as usize;
-                for i in 0..per {
-                    push(&mut arena, &mut off, &mut len, &format!("{dept}/{c}{i}"));
-                    if off.len() >= n {
-                        break 'outer;
-                    }
-                    // Unique per person: the email literal.
-                    push(
-                        &mut arena,
-                        &mut off,
-                        &mut len,
-                        &format!("{c}{i}@Department{d}.University{u}.edu\u{0}"),
-                    );
-                    if off.len() >= n {
-                        break 'outer;
-                    }
-                    if i % 2 == 0 {
-                        push(
-                            &mut arena,
-                            &mut off,
-                            &mut len,
-                            &format!("{dept}/{c}{i}/Publication{}", i % 7),
-                        );
-                        if off.len() >= n {
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-            let ncourse = 20 + (rng.next() % 21) as usize;
-            for i in 0..ncourse {
-                push(&mut arena, &mut off, &mut len, &format!("{dept}/Course{i}"));
-                if off.len() >= n {
-                    break 'outer;
-                }
-                push(
-                    &mut arena,
-                    &mut off,
-                    &mut len,
-                    &format!("{dept}/GraduateCourse{i}"),
-                );
-                if off.len() >= n {
-                    break 'outer;
-                }
-            }
-        }
-        u += 1;
-    }
-    off.truncate(n);
-    len.truncate(n);
-    let end = off[n - 1] as usize + len[n - 1] as usize;
-    arena.truncate(end);
-    Keys { arena, off, len }
-}
-
 /// Re-instantiate a real LUBM key set at `factor` times as many universities,
 /// and replay its term stream over the result.
 ///
@@ -319,8 +191,19 @@ fn synth_keys(n: usize) -> Keys {
 /// generates — `undergraduateDegreeFrom` points at `University975` and the
 /// like — so a stride of 100 makes copy 9 collide with copy 0.
 ///
-/// This is how the 10M and 100M scale points are built. Nothing is invented —
-/// the shape comes from the measured LUBM-100 set.
+/// This is how the 10M and 100M scale points are built. The key *text* is not
+/// invented — every byte comes from the measured LUBM-100 set.
+///
+/// The *set structure* is: the copies are exact replicas differing only in one
+/// number, where a real LUBM-3000 would jitter per-department counts per
+/// university. That flatters `fst` specifically, because a constant id delta
+/// factors onto the university-number transition and the suffix subtree is
+/// shared across all copies. It is the same mechanism that made a hand-written
+/// LUBM-shaped generator (removed) produce an FST three orders of magnitude
+/// too small, only much weaker. Size it from the real corpus, not from here:
+/// `fst` measures 1.02 B/key on real LUBM-100 and 0.67 B/key on this 30x
+/// replication, a 34% drop from copying alone. `docs/benchmarks.md` carries
+/// both and quotes the real-corpus rate.
 const COPY_CHUNK: usize = 1_000_000;
 
 fn scale_keys(src: &Keys, src_stream: &[u32], factor: usize, cap: usize) -> (Keys, Vec<u32>) {
@@ -1008,7 +891,7 @@ fn file_len(path: &Path) -> u64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: dict_base_bench <synth|build|query|cold> --dir DIR [...]");
+        eprintln!("usage: dict_base_bench <scale|build|query|cold> --dir DIR [...]");
         std::process::exit(2);
     }
     let mode = args[1].clone();
@@ -1065,7 +948,6 @@ fn main() {
     }
     std::fs::create_dir_all(&dir).unwrap();
     match mode.as_str() {
-        "synth" => do_synth(&dir, n_keys),
         "scale" => {
             let sd = PathBuf::from(&src_dir);
             let src = Keys::read(&sd.join("keys.bin"));
@@ -1095,19 +977,6 @@ fn main() {
         "cold" => do_cold(&dir, probes, &arm, zipf, drop_first),
         o => panic!("unknown mode {o}"),
     }
-}
-
-fn do_synth(dir: &Path, n: usize) {
-    let t = Instant::now();
-    let k = synth_keys(n);
-    eprintln!(
-        "synth: {} keys, {} arena bytes, {:.1} B/key, {:.2}s",
-        k.n(),
-        k.bytes(),
-        k.bytes() as f64 / k.n() as f64,
-        t.elapsed().as_secs_f64()
-    );
-    k.write(&dir.join("keys.bin"));
 }
 
 fn key_stats(keys: &Keys, sorted: &[u32]) {
