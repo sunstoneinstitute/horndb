@@ -261,8 +261,15 @@ read-compute / write-commit split:
    within the batch; collect the storage batch. Intern failures skip the
    triple (lenient for bulk loads — the single-triple `insert_oxrdf`
    propagates intern errors instead). Already-live triples are not
-   filtered here: storage drops them itself, and does not charge for
-   the attempt.
+   filtered here: storage drops them itself, per triple, at no cost.
+   Per *batch* it is not free. Every quad now reaches
+   `apply_quad_batch`, which copies each touched partition forward and
+   rebuilds it before discovering the adds were all already visible; a
+   batch that is *entirely* already-live pays that whole rebuild and
+   then throws it away, because a zero-effect batch does not swap the
+   snapshot. Before HDB-89 such a batch left `entries` empty and never
+   called storage. Partially-duplicate batches are unaffected — they
+   always paid the rebuild. Tracked in HDB-104.
 2. Phase 2 (write): call `store.insert_quad_ids` once for the surviving
    entries, rebuilding each predicate partition at most once, and
    invalidate the WCOJ snapshot only if something actually became live.
