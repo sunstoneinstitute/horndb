@@ -106,9 +106,10 @@ What this changes for callers:
   read pays it; `MemoryTier::stats()`, `HornBackend::storage_stats()` and a
   Prometheus scrape all count as reads here, so none of them is strictly
   O(partitions) any more. It emits a `merge_runs` load phase.
-- `retract_quad_batch`, `apply_quad_batch` and `compact()` still rebuild a
-  partition row by row — they have to touch every row anyway — so they force
-  the merge first.
+- `retract_quad_batch` and `compact()` still rebuild a partition row by row —
+  they have to touch every row anyway — so they force the merge first.
+  `apply_quad_batch` rebuilds only the predicates a batch actually deletes
+  from; see the next section.
 
 **A read can now stall a write.** The merging thread is a reader. It holds no
 writer lock, and it holds the partition's `runs` mutex for the whole merge — a
@@ -144,6 +145,45 @@ process; `MemoryTier::with_hot_threshold` still overrides it per tier.
 Measured: eager costs 0.71s of a 10M-triple load and no crate above
 `horndb-storage` reads the object-major layout today (`docs/benchmarks.md`,
 "Cutting the `apply_quad_batch` hash tables").
+
+## `apply_quad_batch` append-run path (HDB-102, delivered)
+
+`apply_quad_batch` chooses its write strategy **per predicate**, not per batch:
+
+- **No deletion targets this predicate** → the append-run path above. The pairs
+  that are not already live become one extra run
+  (`PredicatePartition::with_appended_rows`); nothing already stored is read,
+  copied, or re-sorted, and the merge happens on the first read. This covers
+  every add-only batch — which is every `Store::insert_quads`, every SPARQL
+  `INSERT DATA`, and every `INSERT … WHERE` that deletes nothing — and also the
+  add-only predicates of a mixed batch.
+- **This predicate has deletion targets** → the pre-existing rebuild: carry
+  every row forward into a fresh `PartitionBuilder`, end-stamping the matches.
+
+Why the deletion side keeps the rebuild. A deletion sets `end` on a row that
+lives *inside* an existing run, and runs are immutable `Columns` blocks shared
+by `Arc` with every snapshot an older reader pinned. Writing the stamp in place
+would rewrite history under those readers, so the only in-design options are to
+rebuild the partition (what it does) or to give `Columns` a per-row mutable end
+column with its own versioning — a redesign of the MVCC row representation, not
+a local change. Nothing about the append-run path forecloses that later.
+
+`ApplyReport::inserted` stays exact on both paths: `Store::insert_quads` returns
+it and SPARQL `INSERT DATA` idempotency is decided by it. The fast path gets it
+from `PredicatePartition::mark_live`, which answers "which of these sorted pairs
+are already live?" with one galloping search per run and **without** merging the
+partition. Going through the merged view instead would force the whole-partition
+merge on every write and give the O(existing)-per-call cost straight back.
+
+`mark_live` is sound because merging never changes a pair's liveness:
+`Columns::sort_dedup` leaves end stamps alone and only collapses duplicate live
+rows for one pair. So a pair is live in the merged view iff some run holds a live
+row for it.
+
+Load-phase metrics on the fast path: `copy_forward` gets nothing (no rows are
+carried), the `mark_live` probe is charged to `merge`, and
+`with_appended_rows` to `build` — matching `insert_quad_batch`. See
+`docs/metrics.md`.
 
 ## Per-tuple MVCC (SPEC-25 S1, delivered)
 

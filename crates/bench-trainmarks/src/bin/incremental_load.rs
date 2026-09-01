@@ -18,9 +18,13 @@
 //! * `insert` — `HornBackend::insert_oxrdf_batch` -> `Store::insert_quads` ->
 //!   `Store::apply_quads` -> `Tier::apply_quad_batch`. What every SPARQL-side
 //!   ingest uses, and the path HDB-85's table covers. `Store::insert_quads` is
-//!   a wrapper over `apply_quads` (SPEC-28 S6), so this does **not** reach the
-//!   entry point HDB-84 rewrote: it still carries the partition forward and
-//!   still emits `copy_forward` — 30% of an append (HDB-91, HDB-102).
+//!   a wrapper over `apply_quads` (SPEC-28 S6). Before HDB-102 this did not
+//!   reach the append-run design HDB-84 gave `insert_quad_batch`, and
+//!   `copy_forward` was 30% of an append (HDB-91). HDB-102 gave
+//!   `apply_quad_batch` the same design for every predicate a batch does not
+//!   delete from, so an append-only run of this driver now emits no
+//!   `copy_forward` at all and the carry shows up as `merge_runs` on the
+//!   first read, exactly as on `load`.
 //! * `load` — `loader::load_ntriples_file` -> `Tier::insert_quad_batch`, the
 //!   storage bulk loader with no `HornBackend` dedupe above it.
 //!   This is the path HDB-84 fixed: no `copy_forward`, and the carried rows
