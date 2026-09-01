@@ -660,12 +660,19 @@ impl Tier for MemoryTier {
                 if let Some(targets) = add_targets {
                     added = targets.len() as u64;
                     // Both lists ascend, so one cursor over `still_visible`
-                    // replaces a hash probe per added pair. Should either list
-                    // ever arrive out of order the cursor can miss a match and
-                    // append a row that is already live; `Columns::sort_dedup`
-                    // then collapses the pair back to its earlier `begin`, so
-                    // the stored data stays correct and only `inserted`
-                    // over-counts.
+                    // replaces a hash probe per added pair. That is O(live
+                    // rows + adds) for the whole predicate — the merge bound,
+                    // and never worse than the copy-forward pass just above,
+                    // which is already O(live rows). A binary search would beat
+                    // it when a handful of adds land in a huge partition and
+                    // lose when the two lists interleave densely; the linear
+                    // cursor is the one that cannot be pathological.
+                    //
+                    // Should either list ever arrive out of order the cursor
+                    // can miss a match and append a row that is already live;
+                    // `Columns::sort_dedup` then collapses the pair back to its
+                    // earlier `begin`, so the stored data stays correct and
+                    // only `inserted` over-counts.
                     let mut vis = 0usize;
                     for &(s, o) in targets {
                         while still_visible.get(vis).is_some_and(|v| *v < (s, o)) {
