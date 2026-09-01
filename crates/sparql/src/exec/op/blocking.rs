@@ -383,28 +383,58 @@ impl<'r, E: Executor + ?Sized> Op for GroupOp<'r, E> {
     }
 }
 
-/// ORDER BY. Drains the child eagerly, sorts via `compute_order_by`, then
-/// emits via `ChunkedBatch`. Output schema = child schema (sort is
-/// schema-preserving).
+/// ORDER BY, optionally fused with the LIMIT/OFFSET above it (HDB-101).
+/// Drains the child eagerly, then emits via `ChunkedBatch`. Output schema =
+/// child schema (sort is schema-preserving).
+///
+/// `limit` is `None` for a plain sort and `Some(offset + limit)` when
+/// `Runtime::build` found a bounded `Slice` above this sort — never just the
+/// limit, because the `SliceOp` above still applies the offset itself. The
+/// bounded form keeps that many rows in a heap instead of sorting the whole
+/// input; its output is row-for-row what the unbounded form truncated to
+/// `limit` would be, ties included.
 pub struct OrderByOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
     child: Box<dyn Op + 'r>,
     keys: Vec<(Expr, OrderDir)>,
+    limit: Option<usize>,
     buffer: Option<ChunkedBatch>,
     schema: Vec<Var>,
 }
 
 impl<'r, E: Executor + ?Sized> OrderByOp<'r, E> {
+    /// A full sort of everything the child yields.
     pub fn new(
         rt: &'r Runtime<'r, E>,
         child: Box<dyn Op + 'r>,
         keys: Vec<(Expr, OrderDir)>,
+    ) -> Self {
+        Self::bounded(rt, child, keys, None)
+    }
+
+    /// A sort that only has to produce its first `n` rows — see the struct
+    /// doc for what `n` must be.
+    pub fn top_k(
+        rt: &'r Runtime<'r, E>,
+        child: Box<dyn Op + 'r>,
+        keys: Vec<(Expr, OrderDir)>,
+        n: usize,
+    ) -> Self {
+        Self::bounded(rt, child, keys, Some(n))
+    }
+
+    fn bounded(
+        rt: &'r Runtime<'r, E>,
+        child: Box<dyn Op + 'r>,
+        keys: Vec<(Expr, OrderDir)>,
+        limit: Option<usize>,
     ) -> Self {
         let schema = child.schema().to_vec();
         Self {
             rt,
             child,
             keys,
+            limit,
             buffer: None,
             schema,
         }
@@ -416,13 +446,17 @@ impl<'r, E: Executor + ?Sized> Op for OrderByOp<'r, E> {
         &self.schema
     }
     fn may_emit_term(&self) -> Vec<bool> {
-        // Sort only reorders rows; slots pass through untouched.
+        // Sort only selects and reorders rows; slots pass through untouched.
         self.child.may_emit_term()
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
             let b = drain(&mut self.child)?;
-            self.buffer = Some(ChunkedBatch::new(self.rt.compute_order_by(b, &self.keys)?));
+            let sorted = match self.limit {
+                Some(n) => self.rt.compute_top_k(b, &self.keys, n)?,
+                None => self.rt.compute_order_by(b, &self.keys)?,
+            };
+            self.buffer = Some(ChunkedBatch::new(sorted));
         }
         Ok(self.buffer.as_mut().unwrap().next_chunk())
     }
