@@ -357,14 +357,13 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
 /// merged into the shared counters once per batch (SPEC-17 §5.4.1).
 ///
 /// `clock_ns` is the cost of the instrumentation itself, measured in situ: one
-/// empty interval per iteration. Each of the other four intervals carries the
+/// empty interval per iteration. Each of the other three intervals carries the
 /// same one-clock-read cost, so the corrected value of a sub-phase is
 /// `<phase>_ns - clock_ns`. Both are exported; the subtraction is left to the
 /// reader so the raw numbers stay auditable.
 #[derive(Default)]
 struct DedupeSubPhases {
     intern_ns: u64,
-    contains_ns: u64,
     intra_ns: u64,
     rest_ns: u64,
     clock_ns: u64,
@@ -380,7 +379,6 @@ impl DedupeSubPhases {
         use std::time::Duration;
         for (phase, ns) in [
             (LoadPhase::DedupeIntern, self.intern_ns),
-            (LoadPhase::DedupeContains, self.contains_ns),
             (LoadPhase::DedupeIntra, self.intra_ns),
             (LoadPhase::DedupeRest, self.rest_ns),
             (LoadPhase::DedupeClock, self.clock_ns),
@@ -404,14 +402,6 @@ fn dedupe_subphases_enabled() -> bool {
 
 pub struct HornBackend {
     store: ColumnStore,
-    /// Mirror of every `(graph, s, p, o)` TermId key currently LIVE in
-    /// `store` (inserted on insert, removed on retract), keyed by *quad* —
-    /// the same triple in two graphs is two entries (SPEC-28 S2). Gives O(1)
-    /// membership tests for `INSERT DATA` idempotency and `DELETE DATA`
-    /// no-op detection, avoiding storage's O(partition-size)
-    /// `StoreSnapshot::contains` on the bulk-load hot path. See
-    /// `insert_oxrdf_in_graph` for the write funnel's current graph scope.
-    live_keys: HashSet<QuadKey>,
     /// Lazily-built WCOJ sources, one per [`SnapshotScope`] a query has
     /// asked for. A small `apply_quads` delta is merged into these in place
     /// ([`Self::apply_delta_to_snapshots`]); every other write clears them
@@ -445,7 +435,6 @@ impl HornBackend {
     pub fn new() -> Self {
         Self {
             store: ColumnStore::in_memory(),
-            live_keys: HashSet::new(),
             snapshots: Mutex::new(HashMap::new()),
             stats_cache: Mutex::new(None),
         }
@@ -706,15 +695,25 @@ impl HornBackend {
             .dictionary()
             .intern_quad(g, s, p, o)
             .map_err(|e| SparqlError::Executor(format!("intern: {e}")))?;
-        let key = QuadKey::of(quad);
-        if self.live_keys.contains(&key) {
-            return Ok(false); // SPARQL INSERT DATA is idempotent on an already-live triple
+        // SPARQL INSERT DATA is idempotent on an already-live triple. The
+        // storage insert below would report that correctly on its own, but it
+        // rebuilds the whole predicate partition to find out; this point read
+        // is O(log rows) and keeps a repeated insert cheap.
+        if self
+            .store
+            .snapshot()
+            .contains_quad(g, quad.subject(), quad.predicate(), quad.object())
+        {
+            return Ok(false);
         }
         // Ids, not terms: the intern above is the only dictionary pass.
-        self.store
+        let inserted = self
+            .store
             .insert_quad_ids(&[quad])
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
-        self.live_keys.insert(key);
+        if inserted == 0 {
+            return Ok(false);
+        }
         self.invalidate();
         Ok(true)
     }
@@ -739,12 +738,18 @@ impl HornBackend {
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
     ///
-    /// * Phase 1 (read-only): intern all terms and drop any triple already
-    ///   live (via `live_keys`, an O(1) check) or repeated within this batch.
-    ///   Any intern failure skips that triple.
+    /// * Phase 1 (read-only): intern all terms and drop any triple repeated
+    ///   within this batch. Any intern failure skips that triple.
     /// * Phase 2 (write): call `store.insert_quad_ids` once for the surviving
-    ///   entries, then mark them live only on success. Propagates storage
-    ///   errors.
+    ///   entries. Propagates storage errors.
+    ///
+    /// Already-live triples are **not** filtered here. `Tier::apply_quad_batch`
+    /// is itself idempotent — it inserts only what is not visible after the
+    /// batch's deletions — and returns the count of quads that genuinely
+    /// became live, which is what this returns (HDB-89). Filtering them out
+    /// first needed a `HashSet` mirror of every live quad, which cost 6% of a
+    /// bulk load and ~0.5 GB at 10M triples to answer a question storage
+    /// already answers.
     ///
     /// Phase 1 keeps the [`InternedQuad`]s it built, so storage does not
     /// intern the same terms a second time (HDB-87). That also makes the
@@ -760,10 +765,11 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 1 (read-only): intern and drop already-live/intra-batch-duplicate
-        // triples. `intra_batch` deduplicates within the batch itself in O(1)
-        // per triple. `entries` holds the interned ids — it is the buffer
-        // phase 2 hands straight to storage.
+        // Phase 1 (read-only): intern and drop intra-batch-duplicate triples.
+        // `intra_batch` deduplicates within the batch itself in O(1) per
+        // triple, which keeps `entries` (and the vector storage groups from
+        // it) down to the distinct rows. `entries` holds the interned ids —
+        // it is the buffer phase 2 hands straight to storage.
         let mut entries: Vec<InternedQuad> = Vec::with_capacity(triples.len());
         let mut intra_batch: HashSet<QuadKey> = HashSet::new();
         let n_in = triples.len() as u64;
@@ -791,22 +797,15 @@ impl HornBackend {
                         continue;
                     };
                     // `QuadKey::of` and the match above are a handful of ALU
-                    // ops; they land in the `contains` interval.
-                    let key = QuadKey::of(quad);
-                    let live = self.live_keys.contains(&key);
+                    // ops; they land in the `intra` interval.
+                    let fresh = intra_batch.insert(QuadKey::of(quad));
                     let t2 = std::time::Instant::now();
-                    sub.contains_ns += t2.duration_since(t1).as_nanos() as u64;
-                    if live {
-                        continue;
-                    }
-                    let fresh = intra_batch.insert(key);
-                    let t3 = std::time::Instant::now();
-                    sub.intra_ns += t3.duration_since(t2).as_nanos() as u64;
+                    sub.intra_ns += t2.duration_since(t1).as_nanos() as u64;
                     if !fresh {
                         continue;
                     }
                     entries.push(quad);
-                    sub.rest_ns += t3.elapsed().as_nanos() as u64;
+                    sub.rest_ns += t2.elapsed().as_nanos() as u64;
                 }
                 sub.record(n_in);
             } else {
@@ -814,11 +813,7 @@ impl HornBackend {
                     let Ok(quad) = d.intern_quad(g, &s, &p, &o) else {
                         continue; // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
                     };
-                    let key = QuadKey::of(quad);
-                    if self.live_keys.contains(&key) {
-                        continue; // already live — no-op
-                    }
-                    if !intra_batch.insert(key) {
+                    if !intra_batch.insert(QuadKey::of(quad)) {
                         continue; // duplicate within this batch; first occurrence wins
                     }
                     entries.push(quad);
@@ -832,25 +827,25 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 2 (write): storage insert first, then bookkeeping. `entries`
-        // is already in the shape storage wants, so there is nothing to stage
-        // and nothing to re-intern.
-        self.store
+        // Phase 2 (write): one storage call. `entries` is already in the shape
+        // storage wants, so there is nothing to stage and nothing to
+        // re-intern. The returned count is the authoritative number of newly
+        // live quads — storage skips whatever was already visible.
+        let inserted = self
+            .store
             .insert_quad_ids(&entries)
-            .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?;
+            .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?
+            as u64;
 
-        let t_live = std::time::Instant::now();
-        let n_keys = entries.len() as u64;
-        for quad in &entries {
-            self.live_keys.insert(QuadKey::of(*quad));
+        if inserted == 0 {
+            return Ok(0);
         }
-        record_load_phase(LoadPhase::LiveKeys, t_live.elapsed(), n_keys);
 
         let t_inv = std::time::Instant::now();
         self.invalidate();
-        record_load_phase(LoadPhase::Invalidate, t_inv.elapsed(), n_keys);
+        record_load_phase(LoadPhase::Invalidate, t_inv.elapsed(), inserted);
 
-        Ok(n_keys)
+        Ok(inserted)
     }
 
     /// Bulk-insert algebra triples in one pass — O(n) cost versus O(n²) for
@@ -892,6 +887,10 @@ impl HornBackend {
         self.insert_oxrdf_batch(ox_triples)
     }
 
+    /// Interning `QuadKey` lookup: creates dictionary entries for any term
+    /// `g`/`s`/`p`/`o` it has not seen. Used on the insert side of
+    /// [`Self::apply_delta_to_snapshots`], where the terms were interned by
+    /// the storage write just above, so this is a cheap hit in practice.
     fn intern_key(
         &self,
         g: GraphId,
@@ -911,8 +910,8 @@ impl HornBackend {
 
     /// Non-interning `QuadKey` lookup: `None` if `g`/`s`/`p`/`o` has never
     /// been interned, meaning the quad cannot be live. Used on the delete
-    /// side of [`Store::apply_quads`], mirroring [`Self::intern_key`]'s
-    /// interning lookup on the insert side.
+    /// side of [`Self::apply_delta_to_snapshots`], mirroring
+    /// [`Self::intern_key`]'s interning lookup on the insert side.
     fn lookup_key(
         &self,
         g: GraphId,
@@ -1217,11 +1216,9 @@ impl Store for HornBackend {
     /// interning, so a never-seen named graph or term is created), then
     /// applies both in one call to `horndb_storage::Store::apply_quads`
     /// (Task 1, SPEC-28 S6) — the atomic dels-before-adds, idempotent,
-    /// counted store boundary. `live_keys` is kept in step (dels removed
-    /// before adds inserted, mirroring the storage batch's own ordering) —
-    /// not required for correctness (the store is authoritative either way),
-    /// but keeps the O(1) fast path in `insert_oxrdf_in_graph` and friends
-    /// accurate rather than merely harmless-if-stale.
+    /// counted store boundary. The returned `retracted`/`inserted` are
+    /// storage's own counts, so `DELETE DATA` no-op detection and `INSERT
+    /// DATA` idempotency are decided by the store and by nothing above it.
     fn apply_quads(
         &mut self,
         dels: Vec<AlgebraQuad>,
@@ -1260,18 +1257,6 @@ impl Store for HornBackend {
             .apply_quads(&del_rows, &add_rows)
             .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
 
-        for (g, s, p, o) in &del_rows {
-            if let Some(key) = self.lookup_key(*g, s, p, o) {
-                self.live_keys.remove(&key);
-            }
-        }
-        for (g, s, p, o) in &add_rows {
-            // `store.apply_quads` above already interned every add term, so
-            // this re-intern is a cheap dictionary hit, never a fresh entry.
-            if let Ok(key) = self.intern_key(*g, s, p, o) {
-                self.live_keys.insert(key);
-            }
-        }
         if report.retracted > 0 || report.inserted > 0 {
             self.apply_delta_to_snapshots(&del_rows, &add_rows);
         }
@@ -1316,9 +1301,6 @@ impl Store for HornBackend {
             .tier()
             .apply_quad_batch(&dels, &[])
             .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
-        for &(g, s, p, o) in &dels {
-            self.live_keys.remove(&QuadKey::new(g, s, p, o));
-        }
         if report.retracted > 0 {
             self.invalidate();
         }
@@ -2917,17 +2899,18 @@ mod tests {
             b.store.snapshot().graphs().is_empty(),
             "SPEC-28 D11: a fully-retracted graph must cease to exist"
         );
-        assert!(b.live_keys.is_empty());
     }
 
     #[test]
     fn clear_graph_all_graphs_sweeps_a_store_with_no_funnel_writes() {
         let mut b = HornBackend::new();
         // Plant a named-graph quad directly at the storage layer, bypassing
-        // HornBackend's write funnel entirely, so `live_keys` stays empty on
-        // entry. This is the case `clear_graph`'s early-out must not skip:
-        // consulting `live_keys.is_empty()` instead of the snapshot scan
-        // would return here and leave the quad live (#265).
+        // HornBackend's write funnel entirely. `clear_graph` must find it by
+        // scanning the snapshot: this is the case an early-out based on
+        // backend-side bookkeeping would skip, leaving the quad live (#265).
+        // HDB-89 removed the `live_keys` mirror that made that mistake
+        // possible; the test stays as the regression guard for the shape of
+        // it, since the store is now the only place membership is recorded.
         let g = b
             .store
             .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/g")))
@@ -2940,10 +2923,6 @@ mod tests {
                 OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/o")),
             )])
             .unwrap();
-        assert!(
-            b.live_keys.is_empty(),
-            "planted below the funnel: live_keys must stay empty"
-        );
         assert_eq!(b.len(), 1);
 
         let removed = b.clear_graph(&GraphTarget::AllGraphs).unwrap();
@@ -2951,7 +2930,6 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(b.is_empty());
         assert!(b.store.snapshot().graphs().is_empty());
-        assert!(b.live_keys.is_empty());
     }
 
     #[test]

@@ -177,9 +177,10 @@ a cost proportional to the graph.
   criterion changes.
 - **The SPARQL executor stops hard-wiring the default graph.** `HornBackend`'s
   write path becomes quad-grain — it takes the graph from the quad being
-  written, including `horn.rs::clear_all`'s `DEFAULT_GRAPH` retraction sweep —
-  and its `live_keys` dedup set is keyed by *quad*, not triple: the same triple
-  in two graphs is two rows.
+  written, including `horn.rs::clear_all`'s `DEFAULT_GRAPH` retraction sweep.
+  Membership is quad-grain throughout: the same triple in two graphs is two
+  rows. (The backend's `live_keys` dedup set, quad-keyed for this reason,
+  was removed in HDB-89 — storage answers membership now, still per quad.)
 
 ### S3. Query — `GRAPH` and dataset construction
 
