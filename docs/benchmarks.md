@@ -1291,9 +1291,17 @@ here, and it does not move.
 **`group` got faster while doing a sort, because the corpus is already in
 subject order.** trainmarks is generated subject-major and `HornBackend` feeds
 document order, so within a predicate the pairs arrive sorted and
-`sort_unstable` takes pdqsort's already-sorted path. On a randomly ordered
-corpus `group` would pay a real sort — but `build` would then skip one, because
-the same rows reach the builder sorted. The sort moves; it does not double.
+`sort_unstable` takes pdqsort's already-sorted path.
+
+On a randomly ordered corpus `group` would pay a real sort. **Into an empty
+partition that is a move, not an addition** — the builder then receives exactly
+the sorted add list, so `Columns::sort_dedup` skips its own sort and the work
+nets out. **On an append it is additive**, because the builder receives carried
+rows followed by adds, which is two sorted runs rather than one sorted
+sequence, so `sort_dedup` sorts the whole partition either way. The append case
+still comes out ahead — the adds are small against the partition, and the
+`still_visible` and memory wins do not depend on arrival order at all — but the
+group-phase sort is genuinely extra there, not relocated.
 
 ##### Append: into the loaded 9,995,000-triple store
 
