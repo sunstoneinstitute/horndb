@@ -306,12 +306,22 @@ fn dump_load_phases(label: &str) {
     }
 }
 
-/// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) after a cold
-/// read query, so a trainmarks run reports which operator inside `exec` the
-/// query actually spent its time in. Only meaningful with
-/// `HORNDB_EXEC_PHASES=1` set; a silent no-op otherwise (the counters are
-/// simply never touched). Counters are cumulative across the process, like
-/// `dump_load_phases`; subtract successive dumps to get one query's share.
+/// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) so a
+/// trainmarks run reports which operator inside `exec` a query actually
+/// spent its time in. Only meaningful with `HORNDB_EXEC_PHASES=1` set; a
+/// silent no-op otherwise (the counters are simply never touched).
+///
+/// Counters are cumulative across the process, like `dump_load_phases` —
+/// but unlike that helper (called exactly twice, nothing else running in
+/// between), a read loop calls this once per query, so a *query's own*
+/// share is only the diff between its own `"{qname}_pre"` (called
+/// immediately before its cold run) and `"{qname}_cold"` (immediately
+/// after) dumps — see the call sites in the read-query loop. Diffing across
+/// loop iterations instead (e.g. `"q3_cold"` minus `"q2_cold"`) also counts
+/// every warm re-run of the *previous* query that happened in between, which
+/// is large enough to be misleading: it made a HDB-99 measurement pass
+/// briefly show `GROUP BY` phase activity for q3, a query with no `GROUP BY`
+/// at all, borrowed from q2's warm runs.
 fn dump_exec_phases(label: &str) {
     let encoded = horndb_metrics::encode_metrics();
     eprintln!("  [exec-phases after {label}]");
@@ -430,6 +440,7 @@ fn main() -> Result<()> {
         let sql = std::fs::read_to_string(cli.queries_dir.join(format!("{qname}.rq")))
             .with_context(|| format!("read {qname}.rq"))?;
 
+        dump_exec_phases(&format!("{qname}_pre"));
         // Cold run.
         match run_read_timed(&backend, &sql, timeout) {
             None => {

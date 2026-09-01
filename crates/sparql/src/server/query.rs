@@ -271,6 +271,14 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     let store = Arc::clone(&state.store);
 
     tokio::task::spawn_blocking(move || {
+        // HDB-99: discard any per-operator exec-phase data left over on this
+        // (tokio blocking-pool, thread-reused) thread from a previous
+        // query's trailing chunks — see `exec::phases::reset`. This query's
+        // own `record_exec` flush only covers up to the first chunk; the
+        // reset here is what stops a query's later, un-flushed chunk work
+        // from being silently attributed to whichever query flushes next
+        // on this thread.
+        crate::exec::phases::reset();
         let store = store.read().unwrap();
         let rt = Runtime::new(&*store).with_dataset(dataset, default_graph);
         let mut ser = select_serializer(fmt);

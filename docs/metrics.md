@@ -67,7 +67,6 @@ again.
 | `status` | HTTP status code (u16, e.g. `200`, `400`) | `sparql_requests` |
 | `kind` | `select`, `ask`, `construct`, `describe`, `update` | `sparql_query` |
 | `stage` | `parse`, `translate`, `plan`, `exec` | sparql query-errors / stage-duration |
-| `exec_phase` | `scan_wcoj`, `scan_row_build`, `scan_provenance`, `join_build`, `join_probe`, `group_key`, `group_decode`, `agg_fold`, `sort`, `stream_op`, `result_encode`, `clock`, `residual` | `sparql_exec_phase_nanoseconds` / `sparql_exec_phase_rows` (`HORNDB_EXEC_PHASES=1` only) |
 | `phase` | `compiled_rules`, `list_rules`, `closure_backend`, `apply` | `owlrl_phase_duration_seconds` |
 | `rule` | OWL-RL rule id (string, e.g. `cax-sco`) | `owlrl_rule_fires`, `owlrl_rule_duration_seconds` |
 | `tier` | `dram`, `hbm`, `cxl`, `unknown` | `storage_tier_bytes_estimated` (only `unknown` emitted today — tiering is Stage-3) |
@@ -87,8 +86,8 @@ again.
 | `horndb_sparql_query_total` | counter | `kind` | count | query/update operations by kind |
 | `horndb_sparql_query_errors_total` | counter | `stage` | count | pipeline errors by stage; `exec` includes mid-stream errors of HTTP-streamed SELECTs (which abort the response body rather than producing a 4xx/5xx) |
 | `horndb_sparql_stage_duration_seconds` | histogram | `stage` | s `(1e-4 ×3 ×12)` | per-stage pipeline latency; for HTTP-streamed SELECTs, `exec` measures plan→first-result-chunk (no duration metric covers the full body drain; delivered bytes are visible in `horndb_sparql_response_bytes_total`), and non-SELECT `/query` requests record one extra `parse` observation from streaming-path routing |
-| `horndb_sparql_exec_phase_nanoseconds_total` | counter | `exec_phase` | ns | nanoseconds spent in each per-operator SPARQL execution-time phase (`HORNDB_EXEC_PHASES=1` only — zero rows/samples when the flag is off) |
-| `horndb_sparql_exec_phase_rows_total` | counter | `exec_phase` | count | rows each execution-time phase handled |
+| `horndb_sparql_exec_phase_nanoseconds_total` | counter | `phase` | ns | nanoseconds spent in each per-operator SPARQL execution-time phase (`HORNDB_EXEC_PHASES=1` only — zero rows/samples when the flag is off) |
+| `horndb_sparql_exec_phase_rows_total` | counter | `phase` | count | rows each execution-time phase handled |
 
 Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`),
 `crates/sparql/src/api.rs` (`timed()`, query-kind classification), and
@@ -104,7 +103,7 @@ leaving everything inside one `exec` number (HDB-99). The gate is a `OnceLock`
 read, checked at batch/chunk/group granularity — never per row (SPEC-17 §5.3) —
 so it costs nothing measurable when off.
 
-| `exec_phase` | Emitted from | What it covers |
+| `phase` | Emitted from | What it covers |
 |---|---|---|
 | `scan_wcoj` | `crates/sparql/src/exec/horn.rs` (`scan_bgp_ids`) | the WCOJ (leapfrog triejoin) executor producing one arrow batch of join results |
 | `scan_row_build` | `crates/sparql/src/exec/horn.rs` (`scan_bgp_ids`) | converting one arrow batch's columns into slot `Row`s, including the diagonal (repeated-variable) filter — one pair per arrow batch, not per row |
@@ -120,7 +119,7 @@ so it costs nothing measurable when off.
 | `clock` | `crates/sparql/src/exec/runtime.rs` (`eval_group_native`) | one empty `Instant::now()` interval per group (HDB-90 style): the cost of the instrumentation itself, to subtract from `group_decode`/`agg_fold` |
 | `residual` | `crates/sparql/src/exec/phases.rs` (`flush`) | `exec_elapsed − sum(the other 12 phases)` — everything they don't clock (e.g. `drain`'s `rows.extend`, `ChunkedBatch::next_chunk`'s per-chunk `collect` + `schema.clone()`, the pushdown rewrite in `runtime.rs`) |
 
-`decode_subset` (`exec/runtime.rs:207`) is shared by several call sites
+`decode_subset` (`exec/runtime.rs`) is shared by several call sites
 (`compute_order_by`, `compute_path_closure`, `eval_group_native`,
 `probe_into_indexed`); it is not its own phase — its cost lands inside
 whichever phase's timed span encloses the call (`sort`, `group_decode`,

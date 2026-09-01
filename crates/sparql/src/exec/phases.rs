@@ -47,11 +47,29 @@ const PHASE_ORDER: [ExecPhase; 12] = [
 
 const N: usize = PHASE_ORDER.len();
 
+/// Exhaustive match, not a linear scan: a reordered/added/removed
+/// `ExecPhase` variant fails to compile here rather than silently misfiling
+/// a phase into the wrong accumulator slot. Indices must match
+/// `PHASE_ORDER`'s order exactly — `tests::phase_order_matches_index_of`
+/// checks that on every test run.
 fn index_of(phase: &ExecPhase) -> usize {
-    PHASE_ORDER
-        .iter()
-        .position(|p| p == phase)
-        .expect("phase must be one of PHASE_ORDER (Residual is derived, never accumulated)")
+    match phase {
+        ExecPhase::ScanWcoj => 0,
+        ExecPhase::ScanRowBuild => 1,
+        ExecPhase::ScanProvenance => 2,
+        ExecPhase::JoinBuild => 3,
+        ExecPhase::JoinProbe => 4,
+        ExecPhase::GroupKey => 5,
+        ExecPhase::GroupDecode => 6,
+        ExecPhase::AggFold => 7,
+        ExecPhase::Sort => 8,
+        ExecPhase::StreamOp => 9,
+        ExecPhase::ResultEncode => 10,
+        ExecPhase::Clock => 11,
+        ExecPhase::Residual => {
+            unreachable!("residual is derived by flush(), never accumulated via add()/timed()")
+        }
+    }
 }
 
 thread_local! {
@@ -105,6 +123,35 @@ pub(crate) fn timed<T>(phase: ExecPhase, rows: u64, f: impl FnOnce() -> T) -> T 
     out
 }
 
+/// Discard this thread's accumulated phases without merging them into the
+/// shared counters. No-op when disabled.
+///
+/// Call at the *start* of a query's exec stage, before anything on this
+/// thread can call [`add`]/[`timed`] for it — never after. Its job is to
+/// guarantee a clean slate, not to record anything.
+///
+/// This closes a real leak on the HTTP streaming path
+/// (`server::query::record_exec`): that path's [`flush`] runs once, right
+/// after the first result chunk, but the response body keeps streaming
+/// further chunks afterward on the *same* thread — each one still timed
+/// (`result_encode`, `stream_op`, …) since `enabled()` is still true, with
+/// nowhere to flush to for *this* query (by design: the streaming path only
+/// ever measures up to the first chunk, see `docs/metrics.md`). Without a
+/// reset, that leftover sits in the thread-local until whatever query flushes
+/// *next* on this (tokio blocking-pool, thread-reused) thread — silently
+/// inflating that unrelated query's phase totals. `flush`'s `saturating_sub`
+/// would clamp the resulting residual to 0 instead of going negative, so the
+/// corruption has no failing metric or test to catch it; the fix is to never
+/// let it happen, by resetting before every query starts.
+pub(crate) fn reset() {
+    if !enabled() {
+        return;
+    }
+    ACC.with(|a| {
+        *a.borrow_mut() = [(0, 0); N];
+    });
+}
+
 /// Merge this thread's accumulated phases into the shared counters, derive
 /// `residual` as `exec_elapsed - sum(named)`, and reset the accumulator for
 /// this thread's next query. Call once per query, right after the `exec`
@@ -133,4 +180,25 @@ pub(crate) fn flush(exec_elapsed: Duration) {
     let residual_ns = exec_ns.saturating_sub(named_ns);
     m.sparql
         .record_exec_phase(ExecPhase::Residual, Duration::from_nanos(residual_ns), 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `index_of`'s match arms are a second, independent statement of
+    /// `PHASE_ORDER`'s order — this pins them together so a future edit to
+    /// one without the other (rather than the `ExecPhase` variant list
+    /// itself changing, which the exhaustive match already catches at
+    /// compile time) fails a test instead of silently misfiling a phase.
+    #[test]
+    fn phase_order_matches_index_of() {
+        for (i, phase) in PHASE_ORDER.iter().enumerate() {
+            assert_eq!(
+                index_of(phase),
+                i,
+                "PHASE_ORDER[{i}] = {phase:?} but index_of disagrees"
+            );
+        }
+    }
 }

@@ -5,7 +5,6 @@
 //! time. That inequality is the machine-checkable form of "phases are
 //! exclusive by construction": every phase clocks only its own work
 //! statement, never a child operator's `next()`.
-#![cfg(feature = "server")]
 
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::execute_query;
@@ -83,6 +82,21 @@ fn exec_stage_ns(text: &str) -> u64 {
     panic!("no exec-stage stage_duration_seconds_sum line in:\n{text}");
 }
 
+/// Assert `sum(named phases) <= exec_ns` — the machine-checkable form of
+/// "phases are exclusive by construction". Shared by both tests below.
+fn assert_exclusive(text: &str, ns: &HashMap<String, u64>) {
+    let sum_named: u64 = ns
+        .iter()
+        .filter(|(k, _)| k.as_str() != "residual")
+        .map(|(_, v)| *v)
+        .sum();
+    let exec_ns = exec_stage_ns(text);
+    assert!(
+        sum_named <= exec_ns,
+        "sum(named phases) = {sum_named} ns exceeds exec = {exec_ns} ns — phases are not exclusive\n{text}"
+    );
+}
+
 #[test]
 fn exec_phases_are_exclusive() {
     std::env::set_var("HORNDB_EXEC_PHASES", "1");
@@ -97,7 +111,8 @@ fn exec_phases_are_exclusive() {
     // Every phase a GROUP BY + ORDER BY query over one flat BGP touches.
     // `join_build`/`join_probe` are absent by design (Notes for the
     // implementer): a single flat BGP folds into one `BgpScan`, never a
-    // `JoinOp`/`LeftJoinOp`.
+    // `JoinOp`/`LeftJoinOp` — those two are covered by
+    // `exec_phases_join_and_stream_ops` below.
     for phase in [
         "scan_wcoj",
         "scan_row_build",
@@ -114,14 +129,51 @@ fn exec_phases_are_exclusive() {
         );
     }
 
-    let sum_named: u64 = ns
-        .iter()
-        .filter(|(k, _)| k.as_str() != "residual")
-        .map(|(_, v)| *v)
-        .sum();
-    let exec_ns = exec_stage_ns(&text);
-    assert!(
-        sum_named <= exec_ns,
-        "sum(named phases) = {sum_named} ns exceeds exec = {exec_ns} ns — phases are not exclusive\n{text}"
-    );
+    assert_exclusive(&text, &ns);
+}
+
+/// A second, independent check: `OPTIONAL` + `FILTER` + `DISTINCT`,
+/// exercising `LeftJoinOp` (`join_build`/`join_probe` — the two phases with
+/// the "clock the work, not the child pull" trap this whole feature exists
+/// to avoid) and the stream ops (`FilterOp`/`DistinctOp`/`ProjectOp`, all
+/// timed under `stream_op`). The `GROUP BY` test above never produces a
+/// `JoinOp`/`LeftJoinOp` at all (a single flat BGP folds into one
+/// `BgpScan`), so those two phases were previously untested.
+#[test]
+fn exec_phases_join_and_stream_ops() {
+    std::env::set_var("HORNDB_EXEC_PHASES", "1");
+
+    let mut st = HornBackend::new();
+    for i in 0..50u32 {
+        st.insert_triple(
+            iri(&format!("http://ex/s{i}")),
+            iri("http://ex/p1"),
+            int_lit(i),
+        );
+        // Only half the subjects get ?o2, so the OPTIONAL actually leaves
+        // some probe rows unmatched (the LeftJoin's defining behavior) and
+        // the build side is a real, smaller batch — not a degenerate 1:1 join.
+        if i % 2 == 0 {
+            st.insert_triple(
+                iri(&format!("http://ex/s{i}")),
+                iri("http://ex/p2"),
+                int_lit(i * 10),
+            );
+        }
+    }
+    let q = "SELECT DISTINCT ?s ?o1 ?o2 WHERE { ?s <http://ex/p1> ?o1 . \
+             OPTIONAL { ?s <http://ex/p2> ?o2 } FILTER(?o1 > 0) }";
+    execute_query(q, &st).expect("query ok");
+
+    let text = horndb_metrics::encode_metrics();
+    let ns = phase_ns(&text);
+
+    for phase in ["join_build", "join_probe", "stream_op"] {
+        assert!(
+            ns.get(phase).copied().unwrap_or(0) > 0,
+            "phase {phase} recorded 0 ns\n{text}"
+        );
+    }
+
+    assert_exclusive(&text, &ns);
 }
