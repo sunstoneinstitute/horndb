@@ -329,21 +329,22 @@ where
     T: Send,
     F: FnMut(Vec<T>) -> Result<()>,
 {
-    parse_chunks_mapped(chunks, |item| item, sink)
+    parse_chunks_mapped(chunks, |batch| batch, sink)
 }
 
-/// [`parse_chunks_ordered`], with `map` applied to every item **on the parse
-/// thread that produced it** before it is handed down the channel.
+/// [`parse_chunks_ordered`], with `map` applied to each **whole batch** on the
+/// parse thread that produced it, before the batch is handed down the channel.
 ///
 /// This is where the loaders put the dictionary probe (HDB-106): the parse
 /// threads are idle most of a threaded load — at 8 threads `parse` is 14% of a
 /// Turtle load — while the consumer is saturated by interning, so read-only
-/// work that the consumer would otherwise do serially is close to free here.
-/// `map` must not allocate term ids; see [`crate::loader::Probed`] for the
+/// work the consumer would otherwise do serially is close to free here. `map`
+/// must not allocate term ids; see [`crate::loader::Probed`] for the
 /// determinism argument.
 ///
-/// With one chunk there is no parse thread to move work to, so `map` runs
-/// inline on the consumer and the loaders pass an identity-shaped one.
+/// Per batch and not per item so the map can decide *once*, for 8,192 rows,
+/// whether to probe at all — a single-chunk parse hands the rows through
+/// untouched and pays nothing, in time or in bytes, for a probe it cannot use.
 pub(crate) fn parse_chunks_mapped<T, U, M, F>(
     chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
     map: M,
@@ -352,8 +353,8 @@ pub(crate) fn parse_chunks_mapped<T, U, M, F>(
 where
     T: Send,
     U: Send,
-    M: Fn(T) -> U + Sync,
-    F: FnMut(Vec<U>) -> Result<()>,
+    M: Fn(Vec<T>) -> U + Sync,
+    F: FnMut(U) -> Result<()>,
 {
     // One chunk means there is nothing to overlap. Run it inline rather than
     // paying for a thread and a channel — and, more to the point, so terms are
@@ -361,13 +362,16 @@ where
     if chunks.len() == 1 {
         let mut batch = Vec::with_capacity(BATCH);
         for item in chunks.into_iter().next().expect("one chunk") {
-            batch.push(map(item?));
+            batch.push(item?);
             if batch.len() >= BATCH {
-                sink(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))?;
+                sink(map(std::mem::replace(
+                    &mut batch,
+                    Vec::with_capacity(BATCH),
+                )))?;
             }
         }
         if !batch.is_empty() {
-            sink(batch)?;
+            sink(map(batch))?;
         }
         return Ok(());
     }
@@ -376,7 +380,7 @@ where
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {
-        let (tx, rx) = sync_channel::<Result<Vec<U>>>(depth);
+        let (tx, rx) = sync_channel::<Result<U>>(depth);
         senders.push(tx);
         receivers.push(rx);
     }
@@ -389,10 +393,10 @@ where
                 for item in chunk {
                     match item {
                         Ok(v) => {
-                            batch.push(map(v));
+                            batch.push(v);
                             if batch.len() >= BATCH {
                                 let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH));
-                                if tx.send(Ok(full)).is_err() {
+                                if tx.send(Ok(map(full))).is_err() {
                                     return; // consumer gave up
                                 }
                             }
@@ -404,7 +408,7 @@ where
                     }
                 }
                 if !batch.is_empty() {
-                    let _ = tx.send(Ok(batch));
+                    let _ = tx.send(Ok(map(batch)));
                 }
             });
         }

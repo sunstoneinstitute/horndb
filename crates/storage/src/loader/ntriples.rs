@@ -20,7 +20,7 @@ use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
     load_threads, parse_chunks_mapped, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, Probed, QuadSink, SinkTimer};
+use crate::loader::{load_quads, subject_to_term, Batch, Probed, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -88,13 +88,26 @@ pub fn load_ntriples_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_ntriples_probed(bytes, threads, store.dictionary(), |rows| {
+    for_each_ntriples_probed(bytes, threads, store.dictionary(), |batch| {
         timer.sink(|| {
-            sink.intern_batch(|s| {
-                for row in rows {
-                    s.push_probed(DEFAULT_GRAPH, row)?;
+            sink.intern_batch(|s| match batch {
+                Batch::Raw(rows) => {
+                    for t in rows {
+                        s.push(
+                            DEFAULT_GRAPH,
+                            &subject_to_term(t.subject),
+                            &Term::NamedNode(t.predicate),
+                            &t.object,
+                        )?;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                Batch::Probed(rows) => {
+                    for row in rows {
+                        s.push_probed(DEFAULT_GRAPH, row)?;
+                    }
+                    Ok(())
+                }
             })
         })
     })?;
@@ -114,20 +127,28 @@ pub(crate) fn for_each_ntriples_probed<F>(
     sink: F,
 ) -> Result<()>
 where
-    F: FnMut(Vec<Probed>) -> Result<()>,
+    F: FnMut(Batch<Triple, Probed>) -> Result<()>,
 {
     let chunks = ntriples_chunks(bytes, threads);
     let probe = chunks.len() > 1;
     parse_chunks_mapped(
         chunks,
-        move |t: Triple| {
-            let s = subject_to_term(t.subject);
-            let p = Term::NamedNode(t.predicate);
-            if probe {
-                Probed::probe(dict, s, p, t.object)
-            } else {
-                Probed::unprobed(s, p, t.object)
+        move |rows: Vec<Triple>| {
+            if !probe {
+                return Batch::Raw(rows);
             }
+            Batch::Probed(
+                rows.into_iter()
+                    .map(|t| {
+                        Probed::probe(
+                            dict,
+                            subject_to_term(t.subject),
+                            Term::NamedNode(t.predicate),
+                            t.object,
+                        )
+                    })
+                    .collect(),
+            )
         },
         sink,
     )

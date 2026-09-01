@@ -141,50 +141,54 @@ where
 /// 8 extra bytes per term in a buffer that holds millions of them.
 pub(crate) const UNRESOLVED: TermId = TermId(0);
 
-/// One parsed row, plus whatever a parse thread could resolve of it without
-/// interning anything (HDB-106).
+/// One parsed row's subject, predicate and object after a parse thread has
+/// probed each of them against the dictionary (HDB-106).
 ///
-/// The parse threads run [`Dictionary::get`] on each term — a read-only probe
-/// that allocates no id — and hand the answers down the channel with the row.
-/// The calling thread then interns only the terms that came back
-/// [`UNRESOLVED`]. **Term ids are unchanged by this**: see
-/// [`QuadSink::push_probed`] for why.
+/// The probe is [`Dictionary::get`] — read-only, allocates no id. A term it
+/// resolves keeps its id in `ids` and is **dropped on the parse thread**,
+/// which shrinks the in-flight buffer and keeps the free on the thread that
+/// did the allocation. A term it does not resolve travels in `terms` for the
+/// consumer to intern.
 ///
-/// `terms` is `None` when all three probes hit. There is nothing left for the
-/// consumer to intern in that case, so the parse thread drops the parsed terms
-/// itself — which both shrinks the in-flight buffer and keeps the free on the
-/// thread that did the allocation.
+/// Invariant: `terms[i].is_some()` exactly when `ids[i] == UNRESOLVED`.
+///
+/// **Term ids are unchanged by this**: see [`QuadSink::push_probed`].
 pub(crate) struct Probed {
-    pub(crate) terms: Option<(Term, Term, Term)>,
-    pub(crate) ids: [TermId; 3],
+    terms: [Option<Term>; 3],
+    ids: [TermId; 3],
 }
 
 impl Probed {
-    /// Probe `(s, p, o)` against `dict`, dropping the terms if all three are
-    /// already interned.
+    /// Probe `(s, p, o)` against `dict`, keeping only the terms it could not
+    /// resolve.
     pub(crate) fn probe(dict: &Dictionary, s: Term, p: Term, o: Term) -> Self {
-        let ids = [
-            dict.get(&s).unwrap_or(UNRESOLVED),
-            dict.get(&p).unwrap_or(UNRESOLVED),
-            dict.get(&o).unwrap_or(UNRESOLVED),
-        ];
-        let terms = if ids.contains(&UNRESOLVED) {
-            Some((s, p, o))
-        } else {
-            None
-        };
+        let mut terms = [Some(s), Some(p), Some(o)];
+        let mut ids = [UNRESOLVED; 3];
+        for (id, slot) in ids.iter_mut().zip(terms.iter_mut()) {
+            let term = slot.as_ref().expect("all three slots start occupied");
+            if let Some(hit) = dict.get(term) {
+                *id = hit;
+                *slot = None;
+            }
+        }
         Self { terms, ids }
     }
+}
 
-    /// The unprobed form, for the paths where probing cannot pay: a
-    /// single-chunk (serial) parse, where the "parse thread" is the consumer
-    /// itself and a probe would just be a lookup done twice.
-    pub(crate) fn unprobed(s: Term, p: Term, o: Term) -> Self {
-        Self {
-            terms: Some((s, p, o)),
-            ids: [UNRESOLVED; 3],
-        }
-    }
+/// One batch as it travels from a parse thread to the consumer.
+///
+/// Two shapes, chosen once per 8,192-row batch rather than per row:
+///
+/// * `Raw` — a single-chunk (serial) parse. There is no other thread to move
+///   the lookup to, so probing would be the consumer's own lookup done twice.
+///   The rows are handed through exactly as they were before HDB-106, so that
+///   path pays nothing for the probe: no extra bytes in the buffer, no extra
+///   work per row.
+/// * `Probed` — a chunked parse. Each row carries what its parse thread
+///   resolved; the consumer allocates ids only for the rest.
+pub(crate) enum Batch<R, P> {
+    Raw(Vec<R>),
+    Probed(Vec<P>),
 }
 
 /// Intern + batch + flush, shared by the streaming (`load_quads`) and the
@@ -265,20 +269,14 @@ impl<'a> QuadSink<'a> {
     /// *order in which new ids are allocated* is untouched, which is the
     /// property `tests/parallel_loader.rs::assert_same_store` pins.
     pub(crate) fn push_probed(&mut self, g: GraphId, probed: Probed) -> Result<()> {
-        let ids = match probed.terms {
-            // Every term hit; the parse thread dropped them.
-            None => probed.ids,
-            Some((s, p, o)) => {
-                let dict = self.store.dictionary();
-                let mut ids = probed.ids;
-                for (id, term) in ids.iter_mut().zip([&s, &p, &o]) {
-                    if *id == UNRESOLVED {
-                        *id = dict.intern(term)?;
-                    }
-                }
-                ids
+        let Probed { terms, mut ids } = probed;
+        let dict = self.store.dictionary();
+        for (id, term) in ids.iter_mut().zip(terms) {
+            if *id == UNRESOLVED {
+                let term = term.expect("an unresolved slot always carries its term");
+                *id = dict.intern(&term)?;
             }
-        };
+        }
         self.record(g, ids[0], ids[1], ids[2])
     }
 

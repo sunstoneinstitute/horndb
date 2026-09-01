@@ -18,7 +18,7 @@ use crate::loader::parallel::{
     load_threads, parse_chunks_mapped, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
 use crate::loader::{
-    load_quads_in_graphs, subject_to_term, LoadStats, Probed, QuadSink, SinkTimer,
+    load_quads_in_graphs, subject_to_term, Batch, LoadStats, Probed, QuadSink, SinkTimer,
 };
 use crate::store::Store;
 use crate::term::{GraphId, DEFAULT_GRAPH};
@@ -76,17 +76,31 @@ pub fn load_nquads_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_nquads_probed(bytes, threads, store.dictionary(), |rows| {
+    for_each_nquads_probed(bytes, threads, store.dictionary(), |batch| {
         timer.sink(|| {
-            sink.intern_batch(|s| {
-                for (graph_name, row) in rows {
-                    // The graph label is interned here, on the calling thread,
-                    // before the row's own terms — the order the unprobed path
-                    // used, so graph labels keep the ids they had.
-                    let g = graph_id(store, graph_name)?;
-                    s.push_probed(g, row)?;
+            // The graph label is interned on this thread, before the row's own
+            // terms — the order the unprobed path uses, so graph labels keep
+            // the ids they had.
+            sink.intern_batch(|s| match batch {
+                Batch::Raw(rows) => {
+                    for q in rows {
+                        let g = graph_id(store, q.graph_name)?;
+                        s.push(
+                            g,
+                            &subject_to_term(q.subject),
+                            &Term::NamedNode(q.predicate),
+                            &q.object,
+                        )?;
+                    }
+                    Ok(())
                 }
-                Ok(())
+                Batch::Probed(rows) => {
+                    for (graph_name, row) in rows {
+                        let g = graph_id(store, graph_name)?;
+                        s.push_probed(g, row)?;
+                    }
+                    Ok(())
+                }
             })
         })
     })?;
@@ -108,21 +122,29 @@ pub(crate) fn for_each_nquads_probed<F>(
     sink: F,
 ) -> Result<()>
 where
-    F: FnMut(Vec<(GraphName, Probed)>) -> Result<()>,
+    F: FnMut(Batch<Quad, (GraphName, Probed)>) -> Result<()>,
 {
     let chunks = nquads_chunks(bytes, threads);
     let probe = chunks.len() > 1;
     parse_chunks_mapped(
         chunks,
-        move |q: Quad| {
-            let s = subject_to_term(q.subject);
-            let p = Term::NamedNode(q.predicate);
-            let row = if probe {
-                Probed::probe(dict, s, p, q.object)
-            } else {
-                Probed::unprobed(s, p, q.object)
-            };
-            (q.graph_name, row)
+        move |rows: Vec<Quad>| {
+            if !probe {
+                return Batch::Raw(rows);
+            }
+            Batch::Probed(
+                rows.into_iter()
+                    .map(|q| {
+                        let row = Probed::probe(
+                            dict,
+                            subject_to_term(q.subject),
+                            Term::NamedNode(q.predicate),
+                            q.object,
+                        );
+                        (q.graph_name, row)
+                    })
+                    .collect(),
+            )
         },
         sink,
     )
