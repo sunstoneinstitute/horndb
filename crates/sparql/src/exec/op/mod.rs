@@ -3,7 +3,7 @@
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
-use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
+use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, TopKOp, UnionOp};
 mod source;
 /// The one scan-side helper outside this module needs (`GRAPH ?g`'s
 /// per-graph read); the operators themselves stay private.
@@ -92,6 +92,8 @@ impl ChunkedBatch {
 mod chunk_tests;
 #[cfg(test)]
 mod provenance_tests;
+#[cfg(test)]
+mod top_k_tests;
 
 impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     /// Build the pull-based operator tree for `plan`. Every `PhysicalPlan`
@@ -153,7 +155,19 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 start,
                 length,
             } => {
-                let child = self.build(inner)?;
+                // Top-k fusion (HDB-101): a bounded LIMIT directly above an
+                // ORDER BY means only `offset + limit` rows can survive, so
+                // the sort does not have to order the rest. `SliceOp` still
+                // applies the offset and limit — `build_top_k` only narrows
+                // what reaches it.
+                let fused = match length.and_then(|len| start.checked_add(len)) {
+                    Some(n) => self.build_top_k(inner, n)?,
+                    None => None,
+                };
+                let child = match fused {
+                    Some(op) => op,
+                    None => self.build(inner)?,
+                };
                 Ok(Box::new(SliceOp::new(child, *start, *length)))
             }
             PhysicalPlan::Values { vars, rows } => Ok(Box::new(ValuesOp::new(vars, rows))),
@@ -212,6 +226,34 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                     *reflexive,
                 )))
             }
+        }
+    }
+
+    /// Build `plan` as a top-k operator keeping `n` rows, or `None` when the
+    /// plan shape does not permit the fusion.
+    ///
+    /// Only two shapes do. `OrderBy` is the fusion itself. `Project` is
+    /// see-through because SPARQL algebra (§18.2.5) puts the sort *under* the
+    /// projection — `Slice(Project(OrderBy(..)))` is the plan a plain
+    /// `ORDER BY .. LIMIT ..` produces — and projection preserves both row
+    /// order and row count, so an `n`-row bound above it is an `n`-row bound
+    /// below it. Nothing else is see-through: `Distinct`, `Filter` and the
+    /// rest drop rows *after* the sort, where `n` sorted rows are no longer
+    /// enough to answer the limit.
+    fn build_top_k<'r>(&'r self, plan: &PhysicalPlan, n: usize) -> Result<Option<Box<dyn Op + 'r>>>
+    where
+        E: 'r,
+    {
+        match plan {
+            PhysicalPlan::OrderBy { inner, keys } => {
+                let child = self.build(inner)?;
+                Ok(Some(Box::new(TopKOp::new(self, child, keys.clone(), n))))
+            }
+            PhysicalPlan::Project { vars, inner } => match self.build_top_k(inner, n)? {
+                Some(child) => Ok(Some(Box::new(ProjectOp::new(self, child, vars.clone())))),
+                None => Ok(None),
+            },
+            _ => Ok(None),
         }
     }
 }

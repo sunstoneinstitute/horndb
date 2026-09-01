@@ -235,40 +235,173 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
 
     /// Sort `batch` by `keys` (ORDER BY). Output schema = input schema (sort is
     /// schema-preserving). Shared by `OrderByOp`.
+    ///
+    /// Decorate-sort-undecorate (HDB-101): each row's sort value is resolved
+    /// once, up front, into a [`SortCol`]; the comparator then only compares
+    /// already-resolved values. The previous comparator re-evaluated the key
+    /// expression and re-parsed its lexical form on both sides of every
+    /// comparison, so an n-row sort paid O(n log n) decodes for what is O(n)
+    /// work.
     pub(crate) fn compute_order_by(
         &self,
         batch: Batch,
         keys: &[(Expr, OrderDir)],
     ) -> Result<Batch> {
-        let mut want = HashSet::new();
-        for (e, _) in keys {
-            referenced_vars(e, &mut want);
-        }
         // Pull schema and rows apart so the borrow checker sees two
         // independent moves (no partial-move ambiguity on `batch`).
         let schema = batch.schema;
-        let n = batch.rows.len() as u64;
+        let mut rows = batch.rows;
+        let n = rows.len() as u64;
         // Decorate + sort as one "sort" phase (HDB-99): the decode pays for
         // `ORDER BY`'s expressions, so it belongs with the sort it feeds,
         // not with `group_decode`/`agg_fold` (which decode for aggregates).
-        let tagged: Vec<(Bindings, Row)> = phases::timed(ExecPhase::Sort, n, || -> Result<_> {
-            let mut tagged: Vec<(Bindings, Row)> = batch
-                .rows
-                .into_iter()
-                .map(|r| {
-                    let env = self.decode_subset(&r, &schema, &want)?;
-                    Ok((env, r))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            // stable sort: equal-key rows keep their input order,
-            // matching the old Vec::sort_by behaviour.
-            tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
-            Ok(tagged)
+        let order = phases::timed(ExecPhase::Sort, n, || -> Result<Vec<usize>> {
+            let cols = self.sort_columns(&rows, &schema, keys)?;
+            Ok(sorted_order(&cols, rows.len()))
         })?;
         Ok(Batch {
             schema,
-            rows: tagged.into_iter().map(|(_, r)| r).collect(),
+            rows: permute(&mut rows, &order),
         })
+    }
+
+    /// `ORDER BY` fused with the `LIMIT`/`OFFSET` directly above it
+    /// (HDB-101): the first `n` rows of the full sort, without sorting the
+    /// rest. The caller's `SliceOp` still applies `OFFSET` and `LIMIT`, so
+    /// `n` is `offset + limit` — never just `limit`.
+    ///
+    /// Row-for-row identical to `compute_order_by` truncated to `n`. The
+    /// bounded heap keeps the `n` smallest `(key, input position)` pairs, and
+    /// the input-position tie-break reproduces the stable sort's tie order
+    /// exactly. It runs only when every sort column is a strict total order
+    /// (see [`SortCol::is_total_order`]); otherwise this falls back to the
+    /// full sort, because "the n smallest" is not well defined under an
+    /// inconsistent comparator and the two paths could then disagree.
+    pub(crate) fn compute_top_k(
+        &self,
+        batch: Batch,
+        keys: &[(Expr, OrderDir)],
+        n: usize,
+    ) -> Result<Batch> {
+        let schema = batch.schema;
+        let mut rows = batch.rows;
+        let row_count = rows.len() as u64;
+        let order = phases::timed(ExecPhase::Sort, row_count, || -> Result<Vec<usize>> {
+            let cols = self.sort_columns(&rows, &schema, keys)?;
+            if n >= rows.len() || !cols.iter().all(|(c, _)| c.is_total_order()) {
+                let mut order = sorted_order(&cols, rows.len());
+                order.truncate(n);
+                return Ok(order);
+            }
+            Ok(top_k_order(&cols, rows.len(), n))
+        })?;
+        Ok(Batch {
+            schema,
+            rows: permute(&mut rows, &order),
+        })
+    }
+
+    /// Resolve every `ORDER BY` key into one [`SortCol`] over `rows` — the
+    /// "decorate" step. A key that is a bare batch-column variable reads
+    /// straight off the slots; only computed keys need a decoded `Bindings`
+    /// per row, and only for the variables they actually reference.
+    fn sort_columns(
+        &self,
+        rows: &[Row],
+        schema: &[Var],
+        keys: &[(Expr, OrderDir)],
+    ) -> Result<Vec<(SortCol, OrderDir)>> {
+        let mut want: HashSet<String> = HashSet::new();
+        for (e, _) in keys {
+            if bare_var_col(e, schema).is_none() {
+                referenced_vars(e, &mut want);
+            }
+        }
+        let envs: Vec<Bindings> = if want.is_empty() {
+            Vec::new()
+        } else {
+            rows.iter()
+                .map(|r| self.decode_subset(r, schema, &want))
+                .collect::<Result<Vec<_>>>()?
+        };
+
+        keys.iter()
+            .map(|(e, dir)| {
+                let col = match bare_var_col(e, schema) {
+                    Some(idx) => self.slot_sort_col(rows, idx)?,
+                    None => SortCol::classify(
+                        envs.iter()
+                            .map(|env| {
+                                eval_expr_to_term(e, env)
+                                    .ok()
+                                    .flatten()
+                                    .map(|t| SortVal::of(&t))
+                            })
+                            .collect(),
+                    ),
+                };
+                Ok((col, *dir))
+            })
+            .collect()
+    }
+
+    /// The sort column for a bare-variable key, read straight off column
+    /// `idx` of the batch slots.
+    ///
+    /// Tries the all-numeric shape first through
+    /// [`Executor::decode_numeric`] (HDB-100's seam: reads the dictionary's
+    /// stored value in place — no `Term` clone, no N-Triples round trip).
+    /// The first bound slot that is not a number abandons that attempt for
+    /// the general column, whose id decodes are batched through
+    /// [`Executor::decode_terms`] (one dictionary lock for the whole column).
+    ///
+    /// Order-equivalence with the general path: `decode_numeric` yields
+    /// `Some` exactly where `numeric_value(&decode_term(id))` does, and with
+    /// the same value, so an all-`Some` column is one where `compare_terms`
+    /// would take its numeric branch for every pair — which is what
+    /// [`SortCol::Num`] means.
+    fn slot_sort_col(&self, rows: &[Row], idx: usize) -> Result<SortCol> {
+        let mut nums: Vec<Option<f64>> = Vec::with_capacity(rows.len());
+        let mut all_numeric = true;
+        for r in rows {
+            let slot = &r.0[idx];
+            let v = match slot {
+                Slot::Unbound => None,
+                Slot::Id(id) => self.exec.decode_numeric(*id)?,
+                Slot::Term(t) => numeric_value(t),
+            };
+            if v.is_none() && !matches!(slot, Slot::Unbound) {
+                all_numeric = false;
+                break;
+            }
+            nums.push(v);
+        }
+        if all_numeric {
+            return Ok(SortCol::Num(nums));
+        }
+
+        let ids: Vec<TermId> = rows
+            .iter()
+            .filter_map(|r| match &r.0[idx] {
+                Slot::Id(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let decoded = self.exec.decode_terms(&ids)?;
+        let mut next = 0usize;
+        let vals: Vec<Option<SortVal>> = rows
+            .iter()
+            .map(|r| match &r.0[idx] {
+                Slot::Unbound => None,
+                Slot::Id(_) => {
+                    let v = SortVal::of(&decoded[next]);
+                    next += 1;
+                    Some(v)
+                }
+                Slot::Term(t) => Some(SortVal::of(t)),
+            })
+            .collect();
+        Ok(SortCol::classify(vals))
     }
 
     /// Evaluate the transitive closure of the edge relation: decodes the edge
@@ -1823,16 +1956,100 @@ fn dedup_terms(vals: &mut Vec<Term>) {
     vals.retain(|t| seen.insert(t.clone()));
 }
 
-fn compare_by_keys(a: &Bindings, b: &Bindings, keys: &[(Expr, OrderDir)]) -> std::cmp::Ordering {
+/// One row's resolved `ORDER BY` value: the term's numeric coercion (when it
+/// has one) and its lexical value. Holding both mirrors [`compare_terms`],
+/// which picks its branch per *pair* — numeric when both sides are numbers,
+/// lexical otherwise.
+struct SortVal {
+    num: Option<f64>,
+    lex: String,
+}
+
+impl SortVal {
+    fn of(t: &Term) -> Self {
+        let lex = literal_value(t);
+        // Same coercion as `numeric_value`, reusing the lexical form we
+        // already have instead of computing it twice.
+        let num = lex.trim().parse::<f64>().ok();
+        SortVal { num, lex }
+    }
+}
+
+/// One `ORDER BY` key's value for every row of a batch, resolved once — the
+/// "decorate" of decorate-sort-undecorate (HDB-101). `None` at a row means
+/// the key is unbound there (or its expression errored), which sorts first.
+///
+/// The three variants exist to record *how* the column compares, not just
+/// what it holds: `Num` and `Lex` are strict total orders and so can drive
+/// the top-k heap, `Mixed` cannot (see [`SortCol::is_total_order`]).
+enum SortCol {
+    /// Every bound row coerces to a number.
+    Num(Vec<Option<f64>>),
+    /// No bound row coerces to a number, so every comparison is lexical.
+    Lex(Vec<Option<String>>),
+    /// Both kinds present: the branch `compare_terms` takes depends on the
+    /// pair being compared.
+    Mixed(Vec<Option<SortVal>>),
+}
+
+impl SortCol {
+    /// Narrow a resolved column to its cheapest faithful representation.
+    fn classify(vals: Vec<Option<SortVal>>) -> Self {
+        let bound = || vals.iter().flatten();
+        if bound().all(|v| v.num.is_some()) {
+            SortCol::Num(vals.into_iter().map(|v| v.and_then(|v| v.num)).collect())
+        } else if bound().all(|v| v.num.is_none()) {
+            SortCol::Lex(vals.into_iter().map(|v| v.map(|v| v.lex)).collect())
+        } else {
+            SortCol::Mixed(vals)
+        }
+    }
+
+    /// Whether this column's comparison is a strict total order. The top-k
+    /// heap needs one: "the n smallest rows" is only well defined — and only
+    /// agrees with a full sort — when the comparator is consistent.
+    ///
+    /// A `Mixed` column is not, because `compare_terms` chooses numeric vs
+    /// lexical per pair and the two can disagree about transitivity. A `Num`
+    /// column carrying a NaN is not either: NaN compares `Equal` to
+    /// everything, so `a == NaN` and `b == NaN` while `a < b`.
+    fn is_total_order(&self) -> bool {
+        match self {
+            SortCol::Num(v) => !v.iter().flatten().any(|f| f.is_nan()),
+            SortCol::Lex(_) => true,
+            SortCol::Mixed(_) => false,
+        }
+    }
+}
+
+/// Compare rows `a` and `b` by their decorated keys. Reproduces
+/// `compare_by_keys` + [`compare_terms`] exactly: unbound sorts before bound,
+/// a pair of numbers compares numerically, anything else compares lexically.
+fn compare_decorated(cols: &[(SortCol, OrderDir)], a: usize, b: usize) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    for (e, dir) in keys {
-        let ta = eval_expr_to_term(e, a).ok().flatten();
-        let tb = eval_expr_to_term(e, b).ok().flatten();
-        let ord = match (ta, tb) {
-            (Some(x), Some(y)) => compare_terms(&x, &y),
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
+    for (col, dir) in cols {
+        let ord = match col {
+            SortCol::Num(v) => match (v[a], v[b]) {
+                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortCol::Lex(v) => match (&v[a], &v[b]) {
+                (Some(x), Some(y)) => compare_lexical(x, y),
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortCol::Mixed(v) => match (&v[a], &v[b]) {
+                (Some(x), Some(y)) => match (x.num, y.num) {
+                    (Some(p), Some(q)) => p.partial_cmp(&q).unwrap_or(Ordering::Equal),
+                    _ => compare_lexical(&x.lex, &y.lex),
+                },
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
         };
         if ord != Ordering::Equal {
             return match dir {
@@ -1842,6 +2059,88 @@ fn compare_by_keys(a: &Bindings, b: &Bindings, keys: &[(Expr, OrderDir)]) -> std
         }
     }
     std::cmp::Ordering::Equal
+}
+
+/// Row indices in full sorted order. Stable: equal-key rows keep their input
+/// order, matching the pre-HDB-101 `Vec::sort_by` over decoded rows.
+fn sorted_order(cols: &[(SortCol, OrderDir)], rows: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows).collect();
+    order.sort_by(|&a, &b| compare_decorated(cols, a, b));
+    order
+}
+
+/// Indices of the `n` rows a full stable sort would place first, in that same
+/// order, without sorting the other `rows - n`. Requires `n < rows` and a
+/// total order on every column (the caller checks both).
+///
+/// Keeps a bounded max-heap of the best `n` rows seen so far, ordered by
+/// `(key, input position)`. The position tie-break is what makes both the
+/// selection *and* the final order identical to the stable sort's first `n`
+/// rows: among equal keys the stable sort keeps the earliest, and so does
+/// this.
+fn top_k_order(cols: &[(SortCol, OrderDir)], rows: usize, n: usize) -> Vec<usize> {
+    use std::cmp::Ordering;
+    // True when row `a` sorts strictly after row `b` in the full stable sort.
+    let worse = |a: usize, b: usize| match compare_decorated(cols, a, b) {
+        Ordering::Less => false,
+        Ordering::Greater => true,
+        Ordering::Equal => a > b,
+    };
+    // Max-heap: its root is the worst of the rows kept so far, so a new row
+    // only has to beat the root to earn a place.
+    let mut heap: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..rows {
+        if heap.len() < n {
+            heap.push(i);
+            let last = heap.len() - 1;
+            sift_up(&mut heap, last, &worse);
+        } else if worse(heap[0], i) {
+            heap[0] = i;
+            sift_down(&mut heap, 0, &worse);
+        }
+    }
+    // The heap holds the right rows in heap order; put them in sorted order.
+    // `then` on the index reproduces the stable sort's tie order — the heap
+    // itself carries no memory of input position.
+    heap.sort_by(|&a, &b| compare_decorated(cols, a, b).then(a.cmp(&b)));
+    heap
+}
+
+fn sift_up(heap: &mut [usize], mut i: usize, worse: &impl Fn(usize, usize) -> bool) {
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        if !worse(heap[i], heap[parent]) {
+            return;
+        }
+        heap.swap(i, parent);
+        i = parent;
+    }
+}
+
+fn sift_down(heap: &mut [usize], mut i: usize, worse: &impl Fn(usize, usize) -> bool) {
+    loop {
+        let mut m = i;
+        for child in [2 * i + 1, 2 * i + 2] {
+            if child < heap.len() && worse(heap[child], heap[m]) {
+                m = child;
+            }
+        }
+        if m == i {
+            return;
+        }
+        heap.swap(i, m);
+        i = m;
+    }
+}
+
+/// Reorder `rows` into `order`, which must name each index at most once.
+/// Leaves an empty `Row` behind at every index it takes, so no `Row` is
+/// cloned.
+fn permute(rows: &mut [Row], order: &[usize]) -> Vec<Row> {
+    order
+        .iter()
+        .map(|&i| std::mem::replace(&mut rows[i], Row(Vec::new())))
+        .collect()
 }
 
 pub(crate) fn lex(t: &Term) -> String {
@@ -1931,11 +2230,17 @@ fn compare_terms(x: &Term, y: &Term) -> std::cmp::Ordering {
     if let (Some(a), Some(b)) = (numeric_value(x), numeric_value(y)) {
         return a.partial_cmp(&b).unwrap_or(Ordering::Equal);
     }
-    let (lx, ly) = (literal_value(x), literal_value(y));
-    if let (Some(a), Some(b)) = (datetime_key(&lx), datetime_key(&ly)) {
-        return a.cmp(&b);
+    compare_lexical(&literal_value(x), &literal_value(y))
+}
+
+/// The non-numeric half of [`compare_terms`], over two already-extracted
+/// lexical values. Shared with `compare_decorated` so the decorated
+/// comparator cannot drift away from the term comparator.
+fn compare_lexical(lx: &str, ly: &str) -> std::cmp::Ordering {
+    if let (Some(a), Some(b)) = (datetime_key(lx), datetime_key(ly)) {
+        return a.cmp(b);
     }
-    lx.cmp(&ly)
+    lx.cmp(ly)
 }
 
 /// Normalise an xsd:dateTime lexical form into a sortable key. Returns
@@ -1943,7 +2248,7 @@ fn compare_terms(x: &Term, y: &Term) -> std::cmp::Ordering {
 /// not parse offsets fully; the lexical form sorts correctly for the
 /// common `YYYY-MM-DDThh:mm:ss(.fff)?(Z)?` shape used by SPB, so we just
 /// validate the prefix and key on the original string.
-fn datetime_key(s: &str) -> Option<String> {
+fn datetime_key(s: &str) -> Option<&str> {
     let bytes = s.as_bytes();
     // Minimum `YYYY-MM-DDThh:mm:ss` is 19 chars.
     if bytes.len() < 19 {
@@ -1956,7 +2261,7 @@ fn datetime_key(s: &str) -> Option<String> {
         && bytes[16] == b':'
         && bytes[..4].iter().all(|c| c.is_ascii_digit());
     if is_shape {
-        Some(s.to_owned())
+        Some(s)
     } else {
         None
     }
@@ -2720,7 +3025,7 @@ mod slot_differential {
 
     /// ORDER BY over a multi-key DESC/ASC and over an unbound sort key, pinned
     /// to the explicit expected ordering for a fixed input. Unbound-sorts-first
-    /// semantics (None < Some) are baked into `compare_by_keys`; this guards
+    /// semantics (None < Some) are baked into `compare_decorated`; this guards
     /// the native arm's transient-decode path against regressions.
     #[test]
     fn order_by_multi_key_and_unbound() {
@@ -2887,6 +3192,176 @@ mod slot_differential {
             got, expected,
             "GROUP BY ?c ORDER BY ?c with COUNT(DISTINCT *): wrong counts or order"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // HDB-101: decorate-sort-undecorate + ORDER BY/LIMIT top-k fusion
+    // -----------------------------------------------------------------
+
+    /// Rows of a SELECT, rendered in emission order.
+    fn ordered_rows(horn: &HornBackend, q: &str) -> Vec<String> {
+        let plan = plan_select(q);
+        Runtime::new(horn)
+            .run(&plan)
+            .unwrap()
+            .map(|b| format!("{b:?}"))
+            .collect()
+    }
+
+    /// The core HDB-101 correctness property: for every OFFSET/LIMIT window,
+    /// the fused top-k plan must return exactly the window the *full* sort
+    /// would have returned, in the same order. `base` is the query without a
+    /// slice; `windows` are `(offset, limit)` pairs to check.
+    fn assert_slice_matches_full_sort(horn: &HornBackend, base: &str, windows: &[(usize, usize)]) {
+        let full = ordered_rows(horn, base);
+        for &(offset, limit) in windows {
+            let sliced = ordered_rows(horn, &format!("{base} LIMIT {limit} OFFSET {offset}"));
+            let want: Vec<String> = full.iter().skip(offset).take(limit).cloned().collect();
+            assert_eq!(
+                sliced, want,
+                "{base} LIMIT {limit} OFFSET {offset} diverged from the full sort"
+            );
+        }
+    }
+
+    /// Every window of an all-ties sort key. Ties are where a top-k heap is
+    /// easiest to get wrong: `ORDER BY` is stable, so the surviving rows must
+    /// be the *earliest* equal-key rows, in input order — not an arbitrary
+    /// `n` of them.
+    #[test]
+    fn top_k_ties_match_full_sort_at_every_window() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        // 12 subjects, 3 distinct sort keys -> 4-way ties on each key.
+        for i in 0..12 {
+            horn.insert_triple(
+                iri(&format!("s{i:02}")),
+                iri("k"),
+                Term::Literal(format!("\"{}\"", i % 3)),
+            );
+        }
+        let base = "SELECT ?s ?k WHERE { ?s <http://ex/k> ?k } ORDER BY ?k ?s";
+        let windows: Vec<(usize, usize)> = (0..=12)
+            .flat_map(|o| (0..=13).map(move |l| (o, l)))
+            .collect();
+        assert_slice_matches_full_sort(&horn, base, &windows);
+
+        // Same, but with the tie left unbroken by a second key: the stable
+        // sort's input order is the only thing deciding which rows survive.
+        let base = "SELECT ?s ?k WHERE { ?s <http://ex/k> ?k } ORDER BY ?k";
+        assert_slice_matches_full_sort(&horn, base, &windows);
+    }
+
+    /// The q3 shape: DESC over a numeric column, which resolves to a
+    /// `SortCol::Num` and so takes the top-k heap.
+    #[test]
+    fn top_k_desc_numeric_matches_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        // Values chosen so lexical and numeric order disagree (9 > 10
+        // lexically, 9 < 10 numerically) — a decorated key that lost the
+        // numeric coercion would show up here.
+        for (i, v) in [7, 100, 9, 42, 10, 3, 88, 1, 55, 9].iter().enumerate() {
+            horn.insert_triple(
+                iri(&format!("s{i}")),
+                iri("amount"),
+                Term::Literal(format!(
+                    "\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                )),
+            );
+        }
+        let base = "SELECT ?s ?a WHERE { ?s <http://ex/amount> ?a } ORDER BY DESC(?a)";
+        assert_slice_matches_full_sort(&horn, base, &[(0, 1), (0, 3), (2, 3), (5, 5), (0, 20)]);
+
+        // Pin the actual order, so a comparator that silently went lexical
+        // fails here rather than agreeing with an equally-wrong full sort.
+        let top = ordered_rows(&horn, &format!("{base} LIMIT 3"));
+        assert!(
+            top[0].contains("100") && top[1].contains("88") && top[2].contains("55"),
+            "DESC numeric order wrong: {top:?}"
+        );
+    }
+
+    /// A key column holding both numbers and non-numbers is a `SortCol::Mixed`
+    /// — `compare_terms` picks its branch per pair there, so the comparator is
+    /// not guaranteed transitive and `compute_top_k` must fall back to the
+    /// full sort rather than trust a heap.
+    #[test]
+    fn top_k_mixed_numeric_and_lexical_column_matches_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        for (i, v) in ["10", "abc", "9", "zed", "2", "beta"].iter().enumerate() {
+            horn.insert_triple(
+                iri(&format!("s{i}")),
+                iri("k"),
+                Term::Literal(format!("\"{v}\"")),
+            );
+        }
+        let base = "SELECT ?s ?k WHERE { ?s <http://ex/k> ?k } ORDER BY ?k";
+        assert_slice_matches_full_sort(&horn, base, &[(0, 1), (0, 2), (1, 3), (0, 6), (3, 10)]);
+    }
+
+    /// An unbound sort key (OPTIONAL) sorts first, and must keep doing so
+    /// under the fusion — including when the whole LIMIT window falls inside
+    /// the unbound rows.
+    #[test]
+    fn top_k_unbound_key_matches_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        for i in 0..6 {
+            horn.insert_triple(iri(&format!("s{i}")), iri("p"), iri("o"));
+        }
+        // Only half the subjects get the sort key.
+        for i in [1, 3, 5] {
+            horn.insert_triple(
+                iri(&format!("s{i}")),
+                iri("k"),
+                Term::Literal(format!("\"{i}\"")),
+            );
+        }
+        let base = "SELECT ?s ?k WHERE { ?s <http://ex/p> <http://ex/o> \
+                    OPTIONAL { ?s <http://ex/k> ?k } } ORDER BY ?k ?s";
+        assert_slice_matches_full_sort(&horn, base, &[(0, 1), (0, 3), (2, 2), (4, 4), (0, 9)]);
+    }
+
+    /// A computed (non-bare-variable) sort key still goes through the
+    /// decorate step, and DISTINCT between the sort and the slice must block
+    /// the fusion rather than truncate the wrong rows.
+    #[test]
+    fn top_k_computed_key_and_distinct_match_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        for i in 0..8 {
+            horn.insert_triple(
+                iri(&format!("s{i}")),
+                iri("n"),
+                Term::Literal(format!(
+                    "\"{i}\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+                )),
+            );
+        }
+        let base = "SELECT ?s ?n WHERE { ?s <http://ex/n> ?n } ORDER BY DESC(?n + 1)";
+        assert_slice_matches_full_sort(&horn, base, &[(0, 2), (3, 3), (0, 8)]);
+
+        // DISTINCT drops rows *after* the sort: only three distinct ?n values
+        // survive, so a top-k that fed it 2 sorted rows would be short.
+        let mut dup = HornBackend::new();
+        for i in 0..9 {
+            dup.insert_triple(
+                iri(&format!("s{i}")),
+                iri("n"),
+                Term::Literal(format!("\"{}\"", i % 3)),
+            );
+        }
+        let full = ordered_rows(
+            &dup,
+            "SELECT DISTINCT ?n WHERE { ?s <http://ex/n> ?n } ORDER BY ?n",
+        );
+        let limited = ordered_rows(
+            &dup,
+            "SELECT DISTINCT ?n WHERE { ?s <http://ex/n> ?n } ORDER BY ?n LIMIT 2",
+        );
+        assert_eq!(limited, full[..2].to_vec(), "DISTINCT + LIMIT lost rows");
     }
 }
 

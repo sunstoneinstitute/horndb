@@ -288,6 +288,55 @@ fn order_by_cross_chunk() {
 }
 
 // ---------------------------------------------------------------------------
+// TopK: the fused ORDER BY + LIMIT operator (HDB-101)
+// ---------------------------------------------------------------------------
+
+/// `Slice(Project(OrderBy(..)))` fuses into `TopKOp`, whose window must be
+/// the same rows in the same order at every chunk size — and must match what
+/// the unfused `OrderBy` would have emitted for that window.
+#[test]
+fn top_k_cross_chunk() {
+    let horn = HornBackend::new();
+
+    // Duplicate keys so the OFFSET window lands inside a run of ties.
+    let values = PhysicalPlan::Values {
+        vars: vec![Var::new("x")],
+        rows: ["c", "a", "f", "a", "e", "b", "c", "d"]
+            .iter()
+            .map(|s| vec![some_iri(s)])
+            .collect(),
+    };
+    let sorted = PhysicalPlan::OrderBy {
+        inner: Box::new(values),
+        keys: vec![(Expr::Term(Term::Var(Var::new("x"))), OrderDir::Asc)],
+    };
+    let fused = PhysicalPlan::Slice {
+        inner: Box::new(PhysicalPlan::Project {
+            vars: vec![Var::new("x")],
+            inner: Box::new(sorted.clone()),
+        }),
+        start: 2,
+        length: Some(3),
+    };
+
+    let r1 = run_ordered(&horn, &fused, 1);
+    let r2 = run_ordered(&horn, &fused, 2);
+    let rbig = run_ordered(&horn, &fused, 4096);
+    assert_eq!(r1, rbig, "TopK result changed at chunk size 1");
+    assert_eq!(r2, rbig, "TopK result changed at chunk size 2");
+    assert_eq!(rbig.len(), 3, "TopK should yield the 3-row LIMIT window");
+
+    // Same window off the full sort, with no LIMIT for the fusion to latch on
+    // to: the fused plan must not have changed which rows survive.
+    let full = run_ordered(&horn, &sorted, 4096);
+    assert_eq!(
+        rbig,
+        full[2..5].to_vec(),
+        "TopK window diverged from the full sort"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Join: shared var unbound in every build-side row (#128 bound-key selection)
 // ---------------------------------------------------------------------------
 
