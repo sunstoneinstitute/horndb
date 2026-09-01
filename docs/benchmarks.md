@@ -1184,8 +1184,11 @@ latency decision and becomes a space and cold-start decision — and on those
 two axes the matrix picks FST, not the MPHF.**
 
 `hornbench` (Ryzen 7 7700, 16 threads, 124 GB, Debian 6.12, rustc 1.90.0),
-commit `781cd37`, median of 3 interleaved reps per cell with the min–max range.
-Driver: `cargo run --release -p horndb-storage --example dict_base_bench`.
+commit `781cd37`, median of 3 reps per cell with the min–max range. The reps of
+one cell run back to back inside one process rather than interleaved across
+cells — this is a microbenchmark of five structures in one binary, not an A/B
+of two builds. Spread is under 2% on every cell but three. Driver:
+`cargo run --release -p horndb-storage --example dict_base_bench`.
 
 ##### The key sets
 
