@@ -2383,6 +2383,94 @@ execution — read them as an upper bound on caching, not as a target. And the
 benchmark is authored by DataTreehouse, the vendor of maplib, which wins most
 rows.
 
+#### Per-operator exec-phase split: `group_decode` is the biggest single cost on q2, `scan_wcoj` beats `sort` on q3 (HDB-99, 2026-09-01)
+
+`sparql_stage_duration_seconds{stage="exec"}` was one number for the whole
+query executor, so the section above ("Oxigraph beats us here") could name
+q2/q3/q4 as the weak queries but not say *which part* of each was slow. HDB-99
+adds `HORNDB_EXEC_PHASES=1`: a thread-local accumulator that times each
+operator's own work statement — never a child operator's `next()` — so
+phases are exclusive by construction (`crates/sparql/tests/exec_phases.rs`
+asserts `sum(named phases) <= exec_ns` directly, not just by inspection).
+Full phase list and what each one covers: `docs/metrics.md`.
+
+`hornbench` (Ryzen 7 7700, 16 threads, Debian 6.12, rustc 1.90.0), commit
+`2efb153`, `HORNDB_EXEC_PHASES=1`, `HORNDB_LOAD_THREADS=1`, trainmarks xlarge
+(9,995,000 triples), one cold run per query. The counters are process-wide
+and cumulative, so a query's own share is isolated by snapshotting them
+immediately before and after that query's cold run — diffing across a whole
+loop iteration (the naive reading of "dump after each cold query") instead
+counts the *previous* query's three warm re-runs too, which is large enough
+to be misleading (e.g. it makes q3 look like it has `GROUP BY` cost, which
+q3 does not have at all).
+
+| phase | q2 group/sum/limit (2.180s) | q3 3-join + order + limit (1.564s) | q4 `OPTIONAL` + agg (2.903s) |
+|---|---|---|---|
+| `scan_wcoj` | 0.009s (0.4%) | 0.817s (**52.2%**) | 0.008s (0.3%) |
+| `scan_row_build` | 0.029s (1.3%) | 0.005s (0.3%) | 0.027s (0.9%) |
+| `scan_provenance` | 0.006s (0.3%) | 0.001s (0.1%) | 0.004s (0.2%) |
+| `join_build` | — | — | 0.105s (3.6%) |
+| `join_probe` | — | — | 0.248s (8.6%) |
+| `group_key` | 0.035s (1.6%) | — | 0.030s (1.0%) |
+| `group_decode` | 0.953s (**43.7%**) | — | 1.088s (**37.5%**) |
+| `agg_fold` | 0.098s (4.5%) | — | 0.409s (14.1%) |
+| `sort` | 0.000s (0.0%) | 0.344s (**22.0%**) | 0.000s (0.0%) |
+| `stream_op` | 0.100s (4.6%) | 0.014s (0.9%) | 0.000s (0.0%) |
+| `result_encode` | 0.000s (0.0%) | 0.000s (0.0%) | 0.000s (0.0%) |
+| `clock` | ~0s | — | ~0s |
+| `residual` | 0.949s (43.5%) | 0.384s (24.6%) | 0.984s (33.9%) |
+
+`join_build`/`join_probe` are absent from q2/q3 by design (see the "Notes for
+the implementer" in the HDB-99 plan): both are single flat BGPs, so
+`CoalesceBgp` folds them into one `BgpScan` and the WCOJ (leapfrog triejoin)
+join never produces a `JoinOp`/`LeftJoin` node — only q4's `OPTIONAL` does.
+
+**The two findings that pick the next commit:**
+
+- **q2 — `group_decode` + `agg_fold` = 48.2% of exec, just under the 50%
+  line, not over it.** It is still the largest attributable cost by a wide
+  margin (the next-largest named phase, `stream_op`, is 4.6%), so
+  [[HDB-100]] (per-group decode/aggregate work) is still the stronger lever
+  than a join-side change for q2 — but a straight ">50%" reading would
+  overstate it, and the residual finding below (43.5%) means nearly as much
+  of q2's cost is currently *unattributed* as is attributed to `group_decode`.
+  (For comparison, q4 crosses the line: `group_decode` + `agg_fold` = 51.6%
+  there.)
+- **q3 — `sort` does not dominate; `scan_wcoj` does, at 2.4× `sort`'s
+  share** (52.2% vs 22.0%). [[HDB-101]] (sort) is not the highest-value next
+  step for *this* query by this measurement: the WCOJ scan produces
+  5,513,106 rows for a query whose final answer is 50 rows
+  (`ORDER BY … LIMIT 50`), and that overproduction — not the sort at the
+  end — is the bigger cost.
+- **Residual exceeds the acceptance target (< 15%) on all three streaming
+  (non-pushdown) queries** — q2 43.5%, q3 24.6%, q4 33.9% — filed here as
+  its own finding per the acceptance criteria, not papered over. The likely
+  destination, per the design notes in `docs/metrics.md` (not attributed to
+  a named phase — quantifying it is follow-up work, outside HDB-99's
+  instrumented-points scope): `drain()`'s `rows.extend` pulling a
+  `BgpScan`'s chunks together before `Group`/`OrderBy` run, and
+  `ChunkedBatch::next_chunk`'s per-chunk `collect()` + `schema.clone()` on
+  both sides of that pull. (`q1`'s residual is 100% by construction — its
+  `COUNT(*)` `GROUP BY` lowers to the `GroupCountScan` pushdown,
+  `plan::pushdown::lower_count_group`, which bypasses
+  `scan_bgp_ids`/`eval_group_native` — and every phase timed inside them —
+  entirely. `q5`'s residual is 0.7%, comfortably under target.)
+
+**Flag-off overhead — smoke check, not a recorded A/B.** Same binary/commit,
+same host, one run each with and without `HORNDB_EXEC_PHASES=1` (cold
+deltas): q1 +0.5%, q2 −0.8%, q3 +12.4%, q4 +2.8%, q5 +1.5%; the matching warm
+figures (+1.0%, +0.4%, +4.3%, +0.9%, +2.8%) don't reproduce q3's cold
+outlier, which points to run-to-run noise rather than a real per-query cost —
+consistent with a gate that costs one `OnceLock` read per batch/chunk/group
+and nothing when it resolves false. The authoritative check is the LDBC
+SPB-256 nightly `aggregation-qps`, which the two nights immediately before
+this change measured at **56.4957** (2026-09-01) and **56.5011**
+(2026-08-31) qps — both on commit `4459be9`, i.e. essentially flat
+night-over-night. `HORNDB_EXEC_PHASES` defaults off and no nightly config
+sets it, so confirming "flag off costs nothing measurable" is a post-merge
+read of the next nightly run against this ~56.50 qps baseline, not something
+this task triggers itself.
+
 ### Scaffolded but not yet evaluated against targets
 
 These benches compile and run on synthetic fixtures so future regressions are

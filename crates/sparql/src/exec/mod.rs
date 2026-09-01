@@ -9,6 +9,7 @@ pub use batch::{Batch, KeyPart, Row, Slot};
 pub mod horn;
 pub mod mem;
 pub mod op;
+pub(crate) mod phases;
 pub mod runtime;
 pub mod scope;
 pub use scope::{

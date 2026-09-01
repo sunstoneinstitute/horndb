@@ -136,6 +136,34 @@ pub struct LoadPhaseLabel {
     pub phase: LoadPhase,
 }
 
+// Per-operator SPARQL execution-time phases (HDB-99), splitting the single
+// `exec` pipeline stage so a slow query can be attributed to the operator
+// that actually spent the time. Emitted only when `HORNDB_EXEC_PHASES=1` is
+// set (see `crates/sparql/src/exec/phases.rs`); `docs/metrics.md`'s
+// "SPARQL execution-time phases" section documents what each value covers.
+// `Residual` is derived (`exec_elapsed - sum(the other 12)`), never clocked
+// directly.
+label_value_enum!(ExecPhase {
+    ScanWcoj => "scan_wcoj",
+    ScanRowBuild => "scan_row_build",
+    ScanProvenance => "scan_provenance",
+    JoinBuild => "join_build",
+    JoinProbe => "join_probe",
+    GroupKey => "group_key",
+    GroupDecode => "group_decode",
+    AggFold => "agg_fold",
+    Sort => "sort",
+    StreamOp => "stream_op",
+    ResultEncode => "result_encode",
+    Clock => "clock",
+    Residual => "residual",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ExecPhaseLabel {
+    pub phase: ExecPhase,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct RuleLabel {
     pub rule: String,

@@ -14,8 +14,10 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::Result;
+use crate::exec::phases;
 use crate::exec::runtime::{referenced_vars, JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
+use horndb_metrics::labels::ExecPhase;
 use std::collections::HashSet;
 
 /// Pull an op to exhaustion, concatenating its chunks into one `Batch`.
@@ -179,11 +181,11 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
                     return Ok(None);
                 }
                 let left_may_term = self.left.may_emit_term();
-                self.state = Some(self.rt.build_join_state(
-                    self.left.schema(),
-                    &left_may_term,
-                    build,
-                )?);
+                let build_rows = build.rows.len() as u64;
+                self.state = Some(phases::timed(ExecPhase::JoinBuild, build_rows, || {
+                    self.rt
+                        .build_join_state(self.left.schema(), &left_may_term, build)
+                })?);
             }
             // 3. Stream the probe side, one chunk per iteration; loop so a
             //    fully-unmatched chunk never yields Some(empty).
@@ -194,7 +196,10 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
                 }
                 Some(chunk) => {
                     let st = self.state.as_ref().expect("join state built above");
-                    let rows = self.rt.probe_join_chunk(st, &chunk)?;
+                    let chunk_rows = chunk.rows.len() as u64;
+                    let rows = phases::timed(ExecPhase::JoinProbe, chunk_rows, || {
+                        self.rt.probe_join_chunk(st, &chunk)
+                    })?;
                     if !rows.is_empty() {
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),
@@ -278,11 +283,11 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
             if self.state.is_none() {
                 let build = drain(&mut self.right)?;
                 let left_may_term = self.left.may_emit_term();
-                self.state = Some(self.rt.build_join_state(
-                    self.left.schema(),
-                    &left_may_term,
-                    build,
-                )?);
+                let build_rows = build.rows.len() as u64;
+                self.state = Some(phases::timed(ExecPhase::JoinBuild, build_rows, || {
+                    self.rt
+                        .build_join_state(self.left.schema(), &left_may_term, build)
+                })?);
             }
             // 3. Stream the probe side, one chunk per iteration.
             match self.left.next()? {
@@ -292,12 +297,11 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
                 }
                 Some(chunk) => {
                     let st = self.state.as_ref().expect("join state built above");
-                    let rows = self.rt.probe_left_join_chunk(
-                        st,
-                        &chunk,
-                        self.expr.as_ref(),
-                        &self.want,
-                    )?;
+                    let chunk_rows = chunk.rows.len() as u64;
+                    let rows = phases::timed(ExecPhase::JoinProbe, chunk_rows, || {
+                        self.rt
+                            .probe_left_join_chunk(st, &chunk, self.expr.as_ref(), &self.want)
+                    })?;
                     if !rows.is_empty() {
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),

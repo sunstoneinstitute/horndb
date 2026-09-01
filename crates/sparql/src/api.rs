@@ -24,15 +24,29 @@ use std::time::Instant;
 /// whole-stage timing is recorded here — never per-tuple/per-row work.
 fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
     let m = horndb_metrics::metrics();
+    let is_exec = stage == Stage::Exec;
+    // HDB-99: discard any per-operator exec-phase data left over on this
+    // thread from a previous query *before* this one can accumulate any of
+    // its own — see `exec::phases::reset` for why a stale leftover is
+    // otherwise silently attributed to the wrong query.
+    if is_exec {
+        crate::exec::phases::reset();
+    }
     let start = Instant::now();
     let out = f();
+    let elapsed = start.elapsed();
     let label = StageLabel { stage };
     m.sparql
         .stage_duration_seconds
         .get_or_create(&label)
-        .observe(start.elapsed().as_secs_f64());
+        .observe(elapsed.as_secs_f64());
     if out.is_err() {
         m.sparql.query_errors.get_or_create(&label).inc();
+    }
+    // Merge this thread's accumulated per-operator exec phases
+    // (HORNDB_EXEC_PHASES=1) once the exec stage itself is done.
+    if is_exec {
+        crate::exec::phases::flush(elapsed);
     }
     out
 }

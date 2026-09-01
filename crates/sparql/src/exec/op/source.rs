@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::exec::runtime::{integer_literal, lex};
 use crate::exec::{Batch, Executor, GroupCount, KeyPart, ResolvedScope, Row, ScanScope, Slot};
 use crate::plan::GraphScope;
+use horndb_metrics::labels::ExecPhase;
 use std::collections::HashMap;
 
 /// Read one scan leaf under its graph scope.
@@ -121,14 +122,19 @@ impl ScanOp {
     pub fn new(batch: Batch) -> Self {
         // Compute the per-column provenance claim from the actual rows:
         // column c may emit Term iff some row holds a Slot::Term there.
+        // O(rows × cols); timed as its own phase since it was previously
+        // folded into whatever the caller attributed the scan to (HDB-99).
         let mut term_columns = vec![false; batch.schema.len()];
-        for row in &batch.rows {
-            for (c, slot) in row.0.iter().enumerate() {
-                if matches!(slot, Slot::Term(_)) {
-                    term_columns[c] = true;
+        let n = batch.rows.len() as u64;
+        crate::exec::phases::timed(ExecPhase::ScanProvenance, n, || {
+            for row in &batch.rows {
+                for (c, slot) in row.0.iter().enumerate() {
+                    if matches!(slot, Slot::Term(_)) {
+                        term_columns[c] = true;
+                    }
                 }
             }
-        }
+        });
         Self {
             inner: ChunkedBatch::new(batch),
             term_columns,
