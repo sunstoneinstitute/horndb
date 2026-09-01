@@ -4,21 +4,32 @@
 //! (`split_slice_for_parallel_parsing`). This module turns those chunks into a
 //! **parse-parallel, intern-serial** pipeline:
 //!
-//! * one OS thread per chunk runs the parser and pushes fixed-size batches of
-//!   parsed items down a bounded channel;
+//! * one OS thread per chunk runs the parser, **probes** each term against the
+//!   dictionary read-only, and pushes fixed-size batches of parsed items down a
+//!   bounded channel;
 //! * the caller's thread drains the chunk channels **in document order** and
-//!   does all interning and tier insertion itself.
+//!   allocates ids for whatever the probes did not resolve, then does the tier
+//!   insertion.
 //!
-//! Keeping the intern step on one thread in document order is deliberate: it
+//! Keeping *id allocation* on one thread in document order is deliberate: it
 //! makes the parallel path produce byte-identical store contents to the serial
 //! path — same triples, same dictionary, same term ids — so the two are
 //! interchangeable and the differential tests can compare them exactly.
-//! Interning on the chunk threads instead would be a little faster in
+//! Allocating ids on the chunk threads instead would be a little faster in
 //! isolation (it scales ~3.9× on 16 cores, so the dictionary's reverse-map
 //! write lock is *not* the bottleneck it was assumed to be) but it would make
-//! term ids depend on thread scheduling. Since HDB-96 the serial intern is the
-//! largest phase of a load — see [`load_threads`] for the sweep that made the
-//! parse threads the default and left interning where it is.
+//! term ids depend on thread scheduling.
+//!
+//! **The probe is the way round that (HDB-106).** After HDB-96 made parse
+//! threads the default, interning became the largest phase of a load — 56–61%
+//! of trainmarks xlarge — while the parse threads sat idle waiting on the
+//! channel. A corpus has far more term *occurrences* than distinct terms
+//! (trainmarks xlarge: 9,995,000 triples over 1,919,818 distinct terms, ~15.6
+//! occurrences each), so the overwhelming majority of intern calls are lookups
+//! that find an existing id. Those lookups allocate nothing, so they can run
+//! anywhere; only the misses have to be serialised. The parse threads do the
+//! lookups, the consumer allocates. See [`crate::loader::Probed`] and
+//! [`crate::dictionary::Dictionary::get`] for why racing the consumer is safe.
 //!
 //! The bounded channels cap memory: at most [`load_buffer_triples`] parsed
 //! items are in flight across all chunks (see [`channel_depth`]).
@@ -27,8 +38,9 @@ use crate::error::Result;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 
-/// Items per batch handed from a parse thread to the consumer.
-const BATCH: usize = 8_192;
+/// Items per batch handed from a parse thread to the consumer, and the
+/// granularity every load-phase clock on this path is taken at.
+pub(crate) const BATCH: usize = 8_192;
 
 /// Default for [`load_buffer_triples`]: parsed triples that may sit in the
 /// chunk channels at once, summed over every chunk.
@@ -311,11 +323,37 @@ fn auto_load_threads() -> usize {
 /// next `send` and exit, and the scope joins them before returning.
 pub(crate) fn parse_chunks_ordered<T, F>(
     chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
-    mut sink: F,
+    sink: F,
 ) -> Result<()>
 where
     T: Send,
     F: FnMut(Vec<T>) -> Result<()>,
+{
+    parse_chunks_mapped(chunks, |item| item, sink)
+}
+
+/// [`parse_chunks_ordered`], with `map` applied to every item **on the parse
+/// thread that produced it** before it is handed down the channel.
+///
+/// This is where the loaders put the dictionary probe (HDB-106): the parse
+/// threads are idle most of a threaded load — at 8 threads `parse` is 14% of a
+/// Turtle load — while the consumer is saturated by interning, so read-only
+/// work that the consumer would otherwise do serially is close to free here.
+/// `map` must not allocate term ids; see [`crate::loader::Probed`] for the
+/// determinism argument.
+///
+/// With one chunk there is no parse thread to move work to, so `map` runs
+/// inline on the consumer and the loaders pass an identity-shaped one.
+pub(crate) fn parse_chunks_mapped<T, U, M, F>(
+    chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
+    map: M,
+    mut sink: F,
+) -> Result<()>
+where
+    T: Send,
+    U: Send,
+    M: Fn(T) -> U + Sync,
+    F: FnMut(Vec<U>) -> Result<()>,
 {
     // One chunk means there is nothing to overlap. Run it inline rather than
     // paying for a thread and a channel — and, more to the point, so terms are
@@ -323,7 +361,7 @@ where
     if chunks.len() == 1 {
         let mut batch = Vec::with_capacity(BATCH);
         for item in chunks.into_iter().next().expect("one chunk") {
-            batch.push(item?);
+            batch.push(map(item?));
             if batch.len() >= BATCH {
                 sink(std::mem::replace(&mut batch, Vec::with_capacity(BATCH)))?;
             }
@@ -338,11 +376,12 @@ where
     let mut senders = Vec::with_capacity(chunks.len());
     let mut receivers = Vec::with_capacity(chunks.len());
     for _ in 0..chunks.len() {
-        let (tx, rx) = sync_channel::<Result<Vec<T>>>(depth);
+        let (tx, rx) = sync_channel::<Result<Vec<U>>>(depth);
         senders.push(tx);
         receivers.push(rx);
     }
 
+    let map = &map;
     std::thread::scope(|scope| -> Result<()> {
         for (chunk, tx) in chunks.into_iter().zip(senders) {
             scope.spawn(move || {
@@ -350,7 +389,7 @@ where
                 for item in chunk {
                     match item {
                         Ok(v) => {
-                            batch.push(v);
+                            batch.push(map(v));
                             if batch.len() >= BATCH {
                                 let full = std::mem::replace(&mut batch, Vec::with_capacity(BATCH));
                                 if tx.send(Ok(full)).is_err() {

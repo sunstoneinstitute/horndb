@@ -15,11 +15,12 @@
 //! (`BlankNode::new_unchecked(label)`), so `_:b1` denotes the same node in
 //! every chunk.
 
+use crate::dictionary::Dictionary;
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
+    load_threads, parse_chunks_mapped, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, QuadSink, SinkTimer};
+use crate::loader::{load_quads, subject_to_term, Probed, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -87,21 +88,49 @@ pub fn load_ntriples_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_ntriples_batch(bytes, threads, |triples| {
+    for_each_ntriples_probed(bytes, threads, store.dictionary(), |rows| {
         timer.sink(|| {
-            for t in triples {
-                sink.push(
-                    DEFAULT_GRAPH,
-                    &subject_to_term(t.subject),
-                    &Term::NamedNode(t.predicate),
-                    &t.object,
-                )?;
-            }
-            Ok(())
+            sink.intern_batch(|s| {
+                for row in rows {
+                    s.push_probed(DEFAULT_GRAPH, row)?;
+                }
+                Ok(())
+            })
         })
     })?;
     timer.record_parse(sink.total);
     sink.finish()
+}
+
+/// [`for_each_ntriples_batch`], with each row's terms probed against `dict` on
+/// the parse thread that produced it (HDB-106).
+///
+/// A single-chunk parse skips the probe: there is no other thread to move the
+/// lookup to, so probing would just be the consumer's own lookup done twice.
+pub(crate) fn for_each_ntriples_probed<F>(
+    bytes: &[u8],
+    threads: usize,
+    dict: &Dictionary,
+    sink: F,
+) -> Result<()>
+where
+    F: FnMut(Vec<Probed>) -> Result<()>,
+{
+    let chunks = ntriples_chunks(bytes, threads);
+    let probe = chunks.len() > 1;
+    parse_chunks_mapped(
+        chunks,
+        move |t: Triple| {
+            let s = subject_to_term(t.subject);
+            let p = Term::NamedNode(t.predicate);
+            if probe {
+                Probed::probe(dict, s, p, t.object)
+            } else {
+                Probed::unprobed(s, p, t.object)
+            }
+        },
+        sink,
+    )
 }
 
 /// Parse an in-memory N-Triples document on `threads` threads, handing `sink`
@@ -115,18 +144,26 @@ pub fn for_each_ntriples_batch<F>(bytes: &[u8], threads: usize, sink: F) -> Resu
 where
     F: FnMut(Vec<Triple>) -> Result<()>,
 {
+    parse_chunks_ordered(ntriples_chunks(bytes, threads), sink)
+}
+
+/// One independently parseable chunk iterator per parse thread, or a single
+/// serial one when `threads <= 1`.
+fn ntriples_chunks(
+    bytes: &[u8],
+    threads: usize,
+) -> Vec<Box<dyn Iterator<Item = Result<Triple>> + Send + '_>> {
     let parser = NTriplesParser::new();
     let parsers = if threads > 1 {
         parser.split_slice_for_parallel_parsing(bytes, threads)
     } else {
         vec![parser.for_slice(bytes)]
     };
-    let chunks = parsers
+    parsers
         .into_iter()
         .map(|p| {
             Box::new(p.map(|t| t.map_err(|e| StorageError::NtriplesParse(format!("{e}")))))
                 as Box<dyn Iterator<Item = Result<Triple>> + Send + '_>
         })
-        .collect();
-    parse_chunks_ordered(chunks, sink)
+        .collect()
 }

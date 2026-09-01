@@ -3,9 +3,10 @@
 //! `insert_oxrdf_batch` has to intern anyway, to build the `QuadKey`s it
 //! deduplicates on. It therefore passes the resulting ids to storage
 //! (`Store::insert_quad_ids`) instead of handing the terms back for a second,
-//! identical dictionary pass. The `intern` load phase is emitted only by the
-//! term-based `Store::apply_quads`, so it stays at zero on this path — that is
-//! what the counter assertion below pins.
+//! identical dictionary pass. The `intern` load phase is emitted by storage's
+//! **term-based** write paths — `Store::apply_quads` and the bulk loaders'
+//! `QuadSink` (HDB-106) — and this path is neither, so it stays at zero here.
+//! That is what the counter assertion below pins.
 //!
 //! Both halves run in one test function on purpose: the `storage_load_phase_*`
 //! counters are process-global, so a second test running concurrently in this

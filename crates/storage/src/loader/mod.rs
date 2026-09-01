@@ -14,12 +14,13 @@ pub use parallel::{
     DEFAULT_LOAD_BUFFER_TRIPLES, DEFAULT_MAX_SLICE_BYTES,
 };
 
+use crate::dictionary::{flush_intern_phases, Dictionary};
 use crate::error::Result;
 use crate::store::Store;
 use crate::term::{GraphId, TermId};
 use oxrdf::{NamedOrBlankNode, Term};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Default triples per tier insert across all loaders. The tier appends a
 /// batch as one sorted run and merges the runs once, on the first read
@@ -75,12 +76,115 @@ pub(crate) fn load_quads<I>(store: &Store, quads: I) -> Result<LoadStats>
 where
     I: Iterator<Item = Result<(GraphId, Term, Term, Term)>>,
 {
+    load_quads_in_graphs(store, quads, |_, g| Ok(g))
+}
+
+/// [`load_quads`] for a format whose graph label still has to be resolved —
+/// N-Quads, where `to_graph` interns the label and allocates its `GraphId`.
+///
+/// **`to_graph` runs on the consumer, inside the intern batch, not in the
+/// iterator.** Interning a graph label allocates a dictionary id like any
+/// other term, so resolving it while the parser runs ahead would give every
+/// label in a batch its id before any of that batch's subjects — a different
+/// dictionary from the one the same document gets through
+/// [`nquads::load_nquads_slice`]. Doing it here keeps the per-quad
+/// (graph, subject, predicate, object) order both paths share, which is what
+/// `tests/parallel_loader.rs::assert_same_store` pins.
+pub(crate) fn load_quads_in_graphs<I, G, R>(
+    store: &Store,
+    items: I,
+    to_graph: R,
+) -> Result<LoadStats>
+where
+    I: Iterator<Item = Result<(G, Term, Term, Term)>>,
+    R: Fn(&Store, G) -> Result<GraphId>,
+{
     let mut sink = QuadSink::new(store);
-    for quad in quads {
-        let (g, s, p, o) = quad?;
-        sink.push(g, &s, &p, &o)?;
+    // Buffered in the same 8,192-item batches the parallel path uses, for one
+    // reason: it is the granularity the `intern` phase is clocked at
+    // ([`QuadSink::intern_batch`]). Interning is otherwise unchanged — same
+    // terms, same order — and the buffer holds moved `Term`s, not clones.
+    let mut pending: Vec<(G, Term, Term, Term)> = Vec::with_capacity(parallel::BATCH);
+    for item in items {
+        pending.push(item?);
+        if pending.len() >= parallel::BATCH {
+            sink.intern_batch(|s| drain_into(s, &mut pending, &to_graph))?;
+        }
+    }
+    if !pending.is_empty() {
+        sink.intern_batch(|s| drain_into(s, &mut pending, &to_graph))?;
     }
     sink.finish()
+}
+
+fn drain_into<G, R>(
+    sink: &mut QuadSink<'_>,
+    pending: &mut Vec<(G, Term, Term, Term)>,
+    to_graph: &R,
+) -> Result<()>
+where
+    R: Fn(&Store, G) -> Result<GraphId>,
+{
+    for (g, s, p, o) in pending.drain(..) {
+        let g = to_graph(sink.store, g)?;
+        sink.push(g, &s, &p, &o)?;
+    }
+    Ok(())
+}
+
+/// Sentinel for "this term was not interned when a parse thread probed for
+/// it" in [`Probed::ids`].
+///
+/// `TermId(0)` is kind `Uri` with dictionary index 0, and dictionary indices
+/// start at 1 ([`Dictionary::intern`] computes `reverse.len() + 1`), so no
+/// dictionary ever issues it. That makes it a free sentinel — no `Option`, no
+/// 8 extra bytes per term in a buffer that holds millions of them.
+pub(crate) const UNRESOLVED: TermId = TermId(0);
+
+/// One parsed row, plus whatever a parse thread could resolve of it without
+/// interning anything (HDB-106).
+///
+/// The parse threads run [`Dictionary::get`] on each term — a read-only probe
+/// that allocates no id — and hand the answers down the channel with the row.
+/// The calling thread then interns only the terms that came back
+/// [`UNRESOLVED`]. **Term ids are unchanged by this**: see
+/// [`QuadSink::push_probed`] for why.
+///
+/// `terms` is `None` when all three probes hit. There is nothing left for the
+/// consumer to intern in that case, so the parse thread drops the parsed terms
+/// itself — which both shrinks the in-flight buffer and keeps the free on the
+/// thread that did the allocation.
+pub(crate) struct Probed {
+    pub(crate) terms: Option<(Term, Term, Term)>,
+    pub(crate) ids: [TermId; 3],
+}
+
+impl Probed {
+    /// Probe `(s, p, o)` against `dict`, dropping the terms if all three are
+    /// already interned.
+    pub(crate) fn probe(dict: &Dictionary, s: Term, p: Term, o: Term) -> Self {
+        let ids = [
+            dict.get(&s).unwrap_or(UNRESOLVED),
+            dict.get(&p).unwrap_or(UNRESOLVED),
+            dict.get(&o).unwrap_or(UNRESOLVED),
+        ];
+        let terms = if ids.contains(&UNRESOLVED) {
+            Some((s, p, o))
+        } else {
+            None
+        };
+        Self { terms, ids }
+    }
+
+    /// The unprobed form, for the paths where probing cannot pay: a
+    /// single-chunk (serial) parse, where the "parse thread" is the consumer
+    /// itself and a probe would just be a lookup done twice.
+    pub(crate) fn unprobed(s: Term, p: Term, o: Term) -> Self {
+        Self {
+            terms: Some((s, p, o)),
+            ids: [UNRESOLVED; 3],
+        }
+    }
 }
 
 /// Intern + batch + flush, shared by the streaming (`load_quads`) and the
@@ -92,6 +196,14 @@ pub(crate) struct QuadSink<'a> {
     batch_size: usize,
     total: u64,
     start: Instant,
+    /// Nanoseconds charged to the `intern` load phase: the time spent inside
+    /// [`QuadSink::intern_batch`], net of the tier flushes that happened
+    /// there. One clock pair per parse batch, never per triple (SPEC-17 §5.4).
+    intern_ns: u64,
+    /// Nanoseconds inside `Tier::insert_quad_batch`, one clock pair per flush
+    /// — once per `batch_size` rows, so ~150 pairs for a 10 M-triple load.
+    /// Subtracted out of `intern_ns`; the tier reports its own phases.
+    flush_ns: u64,
 }
 
 impl<'a> QuadSink<'a> {
@@ -105,25 +217,102 @@ impl<'a> QuadSink<'a> {
             batch_size,
             total: 0,
             start: Instant::now(),
+            intern_ns: 0,
+            flush_ns: 0,
         }
+    }
+
+    /// Run one parse batch's worth of pushes and charge them to the `intern`
+    /// load phase.
+    ///
+    /// The `intern` phase used to be reported as a residue — wall clock minus
+    /// the counted phases — which meant nobody could optimise against it
+    /// without also owning every unmetered thing it absorbed (HDB-96). This
+    /// makes it a counter. It is still not clocked per triple: HDB-90 put one
+    /// `Instant::now()` pair at 16.5 ns, so bracketing ~30 M intern calls
+    /// would cost half a second to measure three. One pair per 8,192-item
+    /// batch costs microseconds over a whole load.
+    ///
+    /// The tier flushes that fall inside the batch are clocked separately and
+    /// subtracted, so `intern` means interning (plus the id tuple push), not
+    /// interning plus whatever the tier did. What is left uncharged is the
+    /// parse, which [`SinkTimer`] reports.
+    pub(crate) fn intern_batch<F>(&mut self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Self) -> Result<()>,
+    {
+        let t = Instant::now();
+        let flush_before = self.flush_ns;
+        let out = f(self);
+        let elapsed = t.elapsed().as_nanos() as u64;
+        self.intern_ns += elapsed.saturating_sub(self.flush_ns - flush_before);
+        out
     }
 
     pub(crate) fn push(&mut self, g: GraphId, s: &Term, p: &Term, o: &Term) -> Result<()> {
         let (s_id, p_id, o_id) = self.store.dictionary().intern_triple(s, p, o)?;
-        self.batch.push((g, s_id, p_id, o_id));
+        self.record(g, s_id, p_id, o_id)
+    }
+
+    /// [`QuadSink::push`] for a row a parse thread already probed.
+    ///
+    /// **Term ids are identical to what [`QuadSink::push`] would have
+    /// assigned.** A probe that hit names an id the dictionary had already
+    /// issued, and the dictionary is append-only, so interning that term again
+    /// would return the same id. A probe that missed — including one that
+    /// missed only because it raced the consumer — falls through to
+    /// [`Dictionary::intern`] here, on this thread, in document order. So the
+    /// *order in which new ids are allocated* is untouched, which is the
+    /// property `tests/parallel_loader.rs::assert_same_store` pins.
+    pub(crate) fn push_probed(&mut self, g: GraphId, probed: Probed) -> Result<()> {
+        let ids = match probed.terms {
+            // Every term hit; the parse thread dropped them.
+            None => probed.ids,
+            Some((s, p, o)) => {
+                let dict = self.store.dictionary();
+                let mut ids = probed.ids;
+                for (id, term) in ids.iter_mut().zip([&s, &p, &o]) {
+                    if *id == UNRESOLVED {
+                        *id = dict.intern(term)?;
+                    }
+                }
+                ids
+            }
+        };
+        self.record(g, ids[0], ids[1], ids[2])
+    }
+
+    fn record(&mut self, g: GraphId, s: TermId, p: TermId, o: TermId) -> Result<()> {
+        self.batch.push((g, s, p, o));
         self.total += 1;
         if self.batch.len() >= self.batch_size {
-            self.store.tier().insert_quad_batch(&self.batch)?;
-            self.batch.clear();
+            self.flush()?;
         }
         Ok(())
     }
 
+    fn flush(&mut self) -> Result<()> {
+        let t = Instant::now();
+        let out = self.store.tier().insert_quad_batch(&self.batch);
+        self.flush_ns += t.elapsed().as_nanos() as u64;
+        self.batch.clear();
+        out
+    }
+
     pub(crate) fn finish(mut self) -> Result<LoadStats> {
         if !self.batch.is_empty() {
-            self.store.tier().insert_quad_batch(&self.batch)?;
-            self.batch.clear();
+            self.flush()?;
         }
+        if self.total > 0 {
+            horndb_metrics::metrics().storage.record_load_phase(
+                horndb_metrics::labels::LoadPhase::Intern,
+                Duration::from_nanos(self.intern_ns),
+                self.total,
+            );
+        }
+        // Publishes the `HORNDB_INTERN_PHASES=1` split, if it is on. No-op
+        // otherwise.
+        flush_intern_phases();
         Ok(LoadStats {
             triples: self.total,
             bytes_read: 0, // file-level caller overwrites this

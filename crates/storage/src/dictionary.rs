@@ -188,12 +188,114 @@ enum AuxMode {
     Lookup,
 }
 
+/// Sub-phase split of [`Dictionary::intern`] (HDB-106).
+///
+/// `intern` is the largest phase of a bulk load, and "3 seconds of interning"
+/// says nothing about *which* part of interning. This splits it into the four
+/// pieces that can be attacked separately:
+///
+/// | phase | what it covers |
+/// |---|---|
+/// | `intern_encode` | [`Dictionary::encode_key`] — building the byte key |
+/// | `intern_probe` | the `forward` lookup that answers a hit |
+/// | `intern_miss` | the whole slow path a failed probe falls into |
+/// | `intern_reverse` | the reverse-map write **inside** `intern_miss` |
+///
+/// `intern_encode + intern_probe` is the hit path; a miss pays those plus
+/// `intern_miss`, of which `intern_reverse` is a part. So the four do not sum
+/// to `intern` — two of them nest.
+///
+/// **Off unless `HORNDB_INTERN_PHASES=1`.** Interning a term costs on the
+/// order of 100 ns and this takes two `Instant::now()` pairs per call (HDB-90
+/// measured a pair at 16.5 ns), so leaving it on would inflate the very phase
+/// it is attributing by roughly a third. SPEC-17 §5.3 forbids per-tuple
+/// instruments on the shipped path; this is a diagnostic you turn on for one
+/// run, exactly like `HORNDB_EXEC_PHASES=1`.
+///
+/// The accumulator is thread-local and merged into the process counters by
+/// [`flush_intern_phases`], which the bulk loaders and `Store::apply_quads`
+/// call once at the end of a load — never per term.
+mod intern_phases {
+    use horndb_metrics::labels::LoadPhase;
+    use std::cell::RefCell;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    pub(super) const ENCODE: usize = 0;
+    pub(super) const PROBE: usize = 1;
+    pub(super) const MISS: usize = 2;
+    pub(super) const REVERSE: usize = 3;
+
+    const ORDER: [LoadPhase; 4] = [
+        LoadPhase::InternEncode,
+        LoadPhase::InternProbe,
+        LoadPhase::InternMiss,
+        LoadPhase::InternReverse,
+    ];
+
+    thread_local! {
+        /// Per phase: (nanoseconds, calls).
+        static ACC: RefCell<[(u64, u64); 4]> = const { RefCell::new([(0, 0); 4]) };
+    }
+
+    /// Read once per process. A `Dictionary` copies it into a field at
+    /// construction so the shipped path pays a predictable branch on a cache-hot
+    /// bool, not an atomic load, per intern call.
+    pub(super) fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("HORNDB_INTERN_PHASES").as_deref() == Ok("1"))
+    }
+
+    /// Clock reading that is `None` — and free — when the split is off.
+    #[inline]
+    pub(super) fn start(on: bool) -> Option<Instant> {
+        on.then(Instant::now)
+    }
+
+    #[inline]
+    pub(super) fn charge(phase: usize, since: Option<Instant>) {
+        let Some(t) = since else { return };
+        let ns = t.elapsed().as_nanos() as u64;
+        ACC.with(|a| {
+            let mut a = a.borrow_mut();
+            a[phase].0 += ns;
+            a[phase].1 += 1;
+        });
+    }
+
+    /// Merge this thread's accumulator into the process counters and reset it.
+    /// A no-op when the split is off, so callers need no gate of their own.
+    pub(super) fn flush() {
+        ACC.with(|a| {
+            for (i, (ns, calls)) in a.replace([(0, 0); 4]).into_iter().enumerate() {
+                if ns == 0 && calls == 0 {
+                    continue;
+                }
+                horndb_metrics::metrics().storage.record_load_phase(
+                    ORDER[i].clone(),
+                    Duration::from_nanos(ns),
+                    calls,
+                );
+            }
+        });
+    }
+}
+
+/// Publish this thread's [`intern_phases`] accumulator to the process
+/// counters. Called once at the end of a load, never per term; a no-op unless
+/// `HORNDB_INTERN_PHASES=1`.
+pub fn flush_intern_phases() {
+    intern_phases::flush();
+}
+
 pub struct Dictionary {
     id: u64,
     forward: DashMap<Box<[u8]>, TermId>,
     reverse: RwLock<Vec<Term>>,
     datatypes: AuxTable,
     languages: AuxTable,
+    /// `HORNDB_INTERN_PHASES=1`, resolved once at construction.
+    phases: bool,
 }
 
 impl Dictionary {
@@ -204,6 +306,7 @@ impl Dictionary {
             reverse: RwLock::new(Vec::new()),
             datatypes: AuxTable::new(),
             languages: AuxTable::new(),
+            phases: intern_phases::enabled(),
         }
     }
 
@@ -351,31 +454,50 @@ impl Dictionary {
             // reporting it, so this cannot fail today. Asserted rather than
             // assumed: on a `false` return `scratch.buf` holds a truncated
             // key, and inserting that below would alias two distinct terms.
+            let t_encode = intern_phases::start(self.phases);
             let encoded = self.encode_key(&mut scratch, term, AuxMode::Intern);
+            intern_phases::charge(intern_phases::ENCODE, t_encode);
             debug_assert!(encoded, "encode_key must not fail in AuxMode::Intern");
             if !encoded {
                 return Err(StorageError::InvalidTerm(format!(
                     "term key could not be encoded: {term}"
                 )));
             }
-            if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
-                return Ok(*existing);
+            let t_probe = intern_phases::start(self.phases);
+            let hit = self.forward.get(scratch.buf.as_slice()).map(|e| *e);
+            intern_phases::charge(intern_phases::PROBE, t_probe);
+            if let Some(existing) = hit {
+                return Ok(existing);
             }
-            // Slow path: acquire writer lock on reverse vec, double-check, append.
-            let mut reverse = self.reverse.write();
-            if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
-                return Ok(*existing);
-            }
-            let next_index = (reverse.len() as u64) + 1;
-            if next_index >= MAX_DICT_INDEX {
-                return Err(StorageError::DictionaryFull(next_index));
-            }
-            let kind = kind_of(term);
-            let id = TermId::new(kind, next_index);
-            reverse.push(term.clone());
-            self.forward.insert(scratch.buf.as_slice().into(), id);
-            Ok(id)
+            let t_miss = intern_phases::start(self.phases);
+            let out = self.intern_miss(&scratch, term);
+            intern_phases::charge(intern_phases::MISS, t_miss);
+            out
         })
+    }
+
+    /// The slow path of [`Dictionary::intern`]: the probe found nothing, so
+    /// take the reverse-vector write lock, re-check under it, and append.
+    ///
+    /// Split out so the sub-phase split can time it as a unit without an
+    /// early-return in the middle, and so the hit path is a short function the
+    /// optimiser can keep tight.
+    fn intern_miss(&self, scratch: &KeyScratch, term: &Term) -> Result<TermId> {
+        let mut reverse = self.reverse.write();
+        if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
+            return Ok(*existing);
+        }
+        let next_index = (reverse.len() as u64) + 1;
+        if next_index >= MAX_DICT_INDEX {
+            return Err(StorageError::DictionaryFull(next_index));
+        }
+        let kind = kind_of(term);
+        let id = TermId::new(kind, next_index);
+        let t_rev = intern_phases::start(self.phases);
+        reverse.push(term.clone());
+        intern_phases::charge(intern_phases::REVERSE, t_rev);
+        self.forward.insert(scratch.buf.as_slice().into(), id);
+        Ok(id)
     }
 
     /// Intern a subject/predicate/object triple in one call, returning their
@@ -414,6 +536,21 @@ impl Dictionary {
     /// always resolve — they are value-encoded, not dictionary-allocated).
     /// Used by query frontends to look up constants: an absent constant
     /// means no stored triple can match it.
+    ///
+    /// **Safe to call concurrently with `intern` on another thread**, which is
+    /// what the bulk loaders' parse-thread probe does (HDB-106). Two
+    /// properties make the answer usable even though it races:
+    ///
+    /// * the dictionary is append-only, so a `Some(id)` stays correct — the
+    ///   id a later `intern` of the same term would return is the same one;
+    /// * a `None` is only ever *stale*, never wrong, because `intern` publishes
+    ///   the reverse-vector entry before the forward-map key. A caller that
+    ///   falls back to `intern` on `None` therefore gets exactly the id it
+    ///   would have got without the probe.
+    ///
+    /// It also creates no `AuxTable` ids ([`AuxMode::Lookup`]): a datatype IRI
+    /// or language tag first seen on a parse thread is still assigned its id
+    /// by whichever thread interns the term, in that thread's order.
     pub fn get(&self, term: &Term) -> Option<TermId> {
         if let Some(id) = try_inline_int(term) {
             return Some(id);
