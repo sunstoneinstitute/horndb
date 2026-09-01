@@ -154,14 +154,23 @@ const AUTO_THREAD_CAP: usize = 8;
 /// thread — exactly what they did before HDB-96 — so a large file gets slower,
 /// never fatal.
 ///
-/// 2 GiB, because up to roughly that size the transient copy is the same order
-/// as the store the load is about to build anyway (trainmarks xlarge: a 1.17 GB
-/// document becomes a ~1.7 GiB store), so it is a same-order transient rather
-/// than a multiplier on the peak. Past it the ratio inverts, and a file big
-/// enough to threaten memory is exactly the one where the streaming loader's
-/// flat footprint is worth more than the parallel path's remaining upside —
-/// which is small: at the shipped 8 threads `parse` is 14% of a Turtle load and
-/// 3.6% of an N-Triples one (HDB-96).
+/// 2 GiB for two reasons, neither of which is the document-to-store ratio —
+/// that is roughly scale-invariant for RDF and does not change at any
+/// threshold:
+///
+/// * **It bounds the transient absolutely.** Whatever the corpus, the extra
+///   memory a threaded file load can take over a streaming one is at most this
+///   ceiling plus the parse budget — worst case about +3.5 GiB. Any host with
+///   room for the store the load is building has room for that; without a
+///   ceiling the term is unbounded, which is the actual hazard.
+/// * **What it forgoes is small.** At the shipped 8 threads `parse` is 14% of a
+///   Turtle load and 3.6% of an N-Triples one (HDB-96), so a document that trips
+///   the ceiling gives up at most that much and keeps the streaming loader's
+///   flat footprint.
+///
+/// For scale: trainmarks xlarge is a 1.17 GB document and a ~1.7 GiB store, so
+/// the ceiling sits just above a corpus of that size — comfortably inside the
+/// bound, not tuned to it.
 pub const DEFAULT_MAX_SLICE_BYTES: usize = 2 << 30;
 
 /// Resolved once, then cached. `0` means "not yet read".
@@ -174,19 +183,37 @@ static MAX_SLICE_BYTES: AtomicUsize = AtomicUsize::new(0);
 /// and friends: a caller that already holds the bytes has already paid for
 /// them, and this ceiling exists to stop the *file* loaders from allocating a
 /// copy the caller never asked for.
+///
+/// A malformed or `0` value resolves to `1` — "never read a file whole" — for
+/// the same reason a malformed `HORNDB_LOAD_THREADS` resolves to 1: a setting
+/// nobody can read should cost time, not memory.
 pub fn max_slice_bytes() -> usize {
     match MAX_SLICE_BYTES.load(Ordering::Relaxed) {
         0 => {
-            let v = std::env::var("HORNDB_LOAD_MAX_SLICE_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|n| *n >= 1)
-                .unwrap_or(DEFAULT_MAX_SLICE_BYTES);
+            let v = match std::env::var("HORNDB_LOAD_MAX_SLICE_BYTES") {
+                Ok(s) => parse_max_slice_bytes(&s),
+                Err(_) => DEFAULT_MAX_SLICE_BYTES,
+            };
             MAX_SLICE_BYTES.store(v, Ordering::Relaxed);
             v
         }
         v => v,
     }
+}
+
+/// Parse an explicit `HORNDB_LOAD_MAX_SLICE_BYTES`.
+///
+/// Same convention as [`parse_thread_count`]: a malformed value falls back to
+/// the **restrictive** setting, not the permissive one. Here that is `1` — no
+/// document can be both at least [`MIN_PARALLEL_BYTES`] and at most one byte,
+/// so `1` reads as "never read a file whole". `0` means the same and is stored
+/// as `1`, because `0` is the not-yet-resolved sentinel for the cache.
+///
+/// Restrictive means the opposite direction for the two variables — fewer
+/// threads, a lower ceiling — but the same rule: a setting nobody can read
+/// costs time, never memory.
+fn parse_max_slice_bytes(v: &str) -> usize {
+    v.parse::<usize>().unwrap_or(1).max(1)
 }
 
 /// Whether a `load_*_file` entry point should read `len` bytes into memory and
@@ -250,14 +277,22 @@ pub(crate) fn should_read_whole_file(len: u64, threads: usize) -> bool {
 /// `HORNDB_PARALLEL_TURTLE=1` as well, because splitting Turtle carries a
 /// soundness caveat the line-based formats do not.
 pub fn load_threads() -> usize {
-    match std::env::var("HORNDB_LOAD_THREADS").as_deref() {
-        Ok("auto") => auto_load_threads(),
-        // An unparseable or zero value falls back to **1**, not to `auto`.
-        // Someone who wrote `=0` meaning "off" must not get the most expensive
-        // setting, and the +1.5 GiB that comes with it.
-        Ok(v) => v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1),
+    match std::env::var("HORNDB_LOAD_THREADS") {
+        Ok(v) => parse_thread_count(&v),
         Err(_) => auto_load_threads(),
     }
+}
+
+/// Parse an explicit `HORNDB_LOAD_THREADS`.
+///
+/// An unparseable or zero value falls back to **1**, not to `auto`: someone who
+/// wrote `=0` meaning "off" must not get the most expensive setting and the
+/// +1.5 GiB that comes with it.
+fn parse_thread_count(v: &str) -> usize {
+    if v == "auto" {
+        return auto_load_threads();
+    }
+    v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1)
 }
 
 /// `available_parallelism()` clamped to [`AUTO_THREAD_CAP`], 1 if the platform
@@ -395,13 +430,26 @@ mod tests {
         assert!(!should_read_whole_file(u64::MAX, 8));
     }
 
-    /// A malformed `HORNDB_LOAD_THREADS` must land on the cheap setting.
-    /// Checked on the parse, not the env, so the test stays process-local.
+    /// Both knobs resolve a malformed value to their restrictive setting, and
+    /// they agree on which values count as malformed. Driven through the real
+    /// parse functions, not a copy of them, and off the environment, so the
+    /// test stays process-local.
     #[test]
-    fn a_malformed_thread_count_parses_to_serial() {
-        for v in ["0", "", "auto ", "-1", "eight", "1.5"] {
-            let n = v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1);
-            assert_eq!(n, 1, "{v:?} should fall back to serial");
+    fn a_malformed_setting_resolves_to_the_restrictive_value() {
+        for v in ["0", "", "auto ", "-1", "eight", "1.5", " 4"] {
+            assert_eq!(parse_thread_count(v), 1, "{v:?} threads");
+            assert_eq!(parse_max_slice_bytes(v), 1, "{v:?} max slice bytes");
         }
+        // A well-formed value is still honoured on both.
+        assert_eq!(parse_thread_count("4"), 4);
+        assert_eq!(parse_max_slice_bytes("4096"), 4096);
+    }
+
+    /// A ceiling of 1 byte is what a malformed value resolves to, and it has to
+    /// mean "never read a file whole" — no document can clear the 1 MiB floor
+    /// and still fit under one byte.
+    #[test]
+    fn a_one_byte_ceiling_disables_the_whole_file_read() {
+        assert!(MIN_PARALLEL_BYTES as u64 > parse_max_slice_bytes("garbage") as u64);
     }
 }

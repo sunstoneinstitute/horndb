@@ -1863,6 +1863,15 @@ calling thread's wall clock minus the time it spent in the sink. At one thread
 that is the inline parse; above one it is what the consumer still waits for
 after the parse threads have run ahead.
 
+**This flip moves the bottleneck to `intern`**, which is now 56% of a Turtle
+load and 61% of an N-Triples one — larger than `parse` and the tier together.
+It is serial by construction: interning runs on the calling thread in document
+order so term ids do not depend on thread scheduling, which is what makes a
+parallel load produce a byte-identical store (pinned by
+`parallel_loader.rs::assert_same_store`, which compares term ids). That is a
+property with a cost, not an oversight, and attacking it naively would break it.
+Instrumenting and addressing it is **HDB-106**.
+
 **HDB-83's reason for the serial default is gone.** The tier phases are flat in
 the thread count — `group` + `build` + `merge_runs` total **1.65s at 1 thread
 and 1.70s at 16** on Turtle, a 3% drift over a 16× change in producers. HDB-84
@@ -1923,13 +1932,18 @@ unmeasured SPEC-02 LUBM-8000 gate (~1B triples) both use. So the flip ships with
 a ceiling: `HORNDB_LOAD_MAX_SLICE_BYTES`, default **2 GiB**
 (`loader::max_slice_bytes`). Above it the file loaders fall back to the
 streaming reader on one thread — exactly what they did before HDB-96 — so a
-large file loses the speedup and keeps the flat footprint. 2 GiB because up to
-about that size the transient copy is the same order as the store the load is
-about to build anyway (trainmarks xlarge: a 1.17 GB document becomes a ~1.7 GiB
-store), so it is a same-order transient rather than a multiplier; past it the
-ratio inverts, and a file large enough to threaten memory is exactly the one
-where the streaming loader's flat footprint beats the parallel path's remaining
-14% / 3.6% of `parse`.
+large file loses the speedup and keeps the flat footprint.
+
+**Why 2 GiB.** Not the document-to-store size ratio: that is roughly
+scale-invariant for RDF, so it does not invert at any threshold. Two other
+reasons carry it. First, the ceiling makes the transient **absolute** — whatever
+the corpus, a threaded file load can exceed a streaming one by at most the
+ceiling plus the parse budget, worst case about **+3.5 GiB**, and any host with
+room for the store being built has room for that. Without a ceiling the term is
+unbounded, which is the hazard. Second, what tripping it forgoes is small: at 8
+threads `parse` is 14% / 3.6% of the load. For scale, trainmarks xlarge is a
+1.17 GB document and a ~1.7 GiB store, so 2 GiB sits just above a corpus of that
+size — inside the bound, not fitted to it.
 
 Measured on the file path, which is the one the sweep tables cannot show.
 `examples/load_curve`, `xlarge.nt` (1.17 GB), one repeat per cell, `VmHWM`
