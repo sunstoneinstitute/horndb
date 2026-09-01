@@ -1813,11 +1813,14 @@ spreads over the whole table rather than favouring one cell. Host quiet (load
 average 0.21 at start). Driver:
 `cargo run --release -p horndb-bench-trainmarks --bin store_load -- --file <f> --threads <n>`.
 
-The baseline carries HDB-84 (`7d51a70`), HDB-87 (`02fe5b6`), HDB-91 (`902cb1e`),
-HDB-94 and snmalloc. It does **not** carry HDB-89 (PR #307, still open), whose
-`live_keys` deletion takes 1.81 GiB off peak RSS — but on the `HornBackend`
-path, which this one does not use, so the RSS column below should not move when
-it lands.
+The measured commit carries HDB-84 (`7d51a70`), HDB-87 (`02fe5b6`), HDB-91
+(`902cb1e`), HDB-94 and snmalloc. It does **not** carry HDB-89 (`0bdf892`),
+which merged while this sweep was running and is in the branch's final base.
+That does not affect the numbers: HDB-89 deletes `live_keys` from
+`HornBackend`, touches no file under `crates/storage/src/loader/`, and the
+tables below show no `live_keys` or `dedupe*` row at all — the storage bulk-load
+path never reaches that code. Its 1.81 GiB peak-RSS win is on the `HornBackend`
+path, so the RSS column here is unaffected either way.
 
 Peak RSS is `VmHWM` read at process exit, one process per cell. The 386 MB /
 1.17 GB source document is in memory in every cell (the driver reads it before
