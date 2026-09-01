@@ -234,7 +234,7 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 50.25 qps** (Zen4 hornbench, nightly 2026-08-24, commit `8a5ed81`) vs **GraphDB Free 151.96 qps** → **3.02× gap**; the same night's Oxigraph legs: 38.08 as-loaded / 38.05 optimized, so HornDB leads its closest architectural peer by **~1.32×**. Don't compare qps across hosts (Intel SPR hel01 measured 34.4 on the older code; measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2, native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → ~36 (SIMD known-CPU table replacing the net-harmful calibrated kernels) → ~43 on 2026-07-20 (WCOJ galloping descent + bulk leaf materialization [#237](https://github.com/sunstoneinstitute/horndb/issues/237) and SPEC-23 Phase 2 heuristic rewrites [#202](https://github.com/sunstoneinstitute/horndb/issues/202) landed together — not bisected) → ~45.7 on 07-27 (columnar SoA `VecTripleSource`, [#257](https://github.com/sunstoneinstitute/horndb/issues/257)) → **~50 since 08-14** (SPEC-28 named-graph phases 1–4; the 07-31→08-13 nightly gap means this step is not bisected). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Ahead of Oxigraph, 3.02× behind GraphDB Free** — gap down from ~4.2× (2026-07-01) but still outside the ≤2× NF1 target. The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have all landed and did not close it. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
 | `graph_scan` — graph-scoped access paths (`crates/storage/benches/graph_scan.rs`) | `horndb-storage` | `scan_graph` cost tracks the graph, not the store (SPEC-28 S2 acceptance #4); warm footprint ≤**50 B/triple** (SPEC-02 NF1) | hornbench (16-core Debian 6.12, rustc 1.90.0, 2026-07-30, commit `abadb4b`): scanning the **same** 10-triple graph costs **1.113 µs** in a 1,000-graph / 1M-quad store and **1.145 µs** in a 2,000-graph / 2M-quad store — **+2.9% for a doubled store**, i.e. flat in store size. `graph_len` on that graph: **13.35 ns** (it sums a cached per-partition live count, so it is O(predicates in graph) with no row scan). Partition overhead at 1,000 triples/graph (5 predicates, so ~200 rows/partition): **32.08 B/quad**, identical across both corpora. | **GREEN — O(graph)-not-O(store) confirmed; 32.08 B/quad within the ≤50 B/triple NF1 budget.** Note the corpus is 1,000 triples *per graph*: this measures scan cost against graph **count**, and does **not** yet answer SPEC-28's "thousands of **small** graphs vs per-partition overhead" risk, where each graph holds a handful of triples and the ~16 B/partition constant dominates. That shape needs its own corpus ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) |
-| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0), trainmarks xlarge (9,995,000 triples), load plus a first read, at the shipped 65,536-triple batch — parse, interning and index build included. **One thread: 9.57s = 1.04 M triples/s** (2026-09-01, commit `ca4933e`, median of 5). **At the shipped parse-thread default** (`auto` → 8 on this host, HDB-96): **6.09s = 1.64 M triples/s** (commit `c9c1b34`, this branch pre-rebase, median of 3) — measured before HDB-95, so it does not carry that change; HDB-95 moved this path's *memory* rather than its time (the one-thread figure went 9.49s → 9.57s across it, inside the spread). The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it, and to **1,338 MiB** when HDB-95 dropped the datatype IRI out of the dictionary key. Cost is flat in the batch size (full curve below). | **GREEN on this corpus — F8 met at both settings (1.64 M/s threaded, 1.04 M/s on one thread).** Scope: in-memory tier, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at **0.69 M/s** through `HornBackend` since HDB-102 gave `apply_quad_batch` the append-run path (0.04 M/s when HDB-91 first measured it below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
+| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0), trainmarks xlarge (9,995,000 triples), load plus a first read, at the shipped 65,536-triple batch — parse, interning and index build included. **One thread: 9.57s = 1.04 M triples/s** (2026-09-01, commit `ca4933e`, median of 5). **At the shipped parse-thread default** (`auto` → 8 on this host, HDB-96): **6.09s = 1.64 M triples/s** (commit `c9c1b34`, this branch pre-rebase, median of 3) — measured before HDB-95, so it does not carry that change; HDB-95 moved this path's *memory* rather than its time (the one-thread figure went 9.49s → 9.57s across it, inside the spread). The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it, and to **1,338 MiB** when HDB-95 dropped the datatype IRI out of the dictionary key. Cost is flat in the batch size (full curve below). HDB-106 took another **7.9%** off this path (N-Triples, 8 threads, measured with `store_load`: 4.888s -> 4.500s) by probing terms on the parse threads; the `load_curve` figures in this row predate it. | **GREEN on this corpus — F8 met at both settings (1.64 M/s threaded, 1.04 M/s on one thread).** Scope: in-memory tier, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at **0.69 M/s** through `HornBackend` since HDB-102 gave `apply_quad_batch` the append-run path (0.04 M/s when HDB-91 first measured it below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
 | `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
 ### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
@@ -2565,7 +2565,11 @@ order so term ids do not depend on thread scheduling, which is what makes a
 parallel load produce a byte-identical store (pinned by
 `parallel_loader.rs::assert_same_store`, which compares term ids). That is a
 property with a cost, not an oversight, and attacking it naively would break it.
-Instrumenting and addressing it is **HDB-106**.
+**HDB-106 instrumented it and worked around it without weakening the
+property** — see "`intern` becomes a counter, and the parse threads take 41% of
+it" below. The phase is now a counter rather than this residue, and moving the
+read-only half of interning onto the parse threads takes it to 2.14s and the
+Turtle load to 5.08s, with term ids unchanged.
 
 **HDB-83's reason for the serial default is gone.** The tier phases are flat in
 the thread count — `group` + `build` + `merge_runs` total **1.65s at 1 thread
@@ -2842,6 +2846,165 @@ night-over-night. `HORNDB_EXEC_PHASES` defaults off and no nightly config
 sets it, so confirming "flag off costs nothing measurable" is a post-merge
 read of the next nightly run against this ~56.50 qps baseline, not something
 this task triggers itself.
+
+#### `intern` becomes a counter, and the parse threads take 41% of it (HDB-106, 2026-09-01)
+
+HDB-96 threaded the parse and left interning as the largest phase of a bulk
+load — and it was not instrumented. `intern` could only be read off as a
+*residue*: wall clock minus `parse` and the tier phases, which also absorbs
+anything else unmetered. This makes it a counter, splits it far enough to say
+where the time goes, and moves the part of it that does not have to be serial
+onto the parse threads.
+
+`hornbench` (Ryzen 7 7700, 8 cores / 16 threads, 124 GB, Debian 6.12, rustc
+1.90.0), snmalloc, trainmarks xlarge (9,995,000 triples) into a fresh in-memory
+`Store` plus a first read, driver
+`store_load --file <f> --threads <n>`. Base `60b300a`, new `82b8976`. Median of
+3 runs, reps interleaved base/new so host drift spreads over the table. Host
+quiet (load average 0.36 at start).
+
+| corpus | threads | wall base | wall new | Δ | `intern` base (residue) | `intern` new (counter) | `parse` base | `parse` new | peak RSS base | peak RSS new |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `xlarge.ttl` | **8 (shipped)** | 5.583s | **5.079s** | **−9.0%** | 3.002s | **2.136s** | 0.880s | 1.299s | 3,551 MiB | 3,536 MiB |
+| `xlarge.nt` | **8 (shipped)** | 4.888s | **4.500s** | **−7.9%** | 2.849s | **2.082s** | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
+| `xlarge.ttl` | 1 | 12.527s | 12.598s | +0.6% | 2.685s | 2.761s | 0.880s | — | 1,924 MiB | 1,923 MiB |
+| `xlarge.nt` | 1 | 10.027s | 9.651s | −3.7% | 2.641s | 2.694s | — | — | 2,684 MiB | 2,685 MiB |
+
+Run spread is under 1.0% on every cell. **Peak RSS is flat** (−0.4% to +0.9%),
+which was not free — see "what the probe costs" below.
+
+The residue is gone: on the new build `store_load`'s "uninstrumented residue"
+row reads **0.001s** on a 5-second load. `intern` plus `parse` plus the tier
+phases now account for 99.99% of the wall clock, so the phase table is a
+decomposition rather than a decomposition-plus-a-remainder.
+
+##### Where the time in `intern` actually goes
+
+`HORNDB_INTERN_PHASES=1` splits `Dictionary::intern` into key encoding, the
+forward-map probe that answers a hit, the whole slow path a failed probe falls
+into, and the reverse-vector write inside that slow path. It is off by default
+because it costs two `Instant::now()` pairs per call on an operation that takes
+~100 ns.
+
+Turtle, **one thread** (no parse-thread probe, so every intern call goes through
+the dictionary — this is the shape the 2.7–3.0s phase had):
+
+| sub-phase | raw | calls | raw ns/call | clock-corrected ns/call | share of `intern` |
+|---|---|---|---|---|---|
+| `intern_encode` | 0.644s | 28,640,000 | 22.5 | ~6 | ~6% |
+| `intern_probe` | 1.867s | 28,640,000 | 65.2 | ~48 | ~50% |
+| `intern_miss` | 0.878s | 1,919,818 | 457 | ~440 | ~30% |
+| ↳ `intern_reverse` | 0.132s | 1,919,818 | 69 | ~52 | ~4% (12% of the miss path) |
+
+29,985,000 term positions, of which **1,345,000 are inline-int literals** that
+never reach the dictionary (value-encoded, `TermKind::InlineInt`), leaving
+28,640,000 real intern calls. **1,919,818 of those miss (6.7%); 26,720,182 hit
+(93.3%)** — the misses are exactly the final dictionary size, because the store
+starts empty.
+
+The clock-corrected column subtracts ~17 ns per measured interval, derived from
+the gate's own cost: the same load runs `intern` at 2.761s ungated and 4.929s
+gated, and takes 61.12 M clock pairs to do it — 35.5 ns per pair of total added
+cost, of which roughly one `Instant::now()` lands inside the interval being
+measured. Treat the corrected column as an estimate; the raw column and the
+call counts are measurements.
+
+Three things follow, and they are what any further work on this should start
+from:
+
+1. **The hit path is the phase.** 93.3% of calls are hits, and a hit is ~54 ns,
+   so hits are ~1.5s of the 2.76s — more than the miss path and the sink
+   overhead together.
+2. **Inside the hit path it is the hash probe, not the key.** The `DashMap`
+   lookup is ~48 ns against ~6 ns to build the key. HDB-95 shrank the key and
+   moved this path's memory; shrinking it further would come off the 6 ns.
+   A faster/cheaper forward map is where the remaining hit-path time is.
+3. **Inside the miss path it is not the reverse-vector write.** That write —
+   `term.clone()` plus a `Vec` push under the write lock — is ~12% of a ~440 ns
+   miss. The other ~88% is the write-lock acquisition, the re-check probe under
+   it, the `Box<[u8]>` key allocation and the `DashMap` insert. "The reverse map
+   is the bottleneck" was the standing assumption (HDB-83 already doubted it,
+   measuring chunk-local interning at ~3.9× on 16 cores); it is not.
+
+##### The serial-intern constraint: kept, and worked around
+
+Interning runs on the calling thread in document order so term ids do not depend
+on thread scheduling, which is what makes a parallel load produce a
+byte-identical store to a serial one. `crates/storage/tests/parallel_loader.rs::assert_same_store`
+pins it by comparing interned **term ids**, not just triples.
+
+**That property is kept, unchanged and unweakened.** It did not have to be
+traded, because the expensive part of interning does not allocate anything:
+
+* a **lookup** that finds an existing id allocates nothing and can run on any
+  thread, at any time, because the dictionary is append-only — the id it returns
+  is the id a later `intern` would return;
+* only an **allocation** has to be ordered.
+
+So the parse threads now probe (`Dictionary::get`, read-only) and the consumer
+allocates. A probe that misses — including one that missed only because it raced
+the consumer — falls through to `intern` on the consumer, in document order. The
+order in which new ids are allocated is untouched. `assert_same_store` passes
+unmodified.
+
+**How much it recovers, and what caps it.** At the shipped 8 M-triple parse
+buffer the probe resolves **11.97 M of 28.64 M intern calls (41.8%)**, taking
+`intern` from 3.00s to 2.14s. It does not resolve more because the parse threads
+run *ahead* of the consumer and therefore probe a colder dictionary than the
+consumer would see. Shrinking the buffer brings the probe closer to the
+consumer, and the two effects fight (Turtle, 8 threads, new build):
+
+| `HORNDB_LOAD_BUFFER_TRIPLES` | lookahead per chunk | unresolved intern calls | `intern` | `parse` | wall | peak RSS |
+|---|---|---|---|---|---|---|
+| **8,388,608 (shipped)** | ~1.05 M rows | 16.82 M (41.3% resolved) | **2.143s** | 1.284s | **5.086s** | 3,521 MiB |
+| 2,097,152 | ~262 k rows | 13.33 M (53.5%) | 1.830s | 6.317s | 9.794s | 2,059 MiB |
+| 524,288 | ~65 k rows | 11.29 M (60.6%) | 1.686s | 7.909s | 11.261s | 2,015 MiB |
+| 131,072 | ~16 k rows | 10.77 M (62.4%) | 1.660s | 8.236s | 11.569s | 2,012 MiB |
+| 32,768 | ~8 k rows | 10.68 M (62.7%) | 1.651s | 8.389s | 11.711s | 1,999 MiB |
+
+Two readings:
+
+* **The shipped buffer is still right.** Every smaller setting buys `intern`
+  and pays several times over in `parse` — that is HDB-96's producer-starvation
+  curve, unchanged. 8 M is the best wall clock in the table by a factor of two.
+* **`intern` has a floor of ~1.65s that the probe cannot reach past**, even with
+  the probe running 8 k rows ahead instead of 1 M. That is not a batch-locality
+  effect: rebuilding with the parse batch at 256 rows instead of 8,192 (a 32×
+  finer probe granularity) moved unresolved calls only from 10.68 M to 10.42 M.
+  Term recurrence gaps are heavy-tailed, so shrinking the lookahead has sharply
+  diminishing returns — the only way to resolve the last third is to probe
+  immediately before interning, which *is* serial interning.
+
+So the ceiling for a "shallow-lookahead probe stage" — a redesign that keeps the
+deep parse queue for throughput but probes only a few thousand rows ahead of the
+consumer — is `intern` ≈ 1.65s against today's 2.14s, about another 10% of wall
+clock. Worth a follow-up, not worth widening this one.
+
+##### What the probe costs
+
+* **`parse` rises**: 0.880s → 1.299s on Turtle, 0.368s → 0.775s on N-Triples at
+  8 threads. That is the probe work landing on the parse threads, where it
+  overlaps; it is bought back several times over in `intern`.
+* **Peak RSS is flat**, but only after two fixes. The first cut sent every row
+  down the channel as `(Term, Term, Term)` plus three ids, and cost +9% peak RSS
+  (3,551 → 3,889 MiB on Turtle). Resolved terms are now dropped **individually**
+  on the parse thread — a term the dictionary already holds does not also need a
+  copy in the buffer — which pays for the ids the row carries.
+* **The single-chunk path pays nothing.** `HORNDB_LOAD_THREADS=1` and any Turtle
+  document `turtle_split_is_safe` rejects have no second thread to move the
+  lookup to. Deciding *per batch* rather than per row (`Batch::Raw` vs
+  `Batch::Probed`) hands those rows through exactly as before HDB-106. The first
+  cut charged them ~2% for a probe they could not use.
+* **The sub-phase gate costs nothing when off**: one branch per intern call
+  rather than four `Option<Instant>` tests, which was itself worth ~1.7% of a
+  one-thread load.
+
+##### Interaction with HDB-105
+
+HDB-105 (retune `HORNDB_LOAD_BUFFER_TRIPLES`) now has a second term to weigh:
+the buffer sets not just parse overlap and transient memory but also how far
+ahead of the consumer the probe runs, and therefore how much of `intern` it can
+resolve. The table above is that curve; the wall-clock column still says 8 M.
 
 ### Scaffolded but not yet evaluated against targets
 
