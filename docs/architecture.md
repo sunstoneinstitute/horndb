@@ -138,7 +138,7 @@ foundation every other crate reads/writes through.
 
 | Component | Status | Notes |
 |---|---|---|
-| Dictionary (URIs/blank nodes/literals → stable 64-bit ID, reverse lookup) | **implemented** | `dictionary.rs`, lock-free reads via `DashMap`. The forward map is keyed on a compact byte encoding of the term, not on the `oxrdf::Term`: a typed literal's key carries a small dense id for its datatype IRI (a language-tagged literal's, for its tag) instead of the text, from two side tables private to the dictionary (HDB-95). `TermId` assignment is unaffected. |
+| Dictionary (URIs/blank nodes/literals → stable 64-bit ID, reverse lookup) | **implemented** | `dictionary.rs`, lock-free reads via `DashMap`. The forward map is keyed on a compact byte encoding of the term, not on the `oxrdf::Term`: a typed literal's key carries a small dense id for its datatype IRI (a language-tagged literal's, for its tag) instead of the text, from two side tables private to the dictionary (HDB-95). `TermId` assignment is unaffected. **The key is not a persistence format** — the side-table ids are assigned in first-seen order, so the same corpus reimported in another order produces different key bytes; SPEC-25 S2's mapped base must build on `snapshot::term_codec`. |
 | Term taxonomy in high bits (`TermKind`, inline small literals) | **implemented** | `term.rs`. Includes `TripleTerm = 6` (RDF 1.2). |
 | Predicate-partitioned columnar `(s_id, o_id)` storage | **implemented** | `partition.rs`, `store.rs`. |
 | In-memory tiering scaffolding | **implemented** | `tier.rs`, `memory_tier.rs` — single warm tier in Stage 1. |

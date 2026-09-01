@@ -37,6 +37,23 @@
 //!
 //! The one carve-out that *does* look at the lexical form is `try_inline_int`,
 //! and it inlines only the canonical form of an `i32` for exactly this reason.
+//!
+//! ## Not a persistence format — do not write these keys to disk
+//!
+//! This encoding is valid only next to the `AuxTable`s that produced it, and
+//! only for the lifetime of this process. **`AuxTable` ids are assigned in
+//! first-seen order**, so the same corpus interned in a different order — a
+//! reimport, a different file order, a different number of loader threads
+//! reaching the first typed literal — produces *different key bytes for the
+//! same term*. Nothing detects that: a key written out under one ordering and
+//! read back under another silently resolves to the wrong term or to no term.
+//!
+//! So: never persist a key, never ship one between processes, and never derive
+//! an on-disk structure (front-coded block, FST, MPHF, checkpoint) from these
+//! bytes without first mapping them back through the term they came from. The
+//! durable encoding is [`crate::snapshot::term_codec`], which spells the
+//! datatype IRI out and is self-contained by design. SPEC-25 S2's mapped
+//! dictionary base must build on that one, not on this.
 
 use crate::error::{Result, StorageError};
 use crate::term::{GraphId, InternedQuad, TermId, TermKind, KIND_SHIFT, MAX_DICT_INDEX};
@@ -233,6 +250,11 @@ impl Dictionary {
     /// in [`AuxMode::Lookup`], when a datatype IRI or language tag the term
     /// carries has never been interned — which proves the term itself has
     /// never been interned either.
+    ///
+    /// **A `false` return leaves `scratch.buf` partially built.** Inserting
+    /// that truncated buffer as a key would let two different terms share one
+    /// key, so every caller must check the result — hence `#[must_use]`.
+    #[must_use]
     fn encode_key(&self, scratch: &mut KeyScratch, term: &Term, mode: AuxMode) -> bool {
         scratch.buf.clear();
         self.encode_into(scratch, term, mode)
@@ -291,6 +313,11 @@ impl Dictionary {
                 // which otherwise run to the end of the buffer, stay
                 // unambiguous when nested.
                 scratch.buf.push(K_TRIPLE);
+                // A subterm needs its own buffer so its length can be written
+                // before its bytes, and it cannot borrow the thread-local one
+                // — that is already borrowed by the call in flight. Allocating
+                // here does not cost the hit path anything: every non-triple
+                // kind returns above, and triple terms are an RDF 1.2 rarity.
                 let mut sub = KeyScratch::default();
                 let s: Term = match &t.subject {
                     oxrdf::NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n.clone()),
@@ -320,7 +347,17 @@ impl Dictionary {
         }
         SCRATCH.with(|s| {
             let mut scratch = s.borrow_mut();
-            self.encode_key(&mut scratch, term, AuxMode::Intern);
+            // `AuxMode::Intern` creates any missing aux id rather than
+            // reporting it, so this cannot fail today. Asserted rather than
+            // assumed: on a `false` return `scratch.buf` holds a truncated
+            // key, and inserting that below would alias two distinct terms.
+            let encoded = self.encode_key(&mut scratch, term, AuxMode::Intern);
+            debug_assert!(encoded, "encode_key must not fail in AuxMode::Intern");
+            if !encoded {
+                return Err(StorageError::InvalidTerm(format!(
+                    "term key could not be encoded: {term}"
+                )));
+            }
             if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
                 return Ok(*existing);
             }

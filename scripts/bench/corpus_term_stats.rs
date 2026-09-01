@@ -43,6 +43,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{BufWriter, Read, Write};
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
 // ---------------------------------------------------------------- hashing
 
@@ -242,9 +243,19 @@ fn scan_term(line: &[u8], mut i: usize, pos: Pos) -> Option<(ParsedTerm<'static>
                 } else {
                     Kind::TypedLit
                 }
+            } else if kind == Kind::TypedLit && tag == XSD_STRING.as_bytes() {
+                // oxrdf normalises `"x"^^xsd:string` to a simple literal, and
+                // `kind_of` classifies it `PlainLiteral`, so the engine's key
+                // carries no datatype at all. Count it the same way, or both
+                // the before and the after figures are wrong for it.
+                Kind::PlainLit
             } else {
                 kind
             };
+            // A plain literal has no tag to append; an explicit
+            // `^^xsd:string` reclassified above lands here too, which is what
+            // makes its key match the engine's.
+            let tag: &[u8] = if kind == Kind::PlainLit { b"" } else { tag };
             let mut key = Vec::with_capacity(lexical.len() + 1 + tag.len());
             key.extend_from_slice(lexical);
             key.push(0);
