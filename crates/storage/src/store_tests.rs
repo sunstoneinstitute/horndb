@@ -581,3 +581,62 @@ fn non_canonical_literal_identity_preserved() {
         "the non-canonical literal quad survives untouched"
     );
 }
+
+/// `contains_quad` binary-searches the merged columns, which hold a tuple's
+/// whole history: an insert / retract / re-insert cycle leaves several rows
+/// for one `(subject, object)` pair. It must report the visibility of the
+/// pinned version, not of whichever row the search lands on first. It is also
+/// graph-scoped — the same triple in another graph is a different quad.
+#[test]
+fn contains_quad_sees_past_retracted_history_rows() {
+    let store = Store::in_memory();
+    let t = (iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+    // A second row under the same predicate, so the partition is not a
+    // one-row special case for the search.
+    let other = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
+    store.insert_triples(&[t.clone(), other.clone()]).unwrap();
+
+    let (s, p, o) = {
+        let d = store.dictionary();
+        (
+            d.get(&t.0).unwrap(),
+            d.get(&t.1).unwrap(),
+            d.get(&t.2).unwrap(),
+        )
+    };
+    let g = store.intern_graph_uri(&iri("http://ex/g")).unwrap();
+
+    assert!(store.snapshot().contains_quad(DEFAULT_GRAPH, s, p, o));
+    assert!(
+        !store.snapshot().contains_quad(g, s, p, o),
+        "another graph is another quad"
+    );
+
+    // Retract, then re-insert: the dead row stays as history ahead of the
+    // live one in (subject, object, begin) order.
+    store.retract_triples(std::slice::from_ref(&t)).unwrap();
+    let pinned = store.snapshot();
+    assert!(!pinned.contains_quad(DEFAULT_GRAPH, s, p, o));
+
+    store.insert_triples(std::slice::from_ref(&t)).unwrap();
+    assert!(store.snapshot().contains_quad(DEFAULT_GRAPH, s, p, o));
+    assert!(
+        !pinned.contains_quad(DEFAULT_GRAPH, s, p, o),
+        "the older pin does not see the re-insert"
+    );
+
+    // The neighbour is untouched throughout, and an absent object still
+    // answers false even though its subject is present in the partition.
+    let (cs, co) = {
+        let d = store.dictionary();
+        (d.get(&other.0).unwrap(), d.get(&other.2).unwrap())
+    };
+    assert!(store.snapshot().contains_quad(DEFAULT_GRAPH, cs, p, co));
+    assert!(!store
+        .snapshot()
+        .contains_quad(DEFAULT_GRAPH, s, p, TermId(o.0 + 1)));
+    assert!(
+        !store.snapshot().contains_quad(DEFAULT_GRAPH, s, p, co),
+        "a live subject and a live object that never shared a row"
+    );
+}

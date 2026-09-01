@@ -436,6 +436,44 @@ impl PredicatePartition {
         })
     }
 
+    /// Is `(subject, object)` visible at `at`? O(log n) — the merged columns
+    /// are sorted by `(subject, object, begin)`, so a binary search finds the
+    /// row block for this pair and only that block is visibility-checked.
+    ///
+    /// A pair can occupy more than one row: a retracted row stays as history
+    /// until compaction, so an insert / retract / re-insert cycle leaves
+    /// several. The block is walked, not just its first row.
+    ///
+    /// `subject_set` is a superset across all versions (it includes dead
+    /// rows), so it can only prove *absence* — that is exactly what makes it
+    /// a sound first reject.
+    pub fn contains_at(&self, subject: TermId, object: TermId, at: CommitVersion) -> bool {
+        let c = self.cols();
+        if !c.subject_set.contains(subject.payload()) {
+            return false;
+        }
+        let subs: &[u64] = c.subjects.values();
+        let objs: &[u64] = c.objects.values();
+        // Lower bound of the (subject, object) block.
+        let (mut lo, mut hi) = (0usize, subs.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if (subs[mid], objs[mid]) < (subject.0, object.0) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let mut i = lo;
+        while i < subs.len() && subs[i] == subject.0 && objs[i] == object.0 {
+            if visible(c.begin.value(i), c.end.value(i), at) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Count of rows visible at `at`.
     pub fn len_at(&self, at: CommitVersion) -> usize {
         let c = self.cols();

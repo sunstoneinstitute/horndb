@@ -519,7 +519,8 @@ Three things this overturns:
 
 `live_keys` adds a further 1.45s building a 10M-entry `HashSet<QuadKey>` that
 exists for `INSERT DATA` idempotency and cannot hit on a load into an empty
-store.
+store. **Removed by HDB-89** (below): storage decides membership,
+so the phase no longer exists.
 
 Ranked targets, all of them above the tier: tokenisation (9.6s), the duplicate
 intern (1.9s — recovered by HDB-87), the term moves inside `dedupe` (1.5s, half
@@ -527,6 +528,10 @@ recovered with it), `intra_batch.insert` (1.4s), and the `live_keys` build
 (1.4s).
 
 #### Inside `dedupe`: interning is half of it, `live_keys.contains` is free (HDB-90, 2026-08-24)
+
+**Phase names as of the measured commit.** HDB-89 deleted `live_keys` and with
+it the `dedupe_contains` sub-phase; the `QuadKey` build that row also covered is
+now inside `dedupe_intra`.
 
 `dedupe`'s 26% was never split by a counter — HDB-57 R2 inferred it by assuming
 the three `d.intern()` calls in the loop cost what the separately-instrumented
@@ -642,6 +647,65 @@ Run spread: read_turtle 21.630 / 21.619 / 21.890 before, 19.165 / 18.709 /
 
 Predicted 1.9s plus "most of" 1.54s; delivered 2.5-2.8s. The prediction that
 the term moves would largely vanish was too strong — half of them did.
+
+#### Deleting `live_keys` removes a phase and 1.8 GiB (HDB-89, 2026-09-01)
+
+`HornBackend` kept `live_keys`, a `HashSet<QuadKey>` mirroring every live quad,
+so `INSERT DATA` idempotency and `DELETE DATA` no-op detection were O(1)
+lookups. Storage already decides both: `Tier::apply_quad_batch` inserts only
+what is not visible after the batch's deletions and returns the true
+`inserted`/`retracted` counts. The mirror was therefore a second copy of an
+answer the store already had, and on a load into an empty store every lookup
+missed. It is gone; the backend returns storage's counts, and the single-triple
+insert path short-circuits on the new `StoreSnapshot::contains_quad`, an
+O(log rows) binary search over the predicate partition's sorted columns.
+
+Controlled A/B on `hornbench` (16 cores), trainmarks xlarge (9,995,000
+triples), release + snmalloc, `--load-only --reserve-triples 10000000`, serial
+parse (`HORNDB_LOAD_THREADS=1`). Before `902cb1e`, after `dd6032c`; three runs
+of each, interleaved before/after, median reported. Host confirmed quiet (load
+average 0.12 at start).
+
+| | before (ttl) | after (ttl) | before (nt) | after (nt) |
+|---|---|---|---|---|
+| **read_turtle / read_ntriples** | **18.686s** | **17.194s** (**-8.0%**) | **15.669s** | **14.052s** (**-10.3%**) |
+| `parse` | 9.105s | 9.034s | 5.930s | 5.910s |
+| ` ` of which `materialize` | 0.534s | 0.536s | 0.500s | 0.500s |
+| `dedupe` | 5.255s | 5.207s | 5.042s | 5.029s |
+| `live_keys` | 1.291s | **gone** | 1.302s | **gone** |
+| `group` | 1.412s | 1.403s | 1.388s | 1.397s |
+| `build` | 1.222s | 1.222s | 1.206s | 1.200s |
+| `merge` | 0.151s | 0.143s | 0.143s | 0.188s |
+| `copy_forward` / `invalidate` | ~0 | ~0 | ~0 | ~0 |
+| **accounted** | 18.435s | 17.010s | 15.011s | 13.724s |
+| **peak RSS** | **11,323,108 KB** | **9,423,412 KB** (**-1.81 GiB**) | | |
+
+Run spread: read_turtle 18.686 / 18.864 / 18.585 before, 17.146 / 17.194 /
+17.262 after; read_ntriples 15.669 / 15.797 / 15.510 before, 14.160 / 13.966 /
+14.052 after; peak RSS 11,322,156 / 11,331,436 / 11,323,108 KB before,
+9,432,572 / 9,400,520 / 9,423,412 KB after. Neither distribution overlaps on
+either leg, and the RSS legs are 200x apart relative to their own spread.
+
+- **The `live_keys` phase is not reduced, it no longer exists.** With it goes
+  `dedupe_contains`, the opt-in sub-phase that timed the `live_keys.contains`
+  probe (0.7% of `dedupe`, HDB-90). The `QuadKey` build that sub-phase also
+  covered moved into `dedupe_intra`.
+- **End-to-end beats the phase delta** by 0.20s (ttl) and 0.32s (nt): 1.49s and
+  1.62s measured against a 1.29s / 1.30s phase. The remainder is tearing down
+  the set, which no counter covered — the same effect HDB-87 saw when it
+  deleted the ~1 GB `entries` buffer.
+- **Peak RSS falls 1.81 GiB, 16.8%.** The driver keeps the Turtle backend alive
+  across the N-Triples load, so the peak holds two of these sets: ~0.9 GiB
+  each. That is a 10M-entry `hashbrown` table of 32-byte keys (~554 MB at the
+  16.8M-slot capacity) plus the transient old table during its last doubling.
+  At 10M triples the mirror alone was ~55 B/triple — on its own over SPEC-02
+  NF1's ≤50 B/triple budget for the whole store.
+- **No write-path regression.** The full trainmarks suite at `large` (1,001,000
+  triples, one run each) moved no query outside noise, and `q6`, the only
+  UPDATE, went 0.0254s -> 0.0222s. `contains_quad` replaces a hash probe with a
+  binary search on the single-triple insert path, but that path already pays
+  `apply_quad_batch`'s whole-partition rebuild on every triple that is actually
+  new, which is orders of magnitude larger than either lookup.
 
 #### Parse does not parallelise, and the phase counters say where it goes
 
@@ -1063,6 +1127,9 @@ empty-store table covers:
 | `invalidate` | 0.000s | 0.0 | 0.000s | 0.0 | 0.000s | 0.0 |
 | **accounted** | **2.423s** | **98.7** | **24.248s** | **98.8** | **24.425s** | **98.8** |
 | **append total** | **2.456s** | | **24.534s** | | **24.712s** | |
+
+Phase names as of the measured commit: HDB-89 has since deleted the `live_keys`
+row (0.7% here), and the counts this path returns now come from storage.
 
 Every cell is the median of its own three reps, so a column need not add up to
 its `accounted` median — the 16-call columns are 0.05s short of it, 0.2%. Each

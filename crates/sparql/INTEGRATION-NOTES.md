@@ -213,12 +213,24 @@ lifetime on the tier commit clock (SPEC-25 S1). `DELETE DATA` and
 the row stays physically present as history until compaction. Every
 store read (`scan_all_term_ids`, `triple_count`, …) is already
 visibility-filtered, so `HornBackend` applies no overlay when building
-the WCOJ snapshot. `HornBackend` keeps a `live_keys: HashSet<QuadKey>`
-mirror of currently-live quads (`QuadKey { g, s, p, o }`, keyed by
-*quad* since SPEC-28 S2 — the same triple in two graphs is two entries)
-— not for visibility filtering, but to give `INSERT DATA` idempotency
-and `DELETE DATA` no-op detection an O(1) check, avoiding storage's
-O(partition-size) `StoreSnapshot::contains` on the bulk-load hot path.
+the WCOJ snapshot.
+
+`INSERT DATA` idempotency and `DELETE DATA` no-op detection are decided
+by storage, not by the backend. `Tier::apply_quad_batch` inserts only
+what is not visible after the batch's deletions and reports the true
+`inserted`/`retracted` counts, so the backend simply passes those on.
+The single-triple insert path additionally short-circuits on
+`StoreSnapshot::contains_quad`, an O(log rows) binary search over the
+predicate partition's merged columns — not for correctness, but so a
+repeated insert does not pay `apply_quad_batch`'s whole-partition
+rebuild to learn it is a no-op.
+
+Until HDB-89 the backend answered both questions from `live_keys`, a
+`HashSet<QuadKey>` mirror of every live quad. It cost 6% of a bulk load
+to populate and ~0.5 GB at 10M triples, and on a load into an empty
+store every lookup missed. It also had to be kept in step by every
+write path, which made a store mutated below the funnel (tests, the
+storage loader) silently invisible to it.
 
 ### Lazily-rebuilt VecTripleSource snapshot
 
@@ -245,14 +257,23 @@ per-predicate partition rebuild in `horndb-storage` on each call, giving
 O(n²) cost for a bulk load. `insert_oxrdf_batch` addresses this with a
 read-compute / write-commit split:
 
-1. Phase 1 (read-only): intern all terms; drop any triple already live
-   (an O(1) `live_keys` check) or repeated within the batch; collect the
-   storage batch. Intern failures skip the triple (lenient for bulk
-   loads — the single-triple `insert_oxrdf` propagates intern errors
-   instead).
-2. Phase 2 (write): call `store.insert_quads` once for the surviving
-   entries, rebuilding each predicate partition at most once, then mark
-   them live and invalidate the WCOJ snapshot only on success.
+1. Phase 1 (read-only): intern all terms; drop any triple repeated
+   within the batch; collect the storage batch. Intern failures skip the
+   triple (lenient for bulk loads — the single-triple `insert_oxrdf`
+   propagates intern errors instead). Already-live triples are not
+   filtered here: storage drops them itself, per triple, at no cost.
+   Per *batch* it is not free. Every quad now reaches
+   `apply_quad_batch`, which copies each touched partition forward and
+   rebuilds it before discovering the adds were all already visible; a
+   batch that is *entirely* already-live pays that whole rebuild and
+   then throws it away, because a zero-effect batch does not swap the
+   snapshot. Before HDB-89 such a batch left `entries` empty and never
+   called storage. Partially-duplicate batches are unaffected — they
+   always paid the rebuild. Tracked in HDB-104.
+2. Phase 2 (write): call `store.insert_quad_ids` once for the surviving
+   entries, rebuilding each predicate partition at most once, and
+   invalidate the WCOJ snapshot only if something actually became live.
+   The storage call's `inserted` count is what the method returns.
 
 `load_lexical_triples` and `insert_algebra_triples_bulk` both delegate
 to `insert_oxrdf_batch`. The `serve` binary uses it for the initial load.

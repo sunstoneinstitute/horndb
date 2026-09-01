@@ -358,20 +358,28 @@ impl StoreSnapshot<'_> {
         self.tier.version()
     }
 
+    /// True if `(g, s, p, o)` is visible at this pinned version — the
+    /// graph-scoped point read (SPEC-24 S6, SPEC-28 S2). O(log rows in the
+    /// predicate partition): see [`PredicatePartition::contains_at`]. An
+    /// absent graph or predicate is `false`, not an error.
+    ///
+    /// One caveat, inherited from HDB-84: the first read of a partition that
+    /// a batched write left as several runs merges them, which is O(rows in
+    /// that partition) and happens once. A point read right after a bulk load
+    /// can therefore pay that merge; every later one is the binary search.
+    pub fn contains_quad(&self, g: GraphId, s: TermId, p: TermId, o: TermId) -> bool {
+        let version = self.tier.version();
+        self.tier
+            .with_predicate(g, p, |part| part.contains_at(s, o, version))
+            .unwrap_or(false)
+    }
+
     // --- default-graph-scoped ---
 
     /// True if `(s, p, o)` is visible in the default graph at this pinned
-    /// version (SPEC-24 S6 point read). O(partition size) for S1: a linear
-    /// scan of the predicate partition's rows. Fine for the point reads S6
-    /// targets against modest per-predicate partitions; a sorted-column binary
-    /// search is a later optimization (tracked with the WCOJ columnar source).
+    /// version. The default-graph alias of [`Self::contains_quad`].
     pub fn contains(&self, s: TermId, p: TermId, o: TermId) -> bool {
-        let version = self.tier.version();
-        self.tier
-            .with_predicate(DEFAULT_GRAPH, p, |part| {
-                part.scan_at(version).any(|(rs, ro)| rs == s && ro == o)
-            })
-            .unwrap_or(false)
+        self.contains_quad(DEFAULT_GRAPH, s, p, o)
     }
 
     /// Key-ordered iteration over every visible default-graph triple as raw

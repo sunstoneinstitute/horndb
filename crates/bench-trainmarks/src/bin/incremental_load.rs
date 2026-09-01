@@ -22,7 +22,7 @@
 //!   entry point HDB-84 rewrote: it still carries the partition forward and
 //!   still emits `copy_forward` — 30% of an append (HDB-91, HDB-102).
 //! * `load` — `loader::load_ntriples_file` -> `Tier::insert_quad_batch`, the
-//!   storage bulk loader with no `HornBackend` dedupe/`live_keys` above it.
+//!   storage bulk loader with no `HornBackend` dedupe above it.
 //!   This is the path HDB-84 fixed: no `copy_forward`, and the carried rows
 //!   show up as `merge_runs` on the first read.
 //! * `apply` — `Store::apply_quads` -> `Tier::apply_quad_batch` on a bare
