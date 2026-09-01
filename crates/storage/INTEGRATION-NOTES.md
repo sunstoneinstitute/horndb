@@ -135,6 +135,16 @@ The bulk loaders' batch size is `HORNDB_LOAD_BATCH_TRIPLES`
 (`loader::load_batch_triples`, default 65,536). It is a memory knob now, not an
 index-rebuild knob: measured load cost is flat in it (`docs/benchmarks.md`).
 
+The hot-predicate threshold is `HORNDB_HOT_THRESHOLD` (`partition::hot_threshold`
+/ `set_hot_threshold`, default 1,000,000 live rows; `off` disables eager
+materialisation). It decides only *when* a partition builds its object-major
+layout — at build time, or on the first object-major read — never what the
+partition contains, so it is safe to move at any point. Resolved once per
+process; `MemoryTier::with_hot_threshold` still overrides it per tier.
+Measured: eager costs 0.71s of a 10M-triple load and no crate above
+`horndb-storage` reads the object-major layout today (`docs/benchmarks.md`,
+"Cutting the `apply_quad_batch` hash tables").
+
 ## Per-tuple MVCC (SPEC-25 S1, delivered)
 
 Substrate: two stamp columns, `begin`/`end` (`CommitVersion = u64`, `visibility.rs`),
