@@ -234,7 +234,7 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 50.25 qps** (Zen4 hornbench, nightly 2026-08-24, commit `8a5ed81`) vs **GraphDB Free 151.96 qps** → **3.02× gap**; the same night's Oxigraph legs: 38.08 as-loaded / 38.05 optimized, so HornDB leads its closest architectural peer by **~1.32×**. Don't compare qps across hosts (Intel SPR hel01 measured 34.4 on the older code; measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2, native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → ~36 (SIMD known-CPU table replacing the net-harmful calibrated kernels) → ~43 on 2026-07-20 (WCOJ galloping descent + bulk leaf materialization [#237](https://github.com/sunstoneinstitute/horndb/issues/237) and SPEC-23 Phase 2 heuristic rewrites [#202](https://github.com/sunstoneinstitute/horndb/issues/202) landed together — not bisected) → ~45.7 on 07-27 (columnar SoA `VecTripleSource`, [#257](https://github.com/sunstoneinstitute/horndb/issues/257)) → **~50 since 08-14** (SPEC-28 named-graph phases 1–4; the 07-31→08-13 nightly gap means this step is not bisected). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Ahead of Oxigraph, 3.02× behind GraphDB Free** — gap down from ~4.2× (2026-07-01) but still outside the ≤2× NF1 target. The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have all landed and did not close it. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
 | `graph_scan` — graph-scoped access paths (`crates/storage/benches/graph_scan.rs`) | `horndb-storage` | `scan_graph` cost tracks the graph, not the store (SPEC-28 S2 acceptance #4); warm footprint ≤**50 B/triple** (SPEC-02 NF1) | hornbench (16-core Debian 6.12, rustc 1.90.0, 2026-07-30, commit `abadb4b`): scanning the **same** 10-triple graph costs **1.113 µs** in a 1,000-graph / 1M-quad store and **1.145 µs** in a 2,000-graph / 2M-quad store — **+2.9% for a doubled store**, i.e. flat in store size. `graph_len` on that graph: **13.35 ns** (it sums a cached per-partition live count, so it is O(predicates in graph) with no row scan). Partition overhead at 1,000 triples/graph (5 predicates, so ~200 rows/partition): **32.08 B/quad**, identical across both corpora. | **GREEN — O(graph)-not-O(store) confirmed; 32.08 B/quad within the ≤50 B/triple NF1 budget.** Note the corpus is 1,000 triples *per graph*: this measures scan cost against graph **count**, and does **not** yet answer SPEC-28's "thousands of **small** graphs vs per-partition overhead" risk, where each graph holds a handful of triples and the ~16 B/partition constant dominates. That shape needs its own corpus ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) |
-| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0, 2026-08-31, commit `548e850`), trainmarks xlarge (9,995,000 triples), **one thread**, load plus a first read, median of 3: **9.71s = 1.03 M triples/s** at the shipped 65,536-triple batch — parse, interning and index build included. The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it. Cost is now flat in the batch size (full curve below). | **GREEN on this corpus — F8 met (1.03 M/s ≥ 1 M/s).** Scope: in-memory tier, one parse thread, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at 0.04 M/s through `HornBackend` (HDB-91 below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
+| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0, 2026-09-01, commit `ca4933e`), trainmarks xlarge (9,995,000 triples), **one thread**, load plus a first read, median of 5: **9.57s = 1.04 M triples/s** at the shipped 65,536-triple batch — parse, interning and index build included. The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it, and to **1,338 MiB** when HDB-95 dropped the datatype IRI out of the dictionary key. Cost is now flat in the batch size (full curve below). | **GREEN on this corpus — F8 met (1.04 M/s ≥ 1 M/s).** Scope: in-memory tier, one parse thread, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at 0.04 M/s through `HornBackend` (HDB-91 below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
 | `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
 ### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
@@ -1695,6 +1695,99 @@ S2 plan cites this record; if S2 adopts a structure they should become real
 dependencies of the crate, and if it adopts none of them they go with the
 example.
 
+#### The dictionary key carried the datatype IRI on every typed literal (HDB-95, 2026-09-01)
+
+The forward map was `DashMap<Term, TermId>`, so a typed literal's key was the
+whole term — lexical form **plus** datatype IRI. A corpus draws its datatypes
+from a set of a few dozen, so that IRI was stored, hashed and compared millions
+of times over. The key is now a compact byte string that carries a small dense
+id for the datatype IRI (and for a language tag) instead of its text; the ids
+live in two side tables private to the dictionary, so `TermId` assignment is
+unchanged.
+
+Measured with the HDB-92 term-stream analyzer (`scripts/bench/corpus_term_stats.rs`),
+which now reports both keyings from a single pass. Re-keying is injective, so
+the distinct-term count is identical on both sides by construction — the tables
+below compare the *same* term sets.
+
+The analyzer was later corrected to classify an explicit `"x"^^xsd:string` as a
+plain literal, the way `kind_of` does (the engine's key carries no datatype for
+it). Re-running all three corpora reproduced every figure below **byte for
+byte** — none of them contains that shape — so the numbers stand and the tool is
+now right for corpora that do.
+
+**Typed-literal column, bytes per key.** Distinct-weighted is what the
+dictionary stores; occurrence-weighted is what it hashes and compares.
+
+| Corpus | Triples | Distinct typed literals | Distinct: before → after | Δ | Per occurrence: before → after | Δ |
+|---|---:|---:|---|---:|---|---:|
+| trainmarks xlarge | 9,995,000 | 464,182 | 46.70 → 7.71 B | **−83.5%** | 47.37 → 9.40 B | **−80.2%** |
+| LUBM-100 | 13,880,276 | 0 | — | — | — | — |
+| DBpedia infobox-properties EN (2016-10) | 52,680,098 | 9,735,120 | 87.93 → 36.12 B | **−58.9%** | 68.64 → 18.56 B | **−73.0%** |
+
+**Whole dictionary, all kinds.** IRIs, blank nodes and plain literals keep
+their bytes, so the whole-dictionary effect is the typed-literal saving diluted
+by that share.
+
+| Corpus | Distinct terms | Key bytes before → after | Δ | B/key before → after | Distinct datatypes / languages |
+|---|---:|---|---:|---|---:|
+| trainmarks xlarge | 1,919,818 | 72,064,576 → 53,965,510 | **−25.1%** | 37.54 → 28.11 B | 2 / 0 |
+| LUBM-100 | 3,303,902 | 196,819,651 → 196,819,651 | **0%** | 59.57 → 59.57 B | 0 / 0 |
+| DBpedia infobox-properties EN | 14,222,284 | 1,082,846,487 → 578,451,551 | **−46.6%** | 76.14 → 40.67 B | 243 / 0 |
+
+**The saving is smaller on real data than the ~80% the task assumed, and for a
+concrete reason.** On DBpedia the distinct typed literals carry a 35.1 B mean
+lexical form — free text, not short numbers — so the datatype IRI is a smaller
+share of the key than the 47.5 B / 8.2 B figure the task quoted implied.
+Per *occurrence* it is 73%, because the long lexical forms are the ones that
+repeat least. trainmarks, whose typed literals are short dates and decimals,
+does hit the ~80%.
+
+**Language tags were re-keyed the same way, and it is nearly free either way.**
+None of the three corpora contains a language-tagged literal (DBpedia
+infobox-properties spells `rdf:langString` values as typed literals with no
+tag, which the analyzer and the engine both count as typed). Substituting a
+one-byte id for a 2–5 byte tag would save 1–4 B on such a key. It is in scope
+because it is the same code path and the same table type — not because the
+evidence demands it.
+
+**End-to-end A/B on the loader.** `hornbench` (Ryzen 7 7700, 16 cores, Debian
+6.12, rustc 1.90.0, 2026-09-01), trainmarks xlarge N-Triples (9,995,000
+triples), `examples/load_curve` at the shipped 65,536-triple batch, one process
+per run, base and change **interleaved** across 5 reps. `ready` = load plus a
+first read. Peak RSS via `getrusage(RUSAGE_CHILDREN)`.
+
+| Commit | `ready` median | spread | Peak RSS median | spread |
+|---|---:|---|---:|---|
+| `902cb1e` (base) | 9.752 s | 9.709–9.872 s | 1,547.4 MiB | 1,538.2–1,550.5 |
+| `ca4933e` (HDB-95) | **9.574 s** | 9.561–9.592 s | **1,337.8 MiB** | 1,334.3–1,349.3 |
+
+**−1.8% load time (1.025 → 1.044 M triples/s) and −209.6 MiB peak RSS (−13.5%).**
+The memory drop is ten times the 18 MB of key bytes the analyzer predicts,
+because the forward map no longer stores an `oxrdf::Term` per slot: a ~64 B
+inline enum with one or two separate `String` allocations behind it becomes a
+16 B `Box<[u8]>` with one. Over 1.92M live keys plus hash-table growth headroom
+that dominates the key bytes themselves.
+
+The change's own instrumentation agrees with the offline analyzer to the byte:
+`load_curve` reports **55,874,725 key bytes over 1,919,818 keys (29.10 B/key)**,
+which is the analyzer's 53,965,510 plus the one-byte kind tag on every key,
+minus the separator the analyzer already counted on plain literals.
+
+##### What this does not settle
+
+- **LUBM is untouched.** It has no typed and no language-tagged literals, so
+  the key set is byte-identical. Any dictionary base-structure measurement
+  taken on LUBM keys (HDB-93) still holds; the same measurement taken on
+  trainmarks keys is now over a 25% smaller key set and has to be re-run.
+- **Read-path effect unmeasured.** The A/B is the load path. `Dictionary::get`
+  hashes a shorter key too, but no query bench was run for this change.
+- **One-entry memo, not a cache.** The side-table lookup is answered from a
+  thread-local one-entry memo, which suits corpora whose datatypes arrive in
+  runs. A corpus that alternates between many datatypes term by term would fall
+  through to the side-table probe on every typed literal; none of the three
+  measured corpora does.
+
 #### Where HornDB sits against the other eleven engines
 
 Upstream publishes its own numbers in the report page
@@ -1855,6 +1948,12 @@ python3 scripts/bench/trainmarks/generate_append.py --mode fresh \
     --triples 1002000 --out data/append_fresh.nt
 cargo run --release -p horndb-bench-trainmarks --bin incremental_load -- \
     --base data/xlarge.nt --append data/append_overlap.nt --path load --batch 65536
+
+# Dictionary key bytes per corpus, before and after the HDB-95 re-keying
+# (offline; no engine build). Standalone rustc program, edition 2021 required.
+rustc --edition 2021 -O -o /tmp/cts scripts/bench/corpus_term_stats.rs
+/tmp/cts --name trainmarks-xlarge data/xlarge.nt > tm.json 2> tm.txt
+bzip2 -dc infobox_properties_en.ttl.bz2 | /tmp/cts --name dbpedia - > dbp.json 2> dbp.txt
 
 # SPEC-28 S2 storage — graph-scoped access paths (also prints B/quad to stderr)
 cargo bench -p horndb-storage --bench graph_scan

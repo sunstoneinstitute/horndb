@@ -194,6 +194,16 @@ produce a multi-GB dictionary") settled.
   the budget is: id → term in O(1) probes (one offset indirection, page-cache
   resident in steady state); term → id in O(term length). The implementation
   plan states measured numbers next to these bounds.
+- **Build the mapped base on the snapshot term encoding, not on the in-memory
+  dictionary key.** The in-memory forward map is keyed on a compact byte
+  encoding that substitutes a small dense id for a literal's datatype IRI or
+  language tag (HDB-95, `crates/storage/src/dictionary.rs`). Those ids are
+  assigned in **first-seen order**, so the same corpus imported in a different
+  order yields different key bytes for the same term, with nothing to detect
+  it. Persisting or front-coding/FST-indexing those bytes is therefore a
+  silent-corruption bug. Use `snapshot::term_codec`, which spells the datatype
+  IRI out and is self-contained; if the base wants the shorter keys, it needs
+  its own durable datatype table with ids that are stable across reopen.
 - **Fits the snapshot story.** The snapshot format stores terms by label
   precisely because Stage-1 ids were ephemeral. With durable ids this
   robustness property stays (snapshots remain label-level and portable across
