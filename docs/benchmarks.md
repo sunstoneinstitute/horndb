@@ -534,17 +534,40 @@ Phase 4, cost-based `JoinPlanning`) and its plan
 `docs/plans/PLAN-23-04-cost-based-join-planning.md` name this exact defect —
 "variable order by descending degree, `_est` ignored — is structurally wrong"
 (lines 33-34) — and Task 5, "Greedy WCOJ variable ordering… seeded by
-descending degree", is the fix. What HDB-108 adds is the price tag: the
-ordering alone accounts for the entire q3 gap, and none of it needs HDB-46's
-structural cyclic-core hybrid, its connected-subset DP, or its AGM guard.
-PLAN-23-04's statistics prerequisite (PLAN-23-03) is `status: executed`; its
-one remaining blocker is SPEC-23 §8 open question #2, the AGM cost
-calibration — which gates the WCOJ-vs-binary-hash *routing*, not the variable
-elimination order inside a WCOJ core. **Task 5 is therefore unblocked today
-and a candidate to carve out as a standalone slice ahead of the rest of
-HDB-46**, with the target below. Either
-way it is HDB-46's work, not a new task, and it carries cross-query regression
-risk (`four_cycle`, LUBM, SPB-256) that keeps it out of this diagnosis.
+descending degree", is the fix. What HDB-108 adds is the price tag: on
+trainmarks q3 the variable ordering alone accounts for the entire gap, with no
+contribution from HDB-46's structural cyclic-core routing or its
+WCOJ-vs-binary-hash choice.
+
+**PLAN-23-04 is still blocked, and Task 5 cannot simply be lifted out of it.**
+The plan carries a `BLOCKED — not ready to execute` banner over a six-item
+"Prerequisites to unblock" checklist with **no box ticked**. One of the six —
+"[PLAN-23-03] executed" — is in fact satisfied (`PLAN-23-03` is
+`status: executed`) and its checkbox is merely stale, which is worth stating
+because it is the prerequisite closest to this measurement. The other five are
+genuinely open: the per-subplan `ExecutionPlan` refactor, SPEC-23 §8 open
+question #2 (AGM calibration), §8 open question #3 (the `sparql` ↔ `wcoj`
+planner API boundary), the unified-memory materialization-cost term, and a
+confirmed-green WCOJ differential oracle.
+
+Task 5 also has a real in-plan dependency, not just a sequential listing. It
+orders variables *"within a WCOJ core"* and *"emit[s] the variable elimination
+order in the `JoinSpec`"* — cyclic cores are Task 2's output, the `JoinSpec` is
+Task 4's, and both sit on the per-subplan plan IR that Task 1 builds and that
+Task 1 itself describes as unblocking everything below. **Task 5 as written is
+therefore not independently pullable.**
+
+What *could* be pulled forward is narrower than Task 5 and is not currently
+written down anywhere: replacing the descending-degree sort in today's
+single-mode `ExecutionPlan::for_bgp` with a selectivity-aware order, leaving
+the plan IR, the routing, and the cutover exactly as they are. That is a
+strictly smaller change than Task 5, it needs only the PLAN-23-03 estimator
+that already exists, and it is what the measurements above price. Whether it
+is worth doing as an interim slice — or whether it would be thrown away by
+Task 1's refactor — is a scoping call for whoever owns HDB-46, and this entry
+does not attempt to make it. Either way the work belongs to HDB-46, not to a
+new task, and it carries cross-query regression risk (`four_cycle`, LUBM,
+SPB-256) that keeps it out of this diagnosis.
 
 Target for whoever takes it: **q3 at xlarge from 0.830s to ≤ 0.35s warm**,
 `scan_wcoj` from 793 ms to ≤ 300 ms, `wcoj_seeks_per_query` from 10.1M to
