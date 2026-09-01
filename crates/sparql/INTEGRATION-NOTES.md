@@ -259,13 +259,18 @@ per-predicate partition rebuild in `horndb-storage` on each call, giving
 O(n²) cost for a bulk load. `insert_oxrdf_batch` addresses this with a
 read-compute / write-commit split:
 
-1. Phase 1 (read-only): intern all terms; drop any triple repeated
-   within the batch; collect the storage batch. Intern failures skip the
-   triple (lenient for bulk loads — the single-triple `insert_oxrdf`
-   propagates intern errors instead). Already-live triples are not
-   filtered here: storage drops them itself, per triple, at no cost.
-   Per *batch* it is not free: every quad now reaches
-   `apply_quad_batch`, where an already-live one is still interned,
+1. Phase 1 (read-only): intern all terms and collect the storage batch.
+   Intern failures skip the triple (lenient for bulk loads — the
+   single-triple `insert_oxrdf` propagates intern errors instead).
+   Neither already-live triples nor within-batch duplicates are
+   filtered here: storage drops both itself, at no extra cost, per
+   `apply_quad_batch`'s own per-predicate group-sort-dedup pass
+   (HDB-88). A within-batch duplicate used to be dropped in this phase
+   too (`intra_batch`, a `HashSet<QuadKey>`), but that duplicated the
+   storage-layer dedup one layer down — 1.4s of a 10M-triple load
+   (HDB-90) paying twice for the same answer. Retired in HDB-104.
+   Already-live triples are not free per *batch*: every quad still
+   reaches `apply_quad_batch`, where an already-live one is interned,
    grouped, and probed against the partition. Since HDB-102 that is all
    it costs — an add-only batch takes the append-run path, so a batch
    that is *entirely* already-live probes the runs, appends nothing, and
@@ -273,8 +278,6 @@ read-compute / write-commit split:
    same batch paid a whole-partition rebuild and then threw it away,
    because a zero-effect batch does not swap the snapshot. Before HDB-89
    such a batch left `entries` empty and never called storage at all.
-   Tracked in HDB-104, whose remaining cost is now the intern/group/probe
-   pass, not a rebuild.
 2. Phase 2 (write): call `store.insert_quad_ids` once for the surviving
    entries, rebuilding each predicate partition at most once, and
    invalidate the WCOJ snapshot only if something actually became live.

@@ -76,8 +76,7 @@ thread_local! {
     static ACC: RefCell<[(u64, u64); N]> = const { RefCell::new([(0, 0); N]) };
 }
 
-/// Is `HORNDB_EXEC_PHASES=1`? Read once per process (mirrors
-/// `dedupe_subphases_enabled` in `exec/horn.rs`). Call sites that cannot use
+/// Is `HORNDB_EXEC_PHASES=1`? Read once per process. Call sites that cannot use
 /// [`timed`] directly must check this *before* calling `Instant::now()` —
 /// the gate itself (`OnceLock` load + predicted branch) is cheap enough to
 /// pay at batch granularity, but the clock read it guards is not free at row

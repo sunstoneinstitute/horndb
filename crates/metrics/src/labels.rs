@@ -109,19 +109,17 @@ pub struct PhaseLabel {
 // bulk loader uses interns nothing. The rest are inside
 // `MemoryTier::insert_quad_batch`.
 //
-// The four `Dedupe*` values split the `Dedupe` phase into its per-triple steps.
-// They are emitted only when `HORNDB_DEDUPE_SUBPHASES=1` is set, because the
-// split needs a clock read between each step — see `HornBackend::
-// insert_oxrdf_batch_in_graph`. `DedupeClock` is the measured cost of one such
-// read, to be subtracted from each of the other three.
+// `Dedupe` covers `HornBackend::insert_oxrdf_batch_in_graph`'s interning
+// loop. It used to split into four `Dedupe*` sub-phases behind
+// `HORNDB_DEDUPE_SUBPHASES=1` (HDB-90); that split existed to attribute the
+// loop's cost against `intra_batch`, the in-batch dedup HDB-104 removed as
+// redundant with `MemoryTier::apply_quad_batch`'s own per-predicate dedup —
+// with `intra_batch` gone the loop is interning alone, so the split no
+// longer has anything to attribute.
 label_value_enum!(LoadPhase {
     Parse => "parse",
     Materialize => "materialize",
     Dedupe => "dedupe",
-    DedupeIntern => "dedupe_intern",
-    DedupeIntra => "dedupe_intra",
-    DedupeRest => "dedupe_rest",
-    DedupeClock => "dedupe_clock",
     Invalidate => "invalidate",
     Intern => "intern",
     Group => "group",
