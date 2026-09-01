@@ -2856,10 +2856,11 @@ anything else unmetered. This makes it a counter, splits it far enough to say
 where the time goes, and moves the part of it that does not have to be serial
 onto the parse threads.
 
-**Read the thread sweep below before quoting a single number.** The move pays
-where the parse threads have idle capacity to absorb it — −9.0% / −7.9% at the
-shipped 8 threads, −4.9% / −5.2% at 4 — and **costs 4–5% at 2 threads**, where
-they do not.
+The move pays only where the parse threads have idle capacity to absorb it —
+−9.0% / −7.9% (Turtle / N-Triples) at the shipped 8 threads and −4.9% / −5.2% at
+4, but a **4–5% loss at 2 threads**, where they do not. So it is **gated off
+below 4 chunks**; see "The thread sweep" below for the measurements and
+"So the probe is gated" for the gate and its confirmation.
 
 `hornbench` (Ryzen 7 7700, 8 cores / 16 threads, 124 GB, Debian 6.12, rustc
 1.90.0), snmalloc, trainmarks xlarge (9,995,000 triples) into a fresh in-memory
@@ -2876,9 +2877,10 @@ At the shipped default (`auto` -> 8 on this host):
 | `xlarge.nt` | **8 (shipped)** | 4.888s | **4.500s** | **−7.9%** | 2.849s | **2.082s** | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
 
 Run spread is under 1.0% on every cell. **Peak RSS is flat** (−0.4% to +0.9%),
-which was not free — see "what the probe costs" below. **This is not the whole
-picture**: at 2 threads the change is a 4–5% *loss*. Full sweep and the reason
-in the next subsection — read it before quoting the −9%.
+which was not free — see "what the probe costs" below. **This is the 8-thread
+cell, not the whole picture**: ungated, the same change is a 4–5% *loss* at 2
+threads, which is why the probe is gated off below 4 chunks. Full sweep, the
+reason, and the gate are in the next two subsections.
 
 The residue is gone: on the new build `store_load`'s "uninstrumented residue"
 row reads **0.001s** on a 5-second load. `intern` plus `parse` plus the tier
@@ -2904,7 +2906,8 @@ CPU-limited container, not hypotheticals. Same protocol as the table above
 | `xlarge.nt` | 4 | 5.351s | 5.074s | −5.2% | 2.909s | 1.916s | 0.826s | 1.506s | 4,111 MiB | 3,976 MiB |
 | `xlarge.nt` | **8 (shipped)** | 4.888s | 4.500s | **−7.9%** | 2.849s | 2.082s | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
 
-**At 2 threads the probe is a 4–5% loss**, on both formats, well outside the
+**Ungated — which is what this sweep measures, and what motivated the gate in the
+subsection after it — **at 2 threads the probe is a 4–5% loss****, on both formats, well outside the
 under-1% run spread. The mechanism is not subtle and the `intern` column rules
 out the obvious wrong explanation — the probe *works better* at 2 threads
 (`intern` falls to 1.79s, its best figure at any thread count, because two slow
@@ -2929,14 +2932,52 @@ the parse threads have idle capacity to absorb it. Where they do not, it costs.
 probe resolution means more terms dropped on the parse thread, so the loaded
 corpus spends less time duplicated between the buffer and the dictionary.
 
-**Nothing was tuned in response to this**, deliberately. The obvious lever —
-gate the probe on the chunk count, or on some estimate of whether the parse is
-the critical path — is a policy decision that wants its own evidence (which
-thread counts, measured on what corpus mix, and what a wrong guess costs),
-not a threshold picked to make this table look better. What is recorded here is
-the shape: **the probe pays from 4 threads up, and costs 4–5% at 2.** The
-shipped default is `auto` capped at 8, so a host with 4 or more hardware threads
-gets the win and a 2-core host or container takes the loss.
+##### So the probe is gated: off below 4 chunks
+
+`HORNDB_LOAD_THREADS` defaults to `auto` = `min(available_parallelism(), 8)`, so
+a 2-core VM, container or CI runner reaches this path *by default*. A documented
+4–5% regression on the smallest shipped configuration is still a regression, so
+`parallel::should_probe` turns the probe off below `MIN_PROBE_CHUNKS = 4`;
+those loads take the pre-HDB-106 path exactly (`Batch::Raw` — no extra bytes in
+the buffer, no extra work per row).
+
+**4 is the line these measurements draw**, not a tuned threshold. 1, 2, 4 and 8
+were measured, the sign flips between 2 and 4, and nothing was measured in
+between to justify anything finer. The gate keys on the **actual chunk count**,
+not on `HORNDB_LOAD_THREADS`: `oxttl` applies a 16 KiB-per-chunk floor and may
+return fewer chunks than asked for, and a Turtle document `turtle_split_is_safe`
+rejects comes back as one chunk whatever the setting.
+
+Confirmed on hornbench after the gate (`42f0134` vs base `60b300a`, median of 3
+interleaved reps; the 2-thread cells are median of 9, because they are the ones
+the gate exists for):
+
+| corpus | threads | probe | wall base | wall gated | Δ | Δ before the gate |
+|---|---|---|---|---|---|---|
+| `xlarge.ttl` | **2** | off | 7.458s | 7.420s | **−0.5%** | +4.1% |
+| `xlarge.nt` | **2** | off | 5.769s | 5.837s | **+1.2%** | +5.4% |
+| `xlarge.ttl` | 4 | on | 6.234s | 6.011s | −3.6% | −4.9% |
+| `xlarge.nt` | 4 | on | 5.308s | 5.132s | −3.3% | −5.2% |
+| `xlarge.ttl` | **8 (shipped)** | on | 5.499s | 5.128s | −6.7% | −9.0% |
+| `xlarge.nt` | **8 (shipped)** | on | 4.887s | 4.517s | −7.6% | −7.9% |
+
+Turtle at 2 threads is back to baseline. **N-Triples at 2 threads keeps about
++1.2%** — four fifths of the regression is gone, not all of it. That residue is
+not the probe (it is off) and it is not in a hot loop: `Batch::Raw` is the old
+code path, and what is left is the sub-phase branch in `Dictionary::intern`, the
+`Batch` discriminant per 8,192 rows, and ~1,370 clock pairs per load. It is also
+at the edge of what this setup resolves — the same base binary measured 5.583s
+and 5.499s for `xlarge.ttl` at 8 threads in two sessions an hour apart, so
+session-to-session drift on this host is itself ~1–1.5%. Recorded as measured
+rather than rounded to zero.
+
+The 4- and 8-thread wins are unchanged in kind; the whole table sits ~1–2 points
+below the pre-gate session for base and gated alike, which is that same drift.
+
+`parallel_loader.rs::both_sides_of_the_probe_gate_produce_the_same_store` and
+`..._agree_on_named_graphs` load at 1, 2, 3, 4 and 8 threads and compare every
+result to a serial reader through `assert_same_store`. The gate is a throughput
+switch and must never become a correctness one.
 
 ##### Where the time in `intern` actually goes
 
