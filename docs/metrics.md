@@ -159,11 +159,7 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 |---|---|---|
 | `parse` | `crates/bench-trainmarks/src/main.rs`; `crates/storage/src/loader/{turtle,ntriples,nquads}.rs` | Two emission sites, and they measure different things. From the bench driver: tokenising the document **and** materialising the triple batch (`materialize` is the second half). From the slice loaders (`load_*_slice`): the calling thread's wall clock minus the time it spent interning and inserting, taken once per 8,192-item batch — at one parse thread that is the inline parse, above one it is what the consumer still waits for. A process that does both adds them together |
 | `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
-| `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping intra-batch-duplicate triples |
-| `dedupe_intern` | `crates/sparql/src/exec/horn.rs` | the `Dictionary::intern_quad` call inside `dedupe` (opt-in, see below) |
-| `dedupe_intra` | `crates/sparql/src/exec/horn.rs` | the `intra_batch.insert` probe, plus the `QuadKey` build (opt-in) |
-| `dedupe_rest` | `crates/sparql/src/exec/horn.rs` | `entries.push` (opt-in) |
-| `dedupe_clock` | `crates/sparql/src/exec/horn.rs` | cost of the instrumentation itself (opt-in) |
+| `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term of a bulk-insert batch (HDB-104: no longer also drops intra-batch-duplicate triples — `MemoryTier::apply_quad_batch` dedups the add side itself) |
 | `intern` | `crates/storage/src/store.rs` | `Store::apply_quads` interning terms for storage's own ids. Zero on the bulk-load path since HDB-87: `HornBackend` passes the ids it already resolved (`Store::apply_quad_ids`), so only the term-based write path interns here |
 | `group` | `crates/storage/src/memory_tier.rs` | grouping the batch by graph then predicate into per-predicate `(s, o)` lists. Since HDB-88 the two sides differ: the del side is a `HashSet` (probed once per existing live row), the add side a `Vec` that this phase then **sorts and deduplicates**. That sort is why the phase's cost depends on the order the corpus arrives in — near-free on a subject-ordered document, a real `n log n` on a shuffled one (in which case `build` skips one instead) |
 | `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps, end-stamping the ones this batch retracts, and collecting the survivors into the sorted `still_visible` list the `merge` phase reads. `apply_quad_batch` only, and since HDB-102 only for the **predicates a batch actually deletes from** — a predicate the batch only adds to takes the append-run path and carries nothing, so an add-only batch (every `INSERT DATA`, every `Store::insert_quads`) contributes zero seconds and zero rows here. `insert_quad_batch` stopped carrying rows forward in HDB-84 and never emits this |
@@ -175,15 +171,6 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 The pair is a count+sum summary per SPEC-17 §5.4.1 — mean cost per row for a
 phase is `rate(nanoseconds) / rate(rows)`. Each phase accumulates in locals and
 touches its counters once per batch, never per row.
-
-The four `dedupe_*` sub-phases are **off by default**; set
-`HORNDB_DEDUPE_SUBPHASES=1` to emit them. Splitting a per-triple loop needs a
-clock read between each step, which costs the `dedupe` phase 15-25%, so this is
-a diagnostic and not the production path. `dedupe_clock` measures one such read
-in situ (an empty interval per iteration); every other interval carries the same
-cost, so a corrected sub-phase is `dedupe_<x> - dedupe_clock`. With the flag on,
-`dedupe` itself reports the inflated total; compare against a run with the flag
-off for the real one. `rows` is the batch's input triple count for all four.
 
 ## Closure / GraphBLAS (`crates/metrics/src/closure.rs`)
 

@@ -211,13 +211,6 @@ impl QuadKey {
             o: o.0,
         }
     }
-
-    /// The key of an already-interned quad. Four field reads — the bulk path
-    /// keeps the `InternedQuad` and derives the key from it rather than
-    /// carrying both.
-    fn of(q: InternedQuad) -> Self {
-        Self::new(q.graph(), q.subject(), q.predicate(), q.object())
-    }
 }
 
 /// A [`ScanScope`](crate::exec::ScanScope) resolved against *this* store's
@@ -352,53 +345,6 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
     horndb_metrics::metrics()
         .storage
         .record_load_phase(phase, elapsed, rows);
-}
-
-/// Local nanosecond accumulators for the `dedupe` sub-phase split (HDB-90),
-/// merged into the shared counters once per batch (SPEC-17 §5.4.1).
-///
-/// `clock_ns` is the cost of the instrumentation itself, measured in situ: one
-/// empty interval per iteration. Each of the other three intervals carries the
-/// same one-clock-read cost, so the corrected value of a sub-phase is
-/// `<phase>_ns - clock_ns`. Both are exported; the subtraction is left to the
-/// reader so the raw numbers stay auditable.
-#[derive(Default)]
-struct DedupeSubPhases {
-    intern_ns: u64,
-    intra_ns: u64,
-    rest_ns: u64,
-    clock_ns: u64,
-}
-
-impl DedupeSubPhases {
-    /// Merge into the shared counters. `rows` is the batch's input triple
-    /// count for every sub-phase, so a per-triple mean divides by the same
-    /// denominator throughout (the `continue` paths mean the later sub-phases
-    /// ran over fewer triples than that, which only matters on a load into a
-    /// non-empty store).
-    fn record(&self, rows: u64) {
-        use std::time::Duration;
-        for (phase, ns) in [
-            (LoadPhase::DedupeIntern, self.intern_ns),
-            (LoadPhase::DedupeIntra, self.intra_ns),
-            (LoadPhase::DedupeRest, self.rest_ns),
-            (LoadPhase::DedupeClock, self.clock_ns),
-        ] {
-            record_load_phase(phase, Duration::from_nanos(ns), rows);
-        }
-    }
-}
-
-/// Is the `dedupe` sub-phase split switched on (`HORNDB_DEDUPE_SUBPHASES=1`)?
-/// Read once per process; it costs the `dedupe` phase 15-25%, so it is a
-/// diagnostic, never the default.
-fn dedupe_subphases_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("HORNDB_DEDUPE_SUBPHASES")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
 }
 
 pub struct HornBackend {
@@ -742,24 +688,22 @@ impl HornBackend {
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
     ///
-    /// * Phase 1 (read-only): intern all terms and drop any triple repeated
-    ///   within this batch. Any intern failure skips that triple.
-    /// * Phase 2 (write): call `store.insert_quad_ids` once for the surviving
-    ///   entries. Propagates storage errors.
+    /// * Phase 1 (read-only): intern every term into `entries`
+    ///   ([`InternedQuad`]s), in input order, duplicates included. An intern
+    ///   failure skips that triple.
+    /// * Phase 2 (write): call `store.insert_quad_ids` once for `entries`.
+    ///   Propagates storage errors.
     ///
-    /// Already-live triples are **not** filtered here. `Tier::apply_quad_batch`
-    /// is itself idempotent — it inserts only what is not visible after the
-    /// batch's deletions — and returns the count of quads that genuinely
-    /// became live, which is what this returns (HDB-89). Filtering them out
-    /// first needed a `HashSet` mirror of every live quad, which cost 6% of a
-    /// bulk load and ~0.5 GB at 10M triples to answer a question storage
-    /// already answers.
+    /// Neither already-live triples nor within-batch duplicates are filtered
+    /// here: `Tier::apply_quad_batch` groups the add side per predicate and
+    /// sorts + dedups it before deciding what is genuinely new, and is
+    /// itself idempotent, returning the exact count of quads that became
+    /// live — which is what this method returns. (`entries` used to be
+    /// pre-filtered for in-batch duplicates too, via a `HashSet<QuadKey>`;
+    /// HDB-104 removed that as redundant with storage's own dedup.)
     ///
-    /// Phase 1 keeps the [`InternedQuad`]s it built, so storage does not
-    /// intern the same terms a second time (HDB-87). That also makes the
-    /// surviving-entry buffer four ids per row instead of a `QuadKey` plus
-    /// three heap-backed `oxrdf::Term`s, and removes the copy that used to
-    /// stage those terms for the storage call.
+    /// `entries` holds ids, not terms, so storage does not intern the same
+    /// terms a second time.
     fn insert_oxrdf_batch_in_graph(
         &mut self,
         g: GraphId,
@@ -769,59 +713,19 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 1 (read-only): intern and drop intra-batch-duplicate triples.
-        // `intra_batch` deduplicates within the batch itself in O(1) per
-        // triple, which keeps `entries` (and the vector storage groups from
-        // it) down to the distinct rows. `entries` holds the interned ids —
-        // it is the buffer phase 2 hands straight to storage.
+        // Phase 1 (read-only): intern every term. `entries` holds the
+        // interned ids — it is the buffer phase 2 hands straight to storage,
+        // duplicates and all; `apply_quad_batch` dedups the add side itself.
         let mut entries: Vec<InternedQuad> = Vec::with_capacity(triples.len());
-        let mut intra_batch: HashSet<QuadKey> = HashSet::new();
         let n_in = triples.len() as u64;
         let t_dedupe = std::time::Instant::now();
         {
             let d = self.store.dictionary();
-            if dedupe_subphases_enabled() {
-                // Measurement variant (HDB-90). Splitting this loop needs a
-                // clock read between each step, which costs ~15-25% of the
-                // phase — so it is a deliberate second copy of the loop below,
-                // off by default, rather than a branch in the hot path.
-                let mut sub = DedupeSubPhases::default();
-                for (s, p, o) in triples {
-                    // Empty interval between two adjacent reads: what one
-                    // `Instant::now()` pair costs in this exact loop. Every
-                    // interval below carries the same cost, so subtracting
-                    // this from each of the four recovers the real split.
-                    let t_cal = std::time::Instant::now();
-                    let t0 = std::time::Instant::now();
-                    let interned = d.intern_quad(g, &s, &p, &o);
-                    let t1 = std::time::Instant::now();
-                    sub.clock_ns += t0.duration_since(t_cal).as_nanos() as u64;
-                    sub.intern_ns += t1.duration_since(t0).as_nanos() as u64;
-                    let Ok(quad) = interned else {
-                        continue;
-                    };
-                    // `QuadKey::of` and the match above are a handful of ALU
-                    // ops; they land in the `intra` interval.
-                    let fresh = intra_batch.insert(QuadKey::of(quad));
-                    let t2 = std::time::Instant::now();
-                    sub.intra_ns += t2.duration_since(t1).as_nanos() as u64;
-                    if !fresh {
-                        continue;
-                    }
-                    entries.push(quad);
-                    sub.rest_ns += t2.elapsed().as_nanos() as u64;
-                }
-                sub.record(n_in);
-            } else {
-                for (s, p, o) in triples {
-                    let Ok(quad) = d.intern_quad(g, &s, &p, &o) else {
-                        continue; // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
-                    };
-                    if !intra_batch.insert(QuadKey::of(quad)) {
-                        continue; // duplicate within this batch; first occurrence wins
-                    }
-                    entries.push(quad);
-                }
+            for (s, p, o) in triples {
+                let Ok(quad) = d.intern_quad(g, &s, &p, &o) else {
+                    continue; // intern failure — skip this triple (lenient for bulk loads; the single-triple insert_oxrdf propagates instead)
+                };
+                entries.push(quad);
             }
         }
 
@@ -2248,6 +2152,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(b.len(), 2);
+    }
+
+    /// HDB-104: `insert_oxrdf_batch_in_graph` no longer dedups within the
+    /// batch itself (`intra_batch` is gone) — a duplicated triple now reaches
+    /// `Tier::apply_quad_batch`, which groups the add side per predicate and
+    /// sorts + dedups it (HDB-88) before deciding what is genuinely new. This
+    /// must still report exactly one newly-live quad, and the store must
+    /// still hold exactly one copy.
+    #[test]
+    fn a_batch_carrying_the_same_quad_twice_inserts_it_once() {
+        let mut b = HornBackend::new();
+        let s = OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/s"));
+        let p = OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/p"));
+        let o = OxTerm::NamedNode(NamedNode::new_unchecked("http://ex/o"));
+        let n = b
+            .insert_oxrdf_batch(vec![(s.clone(), p.clone(), o.clone()), (s, p, o)])
+            .unwrap();
+        assert_eq!(n, 1, "a duplicated triple counts as one newly-live quad");
+        assert_eq!(b.len(), 1, "the store holds exactly one copy");
     }
 
     #[test]
