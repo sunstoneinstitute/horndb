@@ -688,27 +688,22 @@ impl HornBackend {
     /// Uses a read-compute / write-commit split to keep the storage insert
     /// correct even when intern errors occur:
     ///
-    /// * Phase 1 (read-only): intern all terms. Any intern failure skips that
-    ///   triple.
-    /// * Phase 2 (write): call `store.insert_quad_ids` once for the interned
-    ///   entries. Propagates storage errors.
+    /// * Phase 1 (read-only): intern every term into `entries`
+    ///   ([`InternedQuad`]s), in input order, duplicates included. An intern
+    ///   failure skips that triple.
+    /// * Phase 2 (write): call `store.insert_quad_ids` once for `entries`.
+    ///   Propagates storage errors.
     ///
     /// Neither already-live triples nor within-batch duplicates are filtered
-    /// here. `Tier::apply_quad_batch` groups the add side per predicate and
-    /// sorts + dedups it before deciding what is genuinely new (HDB-88), and
-    /// is itself idempotent — it inserts only what is not visible after the
-    /// batch's deletions — and returns the count of quads that genuinely
-    /// became live, which is what this returns (HDB-89). A within-batch
-    /// duplicate used to be dropped here too (`intra_batch`, a
-    /// `HashSet<QuadKey>`), but that duplicated `apply_quad_batch`'s own
-    /// dedup one layer down — 1.4s of a 10M-triple load (HDB-90) spent
-    /// confirming a fact storage already establishes for free (HDB-104).
+    /// here: `Tier::apply_quad_batch` groups the add side per predicate and
+    /// sorts + dedups it before deciding what is genuinely new, and is
+    /// itself idempotent, returning the exact count of quads that became
+    /// live — which is what this method returns. (`entries` used to be
+    /// pre-filtered for in-batch duplicates too, via a `HashSet<QuadKey>`;
+    /// HDB-104 removed that as redundant with storage's own dedup.)
     ///
-    /// Phase 1 keeps the [`InternedQuad`]s it built, so storage does not
-    /// intern the same terms a second time (HDB-87). That also makes the
-    /// surviving-entry buffer four ids per row instead of a `QuadKey` plus
-    /// three heap-backed `oxrdf::Term`s, and removes the copy that used to
-    /// stage those terms for the storage call.
+    /// `entries` holds ids, not terms, so storage does not intern the same
+    /// terms a second time.
     fn insert_oxrdf_batch_in_graph(
         &mut self,
         g: GraphId,

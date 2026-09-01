@@ -831,12 +831,13 @@ now inside `dedupe_intra`.
 `dedupe`'s 26% was never split by a counter — HDB-57 R2 inferred it by assuming
 the three `d.intern()` calls in the loop cost what the separately-instrumented
 `intern` phase costs (1.909s). They do not. Measured with the opt-in
-`dedupe_*` sub-counters (`HORNDB_DEDUPE_SUBPHASES=1`, see `docs/metrics.md`) on
-`hornbench`, trainmarks xlarge, serial, commit `66e3302`; each column is the
-mean of two runs that agreed within 2%. These runs predate the snmalloc swap
-(#293): the split is a share of `dedupe`, so it holds, but the absolute seconds
-are glibc-allocator numbers and the intern column — which allocates on every
-dictionary miss — is the one most likely to move when they are re-measured.
+`dedupe_*` sub-counters (`HORNDB_DEDUPE_SUBPHASES=1`, removed along with the
+`dedupe_*` phases themselves in HDB-104) on `hornbench`, trainmarks xlarge,
+serial, commit `66e3302`; each column is the mean of two runs that agreed
+within 2%. These runs predate the snmalloc swap (#293): the split is a share
+of `dedupe`, so it holds, but the absolute seconds are glibc-allocator numbers
+and the intern column — which allocates on every dictionary miss — is the one
+most likely to move when they are re-measured.
 
 | sub-phase | read_turtle | % of `dedupe` | read_ntriples | % of `dedupe` |
 |---|---|---|---|---|
@@ -1884,20 +1885,24 @@ Run spread: read_turtle 15.579 / 15.627 / 15.664 before, 13.211 / 13.217 /
 10.296 after. Neither distribution overlaps.
 
 - **`dedupe` drops 2.24s (ttl) / 2.16s (nt), well past the 1.4s HDB-90
-  estimated.** That estimate (see "Inside `dedupe`" above) predates the
-  snmalloc allocator swap (#293) by its own caveat. `intra_batch` grows a
-  10M-entry `hashbrown` table from `HashSet::new()` — no `with_capacity` — so
-  most of its cost is allocation and rehashing across ~24 doublings, exactly
-  the pattern snmalloc and glibc malloc are known to price differently. This
-  run, on the allocator actually in production, is the number to trust over
-  the older instrumented split.
-- **`merge` and `build` also fall, though this change touches neither.**
-  `intra_batch` lives in the calling function's own scope, not the inner
-  block that builds it, so its ~10M-entry table is still resident in memory
-  during the `store.insert_quad_ids` call that runs `group`/`merge`/`build` —
-  competing for cache and TLB entries with that work. Retiring it frees that
-  memory before the storage call starts, which plausibly explains `merge`'s
-  -42% (ttl) and `build`'s -4% (ttl): a secondary effect riding on `dedupe`'s.
+  estimated.** Not an allocator effect: the isolated cost of 10M
+  `HashSet<QuadKey>` inserts on an empty, warm set is ~0.7-0.75s on comparable
+  hardware, consistent with HDB-90's 1.42s on a slower server core under
+  glibc — nothing points to that isolated cost being bigger under snmalloc.
+  The more likely mechanism is cache interference: `intra_batch.insert` and
+  `Dictionary::intern_quad` ran interleaved in the same per-triple loop, and
+  `intra_batch`'s ~550MB table being randomly accessed on every iteration
+  evicted the dictionary's own hash table from L2/L3 and the TLB. HDB-90's
+  split could not see that — the eviction cost landed in whichever of the two
+  instrumented intervals ran next, mostly `dedupe_intern`'s, not
+  `dedupe_intra`'s — so the isolated 1.4s figure structurally undercounts what
+  removing `intra_batch` was actually worth. HDB-89 corroborates the
+  contrast: it removed `live_keys`, a comparably-sized `HashSet`, but one
+  built in a *separate* loop from the dictionary work, and that removal's
+  `dedupe` stayed flat (5.255s -> 5.207s ttl) while `live_keys`'s own phase
+  disappeared almost exactly its own size (1.291s) — no interleaving, no
+  undercounting. This run, on the allocator actually in production, is the
+  number to trust over the older instrumented split.
 - **`parse`'s nt-leg drop (-8.8%) is measurement noise, not a real effect** —
   the same artifact HDB-87 saw. The slice loader's `parse` phase is wall clock
   *minus* the time the same thread spent interning and inserting, so a faster
@@ -1905,8 +1910,12 @@ Run spread: read_turtle 15.579 / 15.627 / 15.664 before, 13.211 / 13.217 /
   subtraction, with nothing in the parser itself touched. The ttl leg's
   `parse` does not move (-0.9%, inside run-to-run spread), which is the
   reading consistent with credit-attribution noise rather than a real change.
-- **No phase regressed.** `group`'s +0.01s (both legs) is inside the ~1%
-  spread every other unmoved phase in this table shows.
+- **No other phase regressed.** `group`'s +0.01s (both legs) is inside the ~1%
+  spread every other unmoved phase in this table shows. `merge` and `build`
+  move too (`merge`'s ttl leg falls 42% but its nt leg only 3%), but both
+  sit at the noise floor of a 13-15s run — 0.10-0.17s absolute for `merge` —
+  so that inconsistency across legs is read as noise, not a mechanism worth a
+  story.
 - **The nt leg's unaccounted residual (wall minus the phase sum above) grows
   from 0.164s to 0.444s.** The ttl leg's residual does not move (0.127s vs
   0.135s). Both driver backends are alive simultaneously during the nt leg
