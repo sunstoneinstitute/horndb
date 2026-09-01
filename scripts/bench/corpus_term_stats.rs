@@ -28,6 +28,14 @@
 //! an `i32` never reach the dictionary at all (`try_inline_int`), so they are
 //! counted separately and excluded from the dictionary-facing figures.
 //!
+//! HDB-95 added a second keying to the same pass: the `rekey_*` figures answer
+//! "what if a typed literal's key carried a small dense id for its datatype IRI
+//! instead of the IRI text?" (and the same for a language tag). The id is
+//! assigned in first-seen order and varint-encoded, exactly as
+//! `Dictionary::encode_key` does it, so the numbers are the engine's key
+//! lengths, not an estimate. Re-keying is injective, so the distinct-term count
+//! is unchanged by construction.
+//!
 //! Output is one JSON object on stdout plus a human-readable summary on stderr.
 
 use std::collections::HashMap;
@@ -502,6 +510,9 @@ struct Interner {
     len: Vec<u32>,
     kind: Vec<Kind>,
     lex_len: Vec<u32>,
+    /// Key length under the HDB-95 re-keying (aux id in place of the
+    /// datatype IRI / language tag).
+    rekey_len: Vec<u32>,
     /// Open-addressed table of ids; `EMPTY_SLOT` marks a free slot.
     table: Vec<u32>,
     mask: usize,
@@ -519,6 +530,7 @@ impl Interner {
             len: Vec::new(),
             kind: Vec::new(),
             lex_len: Vec::new(),
+            rekey_len: Vec::new(),
             table: vec![EMPTY_SLOT; cap],
             mask: cap - 1,
             slot_hash: vec![0; cap],
@@ -534,7 +546,14 @@ impl Interner {
     }
     /// Returns `(id, is_new)`.
     #[inline]
-    fn intern(&mut self, key: &[u8], h: u64, kind: Kind, lex_len: usize) -> (u32, bool) {
+    fn intern(
+        &mut self,
+        key: &[u8],
+        h: u64,
+        kind: Kind,
+        lex_len: usize,
+        rekey_len: usize,
+    ) -> (u32, bool) {
         let mut i = (h as usize) & self.mask;
         loop {
             let id = self.table[i];
@@ -552,6 +571,7 @@ impl Interner {
         self.len.push(key.len() as u32);
         self.kind.push(kind);
         self.lex_len.push(lex_len as u32);
+        self.rekey_len.push(rekey_len as u32);
         self.arena.extend_from_slice(key);
         self.table[i] = id;
         self.slot_hash[i] = h;
@@ -591,6 +611,8 @@ struct KindStats {
     occ_len: LenHist,
     distinct_len: LenHist,
     distinct_lexical_len: LenHist,
+    occ_rekey_len: LenHist,
+    distinct_rekey_len: LenHist,
 }
 impl KindStats {
     fn new() -> Self {
@@ -600,6 +622,8 @@ impl KindStats {
             occ_len: LenHist::new(),
             distinct_len: LenHist::new(),
             distinct_lexical_len: LenHist::new(),
+            occ_rekey_len: LenHist::new(),
+            distinct_rekey_len: LenHist::new(),
         }
     }
 }
@@ -639,6 +663,11 @@ fn main() {
     // Distinct-term table: key bytes -> dense id. Also remembers each term's
     // kind and length so the distinct-side histograms can be built at the end.
     let mut ids = Interner::new();
+
+    // HDB-95: first-seen-order id tables for datatype IRIs and language tags,
+    // mirroring `Dictionary`'s two `AuxTable`s.
+    let mut datatype_ids: FxMap<Vec<u8>, u32> = FxMap::default();
+    let mut language_ids: FxMap<Vec<u8>, u32> = FxMap::default();
 
     let mut kind_stats: Vec<KindStats> = KINDS.iter().map(|_| KindStats::new()).collect();
     // per-position: occurrences, and a distinct-set of ids
@@ -694,13 +723,33 @@ fn main() {
                             kind_stats[ki].occ_len.add(t.key.len(), 1);
                             pos_occ[pos.idx()] += 1;
 
+                            // HDB-95 re-keying: replace the trailing
+                            // `\0` + datatype-IRI / language-tag with a
+                            // varint aux id. Other kinds are unchanged.
+                            let rekey_len = match t.kind {
+                                Kind::TypedLit | Kind::LangLit => {
+                                    let tag = &t.key[t.lexical_len + 1..];
+                                    let table = if t.kind == Kind::TypedLit {
+                                        &mut datatype_ids
+                                    } else {
+                                        &mut language_ids
+                                    };
+                                    let next = table.len() as u32;
+                                    let id = *table.entry(tag.to_vec()).or_insert(next);
+                                    t.lexical_len + uvarint_len(id)
+                                }
+                                _ => t.key.len(),
+                            };
+                            kind_stats[ki].occ_rekey_len.add(rekey_len, 1);
+
                             // Inline ints never reach the dictionary, so they
                             // are neither interned nor cache-probed.
                             if t.kind == Kind::InlineInt {
                                 continue;
                             }
                             let fh = hash_bytes(&t.key);
-                            let (id, _new) = ids.intern(&t.key, fh, t.kind, t.lexical_len);
+                            let (id, _new) =
+                                ids.intern(&t.key, fh, t.kind, t.lexical_len, rekey_len);
                             if emit_keys.is_some() {
                                 stream.push(id);
                             }
@@ -765,6 +814,9 @@ fn main() {
         kind_stats[ki]
             .distinct_lexical_len
             .add(ids.lex_len[id] as usize, 1);
+        kind_stats[ki]
+            .distinct_rekey_len
+            .add(ids.rekey_len[id] as usize, 1);
     }
 
     // ---- prefix analysis over distinct IRIs
@@ -844,7 +896,9 @@ fn main() {
             "    \"{}\": {{ \"occurrences\": {}, \"distinct\": {}, \"occ_per_distinct\": {:.3}, \
              \"key_len_occ_mean\": {:.2}, \"key_len_distinct_mean\": {:.2}, \
              \"key_len_p50\": {}, \"key_len_p90\": {}, \"key_len_p99\": {}, \"key_len_max\": {}, \
-             \"lexical_len_distinct_mean\": {:.2}, \"lexical_len_p99\": {}, \"lexical_len_max\": {} }}{}\n",
+             \"lexical_len_distinct_mean\": {:.2}, \"lexical_len_p99\": {}, \"lexical_len_max\": {}, \
+             \"rekey_len_occ_mean\": {:.2}, \"rekey_len_distinct_mean\": {:.2}, \
+             \"rekey_distinct_bytes\": {}, \"key_distinct_bytes\": {} }}{}\n",
             k.name(),
             s.occ,
             s.distinct,
@@ -858,6 +912,10 @@ fn main() {
             s.distinct_lexical_len.mean(),
             s.distinct_lexical_len.quantile(0.99),
             s.distinct_lexical_len.max,
+            s.occ_rekey_len.mean(),
+            s.distinct_rekey_len.mean(),
+            s.distinct_rekey_len.sum,
+            s.distinct_len.sum,
             if n + 1 < KINDS.len() { "," } else { "" }
         ));
     }
@@ -866,11 +924,29 @@ fn main() {
     // occurrence-weighted length over everything the dictionary actually sees
     let mut occ_all = LenHist::new();
     let mut dist_all = LenHist::new();
+    let mut occ_all_rekey = LenHist::new();
+    let mut dist_all_rekey = LenHist::new();
     for (n, k) in KINDS.iter().enumerate() {
         if *k == Kind::InlineInt {
             continue;
         }
         let s = &kind_stats[n];
+        for (l, &c) in s.occ_rekey_len.small.iter().enumerate() {
+            if c > 0 {
+                occ_all_rekey.add(l, c);
+            }
+        }
+        for (l, c) in &s.occ_rekey_len.large {
+            occ_all_rekey.add(*l, *c);
+        }
+        for (l, &c) in s.distinct_rekey_len.small.iter().enumerate() {
+            if c > 0 {
+                dist_all_rekey.add(l, c);
+            }
+        }
+        for (l, c) in &s.distinct_rekey_len.large {
+            dist_all_rekey.add(*l, *c);
+        }
         for (l, &c) in s.occ_len.small.iter().enumerate() {
             if c > 0 {
                 occ_all.add(l, c);
@@ -901,6 +977,28 @@ fn main() {
         dist_all.quantile(0.90),
         dist_all.quantile(0.99),
         dist_all.max
+    ));
+    j.push_str(&format!(
+        "  \"rekey\": {{ \"datatypes\": {}, \"languages\": {}, \
+         \"key_distinct_bytes\": {}, \"rekey_distinct_bytes\": {}, \
+         \"distinct_saving_pct\": {:.1}, \"key_occ_mean\": {:.2}, \
+         \"rekey_occ_mean\": {:.2}, \"occ_saving_pct\": {:.1} }},\n",
+        datatype_ids.len(),
+        language_ids.len(),
+        dist_all.sum,
+        dist_all_rekey.sum,
+        if dist_all.sum == 0 {
+            0.0
+        } else {
+            100.0 * (dist_all.sum - dist_all_rekey.sum) as f64 / dist_all.sum as f64
+        },
+        occ_all.mean(),
+        occ_all_rekey.mean(),
+        if occ_all.sum == 0 {
+            0.0
+        } else {
+            100.0 * (occ_all.sum - occ_all_rekey.sum) as f64 / occ_all.sum as f64
+        }
     ));
 
     j.push_str(&format!(
@@ -968,6 +1066,41 @@ fn main() {
         dist_all.max
     );
     eprintln!(
+        "   HDB-95 re-key ({} datatypes, {} languages): distinct-mean {:.1} -> {:.1} B \
+         ({:.1}% of key bytes), total {} -> {} B",
+        datatype_ids.len(),
+        language_ids.len(),
+        dist_all.mean(),
+        dist_all_rekey.mean(),
+        if dist_all.sum == 0 {
+            0.0
+        } else {
+            100.0 * (dist_all.sum - dist_all_rekey.sum) as f64 / dist_all.sum as f64
+        },
+        dist_all.sum,
+        dist_all_rekey.sum
+    );
+    for (n, k) in KINDS.iter().enumerate() {
+        if *k == Kind::InlineInt || kind_stats[n].distinct == 0 {
+            continue;
+        }
+        let st = &kind_stats[n];
+        eprintln!(
+            "     {:<14} distinct {:>10}  key/distinct {:>7.1} -> {:>7.1} B  ({:>5.1}%)  lexical {:>6.1} B",
+            k.name(),
+            st.distinct,
+            st.distinct_len.mean(),
+            st.distinct_rekey_len.mean(),
+            if st.distinct_len.sum == 0 {
+                0.0
+            } else {
+                100.0 * (st.distinct_len.sum - st.distinct_rekey_len.sum) as f64
+                    / st.distinct_len.sum as f64
+            },
+            st.distinct_lexical_len.mean()
+        );
+    }
+    eprintln!(
         "   oracle (unbounded cache) hit rate {:.2}%",
         100.0 * (dict_occ.saturating_sub(distinct)) as f64 / dict_occ.max(1) as f64
     );
@@ -982,6 +1115,18 @@ fn main() {
             100.0 * c.lru_hit_rate()
         );
     }
+}
+
+/// Bytes an LEB128 unsigned varint of `v` occupies — what
+/// `Dictionary::encode_key` spends on an aux (datatype / language) id.
+fn uvarint_len(v: u32) -> usize {
+    let mut n = 1;
+    let mut v = v >> 7;
+    while v != 0 {
+        n += 1;
+        v >>= 7;
+    }
+    n
 }
 
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
