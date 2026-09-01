@@ -143,11 +143,19 @@ fn main() -> Result<()> {
             100.0 * secs / wall
         );
     }
+    // The residue is dictionary interning, which the storage load path does
+    // not instrument: `parse` is wall minus the sink, and the sink is intern
+    // plus the tier phases already itemised above.
+    let intern = wall - accounted;
     println!(
-        "  {:<14} {accounted:>8.3}s  {:>6.2}%  (residual {:.3}s)",
+        "  {:<14} {intern:>8.3}s  {:>6.2}%  (uninstrumented residue)",
+        "intern~",
+        100.0 * intern / wall
+    );
+    println!(
+        "  {:<14} {accounted:>8.3}s  {:>6.2}%",
         "accounted",
-        100.0 * accounted / wall,
-        wall - accounted
+        100.0 * accounted / wall
     );
     println!("[mem] peak RSS {:.0} MiB", peak_rss_mib());
     Ok(())
