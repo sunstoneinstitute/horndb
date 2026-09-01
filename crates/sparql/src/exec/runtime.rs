@@ -285,6 +285,18 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     ) -> Result<Batch> {
         let schema = batch.schema;
         let mut rows = batch.rows;
+        // `LIMIT 0` (valid SPARQL) reaches here as `n == 0`. Answer it without
+        // resolving a single sort key — no ordering of an empty answer is
+        // observable. This is also what keeps `top_k_order`'s `heap[0]` in
+        // range; `SliceOp` happens to short-circuit `remaining == Some(0)`
+        // before it ever pulls this operator, but that is a guarantee in
+        // another file and nothing ties the two together.
+        if n == 0 {
+            return Ok(Batch {
+                schema,
+                rows: Vec::new(),
+            });
+        }
         let row_count = rows.len() as u64;
         let order = phases::timed(ExecPhase::Sort, row_count, || -> Result<Vec<usize>> {
             let cols = self.sort_columns(&rows, &schema, keys)?;
@@ -2013,6 +2025,10 @@ impl SortCol {
     /// lexical per pair and the two can disagree about transitivity. A `Num`
     /// column carrying a NaN is not either: NaN compares `Equal` to
     /// everything, so `a == NaN` and `b == NaN` while `a < b`.
+    ///
+    /// `Lex` is total only because [`datetime_key`] is a no-op, which makes
+    /// [`compare_lexical`]'s two branches one comparison. Both carry a note
+    /// pointing back here.
     fn is_total_order(&self) -> bool {
         match self {
             SortCol::Num(v) => !v.iter().flatten().any(|f| f.is_nan()),
@@ -2070,8 +2086,9 @@ fn sorted_order(cols: &[(SortCol, OrderDir)], rows: usize) -> Vec<usize> {
 }
 
 /// Indices of the `n` rows a full stable sort would place first, in that same
-/// order, without sorting the other `rows - n`. Requires `n < rows` and a
-/// total order on every column (the caller checks both).
+/// order, without sorting the other `rows - n`. The caller is expected to have
+/// checked `n < rows` and that every column is a total order; `n == 0` is
+/// handled here as well, so the heap below can index its root unconditionally.
 ///
 /// Keeps a bounded max-heap of the best `n` rows seen so far, ordered by
 /// `(key, input position)`. The position tie-break is what makes both the
@@ -2080,6 +2097,9 @@ fn sorted_order(cols: &[(SortCol, OrderDir)], rows: usize) -> Vec<usize> {
 /// this.
 fn top_k_order(cols: &[(SortCol, OrderDir)], rows: usize, n: usize) -> Vec<usize> {
     use std::cmp::Ordering;
+    if n == 0 {
+        return Vec::new();
+    }
     // True when row `a` sorts strictly after row `b` in the full stable sort.
     let worse = |a: usize, b: usize| match compare_decorated(cols, a, b) {
         Ordering::Less => false,
@@ -2236,6 +2256,15 @@ fn compare_terms(x: &Term, y: &Term) -> std::cmp::Ordering {
 /// The non-numeric half of [`compare_terms`], over two already-extracted
 /// lexical values. Shared with `compare_decorated` so the decorated
 /// comparator cannot drift away from the term comparator.
+///
+/// **This is a total order only while [`datetime_key`] returns its input
+/// unchanged.** Both branches below are then the same comparison, and
+/// [`SortCol::is_total_order`] can call a `SortCol::Lex` column unconditionally
+/// total. If `datetime_key` ever starts normalising (stripping an offset,
+/// padding fractional seconds), this becomes a per-pair conditional — the same
+/// non-transitive shape the numeric/lexical split already has to guard
+/// against — and `is_total_order` must stop trusting `Lex`, or the top-k heap
+/// will quietly answer differently from a full sort.
 fn compare_lexical(lx: &str, ly: &str) -> std::cmp::Ordering {
     if let (Some(a), Some(b)) = (datetime_key(lx), datetime_key(ly)) {
         return a.cmp(b);
@@ -2248,6 +2277,11 @@ fn compare_lexical(lx: &str, ly: &str) -> std::cmp::Ordering {
 /// not parse offsets fully; the lexical form sorts correctly for the
 /// common `YYYY-MM-DDThh:mm:ss(.fff)?(Z)?` shape used by SPB, so we just
 /// validate the prefix and key on the original string.
+///
+/// **Making this actually rewrite the key is not a local change.** It is a
+/// no-op today, which is why [`compare_lexical`]'s two branches are the same
+/// comparison and why [`SortCol::is_total_order`] calls a `SortCol::Lex`
+/// column total. Revisit both before returning anything but `s`.
 fn datetime_key(s: &str) -> Option<&str> {
     let bytes = s.as_bytes();
     // Minimum `YYYY-MM-DDThh:mm:ss` is 19 chars.
@@ -3241,6 +3275,8 @@ mod slot_differential {
             );
         }
         let base = "SELECT ?s ?k WHERE { ?s <http://ex/k> ?k } ORDER BY ?k ?s";
+        // Includes `LIMIT 0` at every offset (`l == 0`) — the shape that
+        // reaches `compute_top_k` with `n == 0`.
         let windows: Vec<(usize, usize)> = (0..=12)
             .flat_map(|o| (0..=13).map(move |l| (o, l)))
             .collect();
@@ -3362,6 +3398,103 @@ mod slot_differential {
             "SELECT DISTINCT ?n WHERE { ?s <http://ex/n> ?n } ORDER BY ?n LIMIT 2",
         );
         assert_eq!(limited, full[..2].to_vec(), "DISTINCT + LIMIT lost rows");
+    }
+
+    /// `top_k_order` must be safe on its own terms. `LIMIT 0` reaches
+    /// `compute_top_k` as `n == 0`, and this is the exact call that indexed
+    /// an empty heap at `heap[0]` before the guard went in — it did not panic
+    /// in a real query only because `SliceOp` short-circuits `remaining ==
+    /// Some(0)` before ever pulling its child, a guarantee in another file
+    /// that nothing tied to this one.
+    #[test]
+    fn top_k_order_handles_zero_n() {
+        let cols = vec![(SortCol::Num(vec![Some(1.0), Some(2.0)]), OrderDir::Asc)];
+        assert_eq!(top_k_order(&cols, 2, 0), Vec::<usize>::new());
+        assert_eq!(top_k_order(&cols, 2, 1), vec![0]);
+    }
+
+    /// `SortCol::classify` decides whether the heap may run at all, so pin
+    /// what it decides. A parity test alone cannot tell "the fallback fired"
+    /// from "the heap happened to agree".
+    #[test]
+    fn sort_col_classify_gates_the_heap() {
+        let val = |s: &str| Some(SortVal::of(&Term::Literal(format!("\"{s}\""))));
+
+        let numeric = SortCol::classify(vec![val("1"), None, val("2")]);
+        assert!(matches!(numeric, SortCol::Num(_)));
+        assert!(numeric.is_total_order());
+
+        let lexical = SortCol::classify(vec![val("abc"), None, val("zed")]);
+        assert!(matches!(lexical, SortCol::Lex(_)));
+        assert!(lexical.is_total_order());
+
+        // What `top_k_mixed_numeric_and_lexical_column_matches_full_sort`
+        // exercises end to end: `compare_terms` picks its branch per pair
+        // here, so the heap must be refused.
+        let mixed = SortCol::classify(vec![val("10"), val("abc")]);
+        assert!(matches!(mixed, SortCol::Mixed(_)));
+        assert!(
+            !mixed.is_total_order(),
+            "a mixed column must refuse the heap"
+        );
+
+        // The other half of the refusal: NaN compares Equal to everything, so
+        // an all-numeric column is still not transitive with one in it.
+        let nan = SortCol::classify(vec![val("1"), val("NaN"), val("2")]);
+        assert!(matches!(nan, SortCol::Num(_)));
+        assert!(
+            !nan.is_total_order(),
+            "a NaN-carrying numeric column must refuse the heap"
+        );
+    }
+
+    /// The NaN fallback end to end: the fused window must still equal the
+    /// full sort's, even though the comparator is not transitive.
+    #[test]
+    fn top_k_nan_column_matches_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        for (i, v) in ["3", "NaN", "1", "2", "NaN", "5"].iter().enumerate() {
+            horn.insert_triple(
+                iri(&format!("s{i}")),
+                iri("k"),
+                Term::Literal(format!(
+                    "\"{v}\"^^<http://www.w3.org/2001/XMLSchema#double>"
+                )),
+            );
+        }
+        let base = "SELECT ?s ?k WHERE { ?s <http://ex/k> ?k } ORDER BY ?k";
+        assert_slice_matches_full_sort(&horn, base, &[(0, 1), (0, 3), (2, 2), (0, 6), (4, 5)]);
+    }
+
+    /// Multi-key with the two directions disagreeing: a fused window must
+    /// still match, and the second key's direction must survive the
+    /// tie-break. `DESC(?a)` groups the rows, `ASC(?b)` orders within a
+    /// group, and equal `(?a, ?b)` pairs fall back to input order.
+    #[test]
+    fn top_k_mixed_asc_desc_multi_key_matches_full_sort() {
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        let mut horn = HornBackend::new();
+        // Three ?a groups of three, with ?b repeating inside each group so
+        // both the second key and the input-order tie-break are exercised.
+        for i in 0..9 {
+            let s = iri(&format!("s{i}"));
+            horn.insert_triple(
+                s.clone(),
+                iri("a"),
+                Term::Literal(format!(
+                    "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                    i / 3
+                )),
+            );
+            horn.insert_triple(s, iri("b"), Term::Literal(format!("\"b{}\"", i % 2)));
+        }
+        let base = "SELECT ?s ?a ?b WHERE { ?s <http://ex/a> ?a ; <http://ex/b> ?b } \
+                    ORDER BY DESC(?a) ASC(?b)";
+        let windows: Vec<(usize, usize)> = (0..=9)
+            .flat_map(|o| (0..=10).map(move |l| (o, l)))
+            .collect();
+        assert_slice_matches_full_sort(&horn, base, &windows);
     }
 }
 

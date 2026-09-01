@@ -337,14 +337,15 @@ nightly run completes; that check is an open item, not verified here.
 comparison, and `compare_terms` then re-derived the lexical form and re-parsed
 it as `f64` on both sides again. An n-row sort therefore paid O(n log n)
 decodes for O(n) work. On top of that, `OrderBy` and `Slice` were independent
-plan nodes, so q3 fully sorted its 133,106 rows to return 50.
+plan nodes, so q3 fully sorted all 133,106 of its rows to return 50.
 
 Both are fixed: each key is resolved once per row into a typed `SortCol` and
 the comparator compares only resolved values (a bare scan-column key reads the
 slots through HDB-100's `decode_numeric`/`decode_terms` seam and never builds a
-`Bindings`), and a bounded `LIMIT` directly above an `ORDER BY` lowers to
-`TopKOp`, a bounded max-heap of `offset + limit` rows. Design and the
-row-order-parity argument: `docs/architecture.md`'s planner/runtime row.
+`Bindings`), and a bounded `LIMIT` directly above an `ORDER BY` puts the sort
+in its bounded form — a max-heap of `offset + limit` rows instead of a full
+sort. Design and the row-order-parity argument: `docs/architecture.md`'s
+planner/runtime row.
 
 Controlled A/B on `hornbench` (AMD Ryzen 7 7700, Debian 6.12, rustc 1.90.0),
 trainmarks xlarge (9,995,000 triples), commit `7c83936` (before) vs `2aba2f8`
@@ -389,15 +390,21 @@ explicitly retired as a pass/fail gate for this task when HDB-99's measurement
 landed.
 
 **Correction to HDB-99's q3 note: the scan does *not* materialise 5,513,106
-rows.** That figure is the `scan_wcoj` counter's cumulative value *after* q3,
-not q3's own delta — the exact misreading the `dump_exec_phases` doc comment
-warns about. q3's own WCOJ scan produces **133,106 rows** (the count that
-survives `:country :Norway`, matching the `sort` phase's row count in both
-columns above). So q3's scan cost is ~6 µs per produced row on the cold run —
-expensive per row, and it includes the `Pos` ordering derive that HDB-97/98
-made q3 pay itself — rather than a 100,000× row overproduction. Any follow-up
-aimed at `scan_wcoj` should start from the per-row figure, not the
-overproduction framing.
+rows.** That figure is the `scan_wcoj` **rows** counter's cumulative value
+*after* q3, not q3's own delta — the exact misreading the `dump_exec_phases`
+doc comment warns about. The two dumps that bracket q3's cold run read:
+
+```
+[exec-phases after q3_join_3_entities_pre]   …_rows_total{phase="scan_wcoj"} 5380000
+[exec-phases after q3_join_3_entities_cold]  …_rows_total{phase="scan_wcoj"} 5513106
+```
+
+so q3's own WCOJ scan produces **133,106 rows** — the count that survives
+`:country :Norway`, and the same delta the `sort` phase's rows counter shows.
+q3's scan cost is therefore ~6 µs per produced row on the cold run (expensive
+per row, and it includes the `Pos` ordering derive HDB-97/98 made q3 pay
+itself), not a 100,000× row overproduction. Any follow-up aimed at `scan_wcoj`
+should start from the per-row figure, not the overproduction framing.
 
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 

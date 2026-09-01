@@ -3,7 +3,7 @@
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
-use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, TopKOp, UnionOp};
+use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
 /// The one scan-side helper outside this module needs (`GRAPH ?g`'s
 /// per-graph read); the operators themselves stay private.
@@ -229,8 +229,8 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         }
     }
 
-    /// Build `plan` as a top-k operator keeping `n` rows, or `None` when the
-    /// plan shape does not permit the fusion.
+    /// Build `plan` as a bounded (top-k) `OrderByOp` keeping `n` rows, or
+    /// `None` when the plan shape does not permit the fusion.
     ///
     /// Only two shapes do. `OrderBy` is the fusion itself. `Project` is
     /// see-through because SPARQL algebra (§18.2.5) puts the sort *under* the
@@ -247,7 +247,12 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
         match plan {
             PhysicalPlan::OrderBy { inner, keys } => {
                 let child = self.build(inner)?;
-                Ok(Some(Box::new(TopKOp::new(self, child, keys.clone(), n))))
+                Ok(Some(Box::new(OrderByOp::top_k(
+                    self,
+                    child,
+                    keys.clone(),
+                    n,
+                ))))
             }
             PhysicalPlan::Project { vars, inner } => match self.build_top_k(inner, n)? {
                 Some(child) => Ok(Some(Box::new(ProjectOp::new(self, child, vars.clone())))),

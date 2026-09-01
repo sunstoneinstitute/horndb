@@ -288,12 +288,12 @@ fn order_by_cross_chunk() {
 }
 
 // ---------------------------------------------------------------------------
-// TopK: the fused ORDER BY + LIMIT operator (HDB-101)
+// TopK: the bounded (LIMIT-fused) form of OrderByOp (HDB-101)
 // ---------------------------------------------------------------------------
 
-/// `Slice(Project(OrderBy(..)))` fuses into `TopKOp`, whose window must be
-/// the same rows in the same order at every chunk size — and must match what
-/// the unfused `OrderBy` would have emitted for that window.
+/// `Slice(Project(OrderBy(..)))` fuses into `OrderByOp::top_k`, whose window
+/// must be the same rows in the same order at every chunk size — and must
+/// match what the unbounded `OrderBy` would have emitted for that window.
 #[test]
 fn top_k_cross_chunk() {
     let horn = HornBackend::new();
