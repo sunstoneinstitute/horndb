@@ -251,6 +251,13 @@ Run it with `scripts/bench/trainmarks.sh` (vendored generator + queries under
 below: **`hornbench`, release, 2026-08-24** (commit `b020f53`, post delta-merge
 snapshot reuse), best-of-3 warm per upstream protocol.
 
+**The two read legs are one-parse-thread numbers.** The driver takes its thread
+count from `loader::load_threads()`, whose default HDB-96 changed from 1 to
+`auto`. `scripts/bench/trainmarks.sh` pins `HORNDB_LOAD_THREADS=1` so this table
+keeps one basis and stays comparable across hosts; unpinning it rebases
+`read_turtle` / `read_ntriples` and nothing else here. Re-measure the table in
+the same commit if you change it.
+
 | operation | medium (~100K) | large (~1M) | xlarge (~10M) |
 |---|---|---|---|
 | read_turtle | 0.180s | 2.076s | 22.92s |
@@ -1886,13 +1893,46 @@ all of them in per-thread parser state and scheduler pressure. An explicit
 `HORNDB_LOAD_THREADS=<n>` is **not** capped — that is the escape hatch, and how
 this table was taken.
 
-**What it costs: memory.** Peak RSS rises 78% on Turtle (2,207 → 3,851 MiB) and
-57% on N-Triples (2,940 → 4,612 MiB). Almost all of it is the 8M-triple
-in-flight parse budget from HDB-94, which a one-chunk load never allocates at
-all; the rest is per-thread parser and allocator state. The budget is absolute,
-so this is a fixed ~1.5 GiB adder rather than something that grows with the
-corpus, and `HORNDB_LOAD_BUFFER_TRIPLES` trades it back against `parse`.
-`HORNDB_LOAD_THREADS=1` restores the old time *and* the old footprint.
+**What it costs: memory, in two parts.** The tables above measure the first
+part. Peak RSS rises 78% on Turtle (2,207 → 3,851 MiB) and 57% on N-Triples
+(2,940 → 4,612 MiB). Almost all of that is the 8M-triple in-flight parse budget
+from HDB-94, which a one-chunk load never allocates at all; the rest is
+per-thread parser and allocator state. That budget is absolute — a fixed
+~1.5 GiB adder, not something that grows with the corpus — and
+`HORNDB_LOAD_BUFFER_TRIPLES` trades it back against `parse`.
+
+**The second part is not in the tables, and it does scale with the document.**
+The parallel path needs one contiguous slice, so the *file* entry points
+(`load_ntriples_file`, `load_nquads_file`, and `load_turtle_file` under
+`HORNDB_PARALLEL_TURTLE=1`) reach it by reading the whole document into memory,
+where the streaming path holds a 1 MiB `BufReader`. That branch already existed;
+it was unreachable by default because it needs `threads > 1`. **Flipping the
+default makes it the default**, so the real cost at those entry points is
+`file size + ~1.5 GiB`, and file size is unbounded. The sweep cannot show this:
+`store_load` reads the document before the timer starts and calls the slice
+functions directly, so its RSS column deliberately holds the document constant
+across cells.
+
+Left alone, that turns "slower" into "fatal" — a document larger than RAM loaded
+before HDB-96 and would OOM after it, on the path `crates/bench-rdfox` and the
+unmeasured SPEC-02 LUBM-8000 gate (~1B triples) both use. So the flip ships with
+a ceiling: `HORNDB_LOAD_MAX_SLICE_BYTES`, default **2 GiB**
+(`loader::max_slice_bytes`). Above it the file loaders fall back to the
+streaming reader on one thread — exactly what they did before HDB-96 — so a
+large file loses the speedup and keeps the flat footprint. 2 GiB because up to
+about that size the transient copy is the same order as the store the load is
+about to build anyway (trainmarks xlarge: a 1.17 GB document becomes a ~1.7 GiB
+store), so it is a same-order transient rather than a multiplier; past it the
+ratio inverts, and a file large enough to threaten memory is exactly the one
+where the streaming loader's flat footprint beats the parallel path's remaining
+14% / 3.6% of `parse`.
+
+The `load_curve` figures below are inside the ceiling (1.17 GB < 2 GiB), so they
+are unaffected by it — the ceiling was not chosen to clear them, and a corpus
+above it would simply have reported the one-thread number.
+
+`HORNDB_LOAD_THREADS=1` restores the old time *and* both parts of the old
+footprint.
 
 **Contention was checked, not assumed.** HDB-84 introduced a reader-blocks-
 writer path — `PredicatePartition::cols()` holds the `runs` mutex across the

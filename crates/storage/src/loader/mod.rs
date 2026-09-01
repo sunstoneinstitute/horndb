@@ -10,7 +10,8 @@ pub mod parallel;
 pub mod turtle;
 
 pub use parallel::{
-    load_buffer_triples, load_threads, set_load_buffer_triples, DEFAULT_LOAD_BUFFER_TRIPLES,
+    load_buffer_triples, load_threads, max_slice_bytes, set_load_buffer_triples,
+    DEFAULT_LOAD_BUFFER_TRIPLES, DEFAULT_MAX_SLICE_BYTES,
 };
 
 use crate::error::Result;

@@ -40,7 +40,7 @@
 
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
+    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
 use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
 use crate::store::Store;
@@ -67,8 +67,7 @@ pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
         std::env::var("HORNDB_PARALLEL_TURTLE").as_deref(),
         Ok("1") | Ok("true")
     );
-    let mut stats = if parallel_opt_in && load_threads() > 1 && bytes as usize >= MIN_PARALLEL_BYTES
-    {
+    let mut stats = if parallel_opt_in && should_read_whole_file(bytes, load_threads()) {
         drop(file);
         load_turtle_slice(store, &std::fs::read(path)?, base.as_deref())?
     } else {

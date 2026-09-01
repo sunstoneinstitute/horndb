@@ -17,7 +17,7 @@
 
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
+    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
 use crate::loader::{load_quads, subject_to_term, QuadSink, SinkTimer};
 use crate::store::Store;
@@ -31,14 +31,19 @@ use std::path::Path;
 pub use crate::loader::LoadStats;
 
 /// Load an N-Triples file. Reads the document into memory and parses it on
-/// [`load_threads`] threads when both the thread count and the file size make
-/// that worthwhile; otherwise streams it on one thread with no full-file
-/// buffer.
+/// [`load_threads`] threads when the thread count and the file size both make
+/// that worthwhile — see [`should_read_whole_file`]; otherwise streams it on
+/// one thread with no full-file buffer.
+///
+/// The size ceiling matters: since HDB-96 threads are the default, so the
+/// read-into-memory branch is the default too. Past
+/// [`max_slice_bytes`](crate::loader::parallel::max_slice_bytes) this falls
+/// back to streaming rather than allocating a copy of an arbitrarily large
+/// document.
 pub fn load_ntriples_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    let threads = load_threads();
-    let mut stats = if threads > 1 && bytes as usize >= MIN_PARALLEL_BYTES {
+    let mut stats = if should_read_whole_file(bytes, load_threads()) {
         drop(file);
         load_ntriples_slice(store, &std::fs::read(path)?)?
     } else {
