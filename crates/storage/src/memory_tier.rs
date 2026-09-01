@@ -617,6 +617,73 @@ impl Tier for MemoryTier {
                     continue;
                 }
 
+                if del_targets.is_none() {
+                    // Append-run fast path (HDB-102). No deletion touches this
+                    // predicate, so nothing already stored has to move: the
+                    // genuinely-new pairs go in as one extra sorted run and the
+                    // first read merges them — the design HDB-84 gave
+                    // `insert_quad_batch`. N calls into one predicate then cost
+                    // O(adds), not O(existing) N times.
+                    //
+                    // This is decided per *predicate*, not per batch, so a
+                    // mixed batch still takes it for every predicate it only
+                    // adds to. Only predicates the batch actually deletes from
+                    // fall through to the rebuild below.
+                    let Some(targets) = add_targets else {
+                        // Unreachable: `touched_preds` is the union of the del
+                        // and add key sets, so a predicate with no del targets
+                        // is in it only because it has add targets.
+                        continue;
+                    };
+
+                    // `inserted` must stay exact — `Store::insert_quads`
+                    // returns it and SPARQL `INSERT DATA` idempotency is
+                    // decided by it — so each pair is still tested against what
+                    // is already live. `mark_live` answers that with a
+                    // galloping search per run and never merges the partition,
+                    // which is what keeps this path off the O(existing) curve.
+                    let t_merge = Instant::now();
+                    let mut already_live = vec![false; targets.len()];
+                    if let Some(existing) = new_partitions.get(&p) {
+                        existing.mark_live(targets, &mut already_live);
+                    }
+                    let new_rows: Vec<_> = targets
+                        .iter()
+                        .zip(&already_live)
+                        .filter(|(_, live)| !**live)
+                        .map(|(&(s, o), _)| (s, o, new_version, UNSET_END))
+                        .collect();
+                    merge_ns += t_merge.elapsed().as_nanos() as u64;
+                    merge_rows += targets.len() as u64;
+
+                    if new_rows.is_empty() {
+                        // Every pair was already visible: a counted no-op that
+                        // must not add an empty run (it would consume a slot
+                        // against `MAX_RUNS` for nothing).
+                        continue;
+                    }
+                    inserted += new_rows.len();
+
+                    let added = new_rows.len() as u64;
+                    let t_build = Instant::now();
+                    let part = match new_partitions.get(&p) {
+                        Some(existing) => existing.with_appended_rows(new_rows),
+                        None => PartitionBuilder::from_rows(new_rows)
+                            .build_with_hot_threshold(self.hot_threshold),
+                    };
+                    new_partitions.insert(p, Arc::new(part));
+                    build_ns += t_build.elapsed().as_nanos() as u64;
+                    build_rows += added;
+                    continue;
+                }
+
+                // Rebuild path: this predicate has deletions, and a deletion
+                // end-stamps a row *inside* an existing run. Runs are immutable
+                // and shared by `Arc` with the snapshots older readers pinned,
+                // so a stamp cannot be written in place — the partition is
+                // carried forward into a fresh builder instead. See the HDB-102
+                // note in `crates/storage/INTEGRATION-NOTES.md`.
+                //
                 // One pass over the existing rows: end-stamp del matches
                 // (dels apply before adds), carry every row forward, and
                 // track which (s, o) pairs remain visible so the add pass

@@ -187,6 +187,42 @@ struct Columns {
     live_len: usize,
 }
 
+/// Index of the first row at or after `from` whose `(subject, object)` key is
+/// `>= key`, or `subs.len()` if there is none. `subs`/`objs` are one block's
+/// columns, sorted by `(subject, object)`.
+///
+/// Galloping search: step out from `from` in doubling strides until the key is
+/// bracketed, then binary-search that bracket. A caller walking ascending keys
+/// passes the previous answer as `from`, so a whole sorted batch costs
+/// `O(k log(n/k))` rather than `k` full binary searches.
+fn lower_bound_from(subs: &[u64], objs: &[u64], from: usize, key: (u64, u64)) -> usize {
+    let n = subs.len();
+    let mut lo = from;
+    if lo >= n || (subs[lo], objs[lo]) >= key {
+        return lo.min(n);
+    }
+    // Everything up to and including `lo` is below `key`; grow the stride
+    // until `hi` is either past the end or at/above `key`.
+    let mut step = 1usize;
+    let mut hi = (lo + step).min(n);
+    while hi < n && (subs[hi], objs[hi]) < key {
+        lo = hi;
+        step = step.saturating_mul(2);
+        hi = lo.saturating_add(step).min(n);
+    }
+    // The answer is in `(lo, hi]`.
+    let (mut a, mut b) = (lo + 1, hi);
+    while a < b {
+        let mid = a + (b - a) / 2;
+        if (subs[mid], objs[mid]) < key {
+            a = mid + 1;
+        } else {
+            b = mid;
+        }
+    }
+    a
+}
+
 impl Columns {
     /// Sort `rows` into SPO order and collapse exact-duplicate live rows.
     /// Split from [`Columns::from_sorted_rows`] so a caller merging runs can
@@ -274,6 +310,46 @@ impl Columns {
                 self.begin.value(i),
                 self.end.value(i),
             ));
+        }
+    }
+
+    /// Set `live[i]` for every `targets[i]` this block already holds a live
+    /// row for. `targets` must ascend; `live` is the same length and is only
+    /// ever set, never cleared, so several blocks can be probed in turn.
+    ///
+    /// One galloping (exponential-then-binary) search per target, resumed from
+    /// the previous target's position. That is `O(k log(n/k))` for `k` targets
+    /// over `n` rows — near-linear when the two are comparable in size, and
+    /// close to `k log n` when a small batch probes a large block. Neither
+    /// bound touches every row, which is the point: the caller is trying to
+    /// avoid an `O(n)` pass over the partition.
+    fn mark_live(&self, targets: &[(u64, u64)], live: &mut [bool]) {
+        let subs: &[u64] = self.subjects.values();
+        let objs: &[u64] = self.objects.values();
+        let ends: &[u64] = self.end.values();
+        let n = subs.len();
+        let mut cursor = 0usize;
+        for (target, flag) in targets.iter().zip(live.iter_mut()) {
+            // Targets ascend, so once one runs off the end so does every
+            // later one.
+            if cursor >= n {
+                return;
+            }
+            cursor = lower_bound_from(subs, objs, cursor, *target);
+            if *flag {
+                continue; // an earlier block already answered this one
+            }
+            // A pair can occupy several rows — a retracted row stays as
+            // history until compaction — so walk its whole block. At most one
+            // of them is live (`sort_dedup` guarantees it).
+            let mut i = cursor;
+            while i < n && (subs[i], objs[i]) == *target {
+                if ends[i] == UNSET_END {
+                    *flag = true;
+                    break;
+                }
+                i += 1;
+            }
         }
     }
 
@@ -415,6 +491,39 @@ impl PredicatePartition {
             part.cols();
         }
         part
+    }
+
+    /// Set `live[i]` for every `targets[i]` already visible at [`LATEST`] —
+    /// **without merging the runs**. `targets` must be sorted and
+    /// deduplicated; `live` has the same length and starts all-`false`.
+    ///
+    /// This is [`Self::contains_at`] at `LATEST` for a whole sorted batch, and
+    /// it deliberately does not go through [`Self::cols`]: a writer asking
+    /// "which of these pairs are new?" would otherwise force the very
+    /// whole-partition merge the append-run design exists to avoid, on every
+    /// call. Probing the runs instead answers the same question, because
+    /// merging never changes a pair's liveness — [`Columns::sort_dedup`] keeps
+    /// end stamps as they are and only collapses duplicate *live* rows for one
+    /// pair into one. So a pair is live in the merged view iff some run holds a
+    /// live row for it.
+    ///
+    /// The run list is cloned (`Arc` clones) rather than held under the lock:
+    /// a concurrent first read holds that lock for its whole merge, and either
+    /// view answers this question identically.
+    ///
+    /// Cost scales with the run count as well as the target count, since every
+    /// run is probed. [`MAX_RUNS`] bounds that, and the first read collapses
+    /// the runs back to one.
+    pub(crate) fn mark_live(&self, targets: &[(u64, u64)], live: &mut [bool]) {
+        debug_assert_eq!(targets.len(), live.len());
+        // The ascending order is the real precondition: every run is probed
+        // with a cursor that only moves forward, so an out-of-order target
+        // would be searched for in the wrong suffix and could read as absent.
+        debug_assert!(targets.is_sorted(), "mark_live needs sorted targets");
+        let runs: Vec<Arc<Columns>> = self.runs.lock().clone();
+        for run in &runs {
+            run.mark_live(targets, live);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -1124,5 +1233,103 @@ mod tests {
         // At v3 object 20 has no visible row → absent from the exact set.
         assert!(!part.object_set_at(3).contains(TermId(20).payload()));
         assert!(part.object_set_at(3).contains(TermId(10).payload()));
+    }
+
+    /// `lower_bound_from` must agree with a linear scan for every start
+    /// position and every key, including keys before the first row, after the
+    /// last, and between two rows.
+    #[test]
+    fn lower_bound_from_agrees_with_a_linear_scan() {
+        // Deliberate duplicate keys: (2, 2) appears twice, so the lower bound
+        // has to land on the first of the block, not just any match.
+        let subs = [1u64, 1, 2, 2, 2, 5, 9];
+        let objs = [4u64, 7, 2, 2, 8, 0, 3];
+        let keys = [
+            (0, 0),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (1, 7),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (2, 8),
+            (5, 0),
+            (9, 3),
+            (9, 4),
+            (u64::MAX, u64::MAX),
+        ];
+        for from in 0..=subs.len() {
+            for key in keys {
+                let want = (from..subs.len())
+                    .find(|&i| (subs[i], objs[i]) >= key)
+                    .unwrap_or(subs.len());
+                assert_eq!(
+                    lower_bound_from(&subs, &objs, from, key),
+                    want,
+                    "from {from}, key {key:?}"
+                );
+            }
+        }
+        // An empty block answers `0` from any start.
+        assert_eq!(lower_bound_from(&[], &[], 0, (1, 1)), 0);
+    }
+
+    /// `mark_live` must give the same answer as `contains_at(LATEST)` — which
+    /// reads the *merged* view — for a partition with several unmerged runs,
+    /// dead rows, and a pair that is dead in one run and live in another.
+    #[test]
+    fn mark_live_agrees_with_contains_at_across_unmerged_runs() {
+        // Run 0 via a build: a mix of live and retracted rows.
+        let mut b = PartitionBuilder::default();
+        for s in 0..40u64 {
+            for o in 0..5u64 {
+                // Every third pair is retracted; pair (7, 1) is retracted here
+                // and re-added in run 2 below.
+                let end = if (s + o) % 3 == 0 { 9 } else { UNSET_END };
+                b.append_stamped(TermId(s), TermId(o), 1, end);
+            }
+        }
+        let base = b.build_with_hot_threshold(NEVER_EAGER);
+
+        // Two appended runs, both all-live, overlapping the base and each other.
+        let run1: Vec<Row> = (0..30u64).map(|i| (i * 2, i % 7, 11, UNSET_END)).collect();
+        let run2: Vec<Row> = (0..30u64)
+            .map(|i| (i + 5, (i * 3) % 5, 12, UNSET_END))
+            .collect();
+        let part = base.with_appended_rows(run1).with_appended_rows(run2);
+        assert_eq!(part.run_count(), 3, "the runs must still be unmerged");
+
+        // Probe a superset of the stored keys, sorted and deduplicated the way
+        // the tier hands them over.
+        let mut targets: Vec<(u64, u64)> = Vec::new();
+        for s in 0..70u64 {
+            for o in 0..8u64 {
+                targets.push((s, o));
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+
+        let mut live = vec![false; targets.len()];
+        part.mark_live(&targets, &mut live);
+
+        // `contains_at` merges the runs, so it has to run second.
+        let want: Vec<bool> = targets
+            .iter()
+            .map(|&(s, o)| part.contains_at(TermId(s), TermId(o), LATEST))
+            .collect();
+        assert_eq!(live, want, "unmerged probe disagreed with the merged view");
+        assert!(want.iter().any(|&v| v), "the fixture must have live pairs");
+        assert!(
+            want.iter().any(|&v| !v),
+            "the fixture must have absent pairs"
+        );
+
+        // Same question once the partition is merged: one run, same answer.
+        assert_eq!(part.run_count(), 1);
+        let mut live_merged = vec![false; targets.len()];
+        part.mark_live(&targets, &mut live_merged);
+        assert_eq!(live_merged, want, "merged probe disagreed with itself");
     }
 }
