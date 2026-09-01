@@ -147,6 +147,31 @@ pub trait Executor {
         None
     }
 
+    /// Read a term's numeric value directly, skipping the `Term` clone +
+    /// N-Triples round trip [`decode_term`](Executor::decode_term) followed
+    /// by the SPARQL-side numeric coercion would otherwise pay per row
+    /// (HDB-100): the `SUM`/`AVG`/`MIN`/`MAX` fast paths in
+    /// `exec/runtime.rs::eval_group_native` fold this way when their inner
+    /// expression is a bare scan-column variable. `None` for a non-literal
+    /// term, an id the backend cannot resolve, or a literal whose value does
+    /// not parse as `f64` — the same cases
+    /// `runtime::numeric_value(&self.decode_term(id)?)` would treat as "not a
+    /// number", which is exactly the default below. `HornBackend` overrides
+    /// this to read the dictionary's stored `oxrdf::Literal` value in place,
+    /// under one lock, with no clone/`to_string`/unescape/re-parse.
+    fn decode_numeric(&self, id: horndb_storage::TermId) -> Result<Option<f64>> {
+        Ok(crate::exec::runtime::numeric_value(&self.decode_term(id)?))
+    }
+
+    /// Batched [`decode_term`](Executor::decode_term): decode every id in
+    /// `ids`, in order. The default calls `decode_term` once per id
+    /// (correct, just not batched); `HornBackend` overrides this to take the
+    /// dictionary's read lock once for the whole batch
+    /// (`Dictionary::lookup_batch`) rather than once per id (HDB-100).
+    fn decode_terms(&self, ids: &[horndb_storage::TermId]) -> Result<Vec<Term>> {
+        ids.iter().map(|&id| self.decode_term(id)).collect()
+    }
+
     /// Best-effort estimate of how many solution rows a BGP yields,
     /// used by `EXPLAIN` (SPEC-07 F9) for per-node cardinality
     /// annotations. The default returns `None` ("unknown"); backends

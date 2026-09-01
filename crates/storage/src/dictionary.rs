@@ -519,6 +519,27 @@ impl Dictionary {
             .collect()
     }
 
+    /// Read a term's numeric value directly off the stored `oxrdf::Literal`,
+    /// skipping the `Term` clone + `to_string()` + N-Triples reparse that
+    /// `lookup` plus the SPARQL-side numeric coercion would otherwise pay
+    /// per row (HDB-100 — `eval_group_native`'s SUM/AVG/MIN/MAX fast paths).
+    /// `None` for an id the dictionary never issued, a non-literal term, or
+    /// a literal whose value does not parse as `f64`.
+    pub fn numeric_value(&self, id: TermId) -> Option<f64> {
+        if id.kind() == TermKind::InlineInt {
+            return id.as_inline_int().map(|v| v as f64);
+        }
+        let idx = id.payload();
+        if idx == 0 {
+            return None;
+        }
+        let reverse = self.reverse.read();
+        match reverse.get((idx - 1) as usize)? {
+            Term::Literal(lit) => lit.value().trim().parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
     /// Total bytes of forward-map key currently stored, and the number of
     /// keys. Test/benchmark instrumentation for the HDB-95 measurement; the
     /// figure excludes the `Box` headers and the map's own slot overhead.
