@@ -108,7 +108,7 @@ Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`) 
 
 | `phase` | Emitted from | What it covers |
 |---|---|---|
-| `parse` | `crates/bench-trainmarks/src/main.rs` | tokenising the document **and** materialising the triple batch (`materialize` is the second half) |
+| `parse` | `crates/bench-trainmarks/src/main.rs`; `crates/storage/src/loader/{turtle,ntriples,nquads}.rs` | Two emission sites, and they measure different things. From the bench driver: tokenising the document **and** materialising the triple batch (`materialize` is the second half). From the slice loaders (`load_*_slice`): the calling thread's wall clock minus the time it spent interning and inserting, taken once per 8,192-item batch — at one parse thread that is the inline parse, above one it is what the consumer still waits for. A process that does both adds them together |
 | `materialize` | `crates/bench-trainmarks/src/main.rs` | the `Vec<(OxTerm, OxTerm, OxTerm)>` build alone; `parse` minus this is tokenisation |
 | `dedupe` | `crates/sparql/src/exec/horn.rs` | interning every term and dropping intra-batch-duplicate triples |
 | `dedupe_intern` | `crates/sparql/src/exec/horn.rs` | the `Dictionary::intern_quad` call inside `dedupe` (opt-in, see below) |
