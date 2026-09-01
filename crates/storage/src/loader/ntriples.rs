@@ -18,7 +18,8 @@
 use crate::dictionary::Dictionary;
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_mapped, parse_chunks_ordered, should_read_whole_file, slice_threads,
+    load_threads, parse_chunks_mapped, parse_chunks_ordered, should_probe, should_read_whole_file,
+    slice_threads,
 };
 use crate::loader::{load_quads, subject_to_term, Batch, Probed, QuadSink, SinkTimer};
 use crate::store::Store;
@@ -130,7 +131,7 @@ where
     F: FnMut(Batch<Triple, Probed>) -> Result<()>,
 {
     let chunks = ntriples_chunks(bytes, threads);
-    let probe = chunks.len() > 1;
+    let probe = should_probe(chunks.len());
     parse_chunks_mapped(
         chunks,
         move |rows: Vec<Triple>| {

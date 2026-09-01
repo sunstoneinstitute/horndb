@@ -599,3 +599,52 @@ fn batch_size_does_not_change_the_store() {
 
     set_load_batch_triples(DEFAULT_LOAD_BATCH_TRIPLES);
 }
+
+/// The HDB-106 probe gate must not be visible in the store.
+///
+/// `loader::parallel::should_probe` turns the parse-thread dictionary probe off
+/// below 4 chunks, because there it costs 4–5% instead of saving 8% (the
+/// measurements are on the constant). That is a pure throughput decision: both
+/// sides of the gate have to produce the same triples, the same dictionary and
+/// **the same term ids** as a serial reader, or the gate has become a
+/// correctness switch.
+///
+/// Thread counts are chosen to straddle it: 1 and 2 fall below (unprobed), 4
+/// and 8 at or above (probed). `oxttl`'s 16 KiB-per-chunk floor means the
+/// document has to be big enough to actually split that many ways, which
+/// `ntriples_corpus(6_000)` is.
+#[test]
+fn both_sides_of_the_probe_gate_produce_the_same_store() {
+    let doc = ntriples_corpus(6_000);
+    assert!(doc.len() > 1 << 20, "corpus must be big enough to split");
+
+    let serial = Store::in_memory();
+    load_ntriples_reader(&serial, doc.as_bytes()).unwrap();
+
+    for threads in [1usize, 2, 3, 4, 8] {
+        let parallel = Store::in_memory();
+        load_ntriples_slice_with_threads(&parallel, doc.as_bytes(), threads).unwrap();
+        assert_same_store(
+            &serial,
+            &parallel,
+            &format!("n-triples @ {threads} threads"),
+        );
+    }
+}
+
+/// The same, for N-Quads — the format whose graph label is resolved on the
+/// consumer rather than probed, so the gate crosses a second code path.
+#[test]
+fn both_sides_of_the_probe_gate_agree_on_named_graphs() {
+    let doc = nquads_corpus(12_000);
+    assert!(doc.len() > 1 << 20, "corpus must be big enough to split");
+
+    let serial = Store::in_memory();
+    load_nquads_reader(&serial, doc.as_bytes()).unwrap();
+
+    for threads in [1usize, 2, 3, 4, 8] {
+        let parallel = Store::in_memory();
+        load_nquads_slice_with_threads(&parallel, doc.as_bytes(), threads).unwrap();
+        assert_same_store(&serial, &parallel, &format!("n-quads @ {threads} threads"));
+    }
+}

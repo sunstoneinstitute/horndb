@@ -187,13 +187,16 @@ impl Probed {
 ///
 /// Two shapes, chosen once per 8,192-row batch rather than per row:
 ///
-/// * `Raw` — a single-chunk (serial) parse. There is no other thread to move
-///   the lookup to, so probing would be the consumer's own lookup done twice.
-///   The rows are handed through exactly as they were before HDB-106, so that
-///   path pays nothing for the probe: no extra bytes in the buffer, no extra
-///   work per row.
-/// * `Probed` — a chunked parse. Each row carries what its parse thread
-///   resolved; the consumer allocates ids only for the rest.
+/// * `Raw` — a parse the probe cannot pay for
+///   ([`parallel::should_probe`] said no): a single chunk, where there is no
+///   other thread to move the lookup to and probing would be the consumer's own
+///   lookup done twice, or 2–3 chunks, where the parse threads have no spare
+///   capacity to absorb it. The rows are handed through exactly as they were
+///   before HDB-106, so those paths pay nothing for the probe — no extra bytes
+///   in the buffer, no extra work per row.
+/// * `Probed` — a parse split at least [`parallel::MIN_PROBE_CHUNKS`] ways.
+///   Each row carries what its parse thread resolved; the consumer allocates
+///   ids only for the rest.
 pub(crate) enum Batch<R, P> {
     Raw(Vec<R>),
     Probed(Vec<P>),
