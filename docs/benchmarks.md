@@ -406,6 +406,173 @@ per row, and it includes the `Pos` ordering derive HDB-97/98 made q3 pay
 itself), not a 100,000× row overproduction. Any follow-up aimed at `scan_wcoj`
 should start from the per-row figure, not the overproduction framing.
 
+#### q3's `scan_wcoj` is a join-order problem, not a per-row floor (HDB-108, 2026-09-01)
+
+HDB-101 left q3 at 0.835s warm with `scan_wcoj` as the whole remaining gap.
+This is the diagnosis of that phase. **Measured on `hornbench`** (AMD Ryzen 7
+7700, Debian 6.12, rustc 1.90.0), trainmarks xlarge (9,995,000 triples),
+commit `d773863`, `HORNDB_LOAD_THREADS=1`, `HORNDB_EXEC_PHASES=1`, best-of-3
+warm.
+
+**Which sub-phase dominates: the join advance, by two orders of magnitude.**
+Warm split of q3 (the `_warm_pre` → `_warm` dump pair):
+
+| phase | time | share | rows | per row |
+|---|---|---|---|---|
+| `scan_wcoj` | 792.73 ms | **95.3%** | 133,106 | **5.96 µs** |
+| `sort` | 18.67 ms | 2.2% | 133,106 | 0.14 µs |
+| `stream_op` | 13.36 ms | 1.6% | 266,312 | 0.05 µs |
+| `scan_row_build` | 4.31 ms | 0.5% | 133,106 | 0.03 µs |
+| `residual` | 2.23 ms | 0.3% | — | — |
+| `scan_provenance` | 0.76 ms | 0.1% | 133,106 | 0.01 µs |
+| `result_encode` | 0.06 ms | ~0% | 50 | — |
+
+Row materialization after the join (`scan_row_build` + `scan_provenance`) is
+0.6% of exec. Every candidate that pointed at the row-build path is ruled out.
+
+The phases sum to 832.1 ms, which sits alongside the 0.830s best-of-3 warm
+wall clock — close enough to say the named phases account for essentially all
+of exec, but **not a same-run identity**: the dump pair brackets the third
+warm run while the recorded wall clock is the best of the three. Treat the
+agreement as a sanity check, not a reconciliation.
+
+The same run's **cold** split reads 66.4% `scan_wcoj` / 30.4% `residual`,
+reproducing HDB-101's cold figure; the cold `residual` is the one-off `Pos`
+trie-ordering build. Cold and warm splits are not interchangeable — see the
+`dump_exec_phases` doc comment.
+
+**Mechanism: q3 enumerates 1,335,000 orders to answer with 133,106 rows.**
+`ExecutionPlan::for_bgp` (`crates/wcoj/src/plan.rs`) orders WCOJ variables by
+**descending pattern degree** — how many patterns mention the variable —
+and never consults cardinality or selectivity. In q3, `?order` appears in four
+patterns and `?customer` in three, so `?order` becomes the depth-0 variable.
+The join therefore walks every one of the dataset's 1,335,000 orders and only
+*then* applies `?customer :country :Norway` at depth 1, which discards ~90% of
+them. Each discarded order still costs a four-way depth-0 leapfrog convergence
+plus a depth-1 probe, and the two iterators that probe it (`?customer
+rdfs:label ?name` and `?customer :country :Norway`) are `reset()` to their
+level start on every order, so each probe is a cold `lower_bound` binary search
+over a 100K-row column rather than a monotone forward gallop.
+
+The `wcoj_seeks_per_query` counter puts numbers on it: **10,143,367 seeks for
+one warm q3** — 7.6 per order enumerated, 76 per answer row, at ~78 ns each.
+
+`perf record` over the query phase alone (14,494 samples, all five slots
+running q3) attributes 94.5% of cycles to five WCOJ symbols:
+
+| symbol | share |
+|---|---|
+| `VecIter::open_level` | 27.0% |
+| `Executor::next` (the `step()` state machine) | 23.4% |
+| `horndb_simd::scalar::lower_bound` | 21.5% |
+| `VecIter::seek` | 10.7% |
+| `AdaptiveIter::peek` | 10.0% |
+| `horndb_simd::lower_bound` (dispatcher) | 1.9% |
+
+`scan_bgp_ids`'s row-build closure is 0.35%. (`lower_bound` resolving to the
+scalar kernel is the calibrated choice on this host, not a dispatch failure —
+these seeks are memory-bound, not compute-bound.)
+
+**Proof by variant queries.** Same dataset, same driver, one process per set;
+each query below occupies one read-query slot so it gets the same cold-plus-3-warm
+treatment:
+
+| variant | patterns | answer rows | seeks | `scan_wcoj` | warm |
+|---|---|---|---|---|---|
+| q3 as shipped | 7 | 133,106 | 10,143,367 | 763–793 ms | 0.797–0.830s |
+| q3, customer patterns written first (same degrees) | 7 | 133,106 | 10,143,392 | 760.00 ms | 0.800s |
+| q3 minus `:country :Norway` | 6 | **1,335,000** | 16,019,985 | 853.90 ms | 1.213s |
+| q3 minus both `rdfs:label` patterns | 5 | 133,106 | 8,409,061 | 446.50 ms | 0.480s |
+| the 4-pattern order star alone | 4 | 1,335,000 | 10,679,997 | 272.25 ms | 0.481s |
+| q3 + `a :Customer` (**`?customer` becomes depth 0**) | 8 | 133,106 | **1,370,956** | **290.66 ms** | **0.331s** |
+| q3 with `:orderStatus` dropped, `a :Customer` added (7 patterns, `?customer` depth 0) | 7 | 133,106 | **1,104,744** | **172.65 ms** | **0.201s** |
+
+Read the table two ways:
+
+1. **Cost does not track answer rows.** Removing the `:country :Norway`
+   restriction multiplies the output by 10 and moves `scan_wcoj` by 1.12×
+   (5.96 → 0.64 µs/row). The four-pattern order star produces the same
+   1,335,000 rows for 272 ms (0.20 µs/row). The engine's per-row cost on this
+   shape is a few hundred nanoseconds; q3's 6 µs/row is 1,335,000 orders of
+   work divided by 133,106 surviving rows.
+2. **Cost tracks the depth-0 variable.** Adding a pattern (`a :Customer`) so
+   `?customer` ties `?order` on degree and wins the first-appearance tiebreak
+   gives the planner the right order: **more join work on paper, 7.4× fewer
+   seeks and 2.6× less `scan_wcoj`.** Writing the customer patterns first
+   without changing any degree changes nothing (10,143,392 vs 10,143,367
+   seeks) — confirming the degree heuristic, not query text order, is what
+   decides.
+
+**Quote the range, not the best number.** The strictly comparable variant is
+the second-to-last row: it keeps all of q3's patterns and all four of its
+output columns, adds one, and still runs at **0.331s warm against 0.804s** for
+q3 as shipped in the same process. The last row is the 7-pattern lower bound —
+it drops `:orderStatus ?status`, so it is one pattern and one column short of
+being q3 — at 0.201s. **A correctly planned q3 lands at 0.20-0.33s, and 0.33s
+is the number to hold anyone to.** The last row's
+1,104,744 seeks match `q5_construct`'s exactly, which is the same BGP; q5 is
+fast today (0.375s) for precisely this reason — its `?customer` has degree 4
+and its `?order` degree 3, so the shipped heuristic happens to pick the good
+order there.
+
+**Conclusion: this is not the floor.** `q3 ≤ 0.5s` is reachable — the measured
+`?customer`-first rewrites land at **0.20-0.33s**, and 0.33s is the figure
+from the variant that matches q3 pattern-for-pattern and column-for-column —
+and the lever is selectivity-aware variable ordering in the WCOJ planner, not
+anything in the scan's inner loop. The seam already exists and is unused: `Planner::choose`
+(`crates/wcoj/src/planner.rs`) takes a `Cardinality` estimator as `_est` and
+discards it, and `ExecutionPlan::for_bgp` is not given one at all, while
+`StatsEstimator` / `SnapshotStats` are already built and wired into
+`HornBackend::cardinality_estimate` for `EXPLAIN`. That unmet requirement is
+**SPEC-03 F6** ("planner uses [per-predicate statistics] for join-order
+selection and WCOJ-vs-binary-join cutover") — not F2, which covers only the
+WCOJ-vs-binary cutover, and which `crates/wcoj/src/planner.rs` used to cite
+for both.
+
+**This is already filed: do not open a new task for it.** HDB-46 (SPEC-23
+Phase 4, cost-based `JoinPlanning`) and its plan
+`docs/plans/PLAN-23-04-cost-based-join-planning.md` name this exact defect —
+"variable order by descending degree, `_est` ignored — is structurally wrong"
+(lines 33-34) — and Task 5, "Greedy WCOJ variable ordering… seeded by
+descending degree", is the fix. What HDB-108 adds is the price tag: on
+trainmarks q3 the variable ordering alone accounts for the entire gap, with no
+contribution from HDB-46's structural cyclic-core routing or its
+WCOJ-vs-binary-hash choice.
+
+**PLAN-23-04 is still blocked, and Task 5 cannot simply be lifted out of it.**
+The plan carries a `BLOCKED — not ready to execute` banner over a six-item
+"Prerequisites to unblock" checklist with **no box ticked**. One of the six —
+"[PLAN-23-03] executed" — is in fact satisfied (`PLAN-23-03` is
+`status: executed`) and its checkbox is merely stale, which is worth stating
+because it is the prerequisite closest to this measurement. The other five are
+genuinely open: the per-subplan `ExecutionPlan` refactor, SPEC-23 §8 open
+question #2 (AGM calibration), §8 open question #3 (the `sparql` ↔ `wcoj`
+planner API boundary), the unified-memory materialization-cost term, and a
+confirmed-green WCOJ differential oracle.
+
+Task 5 also has a real in-plan dependency, not just a sequential listing. It
+orders variables *"within a WCOJ core"* and *"emit[s] the variable elimination
+order in the `JoinSpec`"* — cyclic cores are Task 2's output, the `JoinSpec` is
+Task 4's, and both sit on the per-subplan plan IR that Task 1 builds and that
+Task 1 itself describes as unblocking everything below. **Task 5 as written is
+therefore not independently pullable.**
+
+What *could* be pulled forward is narrower than Task 5 and is not currently
+written down anywhere: replacing the descending-degree sort in today's
+single-mode `ExecutionPlan::for_bgp` with a selectivity-aware order, leaving
+the plan IR, the routing, and the cutover exactly as they are. That is a
+strictly smaller change than Task 5, it needs only the PLAN-23-03 estimator
+that already exists, and it is what the measurements above price. Whether it
+is worth doing as an interim slice — or whether it would be thrown away by
+Task 1's refactor — is a scoping call for whoever owns HDB-46, and this entry
+does not attempt to make it. Either way the work belongs to HDB-46, not to a
+new task, and it carries cross-query regression risk (`four_cycle`, LUBM,
+SPB-256) that keeps it out of this diagnosis.
+
+Target for whoever takes it: **q3 at xlarge from 0.830s to ≤ 0.35s warm**,
+`scan_wcoj` from 793 ms to ≤ 300 ms, `wcoj_seeks_per_query` from 10.1M to
+≤ 2M, no regression on `four_cycle`, LUBM, or the SPB-256 nightly.
+
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 
 `q6` always runs first in the driver, and its `WHERE` clause resolves the
