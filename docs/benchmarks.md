@@ -330,6 +330,75 @@ commit `4459be9`) is **56.50 qps** for HornDB (`gh run download`, the live
 A post-merge comparison cannot exist until this PR merges and the next
 nightly run completes; that check is an open item, not verified here.
 
+#### ORDER BY stopped re-deriving its sort key per comparison; LIMIT fused as top-k (HDB-101, 2026-09-01)
+
+`ORDER BY` resolved each row's sort value **inside** the comparator:
+`compare_by_keys` re-evaluated the key expression on both sides of every
+comparison, and `compare_terms` then re-derived the lexical form and re-parsed
+it as `f64` on both sides again. An n-row sort therefore paid O(n log n)
+decodes for O(n) work. On top of that, `OrderBy` and `Slice` were independent
+plan nodes, so q3 fully sorted its 133,106 rows to return 50.
+
+Both are fixed: each key is resolved once per row into a typed `SortCol` and
+the comparator compares only resolved values (a bare scan-column key reads the
+slots through HDB-100's `decode_numeric`/`decode_terms` seam and never builds a
+`Bindings`), and a bounded `LIMIT` directly above an `ORDER BY` lowers to
+`TopKOp`, a bounded max-heap of `offset + limit` rows. Design and the
+row-order-parity argument: `docs/architecture.md`'s planner/runtime row.
+
+Controlled A/B on `hornbench` (AMD Ryzen 7 7700, Debian 6.12, rustc 1.90.0),
+trainmarks xlarge (9,995,000 triples), commit `7c83936` (before) vs `2aba2f8`
+(after, HDB-101), same generated dataset, `HORNDB_LOAD_THREADS=1`, best-of-3
+warm per upstream protocol:
+
+| query | before | after | change |
+|---|---|---|---|
+| q3 3-join + order + limit (warm) | 1.189s | **0.835s** | **−29.7%** |
+| q3 (cold) | 1.551s | **1.200s** | **−22.6%** |
+| q1 `COUNT(*)` | 0.404s | 0.404s | ~0 |
+| q2 group/sum/limit | 1.307s | 1.278s | −2.2% |
+| q4 `OPTIONAL` + agg | 1.553s | 1.556s | ~0 |
+| q5 `CONSTRUCT` | 0.375s | 0.375s | ~0 |
+| q6 conditional `DELETE`/`INSERT` | 0.510s | 0.494s | −3.2% |
+
+Per-operator split of q3's cold run (`HORNDB_EXEC_PHASES=1`, separate run,
+same two commits; a query's own share is the diff between its `_pre` and
+`_cold` dumps, per HDB-99's method):
+
+| phase | before (exec 1.511s) | after (exec 1.204s) |
+|---|---|---|
+| `scan_wcoj` | 0.766s (50.7%) | 0.803s (**66.7%**) |
+| `residual` | 0.383s (25.3%) | 0.364s (30.2%) |
+| `sort` | 0.343s (**22.7%**) | **0.019s (1.6%)** |
+| `stream_op` | 0.014s (0.9%) | 0.013s (1.1%) |
+| `scan_row_build` | 0.005s (0.3%) | 0.005s (0.4%) |
+| `scan_provenance` | 0.001s (0.1%) | 0.001s (0.1%) |
+| `result_encode` | ~0s | ~0s |
+
+**`sort` fell 18×, from 22.7% of exec to 1.6%, and nothing else moved** — the
+change is exactly as scoped. The `before` column reproduces HDB-99's published
+q3 split (0.817s / 52.2% `scan_wcoj`, 0.344s / 22.0% `sort`, exec 1.564s) at a
+different commit, within run-to-run spread.
+
+**The remaining gap is `scan_wcoj`, not the sort.** As HDB-99 predicted, q3 is
+now two thirds WCOJ scan. Its 0.803s is unchanged in absolute terms and cannot
+be moved from the sort side; closing it needs a scan-side lever (limit/top-k
+pushdown into the join, or join ordering — cost-based-planning territory), which
+is out of this task's scope. `q3 ≤ 0.5s` is therefore still not met and was
+explicitly retired as a pass/fail gate for this task when HDB-99's measurement
+landed.
+
+**Correction to HDB-99's q3 note: the scan does *not* materialise 5,513,106
+rows.** That figure is the `scan_wcoj` counter's cumulative value *after* q3,
+not q3's own delta — the exact misreading the `dump_exec_phases` doc comment
+warns about. q3's own WCOJ scan produces **133,106 rows** (the count that
+survives `:country :Norway`, matching the `sort` phase's row count in both
+columns above). So q3's scan cost is ~6 µs per produced row on the cold run —
+expensive per row, and it includes the `Pos` ordering derive that HDB-97/98
+made q3 pay itself — rather than a 100,000× row overproduction. Any follow-up
+aimed at `scan_wcoj` should start from the per-row figure, not the
+overproduction framing.
+
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 
 `q6` always runs first in the driver, and its `WHERE` clause resolves the
@@ -2479,10 +2548,14 @@ join never produces a `JoinOp`/`LeftJoin` node — only q4's `OPTIONAL` does.
   there.)
 - **q3 — `sort` does not dominate; `scan_wcoj` does, at 2.4× `sort`'s
   share** (52.2% vs 22.0%). [[HDB-101]] (sort) is not the highest-value next
-  step for *this* query by this measurement: the WCOJ scan produces
-  5,513,106 rows for a query whose final answer is 50 rows
-  (`ORDER BY … LIMIT 50`), and that overproduction — not the sort at the
-  end — is the bigger cost.
+  step for *this* query by this measurement: the WCOJ scan, not the sort at
+  the end, is the bigger cost. (**Corrected by HDB-101**: this bullet
+  originally read "the WCOJ scan produces 5,513,106 rows for a query whose
+  final answer is 50 rows". That number is the `scan_wcoj` counter's
+  *cumulative* value after q3, not q3's own delta. q3's own scan produces
+  **133,106 rows** — see the HDB-101 section above. The finding that
+  `scan_wcoj` dominates q3 stands; the row-overproduction explanation for it
+  does not.)
 - **Residual exceeds the acceptance target (< 15%) on all three streaming
   (non-pushdown) queries** — q2 43.5%, q3 24.6%, q4 33.9% — filed here as
   its own finding per the acceptance criteria, not papered over. The likely
