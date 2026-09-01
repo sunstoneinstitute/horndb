@@ -1424,10 +1424,10 @@ subtree is shared across all 30 — exactly the mechanism the FST minimises best
 Front-coding, the records and the arena are all flat across the same scaling, so
 the effect is specific to this arm.
 
-**Quote the real-corpus rate: the FST is 16× smaller than the fingerprint array
-on real LUBM-100 and 6.8× smaller on trainmarks, not the 24× the 100M scale
-point suggests.** Downstream documents carry 16×. Even at the trainmarks rate a
-100M-key FST is 234 MB against the fingerprint array's 1.59 GB.
+**Quote the real-corpus rate: the FST is 15.7× smaller than the fingerprint
+array on real LUBM-100 and 6.8× smaller on trainmarks, not the 24× the 100M
+scale point suggests.** Downstream documents carry 15.7×. Even at the trainmarks
+rate a 100M-key FST is 234 MB against the fingerprint array's 1.59 GB.
 
 Build time, single invocation, from an in-memory key set:
 
@@ -1464,7 +1464,7 @@ real; the plan should pick knowingly rather than assume front-coding is free.
 
 ##### The total mapped base, which is not 66 MB
 
-The 16× term → id ratio above is one component. A base has to answer both
+The 15.7× term → id ratio above is one component. A base has to answer both
 directions, and the id → term half dominates the footprint. Both recommendations
 of this record, added up at 100M keys:
 
@@ -1475,9 +1475,15 @@ of this record, added up at 100M keys:
 | `fst` + front-coded id → term | 0.67 | 17.72 | **18.39** | **1.82 GB** |
 | R3 as written, front-coded id → term | 16.33 | 17.72 | 34.05 | 3.37 GB |
 
+The MPHF rows use **16.33** B/key — the 16.00 B/key fingerprint + id records plus
+the 0.33 B/key MPHF that has to be resident beside them — because a total budget
+has to count both. The 15.7× ratio elsewhere in this record divides by **16.00**,
+the mapped array alone, because that is the component being compared against the
+mapped FST. Both are right for their own question; neither is a typo.
+
 **Read the total, not the term → id column.** Choosing FST over MPHF plus
 fingerprint shrinks the whole mapped base by **1.2×** if id → term stays a flat
-offset table over the arena, or 1.9× if id → term is front-coded. The 16× is
+offset table over the arena, or 1.9× if id → term is front-coded. The 15.7× is
 real but applies to a component that is under 1% of the recommended design's
 bytes. Anyone sizing an S2 base from this record should budget **~7 GB at 100M
 keys**, not 66 MB.
@@ -1499,12 +1505,12 @@ batched (31.81 ns). Against the two other *mapped* candidates it is the largest
 313.8 ns). **Take FST for the mapped term → id base.** With the repeat cache in
 front — which R3 already requires — FST costs 28.85 ns against the MPHF's 17.01,
 a 11.8 ns difference on the ~10% of calls that reach the base at all, in
-exchange for a term → id structure **16× smaller on real-corpus rates** (6.8× on
-trainmarks), **4.5× better cold on the locality-neutral stream**, and ordered,
+exchange for a term → id structure **15.7× smaller on real-corpus rates** (6.8×
+on trainmarks), **4.5× better cold on the locality-neutral stream**, and ordered,
 prefix and automaton search that SPEC-25 will want for `STRSTARTS` and
 regex-over-dictionary. Two bounds on that trade, both from the sections above:
-the whole mapped base shrinks **1.2×**, not 16×, because id → term dominates the
-footprint; and the cold advantage is **~0.73s of one-time faults**, which the
+the whole mapped base shrinks **1.2×**, not 15.7×, because id → term dominates
+the footprint; and the cold advantage is **~0.73s of one-time faults**, which the
 MPHF repays after ~620M dictionary calls. Reopen never reaches that, a
 long-lived server does.
 
@@ -1523,7 +1529,7 @@ cache in first, and the base structure is chosen on size and cold start.
 **R4's FST rejection — overturned.** R4 rejected FST as "the worst latency
 profile of the three for point lookups on a multi-GB map". The premise is wrong:
 the FST is not multi-GB. It is 66 MB for 99,082,405 LUBM keys and 4.5 MB for
-1,919,818 trainmarks keys — **16× smaller than the fingerprint array at
+1,919,818 trainmarks keys — **15.7× smaller than the fingerprint array at
 real-corpus rates**, 6.8× on trainmarks (the 24× at the 100M scale point is
 inflated by the replication; see *Space and build*). Warm, R4's latency claim
 holds (223.0 vs 45.1 ns, and 28.85 vs 17.01 with the cache). Cold, it is
@@ -1546,12 +1552,14 @@ At 100M, corpus stream: `openaddr` 11.71 → 6.84 (1.7×), `ptrhash` 45.14 → 2
 `ptrhash/single/hit` on that stream is the one noisy cell in the matrix, 45.14
 over a 34.25–54.19 range (±22% on 3 reps), so its batching ratio spans
 1.6–2.6×, and the 81× cold-to-warm figure quoted above spans 67–107×. Neither
-range changes a verdict, but do not quote either ratio to three digits. It does nothing for `hashbrown`
-(21.52 → 21.28 — the crate exposes no prefetch hook), nothing for `fst` (223.02
-→ 223.52), and on the locality-rich corpus stream it makes the front-coded base
-*worse* (152.75 → 201.63) while helping it on the uniform stream (1223.80 →
-657.38). Batching pays where the lookup is one or two independent random probes
-and the queries are independent; it does not rescue a dependent chain.
+range changes a verdict, but do not quote either ratio to three digits.
+
+It does nothing for `hashbrown` (21.52 → 21.28 — the crate exposes no prefetch
+hook), nothing for `fst` (223.02 → 223.52), and on the locality-rich corpus
+stream it makes the front-coded base *worse* (152.75 → 201.63) while helping it
+on the uniform stream (1223.80 → 657.38). Batching pays where the lookup is one
+or two independent random probes and the queries are independent; it does not
+rescue a dependent chain.
 
 ##### What a win here is worth end to end
 

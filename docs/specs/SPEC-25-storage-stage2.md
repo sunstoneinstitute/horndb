@@ -181,7 +181,7 @@ produce a multi-GB dictionary") settled.
   at checkpoint scale. Its findings for the plan: put the repeat cache in
   first, because it collapses the spread between the mapped structures from
   178 ns to 24 ns and turns this into a space and cold-start choice; take FST
-  for term → id (16x smaller at real-corpus rates and 4.5x faster cold than an
+  for term → id (15.7x smaller at real-corpus rates and 4.5x faster cold than an
   MPHF plus fingerprint array, 11.8 ns slower warm behind the cache — a cold
   win of ~0.73s of one-time faults, which the MPHF repays after ~620M
   dictionary calls, so this is the right call for reopen and not for a
