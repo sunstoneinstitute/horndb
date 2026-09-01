@@ -1899,7 +1899,11 @@ part. Peak RSS rises 78% on Turtle (2,207 → 3,851 MiB) and 57% on N-Triples
 from HDB-94, which a one-chunk load never allocates at all; the rest is
 per-thread parser and allocator state. That budget is absolute — a fixed
 ~1.5 GiB adder, not something that grows with the corpus — and
-`HORNDB_LOAD_BUFFER_TRIPLES` trades it back against `parse`.
+`HORNDB_LOAD_BUFFER_TRIPLES` trades it back against `parse`. It was tuned by
+HDB-94 at 16 threads on the `HornBackend` path, where `parse` dominated; at the
+shipped 8 threads on this path `parse` is 14% / 3.6%, so a smaller budget
+plausibly keeps most of the speedup for a fraction of the memory. Unmeasured —
+**HDB-105**.
 
 **The second part is not in the tables, and it does scale with the document.**
 The parallel path needs one contiguous slice, so the *file* entry points
@@ -1927,9 +1931,27 @@ ratio inverts, and a file large enough to threaten memory is exactly the one
 where the streaming loader's flat footprint beats the parallel path's remaining
 14% / 3.6% of `parse`.
 
+Measured on the file path, which is the one the sweep tables cannot show.
+`examples/load_curve`, `xlarge.nt` (1.17 GB), one repeat per cell, `VmHWM`
+sampled at 200 Hz by a separate watcher — the sampling costs ~5% wall, so read
+the times as shape, not as headline numbers:
+
+| `load_ntriples_file` path | peak RSS | ready |
+|---|---|---|
+| default: 8 threads, document read whole | **4,029 MiB** | 6.52s |
+| `HORNDB_LOAD_MAX_SLICE_BYTES=1000000000` → streaming fallback | **1,544 MiB** | 10.34s |
+| `HORNDB_LOAD_THREADS=1` → streaming | **1,544 MiB** | 10.11s |
+
+The threaded file load costs **2,485 MiB over streaming**, of which ~1.17 GB is
+the document itself — that is the term "fixed adder" got wrong. And the ceiling
+fallback lands on **exactly** the serial footprint (1,544 MiB, to the MiB),
+which is the point: above the ceiling you get the pre-HDB-96 behaviour, not an
+intermediate one. Both fallback rows load all 9,995,000 triples.
+
 The `load_curve` figures below are inside the ceiling (1.17 GB < 2 GiB), so they
 are unaffected by it — the ceiling was not chosen to clear them, and a corpus
-above it would simply have reported the one-thread number.
+above it would simply have reported the one-thread number. Re-checked after the
+ceiling landed: 6.130s median, against the 6.091s recorded below.
 
 `HORNDB_LOAD_THREADS=1` restores the old time *and* both parts of the old
 footprint.
