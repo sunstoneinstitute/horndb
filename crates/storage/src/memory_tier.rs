@@ -632,6 +632,10 @@ impl Tier for MemoryTier {
                 if let Some(existing) = new_partitions.get(&p) {
                     let n = existing.len();
                     carried = n as u64;
+                    // The row count is known here, and at most one live pair
+                    // per row lands in `still_visible`, so one allocation
+                    // replaces log2(n) doublings per predicate per batch.
+                    still_visible.reserve_exact(n);
                     for i in 0..n {
                         let s = existing.subjects().value(i);
                         let o = existing.objects().value(i);

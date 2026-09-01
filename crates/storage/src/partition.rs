@@ -48,21 +48,41 @@ use std::time::{Duration, Instant};
 /// Configurable per tier — see [`crate::MemoryTier::with_hot_threshold`].
 pub const DEFAULT_HOT_THRESHOLD: usize = 1_000_000;
 
-/// Resolved once, then cached, as `value + 1` so that `0` can mean "not yet
-/// read" while still letting a caller ask for a threshold of `0` (every
-/// predicate hot).
-static HOT_THRESHOLD: AtomicUsize = AtomicUsize::new(0);
+/// "Not yet read" marker for [`HOT_THRESHOLD`].
+///
+/// `0` cannot serve here — it is a legitimate threshold meaning "every
+/// predicate eager" — so the sentinel is `usize::MAX` and every resolved value
+/// is clamped to [`NEVER_EAGER`] instead. A threshold one below `usize::MAX` is
+/// already unreachable: it would need `usize::MAX - 1` live rows in a single
+/// predicate.
+const HOT_THRESHOLD_UNSET: usize = usize::MAX;
+
+/// The largest storable threshold, and what `HORNDB_HOT_THRESHOLD=off`
+/// resolves to: no partition can ever reach this row count, so nothing is
+/// materialised eagerly.
+pub const NEVER_EAGER: usize = usize::MAX - 1;
+
+/// Resolved once, then cached. [`HOT_THRESHOLD_UNSET`] means "not yet read";
+/// every other value is the threshold itself, stored raw.
+static HOT_THRESHOLD: AtomicUsize = AtomicUsize::new(HOT_THRESHOLD_UNSET);
 
 /// Parse a `HORNDB_HOT_THRESHOLD` value, falling back to
 /// [`DEFAULT_HOT_THRESHOLD`] for anything unparseable.
+///
+/// The result is always storable — clamped to [`NEVER_EAGER`] so it can never
+/// collide with the [`HOT_THRESHOLD_UNSET`] sentinel.
 ///
 /// Split out from [`hot_threshold`] so it is testable without touching
 /// process-global environment state.
 fn parse_hot_threshold(raw: Option<&str>) -> usize {
     match raw {
         // `off` reads better than a magic number for "never eager".
-        Some("off") => usize::MAX,
-        Some(v) => v.trim().parse::<usize>().unwrap_or(DEFAULT_HOT_THRESHOLD),
+        Some("off") => NEVER_EAGER,
+        Some(v) => v
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_HOT_THRESHOLD)
+            .min(NEVER_EAGER),
         None => DEFAULT_HOT_THRESHOLD,
     }
 }
@@ -82,12 +102,12 @@ fn parse_hot_threshold(raw: Option<&str>) -> usize {
 /// `docs/benchmarks.md`.
 pub fn hot_threshold() -> usize {
     match HOT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => {
+        HOT_THRESHOLD_UNSET => {
             let v = parse_hot_threshold(std::env::var("HORNDB_HOT_THRESHOLD").ok().as_deref());
-            HOT_THRESHOLD.store(v.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
+            HOT_THRESHOLD.store(v, std::sync::atomic::Ordering::Relaxed);
             v
         }
-        v => v.wrapping_sub(1),
+        v => v,
     }
 }
 
@@ -95,8 +115,11 @@ pub fn hot_threshold() -> usize {
 ///
 /// The threshold cannot change what a partition *contains*, only when the
 /// object-major layout is materialised, so moving it is always safe.
+///
+/// `rows` is clamped to [`NEVER_EAGER`], which is what `usize::MAX` means here
+/// anyway — no partition can hold that many rows.
 pub fn set_hot_threshold(rows: usize) {
-    HOT_THRESHOLD.store(rows.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
+    HOT_THRESHOLD.store(rows.min(NEVER_EAGER), std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Runs a partition may accumulate before a write merges them instead of
@@ -795,11 +818,44 @@ mod tests {
         assert_eq!(parse_hot_threshold(Some("0")), 0, "0 = every predicate hot");
         assert_eq!(parse_hot_threshold(Some("250000")), 250_000);
         assert_eq!(parse_hot_threshold(Some(" 250000 ")), 250_000);
-        assert_eq!(parse_hot_threshold(Some("off")), usize::MAX);
+        assert_eq!(parse_hot_threshold(Some("off")), NEVER_EAGER);
         // Anything unparseable falls back rather than failing a load.
         assert_eq!(parse_hot_threshold(Some("")), DEFAULT_HOT_THRESHOLD);
         assert_eq!(parse_hot_threshold(Some("-1")), DEFAULT_HOT_THRESHOLD);
         assert_eq!(parse_hot_threshold(Some("lots")), DEFAULT_HOT_THRESHOLD);
+        // Every parse result must be storable — i.e. never the "unset"
+        // sentinel, or the cache would re-read the environment forever.
+        for raw in [None, Some("0"), Some("250000"), Some("off"), Some("lots")] {
+            assert_ne!(parse_hot_threshold(raw), HOT_THRESHOLD_UNSET);
+        }
+        assert_eq!(
+            parse_hot_threshold(Some(&usize::MAX.to_string())),
+            NEVER_EAGER,
+            "an explicit usize::MAX clamps rather than aliasing the sentinel"
+        );
+    }
+
+    #[test]
+    fn set_hot_threshold_round_trips_through_the_cache() {
+        // The cache is process-global. nextest gives each test its own
+        // process; under `cargo test` this shares a process with the other lib
+        // tests, which is harmless — the threshold changes only *when* the
+        // object-major layout is built, never what a partition holds — but the
+        // default is restored at the end regardless.
+        for want in [0usize, 1, 250_000, DEFAULT_HOT_THRESHOLD, NEVER_EAGER] {
+            set_hot_threshold(want);
+            assert_eq!(hot_threshold(), want, "cached value must survive a read");
+            // Reading twice must not fall back through the sentinel.
+            assert_eq!(hot_threshold(), want, "second read must agree");
+        }
+
+        // `usize::MAX` is the documented "never eager" spelling; it must not
+        // wrap into the "not yet read" sentinel and resurrect the default.
+        set_hot_threshold(usize::MAX);
+        assert_eq!(hot_threshold(), NEVER_EAGER);
+        assert_ne!(hot_threshold(), DEFAULT_HOT_THRESHOLD);
+
+        set_hot_threshold(DEFAULT_HOT_THRESHOLD);
     }
 
     #[test]
