@@ -386,16 +386,18 @@ where
 /// [`parse_chunks_ordered`], with `map` applied to each **whole batch** on the
 /// parse thread that produced it, before the batch is handed down the channel.
 ///
-/// This is where the loaders put the dictionary probe (HDB-106): the parse
-/// threads are idle most of a threaded load — at 8 threads `parse` is 14% of a
-/// Turtle load — while the consumer is saturated by interning, so read-only
-/// work the consumer would otherwise do serially is close to free here. `map`
-/// must not allocate term ids; see [`crate::loader::Probed`] for the
-/// determinism argument.
+/// This is where the loaders put the dictionary probe (HDB-106): with enough
+/// chunks the parse threads are idle most of a load — at 8 threads `parse` is
+/// 14% of a Turtle load — while the consumer is saturated by interning, so
+/// read-only work the consumer would otherwise do serially is close to free
+/// here. Only with enough chunks, though: see [`MIN_PROBE_CHUNKS`]. `map` must
+/// not allocate term ids; see [`crate::loader::Probed`] for the determinism
+/// argument.
 ///
 /// Per batch and not per item so the map can decide *once*, for 8,192 rows,
-/// whether to probe at all — a single-chunk parse hands the rows through
-/// untouched and pays nothing, in time or in bytes, for a probe it cannot use.
+/// whether to probe at all — a run below [`MIN_PROBE_CHUNKS`] chunks hands the
+/// rows through untouched and pays nothing, in time or in bytes, for a probe
+/// that would not pay for itself.
 pub(crate) fn parse_chunks_mapped<T, U, M, F>(
     chunks: Vec<Box<dyn Iterator<Item = Result<T>> + Send + '_>>,
     map: M,

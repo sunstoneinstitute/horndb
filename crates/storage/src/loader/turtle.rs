@@ -157,8 +157,10 @@ pub fn load_turtle_slice_with_threads(
 }
 
 /// [`for_each_turtle_batch`], with each row's terms probed against `dict` on
-/// the parse thread that produced it (HDB-106). A single-chunk parse — which
-/// includes every document [`turtle_split_is_safe`] rejects — skips the probe.
+/// the parse thread that produced it (HDB-106). Skipped below
+/// [`crate::loader::parallel::MIN_PROBE_CHUNKS`] chunks ([`should_probe`]) — which
+/// includes every document [`turtle_split_is_safe`] rejects, since those come
+/// back as one chunk whatever the thread count.
 pub(crate) fn for_each_turtle_probed<F>(
     bytes: &[u8],
     base_iri: Option<&str>,

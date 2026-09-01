@@ -2906,9 +2906,9 @@ CPU-limited container, not hypotheticals. Same protocol as the table above
 | `xlarge.nt` | 4 | 5.351s | 5.074s | −5.2% | 2.909s | 1.916s | 0.826s | 1.506s | 4,111 MiB | 3,976 MiB |
 | `xlarge.nt` | **8 (shipped)** | 4.888s | 4.500s | **−7.9%** | 2.849s | 2.082s | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
 
-**Ungated — which is what this sweep measures, and what motivated the gate in the
-subsection after it — **at 2 threads the probe is a 4–5% loss****, on both formats, well outside the
-under-1% run spread. The mechanism is not subtle and the `intern` column rules
+This sweep measures the probe **ungated**, which is what motivated the gate in
+the subsection after it. **At 2 threads it is a 4–5% loss** on both formats,
+well outside the under-1% run spread. The mechanism is not subtle and the `intern` column rules
 out the obvious wrong explanation — the probe *works better* at 2 threads
 (`intern` falls to 1.79s, its best figure at any thread count, because two slow
 producers cannot run as far ahead of the consumer as eight fast ones, so the

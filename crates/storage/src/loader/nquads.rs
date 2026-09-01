@@ -110,7 +110,8 @@ pub fn load_nquads_slice_with_threads(
 }
 
 /// [`for_each_nquads_batch`], with each row's subject/predicate/object probed
-/// against `dict` on the parse thread that produced it (HDB-106).
+/// against `dict` on the parse thread that produced it (HDB-106). Skipped below
+/// [`crate::loader::parallel::MIN_PROBE_CHUNKS`] chunks ([`should_probe`]).
 ///
 /// The graph label is *not* probed: it is interned through
 /// [`Store::intern_graph_uri`](crate::Store::intern_graph_uri), which allocates

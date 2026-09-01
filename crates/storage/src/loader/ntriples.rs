@@ -119,8 +119,10 @@ pub fn load_ntriples_slice_with_threads(
 /// [`for_each_ntriples_batch`], with each row's terms probed against `dict` on
 /// the parse thread that produced it (HDB-106).
 ///
-/// A single-chunk parse skips the probe: there is no other thread to move the
-/// lookup to, so probing would just be the consumer's own lookup done twice.
+/// Skipped below [`crate::loader::parallel::MIN_PROBE_CHUNKS`] chunks
+/// ([`should_probe`]): at one chunk there is no other thread to move the lookup
+/// to, and at two or three the parse threads have no spare capacity to absorb
+/// it — measurements on the constant.
 pub(crate) fn for_each_ntriples_probed<F>(
     bytes: &[u8],
     threads: usize,
