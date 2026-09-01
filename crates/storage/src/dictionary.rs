@@ -246,10 +246,11 @@ mod intern_phases {
         *ON.get_or_init(|| std::env::var("HORNDB_INTERN_PHASES").as_deref() == Ok("1"))
     }
 
-    /// Clock reading that is `None` — and free — when the split is off.
+    /// Clock reading, at the call sites that are only reached with the split
+    /// on. `Option` so [`charge`] has one shape for both.
     #[inline]
-    pub(super) fn start(on: bool) -> Option<Instant> {
-        on.then(Instant::now)
+    pub(super) fn start() -> Option<Instant> {
+        Some(Instant::now())
     }
 
     #[inline]
@@ -454,26 +455,51 @@ impl Dictionary {
             // reporting it, so this cannot fail today. Asserted rather than
             // assumed: on a `false` return `scratch.buf` holds a truncated
             // key, and inserting that below would alias two distinct terms.
-            let t_encode = intern_phases::start(self.phases);
+            // One branch, taken once per call, rather than a gate at each of
+            // the three timing points: `Option<Instant>` is lazy but not free,
+            // and four extra branches on a ~100 ns hot path cost ~1.7% of a
+            // one-thread load. Both arms call the same `encode_key` /
+            // `forward.get` / `intern_miss`, so the timed copy cannot drift
+            // from the shipped one on anything that decides a term id.
+            if self.phases {
+                return self.intern_timed(&mut scratch, term);
+            }
             let encoded = self.encode_key(&mut scratch, term, AuxMode::Intern);
-            intern_phases::charge(intern_phases::ENCODE, t_encode);
             debug_assert!(encoded, "encode_key must not fail in AuxMode::Intern");
             if !encoded {
                 return Err(StorageError::InvalidTerm(format!(
                     "term key could not be encoded: {term}"
                 )));
             }
-            let t_probe = intern_phases::start(self.phases);
-            let hit = self.forward.get(scratch.buf.as_slice()).map(|e| *e);
-            intern_phases::charge(intern_phases::PROBE, t_probe);
-            if let Some(existing) = hit {
-                return Ok(existing);
+            if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
+                return Ok(*existing);
             }
-            let t_miss = intern_phases::start(self.phases);
-            let out = self.intern_miss(&scratch, term);
-            intern_phases::charge(intern_phases::MISS, t_miss);
-            out
+            self.intern_miss(&scratch, term)
         })
+    }
+
+    /// [`Dictionary::intern`] with the [`intern_phases`] split taken. Reached
+    /// only under `HORNDB_INTERN_PHASES=1`.
+    fn intern_timed(&self, scratch: &mut KeyScratch, term: &Term) -> Result<TermId> {
+        let t_encode = intern_phases::start();
+        let encoded = self.encode_key(scratch, term, AuxMode::Intern);
+        intern_phases::charge(intern_phases::ENCODE, t_encode);
+        debug_assert!(encoded, "encode_key must not fail in AuxMode::Intern");
+        if !encoded {
+            return Err(StorageError::InvalidTerm(format!(
+                "term key could not be encoded: {term}"
+            )));
+        }
+        let t_probe = intern_phases::start();
+        let hit = self.forward.get(scratch.buf.as_slice()).map(|e| *e);
+        intern_phases::charge(intern_phases::PROBE, t_probe);
+        if let Some(existing) = hit {
+            return Ok(existing);
+        }
+        let t_miss = intern_phases::start();
+        let out = self.intern_miss(scratch, term);
+        intern_phases::charge(intern_phases::MISS, t_miss);
+        out
     }
 
     /// The slow path of [`Dictionary::intern`]: the probe found nothing, so
@@ -493,7 +519,9 @@ impl Dictionary {
         }
         let kind = kind_of(term);
         let id = TermId::new(kind, next_index);
-        let t_rev = intern_phases::start(self.phases);
+        // Gated inside the miss path, which is ~6% of intern calls, so the
+        // branch here does not need hoisting the way the hit path's did.
+        let t_rev = self.phases.then(intern_phases::start).flatten();
         reverse.push(term.clone());
         intern_phases::charge(intern_phases::REVERSE, t_rev);
         self.forward.insert(scratch.buf.as_slice().into(), id);
