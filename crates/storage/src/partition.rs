@@ -37,14 +37,67 @@ use arrow::array::{ArrayRef, UInt64Array};
 use horndb_metrics::labels::LoadPhase;
 use parking_lot::Mutex;
 use roaring::RoaringTreemap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Default hot-predicate threshold: predicates with at least this many triples
-/// eagerly materialise all six orderings; smaller ones materialise the
-/// object-major layout lazily on first request. Configurable per tier — see
-/// [`crate::MemoryTier::with_hot_threshold`].
+/// Default hot-predicate threshold: predicates with at least this many live
+/// rows materialise the object-major layout eagerly, at build time; smaller
+/// ones materialise it lazily, on the first object-major read. Both layouts
+/// together serve all six trie orderings (see [`crate::ordering`]).
+/// Configurable per tier — see [`crate::MemoryTier::with_hot_threshold`].
 pub const DEFAULT_HOT_THRESHOLD: usize = 1_000_000;
+
+/// Resolved once, then cached, as `value + 1` so that `0` can mean "not yet
+/// read" while still letting a caller ask for a threshold of `0` (every
+/// predicate hot).
+static HOT_THRESHOLD: AtomicUsize = AtomicUsize::new(0);
+
+/// Parse a `HORNDB_HOT_THRESHOLD` value, falling back to
+/// [`DEFAULT_HOT_THRESHOLD`] for anything unparseable.
+///
+/// Split out from [`hot_threshold`] so it is testable without touching
+/// process-global environment state.
+fn parse_hot_threshold(raw: Option<&str>) -> usize {
+    match raw {
+        // `off` reads better than a magic number for "never eager".
+        Some("off") => usize::MAX,
+        Some(v) => v.trim().parse::<usize>().unwrap_or(DEFAULT_HOT_THRESHOLD),
+        None => DEFAULT_HOT_THRESHOLD,
+    }
+}
+
+/// The hot-predicate threshold new tiers are built with.
+///
+/// `HORNDB_HOT_THRESHOLD=<n>` sets it; `HORNDB_HOT_THRESHOLD=off` disables
+/// eager materialisation entirely, so every partition builds the object-major
+/// layout lazily. Read once per process and cached, so changing the variable
+/// after the first tier is constructed has no effect. Code can override it for
+/// one tier with [`crate::MemoryTier::with_hot_threshold`], or process-wide
+/// with [`set_hot_threshold`].
+///
+/// The trade: eager costs a second `n log n` sort on the write that crosses the
+/// threshold, whether or not anything ever asks for an object-major read; lazy
+/// moves that same sort onto the first reader that does. Measured in
+/// `docs/benchmarks.md`.
+pub fn hot_threshold() -> usize {
+    match HOT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            let v = parse_hot_threshold(std::env::var("HORNDB_HOT_THRESHOLD").ok().as_deref());
+            HOT_THRESHOLD.store(v.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
+            v
+        }
+        v => v.wrapping_sub(1),
+    }
+}
+
+/// Override [`hot_threshold`] for this process, ignoring the environment.
+///
+/// The threshold cannot change what a partition *contains*, only when the
+/// object-major layout is materialised, so moving it is always safe.
+pub fn set_hot_threshold(rows: usize) {
+    HOT_THRESHOLD.store(rows.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Runs a partition may accumulate before a write merges them instead of
 /// appending another one.
@@ -118,7 +171,17 @@ impl Columns {
     fn sort_dedup(rows: &mut Vec<Row>) {
         // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
         // order for trie iteration; begin orders a tuple's history.
-        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        //
+        // Skip the sort when the rows already arrive in that order (HDB-88).
+        // `is_sorted_by` stops at the first out-of-order pair, so an unsorted
+        // input pays a handful of comparisons; a sorted one — what the tier
+        // hands us for a bulk insert into an empty partition — saves the whole
+        // n log n. This is a measured check, not an assumption about the
+        // caller, so no call site has to promise anything.
+        let key = |r: &Row| (r.0, r.1, r.2);
+        if !rows.is_sorted_by(|a, b| key(a) <= key(b)) {
+            rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        }
         // Collapse only exact-duplicate *live* rows for the same (s, o): a
         // repeated insert is a no-op, and the earliest `begin` wins. Dead rows
         // (end set) are history and are kept until compaction.
@@ -725,6 +788,57 @@ impl PartitionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hot_threshold_parses_without_touching_the_environment() {
+        assert_eq!(parse_hot_threshold(None), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("0")), 0, "0 = every predicate hot");
+        assert_eq!(parse_hot_threshold(Some("250000")), 250_000);
+        assert_eq!(parse_hot_threshold(Some(" 250000 ")), 250_000);
+        assert_eq!(parse_hot_threshold(Some("off")), usize::MAX);
+        // Anything unparseable falls back rather than failing a load.
+        assert_eq!(parse_hot_threshold(Some("")), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("-1")), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("lots")), DEFAULT_HOT_THRESHOLD);
+    }
+
+    #[test]
+    fn sorted_rows_survive_the_skipped_sort() {
+        // `sort_dedup` skips the sort on already-sorted input; the dedupe of
+        // exact-duplicate live rows must still happen.
+        let mut rows: Vec<Row> = vec![
+            (1, 10, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+            (2, 20, 1, UNSET_END),
+            (3, 30, 1, UNSET_END),
+        ];
+        Columns::sort_dedup(&mut rows);
+        assert_eq!(
+            rows,
+            vec![
+                (1, 10, 1, UNSET_END),
+                (2, 20, 1, UNSET_END),
+                (3, 30, 1, UNSET_END)
+            ]
+        );
+
+        // Unsorted input still comes out in (s, o, begin) order.
+        let mut rows: Vec<Row> = vec![
+            (3, 30, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+            (2, 20, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+        ];
+        Columns::sort_dedup(&mut rows);
+        assert_eq!(
+            rows,
+            vec![
+                (1, 10, 1, UNSET_END),
+                (2, 20, 1, UNSET_END),
+                (3, 30, 1, UNSET_END)
+            ]
+        );
+    }
 
     #[test]
     fn live_len_matches_len_at_own_version_insert_only() {

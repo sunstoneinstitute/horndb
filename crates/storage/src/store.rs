@@ -33,8 +33,14 @@ impl Store {
     }
 
     /// In-memory store with a custom hot-predicate threshold (SPEC-02 F4):
-    /// predicates with at least `hot_threshold` triples eagerly materialise all
-    /// six index orderings.
+    /// predicates with at least `hot_threshold` live rows materialise the
+    /// object-major layout eagerly rather than on the first object-major read.
+    /// A partition holds two physical layouts, not six — they serve the six
+    /// trie orderings between them (`crate::ordering`).
+    ///
+    /// [`Store::in_memory`] takes the process-wide value instead
+    /// ([`crate::hot_threshold`], settable with `HORNDB_HOT_THRESHOLD`); this
+    /// constructor overrides it for one store.
     pub fn in_memory_with_hot_threshold(hot_threshold: usize) -> Self {
         Self {
             dictionary: Dictionary::new(),

@@ -1,7 +1,7 @@
 //! In-memory tier — Stage 1 sole implementation of `Tier`.
 
 use crate::error::Result;
-use crate::partition::{PartitionBuilder, PredicatePartition, DEFAULT_HOT_THRESHOLD};
+use crate::partition::{PartitionBuilder, PredicatePartition};
 use crate::term::{GraphId, TermId};
 use crate::tier::{ApplyReport, Tier, TierStats};
 use crate::visibility::UNSET_END;
@@ -202,17 +202,24 @@ pub struct MemoryTier {
     /// `insert_quad_batch` must be atomic so concurrent batches can't lose
     /// updates by building from the same base.
     writer: Mutex<()>,
-    /// Predicates with at least this many triples eagerly materialise all six
-    /// orderings; smaller ones materialise the object-major layout lazily
-    /// (SPEC-02 F4).
+    /// Predicates with at least this many live rows materialise the
+    /// object-major layout eagerly, at build time; smaller ones materialise it
+    /// lazily, on the first object-major read. Two physical layouts serve all
+    /// six trie orderings either way (SPEC-02 F4, `crate::ordering`).
     hot_threshold: usize,
     /// version -> number of live pins at that version. Empty ⇒ no pins.
     pins: Arc<Mutex<BTreeMap<u64, usize>>>,
 }
 
 impl MemoryTier {
+    /// A tier using the process-wide hot-predicate threshold — the
+    /// `HORNDB_HOT_THRESHOLD` environment variable if set, else
+    /// [`DEFAULT_HOT_THRESHOLD`]. This is what makes the threshold reachable
+    /// from a benchmark or a deployment without a code change; every entry
+    /// point that builds a store (`Store::in_memory`, `HornBackend::new`, the
+    /// bulk loaders) lands here.
     pub fn new() -> Self {
-        Self::with_hot_threshold(DEFAULT_HOT_THRESHOLD)
+        Self::with_hot_threshold(crate::partition::hot_threshold())
     }
 
     /// Construct a tier with a custom hot-predicate threshold (SPEC-02 F4).
@@ -517,9 +524,18 @@ impl Tier for MemoryTier {
         if dels.is_empty() && adds.is_empty() {
             return Ok(ApplyReport::default());
         }
-        // Group each side by graph, then predicate, as a set of (s, o)
-        // payload pairs — a `HashSet` absorbs in-batch duplicate targets so
-        // they are not double-counted.
+        // Group each side by graph, then predicate, as (s, o) payload pairs.
+        //
+        // The two sides use different structures because they are asked
+        // different questions (HDB-88). The del side is probed once per
+        // existing live row, so it stays a `HashSet`. The add side is only
+        // ever iterated, so it is a `Vec` that is sorted and deduplicated
+        // once, per predicate, at the end of this phase. Sorting does the same
+        // in-batch dedupe a `HashSet` did, on a 16-byte element instead of a
+        // hash table, and it leaves the pairs in the order the partition
+        // builder wants — so the build-time sort sees a sorted run rather than
+        // hash order, and the add pass below can walk `still_visible` with a
+        // cursor instead of hashing every pair.
         let t_group = Instant::now();
         let mut del_by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> =
             HashMap::new();
@@ -531,15 +547,20 @@ impl Tier for MemoryTier {
                 .or_default()
                 .insert((s.0, o.0));
         }
-        let mut add_by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> =
-            HashMap::new();
+        let mut add_by_graph: HashMap<GraphId, HashMap<TermId, Vec<(u64, u64)>>> = HashMap::new();
         for &(g, s, p, o) in adds {
             add_by_graph
                 .entry(g)
                 .or_default()
                 .entry(p)
                 .or_default()
-                .insert((s.0, o.0));
+                .push((s.0, o.0));
+        }
+        for preds in add_by_graph.values_mut() {
+            for targets in preds.values_mut() {
+                targets.sort_unstable();
+                targets.dedup();
+            }
         }
         record_phase(
             LoadPhase::Group,
@@ -601,7 +622,11 @@ impl Tier for MemoryTier {
                 // track which (s, o) pairs remain visible so the add pass
                 // below knows what is genuinely new.
                 let mut builder = PartitionBuilder::default();
-                let mut still_visible: HashSet<(u64, u64)> = HashSet::new();
+                // Live pairs surviving the dels, in the partition's own SPO
+                // order. A sorted `Vec` rather than a `HashSet` (HDB-88): the
+                // rows arrive sorted, so this is a push per row instead of a
+                // hash insert, and the add pass reads it with one merge cursor.
+                let mut still_visible: Vec<(u64, u64)> = Vec::new();
                 let mut carried = 0u64;
                 let t_copy = Instant::now();
                 if let Some(existing) = new_partitions.get(&p) {
@@ -616,8 +641,12 @@ impl Tier for MemoryTier {
                             if del_targets.is_some_and(|t| t.contains(&(s, o))) {
                                 end = new_version;
                                 retracted += 1;
-                            } else {
-                                still_visible.insert((s, o));
+                            } else if still_visible.last() != Some(&(s, o)) {
+                                // `Columns` holds at most one live row per
+                                // (s, o) and stores rows in (s, o, begin)
+                                // order, so skipping an equal predecessor
+                                // keeps this strictly ascending.
+                                still_visible.push((s, o));
                             }
                         }
                         builder.append_stamped(TermId(s), TermId(o), begin, end);
@@ -630,12 +659,23 @@ impl Tier for MemoryTier {
                 let t_merge = Instant::now();
                 if let Some(targets) = add_targets {
                     added = targets.len() as u64;
+                    // Both lists ascend, so one cursor over `still_visible`
+                    // replaces a hash probe per added pair. Should either list
+                    // ever arrive out of order the cursor can miss a match and
+                    // append a row that is already live; `Columns::sort_dedup`
+                    // then collapses the pair back to its earlier `begin`, so
+                    // the stored data stays correct and only `inserted`
+                    // over-counts.
+                    let mut vis = 0usize;
                     for &(s, o) in targets {
+                        while still_visible.get(vis).is_some_and(|v| *v < (s, o)) {
+                            vis += 1;
+                        }
                         // Visible "after the dels" — a quad ended above by
                         // this same batch is not in `still_visible`, so a
                         // del+add of the same quad within one batch counts
                         // as both a retract and a fresh insert.
-                        if !still_visible.contains(&(s, o)) {
+                        if still_visible.get(vis) != Some(&(s, o)) {
                             builder.append_stamped(TermId(s), TermId(o), new_version, UNSET_END);
                             inserted += 1;
                         }
@@ -1218,6 +1258,97 @@ mod apply_quad_batch_tests {
         let report2 = tier.apply_quad_batch(&[], &[]).unwrap();
         assert_eq!((report2.retracted, report2.inserted), (0, 0));
         assert_eq!(tier.snapshot().version(), 1);
+    }
+
+    #[test]
+    fn in_batch_duplicate_adds_are_counted_once() {
+        // The add side is a sorted `Vec`, not a `HashSet` (HDB-88), so the
+        // in-batch dedupe it used to get for free now comes from the sort.
+        let tier = MemoryTier::new();
+        let q = (DEFAULT_GRAPH, id(1), id(100), id(2));
+        let other = (DEFAULT_GRAPH, id(3), id(100), id(4));
+
+        let report = tier
+            .apply_quad_batch(&[], &[q, other, q, q, other])
+            .unwrap();
+        assert_eq!(report.inserted, 2, "duplicates within one batch collapse");
+        assert_eq!(report.retracted, 0);
+
+        let snap = tier.snapshot();
+        let pairs = snap
+            .with_predicate(DEFAULT_GRAPH, id(100), |p| {
+                p.scan_at(snap.version()).collect::<Vec<_>>()
+            })
+            .unwrap();
+        assert_eq!(pairs, vec![(id(1), id(2)), (id(3), id(4))]);
+    }
+
+    #[test]
+    fn adds_are_stored_sorted_whatever_order_they_arrive_in() {
+        // The group phase sorts the add list, so the builder sees a sorted run
+        // and the partition comes out in SPO order regardless of input order.
+        let tier = MemoryTier::new();
+        let quads: Vec<_> = [7u64, 2, 9, 1, 5, 3]
+            .into_iter()
+            .map(|n| (DEFAULT_GRAPH, id(n), id(100), id(n * 10)))
+            .collect();
+        let report = tier.apply_quad_batch(&[], &quads).unwrap();
+        assert_eq!(report.inserted, 6);
+
+        let snap = tier.snapshot();
+        let pairs = snap
+            .with_predicate(DEFAULT_GRAPH, id(100), |p| {
+                p.scan_at(snap.version()).collect::<Vec<_>>()
+            })
+            .unwrap();
+        let mut expected: Vec<_> = [1u64, 2, 3, 5, 7, 9]
+            .into_iter()
+            .map(|n| (id(n), id(n * 10)))
+            .collect();
+        expected.sort_by_key(|(s, _)| s.0);
+        assert_eq!(pairs, expected);
+    }
+
+    #[test]
+    fn partly_live_adds_over_an_existing_partition() {
+        // Exercises the `still_visible` merge cursor: some adds are already
+        // live, some are new, one is retracted-and-re-added in the same batch,
+        // and they interleave in sort order.
+        let tier = MemoryTier::new();
+        let base: Vec<_> = (1u64..=6)
+            .map(|n| (DEFAULT_GRAPH, id(n), id(100), id(n * 10)))
+            .collect();
+        tier.insert_quad_batch(&base).unwrap(); // v1
+
+        // Retract (2, 20) and (5, 50); re-add (2, 20) in the same batch.
+        let dels = vec![base[1], base[4]];
+        // Adds, deliberately out of order: two already live, one re-added
+        // after its own del, two genuinely new.
+        let adds = vec![
+            base[3],                                 // (4, 40), already live
+            (DEFAULT_GRAPH, id(8), id(100), id(80)), // new, sorts last
+            base[1],                                 // (2, 20), del'd above
+            (DEFAULT_GRAPH, id(0), id(100), id(0)),  // new, sorts first
+            base[0],                                 // (1, 10), already live
+        ];
+        let report = tier.apply_quad_batch(&dels, &adds).unwrap();
+        assert_eq!(report.retracted, 2);
+        assert_eq!(
+            report.inserted, 3,
+            "the two already-live adds are no-ops; the re-added quad is fresh"
+        );
+
+        let snap = tier.snapshot();
+        let pairs = snap
+            .with_predicate(DEFAULT_GRAPH, id(100), |p| {
+                p.scan_at(snap.version()).collect::<Vec<_>>()
+            })
+            .unwrap();
+        let expected: Vec<_> = [0u64, 1, 2, 3, 4, 6, 8]
+            .into_iter()
+            .map(|n| (id(n), id(n * 10)))
+            .collect();
+        assert_eq!(pairs, expected, "(5, 50) gone, (2, 20) back, 0 and 8 new");
     }
 
     #[test]
