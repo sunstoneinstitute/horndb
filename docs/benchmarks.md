@@ -430,6 +430,12 @@ Warm split of q3 (the `_warm_pre` → `_warm` dump pair):
 Row materialization after the join (`scan_row_build` + `scan_provenance`) is
 0.6% of exec. Every candidate that pointed at the row-build path is ruled out.
 
+The phases sum to 832.1 ms, which sits alongside the 0.830s best-of-3 warm
+wall clock — close enough to say the named phases account for essentially all
+of exec, but **not a same-run identity**: the dump pair brackets the third
+warm run while the recorded wall clock is the best of the three. Treat the
+agreement as a sanity check, not a reconciliation.
+
 The same run's **cold** split reads 66.4% `scan_wcoj` / 30.4% `residual`,
 reproducing HDB-101's cold figure; the cold `residual` is the one-off `Pos`
 trie-ordering build. Cold and warm splits are not interchangeable — see the
@@ -497,25 +503,52 @@ Read the table two ways:
    seeks) — confirming the degree heuristic, not query text order, is what
    decides.
 
-The last row is the tightest bound: the same seven patterns and the same
-133,106 answer rows, planned `?customer`-first, run at **0.201s warm against
-0.804s** for q3 as shipped in the same process — `scan_wcoj` 172.65 ms against
-764.17 ms, a **4.4× cut**. Its
+**Quote the range, not the best number.** The strictly comparable variant is
+the second-to-last row: it keeps all of q3's patterns and all four of its
+output columns, adds one, and still runs at **0.331s warm against 0.804s** for
+q3 as shipped in the same process. The last row is the 7-pattern lower bound —
+it drops `:orderStatus ?status`, so it is one pattern and one column short of
+being q3 — at 0.201s. **A correctly planned q3 lands at 0.20-0.33s, and 0.33s
+is the number to hold anyone to.** The last row's
 1,104,744 seeks match `q5_construct`'s exactly, which is the same BGP; q5 is
 fast today (0.375s) for precisely this reason — its `?customer` has degree 4
 and its `?order` degree 3, so the shipped heuristic happens to pick the good
 order there.
 
 **Conclusion: this is not the floor.** `q3 ≤ 0.5s` is reachable — the measured
-`?customer`-first rewrites land at 0.20–0.33s — and the lever is
-selectivity-aware variable ordering in the WCOJ planner, not anything in the
-scan's inner loop. The seam already exists and is unused: `Planner::choose`
+`?customer`-first rewrites land at **0.20-0.33s**, and 0.33s is the figure
+from the variant that matches q3 pattern-for-pattern and column-for-column —
+and the lever is selectivity-aware variable ordering in the WCOJ planner, not
+anything in the scan's inner loop. The seam already exists and is unused: `Planner::choose`
 (`crates/wcoj/src/planner.rs`) takes a `Cardinality` estimator as `_est` and
 discards it, and `ExecutionPlan::for_bgp` is not given one at all, while
 `StatsEstimator` / `SnapshotStats` are already built and wired into
-`HornBackend::cardinality_estimate` for `EXPLAIN`. Connecting them is a
-cost-based-planning task with cross-query regression risk (`four_cycle`, LUBM,
-SPB-256) and belongs in its own change, not in this diagnosis.
+`HornBackend::cardinality_estimate` for `EXPLAIN`. That unmet requirement is
+**SPEC-03 F6** ("planner uses [per-predicate statistics] for join-order
+selection and WCOJ-vs-binary-join cutover") — not F2, which covers only the
+WCOJ-vs-binary cutover, and which `crates/wcoj/src/planner.rs` used to cite
+for both.
+
+**This is already filed: do not open a new task for it.** HDB-46 (SPEC-23
+Phase 4, cost-based `JoinPlanning`) and its plan
+`docs/plans/PLAN-23-04-cost-based-join-planning.md` name this exact defect —
+"variable order by descending degree, `_est` ignored — is structurally wrong"
+(lines 33-34) — and Task 5, "Greedy WCOJ variable ordering… seeded by
+descending degree", is the fix. What HDB-108 adds is the price tag: the
+ordering alone accounts for the entire q3 gap, and none of it needs HDB-46's
+structural cyclic-core hybrid, its connected-subset DP, or its AGM guard.
+PLAN-23-04's statistics prerequisite (PLAN-23-03) is `status: executed`; its
+one remaining blocker is SPEC-23 §8 open question #2, the AGM cost
+calibration — which gates the WCOJ-vs-binary-hash *routing*, not the variable
+elimination order inside a WCOJ core. **Task 5 is therefore unblocked today
+and a candidate to carve out as a standalone slice ahead of the rest of
+HDB-46**, with the target below. Either
+way it is HDB-46's work, not a new task, and it carries cross-query regression
+risk (`four_cycle`, LUBM, SPB-256) that keeps it out of this diagnosis.
+
+Target for whoever takes it: **q3 at xlarge from 0.830s to ≤ 0.35s warm**,
+`scan_wcoj` from 793 ms to ≤ 300 ms, `wcoj_seeks_per_query` from 10.1M to
+≤ 2M, no regression on `four_cycle`, LUBM, or the SPB-256 nightly.
 
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 

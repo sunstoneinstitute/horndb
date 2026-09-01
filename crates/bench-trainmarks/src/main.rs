@@ -309,8 +309,14 @@ fn dump_load_phases(label: &str) {
 /// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) and the
 /// `wcoj_*` per-query counters so a trainmarks run reports which operator
 /// inside `exec` a query spent its time in, and how many leapfrog seeks the
-/// join needed to get there. The exec-phase counters only move with
-/// `HORNDB_EXEC_PHASES=1` set; the `wcoj_*` ones are always live.
+/// join needed to get there.
+///
+/// The whole dump is gated on `HORNDB_EXEC_PHASES=1`. The exec-phase
+/// counters are never touched without it, but the `wcoj_*` histograms are
+/// always live, so printing them ungated would add ~1000 lines of stderr to
+/// every ordinary trainmarks run. Only their `_sum`/`_count` lines are
+/// printed — the twelve exponential buckets say nothing a run of one query
+/// per dump interval needs.
 ///
 /// Counters are cumulative across the process, like `dump_load_phases` —
 /// but unlike that helper (called exactly twice, nothing else running in
@@ -330,10 +336,19 @@ fn dump_load_phases(label: &str) {
 /// xlarge is 66% `scan_wcoj` cold but 95% warm (HDB-108). Quote the warm
 /// pair against a warm wall-clock number, the cold pair against a cold one.
 fn dump_exec_phases(label: &str) {
+    if !matches!(
+        std::env::var("HORNDB_EXEC_PHASES").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    ) {
+        return;
+    }
     let encoded = horndb_metrics::encode_metrics();
     eprintln!("  [exec-phases after {label}]");
     for line in encoded.lines() {
-        if line.starts_with("horndb_sparql_exec_phase") || line.starts_with("horndb_wcoj_") {
+        let keep = line.starts_with("horndb_sparql_exec_phase")
+            || (line.starts_with("horndb_wcoj_")
+                && (line.contains("_sum ") || line.contains("_count ")));
+        if keep {
             eprintln!("    {line}");
         }
     }
