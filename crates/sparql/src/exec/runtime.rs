@@ -8,9 +8,11 @@ use crate::algebra::{
     AggFunc, Aggregate, DatasetSpec, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
 };
 use crate::error::{Result, SparqlError};
+use crate::exec::phases;
 use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, ScanScope, Slot};
 use crate::plan::{GraphScope, PhysicalPlan};
 use crate::DefaultGraphMode;
+use horndb_metrics::labels::ExecPhase;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashSet;
 
@@ -244,17 +246,24 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         // Pull schema and rows apart so the borrow checker sees two
         // independent moves (no partial-move ambiguity on `batch`).
         let schema = batch.schema;
-        let mut tagged: Vec<(Bindings, Row)> = batch
-            .rows
-            .into_iter()
-            .map(|r| {
-                let env = self.decode_subset(&r, &schema, &want)?;
-                Ok((env, r))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // stable sort: equal-key rows keep their input order,
-        // matching the old Vec::sort_by behaviour.
-        tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
+        let n = batch.rows.len() as u64;
+        // Decorate + sort as one "sort" phase (HDB-99): the decode pays for
+        // `ORDER BY`'s expressions, so it belongs with the sort it feeds,
+        // not with `group_decode`/`agg_fold` (which decode for aggregates).
+        let tagged: Vec<(Bindings, Row)> = phases::timed(ExecPhase::Sort, n, || -> Result<_> {
+            let mut tagged: Vec<(Bindings, Row)> = batch
+                .rows
+                .into_iter()
+                .map(|r| {
+                    let env = self.decode_subset(&r, &schema, &want)?;
+                    Ok((env, r))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // stable sort: equal-key rows keep their input order,
+            // matching the old Vec::sort_by behaviour.
+            tagged.sort_by(|(ea, _), (eb, _)| compare_by_keys(ea, eb, keys));
+            Ok(tagged)
+        })?;
         Ok(Batch {
             schema,
             rows: tagged.into_iter().map(|(_, r)| r).collect(),
@@ -297,21 +306,24 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             key_slots: Vec<Slot>,
             members: Vec<Row>,
         }
+        let group_key_rows = b.rows.len() as u64;
         let mut groups: FxHashMap<Vec<KeyPart>, Grp> = FxHashMap::default();
-        for r in b.rows {
-            let gkey: Vec<KeyPart> = key_idx
-                .iter()
-                .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
-                .collect();
-            let entry = groups.entry(gkey).or_insert_with(|| Grp {
-                key_slots: key_idx
+        phases::timed(ExecPhase::GroupKey, group_key_rows, || {
+            for r in b.rows {
+                let gkey: Vec<KeyPart> = key_idx
                     .iter()
-                    .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
-                    .collect(),
-                members: Vec::new(),
-            });
-            entry.members.push(r);
-        }
+                    .map(|i| i.map(|i| r.0[i].key_part()).unwrap_or(KeyPart::Unbound))
+                    .collect();
+                let entry = groups.entry(gkey).or_insert_with(|| Grp {
+                    key_slots: key_idx
+                        .iter()
+                        .map(|i| i.map(|i| r.0[i].clone()).unwrap_or(Slot::Unbound))
+                        .collect(),
+                    members: Vec::new(),
+                });
+                entry.members.push(r);
+            }
+        });
 
         // Implicit grouping with no input rows still yields one empty group
         // (SPARQL §11.2: COUNT(*) of nothing is one row with 0).
@@ -350,63 +362,81 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         let mut out: Vec<(Vec<Option<String>>, Row)> = Vec::with_capacity(groups.len());
         for grp in groups.into_values() {
             let Grp { key_slots, members } = grp;
+            let member_rows = members.len() as u64;
 
-            // Sort key: decoded lexical of each group key slot. Reproduces the
-            // pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering exactly
-            // (None < Some(...) in BTreeMap order is the same as Option<String>
-            // Ord ordering used in sort_by). Computed before `key_slots` is
-            // moved into `slots`, which lets us avoid cloning it.
-            let sort_key: Vec<Option<String>> = key_slots
-                .iter()
-                .map(|s| match s {
-                    Slot::Unbound => Ok(None),
-                    Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
-                    Slot::Term(t) => Ok(Some(lex(t))),
-                })
-                .collect::<Result<Vec<_>>>()?;
+            // HDB-90-style empty interval: one Instant::now() pair with no
+            // work between them, so the per-group instrumentation's own cost
+            // is visible and subtractable from `group_decode`/`agg_fold`.
+            if let Some(t0) = phases::enabled().then(std::time::Instant::now) {
+                phases::add(ExecPhase::Clock, t0.elapsed().as_nanos() as u64, 1);
+            }
 
-            // Decode the union of referenced columns once for this group; every
-            // decoding aggregate shares it.
-            let members_decoded: Vec<Bindings> = if needs_decode {
-                members
-                    .iter()
-                    .map(|r| self.decode_subset(r, &b.schema, &union_want))
-                    .collect::<Result<Vec<_>>>()?
-            } else {
-                Vec::new()
-            };
+            // Sort key + shared column decode as one "group_decode" phase
+            // (HDB-99): decoded lexical of each group key slot, reproducing
+            // the pre-#128 BTreeMap<Vec<Option<String>>> lexical ordering
+            // exactly (None < Some(...) in BTreeMap order is the same as
+            // Option<String> Ord ordering used in sort_by), plus the union of
+            // referenced columns every decoding aggregate shares. Computed
+            // before `key_slots` is moved into `slots`, which lets us avoid
+            // cloning it.
+            let (sort_key, members_decoded): (Vec<Option<String>>, Vec<Bindings>) =
+                phases::timed(ExecPhase::GroupDecode, member_rows, || -> Result<_> {
+                    let sort_key: Vec<Option<String>> = key_slots
+                        .iter()
+                        .map(|s| match s {
+                            Slot::Unbound => Ok(None),
+                            Slot::Id(id) => self.exec.decode_term(*id).map(|t| Some(lex(&t))),
+                            Slot::Term(t) => Ok(Some(lex(t))),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let members_decoded: Vec<Bindings> = if needs_decode {
+                        members
+                            .iter()
+                            .map(|r| self.decode_subset(r, &b.schema, &union_want))
+                            .collect::<Result<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    };
+                    Ok((sort_key, members_decoded))
+                })?;
 
             let mut slots: Vec<Slot> = key_slots;
-            for agg in aggregates {
-                let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
-                    // COUNT(*) fast path: member count needs no decode at all.
-                    Some(integer_literal(members.len() as i64))
-                } else if matches!(agg.func, AggFunc::CountStar) {
-                    // COUNT(DISTINCT *): distinct whole-solution rows.
-                    // agg_inner_exprs returns empty for CountStar, so the
-                    // decoded union would yield empty Bindings for every row —
-                    // all deduped to 1, wrong count. Instead, key on
-                    // Vec<KeyPart> directly: within-column homogeneity ensures
-                    // same-value cells hash identically, giving the same
-                    // deduplication as the old `HashSet<&Bindings>` path without
-                    // any decode.
-                    let distinct: FxHashSet<Vec<KeyPart>> = members
-                        .iter()
-                        .map(|r| r.0.iter().map(|s| s.key_part()).collect())
-                        .collect();
-                    Some(integer_literal(distinct.len() as i64))
-                } else {
-                    eval_aggregate(agg, &members_decoded)?
-                };
-                match value {
-                    Some(t) => slots.push(Slot::Term(t)),
-                    None => slots.push(Slot::Unbound),
+            phases::timed(ExecPhase::AggFold, member_rows, || -> Result<()> {
+                for agg in aggregates {
+                    let value = if matches!(agg.func, AggFunc::CountStar) && !agg.distinct {
+                        // COUNT(*) fast path: member count needs no decode at all.
+                        Some(integer_literal(members.len() as i64))
+                    } else if matches!(agg.func, AggFunc::CountStar) {
+                        // COUNT(DISTINCT *): distinct whole-solution rows.
+                        // agg_inner_exprs returns empty for CountStar, so the
+                        // decoded union would yield empty Bindings for every row —
+                        // all deduped to 1, wrong count. Instead, key on
+                        // Vec<KeyPart> directly: within-column homogeneity ensures
+                        // same-value cells hash identically, giving the same
+                        // deduplication as the old `HashSet<&Bindings>` path without
+                        // any decode.
+                        let distinct: FxHashSet<Vec<KeyPart>> = members
+                            .iter()
+                            .map(|r| r.0.iter().map(|s| s.key_part()).collect())
+                            .collect();
+                        Some(integer_literal(distinct.len() as i64))
+                    } else {
+                        eval_aggregate(agg, &members_decoded)?
+                    };
+                    match value {
+                        Some(t) => slots.push(Slot::Term(t)),
+                        None => slots.push(Slot::Unbound),
+                    }
                 }
-            }
+                Ok(())
+            })?;
 
             out.push((sort_key, Row(slots)));
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        let out_rows = out.len() as u64;
+        phases::timed(ExecPhase::Sort, out_rows, || {
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+        });
 
         Ok(Batch {
             schema,
@@ -849,7 +879,12 @@ impl<'r, E: Executor + ?Sized> BindingsStream<'r, E> {
             return Ok(Some(buffered));
         }
         match self.op.next()? {
-            Some(batch) => Ok(Some(batch.to_bindings(|id| self.exec.decode_term(id))?)),
+            Some(batch) => {
+                let n = batch.rows.len() as u64;
+                Ok(Some(phases::timed(ExecPhase::ResultEncode, n, || {
+                    batch.to_bindings(|id| self.exec.decode_term(id))
+                })?))
+            }
             None => Ok(None),
         }
     }

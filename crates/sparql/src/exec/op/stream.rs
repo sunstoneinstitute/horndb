@@ -3,8 +3,10 @@
 use super::Op;
 use crate::algebra::{Expr, Var};
 use crate::error::Result;
+use crate::exec::phases;
 use crate::exec::runtime::Runtime;
 use crate::exec::{Batch, Executor, KeyPart};
+use horndb_metrics::labels::ExecPhase;
 use rustc_hash::FxHashSet;
 
 /// Streams its child, evaluating `expr` and binding the result to `var` (BIND).
@@ -52,7 +54,12 @@ impl<'r, E: Executor + ?Sized> Op for ExtendOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         match self.child.next()? {
-            Some(chunk) => Ok(Some(self.rt.apply_extend(chunk, &self.var, &self.expr)?)),
+            Some(chunk) => {
+                let n = chunk.rows.len() as u64;
+                Ok(Some(phases::timed(ExecPhase::StreamOp, n, || {
+                    self.rt.apply_extend(chunk, &self.var, &self.expr)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -112,7 +119,12 @@ impl<'r, E: Executor + ?Sized> Op for ProjectOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         match self.child.next()? {
-            Some(chunk) => Ok(Some(self.rt.apply_project(chunk, &self.vars)?)),
+            Some(chunk) => {
+                let n = chunk.rows.len() as u64;
+                Ok(Some(phases::timed(ExecPhase::StreamOp, n, || {
+                    self.rt.apply_project(chunk, &self.vars)
+                })?))
+            }
             None => Ok(None),
         }
     }
@@ -207,7 +219,10 @@ impl<'r, E: Executor + ?Sized> Op for FilterOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         while let Some(chunk) = self.child.next()? {
-            let kept = self.rt.apply_filter(chunk, &self.expr)?;
+            let n = chunk.rows.len() as u64;
+            let kept = phases::timed(ExecPhase::StreamOp, n, || {
+                self.rt.apply_filter(chunk, &self.expr)
+            })?;
             if !kept.rows.is_empty() {
                 return Ok(Some(kept));
             }
@@ -245,13 +260,18 @@ impl<'r> Op for DistinctOp<'r> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         while let Some(chunk) = self.child.next()? {
-            let mut kept = Vec::new();
-            for row in chunk.rows {
-                let key: Vec<KeyPart> = row.0.iter().map(|s| s.key_part()).collect();
-                if self.seen.insert(key) {
-                    kept.push(row);
+            let n = chunk.rows.len() as u64;
+            let seen = &mut self.seen;
+            let kept = phases::timed(ExecPhase::StreamOp, n, move || {
+                let mut kept = Vec::new();
+                for row in chunk.rows {
+                    let key: Vec<KeyPart> = row.0.iter().map(|s| s.key_part()).collect();
+                    if seen.insert(key) {
+                        kept.push(row);
+                    }
                 }
-            }
+                kept
+            });
             if !kept.is_empty() {
                 return Ok(Some(Batch {
                     schema: self.schema.clone(),

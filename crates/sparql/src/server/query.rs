@@ -199,16 +199,24 @@ const STREAM_CHANNEL_CHUNKS: usize = 8;
 /// roughly the same instant — so no duration metric covers the full body
 /// drain; only `response_bytes` (via `CountingBody`) reflects delivered
 /// bytes.
+///
+/// HDB-99: also flushes this thread's accumulated per-operator exec phases
+/// (`HORNDB_EXEC_PHASES=1`). Since the elapsed time measured here stops at
+/// the first chunk, the phase split it produces covers the same "get the
+/// first chunk out" window, not the full result-set drain — see
+/// `docs/metrics.md`.
 fn record_exec(start: Instant, err: bool) {
     let m = horndb_metrics::metrics();
     let label = StageLabel { stage: Stage::Exec };
+    let elapsed = start.elapsed();
     m.sparql
         .stage_duration_seconds
         .get_or_create(&label)
-        .observe(start.elapsed().as_secs_f64());
+        .observe(elapsed.as_secs_f64());
     if err {
         m.sparql.query_errors.get_or_create(&label).inc();
     }
+    crate::exec::phases::flush(elapsed);
 }
 
 /// Bump `query_errors{stage=exec}` for an error after the exec stage was

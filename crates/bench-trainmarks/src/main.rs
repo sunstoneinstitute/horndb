@@ -306,6 +306,22 @@ fn dump_load_phases(label: &str) {
     }
 }
 
+/// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) after a cold
+/// read query, so a trainmarks run reports which operator inside `exec` the
+/// query actually spent its time in. Only meaningful with
+/// `HORNDB_EXEC_PHASES=1` set; a silent no-op otherwise (the counters are
+/// simply never touched). Counters are cumulative across the process, like
+/// `dump_load_phases`; subtract successive dumps to get one query's share.
+fn dump_exec_phases(label: &str) {
+    let encoded = horndb_metrics::encode_metrics();
+    eprintln!("  [exec-phases after {label}]");
+    for line in encoded.lines() {
+        if line.starts_with("horndb_sparql_exec_phase") {
+            eprintln!("    {line}");
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let timeout = Duration::from_secs(cli.timeout_secs);
@@ -439,6 +455,7 @@ fn main() -> Result<()> {
             }
             Some(Ok(secs)) => results.record(&format!("query_{qname}_cold"), json!(secs)),
         }
+        dump_exec_phases(&format!("{qname}_cold"));
 
         // Best of 3 warm runs.
         let mut best = f64::INFINITY;

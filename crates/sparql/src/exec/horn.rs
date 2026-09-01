@@ -9,6 +9,7 @@
 use crate::algebra::Term;
 use crate::error::{Result, SparqlError};
 use crate::exec::runtime::{literal_parts, unescape_ntriples};
+use horndb_metrics::labels::ExecPhase;
 use oxrdf::{BlankNode, Literal, NamedNode, Term as OxTerm};
 
 /// algebra::Term constant -> oxrdf::Term (dictionary key form).
@@ -1715,13 +1716,30 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut rows: Vec<Row> = Vec::new();
-        for batch in WcojExecutor::for_bgp(
+        // HDB-99: timed by hand rather than via `crate::exec::phases::timed`
+        // because the phase's `rows` (the arrow batch's row count) is only
+        // known from the value the iterator yields — `enabled()` gates the
+        // `Instant::now()` pair so the check costs one branch per arrow
+        // batch when the flag is off, never a clock read.
+        let mut wcoj_iter = WcojExecutor::for_bgp(
             snapshot.as_ref(),
             &bgp,
             &Planner::default(),
             CancelToken::new(),
-        ) {
+        );
+        loop {
+            let scan_t0 = crate::exec::phases::enabled().then(std::time::Instant::now);
+            let next = wcoj_iter.next();
+            let Some(batch) = next else { break };
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
+            let batch_rows = batch.num_rows() as u64;
+            if let Some(t0) = scan_t0 {
+                crate::exec::phases::add(
+                    ExecPhase::ScanWcoj,
+                    t0.elapsed().as_nanos() as u64,
+                    batch_rows,
+                );
+            }
             let arrow_schema = batch.schema();
             // Include ALL vars from var_index (including aliases) so the
             // diagonal check can compare original vs alias columns.
@@ -1746,25 +1764,28 @@ impl Executor for HornBackend {
                 .filter_map(|(orig, alias)| Some((pos(orig)?, pos(alias)?)))
                 .collect();
             let schema_col_idx: Vec<Option<usize>> = schema.iter().map(|v| pos(v.name())).collect();
-            for r in 0..batch.num_rows() {
-                // Diagonal filter: compare raw ids for alias pairs (no decode needed).
-                // filter_map above drops any pair whose orig or alias column is absent —
-                // that preserves the previous "missing column ⇒ no constraint" semantics.
-                let keep = diag_col_idx
-                    .iter()
-                    .all(|&(io, ia)| cols[io].1.value(r) == cols[ia].1.value(r));
-                if !keep {
-                    continue;
+            // One pair per arrow batch, not per row (SPEC-17 §5.3/§5.4).
+            crate::exec::phases::timed(ExecPhase::ScanRowBuild, batch_rows, || {
+                for r in 0..batch.num_rows() {
+                    // Diagonal filter: compare raw ids for alias pairs (no decode needed).
+                    // filter_map above drops any pair whose orig or alias column is absent —
+                    // that preserves the previous "missing column ⇒ no constraint" semantics.
+                    let keep = diag_col_idx
+                        .iter()
+                        .all(|&(io, ia)| cols[io].1.value(r) == cols[ia].1.value(r));
+                    if !keep {
+                        continue;
+                    }
+                    let slots = schema_col_idx
+                        .iter()
+                        .map(|idx| match idx {
+                            Some(i) => Slot::Id(TermId(cols[*i].1.value(r))),
+                            None => Slot::Unbound,
+                        })
+                        .collect();
+                    rows.push(Row(slots));
                 }
-                let slots = schema_col_idx
-                    .iter()
-                    .map(|idx| match idx {
-                        Some(i) => Slot::Id(TermId(cols[*i].1.value(r))),
-                        None => Slot::Unbound,
-                    })
-                    .collect();
-                rows.push(Row(slots));
-            }
+            });
         }
         Ok(Batch { schema, rows })
     }
