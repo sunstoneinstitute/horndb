@@ -132,6 +132,51 @@ impl<'a> QuadSink<'a> {
     }
 }
 
+/// Accumulates the calling thread's own time inside a slice load, so the
+/// `parse` phase can be reported for a real `Store` load.
+///
+/// The slice loaders drain parsed batches on the calling thread and intern and
+/// insert them there. Timing the drain per triple would cost more than it
+/// measures (HDB-90 put one clock read at 16.5 ns), so the split is taken once
+/// per 8,192-item parse batch: `sink` is the intern plus tier work, and
+/// whatever is left of the wall clock is time the consumer spent waiting on,
+/// or running, the parse.
+///
+/// At one thread that residue is the inline parse itself; above one thread it
+/// is what the consumer still waits for after the parse threads have run
+/// ahead. Either way it is the quantity `HORNDB_LOAD_THREADS` acts on.
+pub(crate) struct SinkTimer {
+    start: Instant,
+    sink_ns: u64,
+}
+
+impl SinkTimer {
+    pub(crate) fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            sink_ns: 0,
+        }
+    }
+
+    /// Run one batch's worth of sink work and charge it to the sink, not parse.
+    pub(crate) fn sink<T>(&mut self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let t = Instant::now();
+        let out = f();
+        self.sink_ns += t.elapsed().as_nanos() as u64;
+        out
+    }
+
+    /// Record everything not charged to the sink as the `parse` load phase.
+    pub(crate) fn record_parse(self, rows: u64) {
+        let parse_ns = (self.start.elapsed().as_nanos() as u64).saturating_sub(self.sink_ns);
+        horndb_metrics::metrics().storage.record_load_phase(
+            horndb_metrics::labels::LoadPhase::Parse,
+            std::time::Duration::from_nanos(parse_ns),
+            rows,
+        );
+    }
+}
+
 /// RDF 1.2's data model (oxrdf 0.3 with `rdf-12`) keeps subjects as the
 /// 1.1-shaped `NamedOrBlankNode`: triple terms appear only in the object
 /// position (oxrdf's `Term::Triple`). The match is exhaustive.

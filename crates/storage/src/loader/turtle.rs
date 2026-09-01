@@ -42,7 +42,7 @@ use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
     load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
 };
-use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink};
+use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -125,17 +125,21 @@ pub fn load_turtle_slice_with_threads(
     threads: usize,
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
+    let mut timer = SinkTimer::new();
     for_each_turtle_batch(bytes, base_iri, threads, |triples| {
-        for t in triples {
-            sink.push(
-                DEFAULT_GRAPH,
-                &subject_to_term(t.subject),
-                &Term::NamedNode(t.predicate),
-                &t.object,
-            )?;
-        }
-        Ok(())
+        timer.sink(|| {
+            for t in triples {
+                sink.push(
+                    DEFAULT_GRAPH,
+                    &subject_to_term(t.subject),
+                    &Term::NamedNode(t.predicate),
+                    &t.object,
+                )?;
+            }
+            Ok(())
+        })
     })?;
+    timer.record_parse(sink.total);
     sink.finish()
 }
 

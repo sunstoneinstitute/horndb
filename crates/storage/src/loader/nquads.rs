@@ -16,7 +16,7 @@ use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
     load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
 };
-use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink};
+use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::{GraphId, DEFAULT_GRAPH};
 use oxrdf::{GraphName, Quad, Term};
@@ -73,18 +73,22 @@ pub fn load_nquads_slice_with_threads(
     threads: usize,
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
+    let mut timer = SinkTimer::new();
     for_each_nquads_batch(bytes, threads, |quads| {
-        for q in quads {
-            let g = graph_id(store, q.graph_name)?;
-            sink.push(
-                g,
-                &subject_to_term(q.subject),
-                &Term::NamedNode(q.predicate),
-                &q.object,
-            )?;
-        }
-        Ok(())
+        timer.sink(|| {
+            for q in quads {
+                let g = graph_id(store, q.graph_name)?;
+                sink.push(
+                    g,
+                    &subject_to_term(q.subject),
+                    &Term::NamedNode(q.predicate),
+                    &q.object,
+                )?;
+            }
+            Ok(())
+        })
     })?;
+    timer.record_parse(sink.total);
     sink.finish()
 }
 

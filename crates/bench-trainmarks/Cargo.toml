@@ -43,3 +43,8 @@ snmalloc-rs = { workspace = true, optional = true }
 [[bin]]
 name = "incremental_load"
 path = "src/bin/incremental_load.rs"
+
+# HDB-96: parse-thread sweep for a real `Store` bulk load.
+[[bin]]
+name = "store_load"
+path = "src/bin/store_load.rs"
