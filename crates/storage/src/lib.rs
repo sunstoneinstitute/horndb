@@ -33,7 +33,10 @@ pub use dictionary::Dictionary;
 pub use error::StorageError;
 pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
 pub use ordering::{Ordering, PartitionAxis};
-pub use partition::{OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD};
+pub use partition::{
+    hot_threshold, set_hot_threshold, OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD,
+    NEVER_EAGER,
+};
 pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, InternedQuad, TermId, TermKind, DEFAULT_GRAPH};

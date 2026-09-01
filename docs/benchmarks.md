@@ -481,7 +481,9 @@ the tier through `Store::insert_quads` -> `Store::apply_quads` ->
 is ~0 here because the whole 10M arrives in one call into an empty store, with
 nothing to carry; on an append it is 30% (see HDB-91 below). `merge_runs`
 belongs to the bulk-loader path, not to this one. The numbers are correct for
-`25f4110`; `docs/metrics.md` has the current definitions.
+`25f4110`; `docs/metrics.md` has the current definitions. **The `group` and
+`build` rows have since been roughly halved** — see "Cutting the
+`apply_quad_batch` hash tables" (HDB-88) below for the current figures.
 
 Three things this overturns:
 
@@ -1236,6 +1238,169 @@ number cannot repay. Add:
 - **Only this summary survives.** The raw per-rep driver output was not kept.
   Re-derive it with the commands under *Reproducing the numbers* — the corpora
   are deterministic, one command per mode.
+#### Cutting the `apply_quad_batch` hash tables (HDB-88, 2026-09-01)
+
+`Tier::apply_quad_batch` is the tier entry point every SPARQL-side write takes
+(`Store::insert_quads` is a wrapper over `apply_quads` — see the HDB-91 section
+above). Three things in it were built on hash tables that did not earn their
+keep:
+
+1. `group` built `HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>>` for
+   **both** sides of the batch — one hash insert per incoming quad, 10M of them
+   into a handful of very large sets — purely to absorb in-batch duplicate
+   targets.
+2. The add pass then iterated that set, so rows reached the partition builder
+   in **hash order** — the worst input a sort can get.
+3. `still_visible` was a `HashSet` sized by the *existing* partition, one insert
+   per live row carried forward.
+
+The add side is now a `Vec`, sorted and deduplicated once per predicate at the
+end of `group`. The sort does the same in-batch dedupe on a 16-byte element
+instead of a hash table, and leaves the pairs in the order the builder wants.
+`still_visible` becomes a sorted `Vec` — the rows already arrive in the
+partition's SPO order, so it is a push per row — and the add pass walks it with
+one merge cursor, `O(live rows + adds)`, never worse than the copy-forward pass
+it sits beside. The del side stays a `HashSet`: it is *probed* once per live
+row, which is a lookup, not an iteration. Finally `Columns::sort_dedup` skips
+its sort outright when the rows already arrive sorted (`is_sorted_by` stops at
+the first out-of-order pair, so unsorted input pays a few comparisons).
+
+`hornbench` (Ryzen 7 7700, 16 threads, Debian 6.12, rustc 1.90.0), snmalloc,
+serial parse, trainmarks xlarge (9,995,000 triples). Before `4459be9`, after
+`c0b0b07`. Driver: `incremental_load --path insert`, three interleaved reps per
+cell, median reported; run-to-run spread is under 2% on every cell. The driver
+parses outside the timed window, so these walls are the tier-side insert alone,
+not a whole load — the phase seconds are directly comparable to HDB-85's table.
+
+##### Bulk insert: 10M into an empty store, one call
+
+| phase | before (ttl) | after (ttl) | before (nt) | after (nt) |
+|---|---|---|---|---|
+| `group` | 1.382s | **0.240s** | 1.381s | **0.253s** |
+| `build` | 1.208s | **0.934s** | 1.222s | **0.940s** |
+| `merge` | 0.135s | 0.161s | 0.176s | 0.133s |
+| `copy_forward` | ~0 | ~0 | ~0 | ~0 |
+| `dedupe` (control, `HornBackend`) | 4.949s | 4.932s | 4.950s | 4.952s |
+| **tier total** | **2.725s** | **1.335s** | **2.779s** | **1.326s** |
+| **insert wall** | **7.696s** | **6.314s** | **7.782s** | **6.301s** |
+
+`group` −83%, `build` −23%, the tier's own work **−51%**, and the insert stage
+−18% end to end. `dedupe` is the control: it is `HornBackend`'s work, untouched
+here, and it does not move.
+
+**`group` got faster while doing a sort, because the corpus is already in
+subject order.** trainmarks is generated subject-major and `HornBackend` feeds
+document order, so within a predicate the pairs arrive sorted and
+`sort_unstable` takes pdqsort's already-sorted path.
+
+On a randomly ordered corpus `group` would pay a real sort. **Into an empty
+partition that is a move, not an addition** — the builder then receives exactly
+the sorted add list, so `Columns::sort_dedup` skips its own sort and the work
+nets out. **On an append it is additive**, because the builder receives carried
+rows followed by adds, which is two sorted runs rather than one sorted
+sequence, so `sort_dedup` sorts the whole partition either way. The append case
+still comes out ahead — the adds are small against the partition, and the
+`still_visible` and memory wins do not depend on arrival order at all — but the
+group-phase sort is genuinely extra there, not relocated.
+
+##### Append: into the loaded 9,995,000-triple store
+
+98,000 triples in one call, and 1,002,000 triples in 16 calls of 65,536 (the
+shipped batch size) — the HDB-91 / HDB-102 path:
+
+| phase | 98k, 1 call, before | after | 1M, 16 calls, before | after |
+|---|---|---|---|---|
+| `copy_forward` | 0.566s | **0.180s** | 7.393s | **2.032s** |
+| `build` | 1.104s | 1.107s | 15.947s | **13.162s** |
+| `group` | 0.005s | 0.002s | 0.058s | 0.021s |
+| `merge` | 0.003s | 0.001s | 0.017s | 0.072s |
+| **append wall** | **1.724s** | **1.334s** | **24.119s** | **15.981s** |
+
+`copy_forward` −68% / −72%: that is the `still_visible` `HashSet` disappearing.
+The 16-call append — the case HDB-91 measured at "twice what loading the whole
+base costs" — drops **−34%**. It is still the per-batch partition rebuild
+(HDB-102), just a third cheaper.
+
+`merge` rises from 0.017s to 0.072s on the 16-call append. That is the merge
+cursor scanning `still_visible` once per predicate per batch instead of hashing
+each added pair. It is the `O(live rows + adds)` term, it is 0.45% of the
+append, and it buys the 5.4s off `copy_forward`.
+
+##### `hot_threshold` is now reachable, and the eager build buys nothing today
+
+`DEFAULT_HOT_THRESHOLD` (1,000,000 live rows) decides whether a partition
+materialises the object-major layout at build time or on the first
+object-major read. It was settable only from Rust source. It now resolves once
+per process from `HORNDB_HOT_THRESHOLD` (`<n>`, or `off` for "never eager"),
+with `horndb_storage::set_hot_threshold` for code that wants to override the
+environment — the same shape as `HORNDB_LOAD_THREADS`.
+
+Same driver and corpus, after-commit only, `--base xlarge.ttl`. Two reps per
+row, agreeing within 1%; rep 1 shown. (`bench-trainmarks --scale xlarge`
+reproduces the query half of this sweep.)
+
+| `HORNDB_HOT_THRESHOLD` | `build` | `group` | `merge` | insert wall |
+|---|---|---|---|---|
+| `0` (every predicate eager) | 0.953s | 0.241s | 0.159s | 6.304s |
+| `1000000` (the default) | 0.937s | 0.238s | 0.152s | 6.283s |
+| `off` (every predicate lazy) | **0.230s** | 0.239s | 0.154s | **5.601s** |
+
+Two things fall out:
+
+- **`0` and the default are nearly the same run.** trainmarks xlarge has 15
+  predicates, and the seven largest (`rdf:type` at 1,445,000 rows plus six at
+  1,335,000) clear 1,000,000 and carry 94.6% of the corpus. The default is
+  already "almost everything eager" here; the 0.016s between the two columns is
+  the object-major build for the remaining 540,000 rows.
+- **The eager object-major sort is 0.71s of a 10M load — 76% of `build` after
+  the change above.** It is the single largest remaining item in the tier's
+  budget on this path.
+
+And it currently buys nothing: **no crate above `horndb-storage` calls
+`scan_predicate_ordered`, `ordered_predicate`, or `top_predicates`.** The
+SPARQL executor builds its own snapshot orderings (`VecTripleSource`, see the
+HDB-97 sections above); the tier's object-major columns have no reader on any
+shipped path. The full trainmarks xlarge suite says the same thing from the
+other side — same host, same commit, two reps each, mean shown:
+
+| | `0` | `1000000` (default) | `off` |
+|---|---|---|---|
+| `read_turtle` (whole load) | 15.798s | 15.694s | **14.904s** |
+| `read_ntriples` (whole load) | 12.392s | 12.525s | **11.659s** |
+| `q1_count` | 0.404s | 0.406s | 0.402s |
+| `q2_customer_orders` | 2.186s | 2.207s | 2.196s |
+| `q3_join_3_entities` | 1.194s | 1.171s | 1.194s |
+| `q4_optional_aggregation` | 2.889s | 2.988s | 2.902s |
+| `q5_construct` | 0.373s | 0.378s | 0.384s |
+| `q6_delete_insert` | 0.505s | 0.507s | 0.505s |
+
+Load is 0.79s (Turtle) / 0.87s (N-Triples) cheaper with the layout off — the
+same 0.71s plus its allocation — and **not one of the six queries moves outside
+the ±2% run-to-run spread, in either direction.**
+
+Flipping the default to `off` would therefore take ~0.8s off every 10M load for
+no measured loss. It is not flipped here: it changes SPEC-02 F4's stated
+behaviour, and eager materialisation is what SPEC-25 S5 tiering and any future
+tier-side ordered reader will want. The default stays at 1,000,000 as a
+*measured* choice rather than an inherited constant, and the flip is left as its
+own decision with these numbers behind it.
+
+##### Reproducing
+
+```bash
+cargo build --release -p horndb-bench-trainmarks --bin incremental_load
+D=target/trainmarks/data
+# bulk insert into an empty store: read the `base` stage
+./target/release/incremental_load --base $D/xlarge.ttl --append $D/medium.nt \
+    --path insert --batch 0
+# append into the loaded store: read the `append` stage
+./target/release/incremental_load --base $D/xlarge.nt \
+    --append $D/append_overlap.nt --path insert --batch 65536
+# the threshold sweep
+HORNDB_HOT_THRESHOLD=off ./target/release/incremental_load \
+    --base $D/xlarge.ttl --append $D/medium.nt --path insert --batch 0
+```
+
 #### Which structure backs the mapped dictionary base (HDB-93, 2026-09-01)
 
 SPEC-25 §S2 leaves the base structure "settled by the implementation plan with

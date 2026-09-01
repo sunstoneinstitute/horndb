@@ -37,14 +37,90 @@ use arrow::array::{ArrayRef, UInt64Array};
 use horndb_metrics::labels::LoadPhase;
 use parking_lot::Mutex;
 use roaring::RoaringTreemap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Default hot-predicate threshold: predicates with at least this many triples
-/// eagerly materialise all six orderings; smaller ones materialise the
-/// object-major layout lazily on first request. Configurable per tier — see
-/// [`crate::MemoryTier::with_hot_threshold`].
+/// Default hot-predicate threshold: predicates with at least this many live
+/// rows materialise the object-major layout eagerly, at build time; smaller
+/// ones materialise it lazily, on the first object-major read. Both layouts
+/// together serve all six trie orderings (see [`crate::ordering`]).
+/// Configurable per tier — see [`crate::MemoryTier::with_hot_threshold`].
 pub const DEFAULT_HOT_THRESHOLD: usize = 1_000_000;
+
+/// "Not yet read" marker for [`HOT_THRESHOLD`].
+///
+/// `0` cannot serve here — it is a legitimate threshold meaning "every
+/// predicate eager" — so the sentinel is `usize::MAX` and every resolved value
+/// is clamped to [`NEVER_EAGER`] instead. A threshold one below `usize::MAX` is
+/// already unreachable: it would need `usize::MAX - 1` live rows in a single
+/// predicate.
+const HOT_THRESHOLD_UNSET: usize = usize::MAX;
+
+/// The largest storable threshold, and what `HORNDB_HOT_THRESHOLD=off`
+/// resolves to: no partition can ever reach this row count, so nothing is
+/// materialised eagerly.
+pub const NEVER_EAGER: usize = usize::MAX - 1;
+
+/// Resolved once, then cached. [`HOT_THRESHOLD_UNSET`] means "not yet read";
+/// every other value is the threshold itself, stored raw.
+static HOT_THRESHOLD: AtomicUsize = AtomicUsize::new(HOT_THRESHOLD_UNSET);
+
+/// Parse a `HORNDB_HOT_THRESHOLD` value, falling back to
+/// [`DEFAULT_HOT_THRESHOLD`] for anything unparseable.
+///
+/// The result is always storable — clamped to [`NEVER_EAGER`] so it can never
+/// collide with the [`HOT_THRESHOLD_UNSET`] sentinel.
+///
+/// Split out from [`hot_threshold`] so it is testable without touching
+/// process-global environment state.
+fn parse_hot_threshold(raw: Option<&str>) -> usize {
+    match raw {
+        // `off` reads better than a magic number for "never eager".
+        Some("off") => NEVER_EAGER,
+        Some(v) => v
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(DEFAULT_HOT_THRESHOLD)
+            .min(NEVER_EAGER),
+        None => DEFAULT_HOT_THRESHOLD,
+    }
+}
+
+/// The hot-predicate threshold new tiers are built with.
+///
+/// `HORNDB_HOT_THRESHOLD=<n>` sets it; `HORNDB_HOT_THRESHOLD=off` disables
+/// eager materialisation entirely, so every partition builds the object-major
+/// layout lazily. Read once per process and cached, so changing the variable
+/// after the first tier is constructed has no effect. Code can override it for
+/// one tier with [`crate::MemoryTier::with_hot_threshold`], or process-wide
+/// with [`set_hot_threshold`].
+///
+/// The trade: eager costs a second `n log n` sort on the write that crosses the
+/// threshold, whether or not anything ever asks for an object-major read; lazy
+/// moves that same sort onto the first reader that does. Measured in
+/// `docs/benchmarks.md`.
+pub fn hot_threshold() -> usize {
+    match HOT_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) {
+        HOT_THRESHOLD_UNSET => {
+            let v = parse_hot_threshold(std::env::var("HORNDB_HOT_THRESHOLD").ok().as_deref());
+            HOT_THRESHOLD.store(v, std::sync::atomic::Ordering::Relaxed);
+            v
+        }
+        v => v,
+    }
+}
+
+/// Override [`hot_threshold`] for this process, ignoring the environment.
+///
+/// The threshold cannot change what a partition *contains*, only when the
+/// object-major layout is materialised, so moving it is always safe.
+///
+/// `rows` is clamped to [`NEVER_EAGER`], which is what `usize::MAX` means here
+/// anyway — no partition can hold that many rows.
+pub fn set_hot_threshold(rows: usize) {
+    HOT_THRESHOLD.store(rows.min(NEVER_EAGER), std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Runs a partition may accumulate before a write merges them instead of
 /// appending another one.
@@ -118,7 +194,17 @@ impl Columns {
     fn sort_dedup(rows: &mut Vec<Row>) {
         // Sort by (subject, object, begin) so the (s, o) columns stay in SPO
         // order for trie iteration; begin orders a tuple's history.
-        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        //
+        // Skip the sort when the rows already arrive in that order (HDB-88).
+        // `is_sorted_by` stops at the first out-of-order pair, so an unsorted
+        // input pays a handful of comparisons; a sorted one — what the tier
+        // hands us for a bulk insert into an empty partition — saves the whole
+        // n log n. This is a measured check, not an assumption about the
+        // caller, so no call site has to promise anything.
+        let key = |r: &Row| (r.0, r.1, r.2);
+        if !rows.is_sorted_by(|a, b| key(a) <= key(b)) {
+            rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        }
         // Collapse only exact-duplicate *live* rows for the same (s, o): a
         // repeated insert is a no-op, and the earliest `begin` wins. Dead rows
         // (end set) are history and are kept until compaction.
@@ -725,6 +811,90 @@ impl PartitionBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hot_threshold_parses_without_touching_the_environment() {
+        assert_eq!(parse_hot_threshold(None), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("0")), 0, "0 = every predicate hot");
+        assert_eq!(parse_hot_threshold(Some("250000")), 250_000);
+        assert_eq!(parse_hot_threshold(Some(" 250000 ")), 250_000);
+        assert_eq!(parse_hot_threshold(Some("off")), NEVER_EAGER);
+        // Anything unparseable falls back rather than failing a load.
+        assert_eq!(parse_hot_threshold(Some("")), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("-1")), DEFAULT_HOT_THRESHOLD);
+        assert_eq!(parse_hot_threshold(Some("lots")), DEFAULT_HOT_THRESHOLD);
+        // Every parse result must be storable — i.e. never the "unset"
+        // sentinel, or the cache would re-read the environment forever.
+        for raw in [None, Some("0"), Some("250000"), Some("off"), Some("lots")] {
+            assert_ne!(parse_hot_threshold(raw), HOT_THRESHOLD_UNSET);
+        }
+        assert_eq!(
+            parse_hot_threshold(Some(&usize::MAX.to_string())),
+            NEVER_EAGER,
+            "an explicit usize::MAX clamps rather than aliasing the sentinel"
+        );
+    }
+
+    #[test]
+    fn set_hot_threshold_round_trips_through_the_cache() {
+        // The cache is process-global. nextest gives each test its own
+        // process; under `cargo test` this shares a process with the other lib
+        // tests, which is harmless — the threshold changes only *when* the
+        // object-major layout is built, never what a partition holds — but the
+        // default is restored at the end regardless.
+        for want in [0usize, 1, 250_000, DEFAULT_HOT_THRESHOLD, NEVER_EAGER] {
+            set_hot_threshold(want);
+            assert_eq!(hot_threshold(), want, "cached value must survive a read");
+            // Reading twice must not fall back through the sentinel.
+            assert_eq!(hot_threshold(), want, "second read must agree");
+        }
+
+        // `usize::MAX` is the documented "never eager" spelling; it must not
+        // wrap into the "not yet read" sentinel and resurrect the default.
+        set_hot_threshold(usize::MAX);
+        assert_eq!(hot_threshold(), NEVER_EAGER);
+        assert_ne!(hot_threshold(), DEFAULT_HOT_THRESHOLD);
+
+        set_hot_threshold(DEFAULT_HOT_THRESHOLD);
+    }
+
+    #[test]
+    fn sorted_rows_survive_the_skipped_sort() {
+        // `sort_dedup` skips the sort on already-sorted input; the dedupe of
+        // exact-duplicate live rows must still happen.
+        let mut rows: Vec<Row> = vec![
+            (1, 10, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+            (2, 20, 1, UNSET_END),
+            (3, 30, 1, UNSET_END),
+        ];
+        Columns::sort_dedup(&mut rows);
+        assert_eq!(
+            rows,
+            vec![
+                (1, 10, 1, UNSET_END),
+                (2, 20, 1, UNSET_END),
+                (3, 30, 1, UNSET_END)
+            ]
+        );
+
+        // Unsorted input still comes out in (s, o, begin) order.
+        let mut rows: Vec<Row> = vec![
+            (3, 30, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+            (2, 20, 1, UNSET_END),
+            (1, 10, 1, UNSET_END),
+        ];
+        Columns::sort_dedup(&mut rows);
+        assert_eq!(
+            rows,
+            vec![
+                (1, 10, 1, UNSET_END),
+                (2, 20, 1, UNSET_END),
+                (3, 30, 1, UNSET_END)
+            ]
+        );
+    }
 
     #[test]
     fn live_len_matches_len_at_own_version_insert_only() {
