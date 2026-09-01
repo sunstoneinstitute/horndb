@@ -16,8 +16,9 @@
 //! Interning on the chunk threads instead would be a little faster in
 //! isolation (it scales ~3.9× on 16 cores, so the dictionary's reverse-map
 //! write lock is *not* the bottleneck it was assumed to be) but it would make
-//! term ids depend on thread scheduling, and it does not help the number that
-//! matters — see [`load_threads`] for why the whole thing is off by default.
+//! term ids depend on thread scheduling. Since HDB-96 the serial intern is the
+//! largest phase of a load — see [`load_threads`] for the sweep that made the
+//! parse threads the default and left interning where it is.
 //!
 //! The bounded channels cap memory: at most [`load_buffer_triples`] parsed
 //! items are in flight across all chunks (see [`channel_depth`]).
@@ -56,12 +57,14 @@ const BATCH: usize = 8_192;
 ///
 /// The budget is a **total**, not per chunk, so peak in-flight memory does not
 /// grow with `HORNDB_LOAD_THREADS`; more threads split the same budget more
-/// ways. That is what the old per-chunk constant got wrong: its cost and its
+/// ways. It is still the bulk of what the threaded default costs in memory
+/// (HDB-96: peak RSS 2,207 -> 3,851 MiB at trainmarks xlarge Turtle). That is what the old per-chunk constant got wrong: its cost and its
 /// benefit both scaled with the thread count, so neither was visible in the
 /// constant itself.
 ///
-/// It costs nothing at the shipped default of one parse thread — a single
-/// chunk skips the channel entirely.
+/// A one-chunk load never allocates it at all — a single chunk skips the
+/// channel entirely — so `HORNDB_LOAD_THREADS=1` is also how to get the
+/// pre-HDB-96 memory footprint back.
 pub const DEFAULT_LOAD_BUFFER_TRIPLES: usize = 8 << 20;
 
 /// Resolved once, then cached: `HORNDB_LOAD_BUFFER_TRIPLES` if set and
@@ -119,37 +122,185 @@ fn channel_depth(chunks: usize) -> usize {
 /// differential tests use to exercise the split on small documents.
 pub(crate) const MIN_PARALLEL_BYTES: usize = 1 << 20;
 
-/// Parse-thread count for the slice loaders. **Defaults to 1 — serial.**
+/// Ceiling on what `auto` resolves to, and therefore on the shipped default.
 ///
-/// `HORNDB_LOAD_THREADS=<n>` sets it explicitly; `HORNDB_LOAD_THREADS=auto`
-/// uses [`std::thread::available_parallelism`].
+/// The measured knee (HDB-96, table in [`load_threads`]): the fourth and
+/// eighth threads still pay, the ninth onwards does not. By 8 threads `parse`
+/// is 14% of a Turtle load and 4% of an N-Triples one, so even driving it to
+/// zero could not buy another 15% — what is left is interning and the tier,
+/// both of which run on the calling thread by design.
 ///
-/// The default is 1 because the *whole load* has not been shown to get faster
-/// with more parse threads, not because the parse does not scale — since
-/// HDB-94 it does. Measured on hornbench (16 cores, trainmarks xlarge,
-/// 9,995,000 triples, Turtle, default buffer budget):
+/// It is also a guard on a default nobody sets: without a cap, a 64-core host
+/// would spawn 64 parse threads for a leg that stopped scaling at 8, and pay
+/// for all of them in scheduler pressure and per-thread parser state. An
+/// explicit `HORNDB_LOAD_THREADS=<n>` is not capped — that is the escape hatch,
+/// and how the sweep was taken.
+const AUTO_THREAD_CAP: usize = 8;
+
+/// Default for [`max_slice_bytes`]: the largest document a `load_*_file` entry
+/// point will read into memory to parse in parallel.
 ///
-/// | | 1 thread | 4 | 16 |
-/// |---|---|---|---|
-/// | `parse` phase | 9.126s | 3.738s | 2.381s |
-/// | parse -> `Vec` -> `HornBackend` insert (bench driver) | 21.920s | 16.208s | 15.002s |
+/// **This ceiling is why the threaded default is safe.** The parallel path
+/// needs one contiguous slice, so `load_ntriples_file` / `load_nquads_file`
+/// (and `load_turtle_file` under `HORNDB_PARALLEL_TURTLE=1`) take it by reading
+/// the whole document into memory, where the streaming path holds only a 1 MiB
+/// `BufReader`. Before HDB-96 that branch was unreachable by default — it
+/// needed `threads > 1`, which nobody had — so the cost never shipped. Making
+/// threads the default makes it the default too, and file size is unbounded:
+/// without a ceiling, a document larger than RAM would load before HDB-96 and
+/// OOM after it.
 ///
-/// What is still unmeasured is the same sweep against a real `Store` load.
-/// HDB-83 measured that path getting *slower* with threads (40.1s -> 46.6s),
-/// because the serial `Tier::insert_quad_batch` has to free terms allocated on
-/// the parse threads while those threads keep allocating. Two things have
-/// changed under it since — snmalloc (HDB-86 E1) and the buffer budget — so
-/// the number needs re-taking before the default flips. See
-/// `docs/benchmarks.md`.
+/// Above the ceiling the loaders fall back to the streaming reader on one
+/// thread — exactly what they did before HDB-96 — so a large file gets slower,
+/// never fatal.
 ///
-pub fn load_threads() -> usize {
-    match std::env::var("HORNDB_LOAD_THREADS").as_deref() {
-        Ok("auto") => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
-        Ok(v) => v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1),
-        Err(_) => 1,
+/// 2 GiB for two reasons, neither of which is the document-to-store ratio —
+/// that is roughly scale-invariant for RDF and does not change at any
+/// threshold:
+///
+/// * **It bounds the transient absolutely.** Whatever the corpus, the extra
+///   memory a threaded file load can take over a streaming one is at most this
+///   ceiling plus the parse budget — worst case about +3.5 GiB. Any host with
+///   room for the store the load is building has room for that; without a
+///   ceiling the term is unbounded, which is the actual hazard.
+/// * **What it forgoes is small.** At the shipped 8 threads `parse` is 14% of a
+///   Turtle load and 3.6% of an N-Triples one (HDB-96), so a document that trips
+///   the ceiling gives up at most that much and keeps the streaming loader's
+///   flat footprint.
+///
+/// For scale: trainmarks xlarge is a 1.17 GB document and a ~1.7 GiB store, so
+/// the ceiling sits just above a corpus of that size — comfortably inside the
+/// bound, not tuned to it.
+pub const DEFAULT_MAX_SLICE_BYTES: usize = 2 << 30;
+
+/// Resolved once, then cached. `0` means "not yet read".
+static MAX_SLICE_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// Largest document a `load_*_file` entry point will read into memory in order
+/// to parse it in parallel. Set with `HORNDB_LOAD_MAX_SLICE_BYTES=<n>`.
+///
+/// It does not bound [`load_turtle_slice`](crate::loader::turtle::load_turtle_slice)
+/// and friends: a caller that already holds the bytes has already paid for
+/// them, and this ceiling exists to stop the *file* loaders from allocating a
+/// copy the caller never asked for.
+///
+/// A malformed or `0` value resolves to `1` — "never read a file whole" — for
+/// the same reason a malformed `HORNDB_LOAD_THREADS` resolves to 1: a setting
+/// nobody can read should cost time, not memory.
+pub fn max_slice_bytes() -> usize {
+    match MAX_SLICE_BYTES.load(Ordering::Relaxed) {
+        0 => {
+            let v = match std::env::var("HORNDB_LOAD_MAX_SLICE_BYTES") {
+                Ok(s) => parse_max_slice_bytes(&s),
+                Err(_) => DEFAULT_MAX_SLICE_BYTES,
+            };
+            MAX_SLICE_BYTES.store(v, Ordering::Relaxed);
+            v
+        }
+        v => v,
     }
+}
+
+/// Parse an explicit `HORNDB_LOAD_MAX_SLICE_BYTES`.
+///
+/// Same convention as [`parse_thread_count`]: a malformed value falls back to
+/// the **restrictive** setting, not the permissive one. Here that is `1` — no
+/// document can be both at least [`MIN_PARALLEL_BYTES`] and at most one byte,
+/// so `1` reads as "never read a file whole". `0` means the same and is stored
+/// as `1`, because `0` is the not-yet-resolved sentinel for the cache.
+///
+/// Restrictive means the opposite direction for the two variables — fewer
+/// threads, a lower ceiling — but the same rule: a setting nobody can read
+/// costs time, never memory.
+fn parse_max_slice_bytes(v: &str) -> usize {
+    v.parse::<usize>().unwrap_or(1).max(1)
+}
+
+/// Whether a `load_*_file` entry point should read `len` bytes into memory and
+/// parse them on `threads` threads, rather than streaming on one.
+///
+/// Three conditions, all of which have to hold: more than one thread to use, a
+/// document big enough that splitting beats the setup cost, and one small
+/// enough that holding it whole is affordable. Pulled out of the three file
+/// loaders so the policy is stated and tested once.
+pub(crate) fn should_read_whole_file(len: u64, threads: usize) -> bool {
+    threads > 1 && len >= MIN_PARALLEL_BYTES as u64 && len <= max_slice_bytes() as u64
+}
+
+/// Parse-thread count for the slice loaders. **Defaults to `auto`** — see
+/// [`AUTO_THREAD_CAP`] for what `auto` resolves to.
+///
+/// `HORNDB_LOAD_THREADS=<n>` sets it explicitly and is not capped;
+/// `HORNDB_LOAD_THREADS=1` restores the pre-HDB-96 serial behaviour. A value
+/// that does not parse, or is `0`, also resolves to 1 — a malformed setting
+/// falls back to the cheap behaviour, not the expensive one.
+///
+/// Measured on hornbench (Ryzen 7 7700, 8 cores / 16 threads, 124 GB, Debian
+/// 6.12, rustc 1.90.0), commit `c6da644`, trainmarks xlarge (9,995,000
+/// triples) loaded into a fresh `Store` through `load_turtle_slice` /
+/// `load_ntriples_slice` plus a first read to force HDB-84's deferred merge.
+/// Median of 3 interleaved runs; full table and phase split in
+/// `docs/benchmarks.md`:
+///
+/// | threads | Turtle wall | N-Triples wall | `parse` (ttl) | peak RSS (ttl) |
+/// |---|---|---|---|---|
+/// | 1 | 12.926s | 9.672s | 8.479s | 2,207 MiB |
+/// | 2 | 7.388s | 5.926s | 2.613s | 3,210 MiB |
+/// | 4 | 6.255s | 5.199s | 1.535s | 3,698 MiB |
+/// | **8 (the cap)** | **5.581s** | **4.903s** | **0.780s** | 3,851 MiB |
+/// | 16 | 5.499s | 4.956s | 0.777s | 3,915 MiB |
+///
+/// **HDB-83's reason for the serial default no longer holds.** It measured a
+/// real `Store` load getting *slower* with threads (40.1s -> 46.6s) because
+/// `Tier::insert_quad_batch` had to free terms allocated on the parse threads
+/// while rebuilding every partition it touched. HDB-84 replaced that rebuild
+/// with an appended run, and the tier phases are now flat in the thread count:
+/// `group` + `build` + `merge_runs` total 1.65s at 1 thread and 1.70s at 16.
+/// What is left of the cross-thread free cost shows up in interning, which
+/// rises 2.78s -> 3.05s (+10%) from 1 to 2 threads and is flat above that.
+///
+/// The cost of the default is memory, in two parts. The measured one: peak RSS
+/// rises 78% on Turtle (2,207 -> 3,851 MiB) and 57% on N-Triples, almost all of
+/// it the 8M-triple in-flight parse budget, which a one-chunk load never
+/// allocates. That part is absolute — lower it with [`load_buffer_triples`].
+///
+/// The second part is not in the table and does scale with the document: the
+/// `load_*_file` entry points reach the parallel path by reading the whole file
+/// into memory, a branch that was unreachable while the default was 1. See
+/// [`DEFAULT_MAX_SLICE_BYTES`] for the ceiling that bounds it, and
+/// `docs/benchmarks.md` for the accounting.
+///
+/// `HORNDB_LOAD_THREADS=1` restores the old time and both parts of the old
+/// footprint.
+///
+/// Turtle *files* are not affected: `load_turtle_file` needs
+/// `HORNDB_PARALLEL_TURTLE=1` as well, because splitting Turtle carries a
+/// soundness caveat the line-based formats do not.
+pub fn load_threads() -> usize {
+    match std::env::var("HORNDB_LOAD_THREADS") {
+        Ok(v) => parse_thread_count(&v),
+        Err(_) => auto_load_threads(),
+    }
+}
+
+/// Parse an explicit `HORNDB_LOAD_THREADS`.
+///
+/// An unparseable or zero value falls back to **1**, not to `auto`: someone who
+/// wrote `=0` meaning "off" must not get the most expensive setting and the
+/// +1.5 GiB that comes with it.
+fn parse_thread_count(v: &str) -> usize {
+    if v == "auto" {
+        return auto_load_threads();
+    }
+    v.parse::<usize>().ok().filter(|n| *n >= 1).unwrap_or(1)
+}
+
+/// `available_parallelism()` clamped to [`AUTO_THREAD_CAP`], 1 if the platform
+/// will not say.
+fn auto_load_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(AUTO_THREAD_CAP))
+        .unwrap_or(1)
 }
 
 /// Run `chunks` on one thread each and feed `sink` their batches in document
@@ -235,5 +386,70 @@ pub(crate) fn slice_threads(len: usize) -> usize {
         load_threads()
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped default resolves inside the cap on every host. Pins
+    /// [`AUTO_THREAD_CAP`] against an accidental "just use every core".
+    #[test]
+    fn auto_load_threads_stays_inside_the_cap() {
+        let n = auto_load_threads();
+        assert!(
+            (1..=AUTO_THREAD_CAP).contains(&n),
+            "auto resolved to {n}, outside 1..={AUTO_THREAD_CAP}"
+        );
+    }
+
+    /// The whole-file read is gated on all three conditions, not just the two
+    /// it had before HDB-96. The ceiling is the one that keeps the threaded
+    /// default from turning an arbitrarily large file into an OOM: past it the
+    /// caller falls back to the streaming reader.
+    #[test]
+    fn should_read_whole_file_is_bounded_at_both_ends() {
+        let max = max_slice_bytes() as u64;
+        let min = MIN_PARALLEL_BYTES as u64;
+
+        // One thread never reads the file whole, at any size.
+        assert!(!should_read_whole_file(min, 1));
+        assert!(!should_read_whole_file(max, 1));
+
+        // Below the floor the split costs more than it saves.
+        assert!(!should_read_whole_file(min - 1, 8));
+
+        // In between, it does.
+        assert!(should_read_whole_file(min, 8));
+        assert!(should_read_whole_file(max, 8));
+
+        // Above the ceiling it falls back to streaming rather than allocating
+        // a copy of the document.
+        assert!(!should_read_whole_file(max + 1, 8));
+        assert!(!should_read_whole_file(u64::MAX, 8));
+    }
+
+    /// Both knobs resolve a malformed value to their restrictive setting, and
+    /// they agree on which values count as malformed. Driven through the real
+    /// parse functions, not a copy of them, and off the environment, so the
+    /// test stays process-local.
+    #[test]
+    fn a_malformed_setting_resolves_to_the_restrictive_value() {
+        for v in ["0", "", "auto ", "-1", "eight", "1.5", " 4"] {
+            assert_eq!(parse_thread_count(v), 1, "{v:?} threads");
+            assert_eq!(parse_max_slice_bytes(v), 1, "{v:?} max slice bytes");
+        }
+        // A well-formed value is still honoured on both.
+        assert_eq!(parse_thread_count("4"), 4);
+        assert_eq!(parse_max_slice_bytes("4096"), 4096);
+    }
+
+    /// A ceiling of 1 byte is what a malformed value resolves to, and it has to
+    /// mean "never read a file whole" — no document can clear the 1 MiB floor
+    /// and still fit under one byte.
+    #[test]
+    fn a_one_byte_ceiling_disables_the_whole_file_read() {
+        assert!(MIN_PARALLEL_BYTES as u64 > parse_max_slice_bytes("garbage") as u64);
     }
 }

@@ -73,6 +73,17 @@ cargo build --release -p horndb-bench-trainmarks >/dev/null 2>&1
 
 DRIVER="$REPO_ROOT/target/release/bench-trainmarks"
 
+# Pin the parse-thread count so the trainmarks series keeps one basis.
+#
+# The driver takes its thread count from `loader::load_threads()`, whose default
+# HDB-96 changed from 1 to `auto` (cores, capped at 8). Every trainmarks number
+# in docs/benchmarks.md was measured at one parse thread, and `auto` is
+# host-dependent on top of that — so leaving it unset would silently rebase the
+# series and make it uncomparable across machines. Raise it deliberately, in a
+# commit that also re-measures the table, or not at all.
+export HORNDB_LOAD_THREADS="${HORNDB_LOAD_THREADS:-1}"
+echo ">> HORNDB_LOAD_THREADS=$HORNDB_LOAD_THREADS (pinned; see comment)" >&2
+
 # 3. run each scale fresh (one process per scale). Reset the results file once.
 rm -f "$OUT"
 IFS=',' read -ra SCALE_ARR <<< "$SCALES"

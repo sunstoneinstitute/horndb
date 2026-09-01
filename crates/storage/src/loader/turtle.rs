@@ -40,9 +40,9 @@
 
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
+    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink};
+use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -51,9 +51,11 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-/// Load a Turtle file. Serial by default; set `HORNDB_PARALLEL_TURTLE=1` to
-/// let it take the parallel-chunked path when the file is large enough and
-/// [`turtle_split_is_safe`] clears it.
+/// Load a Turtle file. Serial unless `HORNDB_PARALLEL_TURTLE=1` is set — the
+/// [`load_threads`] default going threaded (HDB-96) does not reach here,
+/// because splitting Turtle carries a soundness caveat the line-based formats
+/// do not. With the opt-in it takes the parallel-chunked path when the file is
+/// large enough and [`turtle_split_is_safe`] clears it.
 pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
@@ -65,8 +67,7 @@ pub fn load_turtle_file(store: &Store, path: &Path) -> Result<LoadStats> {
         std::env::var("HORNDB_PARALLEL_TURTLE").as_deref(),
         Ok("1") | Ok("true")
     );
-    let mut stats = if parallel_opt_in && load_threads() > 1 && bytes as usize >= MIN_PARALLEL_BYTES
-    {
+    let mut stats = if parallel_opt_in && should_read_whole_file(bytes, load_threads()) {
         drop(file);
         load_turtle_slice(store, &std::fs::read(path)?, base.as_deref())?
     } else {
@@ -125,17 +126,21 @@ pub fn load_turtle_slice_with_threads(
     threads: usize,
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
+    let mut timer = SinkTimer::new();
     for_each_turtle_batch(bytes, base_iri, threads, |triples| {
-        for t in triples {
-            sink.push(
-                DEFAULT_GRAPH,
-                &subject_to_term(t.subject),
-                &Term::NamedNode(t.predicate),
-                &t.object,
-            )?;
-        }
-        Ok(())
+        timer.sink(|| {
+            for t in triples {
+                sink.push(
+                    DEFAULT_GRAPH,
+                    &subject_to_term(t.subject),
+                    &Term::NamedNode(t.predicate),
+                    &t.object,
+                )?;
+            }
+            Ok(())
+        })
     })?;
+    timer.record_parse(sink.total);
     sink.finish()
 }
 

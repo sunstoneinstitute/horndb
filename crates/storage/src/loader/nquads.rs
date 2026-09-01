@@ -14,9 +14,9 @@
 
 use crate::error::{Result, StorageError};
 use crate::loader::parallel::{
-    load_threads, parse_chunks_ordered, slice_threads, MIN_PARALLEL_BYTES,
+    load_threads, parse_chunks_ordered, should_read_whole_file, slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink};
+use crate::loader::{load_quads, subject_to_term, LoadStats, QuadSink, SinkTimer};
 use crate::store::Store;
 use crate::term::{GraphId, DEFAULT_GRAPH};
 use oxrdf::{GraphName, Quad, Term};
@@ -30,8 +30,7 @@ use std::path::Path;
 pub fn load_nquads_file(store: &Store, path: &Path) -> Result<LoadStats> {
     let file = File::open(path)?;
     let bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    let threads = load_threads();
-    let mut stats = if threads > 1 && bytes as usize >= MIN_PARALLEL_BYTES {
+    let mut stats = if should_read_whole_file(bytes, load_threads()) {
         drop(file);
         load_nquads_slice(store, &std::fs::read(path)?)?
     } else {
@@ -73,18 +72,22 @@ pub fn load_nquads_slice_with_threads(
     threads: usize,
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
+    let mut timer = SinkTimer::new();
     for_each_nquads_batch(bytes, threads, |quads| {
-        for q in quads {
-            let g = graph_id(store, q.graph_name)?;
-            sink.push(
-                g,
-                &subject_to_term(q.subject),
-                &Term::NamedNode(q.predicate),
-                &q.object,
-            )?;
-        }
-        Ok(())
+        timer.sink(|| {
+            for q in quads {
+                let g = graph_id(store, q.graph_name)?;
+                sink.push(
+                    g,
+                    &subject_to_term(q.subject),
+                    &Term::NamedNode(q.predicate),
+                    &q.object,
+                )?;
+            }
+            Ok(())
+        })
     })?;
+    timer.record_parse(sink.total);
     sink.finish()
 }
 
