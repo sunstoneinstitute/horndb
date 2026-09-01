@@ -221,9 +221,11 @@ what is not visible after the batch's deletions and reports the true
 `inserted`/`retracted` counts, so the backend simply passes those on.
 The single-triple insert path additionally short-circuits on
 `StoreSnapshot::contains_quad`, an O(log rows) binary search over the
-predicate partition's merged columns — not for correctness, but so a
-repeated insert does not pay `apply_quad_batch`'s whole-partition
-rebuild to learn it is a no-op.
+predicate partition's merged columns — not for correctness, but to keep
+a repeated insert off the tier entirely. Since HDB-102 the cost it
+avoids is small (an add-only batch probes the partition's runs and
+returns without rebuilding anything); before it, the same call paid a
+whole-partition rebuild to learn it was a no-op.
 
 Until HDB-89 the backend answered both questions from `live_keys`, a
 `HashSet<QuadKey>` mirror of every live quad. It cost 6% of a bulk load
@@ -262,14 +264,17 @@ read-compute / write-commit split:
    triple (lenient for bulk loads — the single-triple `insert_oxrdf`
    propagates intern errors instead). Already-live triples are not
    filtered here: storage drops them itself, per triple, at no cost.
-   Per *batch* it is not free. Every quad now reaches
-   `apply_quad_batch`, which copies each touched partition forward and
-   rebuilds it before discovering the adds were all already visible; a
-   batch that is *entirely* already-live pays that whole rebuild and
-   then throws it away, because a zero-effect batch does not swap the
-   snapshot. Before HDB-89 such a batch left `entries` empty and never
-   called storage. Partially-duplicate batches are unaffected — they
-   always paid the rebuild. Tracked in HDB-104.
+   Per *batch* it is not free: every quad now reaches
+   `apply_quad_batch`, where an already-live one is still interned,
+   grouped, and probed against the partition. Since HDB-102 that is all
+   it costs — an add-only batch takes the append-run path, so a batch
+   that is *entirely* already-live probes the runs, appends nothing, and
+   returns without rebuilding or swapping anything. Before HDB-102 the
+   same batch paid a whole-partition rebuild and then threw it away,
+   because a zero-effect batch does not swap the snapshot. Before HDB-89
+   such a batch left `entries` empty and never called storage at all.
+   Tracked in HDB-104, whose remaining cost is now the intern/group/probe
+   pass, not a rebuild.
 2. Phase 2 (write): call `store.insert_quad_ids` once for the surviving
    entries, rebuilding each predicate partition at most once, and
    invalidate the WCOJ snapshot only if something actually became live.

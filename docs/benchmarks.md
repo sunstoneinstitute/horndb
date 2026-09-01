@@ -234,7 +234,7 @@ Honest accounting. Updated when a bench moves.
 | `crosswalk` — Fork-A best-confidence crosswalk closure ([#12](https://github.com/sunstoneinstitute/horndb/issues/12)) | `horndb-closure` | one built-in `(max,×)` closure replaces a SPARQL property-path crawl | hornbench, 2026-06-18, GTIO/SKOS-shaped layered DAG: valued closure **2.55 ms** (256 concepts) / **50.9 ms** (1,024 concepts) — **~2.3–2.6×** over boolean reachability; the end-to-end `CrosswalkGraph::best_confidence_closure` entry point (incl. extraction + ID remap) adds ≈0. | **GREEN — Fork A delivered.** Correctness pinned by `tests/crosswalk.rs`; Fork B / PreJIT deferred |
 | LDBC SPB-256 `aggregation-qps` (nightly A/B vs GraphDB Free) | `horndb-sparql` | SPEC-07 NF1 — ≤2× GraphDB Enterprise (gap-closing work now tracked under [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) | **HornDB 50.25 qps** (Zen4 hornbench, nightly 2026-08-24, commit `8a5ed81`) vs **GraphDB Free 151.96 qps** → **3.02× gap**; the same night's Oxigraph legs: 38.08 as-loaded / 38.05 optimized, so HornDB leads its closest architectural peer by **~1.32×**. Don't compare qps across hosts (Intel SPR hel01 measured 34.4 on the older code; measurement windows differ). Progression: ~13 (pre-[#128](https://github.com/sunstoneinstitute/horndb/issues/128)) → ~23 (Slice 1, id-based slot rows) → ~30.8 (Slice 2, native-slot `LeftJoin`/`OPTIONAL` hash probe — the SPB mix is `OPTIONAL`-heavy) → ~36 (SIMD known-CPU table replacing the net-harmful calibrated kernels) → ~43 on 2026-07-20 (WCOJ galloping descent + bulk leaf materialization [#237](https://github.com/sunstoneinstitute/horndb/issues/237) and SPEC-23 Phase 2 heuristic rewrites [#202](https://github.com/sunstoneinstitute/horndb/issues/202) landed together — not bisected) → ~45.7 on 07-27 (columnar SoA `VecTripleSource`, [#257](https://github.com/sunstoneinstitute/horndb/issues/257)) → **~50 since 08-14** (SPEC-28 named-graph phases 1–4; the 07-31→08-13 nightly gap means this step is not bisected). Streaming runtime + COUNT pushdown (#143/#144) were net-neutral on this mix. | **Ahead of Oxigraph, 3.02× behind GraphDB Free** — gap down from ~4.2× (2026-07-01) but still outside the ≤2× NF1 target. The levers once listed here as "remaining" (probe-side join streaming, filter-aware/multi-aggregate pushdown via SPEC-21, HTTP result streaming via SPEC-22) have all landed and did not close it. Next lever: cost-based join planning (SPEC-23 Phase 4, [#204](https://github.com/sunstoneinstitute/horndb/issues/204)) |
 | `graph_scan` — graph-scoped access paths (`crates/storage/benches/graph_scan.rs`) | `horndb-storage` | `scan_graph` cost tracks the graph, not the store (SPEC-28 S2 acceptance #4); warm footprint ≤**50 B/triple** (SPEC-02 NF1) | hornbench (16-core Debian 6.12, rustc 1.90.0, 2026-07-30, commit `abadb4b`): scanning the **same** 10-triple graph costs **1.113 µs** in a 1,000-graph / 1M-quad store and **1.145 µs** in a 2,000-graph / 2M-quad store — **+2.9% for a doubled store**, i.e. flat in store size. `graph_len` on that graph: **13.35 ns** (it sums a cached per-partition live count, so it is O(predicates in graph) with no row scan). Partition overhead at 1,000 triples/graph (5 predicates, so ~200 rows/partition): **32.08 B/quad**, identical across both corpora. | **GREEN — O(graph)-not-O(store) confirmed; 32.08 B/quad within the ≤50 B/triple NF1 budget.** Note the corpus is 1,000 triples *per graph*: this measures scan cost against graph **count**, and does **not** yet answer SPEC-28's "thousands of **small** graphs vs per-partition overhead" risk, where each graph holds a handful of triples and the ~16 B/partition constant dominates. That shape needs its own corpus ([#265](https://github.com/sunstoneinstitute/horndb/issues/265)) |
-| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0), trainmarks xlarge (9,995,000 triples), load plus a first read, at the shipped 65,536-triple batch — parse, interning and index build included. **One thread: 9.57s = 1.04 M triples/s** (2026-09-01, commit `ca4933e`, median of 5). **At the shipped parse-thread default** (`auto` → 8 on this host, HDB-96): **6.09s = 1.64 M triples/s** (commit `c9c1b34`, this branch pre-rebase, median of 3) — measured before HDB-95, so it does not carry that change; HDB-95 moved this path's *memory* rather than its time (the one-thread figure went 9.49s → 9.57s across it, inside the spread). The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it, and to **1,338 MiB** when HDB-95 dropped the datatype IRI out of the dictionary key. Cost is flat in the batch size (full curve below). | **GREEN on this corpus — F8 met at both settings (1.64 M/s threaded, 1.04 M/s on one thread).** Scope: in-memory tier, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at 0.04 M/s through `HornBackend` (HDB-91 below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
+| Bulk N-Triples import (`Store::load_ntriples_file`, `examples/load_curve.rs`) | `horndb-storage` | ≥**1 M triples/sec** (SPEC-02 F8) | hornbench (Ryzen 7 7700, Debian 6.12, rustc 1.90.0), trainmarks xlarge (9,995,000 triples), load plus a first read, at the shipped 65,536-triple batch — parse, interning and index build included. **One thread: 9.57s = 1.04 M triples/s** (2026-09-01, commit `ca4933e`, median of 5). **At the shipped parse-thread default** (`auto` → 8 on this host, HDB-96): **6.09s = 1.64 M triples/s** (commit `c9c1b34`, this branch pre-rebase, median of 3) — measured before HDB-95, so it does not carry that change; HDB-95 moved this path's *memory* rather than its time (the one-thread figure went 9.49s → 9.57s across it, inside the spread). The same corpus took **48.21s (0.21 M/s)** at `e6b6836`, immediately before HDB-84 replaced the per-batch partition rebuild with an appended run; peak RSS fell 2,205 → 1,547 MiB with it, and to **1,338 MiB** when HDB-95 dropped the datatype IRI out of the dictionary key. Cost is flat in the batch size (full curve below). | **GREEN on this corpus — F8 met at both settings (1.64 M/s threaded, 1.04 M/s on one thread).** Scope: in-memory tier, a 10M-triple synthetic e-commerce graph, **empty store**. A 10% append into that loaded store runs at 0.57 M/s on the same path, and at **0.69 M/s** through `HornBackend` since HDB-102 gave `apply_quad_batch` the append-run path (0.04 M/s when HDB-91 first measured it below). The LUBM-100 / LUBM-8000 acceptance gates (#1, #2) are separate and still unmeasured |
 | `retraction_throughput` — small-delta retraction A/B, delta-incremental vs Stage-1 recompute fallback (SPEC-24 S1, [#210](https://github.com/sunstoneinstitute/horndb/issues/210)) | `horndb-incremental` | incremental ≥**10×** recompute at N=256 (#210 acceptance) | hornbench (Ryzen 7 7700, Linux 6.12, rustc 1.90.0, 2026-07-20), warm SC-chain fixture (N `SC` edges + N `TYPE` facts, ~N² derived rows), steady-state retract/tick/re-assert/tick cycle at the interior N−4 cut: incremental **11.8 ms / 110 ms / 1.15 s** vs recompute fallback **57.8 ms / 1.21 s / 28.97 s** at N=64/128/256 → **4.9× / 11.0× / 25.1×**. Same host, `insert_throughput` (insertion-path no-regression companion, first hornbench baseline for the scaffold): insert/10 **14.1 µs**, insert/50 **2.67 ms**, insert/100 **30.3 ms**. Known crossover: a *bulk* cut (delta ≈ half the store) runs at ~0.8× recompute — the expected DBSP trade-off; the gate is small-delta by design. LUBM-scale rerun deferred until SPEC-24 S4 engine wiring gives the circuit real consumers. | **GREEN — #210 acceptance met (25.1× ≥ 10× at N=256)** |
 
 ### trainmarks (DataTreehouse) — SPEC-07 SPARQL frontend, end-to-end
@@ -716,7 +716,9 @@ either leg, and the RSS legs are 200x apart relative to their own spread.
   UPDATE, went 0.0254s -> 0.0222s. `contains_quad` replaces a hash probe with a
   binary search on the single-triple insert path, but that path already pays
   `apply_quad_batch`'s whole-partition rebuild on every triple that is actually
-  new, which is orders of magnitude larger than either lookup.
+  new, which is orders of magnitude larger than either lookup. (HDB-102 has
+  since removed that rebuild from add-only calls; the conclusion — that the
+  lookup is not what costs here — is unchanged, and the margin is smaller.)
 
 #### Parse does not parallelise, and the phase counters say where it goes
 
@@ -1083,11 +1085,14 @@ on every cell.
 | entry point | reached from | carries existing rows forward? |
 |---|---|---|
 | `insert_quad_batch` | `Store::insert_triples`, the bulk loaders (`load_ntriples_file` / `load_turtle_file`) | no — appends a run, merges on first read (`merge_runs`) |
-| `apply_quad_batch` | `Store::apply_quads` **and `Store::insert_quads`**, hence all of `HornBackend` — every SPARQL ingest, `INSERT DATA`, and the trainmarks driver | yes — `copy_forward` + a full partition rebuild per batch |
+| `apply_quad_batch` | `Store::apply_quads` **and `Store::insert_quads`**, hence all of `HornBackend` — every SPARQL ingest, `INSERT DATA`, and the trainmarks driver | yes, at the time of this measurement — `copy_forward` + a full partition rebuild per batch. **HDB-102 has since removed it** for every predicate a batch does not delete from; the rows below are the pre-HDB-102 state |
 
 `Store::insert_quads` is a thin wrapper over `apply_quads` (SPEC-28 S6), so the
 whole SPARQL side reaches the tier through `apply_quad_batch`. HDB-84's
-appended-run rewrite never touched it. Both are measured below.
+appended-run rewrite never touched it. Both are measured below. **HDB-102 has
+since closed this gap** — see "`apply_quad_batch` takes the append-run path"
+below for the current numbers; everything in this section is the state before
+it.
 
 ##### Bulk loader (`insert_quad_batch`) — `copy_forward` is gone, `merge_runs` replaced it
 
@@ -1160,7 +1165,8 @@ to add 1,002,000) and rebuilt its columns.
 
 `Store::apply_quads` on a bare `Store`, with no `HornBackend` above it, gives
 the same tier numbers (`copy_forward` 7.51s, `build` 16.14s of a 24.26s
-append), so this is the tier's cost, not the SPARQL layer's.
+append), so this is the tier's cost, not the SPARQL layer's. HDB-102 removed
+that cost: the same 16-call append is **1.446s** there now.
 
 ##### HDB-57 R7: confirmed
 
@@ -1195,7 +1201,9 @@ The correction: on the path S2 should be graded against — the bulk loader —
 `copy_forward` **is not emitted at all**, so R7's stated term is measured at
 zero there. Its role is taken by `merge_runs`, at 52–54% of the append against
 the dictionary's 9–12%. R7's conclusion survives the substitution intact, and
-on the SPARQL ingest path `copy_forward` really is still there, at 30%.
+on the SPARQL ingest path `copy_forward` really was still there, at 30% — until
+HDB-102 removed it from every add-only batch, after which that path emits none
+either.
 
 The vocabulary experiment settles a second question. Tripling the miss count
 (167,000 → 501,426 new terms) moved the append by 0.10s on the loader path and
@@ -1229,6 +1237,9 @@ number cannot repay. Add:
    more than 3% until `apply_quad_batch` stops carrying the partition forward
    per batch (HDB-102). That is a tier task, not an S2 task, and it gates
    whether S2's load-path argument is worth making on that path at all.
+   **HDB-102 has since done it** — the 16-call append is 1.446s, and `intern`
+   is now 0.223s of it, ~15%. The S2 argument is worth making on this path now;
+   re-derive the share against the new denominator before quoting the 3%.
 
 ##### What this does not settle
 
@@ -1330,8 +1341,9 @@ shipped batch size) — the HDB-91 / HDB-102 path:
 
 `copy_forward` −68% / −72%: that is the `still_visible` `HashSet` disappearing.
 The 16-call append — the case HDB-91 measured at "twice what loading the whole
-base costs" — drops **−34%**. It is still the per-batch partition rebuild
-(HDB-102), just a third cheaper.
+base costs" — drops **−34%**. It is still the per-batch partition rebuild, just
+a third cheaper; HDB-102 removed the rebuild itself, taking the same append to
+1.446s.
 
 `merge` rises from 0.017s to 0.072s on the 16-call append. That is the merge
 cursor scanning `still_visible` once per predicate per batch instead of hashing
@@ -1411,6 +1423,126 @@ D=target/trainmarks/data
 # the threshold sweep
 HORNDB_HOT_THRESHOLD=off ./target/release/incremental_load \
     --base $D/xlarge.ttl --append $D/medium.nt --path insert --batch 0
+```
+
+#### `apply_quad_batch` takes the append-run path (HDB-102, 2026-09-01)
+
+HDB-84 stopped `insert_quad_batch` rebuilding a partition per batch. HDB-91 then
+measured what that left behind: `Tier::apply_quad_batch` — the entry point every
+SPARQL-side write reaches, since `Store::insert_quads` wraps `Store::apply_quads`
+(SPEC-28 S6) — still carried every existing row forward and re-materialised the
+whole partition on every call. HDB-88 made that rebuild ~a third cheaper without
+changing its shape. This removes it, for the case where it is removable.
+
+`apply_quad_batch` now chooses **per predicate**:
+
+- **no deletion targets this predicate** → append-run path. The pairs that are
+  not already live become one extra sorted run; nothing already stored is read,
+  copied, or re-sorted, and the merge happens on the first read. Covers every
+  add-only batch, and the add-only predicates of a mixed batch.
+- **this predicate has deletion targets** → the pre-existing rebuild. A delete
+  end-stamps a row inside an immutable run that pinned readers share by `Arc`,
+  so it cannot be written in place. Left as it was (see "What this does not
+  settle").
+
+`ApplyReport::inserted` stays exact — `Store::insert_quads` returns it and
+`INSERT DATA` idempotency is decided by it — so the append path still tests each
+added pair against what is live, through `PredicatePartition::mark_live`: one
+galloping search per *unmerged run*, never a `cols()` call. Going through the
+merged view would force the whole-partition merge on every write and hand the
+O(existing) cost straight back.
+
+`hornbench` (Ryzen 7 7700, 16 threads, Debian 6.12, rustc 1.90.0), snmalloc,
+`HORNDB_LOAD_THREADS` at the shipped `auto` (8 here). Base: trainmarks
+`xlarge.nt`, 9,995,000 triples, brought to a fully-merged state first. Append:
+`append_overlap.nt`, 1,002,000 triples. Before `58c4ab4` (HDB-96, which carries
+HDB-88), after `bced5e4`. Driver `incremental_load`; three interleaved reps per
+cell, median reported, run-to-run spread under 1% on every cell except
+`main`/`apply`/one-call (7%).
+
+##### The 16-call append, `--path insert` (`HornBackend` → `apply_quad_batch`)
+
+1,002,000 triples in 16 calls of 65,536 (15 full chunks plus an 18,960
+remainder), into the loaded 9,995,000-triple store:
+
+| phase | before | rows before | after | rows after |
+|---|---|---|---|---|
+| `build` | 13.364s | 138,786,320 | **0.019s** | 1,002,000 |
+| `copy_forward` | 1.720s | 137,784,320 | **not emitted** | 0 |
+| `merge_runs` | not emitted | 0 | **0.930s** | 9,122,000 |
+| `dedupe` | 0.390s | 1,002,000 | 0.344s | 1,002,000 |
+| `group` | 0.021s | 1,002,000 | 0.021s | 1,002,000 |
+| `merge` | 0.073s | 1,002,000 | **0.004s** | 1,002,000 |
+| **append wall** | **15.830s** | | **1.446s** | |
+
+**−90.9%.** The 137,784,320 rows the 16 calls used to carry forward are gone;
+what is left is the same 9,122,000-row `merge_runs` the bulk-loader path has
+paid since HDB-84 — six touched partitions, merged once, on the first read.
+
+##### Chunked now costs what one call costs
+
+The stated goal was for the 16-call append to land within noise of its one-call
+cost. Append wall, both paths, both chunkings:
+
+| entry point | chunking | before | after |
+|---|---|---|---|
+| `insert` (`HornBackend`) | 16 × 65,536 | 15.830s | **1.446s** |
+| `insert` (`HornBackend`) | one call | 1.398s | **1.354s** |
+| `apply` (bare `Store`) | 16 × 65,536 | 15.641s | **1.258s** |
+| `apply` (bare `Store`) | one call | 1.371s | **1.270s** |
+
+On the bare `Store` the two chunkings are now indistinguishable (1.258s vs
+1.270s, inside the spread). Through `HornBackend` the 16-call run is 6.8%
+above its one-call run; that gap is not the tier — the tier phases are within
+0.005s of each other — it is 16 × the per-call `HornBackend` overhead, and it
+shows up as the 0.128s unaccounted residual.
+
+Throughput on the SPARQL ingest path goes from **0.063 M triples/s to 0.69 M
+triples/s** for a 10% append into a 10M store. HDB-91's 0.04 M/s figure for the
+same case was measured before HDB-88.
+
+Note also the *one-call* before column: 1.398s of which `build` was 0.869s over
+9,122,000 rows. Even one call rebuilt the whole partition. After, that same work
+is 0.923s of `merge_runs` — the cost did not vanish there, it moved to the first
+read, which is where the bulk loader has had it since HDB-84.
+
+##### What this does not settle
+
+- **The probe's cost is data-dependent, and this corpus is its best case.**
+  Every appended subject in trainmarks is a freshly-interned order IRI, so its
+  dictionary id sorts above everything in the base: the first gallop into the
+  base run runs off the end and every later target short-circuits. That is why
+  `merge` reads 0.004s. A workload adding new objects to *existing* subjects
+  interleaves instead, and each target then costs a real `log(rows/adds)`
+  gallop plus a binary search — analytically a few hundred million probes for
+  this shape, order 0.3s, still an order of magnitude under the 15.8s it
+  replaces, but it was not measured. Galloping is bounded by the linear merge it
+  degenerates to, so it can never be worse than a single pass over the run.
+- **Batches that delete are unchanged.** A predicate with any deletion target
+  still pays `copy_forward` + a whole-partition `build`. Making it cheaper means
+  giving `Columns` a versioned per-row `end` column so a stamp can be written
+  without rewriting the run — a redesign of the MVCC row representation, out of
+  this task's scope. Nothing here forecloses it. `DELETE DATA`, `CLEAR`/`DROP`
+  and `DELETE … INSERT … WHERE` are the affected shapes; none was measured.
+- **`merge_runs` is now the whole story on this path**, at 64% of the append,
+  and it is O(partition) per partition version — so the append/base ratio and
+  the base size both move it, and neither curve was measured. It is one bracket
+  over three jobs (merge sort, column materialisation, object-major sort above
+  `hot_threshold`), as HDB-91 already noted.
+- **One corpus, one append ratio, one vocabulary flavour** (`overlap`). The
+  `fresh` flavour was not re-run; HDB-91 measured the two within 1% of each
+  other on this path and nothing here touches interning.
+
+##### Reproducing
+
+```bash
+cargo build --release -p horndb-bench-trainmarks --bin incremental_load
+python3 scripts/bench/trainmarks/generate_data.py          # base corpora
+python3 scripts/bench/trainmarks/generate_append.py --mode overlap \
+    --triples 1002000 --out data/append_overlap.nt
+# 16 calls; --batch 0 for the one-call cell, --path apply for the bare Store
+./target/release/incremental_load --base data/xlarge.nt \
+    --append data/append_overlap.nt --path insert --batch 65536
 ```
 
 #### Which structure backs the mapped dictionary base (HDB-93, 2026-09-01)

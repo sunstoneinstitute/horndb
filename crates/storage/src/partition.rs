@@ -510,6 +510,10 @@ impl PredicatePartition {
     /// The run list is cloned (`Arc` clones) rather than held under the lock:
     /// a concurrent first read holds that lock for its whole merge, and either
     /// view answers this question identically.
+    ///
+    /// Cost scales with the run count as well as the target count, since every
+    /// run is probed. [`MAX_RUNS`] bounds that, and the first read collapses
+    /// the runs back to one.
     pub(crate) fn mark_live(&self, targets: &[(u64, u64)], live: &mut [bool]) {
         debug_assert_eq!(targets.len(), live.len());
         let runs: Vec<Arc<Columns>> = self.runs.lock().clone();
