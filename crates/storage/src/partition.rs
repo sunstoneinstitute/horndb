@@ -516,6 +516,10 @@ impl PredicatePartition {
     /// the runs back to one.
     pub(crate) fn mark_live(&self, targets: &[(u64, u64)], live: &mut [bool]) {
         debug_assert_eq!(targets.len(), live.len());
+        // The ascending order is the real precondition: every run is probed
+        // with a cursor that only moves forward, so an out-of-order target
+        // would be searched for in the wrong suffix and could read as absent.
+        debug_assert!(targets.is_sorted(), "mark_live needs sorted targets");
         let runs: Vec<Arc<Columns>> = self.runs.lock().clone();
         for run in &runs {
             run.mark_live(targets, live);

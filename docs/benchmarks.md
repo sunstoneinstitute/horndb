@@ -1237,9 +1237,15 @@ number cannot repay. Add:
    more than 3% until `apply_quad_batch` stops carrying the partition forward
    per batch (HDB-102). That is a tier task, not an S2 task, and it gates
    whether S2's load-path argument is worth making on that path at all.
-   **HDB-102 has since done it** — the 16-call append is 1.446s, and `intern`
-   is now 0.223s of it, ~15%. The S2 argument is worth making on this path now;
-   re-derive the share against the new denominator before quoting the 3%.
+   **HDB-102 has since done it** — the 16-call append is 1.446s through
+   `HornBackend`. The 3% no longer holds against that denominator, so re-derive
+   the share before quoting it. Watch which phase carries the dictionary on
+   which path: `HornBackend` reaches the tier through `Store::insert_quad_ids`,
+   so `LoadPhase::Intern` is zero there (HDB-87) and the dictionary work sits
+   inside `dedupe` — 0.344s of 1.446s, an **upper bound** of 24%, or ~11%
+   applying HDB-90's measured 46.7% interning split to `dedupe`. Only the
+   term-based bare-`Store` path (`--path apply`) emits `intern`, at 0.223s of a
+   1.258s append, **18%**.
 
 ##### What this does not settle
 
@@ -1532,6 +1538,20 @@ read, which is where the bulk loader has had it since HDB-84.
 - **One corpus, one append ratio, one vocabulary flavour** (`overlap`). The
   `fresh` flavour was not re-run; HDB-91 measured the two within 1% of each
   other on this path and nothing here touches interning.
+- **The single-triple insert path gets no benefit, and was not measured.**
+  `HornBackend::insert_oxrdf_in_graph` — the shape HTTP `INSERT DATA` takes,
+  one triple at a time — short-circuits on `StoreSnapshot::contains_quad`,
+  which goes through `PredicatePartition::cols` and therefore **merges the
+  runs before every insert**. Runs never accumulate there, so the deferred
+  merge is paid by the very next insert instead of by a later reader: the same
+  work, moved from the writer's `build` to `merge_runs` one call later. It is
+  not cheaper, and it is not obviously dearer either — both the old rebuild and
+  the new run merge hand `Columns::sort_dedup` the same row order (existing
+  rows in SPO order, then the new one), so the already-sorted skip fires or
+  fails identically, and both materialise one transient `Vec<Row>` of the whole
+  partition. This is reasoning, not measurement: the path was timed neither
+  before nor after. It is a known Stage-1 limit either way — single-triple
+  insert into a columnar partition is the wrong shape, batch it.
 
 ##### Reproducing
 

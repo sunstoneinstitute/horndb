@@ -91,7 +91,24 @@ fn live_quads(tier: &MemoryTier) -> BTreeSet<Quad> {
 /// One randomized run. `graphs`/`preds`/`terms` bound the key space — small
 /// values make collisions (and so the interesting duplicate/resurrect cases)
 /// common.
-fn run_differential(seed: u64, rounds: usize, graphs: u64, preds: u64, terms: u64) {
+///
+/// `read_every` is what makes this test able to see the append-run path at
+/// all. Reading the live set (or `triple_count`) goes through
+/// `PredicatePartition::cols`, which **merges the partition's runs down to
+/// one**. Checking after every batch therefore hands every later batch a
+/// single-run partition, and `mark_live` is never asked a question that needs
+/// more than one run — a probe that ignored every run but the last would still
+/// pass. Reading only every `read_every`-th round lets that many unmerged runs
+/// pile up first. The count and version assertions stay on every round: they
+/// read no columns, so they force no merge.
+fn run_differential(
+    seed: u64,
+    rounds: usize,
+    graphs: u64,
+    preds: u64,
+    terms: u64,
+    read_every: usize,
+) {
     let mut rng = Rng(seed);
     let tier = MemoryTier::new();
     let mut model: BTreeSet<Quad> = BTreeSet::new();
@@ -178,6 +195,12 @@ fn run_differential(seed: u64, rounds: usize, graphs: u64, preds: u64, terms: u6
         );
 
         model = want_model;
+
+        // Both checks below read columns, so both collapse the runs. Skip them
+        // on most rounds so the runs accumulate; always check the last round.
+        if round % read_every != 0 && round + 1 != rounds {
+            continue;
+        }
         assert_eq!(
             live_quads(&tier),
             model,
@@ -194,9 +217,10 @@ fn run_differential(seed: u64, rounds: usize, graphs: u64, preds: u64, terms: u6
 #[test]
 fn mixed_batches_match_a_reference_model() {
     // Dense key space: heavy collision, so resurrect / idempotent-insert /
-    // absent-delete all fire constantly.
+    // absent-delete all fire constantly. `read_every = 1` keeps every
+    // partition merged, which is the single-run baseline.
     for seed in [1u64, 2, 3, 5, 8, 13] {
-        run_differential(seed, 120, 3, 3, 12);
+        run_differential(seed, 120, 3, 3, 12, 1);
     }
 }
 
@@ -205,8 +229,26 @@ fn sparse_batches_match_a_reference_model() {
     // Sparse key space: most adds are genuinely new, most deletes miss, and
     // partitions accumulate runs the way an append workload does.
     for seed in [21u64, 34, 55] {
-        run_differential(seed, 120, 2, 6, 4000);
+        run_differential(seed, 120, 2, 6, 4000, 1);
     }
+}
+
+/// The same model check with the reads pulled out, so partitions carry many
+/// unmerged runs while the batches are applied. This is what covers
+/// `PredicatePartition::mark_live` across runs at the tier level: with
+/// `read_every = 1` above, every probe sees a freshly merged single-run
+/// partition and a probe that consulted only one run would still pass.
+#[test]
+fn batches_against_multi_run_partitions_match_a_reference_model() {
+    for seed in [1u64, 2, 3, 5, 8, 13] {
+        run_differential(seed, 120, 3, 3, 12, 25);
+    }
+    for seed in [21u64, 34, 55] {
+        run_differential(seed, 120, 2, 6, 4000, 25);
+    }
+    // No read at all until the final round: the deepest run stack this test
+    // builds. Every add-only batch in it appends another unmerged run.
+    run_differential(89, 60, 1, 2, 300, usize::MAX);
 }
 
 /// The path this task exists for: repeated add-only batches into one growing
@@ -243,7 +285,11 @@ fn repeated_add_only_batches_match_a_reference_model() {
         inserted_total += report.inserted;
 
         model.extend(add_set);
-        assert_eq!(live_quads(&tier), model, "round {round}: live set diverged");
+        // Read every eighth round only, so the partition carries several
+        // unmerged runs when the next batch probes it (see `run_differential`).
+        if round % 8 == 0 || round == 39 {
+            assert_eq!(live_quads(&tier), model, "round {round}: live set diverged");
+        }
     }
     assert_eq!(model.len(), inserted_total, "every insert was counted once");
 }

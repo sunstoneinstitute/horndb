@@ -696,9 +696,12 @@ impl HornBackend {
             .intern_quad(g, s, p, o)
             .map_err(|e| SparqlError::Executor(format!("intern: {e}")))?;
         // SPARQL INSERT DATA is idempotent on an already-live triple. The
-        // storage insert below would report that correctly on its own, but it
-        // rebuilds the whole predicate partition to find out; this point read
-        // is O(log rows) and keeps a repeated insert cheap.
+        // storage insert below reports that correctly on its own; this point
+        // read is O(log rows) and keeps a repeated insert off the tier
+        // entirely. Since HDB-102 the call it skips no longer rebuilds the
+        // partition to reach the same answer — it probes the partition's runs
+        // and appends nothing — so what this saves is smaller than it was,
+        // but a read is still cheaper than a write.
         if self
             .store
             .snapshot()

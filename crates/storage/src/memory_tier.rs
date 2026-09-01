@@ -630,7 +630,10 @@ impl Tier for MemoryTier {
                     // adds to. Only predicates the batch actually deletes from
                     // fall through to the rebuild below.
                     let Some(targets) = add_targets else {
-                        continue; // unreachable: guarded above
+                        // Unreachable: `touched_preds` is the union of the del
+                        // and add key sets, so a predicate with no del targets
+                        // is in it only because it has add targets.
+                        continue;
                     };
 
                     // `inserted` must stay exact — `Store::insert_quads`
