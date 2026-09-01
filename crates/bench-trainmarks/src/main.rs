@@ -306,27 +306,34 @@ fn dump_load_phases(label: &str) {
     }
 }
 
-/// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) so a
-/// trainmarks run reports which operator inside `exec` a query actually
-/// spent its time in. Only meaningful with `HORNDB_EXEC_PHASES=1` set; a
-/// silent no-op otherwise (the counters are simply never touched).
+/// Print the cumulative `sparql_exec_phase_*` counters (HDB-99) and the
+/// `wcoj_*` per-query counters so a trainmarks run reports which operator
+/// inside `exec` a query spent its time in, and how many leapfrog seeks the
+/// join needed to get there. The exec-phase counters only move with
+/// `HORNDB_EXEC_PHASES=1` set; the `wcoj_*` ones are always live.
 ///
 /// Counters are cumulative across the process, like `dump_load_phases` —
 /// but unlike that helper (called exactly twice, nothing else running in
-/// between), a read loop calls this once per query, so a *query's own*
-/// share is only the diff between its own `"{qname}_pre"` (called
-/// immediately before its cold run) and `"{qname}_cold"` (immediately
-/// after) dumps — see the call sites in the read-query loop. Diffing across
-/// loop iterations instead (e.g. `"q3_cold"` minus `"q2_cold"`) also counts
-/// every warm re-run of the *previous* query that happened in between, which
-/// is large enough to be misleading: it made a HDB-99 measurement pass
-/// briefly show `GROUP BY` phase activity for q3, a query with no `GROUP BY`
-/// at all, borrowed from q2's warm runs.
+/// between), a read loop calls this four times per query, so a *single run's*
+/// share is only the diff between an adjacent pair of that query's own dumps:
+/// `"{qname}_pre"` → `"{qname}_cold"` for the cold run, and
+/// `"{qname}_warm_pre"` → `"{qname}_warm"` for the last of the three warm
+/// runs. Diffing any other pair (e.g. `"q3_cold"` minus `"q2_cold"`, or
+/// `"q3_cold"` minus `"q3_pre"` against a warm figure) folds in unrelated
+/// work: it made a HDB-99 measurement pass briefly show `GROUP BY` phase
+/// activity for q3, a query with no `GROUP BY` at all, borrowed from q2's
+/// warm runs.
+///
+/// Cold and warm splits differ substantially and are not interchangeable.
+/// A cold run also carries the first-use build of whatever WCOJ trie
+/// ordering the query needs (HDB-97/98), which lands in `residual`: q3 at
+/// xlarge is 66% `scan_wcoj` cold but 95% warm (HDB-108). Quote the warm
+/// pair against a warm wall-clock number, the cold pair against a cold one.
 fn dump_exec_phases(label: &str) {
     let encoded = horndb_metrics::encode_metrics();
     eprintln!("  [exec-phases after {label}]");
     for line in encoded.lines() {
-        if line.starts_with("horndb_sparql_exec_phase") {
+        if line.starts_with("horndb_sparql_exec_phase") || line.starts_with("horndb_wcoj_") {
             eprintln!("    {line}");
         }
     }
@@ -468,10 +475,15 @@ fn main() -> Result<()> {
         }
         dump_exec_phases(&format!("{qname}_cold"));
 
-        // Best of 3 warm runs.
+        // Best of 3 warm runs. The last one is bracketed by its own dump
+        // pair so a warm phase split can be read off without the cold run's
+        // one-off ordering build folded in — see `dump_exec_phases`.
         let mut best = f64::INFINITY;
         let mut timed_out = false;
-        for _ in 0..3 {
+        for i in 0..3 {
+            if i == 2 {
+                dump_exec_phases(&format!("{qname}_warm_pre"));
+            }
             match run_read_timed(&backend, &sql, timeout) {
                 Some(Ok(secs)) => best = best.min(secs),
                 Some(Err(_)) => {}
@@ -481,6 +493,7 @@ fn main() -> Result<()> {
                 }
             }
         }
+        dump_exec_phases(&format!("{qname}_warm"));
         if timed_out {
             eprintln!("    {qname}: TIMEOUT on warm run (>{}s)", timeout.as_secs());
             results.record(&format!("query_{qname}"), Value::String("TIMEOUT".into()));
