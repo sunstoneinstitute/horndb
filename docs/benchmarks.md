@@ -1710,6 +1710,12 @@ which now reports both keyings from a single pass. Re-keying is injective, so
 the distinct-term count is identical on both sides by construction — the tables
 below compare the *same* term sets.
 
+The analyzer was later corrected to classify an explicit `"x"^^xsd:string` as a
+plain literal, the way `kind_of` does (the engine's key carries no datatype for
+it). Re-running all three corpora reproduced every figure below **byte for
+byte** — none of them contains that shape — so the numbers stand and the tool is
+now right for corpora that do.
+
 **Typed-literal column, bytes per key.** Distinct-weighted is what the
 dictionary stores; occurrence-weighted is what it hashes and compares.
 
