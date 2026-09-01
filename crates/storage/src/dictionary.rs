@@ -213,8 +213,12 @@ enum AuxMode {
 /// run, exactly like `HORNDB_EXEC_PHASES=1`.
 ///
 /// The accumulator is thread-local and merged into the process counters by
-/// [`flush_intern_phases`], which the bulk loaders and `Store::apply_quads`
-/// call once at the end of a load — never per term.
+/// [`flush_intern_phases`], once at the end of a load — never per term.
+/// **The bulk loaders (`QuadSink::finish`) are its only caller**, so the split
+/// covers the storage bulk-load path and nothing else: interning done through
+/// `Store::apply_quads` or `HornBackend`'s dedupe loop accumulates on those
+/// threads and is simply never published. Those paths have their own phases
+/// (`intern`, `dedupe`); extending the split to them is a separate change.
 mod intern_phases {
     use horndb_metrics::labels::LoadPhase;
     use std::cell::RefCell;
@@ -285,6 +289,10 @@ mod intern_phases {
 /// Publish this thread's [`intern_phases`] accumulator to the process
 /// counters. Called once at the end of a load, never per term; a no-op unless
 /// `HORNDB_INTERN_PHASES=1`.
+///
+/// Called from `QuadSink::finish` only. A thread that interns without going
+/// through a bulk loader accumulates sub-phase time that nothing publishes —
+/// see [`intern_phases`].
 pub fn flush_intern_phases() {
     intern_phases::flush();
 }

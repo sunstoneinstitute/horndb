@@ -90,6 +90,14 @@ where
 /// [`nquads::load_nquads_slice`]. Doing it here keeps the per-quad
 /// (graph, subject, predicate, object) order both paths share, which is what
 /// `tests/parallel_loader.rs::assert_same_store` pins.
+///
+/// **Note the buffer this introduces on the streaming path (HDB-106):** up to
+/// 8,192 parsed rows — owned `Term`s, moved not cloned — are held before each
+/// intern batch, where the pre-HDB-106 loop interned each row as the parser
+/// produced it. It is bounded and small (a fraction of the 1 MiB `BufReader`
+/// this path already carries), and it exists for one reason only: it is the
+/// granularity the `intern` phase is clocked at. It buys no parse overlap and
+/// is not a document buffer.
 pub(crate) fn load_quads_in_graphs<I, G, R>(
     store: &Store,
     items: I,
@@ -293,8 +301,12 @@ impl<'a> QuadSink<'a> {
         let t = Instant::now();
         let out = self.store.tier().insert_quad_batch(&self.batch);
         self.flush_ns += t.elapsed().as_nanos() as u64;
+        // Clear only on success. A failed insert leaves the batch that failed
+        // in place rather than discarding it, which is what the `?` this
+        // replaced did.
+        out?;
         self.batch.clear();
-        out
+        Ok(())
     }
 
     pub(crate) fn finish(mut self) -> Result<LoadStats> {

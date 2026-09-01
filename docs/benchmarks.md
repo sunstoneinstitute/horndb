@@ -2856,6 +2856,11 @@ anything else unmetered. This makes it a counter, splits it far enough to say
 where the time goes, and moves the part of it that does not have to be serial
 onto the parse threads.
 
+**Read the thread sweep below before quoting a single number.** The move pays
+where the parse threads have idle capacity to absorb it — −9.0% / −7.9% at the
+shipped 8 threads, −4.9% / −5.2% at 4 — and **costs 4–5% at 2 threads**, where
+they do not.
+
 `hornbench` (Ryzen 7 7700, 8 cores / 16 threads, 124 GB, Debian 6.12, rustc
 1.90.0), snmalloc, trainmarks xlarge (9,995,000 triples) into a fresh in-memory
 `Store` plus a first read, driver
@@ -2863,20 +2868,75 @@ onto the parse threads.
 3 runs, reps interleaved base/new so host drift spreads over the table. Host
 quiet (load average 0.36 at start).
 
+At the shipped default (`auto` -> 8 on this host):
+
 | corpus | threads | wall base | wall new | Δ | `intern` base (residue) | `intern` new (counter) | `parse` base | `parse` new | peak RSS base | peak RSS new |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `xlarge.ttl` | **8 (shipped)** | 5.583s | **5.079s** | **−9.0%** | 3.002s | **2.136s** | 0.880s | 1.299s | 3,551 MiB | 3,536 MiB |
 | `xlarge.nt` | **8 (shipped)** | 4.888s | **4.500s** | **−7.9%** | 2.849s | **2.082s** | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
-| `xlarge.ttl` | 1 | 12.527s | 12.598s | +0.6% | 2.685s | 2.761s | 0.880s | — | 1,924 MiB | 1,923 MiB |
-| `xlarge.nt` | 1 | 10.027s | 9.651s | −3.7% | 2.641s | 2.694s | — | — | 2,684 MiB | 2,685 MiB |
 
 Run spread is under 1.0% on every cell. **Peak RSS is flat** (−0.4% to +0.9%),
-which was not free — see "what the probe costs" below.
+which was not free — see "what the probe costs" below. **This is not the whole
+picture**: at 2 threads the change is a 4–5% *loss*. Full sweep and the reason
+in the next subsection — read it before quoting the −9%.
 
 The residue is gone: on the new build `store_load`'s "uninstrumented residue"
 row reads **0.001s** on a 5-second load. `intern` plus `parse` plus the tier
 phases now account for 99.99% of the wall clock, so the phase table is a
 decomposition rather than a decomposition-plus-a-remainder.
+
+##### The thread sweep: the win reverses at 2 threads
+
+`HORNDB_LOAD_THREADS=auto` resolves to `min(available_parallelism(), 8)`, so 2
+and 4 threads are shipped configurations on a smaller host or a
+CPU-limited container, not hypotheticals. Same protocol as the table above
+(median of 3 interleaved reps, base `60b300a` vs `f938959`, host load average
+0.10 at start):
+
+| corpus | threads | wall base | wall new | Δ | `intern` base | `intern` new | `parse` base | `parse` new | RSS base | RSS new |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `xlarge.ttl` | 1 | 12.527s | 12.598s | +0.6% | 2.685s | 2.761s | 8.170s | 8.178s | 1,924 MiB | 1,923 MiB |
+| `xlarge.ttl` | **2** | 7.472s | 7.780s | **+4.1%** | 3.035s | 1.794s | 2.758s | 4.323s | 2,935 MiB | 2,775 MiB |
+| `xlarge.ttl` | 4 | 6.221s | 5.914s | −4.9% | 2.958s | 1.933s | 1.622s | 2.371s | 3,344 MiB | 3,232 MiB |
+| `xlarge.ttl` | **8 (shipped)** | 5.583s | 5.079s | **−9.0%** | 3.002s | 2.136s | 0.880s | 1.299s | 3,551 MiB | 3,536 MiB |
+| `xlarge.nt` | 1 | 10.027s | 9.651s | −3.7% | 2.641s | 2.694s | 5.693s | 5.292s | 2,684 MiB | 2,685 MiB |
+| `xlarge.nt` | **2** | 5.784s | 6.097s | **+5.4%** | 2.937s | 1.739s | 1.202s | 2.714s | 3,735 MiB | 3,508 MiB |
+| `xlarge.nt` | 4 | 5.351s | 5.074s | −5.2% | 2.909s | 1.916s | 0.826s | 1.506s | 4,111 MiB | 3,976 MiB |
+| `xlarge.nt` | **8 (shipped)** | 4.888s | 4.500s | **−7.9%** | 2.849s | 2.082s | 0.368s | 0.775s | 4,280 MiB | 4,317 MiB |
+
+**At 2 threads the probe is a 4–5% loss**, on both formats, well outside the
+under-1% run spread. The mechanism is not subtle and the `intern` column rules
+out the obvious wrong explanation — the probe *works better* at 2 threads
+(`intern` falls to 1.79s, its best figure at any thread count, because two slow
+producers cannot run as far ahead of the consumer as eight fast ones, so the
+probe sees a warmer dictionary). It loses anyway:
+
+* The probe is ~1.5s of single-threaded work, and it lands **on the parse
+  threads**. At 2 threads that is ~0.75s added to each.
+* At 2 threads the parse is already close to the critical path (`parse` is 2.76s
+  of a 7.47s Turtle load). Adding to it adds to the wall clock roughly
+  one-for-one, while the `intern` saving comes off the consumer, which is not
+  the constraint there.
+* By 4 threads the parse has enough headroom that the trade turns positive, and
+  by 8 it is the ~8% win the shipped default gets.
+
+`parse` grows faster than `intern` shrinks at every thread count — Turtle at 8
+threads, `intern` −0.866s against `parse` +0.419s; at 2 threads, −1.241s against
++1.565s. The win at 4 and 8 threads is not that the probe is cheap, it is that
+the parse threads have idle capacity to absorb it. Where they do not, it costs.
+
+**Peak RSS goes the other way**: −3% to −6% at 2 and 4 threads, flat at 8. Higher
+probe resolution means more terms dropped on the parse thread, so the loaded
+corpus spends less time duplicated between the buffer and the dictionary.
+
+**Nothing was tuned in response to this**, deliberately. The obvious lever —
+gate the probe on the chunk count, or on some estimate of whether the parse is
+the critical path — is a policy decision that wants its own evidence (which
+thread counts, measured on what corpus mix, and what a wrong guess costs),
+not a threshold picked to make this table look better. What is recorded here is
+the shape: **the probe pays from 4 threads up, and costs 4–5% at 2.** The
+shipped default is `auto` capped at 8, so a host with 4 or more hardware threads
+gets the win and a 2-core host or container takes the loss.
 
 ##### Where the time in `intern` actually goes
 
