@@ -1849,6 +1849,81 @@ python3 scripts/bench/trainmarks/generate_append.py --mode overlap \
     --append data/append_overlap.nt --path insert --batch 65536
 ```
 
+#### Retiring `intra_batch` drops `dedupe` further than HDB-90 predicted (HDB-104, 2026-09-01)
+
+HDB-104 removed `intra_batch`, the `HashSet<QuadKey>` `insert_oxrdf_batch_in_graph`
+used to drop within-batch duplicate triples before handing them to storage.
+`Tier::apply_quad_batch` already groups the add side per predicate and sorts +
+dedups it (HDB-88) before deciding what is genuinely new, so `intra_batch` was
+redundant, not just slow — confirmed with a test asserting `inserted == 1` for a
+batch carrying the same quad twice, `intra_batch` gone (trainmarks has no actual
+duplicate triples, so this run's row counts are identical before/after; only the
+removed check's cost is being measured).
+
+Controlled A/B on `hornbench` (16 cores), trainmarks xlarge (9,995,000 triples),
+release + snmalloc, `--load-only --reserve-triples 10000000`, serial parse
+(`HORNDB_LOAD_THREADS=1`). Before `3ff979f` (current `main`, includes HDB-102),
+after `1704c39`. Three runs of each, interleaved before/after, median reported.
+Host confirmed quiet throughout (load average 0.00-0.74, rising only from the
+two `cargo build`s run between legs, never above 1).
+
+| | before (ttl) | after (ttl) | before (nt) | after (nt) |
+|---|---|---|---|---|
+| **read_turtle / read_ntriples** | **15.627s** | **13.217s** (**-15.4%**) | **12.720s** | **10.263s** (**-19.3%**) |
+| `parse` | 9.069s | 8.988s | 6.367s | 5.806s |
+| ` ` of which `materialize` | 0.530s | 0.523s | 0.503s | 0.501s |
+| `dedupe` | 5.061s | **2.824s** (**-44.2%**) | 4.869s | **2.706s** (**-44.4%**) |
+| `group` | 0.260s | 0.270s | 0.247s | 0.255s |
+| `build` | 0.944s | 0.904s | 0.926s | 0.910s |
+| `merge` | 0.166s | 0.096s | 0.147s | 0.142s |
+| `copy_forward` / `invalidate` | ~0 | ~0 | ~0 | ~0 |
+| **accounted** | 15.500s | 13.082s | 12.556s | 9.819s |
+
+Run spread: read_turtle 15.579 / 15.627 / 15.664 before, 13.211 / 13.217 /
+13.364 after; read_ntriples 12.718 / 12.720 / 12.823 before, 10.239 / 10.263 /
+10.296 after. Neither distribution overlaps.
+
+- **`dedupe` drops 2.24s (ttl) / 2.16s (nt), well past the 1.4s HDB-90
+  estimated.** That estimate (see "Inside `dedupe`" above) predates the
+  snmalloc allocator swap (#293) by its own caveat. `intra_batch` grows a
+  10M-entry `hashbrown` table from `HashSet::new()` — no `with_capacity` — so
+  most of its cost is allocation and rehashing across ~24 doublings, exactly
+  the pattern snmalloc and glibc malloc are known to price differently. This
+  run, on the allocator actually in production, is the number to trust over
+  the older instrumented split.
+- **`merge` and `build` also fall, though this change touches neither.**
+  `intra_batch` lives in the calling function's own scope, not the inner
+  block that builds it, so its ~10M-entry table is still resident in memory
+  during the `store.insert_quad_ids` call that runs `group`/`merge`/`build` —
+  competing for cache and TLB entries with that work. Retiring it frees that
+  memory before the storage call starts, which plausibly explains `merge`'s
+  -42% (ttl) and `build`'s -4% (ttl): a secondary effect riding on `dedupe`'s.
+- **`parse`'s nt-leg drop (-8.8%) is measurement noise, not a real effect** —
+  the same artifact HDB-87 saw. The slice loader's `parse` phase is wall clock
+  *minus* the time the same thread spent interning and inserting, so a faster
+  `dedupe` shifts how much of the wall clock lands on `parse`'s side of that
+  subtraction, with nothing in the parser itself touched. The ttl leg's
+  `parse` does not move (-0.9%, inside run-to-run spread), which is the
+  reading consistent with credit-attribution noise rather than a real change.
+- **No phase regressed.** `group`'s +0.01s (both legs) is inside the ~1%
+  spread every other unmoved phase in this table shows.
+- **The nt leg's unaccounted residual (wall minus the phase sum above) grows
+  from 0.164s to 0.444s.** The ttl leg's residual does not move (0.127s vs
+  0.135s). Both driver backends are alive simultaneously during the nt leg
+  (the Turtle backend is kept, not dropped, across the N-Triples load — see
+  HDB-89), so this is plausibly memory-pressure noise from that second,
+  larger structure rather than anything HDB-104 added; nothing in this change
+  touches code that runs after the phases already accounted for.
+
+##### Reproducing
+
+```bash
+cargo build --release -p horndb-bench-trainmarks --bin bench-trainmarks
+HORNDB_LOAD_THREADS=1 ./target/release/bench-trainmarks \
+    --data-dir data --queries-dir queries --scale xlarge \
+    --out /tmp/out.json --load-only --reserve-triples 10000000
+```
+
 #### Which structure backs the mapped dictionary base (HDB-93, 2026-09-01)
 
 SPEC-25 §S2 leaves the base structure "settled by the implementation plan with
