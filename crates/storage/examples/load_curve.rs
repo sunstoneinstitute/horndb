@@ -53,9 +53,14 @@ fn main() {
         // Forces every partition to merge its runs.
         let triples = store.triple_count();
         let ready = t.elapsed().as_secs_f64();
+        // Measured after the clock stops: the forward map's key bytes, which
+        // HDB-95 shrank by substituting a dense id for each datatype IRI.
+        let (key_bytes, keys) = store.dictionary().key_bytes();
         println!(
-            "run {i}: load {load:.3}s  ready {ready:.3}s  ({triples} triples, {} parsed)",
-            stats.triples
+            "run {i}: load {load:.3}s  ready {ready:.3}s  ({triples} triples, {} parsed)  \
+             dict {keys} keys, {key_bytes} key bytes ({:.2} B/key)",
+            stats.triples,
+            key_bytes as f64 / keys.max(1) as f64
         );
         ready_secs.push(ready);
     }
