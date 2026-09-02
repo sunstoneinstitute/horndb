@@ -285,6 +285,31 @@ pub trait Store {
     /// never `graph`'s value.
     fn graph_exists(&self, graph: &str) -> bool;
 
+    /// True if this exact quad is currently visible — a point read of the
+    /// same state [`Store::apply_quads`] would find. Backs the
+    /// multi-operation Update rollback journal (`crate::update`), which reads
+    /// it once per quad an operation is about to touch so a failing later
+    /// operation can restore the pre-request state.
+    ///
+    /// The default answers it by scanning the quad's whole graph. A backend
+    /// that can answer it as a point read should override it — `MemStore` and
+    /// `HornBackend` both do.
+    fn quad_exists(&self, quad: &AlgebraQuad) -> bool {
+        let (g, s, p, o) = quad;
+        let target = match g {
+            None => spargebra::algebra::GraphTarget::DefaultGraph,
+            Some(iri) => spargebra::algebra::GraphTarget::NamedNode(
+                spargebra::term::NamedNode::new_unchecked(iri),
+            ),
+        };
+        match self.scan_graph_quads(&target) {
+            Ok(triples) => triples
+                .iter()
+                .any(|(ts, tp, to)| ts == s && tp == p && to == o),
+            Err(_) => false,
+        }
+    }
+
     /// Every named graph currently holding at least one visible quad, by
     /// IRI. Backs `DROP ALL`'s per-graph sweep and `ADD`/`MOVE`/`COPY`'s
     /// graph enumeration.

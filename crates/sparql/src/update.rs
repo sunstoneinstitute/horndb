@@ -47,14 +47,22 @@
 //!   checked before any silent/existence logic. Reads of reserved graphs stay
 //!   allowed.
 //!
-//! **Atomicity** (§3.1.3): a multi-operation update preflights the whole
-//! request against the pre-update store before the first mutation, so a failing
-//! request mutates nothing. Two checks run: a recovered-`SILENT` source
-//! existence sweep over the `ADD`/`MOVE`/`COPY` hints, then `validate_op` per
-//! operation (reserved namespace, D11 existence, `LOAD` routing/fetch). This is
-//! why `COPY <absent> TO DEFAULT` — which desugars to a destructive
-//! `Drop{DEFAULT}` + a copy from a missing source — never clears the default
-//! graph. One store batch per operation, applied in request order.
+//! **Atomicity** (§3.1.3): an update request is all-or-nothing. Two mechanisms
+//! deliver that.
+//!
+//! *Preflight* rejects most bad requests before the first mutation, against the
+//! pre-update store: a recovered-`SILENT` source existence sweep over the
+//! `ADD`/`MOVE`/`COPY` hints, then `validate_op` per operation (reserved
+//! namespace, D11 existence, `LOAD` routing/fetch). This is why `COPY <absent>
+//! TO DEFAULT` — which desugars to a destructive `Drop{DEFAULT}` + a copy from
+//! a missing source — never clears the default graph.
+//!
+//! *Rollback* ([`Journal`]) covers what preflight cannot see: a later operation
+//! that fails only because an earlier one in the same request changed the store
+//! (see [`validate_op`]). Operations still apply in request order against the
+//! live store, so a later WHERE clause reads the earlier ones' writes; the
+//! journal records each touched quad's pre-request visibility, and any failure
+//! restores exactly that in one batch. One store batch per operation.
 
 use crate::algebra::translate::{dataset_spec_from, translate_where};
 use crate::algebra::{DatasetSpec, Term};
@@ -198,60 +206,168 @@ pub fn apply_update_with<B: FullBackend>(
         validate_op(op, cfg, store)?;
     }
 
+    // Atomicity part 3: ops apply in request order against the live store (so
+    // each one reads the previous ones' writes), journalled so a failure undoes
+    // the whole request. A single-op request is already one atomic batch, so its
+    // journal is disabled and costs nothing.
+    let mut journal = Journal::new(ops.len() > 1);
     for op in ops {
-        match op {
-            GraphUpdateOperation::InsertData { data } => {
-                let mut adds: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
-                for q in data {
-                    let g = spg_graph_name(&q.graph_name);
-                    let s = subject_to_term(&q.subject);
-                    let p = Term::Iri(q.predicate.as_str().to_owned());
-                    let o = object_to_term(&q.object)?;
-                    adds.push((g, s, p, o));
-                }
-                store.apply_quads(Vec::new(), adds)?;
-            }
-            GraphUpdateOperation::DeleteData { data } => {
-                let mut dels: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
-                for q in data {
-                    let g = spg_graph_name(&q.graph_name);
-                    let s = Term::Iri(q.subject.as_str().to_owned());
-                    let p = Term::Iri(q.predicate.as_str().to_owned());
-                    let o = ground_term_to_term(&q.object)?;
-                    dels.push((g, s, p, o));
-                }
-                store.apply_quads(dels, Vec::new())?;
-            }
-            GraphUpdateOperation::DeleteInsert {
-                delete,
-                insert,
-                using,
-                pattern,
-            } => {
-                // An `ADD`/`COPY` copy-op reading an absent named source binds
-                // zero rows, so it is a natural no-op; a non-silent absent
-                // source was already rejected in the preflight sweep above.
-                apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern)?;
-            }
-            GraphUpdateOperation::Clear { silent, graph } => {
-                apply_clear_drop(store, "CLEAR", *silent, graph)?;
-            }
-            GraphUpdateOperation::Drop { silent, graph } => {
-                apply_clear_drop(store, "DROP", *silent, graph)?;
-            }
-            GraphUpdateOperation::Create { silent, graph } => {
-                apply_create(store, *silent, graph.as_str())?;
-            }
-            GraphUpdateOperation::Load {
-                silent,
-                source,
-                destination,
-            } => {
-                apply_load(store, *silent, source, destination)?;
-            }
+        if let Err(e) = apply_op(store, cfg, op, &mut journal) {
+            journal.rollback(store);
+            return Err(e);
         }
     }
     Ok(())
+}
+
+/// Apply one operation, recording its pre-touch state in `journal` so
+/// [`apply_update_with`] can undo it if a later operation fails.
+fn apply_op<B: FullBackend>(
+    store: &mut B,
+    cfg: &SparqlConfig,
+    op: &GraphUpdateOperation,
+    journal: &mut Journal,
+) -> Result<()> {
+    match op {
+        GraphUpdateOperation::InsertData { data } => {
+            let mut adds: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
+            for q in data {
+                let g = spg_graph_name(&q.graph_name);
+                let s = subject_to_term(&q.subject);
+                let p = Term::Iri(q.predicate.as_str().to_owned());
+                let o = object_to_term(&q.object)?;
+                adds.push((g, s, p, o));
+            }
+            journal.record(store, &adds);
+            store.apply_quads(Vec::new(), adds)?;
+        }
+        GraphUpdateOperation::DeleteData { data } => {
+            let mut dels: Vec<AlgebraQuad> = Vec::with_capacity(data.len());
+            for q in data {
+                let g = spg_graph_name(&q.graph_name);
+                let s = Term::Iri(q.subject.as_str().to_owned());
+                let p = Term::Iri(q.predicate.as_str().to_owned());
+                let o = ground_term_to_term(&q.object)?;
+                dels.push((g, s, p, o));
+            }
+            journal.record(store, &dels);
+            store.apply_quads(dels, Vec::new())?;
+        }
+        GraphUpdateOperation::DeleteInsert {
+            delete,
+            insert,
+            using,
+            pattern,
+        } => {
+            // An `ADD`/`COPY` copy-op reading an absent named source binds
+            // zero rows, so it is a natural no-op; a non-silent absent
+            // source was already rejected in the preflight sweep above.
+            apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern, journal)?;
+        }
+        GraphUpdateOperation::Clear { silent, graph } => {
+            apply_clear_drop(store, "CLEAR", *silent, graph, journal)?;
+        }
+        GraphUpdateOperation::Drop { silent, graph } => {
+            apply_clear_drop(store, "DROP", *silent, graph, journal)?;
+        }
+        GraphUpdateOperation::Create { silent, graph } => {
+            apply_create(store, *silent, graph.as_str())?;
+        }
+        GraphUpdateOperation::Load {
+            silent,
+            source,
+            destination,
+        } => {
+            apply_load(store, *silent, source, destination, journal)?;
+        }
+    }
+    Ok(())
+}
+
+// ── Rollback journal (§3.1.3) ────────────────────────────────────────────────
+
+/// Undo log for a multi-operation update request.
+///
+/// For every quad an operation is about to touch it records one bit — was that
+/// quad visible before this request first touched it? — read from the store
+/// just before the touching batch. [`Self::rollback`] then restores exactly
+/// that state: re-insert the quads that were there, retract the ones that were
+/// not. Recording the *first* reading per quad is what makes the undo
+/// order-independent, so ops that touch the same quad twice still roll back to
+/// the pre-request state.
+///
+/// This is a rollback, not a working copy: ops mutate the live store in order,
+/// which is what keeps read-your-own-writes inside a request. An overlay would
+/// avoid the recording reads, but the read seam ([`crate::exec::Executor`])
+/// evaluates a whole BGP join at once, so a pending delta cannot be layered
+/// over its results.
+///
+/// Disabled for a single-operation request: one op is already one atomic
+/// `apply_quads` batch, so recording would be pure cost.
+struct Journal {
+    enabled: bool,
+    /// Touched quad → was it visible before this request first touched it.
+    before: HashMap<AlgebraQuad, bool>,
+}
+
+impl Journal {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            before: HashMap::new(),
+        }
+    }
+
+    /// Record the pre-touch visibility of every quad in `quads`. Call it
+    /// immediately before the batch that touches them; a quad already recorded
+    /// keeps its first reading.
+    fn record<B: FullBackend>(&mut self, store: &B, quads: &[AlgebraQuad]) {
+        if !self.enabled {
+            return;
+        }
+        for q in quads {
+            if !self.before.contains_key(q) {
+                let live = store.quad_exists(q);
+                self.before.insert(q.clone(), live);
+            }
+        }
+    }
+
+    /// Record every quad a `CLEAR`/`DROP` sweep of one graph is about to
+    /// retract — all of them visible by construction, so no point read is
+    /// needed. `graph` names a single graph (`None` = the default graph).
+    fn record_cleared<B: FullBackend>(&mut self, store: &B, graph: &GraphName) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let target = match graph {
+            None => GraphTarget::DefaultGraph,
+            Some(iri) => GraphTarget::NamedNode(named_node(iri)),
+        };
+        for (s, p, o) in store.scan_graph_quads(&target)? {
+            self.before.entry((graph.clone(), s, p, o)).or_insert(true);
+        }
+        Ok(())
+    }
+
+    /// Restore the pre-request state of every recorded quad in one batch.
+    /// Best effort: the caller is already returning the operation's own error,
+    /// which is the one the client needs to see.
+    fn rollback<B: FullBackend>(self, store: &mut B) {
+        if self.before.is_empty() {
+            return;
+        }
+        let mut dels: Vec<AlgebraQuad> = Vec::new();
+        let mut adds: Vec<AlgebraQuad> = Vec::new();
+        for (q, was_live) in self.before {
+            if was_live {
+                adds.push(q);
+            } else {
+                dels.push(q);
+            }
+        }
+        let _ = store.apply_quads(dels, adds);
+    }
 }
 
 /// Preflight one operation: return the error it *would* produce at apply time,
@@ -264,11 +380,11 @@ pub fn apply_update_with<B: FullBackend>(
 /// store), and (b) a reserved-graph write through a **variable** template graph
 /// (`resolve_graph_name` can only test it once a WHERE row binds the variable).
 /// In both, the POLICY still fires unconditionally — a reserved write always
-/// errors, a missing/existing graph always errors — so only multi-op
-/// *atomicity* (nothing-mutated-on-failure) can slip: a later op whose D11
-/// existence an earlier op flipped, or a variable-bound reserved write an
-/// earlier op's mutation preceded. Closing either would need store-level
-/// rollback (out of scope); a single op and independent ops are exact.
+/// errors, a missing/existing graph always errors — so what preflight misses is
+/// only the *timing*: a later op whose D11 existence an earlier op flipped, or
+/// a variable-bound reserved write an earlier op's mutation preceded, fails at
+/// apply time rather than up front. [`Journal`] covers that case — the failure
+/// rolls the whole request back, so the request still mutates nothing.
 fn validate_op<B: FullBackend>(
     op: &GraphUpdateOperation,
     cfg: &SparqlConfig,
@@ -378,11 +494,13 @@ fn apply_clear_drop<B: FullBackend>(
     verb: &str,
     silent: bool,
     graph: &GraphTarget,
+    journal: &mut Journal,
 ) -> Result<()> {
     match graph {
         // Sweep just the default graph. Never an error (the default graph
         // always exists), even when it is empty.
         GraphTarget::DefaultGraph => {
+            journal.record_cleared(store, &None)?;
             store.clear_graph(&GraphTarget::DefaultGraph)?;
             Ok(())
         }
@@ -390,16 +508,18 @@ fn apply_clear_drop<B: FullBackend>(
         // quad. Reserved graphs are left untouched (SPEC-30 owns the
         // store-level reset), so this cannot use `clear_graph(AllGraphs)`.
         GraphTarget::AllGraphs => {
+            journal.record_cleared(store, &None)?;
             store.clear_graph(&GraphTarget::DefaultGraph)?;
-            clear_named_graphs(store)?;
+            clear_named_graphs(store, journal)?;
             Ok(())
         }
         // `NAMED` = every non-reserved named graph (default graph left alone).
-        GraphTarget::NamedGraphs => clear_named_graphs(store),
+        GraphTarget::NamedGraphs => clear_named_graphs(store, journal),
         GraphTarget::NamedNode(n) => {
             let iri = n.as_str();
             reserved_iri_write_check(iri)?;
             if store.graph_exists(iri) {
+                journal.record_cleared(store, &Some(iri.to_owned()))?;
                 store.clear_graph(graph)?;
             } else if !silent {
                 return Err(missing_graph_error(verb, iri));
@@ -411,11 +531,12 @@ fn apply_clear_drop<B: FullBackend>(
 
 /// Sweep every non-reserved named graph quad by quad. Backs `DROP ALL`'s
 /// named-graph half and `CLEAR`/`DROP NAMED`.
-fn clear_named_graphs<B: FullBackend>(store: &mut B) -> Result<()> {
+fn clear_named_graphs<B: FullBackend>(store: &mut B, journal: &mut Journal) -> Result<()> {
     for g in store.graphs() {
         if is_reserved_graph(&g) {
             continue;
         }
+        journal.record_cleared(store, &Some(g.clone()))?;
         store.clear_graph(&GraphTarget::NamedNode(named_node(&g)))?;
     }
     Ok(())
@@ -500,6 +621,7 @@ fn apply_delete_insert<B: FullBackend>(
     insert: &[QuadPattern],
     using: Option<&QueryDataset>,
     pattern: &GraphPattern,
+    journal: &mut Journal,
 ) -> Result<()> {
     validate_delete_insert(delete, insert, pattern, cfg)?;
 
@@ -549,6 +671,8 @@ fn apply_delete_insert<B: FullBackend>(
     }
 
     // One atomic batch (SPEC-28 S6): dels apply before adds.
+    journal.record(store, &dels);
+    journal.record(store, &adds);
     store.apply_quads(dels, adds)?;
     Ok(())
 }
@@ -613,6 +737,7 @@ fn apply_load<B: FullBackend>(
     silent: bool,
     source: &spargebra::term::NamedNode,
     destination: &SpgGraphName,
+    journal: &mut Journal,
 ) -> Result<()> {
     // Reserved destination: refused regardless of SILENT.
     if let SpgGraphName::NamedNode(n) = destination {
@@ -644,6 +769,7 @@ fn apply_load<B: FullBackend>(
                         .collect()
                 }
             };
+            journal.record(store, &adds);
             store.apply_quads(Vec::new(), adds)?;
             Ok(())
         }
