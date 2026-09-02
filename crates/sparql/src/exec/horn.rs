@@ -127,13 +127,23 @@ pub(crate) fn lexical_to_oxrdf(s: &str) -> OxTerm {
 
 /// Statistics returned by [`load_with_reasoning`].
 #[cfg(feature = "reasoner")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ReasonStats {
     /// Triples loaded into the backend (asserted base + inferred).
     pub loaded: u64,
     /// Asserted triples in the input dataset's default graph.
     pub asserted: usize,
+    /// OWL 2 RL inconsistency witnesses: individuals inferred to be
+    /// `owl:Nothing`, in lexical form, capped at
+    /// [`INCONSISTENT_WITNESS_CAP`]. Empty iff the closure is consistent.
+    pub inconsistent: Vec<String>,
 }
+
+/// How many `owl:Nothing` individuals [`load_with_reasoning`] reports. An
+/// inconsistent ontology can make every individual an `owl:Nothing`, and the
+/// caller logs this list, so it is capped rather than unbounded.
+#[cfg(feature = "reasoner")]
+pub const INCONSISTENT_WITNESS_CAP: usize = 20;
 
 /// Run the OWL 2 RL `horndb_owlrl` `Engine` (RuleFiring backend) over
 /// `dataset`'s default graph and load the full materialized closure —
@@ -148,11 +158,16 @@ pub fn load_with_reasoning(
         .load(dataset)
         .map_err(|e| SparqlError::Executor(format!("owlrl load: {e}")))?;
     let asserted = engine.asserted_len().unwrap_or(0);
+    let inconsistent = engine.inconsistent_individuals(INCONSISTENT_WITNESS_CAP);
     let triples = engine
         .materialized_triples()
         .ok_or_else(|| SparqlError::Executor("owlrl produced no state".into()))?;
     let loaded = backend.load_lexical_triples(triples.into_iter())?;
-    Ok(ReasonStats { loaded, asserted })
+    Ok(ReasonStats {
+        loaded,
+        asserted,
+        inconsistent,
+    })
 }
 
 use crate::algebra::{TriplePattern, Var};

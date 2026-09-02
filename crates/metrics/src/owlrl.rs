@@ -4,6 +4,7 @@
 
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 
@@ -18,6 +19,11 @@ pub struct OwlrlMetrics {
     pub rounds: Counter,
     pub rule_pruned: Counter,
     pub rule_considered: Counter,
+    /// 1 iff the last materialization derived the OWL 2 RL `owl:Nothing`
+    /// inconsistency marker (HDB-125). Scraped as
+    /// `horndb_reasoning_inconsistent` — deliberately not under the
+    /// `owlrl_` prefix: it describes the served closure, not the rule engine.
+    pub reasoning_inconsistent: Gauge,
 }
 
 fn latency_hist() -> Histogram {
@@ -35,6 +41,7 @@ impl OwlrlMetrics {
         let rounds = Counter::default();
         let rule_pruned = Counter::default();
         let rule_considered = Counter::default();
+        let reasoning_inconsistent = Gauge::default();
 
         reg.register(
             "owlrl_rule_fires",
@@ -68,6 +75,12 @@ impl OwlrlMetrics {
             rule_considered.clone(),
         );
 
+        reg.register(
+            "reasoning_inconsistent",
+            "1 iff the materialized closure is OWL 2 RL inconsistent (some individual is an owl:Nothing)",
+            reasoning_inconsistent.clone(),
+        );
+
         Self {
             rule_fires,
             rule_duration_seconds,
@@ -76,6 +89,7 @@ impl OwlrlMetrics {
             rounds,
             rule_pruned,
             rule_considered,
+            reasoning_inconsistent,
         }
     }
 }
@@ -108,6 +122,13 @@ mod tests {
         assert!(buf.contains("phase=\"apply\""), "got:\n{buf}");
         assert!(
             buf.contains("horndb_owlrl_triples_inferred_total"),
+            "got:\n{buf}"
+        );
+        m.reasoning_inconsistent.set(1);
+        let mut buf = String::new();
+        prometheus_client::encoding::text::encode(&mut buf, &reg).unwrap();
+        assert!(
+            buf.contains("horndb_reasoning_inconsistent 1"),
             "got:\n{buf}"
         );
     }

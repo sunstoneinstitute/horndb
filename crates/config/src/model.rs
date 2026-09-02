@@ -42,6 +42,7 @@ mod tests {
         assert!(cfg.simd.autotune);
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.reload.debounce.0, Duration::from_millis(250));
+        assert_eq!(cfg.reasoning.on_inconsistency, OnInconsistency::Warn);
     }
 
     #[test]
@@ -63,6 +64,8 @@ mod tests {
             [simd]
             max_isa = "scalar"
             autotune = false
+            [reasoning]
+            on_inconsistency = "reject-startup"
             "#,
         );
         assert_eq!(cfg.server.bind, "0.0.0.0:80");
@@ -83,6 +86,10 @@ mod tests {
         assert_eq!(cfg.server.limits.max_request_body, ByteSize(1024 * 1024));
         assert_eq!(cfg.simd.max_isa.as_deref(), Some("scalar"));
         assert!(!cfg.simd.autotune);
+        assert_eq!(
+            cfg.reasoning.on_inconsistency,
+            OnInconsistency::RejectStartup
+        );
     }
 
     #[test]
@@ -134,6 +141,7 @@ pub struct ServerConfig {
     pub simd: Simd,
     pub logging: Logging,
     pub reload: Reload,
+    pub reasoning: Reasoning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,6 +225,30 @@ pub enum DefaultGraph {
     Union,
     /// Only the default-graph sentinel; no named-graph data is visible.
     Strict,
+}
+
+/// `[reasoning]` — what the server does when OWL 2 RL materialization derives
+/// the `owl:Nothing` inconsistency marker (HDB-125).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Reasoning {
+    pub on_inconsistency: OnInconsistency,
+}
+
+/// Inconsistency policy. A serde enum (like `DefaultGraph`), so an
+/// unrecognized value is rejected at load with file+key attribution.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OnInconsistency {
+    /// Log a warning naming the `owl:Nothing` individuals, then serve.
+    #[default]
+    Warn,
+    /// Log the same warning and exit non-zero instead of serving. The load
+    /// runs after the socket binds (HDB-124), so the process exits without
+    /// ever reporting ready rather than never binding.
+    RejectStartup,
+    /// Warn, serve, and mark every HTTP response `x-horndb-inconsistent: true`.
+    ServeWithFlag,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

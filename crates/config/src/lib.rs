@@ -10,15 +10,10 @@ mod load;
 mod model;
 mod units;
 
-// NOTE: pub-use lines below are added incrementally, task by task, as each
-// symbol lands (Tasks 2-7 of PLAN-26-01) — a lib.rs that re-exports a symbol
-// before it exists would fail to compile the whole crate for every
-// intermediate TDD checkpoint. The final set (after Task 7) is exactly:
-//   pub use error::ConfigError;
-//   pub use load::{load, CliOverrides, LoadInputs};
-//   pub use model::{DefaultGraph, Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
-//   pub use units::{ByteSize, HumanDuration};
 pub use error::ConfigError;
 pub use load::{load, CliOverrides, LoadInputs};
-pub use model::{DefaultGraph, Limits, Logging, QuerySettings, Reload, Server, ServerConfig, Simd};
+pub use model::{
+    DefaultGraph, Limits, Logging, OnInconsistency, QuerySettings, Reasoning, Reload, Server,
+    ServerConfig, Simd,
+};
 pub use units::{ByteSize, HumanDuration};
