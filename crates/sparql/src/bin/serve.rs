@@ -36,6 +36,9 @@ use horndb_config::{CliOverrides, LoadInputs};
 use oxrdf::{GraphName, Quad};
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
+// HDB-113: every file loaded into a `serve --data <dir>` store is renamed
+// per document so blank-node labels from different files never collide.
+use horndb_storage::loader::{scope_blank_node, scope_term};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
@@ -179,7 +182,7 @@ async fn main() -> Result<()> {
             let t = Instant::now();
             for f in &files {
                 input_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-                let n = collect_into_dataset(f, &mut dataset)
+                let n = collect_into_dataset(&store, f, &mut dataset)
                     .with_context(|| format!("loading {}", f.display()))?;
                 eprintln!("serve: parsed {n} triples from {}", f.display());
             }
@@ -355,6 +358,13 @@ fn is_dataset_format(path: &Path) -> bool {
 /// `LOAD` uses) so each quad lands in the named graph it carries; anything
 /// else is parsed here directly, `.ttl` as Turtle and everything else
 /// (including `.nt`) as N-Triples, all landing in the default graph.
+///
+/// Blank-node labels are document-scoped (HDB-113): `serve --data <dir>`
+/// loads several files into one store, so every blank node parsed from this
+/// file is renamed with a fresh per-file tag before it reaches the store —
+/// otherwise `_:b1` in two different files would land on the same node. The
+/// dataset path passes that tag to `parse_rdf_bytes`; the triples path
+/// applies `horndb_storage::loader::scope_blank_node` here.
 fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
     if is_dataset_format(path) {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -363,7 +373,8 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
         // `crates/harness/src/rdf.rs`) so a relative IRI in `.trig` resolves;
         // `.nq` ignores it (N-Quads requires absolute IRIs).
         let base = format!("file://{}", path.display());
-        let quads = horndb_sparql::update::parse_rdf_bytes(&bytes, extension, &base)
+        let tag = store.next_bnode_doc_tag();
+        let quads = horndb_sparql::update::parse_rdf_bytes(tag, &bytes, extension, &base)
             .with_context(|| format!("parsing {}", path.display()))?;
         let n = quads.len() as u64;
         horndb_sparql::exec::Store::apply_quads(store, Vec::new(), quads)
@@ -374,22 +385,23 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
     let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
+    let tag = store.next_bnode_doc_tag();
     if is_turtle {
         for triple in TurtleParser::new().for_reader(reader) {
             let t = triple.with_context(|| format!("parsing {}", path.display()))?;
             batch.push((
-                named_or_blank_to_term(&t.subject),
+                named_or_blank_to_term(tag, &t.subject),
                 OxTerm::NamedNode(t.predicate),
-                t.object,
+                scope_term(tag, t.object),
             ));
         }
     } else {
         for triple in NTriplesParser::new().for_reader(reader) {
             let t = triple.with_context(|| format!("parsing {}", path.display()))?;
             batch.push((
-                named_or_blank_to_term(&t.subject),
+                named_or_blank_to_term(tag, &t.subject),
                 OxTerm::NamedNode(t.predicate),
-                t.object,
+                scope_term(tag, t.object),
             ));
         }
     }
@@ -398,27 +410,47 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
         .with_context(|| format!("bulk inserting triples from {}", path.display()))
 }
 
-fn named_or_blank_to_term(n: &NamedOrBlankNode) -> OxTerm {
+fn named_or_blank_to_term(tag: u64, n: &NamedOrBlankNode) -> OxTerm {
     match n {
         NamedOrBlankNode::NamedNode(nn) => OxTerm::NamedNode(nn.clone()),
-        NamedOrBlankNode::BlankNode(b) => OxTerm::BlankNode(b.clone()),
+        NamedOrBlankNode::BlankNode(b) => OxTerm::BlankNode(scope_blank_node(tag, b.clone())),
+    }
+}
+
+/// [`scope_blank_node`] for a `NamedOrBlankNode` subject; a named node passes
+/// through. Used where the caller needs a `NamedOrBlankNode` rather than the
+/// `OxTerm` [`named_or_blank_to_term`] returns (e.g. `Quad::new`'s subject).
+#[cfg(feature = "reasoner")]
+fn scoped_subject(tag: u64, s: NamedOrBlankNode) -> NamedOrBlankNode {
+    match s {
+        NamedOrBlankNode::BlankNode(b) => NamedOrBlankNode::BlankNode(scope_blank_node(tag, b)),
+        other => other,
     }
 }
 
 /// Parse one file and collect each triple into an `oxrdf::Dataset` (default
 /// graph). Returns the number of triples inserted. Used by `--materialize`.
+///
+/// Every file in `--data` feeds the same `dataset` before materialization, so
+/// blank nodes are renamed per file here too (HDB-113) — same as
+/// [`load_file`]'s non-materialize path.
 #[cfg(feature = "reasoner")]
-fn collect_into_dataset(path: &Path, dataset: &mut oxrdf::Dataset) -> Result<usize> {
+fn collect_into_dataset(
+    store: &HornBackend,
+    path: &Path,
+    dataset: &mut oxrdf::Dataset,
+) -> Result<usize> {
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
     let mut count = 0usize;
+    let tag = store.next_bnode_doc_tag();
     if is_turtle {
         for triple in TurtleParser::new().for_reader(reader) {
             let t = triple?;
             dataset.insert(&Quad::new(
-                t.subject,
+                scoped_subject(tag, t.subject),
                 t.predicate,
-                t.object,
+                scope_term(tag, t.object),
                 GraphName::DefaultGraph,
             ));
             count += 1;
@@ -427,9 +459,9 @@ fn collect_into_dataset(path: &Path, dataset: &mut oxrdf::Dataset) -> Result<usi
         for triple in NTriplesParser::new().for_reader(reader) {
             let t = triple?;
             dataset.insert(&Quad::new(
-                t.subject,
+                scoped_subject(tag, t.subject),
                 t.predicate,
-                t.object,
+                scope_term(tag, t.object),
                 GraphName::DefaultGraph,
             ));
             count += 1;

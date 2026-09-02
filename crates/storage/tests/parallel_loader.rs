@@ -18,7 +18,7 @@ use horndb_storage::loader::turtle::{
     load_turtle_reader_with_base, load_turtle_slice_with_threads, turtle_split_is_safe,
 };
 use horndb_storage::loader::{
-    load_buffer_triples, set_load_batch_triples, set_load_buffer_triples,
+    load_buffer_triples, scope_blank_node_label, set_load_batch_triples, set_load_buffer_triples,
     DEFAULT_LOAD_BATCH_TRIPLES, DEFAULT_LOAD_BUFFER_TRIPLES,
 };
 use horndb_storage::{Store, DEFAULT_GRAPH};
@@ -176,8 +176,11 @@ fn blank_node_spanning_chunk_boundary_stays_one_node() {
     assert_same_store(&serial, &parallel, "blank node across chunks");
 
     // The shared blank node must be a single dictionary entry carrying all 22
-    // of its statements (2 endpoints + 20 `seen` markers).
-    let bnode = Term::BlankNode(oxrdf::BlankNode::new("shared").unwrap());
+    // of its statements (2 endpoints + 20 `seen` markers). `parallel` is a
+    // fresh store loading its first (only) document, so HDB-113's per-store
+    // tag is 0 — see `Store::next_bnode_doc_tag`.
+    let bnode =
+        Term::BlankNode(oxrdf::BlankNode::new(scope_blank_node_label(0, "shared")).unwrap());
     let id = parallel
         .dictionary()
         .get(&bnode)

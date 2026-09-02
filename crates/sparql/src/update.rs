@@ -313,7 +313,7 @@ fn validate_op<B: FullBackend>(
             silent,
             source,
             destination,
-        } => validate_load(*silent, source, destination),
+        } => validate_load(store, *silent, source, destination),
     }
 }
 
@@ -578,7 +578,8 @@ fn resolve_graph_name(g: &GraphNamePattern, row: &Bindings) -> Result<Option<Gra
 /// suppressible), then — for a non-silent load — the dataset-format/`INTO`
 /// error and a fetch+parse of the source (a pure read that surfaces a
 /// fetch/parse failure before any earlier op mutates).
-fn validate_load(
+fn validate_load<B: FullBackend>(
+    store: &B,
     silent: bool,
     source: &spargebra::term::NamedNode,
     destination: &SpgGraphName,
@@ -596,7 +597,7 @@ fn validate_load(
             return Err(load_dataset_into_graph_error(source.as_str(), n.as_str()));
         }
     }
-    fetch_and_parse(source.as_str()).map(|_| ())
+    fetch_and_parse(store.next_bnode_doc_tag(), source.as_str()).map(|_| ())
 }
 
 /// Apply `LOAD <source> [INTO GRAPH <destination>]`. Routing:
@@ -627,7 +628,7 @@ fn apply_load<B: FullBackend>(
             };
         }
     }
-    match fetch_and_parse(source.as_str()) {
+    match fetch_and_parse(store.next_bnode_doc_tag(), source.as_str()) {
         Ok(quads) => {
             let adds: Vec<AlgebraQuad> = match destination {
                 // No `INTO`: each quad keeps its parsed graph (None = default
@@ -671,7 +672,9 @@ fn source_extension(source: &str) -> Option<String> {
 
 /// Fetch and parse an RDF document named by `source`, returning its quads as
 /// algebra [`Term`]s tagged by graph. Stage-1 supports `file:` IRIs only.
-fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
+/// Blank-node labels are document-scoped, so every one parsed here is renamed
+/// with `tag` (HDB-113) before it becomes an algebra term.
+fn fetch_and_parse(tag: u64, source: &str) -> Result<Vec<AlgebraQuad>> {
     let raw = file_iri_to_path(source)?;
     // A file IRI percent-encodes reserved characters (e.g. a space as `%20`);
     // decode to the real filesystem path before reading.
@@ -679,7 +682,7 @@ fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
 
     let bytes = std::fs::read(&path)
         .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
-    parse_rdf_bytes(&bytes, source_extension(&path).as_deref(), source)
+    parse_rdf_bytes(tag, &bytes, source_extension(&path).as_deref(), source)
 }
 
 /// Parse an RDF document's `bytes` by `extension` (`"nt"`, `"nq"`, `"trig"`,
@@ -693,7 +696,13 @@ fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
 /// The one parser call site for both `LOAD` ([`fetch_and_parse`]) and the
 /// `serve --data` startup loader (`crates/sparql/src/bin/serve.rs`), so the
 /// two never drift on format handling.
+///
+/// `tag` scopes this document's blank-node labels (HDB-113): the label `_:b1`
+/// is document-scoped in every RDF syntax, so both call sites pass a fresh tag
+/// per document (`exec::Store::next_bnode_doc_tag`) to keep `_:b1` in two
+/// files from landing on the same node.
 pub fn parse_rdf_bytes(
+    tag: u64,
     bytes: &[u8],
     extension: Option<&str>,
     base: &str,
@@ -709,15 +718,15 @@ pub fn parse_rdf_bytes(
         Some("nt") => {
             for t in NTriplesParser::new().for_slice(bytes) {
                 let t = t.map_err(map_err)?;
-                let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
+                let (s, p, o) = oxrdf_triple_to_terms(tag, &t.subject, &t.predicate, &t.object);
                 out.push((None, s, p, o));
             }
         }
         Some("nq") => {
             for q in NQuadsParser::new().for_slice(bytes) {
                 let q = q.map_err(map_err)?;
-                let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
-                out.push((oxrdf_graph_to_name(&q.graph_name), s, p, o));
+                let (s, p, o) = oxrdf_triple_to_terms(tag, &q.subject, &q.predicate, &q.object);
+                out.push((oxrdf_graph_to_name(tag, &q.graph_name), s, p, o));
             }
         }
         // Turtle/TriG may carry relative IRIs resolved against the document IRI.
@@ -725,8 +734,8 @@ pub fn parse_rdf_bytes(
             let parser = with_base(TriGParser::new(), base)?;
             for q in parser.for_slice(bytes) {
                 let q = q.map_err(map_err)?;
-                let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
-                out.push((oxrdf_graph_to_name(&q.graph_name), s, p, o));
+                let (s, p, o) = oxrdf_triple_to_terms(tag, &q.subject, &q.predicate, &q.object);
+                out.push((oxrdf_graph_to_name(tag, &q.graph_name), s, p, o));
             }
         }
         // `.ttl` and anything else default to Turtle (a triples format).
@@ -734,7 +743,7 @@ pub fn parse_rdf_bytes(
             let parser = with_base(TurtleParser::new(), base)?;
             for t in parser.for_slice(bytes) {
                 let t = t.map_err(map_err)?;
-                let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
+                let (s, p, o) = oxrdf_triple_to_terms(tag, &t.subject, &t.predicate, &t.object);
                 out.push((None, s, p, o));
             }
         }
@@ -743,12 +752,16 @@ pub fn parse_rdf_bytes(
 }
 
 /// Lower an `oxrdf` graph name to a store [`GraphName`]. A blank-node graph
-/// name is kept as its label (rare; matches the loader's best effort).
-fn oxrdf_graph_to_name(g: &oxrdf::GraphName) -> GraphName {
+/// name is renamed with `tag` first (HDB-113), same as every other blank node
+/// this `LOAD` parses.
+fn oxrdf_graph_to_name(tag: u64, g: &oxrdf::GraphName) -> GraphName {
     match g {
         oxrdf::GraphName::DefaultGraph => None,
         oxrdf::GraphName::NamedNode(n) => Some(n.as_str().to_owned()),
-        oxrdf::GraphName::BlankNode(b) => Some(b.as_str().to_owned()),
+        oxrdf::GraphName::BlankNode(b) => Some(horndb_storage::loader::scope_blank_node_label(
+            tag,
+            b.as_str(),
+        )),
     }
 }
 
@@ -829,33 +842,40 @@ fn percent_decode(s: &str) -> String {
 
 /// Lower a parsed `(subject, predicate, object)` from oxttl to algebra terms.
 fn oxrdf_triple_to_terms(
+    tag: u64,
     subject: &oxrdf::NamedOrBlankNode,
     predicate: &oxrdf::NamedNode,
     object: &oxrdf::Term,
 ) -> (Term, Term, Term) {
     (
-        oxrdf_subject_to_term(subject),
+        oxrdf_subject_to_term(tag, subject),
         Term::Iri(predicate.as_str().to_owned()),
-        oxrdf_term_to_term(object),
+        oxrdf_term_to_term(tag, object),
     )
 }
 
 /// Lower an `oxrdf` subject (named node or blank node) to an algebra [`Term`].
-/// Blank-node labels are carried through verbatim, sharing the Stage-1 store's
-/// known blank-node approximation with the bulk loaders.
-fn oxrdf_subject_to_term(s: &oxrdf::NamedOrBlankNode) -> Term {
+/// A blank-node label is renamed with `tag` (HDB-113) so it can't collide
+/// with the same label from a different `LOAD` or bulk load into the same
+/// store — matching the bulk loaders' `crate::loader::scope_blank_node`.
+fn oxrdf_subject_to_term(tag: u64, s: &oxrdf::NamedOrBlankNode) -> Term {
     match s {
         oxrdf::NamedOrBlankNode::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
-        oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+        oxrdf::NamedOrBlankNode::BlankNode(b) => Term::BlankNode(
+            horndb_storage::loader::scope_blank_node_label(tag, b.as_str()),
+        ),
     }
 }
 
 /// Lower an `oxrdf` object term to an algebra [`Term`]. Literals keep their
-/// N-Triples lexical form.
-fn oxrdf_term_to_term(t: &oxrdf::Term) -> Term {
+/// N-Triples lexical form; a blank node is renamed with `tag`, same as
+/// [`oxrdf_subject_to_term`].
+fn oxrdf_term_to_term(tag: u64, t: &oxrdf::Term) -> Term {
     match t {
         oxrdf::Term::NamedNode(n) => Term::Iri(n.as_str().to_owned()),
-        oxrdf::Term::BlankNode(b) => Term::BlankNode(b.as_str().to_owned()),
+        oxrdf::Term::BlankNode(b) => Term::BlankNode(
+            horndb_storage::loader::scope_blank_node_label(tag, b.as_str()),
+        ),
         oxrdf::Term::Literal(l) => Term::Literal(l.to_string()),
         // RDF 1.2 triple-term objects: best-effort lexical form (the same
         // lowering the loader applies).

@@ -326,6 +326,22 @@ pub trait Store {
             Vec::new(),
         );
     }
+
+    /// A fresh tag for one document `LOAD`s into this store (HDB-113): blank
+    /// node labels are document-scoped in N-Triples/Turtle/N-Quads, so
+    /// `update.rs::fetch_and_parse` renames every one it parses with
+    /// `horndb_storage::loader::scope_blank_node(tag, ...)`, tagged by this,
+    /// before turning it into an algebra `Term`. Same rename the bulk loaders
+    /// apply via `horndb_storage::Store::next_bnode_doc_tag`.
+    ///
+    /// Default: a process-wide counter, for a backend with no
+    /// `horndb_storage::Store` of its own to scope it to (e.g. `MemStore`).
+    /// [`HornBackend`](crate::exec::horn::HornBackend) overrides this to
+    /// delegate to its store's own counter.
+    fn next_bnode_doc_tag(&self) -> u64 {
+        static GLOBAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        GLOBAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Convenience: a backend that is both an `Executor` and a `Store`.

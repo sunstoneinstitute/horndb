@@ -11,6 +11,7 @@ use crate::ordering::Ordering;
 use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
 use crate::tier::{ApplyReport, Tier, TierStats};
 use oxrdf::Term;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 #[derive(Debug, Clone, Copy)]
 pub struct FootprintReport {
@@ -22,6 +23,9 @@ pub struct FootprintReport {
 pub struct Store {
     dictionary: Dictionary,
     tier: Box<dyn Tier>,
+    /// Counts documents loaded into this store (HDB-113 blank-node scoping:
+    /// see [`Store::next_bnode_doc_tag`]).
+    bnode_doc_tag: AtomicU64,
 }
 
 impl Store {
@@ -29,6 +33,7 @@ impl Store {
         Self {
             dictionary: Dictionary::new(),
             tier: Box::new(MemoryTier::new()),
+            bnode_doc_tag: AtomicU64::new(0),
         }
     }
 
@@ -45,7 +50,26 @@ impl Store {
         Self {
             dictionary: Dictionary::new(),
             tier: Box::new(MemoryTier::with_hot_threshold(hot_threshold)),
+            bnode_doc_tag: AtomicU64::new(0),
         }
+    }
+
+    /// A fresh tag for one document load into this store (HDB-113). Blank
+    /// node labels are scoped to one document in N-Triples/Turtle/N-Quads,
+    /// but `oxttl` emits them verbatim, so nothing stops `_:b1` from two
+    /// different documents landing on the same node once both are loaded
+    /// into one store. Every loader entry point (and SPARQL `LOAD`) calls
+    /// this once per document and renames every blank node label it parses
+    /// with [`crate::loader::scope_blank_node`], so two labels only collide
+    /// when they share a tag — i.e. came from the same document load.
+    ///
+    /// Scoped per store, not process-wide: two stores that each load "their
+    /// first document" independently (e.g. a parallel-parse-vs-serial-parse
+    /// comparison of the same bytes into two separate stores) see the same
+    /// first tag, so document-scoped renaming does not by itself change
+    /// which store a term lands in.
+    pub fn next_bnode_doc_tag(&self) -> u64 {
+        self.bnode_doc_tag.fetch_add(1, AtomicOrdering::Relaxed)
     }
 
     pub fn dictionary(&self) -> &Dictionary {

@@ -44,7 +44,9 @@ use crate::loader::parallel::{
     load_threads, parse_chunks_mapped, parse_chunks_ordered, should_probe, should_read_whole_file,
     slice_threads,
 };
-use crate::loader::{load_quads, subject_to_term, Batch, LoadStats, Probed, QuadSink, SinkTimer};
+use crate::loader::{
+    load_quads, scope_term, subject_to_term, Batch, LoadStats, Probed, QuadSink, SinkTimer,
+};
 use crate::store::Store;
 use crate::term::DEFAULT_GRAPH;
 use oxrdf::{Term, Triple};
@@ -93,15 +95,16 @@ pub fn load_turtle_reader_with_base<R: Read>(
     base_iri: Option<&str>,
 ) -> Result<LoadStats> {
     let parser = turtle_parser(base_iri)?;
+    let tag = store.next_bnode_doc_tag();
     load_quads(
         store,
-        parser.for_reader(reader).map(|t| {
+        parser.for_reader(reader).map(move |t| {
             let triple = t.map_err(|e| StorageError::TurtleParse(format!("{e}")))?;
             Ok((
                 DEFAULT_GRAPH,
-                subject_to_term(triple.subject),
+                scope_term(tag, subject_to_term(triple.subject)),
                 Term::NamedNode(triple.predicate),
-                triple.object,
+                scope_term(tag, triple.object),
             ))
         }),
     )
@@ -129,16 +132,17 @@ pub fn load_turtle_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_turtle_probed(bytes, base_iri, threads, store.dictionary(), |batch| {
+    let tag = store.next_bnode_doc_tag();
+    for_each_turtle_probed(bytes, base_iri, threads, tag, store.dictionary(), |batch| {
         timer.sink(|| {
             sink.intern_batch(|s| match batch {
                 Batch::Raw(rows) => {
                     for t in rows {
                         s.push(
                             DEFAULT_GRAPH,
-                            &subject_to_term(t.subject),
+                            &scope_term(tag, subject_to_term(t.subject)),
                             &Term::NamedNode(t.predicate),
-                            &t.object,
+                            &scope_term(tag, t.object),
                         )?;
                     }
                     Ok(())
@@ -165,6 +169,7 @@ pub(crate) fn for_each_turtle_probed<F>(
     bytes: &[u8],
     base_iri: Option<&str>,
     threads: usize,
+    tag: u64,
     dict: &Dictionary,
     sink: F,
 ) -> Result<()>
@@ -184,9 +189,9 @@ where
                     .map(|t| {
                         Probed::probe(
                             dict,
-                            subject_to_term(t.subject),
+                            scope_term(tag, subject_to_term(t.subject)),
                             Term::NamedNode(t.predicate),
-                            t.object,
+                            scope_term(tag, t.object),
                         )
                     })
                     .collect(),

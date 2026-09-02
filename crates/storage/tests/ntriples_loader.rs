@@ -1,5 +1,5 @@
 use horndb_storage::loader::ntriples::{load_ntriples_file, LoadStats};
-use horndb_storage::{Store, TermKind};
+use horndb_storage::{Store, TermKind, DEFAULT_GRAPH};
 use oxrdf::{Literal, NamedNode, Term, Triple};
 use std::path::PathBuf;
 
@@ -98,4 +98,43 @@ fn missing_file_returns_error() {
     let store = Store::in_memory();
     let err = load_ntriples_file(&store, &fixture("does-not-exist.nt"));
     assert!(err.is_err());
+}
+
+#[test]
+fn blank_node_labels_are_scoped_per_document() {
+    // HDB-113: `_:b1` in two different files must not collide when both are
+    // loaded into the same store, but a repeated label within one file (or
+    // one load call) must still resolve to the same node.
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let p = NamedNode::new("http://example.org/p").unwrap();
+
+    let path_a = dir.path().join("a.nt");
+    std::fs::File::create(&path_a)
+        .unwrap()
+        .write_all(b"_:b1 <http://example.org/p> <http://example.org/oa> .\n_:b1 <http://example.org/p> <http://example.org/oa2> .\n")
+        .unwrap();
+
+    let path_b = dir.path().join("b.nt");
+    std::fs::File::create(&path_b)
+        .unwrap()
+        .write_all(b"_:b1 <http://example.org/p> <http://example.org/ob> .\n")
+        .unwrap();
+
+    let store = Store::in_memory();
+    load_ntriples_file(&store, &path_a).unwrap();
+    load_ntriples_file(&store, &path_b).unwrap();
+
+    let rows = store
+        .scan_predicate(DEFAULT_GRAPH, &Term::NamedNode(p))
+        .unwrap();
+    let mut subjects: Vec<String> = rows.into_iter().map(|(s, _)| s.to_string()).collect();
+    subjects.sort();
+    subjects.dedup();
+    assert_eq!(
+        subjects.len(),
+        2,
+        "`_:b1` from a.nt and `_:b1` from b.nt must be distinct nodes, but the same \
+         label repeated within a.nt must stay one node: {subjects:?}"
+    );
 }
