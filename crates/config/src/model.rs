@@ -144,6 +144,56 @@ mod tests {
         );
     }
 
+    /// SPEC-26 S4/AC5: a URL override wins over the `[server.limits]`
+    /// default, using the config files' own value syntax.
+    #[test]
+    fn overrides_win_over_the_limits_defaults() {
+        let limits = Limits {
+            query_timeout: HumanDuration(Duration::from_secs(30)),
+            max_result_rows: 1_000,
+            ..Default::default()
+        };
+        let mut qs = QuerySettings::from_limits(&limits);
+        qs.apply_override("query_timeout", "250ms").unwrap();
+        qs.apply_override("max_result_rows", "7").unwrap();
+        qs.apply_override("rdf12", "true").unwrap();
+        qs.apply_override("max_query_memory", "2GiB").unwrap();
+        qs.apply_override("default_graph", "strict").unwrap();
+        assert_eq!(qs.query_timeout.0, Duration::from_millis(250));
+        assert_eq!(qs.max_result_rows, 7);
+        assert!(qs.rdf12);
+        assert_eq!(qs.max_query_memory, Some(ByteSize(2 * 1024 * 1024 * 1024)));
+        assert_eq!(qs.default_graph, DefaultGraph::Strict);
+    }
+
+    /// SPEC-26 S4: an unknown key, a typo of a real one, and a server-only
+    /// key are all errors naming the key — never a silent no-op.
+    #[test]
+    fn unknown_and_server_only_keys_are_rejected_by_name() {
+        let mut qs = QuerySettings::from_limits(&Limits::default());
+        for key in ["bogus", "query_timout", "bind", "config_dirs", "simd"] {
+            let err = qs.apply_override(key, "1s").unwrap_err();
+            assert!(err.contains(key), "error must name `{key}`: {err}");
+        }
+        // ...and nothing was mutated by the rejected calls.
+        assert_eq!(qs, QuerySettings::from_limits(&Limits::default()));
+    }
+
+    #[test]
+    fn unparseable_values_are_rejected_by_key() {
+        let mut qs = QuerySettings::from_limits(&Limits::default());
+        for (key, value) in [
+            ("query_timeout", "30"),     // unit required
+            ("max_result_rows", "-1"),   // not a u64
+            ("rdf12", "yes"),            // true/false only
+            ("max_query_memory", "2GB"), // IEC units only
+            ("default_graph", "Union"),  // case-sensitive
+        ] {
+            let err = qs.apply_override(key, value).unwrap_err();
+            assert!(err.contains(key), "error must name `{key}`: {err}");
+        }
+    }
+
     fn toml_from(s: &str) -> ServerConfig {
         toml::from_str(s).expect("valid config")
     }
@@ -356,4 +406,70 @@ impl QuerySettings {
             default_graph: limits.default_graph,
         }
     }
+
+    /// SPEC-26 S4: apply one whitelisted per-query override on top of the
+    /// `[server.limits]` defaults this was built from.
+    ///
+    /// The whitelist is exactly this struct's fields. Every other key —
+    /// including a server-only one (`bind`, `config_dirs`, `simd`, `logging`,
+    /// `reload`) and a typo of a whitelisted one — is an error naming the
+    /// key, never a silent no-op: a `query_timout=1s` that quietly did
+    /// nothing is the failure mode this rejection exists to prevent.
+    ///
+    /// Value syntax is the config files' syntax, verbatim (`HumanDuration`,
+    /// `ByteSize`), so the two channels cannot drift.
+    ///
+    /// Callers layer overrides highest-precedence-last. A future session
+    /// tier slots in as another sequence of these calls between the server
+    /// defaults and the URL params — no rewrite of this resolution.
+    pub fn apply_override(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let bad = |what: &str| format!("invalid `{key}` value {value:?}: {what}");
+        match key {
+            "query_timeout" => self.query_timeout = value.parse().map_err(|e: String| bad(&e))?,
+            "max_result_rows" => {
+                self.max_result_rows = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| bad("expected a non-negative integer"))?
+            }
+            "rdf12" => {
+                self.rdf12 = match value.trim() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(bad("expected `true` or `false`")),
+                }
+            }
+            // SPEC-26 S5: parsed and stored, NOT enforced. Real per-query
+            // memory accounting is the companion spec's job; until it lands
+            // this knob is accepted so operators can write it, and the API
+            // docs say plainly that it does not yet bound anything.
+            "max_query_memory" => {
+                self.max_query_memory = Some(value.parse().map_err(|e: String| bad(&e))?)
+            }
+            "default_graph" => {
+                self.default_graph = match value.trim() {
+                    "union" => DefaultGraph::Union,
+                    "strict" => DefaultGraph::Strict,
+                    _ => return Err(bad("expected `union` or `strict`")),
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "unknown query setting `{key}` (overridable: {})",
+                    OVERRIDABLE_KEYS.join(", ")
+                ))
+            }
+        }
+        Ok(())
+    }
 }
+
+/// The SPEC-26 S4 whitelist, for error messages. Kept next to
+/// [`QuerySettings::apply_override`]'s match, which is the real authority.
+pub const OVERRIDABLE_KEYS: [&str; 5] = [
+    "query_timeout",
+    "max_result_rows",
+    "rdf12",
+    "max_query_memory",
+    "default_graph",
+];

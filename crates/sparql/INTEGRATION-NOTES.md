@@ -120,14 +120,54 @@ of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
 `SparqlConfig.default_graph` (`lib.rs`, `DefaultGraphMode::{Union, Strict}`)
 comes from `[server.limits].default_graph` — a typed `union | strict` enum in
 `horndb-config`, so a bad value is rejected at startup naming the file and
-key. `serve.rs` builds one `SparqlConfig` into `AppState.cfg`; the handlers
-use it instead of the `SparqlConfig::default()` they hardcoded before. A
-single query overrides it with the `default_graph` URL or form parameter on
-all three protocol channels (GET, form-POST, direct POST); an unparseable
-value is a 400 naming the key. Spelling: `default_graph`, the config-key
-spelling — SPEC-26 S4 names every override after its field, and
-`default-graph` sits one suffix from the SPARQL 1.1 Protocol's reserved
-`default-graph-uri`, which phase 5's GSP needs on the same endpoint.
+key. `serve.rs` puts the whole `[server.limits]` table in `AppState.limits`,
+and each request derives its own `SparqlConfig` from it (see *Per-query
+settings* below). A single query overrides the mode with the `default_graph`
+URL or form parameter on all three protocol channels (GET, form-POST, direct
+POST); an unparseable value is a 400 naming the key. Spelling:
+`default_graph`, the config-key spelling — SPEC-26 S4 names every override
+after its field, and `default-graph` sits one suffix from the SPARQL 1.1
+Protocol's reserved `default-graph-uri`, which phase 5's GSP needs on the
+same endpoint.
+
+### Per-query settings (SPEC-26 S4/S5)
+
+`AppState.limits` holds the server-scoped **defaults**. Every `/query`
+request folds the whitelisted URL parameters (and, for a form POST, the body
+fields, which win) over them into one `horndb_config::QuerySettings`
+(`server/query.rs::resolve_settings`). The whitelist is exactly
+`QuerySettings`' fields; `query`, `default-graph-uri` and `named-graph-uri`
+are protocol keys and are skipped; anything else — a server-only key, a typo,
+an unparseable value — is a 400 naming the key, affecting no other query.
+
+Not to be confused with `AppState.admission` (HDB-118): that is the
+concurrency gate built from three server-only `[server.limits]` keys
+(`max_concurrent_queries`, `queue_timeout`, `max_request_body`), which are
+deliberately outside the per-query whitelist. `AppState.limits` is the whole
+config table.
+
+Enforcement:
+
+- `query_timeout` — `arm_timeout` spawns a tokio timer holding the query's
+  `wcoj::CancelToken`; `exec::cancel::scope` publishes that token to the
+  executors running on the query's blocking thread (thread-local, for the
+  same `&self`-on-a-shared-backend reason `exec::phases` is). The timer
+  disarms when the query drops its "still running" sender, so a fast query
+  leaves nothing sleeping. `horndb-wcoj` sees only a `CancelToken` and gains
+  no config dependency. A cancelled query surfaces as
+  `SparqlError::QueryTimeout` — HTTP 504 before the headers commit.
+- `max_result_rows` — a solution counter in the streaming SELECT path. Over
+  the cap the response ends with `SparqlError::ResultRowLimit`, **never** a
+  short-but-well-formed document: a 400 while the headers are uncommitted, an
+  aborted `ChannelBody` (chunked response with no terminator) after.
+- `rdf12` — becomes the request's `SparqlConfig.rdf12`.
+- `max_query_memory` — parsed, carried, **enforces nothing** (SPEC-26 S5
+  delegates real accounting to the companion memory spec).
+
+The materialized path (ASK/CONSTRUCT/DESCRIBE/EXPLAIN) moved onto the
+blocking pool for this: it used to run the whole query on a runtime worker,
+which would have parked the very timer meant to interrupt it. The row cap
+applies to the streaming SELECT path, which is where every SELECT goes.
 
 ### Two families of `GRAPH ?g` query are refused, not answered
 

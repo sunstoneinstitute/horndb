@@ -106,6 +106,8 @@ bytemuck = { version = "1", features = ["derive"] }
 spargebra = "0.4"
 regex = "1"
 axum = "0.8"
+# `time` backs the SPEC-26 S5 per-query `query_timeout` timer in the SPARQL
+# server (`crates/sparql/src/server/query.rs::arm_timeout`).
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tower = "0.5"
 hyper = "1"

@@ -2,6 +2,12 @@
 //!   * GET with `query` in the URL query string,
 //!   * POST `application/sparql-query` raw,
 //!   * POST `application/x-www-form-urlencoded` with `query=`.
+//!
+//! Every request also builds its own [`QuerySettings`] (SPEC-26 S4): the
+//! server's `[server.limits]` defaults with the whitelisted URL/form
+//! overrides layered on top. `query_timeout`, `max_result_rows` and `rdf12`
+//! are enforced here (S5); `max_query_memory` is accepted and carried but
+//! **not yet enforced** — see [`resolve_settings`].
 
 use super::stream_body::ChannelBody;
 use super::{AppState, QueryPermit};
@@ -20,49 +26,87 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use bytes::Bytes;
+use horndb_config::QuerySettings;
 use horndb_metrics::labels::{Stage, StageLabel};
-use serde::Deserialize;
+use horndb_wcoj::cancel::CancelToken;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
-#[derive(Deserialize)]
-pub struct QueryParams {
-    pub query: Option<String>,
-    /// SPEC-26 S4: the one per-query override key SPEC-28 S3 needs live
-    /// ahead of SPEC-26 Phase 2's general whitelist mechanism (#251)
-    /// (`union`/`strict`,
-    /// see `SparqlConfig::default_graph`). Spelled `default_graph` — the
-    /// config-key spelling, not `default-graph`: SPEC-26 S4 spells URL
-    /// overrides after their `QuerySettings` field names (e.g.
-    /// `?query_timeout=30s`), and `default-graph` sits one suffix from the
-    /// SPARQL 1.1 Protocol's reserved `default-graph-uri`, which SPEC-28
-    /// phase 5 (GSP) will need on this same endpoint. Read from the URL
-    /// query string on GET and on a direct POST (`application/sparql-query`,
-    /// raw body); a POST-form body (`application/x-www-form-urlencoded`)
-    /// instead carries it as a `default_graph=` form field (`url_form_field`,
-    /// below) — the same channel `query=` uses there.
-    pub default_graph: Option<String>,
+/// URL/form keys on `/query` that are **not** SPEC-26 S4 overrides.
+/// `query` is the query text itself; the two graph-uri keys are reserved by
+/// the SPARQL 1.1 Protocol (SPEC-28 phase 5's Graph Store Protocol needs
+/// them on this endpoint) and are still ignored here — but they must not be
+/// mistaken for an unknown setting and rejected. Every *other* key is either
+/// a whitelisted override or a 400.
+const PROTOCOL_KEYS: [&str; 3] = ["query", "default-graph-uri", "named-graph-uri"];
+
+/// Params come back as raw pairs rather than a typed struct: SPEC-26 S4
+/// needs the whole key set to tell a whitelisted override from an unknown
+/// key, which a `#[derive(Deserialize)]` struct would silently drop.
+type Params = Vec<(String, String)>;
+
+fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// SPEC-26 S4: build one query's settings — the server's `[server.limits]`
+/// defaults with each `layers` entry applied on top, later layers winning.
+///
+/// Only the [`QuerySettings`] whitelist is overridable; an unknown key or an
+/// unparseable value is `Err` (a per-query 400 naming the key) and touches
+/// neither the server config nor any other query. Layering is a fold over an
+/// ordered list precisely so a future session tier slots in as one more
+/// layer between the defaults and the URL params.
+///
+/// Keys are spelled after their `QuerySettings` field (`query_timeout`,
+/// `default_graph`, …), never kebab-case — `default-graph` would sit one
+/// suffix from the protocol's reserved `default-graph-uri` above.
+///
+/// **`max_query_memory` is accepted, parsed and carried, but not enforced**
+/// (SPEC-26 S5, non-goal): real per-query memory accounting is the companion
+/// spec's. Setting it bounds nothing today.
+fn resolve_settings(
+    limits: &horndb_config::Limits,
+    layers: &[&[(String, String)]],
+) -> Result<QuerySettings, String> {
+    let mut settings = QuerySettings::from_limits(limits);
+    for layer in layers {
+        for (key, value) in layer.iter() {
+            if PROTOCOL_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            settings.apply_override(key, value)?;
+        }
+    }
+    Ok(settings)
 }
 
 pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
-    Query(p): Query<QueryParams>,
+    Query(params): Query<Params>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(q) = p.query else {
+    let Some(q) = param(&params, "query").map(str::to_owned) else {
         return (
             StatusCode::BAD_REQUEST,
             "missing `query` parameter".to_string(),
         )
             .into_response();
     };
-    run(state, &q, &headers, p.default_graph.as_deref()).await
+    let settings = match resolve_settings(&state.limits, &[&params]) {
+        Ok(s) => s,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    run(state, &q, &headers, settings).await
 }
 
 pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
     State(state): State<AppState<B>>,
-    Query(p): Query<QueryParams>,
+    Query(params): Query<Params>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
@@ -72,68 +116,50 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let (query, default_graph) = if ctype.contains("application/x-www-form-urlencoded") {
-        let q = match url_form_field(&body, "query") {
-            Some(q) => q,
-            None => {
-                return (StatusCode::BAD_REQUEST, "form missing `query`".to_string())
-                    .into_response();
-            }
+    // A form-encoded POST can carry overrides in both channels; the body
+    // wins, with the URL query string as the fallback for a client that put
+    // them there instead — the precedence `query=` itself already implies.
+    // A direct POST's raw body IS the query text (SPARQL 1.1 Protocol
+    // §2.1.2), so there the overrides travel on the URL, like GET's.
+    let (query, body_params) = if ctype.contains("application/x-www-form-urlencoded") {
+        let params = url_form_pairs(&body);
+        let Some(q) = param(&params, "query").map(str::to_owned) else {
+            return (StatusCode::BAD_REQUEST, "form missing `query`".to_string()).into_response();
         };
-        // Body wins over the URL query string; the URL is a fallback for a
-        // client that put its override there instead (a form-encoded POST
-        // can carry both). Same precedence a form-encoded POST already
-        // implies for `query=` vs. any URL query string.
-        (
-            q,
-            url_form_field(&body, "default_graph").or(p.default_graph),
-        )
+        (q, params)
     } else {
-        // Direct POST: the raw body IS the query text (SPARQL 1.1 Protocol
-        // §2.1.2), so the override travels on the URL query string here,
-        // like GET's `?default_graph=...`.
-        (body, p.default_graph)
+        (body, Params::new())
     };
-    run(state, &query, &headers, default_graph.as_deref()).await
+    let settings = match resolve_settings(&state.limits, &[&params, &body_params]) {
+        Ok(s) => s,
+        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    };
+    run(state, &query, &headers, settings).await
 }
 
-/// Resolve the effective [`SparqlConfig`] for one request: the server's
-/// configured default, with the per-query `default_graph` override (SPEC-26
-/// S4, threaded early for SPEC-28 S3) applied on top if present. `Err` is a
-/// `String`, not `Response` (`clippy::result_large_err`).
-fn resolve_query_config(
-    base: &SparqlConfig,
-    default_graph_override: Option<&str>,
-) -> Result<SparqlConfig, String> {
-    let Some(raw) = default_graph_override else {
-        return Ok(*base);
-    };
-    match raw.parse() {
-        Ok(mode) => Ok(SparqlConfig {
-            default_graph: mode,
-            ..*base
-        }),
-        Err(_) => Err(format!(
-            "invalid `default_graph` value {raw:?}: expected `union` or `strict`"
-        )),
-    }
-}
-
-/// Extract a single urlencoded form field by key (`query=…` / `update=…`)
-/// from a request body, percent-decoding its value. Unlike the URL `Query`
-/// extractor (which rejects a duplicate key), a duplicate form key silently
-/// takes its first occurrence — a pre-existing asymmetry between the two
-/// channels, now user-visible for `default_graph` too.
-pub(crate) fn url_form_field(body: &str, key: &str) -> Option<String> {
-    for pair in body.split('&') {
-        let mut it = pair.splitn(2, '=');
-        if let (Some(k), Some(v)) = (it.next(), it.next()) {
-            if k == key {
-                return Some(percent_decode(v));
+/// Split an urlencoded body (`query=…&max_result_rows=…`) into its
+/// percent-decoded key/value pairs, in order. One parser for both the form
+/// body and, via [`url_form_field`], `/update`'s single field.
+pub(crate) fn url_form_pairs(body: &str) -> Vec<(String, String)> {
+    body.split('&')
+        .filter_map(|pair| {
+            let mut it = pair.splitn(2, '=');
+            match (it.next(), it.next()) {
+                (Some(k), Some(v)) => Some((percent_decode(k), percent_decode(v))),
+                _ => None,
             }
-        }
-    }
-    None
+        })
+        .collect()
+}
+
+/// Extract a single urlencoded form field by key (`update=…`) from a request
+/// body. A duplicate form key takes its first occurrence — a pre-existing
+/// asymmetry with the URL `Query` extractor, which rejects duplicates.
+pub(crate) fn url_form_field(body: &str, key: &str) -> Option<String> {
+    url_form_pairs(body)
+        .into_iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
 }
 
 fn percent_decode(s: &str) -> String {
@@ -163,7 +189,7 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
     q: &str,
     headers: &HeaderMap,
-    default_graph_override: Option<&str>,
+    settings: QuerySettings,
 ) -> axum::response::Response {
     let accept = headers
         .get("accept")
@@ -171,16 +197,19 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
         .unwrap_or("");
     let fmt = ResultFormat::from_accept(accept);
 
-    let cfg = match resolve_query_config(&state.cfg, default_graph_override) {
-        Ok(cfg) => cfg,
-        Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+    // The two settings the SPARQL pipeline itself consumes (SPEC-26 S5:
+    // `rdf12` per query is what makes the already-plumbed per-request
+    // `SparqlConfig` path live from the HTTP layer).
+    let cfg = SparqlConfig {
+        rdf12: settings.rdf12,
+        default_graph: settings.default_graph.into(),
     };
 
     // HDB-118 admission control: take an execution slot before touching the
     // store. Acquired here (not deeper) so both the streaming and the
     // materialized path are covered by one gate.
-    let Some(permit) = state.limits.acquire().await else {
-        let retry_after = state.limits.queue_timeout.as_secs().max(1).to_string();
+    let Some(permit) = state.admission.acquire().await else {
+        let retry_after = state.admission.queue_timeout.as_secs().max(1).to_string();
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [("retry-after", retry_after)],
@@ -204,10 +233,52 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
                 cfg.default_graph,
                 fmt,
                 permit,
+                &settings,
             )
             .await
         }
-        Ok(None) => run_materialized(state, q, fmt, &cfg, permit).await,
+        Ok(None) => run_materialized(state, q, fmt, &cfg, permit, &settings).await,
+    }
+}
+
+/// SPEC-26 S5: arm this query's `query_timeout`.
+///
+/// Returns the [`CancelToken`] to publish to the executors plus a
+/// "still running" sender: the timer cancels only if that sender is still
+/// alive at the deadline, so a query that finishes first leaves no task
+/// sleeping out the rest of its timeout. The timer lives here, in the
+/// server layer — `horndb-wcoj` only ever sees a plain `CancelToken` and
+/// gains no config dependency.
+fn arm_timeout(timeout: Duration) -> (CancelToken, oneshot::Sender<()>) {
+    let token = CancelToken::new();
+    let (running_tx, running_rx) = oneshot::channel::<()>();
+    let timer_token = token.clone();
+    tokio::spawn(async move {
+        // Err == the deadline hit first; Ok == the query ended and dropped
+        // its sender.
+        if tokio::time::timeout(timeout, running_rx).await.is_err() {
+            timer_token.cancel();
+        }
+    });
+    (token, running_tx)
+}
+
+/// Status for an error that lands *before* any body byte. A timeout is the
+/// server giving up, not a malformed request, so it is not a 400.
+fn error_status(e: &SparqlError) -> StatusCode {
+    match e {
+        SparqlError::QueryTimeout => StatusCode::GATEWAY_TIMEOUT,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+/// Re-label an execution error raised after the query was cancelled: the
+/// executor reports its own "cancelled", the client needs the reason.
+fn classify(e: SparqlError, cancel: &CancelToken) -> SparqlError {
+    if cancel.is_cancelled() {
+        SparqlError::QueryTimeout
+    } else {
+        e
     }
 }
 
@@ -323,10 +394,13 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     default_graph: DefaultGraphMode,
     fmt: ResultFormat,
     permit: QueryPermit,
+    settings: &QuerySettings,
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
     let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
     let store = Arc::clone(&state.store);
+    let (cancel, running) = arm_timeout(settings.query_timeout.0);
+    let max_rows = settings.max_result_rows;
 
     // Declared first inside the closure so it drops LAST — after the pinned
     // read view and the operator tree — and therefore stays armed for every
@@ -349,6 +423,17 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         // client disconnect, error) and a panic unwinds it, so the slot is
         // freed exactly once.
         let _permit = permit;
+        // SPEC-26 S5. `running` disarms the timeout on every return path
+        // below; `cancel::scope` publishes the token to the executors on
+        // this thread (and clears it again on the way out, so the next
+        // query to be scheduled here does not inherit this one's cancel).
+        let _running = running;
+        let _cancel_scope = crate::exec::cancel::scope(cancel.clone());
+        // Solutions serialized so far, against `max_result_rows`. The cap
+        // NEVER truncates: the response ends with a typed
+        // `ResultRowLimit` error instead (a 400 while the headers are
+        // still uncommitted, an aborted body after).
+        let mut emitted: u64 = 0;
         // HDB-99: discard any per-operator exec-phase data left over on this
         // (tokio blocking-pool, thread-reused) thread from a previous
         // query's trailing chunks — see `exec::phases::reset`. This query's
@@ -370,7 +455,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             Ok(s) => s,
             Err(e) => {
                 record_exec(start, true);
-                let _ = first_tx.send(Err(e));
+                let _ = first_tx.send(Err(classify(e, &cancel)));
                 return;
             }
         };
@@ -379,7 +464,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             Ok(r) => r,
             Err(e) => {
                 record_exec(start, true);
-                let _ = first_tx.send(Err(e));
+                let _ = first_tx.send(Err(classify(e, &cancel)));
                 return;
             }
         };
@@ -387,7 +472,14 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
 
         let mut head = ser.header(&vars);
         match first_rows {
-            Some(rows) => head.push_str(&ser.chunk(&vars, &rows)),
+            Some(rows) => {
+                emitted += rows.len() as u64;
+                if emitted > max_rows {
+                    let _ = first_tx.send(Err(SparqlError::ResultRowLimit(max_rows)));
+                    return;
+                }
+                head.push_str(&ser.chunk(&vars, &rows))
+            }
             None => {
                 // Empty result: a sized body carrying the whole document.
                 head.push_str(&ser.footer());
@@ -405,7 +497,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
                 // the pre-fast-path contract (see ChannelBody).
                 let _ = first_tx.send(Ok(FirstReply::Streaming(Bytes::from(head))));
                 bump_exec_error();
-                let _ = tx.blocking_send(Err(e));
+                let _ = tx.blocking_send(Err(classify(e, &cancel)));
                 return;
             }
         };
@@ -417,6 +509,12 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
                 return;
             }
         };
+        emitted += rows2.len() as u64;
+        if emitted > max_rows {
+            // Still uncommitted: a clean typed 400, no partial document.
+            let _ = first_tx.send(Err(SparqlError::ResultRowLimit(max_rows)));
+            return;
+        }
         // Multi-chunk: commit the streaming path, then forward chunk 2.
         if first_tx
             .send(Ok(FirstReply::Streaming(Bytes::from(head))))
@@ -431,8 +529,26 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             return; // client disconnected
         }
         loop {
+            // One atomic load per chunk: catches a deadline that passed
+            // while an operator pipeline (rather than a WCOJ scan, which
+            // polls the token itself) was producing rows.
+            if cancel.is_cancelled() {
+                bump_exec_error();
+                let _ = tx.blocking_send(Err(SparqlError::QueryTimeout));
+                return;
+            }
             match stream.next_chunk() {
                 Ok(Some(rows)) => {
+                    emitted += rows.len() as u64;
+                    if emitted > max_rows {
+                        // Headers are committed, so the cap surfaces the
+                        // same way a mid-stream executor error does: the
+                        // body aborts without its terminator rather than
+                        // ending short and looking complete.
+                        bump_exec_error();
+                        let _ = tx.blocking_send(Err(SparqlError::ResultRowLimit(max_rows)));
+                        return;
+                    }
                     let bytes = Bytes::from(ser.chunk(&vars, &rows));
                     if tx.blocking_send(Ok(bytes)).is_err() {
                         return; // client disconnected
@@ -445,7 +561,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
                 Err(e) => {
                     // Headers are committed: abort the body (see ChannelBody).
                     bump_exec_error();
-                    let _ = tx.blocking_send(Err(e));
+                    let _ = tx.blocking_send(Err(classify(e, &cancel)));
                     return;
                 }
             }
@@ -462,9 +578,9 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             let body = axum::body::Body::new(ChannelBody::new(first, rx));
             (StatusCode::OK, [("content-type", fmt.content_type())], body).into_response()
         }
-        // Errors before any byte was emitted are still a clean 400 —
+        // Errors before any byte was emitted are still a clean status —
         // parity with the materialized path's error handling.
-        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        Ok(Err(e)) => (error_status(&e), e.to_string()).into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "result stream ended before producing output".to_string(),
@@ -481,21 +597,35 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
     q: &str,
     fmt: ResultFormat,
     cfg: &SparqlConfig,
-    // Held for the whole function: unlike the streaming path this executes
-    // and serializes inline, so the slot is free once the response is built.
-    _permit: QueryPermit,
+    permit: QueryPermit,
+    settings: &QuerySettings,
 ) -> axum::response::Response {
-    // Scope the read guard to the execution only; results are
-    // materialised into `ans`, so serialization below holds no lock and
+    let (cancel, running) = arm_timeout(settings.query_timeout.0);
+    let store = Arc::clone(&state.store);
+    let (query, cfg) = (q.to_string(), *cfg);
+
+    // On the blocking pool, not this worker: like `/update`, this path takes
+    // a store lock and then runs the whole query, so leaving it on a runtime
+    // worker would park that worker for the query's full duration — and the
+    // `query_timeout` timer, which is an async task, could never fire.
+    // The read guard is scoped to the execution only; results are
+    // materialised into `ans`, so the serialization below holds no lock and
     // never blocks a concurrent writer.
-    let ans = {
-        let store = state.store.read();
-        match execute_query_with(q, &*store, cfg) {
-            Ok(a) => a,
-            Err(e) => {
-                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
-            }
-        }
+    let ans = tokio::task::spawn_blocking(move || {
+        // HDB-118: the permit is held until this closure returns, i.e. for
+        // the whole execution. Serialization below runs unpermitted, as it
+        // touches no store.
+        let _permit = permit;
+        let _running = running;
+        let _cancel_scope = crate::exec::cancel::scope(cancel.clone());
+        let store = store.read();
+        execute_query_with(&query, &*store, &cfg).map_err(|e| classify(e, &cancel))
+    })
+    .await
+    .expect("query task panicked");
+    let ans = match ans {
+        Ok(a) => a,
+        Err(e) => return (error_status(&e), e.to_string()).into_response(),
     };
 
     match ans {

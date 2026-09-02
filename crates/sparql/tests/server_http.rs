@@ -2,6 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use horndb_config::Limits;
 use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
@@ -9,7 +10,6 @@ use horndb_sparql::exec::ScanScope;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
-use horndb_sparql::SparqlConfig;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -24,9 +24,9 @@ fn router_with_data() -> axum::Router {
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     build_router(state)
 }
@@ -150,9 +150,9 @@ fn router_with_named_graph() -> axum::Router {
     );
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     build_router(state)
 }
@@ -301,24 +301,40 @@ async fn default_graph_url_param_form_valid_value_changes_the_result_set() {
 }
 
 /// The form-encoded POST-body field wins over a `default_graph` also present
-/// on the URL query string: the body carries a *valid* value (`union`) while
-/// the URL carries an *invalid* one (`bogus`) — a 200 here proves the body's
-/// value was applied and the URL's was never even parsed.
+/// on the URL query string: both carry a *valid* value, and the answer is
+/// the body's (`strict`, default graph only), not the URL's (`union`).
+///
+/// SPEC-26 S4 note: this used to prove the precedence with an *invalid* URL
+/// value, on the theory that the winning layer's value is the only one
+/// parsed. The general override fold validates every layer it is handed, so
+/// a bad value now 400s wherever it sits — a shadowed typo is still a
+/// client error, not a silent no-op.
 #[tokio::test]
 async fn default_graph_url_param_form_body_field_wins_over_url() {
-    let app = router_with_data();
+    let app = router_with_named_graph();
     let req = Request::builder()
         .method("POST")
-        .uri("/query?default_graph=bogus")
+        .uri("/query?default_graph=union")
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/sparql-results+json")
         .body(Body::from(
-            "query=SELECT%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=union"
+            "query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D&default_graph=strict"
                 .to_string(),
         ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let b = &v["results"]["bindings"];
+    assert_eq!(
+        b.as_array().map(Vec::len),
+        Some(1),
+        "body's `strict` won: {v}"
+    );
+    assert_eq!(b[0]["s"]["value"], "http://ex/a");
 }
 
 /// When the form body carries no `default_graph` field at all, the handler
@@ -420,9 +436,9 @@ async fn get_query_returns_json_hornbackend() {
     backend.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     let app = build_router(state);
 
@@ -640,9 +656,9 @@ async fn large_select_streams_in_multiple_chunks() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     let app = build_router(state);
 
@@ -697,9 +713,9 @@ async fn small_select_replies_with_sized_single_frame_body() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     let app = build_router(state);
 
@@ -797,9 +813,9 @@ mod streaming_error_semantics {
     async fn exec_error_before_first_chunk_returns_400() {
         let state = AppState {
             store: Arc::new(RwLock::new(FailingScan)),
-            cfg: SparqlConfig::default(),
+            limits: Limits::default(),
             ready: Arc::new(AtomicBool::new(true)),
-            limits: Default::default(),
+            admission: Default::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -969,9 +985,9 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(PanicsLate)),
-            cfg: SparqlConfig::default(),
+            limits: Limits::default(),
             ready: Arc::new(AtomicBool::new(true)),
-            limits: Default::default(),
+            admission: Default::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -1020,9 +1036,9 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
-            cfg: SparqlConfig::default(),
+            limits: Limits::default(),
             ready: Arc::new(AtomicBool::new(true)),
-            limits: Default::default(),
+            admission: Default::default(),
         };
         let app = build_router(state);
         // SELECT all three vars so column pruning keeps every column.
@@ -1142,9 +1158,9 @@ mod lock_poisoning {
                 inner: MemStore::default(),
                 panicked: false,
             })),
-            cfg: SparqlConfig::default(),
+            limits: Limits::default(),
             ready: Arc::new(AtomicBool::new(true)),
-            limits: Default::default(),
+            admission: Default::default(),
         };
         let app = build_router(state);
 
@@ -1216,9 +1232,11 @@ async fn admission_control_sheds_the_query_past_the_slot_cap() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        cfg: SparqlConfig::default(),
+        // `Limits` is `horndb_sparql::server::Limits` in this fn (imported
+        // above for `admission`); the config table is inferred here.
+        limits: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Limits::new(SLOTS, Duration::from_millis(100), 4 * 1024 * 1024),
+        admission: Limits::new(SLOTS, Duration::from_millis(100), 4 * 1024 * 1024),
     };
     let app = build_router(state);
 
@@ -1256,9 +1274,11 @@ async fn request_body_limit_rejects_oversized_post() {
 
     let state = AppState {
         store: Arc::new(RwLock::new(MemStore::default())),
-        cfg: SparqlConfig::default(),
+        // `Limits` is `horndb_sparql::server::Limits` in this fn (imported
+        // above for `admission`); the config table is inferred here.
+        limits: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Limits::new(4, Duration::from_secs(1), 64),
+        admission: Limits::new(4, Duration::from_secs(1), 64),
     };
     let app = build_router(state);
 
@@ -1321,9 +1341,9 @@ async fn update_completes_while_a_select_is_still_streaming() {
     );
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
         ready: Arc::new(AtomicBool::new(true)),
-        limits: Default::default(),
+        admission: Default::default(),
     };
     let app = build_router(state);
 
@@ -1387,4 +1407,314 @@ async fn update_completes_while_a_select_is_still_streaming() {
     assert!(String::from_utf8(body.to_vec())
         .unwrap()
         .contains("http://ex/stream"));
+}
+
+/// SPEC-26 S4/S5 (#251): per-query URL-parameter overrides and their
+/// enforcement.
+mod spec26_query_settings {
+    use super::*;
+    use horndb_config::HumanDuration;
+    use horndb_sparql::algebra::{TriplePattern, Var};
+    use horndb_sparql::exec::{Batch, Bindings, Executor, Row, Slot};
+    use horndb_sparql::SparqlError;
+    use horndb_storage::TermId;
+    use std::time::Duration;
+
+    const SELECT_ALL: &str =
+        "/query?query=SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D";
+
+    async fn get(app: axum::Router, uri: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .uri(uri)
+            .header("accept", "text/csv")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        (status, body)
+    }
+
+    fn router(limits: Limits) -> axum::Router {
+        let mut s = MemStore::default();
+        s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
+        build_router(AppState {
+            store: Arc::new(RwLock::new(s)),
+            limits,
+            ready: Arc::new(AtomicBool::new(true)),
+            admission: Default::default(),
+        })
+    }
+
+    fn router_with_rows(n: u64, limits: Limits) -> axum::Router {
+        let mut s = MemStore::default();
+        for i in 0..n {
+            s.insert_triple(
+                iri(&format!("http://ex/s{i}")),
+                iri("http://ex/p"),
+                iri(&format!("http://ex/o{i}")),
+            );
+        }
+        build_router(AppState {
+            store: Arc::new(RwLock::new(s)),
+            limits,
+            ready: Arc::new(AtomicBool::new(true)),
+            admission: Default::default(),
+        })
+    }
+
+    /// A scan that parks until the query's `CancelToken` trips — the
+    /// deterministic stand-in for a long-running query. No sleep race: the
+    /// loop is driven by the cancel flag, and the 5 s bound only exists so a
+    /// broken timeout fails the assertion instead of hanging the suite.
+    struct BlocksUntilCancelled;
+
+    impl Executor for BlocksUntilCancelled {
+        fn scan_bgp(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+            unreachable!("scan_bgp_ids is overridden")
+        }
+        fn scan_bgp_ids(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Batch> {
+            let cancel = horndb_sparql::exec::cancel::current();
+            let give_up = std::time::Instant::now() + Duration::from_secs(5);
+            while !cancel.is_cancelled() && std::time::Instant::now() < give_up {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if cancel.is_cancelled() {
+                // What a real executor reports; the server re-labels it as
+                // the timeout it actually was.
+                return Err(SparqlError::Executor("wcoj: cancelled".into()));
+            }
+            Ok(Batch {
+                schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
+                rows: vec![Row(vec![
+                    Slot::Id(TermId(0)),
+                    Slot::Id(TermId(0)),
+                    Slot::Id(TermId(0)),
+                ])],
+            })
+        }
+        fn decode_term(&self, id: TermId) -> horndb_sparql::Result<Term> {
+            Ok(Term::Iri(format!("http://ex/t{}", id.0)))
+        }
+    }
+    /// HDB-119: `/query` runs against a pinned read view, and for this
+    /// stateless stub the view is another copy of itself — the parking scan
+    /// (and the thread-local cancel token it polls) is unchanged by the pin.
+    impl horndb_sparql::exec::Pinnable for BlocksUntilCancelled {
+        type View = BlocksUntilCancelled;
+        fn pin_read(&self) -> BlocksUntilCancelled {
+            BlocksUntilCancelled
+        }
+    }
+    impl horndb_sparql::exec::Store for BlocksUntilCancelled {
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(horndb_sparql::exec::ApplyCounts::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn blocking_router(limits: Limits) -> axum::Router {
+        build_router(AppState {
+            store: Arc::new(RwLock::new(BlocksUntilCancelled)),
+            limits,
+            ready: Arc::new(AtomicBool::new(true)),
+            admission: Default::default(),
+        })
+    }
+
+    /// AC6: the `[server.limits].query_timeout` default cancels a query
+    /// through its `CancelToken`, and the client sees a typed timeout — not
+    /// the executor's own "cancelled".
+    #[tokio::test]
+    async fn server_default_query_timeout_cancels_via_the_cancel_token() {
+        let limits = Limits {
+            query_timeout: HumanDuration(Duration::from_millis(1)),
+            ..Default::default()
+        };
+        let (status, body) = get(blocking_router(limits), SELECT_ALL).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "body: {body}");
+        assert!(body.contains("query timeout exceeded"), "body: {body}");
+    }
+
+    /// AC5 + AC6: `?query_timeout=` beats the `[server.limits]` default. The
+    /// default here is the built-in 30 s, so a cancel inside milliseconds can
+    /// only have come from the URL parameter.
+    #[tokio::test]
+    async fn query_timeout_url_param_overrides_the_server_default() {
+        let app = blocking_router(Limits::default());
+        assert_eq!(Limits::default().query_timeout.0, Duration::from_secs(30));
+        let (status, body) = get(app, &format!("{SELECT_ALL}&query_timeout=1ms")).await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "body: {body}");
+        assert!(body.contains("query timeout exceeded"), "body: {body}");
+    }
+
+    /// AC5: an unknown key, a server-only key, and an unparseable value are
+    /// each a 400 naming the key — and none of them disturbs the server
+    /// config, so the next query on the same router still answers normally.
+    #[tokio::test]
+    async fn bad_url_params_400_by_name_and_leave_the_server_config_alone() {
+        let app = router(Limits::default());
+        for (param, key) in [
+            ("bogus_key=1", "bogus_key"),
+            ("bind=0.0.0.0%3A80", "bind"),
+            ("query_timout=1s", "query_timout"),
+            ("query_timeout=nonsense", "query_timeout"),
+            ("max_result_rows=-1", "max_result_rows"),
+            ("rdf12=yes", "rdf12"),
+            ("max_query_memory=2GB", "max_query_memory"),
+        ] {
+            let (status, body) = get(app.clone(), &format!("{SELECT_ALL}&{param}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{param} -> {body}");
+            assert!(body.contains(key), "400 body must name `{key}`: {body}");
+        }
+        let (status, body) = get(app, SELECT_ALL).await;
+        assert_eq!(status, StatusCode::OK, "server config undisturbed: {body}");
+    }
+
+    /// The SPARQL 1.1 Protocol's own reserved keys are not SPEC-26 settings
+    /// and must not be mistaken for unknown ones (SPEC-28 phase 5 needs them
+    /// on this endpoint).
+    #[tokio::test]
+    async fn protocol_reserved_params_are_not_rejected_as_unknown_settings() {
+        let (status, body) = get(
+            router(Limits::default()),
+            &format!("{SELECT_ALL}&default-graph-uri=http%3A%2F%2Fex%2Fg"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+    }
+
+    /// AC6: over-cap before the headers commit — a clean typed 400, no
+    /// partial document at all.
+    #[tokio::test]
+    async fn max_result_rows_over_cap_in_the_first_chunk_is_a_typed_400() {
+        let app = router_with_rows(5_000, Limits::default());
+        let (status, body) = get(app, &format!("{SELECT_ALL}&max_result_rows=10")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(
+            body.contains("result row limit exceeded") && body.contains("10"),
+            "body: {body}"
+        );
+    }
+
+    /// AC6, the case that matters: the cap trips after the 200 is committed.
+    /// The body must ABORT (an error frame — on the wire, a chunked response
+    /// with no terminating chunk), never end short and look complete.
+    ///
+    /// 15 000 rows at the fixed 4096-row chunk against a 9 000-row cap:
+    /// chunks 1-2 (8 192 rows) fit and commit the streaming response, chunk 3
+    /// crosses the cap.
+    #[tokio::test]
+    async fn max_result_rows_over_cap_mid_stream_aborts_the_body() {
+        use http_body::Body as _;
+
+        let app = router_with_rows(15_000, Limits::default());
+        let req = Request::builder()
+            .uri(format!("{SELECT_ALL}&max_result_rows=9000"))
+            .header("accept", "text/csv")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "headers commit before the cap trips"
+        );
+
+        let mut body = resp.into_body();
+        let mut rows = 0usize;
+        let mut aborted = false;
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame {
+                Ok(f) => {
+                    if let Ok(data) = f.into_data() {
+                        rows += data.iter().filter(|b| **b == b'\n').count();
+                    }
+                }
+                Err(_) => {
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+        assert!(aborted, "the over-cap body must abort, not end cleanly");
+        assert!(
+            rows <= 9_001, // + the CSV header line
+            "no rows past the cap are delivered, got {rows}"
+        );
+    }
+
+    /// A result at or under the cap streams to completion untouched — the
+    /// counter must not fire one row early.
+    #[tokio::test]
+    async fn at_the_cap_the_result_is_delivered_in_full() {
+        let app = router_with_rows(5_000, Limits::default());
+        let (status, body) = get(app, &format!("{SELECT_ALL}&max_result_rows=5000")).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body.lines().count(), 5_001, "5000 rows + the CSV header");
+    }
+
+    /// AC6: `?rdf12=` flips RDF 1.2 acceptance from the HTTP layer — the
+    /// per-request `SparqlConfig` path that was dead code from the server's
+    /// point of view before SPEC-26 S5.
+    #[tokio::test]
+    async fn rdf12_url_param_flips_triple_term_acceptance() {
+        // `?s <claims> <<( <Bob> <age> 30 )>>` — an RDF 1.2 triple term.
+        let q = "SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fex%2Fclaims%3E%20%3C%3C(%20%3Chttp%3A%2F%2Fex%2FBob%3E%20%3Chttp%3A%2F%2Fex%2Fage%3E%2030%20)%3E%3E%20%7D";
+        let app = router(Limits::default());
+        let (status, body) = get(app.clone(), &format!("/query?query={q}")).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "rdf12 defaults to off: {body}"
+        );
+        let (status, body) = get(app, &format!("/query?query={q}&rdf12=true")).await;
+        assert_eq!(status, StatusCode::OK, "?rdf12=true must accept it: {body}");
+    }
+
+    /// AC6: `max_query_memory` is accepted and carried on `QuerySettings`,
+    /// but enforces nothing — the companion memory-accounting spec turns the
+    /// stub real. A 200 on a value far below any real query's footprint is
+    /// the observable proof that it does not bound anything today.
+    #[tokio::test]
+    async fn max_query_memory_is_accepted_but_enforces_nothing() {
+        let app = router_with_rows(5_000, Limits::default());
+        let (status, body) = get(app, &format!("{SELECT_ALL}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body.lines().count(), 5_001, "not truncated, not refused");
+    }
 }

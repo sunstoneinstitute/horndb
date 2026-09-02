@@ -151,16 +151,6 @@ async fn main() -> Result<()> {
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
 
-    // SPEC-28 S3/D2: map `[server.limits].default_graph` into the typed
-    // `SparqlConfig` the query handlers use. Unlike `[simd].max_isa` above,
-    // no domain check is needed here — `default_graph` is a serde-level enum
-    // (`horndb_config::DefaultGraph`), so an unrecognized value already
-    // failed `horndb_config::load()` above, with file+key attribution.
-    let sparql_cfg = horndb_sparql::SparqlConfig {
-        rdf12: cfg.server.limits.rdf12,
-        default_graph: cfg.server.limits.default_graph.into(),
-    };
-
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
         collect_data_files(path, &mut files)
@@ -196,7 +186,7 @@ async fn main() -> Result<()> {
     if cfg.server.limits.max_concurrent_queries == 0 {
         anyhow::bail!("[server.limits].max_concurrent_queries must be at least 1");
     }
-    let limits = Limits::new(
+    let admission = Limits::new(
         cfg.server.limits.max_concurrent_queries,
         cfg.server.limits.queue_timeout.0,
         cfg.server.limits.max_request_body.0 as usize,
@@ -211,11 +201,16 @@ async fn main() -> Result<()> {
     // dead process.
     let store = Arc::new(RwLock::new(HornBackend::new()));
     let ready = Arc::new(AtomicBool::new(false));
+    // SPEC-26 S2: the server holds the `[server.limits]` *defaults*; each
+    // request layers its own URL/form overrides on top (S4). No domain check
+    // is needed here — unlike the free-string `[simd].max_isa` above, every
+    // limits field is typed, so a bad value already failed
+    // `horndb_config::load()`, with file+key attribution.
     let state = AppState::<HornBackend> {
         store: Arc::clone(&store),
-        cfg: sparql_cfg,
+        limits: cfg.server.limits.clone(),
         ready: Arc::clone(&ready),
-        limits,
+        admission,
     };
 
     // Scrape-time storage size collector: reads a stats snapshot through a

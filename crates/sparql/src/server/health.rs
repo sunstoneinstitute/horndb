@@ -34,7 +34,6 @@ pub async fn handle_readyz<B: FullBackend + Send + Sync + 'static>(
 mod tests {
     use super::*;
     use crate::exec::mem::MemStore;
-    use crate::SparqlConfig;
     use axum::body::Body;
     use axum::http::Request;
     use parking_lot::RwLock;
@@ -45,9 +44,9 @@ mod tests {
     fn state(ready: bool) -> AppState<MemStore> {
         AppState {
             store: Arc::new(RwLock::new(MemStore::default())),
-            cfg: SparqlConfig::default(),
+            limits: horndb_config::Limits::default(),
             ready: Arc::new(AtomicBool::new(ready)),
-            limits: Default::default(),
+            admission: Default::default(),
         }
     }
 

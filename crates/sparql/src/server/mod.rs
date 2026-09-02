@@ -15,7 +15,6 @@ pub mod update;
 
 use crate::exec::mem::MemStore;
 use crate::exec::FullBackend;
-use crate::SparqlConfig;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -140,9 +139,15 @@ pub fn flag_inconsistent() {
 /// (HDB-114). parking_lot never poisons — a panicking handler loses only
 /// its own request.
 ///
-/// `cfg` is the resolved [`SparqlConfig`] (SPEC-26 `[server.limits]`'s
-/// `rdf12` and `default_graph`, PLAN-28-03 Task 2), read by both query
-/// handlers.
+/// `limits` is the resolved `[server.limits]` table (SPEC-26 S2) — the
+/// server-scoped *defaults* for every query-overridable setting. Each
+/// request layers its URL/form overrides on top to get its own
+/// `QuerySettings` (SPEC-26 S4, `query::resolve_settings`); the two of them
+/// that the SPARQL pipeline itself needs (`rdf12`, `default_graph`) become
+/// that request's [`crate::SparqlConfig`]. Not to be confused with
+/// `admission` below: that is this module's [`Limits`] (the concurrency gate
+/// built from three of the same `[server.limits]` keys), this is the whole
+/// config table.
 ///
 /// `ready` backs `GET /readyz` (HDB-124): `false` until the `serve` binary's
 /// startup data load (and any `--materialize` pass) finishes, then flipped
@@ -151,30 +156,30 @@ pub fn flag_inconsistent() {
 /// front — the data is already loaded by construction.
 ///
 /// Note: `#[derive(Clone)]` is intentionally avoided here — it would
-/// wrongly require `B: Clone`. The manual impl clones only the `Arc`s
-/// (`cfg` is `Copy`).
+/// wrongly require `B: Clone`. The manual impl clones only the `Arc`s and
+/// the small `limits` table.
 pub struct AppState<B: FullBackend + Send + Sync + 'static = MemStore> {
     pub store: Arc<RwLock<B>>,
-    pub cfg: SparqlConfig,
+    pub limits: horndb_config::Limits,
     pub ready: Arc<AtomicBool>,
     /// Admission control + request-body cap (HDB-118).
-    pub limits: Limits,
+    pub admission: Limits,
 }
 
 impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
-            cfg: self.cfg,
-            ready: Arc::clone(&self.ready),
             limits: self.limits.clone(),
+            ready: Arc::clone(&self.ready),
+            admission: self.admission.clone(),
         }
     }
 }
 
 /// Build the axum router. Callers attach it to a `tokio::net::TcpListener`.
 pub fn build_router<B: FullBackend + Send + Sync + 'static>(state: AppState<B>) -> Router {
-    let body_limit = state.limits.max_request_body;
+    let body_limit = state.admission.max_request_body;
     Router::new()
         .route(
             "/query",
