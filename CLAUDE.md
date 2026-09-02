@@ -141,30 +141,11 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 - Executed plans (`docs/plans/PLAN-*.md` with `status: executed`) are historical implementation logs; treat them as commit-message-grade context, not as a source of truth for current behaviour.
 - `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (#13, closed not-planned; rocksdb duplication is the driver).
 
-## Codebase knowledge graph (graphify, optional)
-
-If `graphify-out/graph.json` exists, an AST-derived knowledge graph of this
-workspace is available — with god nodes, community structure, and cross-file
-relationships. For codebase questions and "where/how does X connect to Y"
-navigation, prefer a scoped graph query over broad grep/read:
-
-- `graphify query "<question>"` — scoped subgraph for a codebase question.
-- `graphify path "<A>" "<B>"` — relationship between two symbols.
-- `graphify explain "<concept>"` — a node and its neighbours.
-- If `graphify-out/wiki/index.md` exists, use it for broad navigation instead of raw source browsing.
-- Read `graphify-out/GRAPH_REPORT.md` only for broad architecture review, or when query/path/explain do not surface enough context.
-- After changing code, `graphify update .` refreshes the graph (AST-only, no API cost).
-
-The graph is **AST-only** (structural). It is not committed — rebuild locally with
-`graphify update .`. Absent the file, ignore this section. See
-`.claude/skills/graphify/SKILL.md` for the full workflow.
-
 ## Where deeper guidance lives
 
-**`AGENTS.md` is the real file; `CLAUDE.md` is a symlink to it** (this directory and
-every crate). Edit `AGENTS.md` only — never write through the `CLAUDE.md` path or
-replace the symlink with a copy. New agent-doc directory → create `AGENTS.md`, then
-`ln -s AGENTS.md CLAUDE.md`.
+**`CLAUDE.md` is the real file; `AGENTS.md` includes it** (this directory and
+every crate). Edit `CLAUDE.md` only, never `AGENTS.md.
+New agent-doc directory → create `CLAUDE.md`, then `echo @CLAUDE.md > AGENTS.md`.
 
 These nested `CLAUDE.md`/`AGENTS.md` files load on-demand when you work in their directory:
 
@@ -181,7 +162,7 @@ These nested `CLAUDE.md`/`AGENTS.md` files load on-demand when you work in their
 
 ## Writing Style: Plain Language, Precise Meaning
 
-Specs, plans, docs, READMEs, AGENTS.md files etc. in this repo are read by agents and humans
+Specs, plans, docs, READMEs, CLAUDE.md files etc. in this repo are read by agents and humans
 of varying skill levels. If possible, write these so it does not require deep specialization
 in the subject matter to follow the document.  **The goal is plain language that keeps
 every bit of the original precision — simpler words, not a simpler meaning.**
@@ -208,3 +189,15 @@ every bit of the original precision — simpler words, not a simpler meaning.**
 
 Quick test: *could a smart colleague from a different discipline follow this without a glossary,
 and does it still say exactly what it said before?* If yes to both, the balance is right.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists.
+  Use `graphify path "{A}" "{B}"` for relationships and `graphify explain "<concept>"` for focused concepts.
+  These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
