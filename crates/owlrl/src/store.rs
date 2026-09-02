@@ -60,6 +60,10 @@ pub trait TripleStore {
 
 /// Simple in-memory store keyed by predicate. Used by tests and by the
 /// `RuleFiringBackend` reference implementation.
+///
+/// `Clone` backs `Engine::fork` (SPEC-29 D3): every field is a plain
+/// map/set/vec, so the derive is a deep copy with no aliasing.
+#[derive(Clone)]
 pub struct MemStore {
     vocab: Vocabulary,
     /// predicate → set of (subject, object)
