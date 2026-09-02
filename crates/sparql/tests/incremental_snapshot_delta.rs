@@ -233,10 +233,11 @@ fn explain_cardinality_estimate_reflects_mutation_not_stats_cache() {
     assert!(before.contains("~4 rows"), "{before}");
 
     // A small delta -- one more matching triple, well under the fast path's
-    // rebuild-instead threshold -- must not leave `stats_cache` pinned to the
-    // pre-mutation snapshot (the hazard the plan calls out: an in-place merge
-    // keeps the same `Arc` pointer, so `Arc::ptr_eq` alone cannot tell a
-    // stale cache entry from a fresh one).
+    // rebuild-instead threshold -- must not leave `stats_cache` describing the
+    // pre-mutation snapshot. An in-place merge keeps the same snapshot `Arc`,
+    // so pointer identity could never have told a stale entry from a fresh
+    // one; the commit-version tag plus the merged summary (HDB-123) is what
+    // does.
     apply(
         &mut store,
         "INSERT DATA { <http://ex/s4> <http://ex/p> <http://ex/o4> }",

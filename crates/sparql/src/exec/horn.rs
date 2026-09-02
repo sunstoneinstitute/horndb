@@ -297,6 +297,11 @@ const EMPTY_GRAPH_SCOPE: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
 /// instead. See [`HornBackend::apply_delta_to_snapshots`].
 const SNAPSHOT_DELTA_REBUILD_DIVISOR: usize = 2;
 
+/// Most scopes [`HornBackend::snapshot_stats`] keeps a summary for at once.
+/// Small: the whole-store scopes plus a few `GRAPH <g>` ones is the shape that
+/// benefits; beyond that the cache is being swept, not reused.
+const STATS_CACHE_MAX_SCOPES: usize = 8;
+
 /// True if `g` is a HornDB-internal graph (SPEC-27 F6 / SPEC-29 D4). The
 /// default-graph sentinel has no IRI (`graph_uri` errors on it) and is never
 /// reserved, so it stays in the union default graph.
@@ -382,10 +387,6 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
 /// other way round). Untagged, a reader that started its build before a
 /// commit could insert a stale entry after it and every later query would
 /// read it.
-/// One cached `EXPLAIN` statistics summary: the commit version it was built
-/// at, the snapshot `Arc` it was derived from, and the stats themselves.
-type StatsCacheEntry = (u64, Arc<VecTripleSource>, Arc<SnapshotStats>);
-
 #[derive(Default)]
 struct SnapshotMemo {
     /// Commit version every entry in `map` was built at.
@@ -405,26 +406,38 @@ pub struct HornBackend {
     /// unqualified default graph); a query mixing `GRAPH` scopes adds one
     /// per distinct scope.
     snapshots: Arc<Mutex<SnapshotMemo>>,
-    /// Cached statistics summary derived from a specific snapshot, used by
-    /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
-    /// stats were built from alongside the stats themselves, and is reused only
-    /// while that `Arc` is still the current snapshot (`Arc::ptr_eq`).
+    /// Cached statistics summaries for `EXPLAIN`'s `cardinality_estimate`, one
+    /// per [`SnapshotScope`] asked for, each tagged with the store commit
+    /// version it describes (HDB-123). Shared with every pinned read view, the
+    /// same way the snapshot memo is.
     ///
-    /// **Pointer identity alone does not prove freshness.** A delta merge
-    /// mutates a snapshot through `Arc::get_mut`, which keeps the same pointer,
-    /// so a stale entry would still pass the `ptr_eq` check. The invariant is
-    /// therefore held by explicit clearing, not by identity: every write path
-    /// clears this cache unconditionally — [`Self::invalidate`] and
-    /// [`Self::apply_delta_to_snapshots`] both do. Clearing it *before* a merge
-    /// is also what lets `Arc::get_mut` succeed at all: the cached `Arc` is a
-    /// second strong reference to the very snapshot being merged into.
-    stats_cache: Arc<Mutex<Option<StatsCacheEntry>>>,
+    /// **The version tag is the whole freshness argument.** An entry is reused
+    /// only by a read at the same version, so it cannot answer for a store
+    /// that has moved on. That is what lets a `GRAPH <g>` scope be cached at
+    /// all: its snapshot is rebuilt per query (`SnapshotScope::memoisable` is
+    /// false for it), so there is no stable `Arc` to key on, but the rows it
+    /// would rebuild are fixed by the version.
+    ///
+    /// A write does not drop the whole-store entries. It merges the same quad
+    /// delta into them ([`SnapshotStats::apply_delta`]) and re-tags them, so a
+    /// small write followed by a read costs no full rebuild — see
+    /// [`Self::apply_delta_to_snapshots`]. Entries this cannot maintain (a
+    /// graph scope, or one whose drift bound is spent) are dropped instead.
+    ///
+    /// Deliberately holds no `Arc<VecTripleSource>`: a second strong reference
+    /// to a memoised snapshot would fail the `Arc::get_mut` an in-place delta
+    /// merge needs.
+    stats_cache: Arc<Mutex<HashMap<SnapshotScope, StatsCacheEntry>>>,
     /// `Some` on a pinned read view: every read resolves at that commit
     /// version instead of the store's latest. `None` on the writable backend
     /// (the one the server keeps under its `RwLock`), which always reads the
     /// newest committed state. See [`Self::pin_read`].
     pin: Option<PinnedSnapshot>,
 }
+
+/// One cached statistics summary: the store commit version it describes, and
+/// the summary itself. Lines up with HDB-119's version-tagged snapshot memo.
+type StatsCacheEntry = (u64, Arc<SnapshotStats>);
 
 impl Default for HornBackend {
     fn default() -> Self {
@@ -437,7 +450,7 @@ impl HornBackend {
         Self {
             store: Arc::new(ColumnStore::in_memory()),
             snapshots: Arc::new(Mutex::new(SnapshotMemo::default())),
-            stats_cache: Arc::new(Mutex::new(None)),
+            stats_cache: Arc::new(Mutex::new(HashMap::new())),
             pin: None,
         }
     }
@@ -526,9 +539,11 @@ impl HornBackend {
         memo.map.clear();
         memo.version = version;
         drop(memo);
-        // Clear the stats cache too: releases the obsolete snapshot's Arc (all six
-        // sorted indexes) immediately rather than pinning it until the next estimate.
-        *self.stats_cache.lock().expect("stats_cache lock poisoned") = None;
+        // The snapshots these described are gone; nothing here can be salvaged.
+        self.stats_cache
+            .lock()
+            .expect("stats_cache lock poisoned")
+            .clear();
     }
 
     /// Push a committed quad delta into every memoised snapshot, falling back
@@ -574,12 +589,16 @@ impl HornBackend {
         del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
         add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
     ) {
-        // First, unconditionally: the stats cache holds a second `Arc` to a live
-        // snapshot and reuses its entry on pointer identity. An in-place merge
-        // breaks both halves of that — the extra strong reference would fail
-        // `Arc::get_mut` below, and the pointer does not change, so a stale
-        // entry would still pass `Arc::ptr_eq`. See the field's doc.
-        *self.stats_cache.lock().expect("stats_cache lock poisoned") = None;
+        // A graph-scoped summary has no memoised source to merge a delta
+        // against, so a write simply drops it. The whole-store scopes are
+        // maintained in place alongside their snapshot, in the merge loop
+        // below. Unlike the old snapshot-`Arc`-keyed cache, an entry here is
+        // no second strong reference, so keeping it cannot fail the
+        // `Arc::get_mut` that merge needs.
+        self.stats_cache
+            .lock()
+            .expect("stats_cache lock poisoned")
+            .retain(|scope, _| scope.memoisable());
 
         // Each memoised scope with the row count it currently holds — only if
         // the memo is the one this write started from (condition 5).
@@ -691,12 +710,29 @@ impl HornBackend {
         let post = self.store.snapshot().version();
         let merged = {
             let mut memo = self.snapshots.lock().expect("snapshot lock poisoned");
+            let mut stats_cache = self.stats_cache.lock().expect("stats_cache lock poisoned");
             // Re-check under the same lock the merge happens under: a pinned
             // reader may have re-tagged the memo since `cached` was read.
             let ok = memo.version == base
                 && plans.iter().all(|(scope, d, a)| {
                     match memo.map.get_mut(scope).and_then(Arc::get_mut) {
                         Some(src) => {
+                            // Stats first: `apply_delta` reads the *pre*-merge
+                            // source to tell which rows the delta really
+                            // changes. A summary that refuses the merge (drift
+                            // spent) is dropped, and the next estimate
+                            // rebuilds it.
+                            let keep = match stats_cache.get_mut(scope) {
+                                Some((v, stats)) => {
+                                    let ok = Arc::make_mut(stats).apply_delta(src, d, a);
+                                    *v = post;
+                                    ok
+                                }
+                                None => true,
+                            };
+                            if !keep {
+                                stats_cache.remove(scope);
+                            }
                             src.apply_delta(d, a);
                             true
                         }
@@ -1231,23 +1267,42 @@ impl HornBackend {
             .len()
     }
 
-    /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
-    /// against the snapshot's `Arc` identity. Reuses the cached stats when they
-    /// were built from the same snapshot `Arc`; otherwise rebuilds (a full
-    /// snapshot scan) and replaces the cache. Correct across writes because
-    /// every write path clears `stats_cache` explicitly (see the field's doc):
-    /// a delta merge keeps the snapshot's `Arc` pointer, so `Arc::ptr_eq` on
-    /// its own could not tell a stale entry from a fresh one.
-    fn snapshot_stats(&self, snapshot: &Arc<VecTripleSource>) -> Arc<SnapshotStats> {
+    /// Get-or-build the [`SnapshotStats`] summary for `scope`, caching it
+    /// against the commit version this backend reads at (see the `stats_cache`
+    /// field) — the pinned version on a read view, the latest committed state
+    /// on the writable backend. A hit costs a hash lookup; a miss is a full
+    /// snapshot scan and is counted and timed as `horndb_sparql_stats_rebuild`.
+    fn snapshot_stats(
+        &self,
+        scope: &SnapshotScope,
+        snapshot: &Arc<VecTripleSource>,
+    ) -> Arc<SnapshotStats> {
         let version = self.read_version();
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
-        if let Some((cached_version, cached_snap, cached_stats)) = guard.as_ref() {
-            if *cached_version == version && Arc::ptr_eq(cached_snap, snapshot) {
-                return Arc::clone(cached_stats);
+        if let Some((v, stats)) = guard.get(scope) {
+            if *v == version {
+                return Arc::clone(stats);
             }
         }
+        let started = std::time::Instant::now();
         let stats = Arc::new(SnapshotStats::from_source(snapshot.as_ref()));
-        *guard = Some((version, Arc::clone(snapshot), Arc::clone(&stats)));
+        let m = &horndb_metrics::metrics().sparql;
+        m.stats_rebuild.inc();
+        m.stats_rebuild_seconds
+            .observe(started.elapsed().as_secs_f64());
+
+        // Bound the cache: an entry at another version is already dead, and a
+        // client naming many `GRAPH <g>` scopes in one version must not grow
+        // it without limit (the sink `graph_scoped_snapshots_are_not_memoised`
+        // bounds for snapshots).
+        // ponytail: clear-when-full, not LRU. Ceiling is a cold rebuild for the
+        // hot scopes right after a wide `GRAPH` sweep; make it an LRU if that
+        // ever shows up in a profile.
+        guard.retain(|_, (v, _)| *v == version);
+        if guard.len() >= STATS_CACHE_MAX_SCOPES {
+            guard.clear();
+        }
+        guard.insert(scope.clone(), (version, Arc::clone(&stats)));
         stats
     }
 
@@ -1969,7 +2024,8 @@ impl Executor for HornBackend {
             return Some(1);
         }
         // A scope with no snapshot form (`GRAPH ?g`) is simply "unknown".
-        let snapshot = self.wcoj_snapshot(&self.resolve_scope(scope).ok()?);
+        let resolved = self.resolve_scope(scope).ok()?;
+        let snapshot = self.wcoj_snapshot(&resolved);
         // Empty store: no pattern can match.
         if snapshot.total_triples() == 0 {
             return Some(0);
@@ -1983,11 +2039,10 @@ impl Executor for HornBackend {
         };
         // Recompute-from-snapshot statistics (SPEC-23 Phase 3), fed to the
         // layered estimator. Building `SnapshotStats` scans the whole snapshot,
-        // so cache it keyed on the snapshot's `Arc` identity: an `EXPLAIN` with
-        // many BgpScan/GroupCountScan nodes calls this once per node, and every
-        // node shares one snapshot. Every write path clears the cache, so no
-        // stale entry can survive a mutation — see the `stats_cache` field.
-        let stats = self.snapshot_stats(&snapshot);
+        // so cache it per scope, tagged with the store's commit version: an
+        // `EXPLAIN` with many BgpScan/GroupCountScan nodes calls this once per
+        // node at one version — see the `stats_cache` field.
+        let stats = self.snapshot_stats(&resolved, &snapshot);
         let est = StatsEstimator::new(stats.as_ref());
         let e = est.estimate_bgp(&wpatterns);
         Some(usize::try_from(e.estimate).unwrap_or(usize::MAX))
@@ -2733,6 +2788,62 @@ mod tests {
             before_ptr,
             "the update must merge into the existing Arc, not fall back to invalidate+rebuild"
         );
+    }
+
+    /// A small write must not cost the next query a full `SnapshotStats`
+    /// rebuild (HDB-123): `apply_delta_to_snapshots` merges the same quad
+    /// delta into the cached summary and re-tags it with the new commit
+    /// version. Asserted on the rebuild counter rather than on wall-clock,
+    /// which would be flaky. No other unit test in this crate builds planner
+    /// statistics, so the process-global counter is this test's alone.
+    #[test]
+    fn small_write_merges_planner_stats_instead_of_rebuilding() {
+        let rebuilds = || horndb_metrics::metrics().sparql.stats_rebuild.get();
+        // 2000 rows so that one added row stays far under the drift bound
+        // (`STATS_DRIFT_DIVISOR`), which is what keeps the merge path live.
+        let mut b = HornBackend::new();
+        for i in 0..2000 {
+            b.insert_triple(
+                Term::Iri(format!("http://ex/s{i}")),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri(format!("http://ex/o{}", i % 7)),
+            );
+        }
+        let patterns = vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: Term::Iri("http://ex/p".into()),
+            object: Term::Var(Var::new("o")),
+        }];
+
+        let base = rebuilds();
+        let e0 = b
+            .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
+            .unwrap();
+        assert_eq!(
+            rebuilds(),
+            base + 1,
+            "the first estimate builds the summary"
+        );
+        assert_eq!(
+            b.cardinality_estimate(&patterns, &ScanScope::DEFAULT),
+            Some(e0),
+            "a second estimate at the same version is a cache hit"
+        );
+        assert_eq!(rebuilds(), base + 1, "...and rebuilds nothing");
+
+        assert_update_merges_in_place(
+            &mut b,
+            "INSERT DATA { <http://ex/new> <http://ex/p> <http://ex/o0> }",
+        );
+        let e1 = b
+            .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
+            .unwrap();
+        assert_eq!(
+            rebuilds(),
+            base + 1,
+            "the query path after a small write must not rebuild the summary"
+        );
+        assert_eq!(e1, e0 + 1, "the merged summary must see the new row");
     }
 
     /// Mirrors `tests/incremental_snapshot_delta.rs`'s

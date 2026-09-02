@@ -1399,6 +1399,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "criterion 0.8.2",
  "horndb-config",
  "horndb-metrics",
  "horndb-owlrl",

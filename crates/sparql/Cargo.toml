@@ -95,3 +95,10 @@ assert_cmd = { workspace = true }
 # (`tests/update_feed_replay.rs`), the frontend analog of the storage crate's
 # `feed_replay.rs`.
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+# HDB-123: write-then-read feed, proving a small batch does not make the next
+# plan pay a full `SnapshotStats` rebuild.
+[[bench]]
+name = "stats_incremental"
+harness = false

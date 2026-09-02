@@ -418,10 +418,10 @@ fn cardinality_empty_bgp_is_join_identity() {
 }
 
 /// The `SnapshotStats` cache behind `cardinality_estimate` must not go stale:
-/// it is keyed on the snapshot's `Arc` identity, and any write rebuilds the
-/// snapshot into a fresh `Arc`. Two calls with no write in between must return
-/// the same number (cache hit); a write in between must change the estimate to
-/// reflect the new data (cache correctly invalidated, not stale).
+/// entries are tagged with the store's commit version, and any write bumps it.
+/// Two calls with no write in between must return the same number (cache hit);
+/// a write in between must change the estimate to reflect the new data —
+/// whether the write dropped the entry or merged its delta into it (HDB-123).
 #[test]
 fn cardinality_stats_cache_invalidates_on_write() {
     let mut st = stats_store();
@@ -443,7 +443,7 @@ fn cardinality_stats_cache_invalidates_on_write() {
     );
 
     // Mutate the store: add 5 more distinct p1 triples (subjects s6..s10),
-    // rebuilding the snapshot into a fresh `Arc`.
+    // moving the store to a new commit version.
     for i in 6..=10 {
         st.insert_triple(iri(&format!("s{i}")), iri("p1"), iri(&format!("o{i}")));
     }
