@@ -96,6 +96,21 @@ struct Cli {
 const FRAMEWORK: &str = "horndb";
 
 /// Read queries, in upstream order. q6 (the only UPDATE) is handled separately.
+/// Resident set size in MiB from `/proc/self/status`: `VmRSS` (current) for
+/// `field = "VmRSS:"`, `VmHWM` (peak) for `field = "VmHWM:"`. Linux only;
+/// 0.0 elsewhere.
+fn rss_mib(field: &str) -> f64 {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0.0;
+    };
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix(field))
+        .and_then(|v| v.split_whitespace().next()?.parse::<f64>().ok())
+        .map(|kb| kb / 1024.0)
+        .unwrap_or(0.0)
+}
+
 const READ_QUERIES: &[&str] = &[
     "q1_count",
     "q2_customer_orders",
@@ -516,6 +531,26 @@ fn main() -> Result<()> {
             eprintln!("    {qname}: {best:.4}s (best of 3)");
             results.record(&format!("query_{qname}"), json!(best));
         }
+    }
+
+    // Serving footprint (HDB-120): RSS with the store loaded AND a query
+    // snapshot built, over the triples actually served. This is the number
+    // `docs/benchmarks.md`'s "serving footprint" row reports — the partition
+    // B/quad figure covers the columnar partitions alone and does not include
+    // the per-query source or the dictionary.
+    {
+        let triples = backend.len();
+        let rss = rss_mib("VmRSS:");
+        let peak = rss_mib("VmHWM:");
+        let per_triple = if triples == 0 {
+            0.0
+        } else {
+            rss * 1024.0 * 1024.0 / triples as f64
+        };
+        eprintln!(
+            "  [mem] serving footprint: RSS {rss:.0} MiB over {triples} triples \
+             = {per_triple:.1} B/triple (peak {peak:.0} MiB)"
+        );
     }
 
     eprintln!("  done; results -> {}", cli.out.display());
