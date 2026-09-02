@@ -27,14 +27,15 @@
 //!
 //! A write still clones the run *list*, and each run carries fixed per-run
 //! overhead, so the run count is capped at [`MAX_RUNS`]; reaching it makes the
-//! write merge rather than append. The merge itself blocks writers to that
-//! partition for its duration — see [`PredicatePartition::cols`].
+//! write merge rather than append. The merge runs outside the `runs` mutex, so
+//! it does not block writers to that partition — see
+//! [`PredicatePartition::merged_cols`].
 
 use crate::ordering::{Ordering, PartitionAxis};
 use crate::term::TermId;
 use crate::visibility::{visible, CommitVersion, LATEST, UNSET_END};
 use arrow::array::{ArrayRef, UInt64Array};
-use horndb_metrics::labels::LoadPhase;
+use horndb_metrics::labels::{LoadPhase, MergeTrigger};
 use parking_lot::Mutex;
 use roaring::RoaringTreemap;
 use std::sync::atomic::AtomicUsize;
@@ -411,20 +412,41 @@ impl PredicatePartition {
 
     /// The merged view, building it on first call. Every read path goes
     /// through here; after the first call it is an atomic load.
-    ///
-    /// **This can block a writer.** The merging thread is a reader; it holds
-    /// no writer lock, and it holds the `runs` mutex for the whole merge — a
-    /// sort of every row in the partition, plus a second sort for the
-    /// object-major layout above `hot_threshold`. A concurrent
-    /// [`Self::with_appended_rows`] on this same partition waits that out: on
-    /// a 10M-row predicate, order of seconds. The work itself is not new (the
-    /// pre-HDB-84 tier charged the same sort to the writer on every batch) and
-    /// it runs once per partition version, but the thread that pays it has
-    /// changed, so a read can now stall a write.
     fn cols(&self) -> &Columns {
+        self.merged_cols(MergeTrigger::Read)
+    }
+
+    /// [`Self::cols`], recording `trigger` if this call is the one that merges.
+    ///
+    /// **The merge runs outside the `runs` mutex** (HDB-122). It is a sort of
+    /// every row in the partition, plus a second sort for the object-major
+    /// layout above `hot_threshold` — order of seconds on a 10M-row predicate
+    /// — and holding the lock across it stalled every concurrent
+    /// [`Self::with_appended_rows`] and [`Self::mark_live`] on this partition,
+    /// which is a reader blocking a writer. The lock is now taken twice, each
+    /// time for an `Arc`-clone of the run list.
+    ///
+    /// Two races, and why neither can lose a row:
+    ///
+    /// - **Two readers both decide to merge.** They cannot: `OnceLock::
+    ///   get_or_init` runs the closure on exactly one thread per partition and
+    ///   blocks the rest until it returns. The `runs` mutex never serialised
+    ///   merges; it only guarded the `Vec`.
+    /// - **A writer appends while the merge is in flight.** It cannot lose the
+    ///   append, because a writer never mutates *this* partition:
+    ///   `with_appended_rows` clones the run list into a **new**
+    ///   `PredicatePartition` and pushes its run there. Whether that clone
+    ///   catches the pre-merge list (N runs) or the post-merge one (1 run), the
+    ///   rows are the same multiset, so the swap below is invisible to it. The
+    ///   swap is pure compaction of a list only this partition reads.
+    fn merged_cols(&self, trigger: MergeTrigger) -> &Columns {
         self.cols.get_or_init(|| {
             let t = Instant::now();
-            let mut runs = self.runs.lock();
+            // Clone (Arc clones) and release: the merge below must not hold
+            // the lock. The clone also keeps the runs alive until the merged
+            // columns exist, so an unwind mid-merge leaves `runs` intact
+            // rather than emptied with `cols` still uninitialised.
+            let runs = self.runs.lock().clone();
             let mut worked = runs.len() != 1;
             let merged = if runs.len() == 1 {
                 runs[0].clone()
@@ -437,13 +459,9 @@ impl PredicatePartition {
                 Columns::sort_dedup(&mut rows);
                 Arc::new(Columns::from_sorted_rows(rows))
             };
-            // The runs stay alive until the merged columns exist. Releasing
-            // them earlier would save one transient copy of the rows, but an
-            // unwind between the two would leave `runs` empty with `cols`
-            // still uninitialised, and the next reader would then build an
-            // *empty* partition instead of failing — silent data loss for a
-            // transient allocation.
-            *runs = vec![merged.clone()];
+            if worked {
+                *self.runs.lock() = vec![merged.clone()];
+            }
             if merged.live_len >= self.hot_threshold {
                 // Above the threshold this is a second n log n sort, and it
                 // belongs inside the same bracket: before HDB-84 it ran inside
@@ -453,7 +471,11 @@ impl PredicatePartition {
                 worked = true;
             }
             if worked {
-                record_phase(LoadPhase::MergeRuns, t.elapsed(), merged.len() as u64);
+                let elapsed = t.elapsed();
+                record_phase(LoadPhase::MergeRuns, elapsed, merged.len() as u64);
+                horndb_metrics::metrics()
+                    .storage
+                    .record_partition_merge(trigger, elapsed);
             }
             merged
         })
@@ -488,7 +510,7 @@ impl PredicatePartition {
             // `merge_runs` sample inside `insert_quad_batch`'s `build` window,
             // so at the cap those nanoseconds are counted in both phases —
             // see `docs/metrics.md`.
-            part.cols();
+            part.merged_cols(MergeTrigger::WriteCap);
         }
         part
     }
@@ -1331,5 +1353,60 @@ mod tests {
         let mut live_merged = vec![false; targets.len()];
         part.mark_live(&targets, &mut live_merged);
         assert_eq!(live_merged, want, "merged probe disagreed with itself");
+    }
+
+    /// HDB-122: the run merge must not hold the `runs` mutex, so a writer can
+    /// keep appending while a reader merges.
+    ///
+    /// Counts appends completed while one merge is in flight rather than
+    /// measuring either side's wall clock, so there is no absolute timing
+    /// threshold to drift. With the merge under the lock the first append
+    /// blocks until the merge finishes, so the count is a handful; without it
+    /// the count is thousands, because an append is `O(runs)` `Arc` clones
+    /// against a sort of 500k rows. The 100 bar sits two orders of magnitude
+    /// clear of both.
+    #[test]
+    fn a_merge_does_not_block_a_concurrent_append() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        // Two runs of 250k rows: enough that the merge sort is tens of ms.
+        let mut b = PartitionBuilder::default();
+        for i in 0..250_000u64 {
+            b.append_stamped(TermId(i), TermId(i % 977), 1, UNSET_END);
+        }
+        let base = b.build_with_hot_threshold(NEVER_EAGER);
+        let run: Vec<Row> = (0..250_000u64)
+            .map(|i| (i + 7, i % 991, 2, UNSET_END))
+            .collect();
+        let part = Arc::new(base.with_appended_rows(run));
+        assert_eq!(part.run_count(), 2, "the merge must still be pending");
+
+        let merging = part.clone();
+        let started = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let (go, flag) = (started.clone(), done.clone());
+        let reader = std::thread::spawn(move || {
+            go.store(true, AtomicOrdering::Release);
+            let n = merging.len();
+            flag.store(true, AtomicOrdering::Release);
+            n
+        });
+
+        // Don't count appends made before the reader thread is even running,
+        // or the head start alone could clear the bar.
+        while !started.load(AtomicOrdering::Acquire) {
+            std::hint::spin_loop();
+        }
+        let mut appends = 0u64;
+        while !done.load(AtomicOrdering::Acquire) {
+            std::hint::black_box(part.with_appended_rows(vec![(1, 2, 3, UNSET_END)]));
+            appends += 1;
+        }
+        assert!(reader.join().unwrap() > 0, "the merge must produce rows");
+        assert!(
+            appends > 100,
+            "only {appends} appends landed during the merge — the merge is \
+             holding the runs mutex again"
+        );
     }
 }
