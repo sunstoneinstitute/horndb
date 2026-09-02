@@ -155,6 +155,13 @@ fn compact_reclaims_dead_rows_and_leaves_live_count_correct() {
     let c = (iri("http://ex/c"), iri("http://ex/p"), iri("http://ex/d"));
     store.insert_triples(&[a.clone(), c.clone()]).unwrap();
     store.retract_triples(std::slice::from_ref(&a)).unwrap();
+    // Captured before compaction: the sweep frees the terms only `a`
+    // mentioned, so `get` cannot resolve them afterwards (HDB-121).
+    let a_ids = (
+        store.dictionary().get(&a.0).unwrap(),
+        store.dictionary().get(&a.1).unwrap(),
+        store.dictionary().get(&a.2).unwrap(),
+    );
 
     // No pinned snapshot below the retraction's version, so the dead row
     // is reclaimable.
@@ -164,12 +171,16 @@ fn compact_reclaims_dead_rows_and_leaves_live_count_correct() {
     let snap = store.snapshot();
     assert_eq!(snap.len(), 1);
     assert!(
-        !snap.contains(
-            store.dictionary().get(&a.0).unwrap(),
-            store.dictionary().get(&a.1).unwrap(),
-            store.dictionary().get(&a.2).unwrap(),
-        ),
+        !snap.contains(a_ids.0, a_ids.1, a_ids.2),
         "retracted triple stays absent after compaction"
+    );
+    assert!(
+        store.dictionary().get(&a.0).is_none(),
+        "the subject only the reclaimed row mentioned is swept from the dictionary"
+    );
+    assert!(
+        store.dictionary().get(&a.1).is_some(),
+        "the predicate is still a partition key, so it survives the sweep"
     );
     // Physical check: the partition backing predicate `p` holds exactly
     // one row after compaction (the dead row was reclaimed, not just

@@ -269,9 +269,20 @@ impl Store {
     }
 
     /// Reclaim physically-dead rows (`end <= min pinned version`) across the
-    /// tier (SPEC-25 S1). A thin passthrough to `MemoryTier::compact` — without
-    /// this, compaction is only reachable from tests that construct a
-    /// `MemoryTier` directly.
+    /// tier (SPEC-25 S1), then sweep the dictionary terms those rows were the
+    /// last mention of (HDB-121). Without this, compaction is only reachable
+    /// from tests that construct a `MemoryTier` directly.
+    ///
+    /// **Precondition on the dictionary sweep:** no thread may be holding a
+    /// `TermId` it interned but has not yet installed rows for. Every
+    /// `Store` write path interns and installs inside one call and the sweep
+    /// bails if a write commits underneath it, so the exposure is the
+    /// id-based entry points (`intern_graph_uri` / `Dictionary::intern_quad`
+    /// followed by a later `insert_quad_ids`) and the bulk loaders, which
+    /// intern on parse threads. Compaction is an explicit, quiesced
+    /// maintenance call (HDB-63); do not wire it to a timer without closing
+    /// that gap first. Rows are reclaimed either way — only the dictionary
+    /// sweep carries this precondition.
     pub fn compact(&self) {
         let mt = self
             .tier
@@ -279,6 +290,44 @@ impl Store {
             .downcast_ref::<MemoryTier>()
             .expect("Stage-1 store always wraps MemoryTier");
         mt.compact();
+        self.gc_dictionary(mt);
+    }
+
+    /// Mark-and-sweep the dictionary against the rows the tier still holds.
+    ///
+    /// Mark, not refcount: a refcount would have to be maintained on every
+    /// insert, retract and partition rebuild — including rows carried forward
+    /// through MVCC history — to save a walk that only ever runs beside a
+    /// compaction that has just walked the same rows anyway.
+    ///
+    /// The liveness bound is the tier's own: `compact()` keeps every row with
+    /// `end > min_pinned`, so marking the rows that survive it marks
+    /// everything any pinned reader can still resolve. Terms interned after
+    /// `marks` was sized are past its end and are skipped; a write that lands
+    /// while marking bumps the version and aborts the sweep.
+    fn gc_dictionary(&self, mt: &MemoryTier) {
+        let slots = self.dictionary.len();
+        if slots == 0 {
+            return;
+        }
+        let mut marks = vec![false; slots];
+        let snap = mt.snapshot();
+        let version = snap.version();
+        snap.for_each_term_id(|bits| {
+            let id = TermId(bits);
+            if id.kind() == crate::term::TermKind::InlineInt {
+                return; // value-encoded, never allocated
+            }
+            let idx = id.payload();
+            if idx >= 1 && (idx as usize) <= marks.len() {
+                marks[idx as usize - 1] = true;
+            }
+        });
+        drop(snap);
+        if mt.version() != version {
+            return; // a write landed mid-mark; its terms may be unmarked
+        }
+        self.dictionary.gc(&marks);
     }
 
     pub fn intern_graph_uri(&self, graph_uri: &Term) -> Result<GraphId> {

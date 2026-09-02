@@ -3,7 +3,18 @@
 //! Forward map: `DashMap<Box<[u8]>, TermId>` (lock-free reads, sharded writes),
 //! keyed on a compact byte encoding of the term rather than on the
 //! `oxrdf::Term` itself — see [`encode_key`].
-//! Reverse map: `RwLock<Vec<Term>>` indexed by `payload - 1`.
+//! Reverse map: `RwLock<Vec<Option<Term>>>` indexed by `payload - 1`; a
+//! `None` slot is a term [`Dictionary::gc`] reclaimed.
+//!
+//! ## Append-only, with a sweep (HDB-121)
+//!
+//! Interning only appends, and an index, once handed out, keeps its meaning
+//! for the life of the process. [`Dictionary::gc`] — driven from
+//! [`crate::Store::compact`], the same trigger as row compaction — reclaims
+//! the *bytes* of terms no reachable row mentions (the reverse `Term` and the
+//! forward-map key) but leaves the index consumed: nothing hands a freed index
+//! back out. So id stability is unchanged, and a `Some(id)` from
+//! [`Dictionary::get`] still names the same term forever.
 //!
 //! ## Why the forward map is keyed on bytes (HDB-95)
 //!
@@ -300,7 +311,14 @@ pub fn flush_intern_phases() {
 pub struct Dictionary {
     id: u64,
     forward: DashMap<Box<[u8]>, TermId>,
-    reverse: RwLock<Vec<Term>>,
+    /// Reverse map, indexed by `payload - 1`. A `None` slot is a term that
+    /// [`Dictionary::gc`] reclaimed: its lexical bytes and its forward-map key
+    /// are gone, and the index is free. **Free indices are not re-issued** —
+    /// see [`Dictionary::gc`].
+    reverse: RwLock<Vec<Option<Term>>>,
+    /// How many reverse slots are `None`. Cheaper than counting them, and the
+    /// difference from `reverse.len()` is the live-term gauge.
+    freed: AtomicU64,
     datatypes: AuxTable,
     languages: AuxTable,
     /// `HORNDB_INTERN_PHASES=1`, resolved once at construction.
@@ -313,14 +331,25 @@ impl Dictionary {
             id: NEXT_DICT_ID.fetch_add(1, Ordering::Relaxed),
             forward: DashMap::new(),
             reverse: RwLock::new(Vec::new()),
+            freed: AtomicU64::new(0),
             datatypes: AuxTable::new(),
             languages: AuxTable::new(),
             phases: intern_phases::enabled(),
         }
     }
 
+    /// Indices this dictionary has ever handed out. Monotonic: it does not
+    /// drop when [`Dictionary::gc`] reclaims terms, because a reclaimed index
+    /// is never re-issued. Use [`Dictionary::live_len`] for the number of
+    /// terms currently resolvable.
     pub fn len(&self) -> usize {
         self.reverse.read().len()
+    }
+
+    /// Terms currently resolvable — [`Dictionary::len`] minus the slots
+    /// [`Dictionary::gc`] has reclaimed. Equal to `len()` until the first GC.
+    pub fn live_len(&self) -> usize {
+        self.len() - self.freed.load(Ordering::Relaxed) as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -530,7 +559,7 @@ impl Dictionary {
         // Gated inside the miss path, which is ~6% of intern calls, so the
         // branch here does not need hoisting the way the hit path's did.
         let t_rev = self.phases.then(intern_phases::start).flatten();
-        reverse.push(term.clone());
+        reverse.push(Some(term.clone()));
         intern_phases::charge(intern_phases::REVERSE, t_rev);
         self.forward.insert(scratch.buf.as_slice().into(), id);
         Ok(id)
@@ -573,7 +602,9 @@ impl Dictionary {
 
     /// True if this dictionary could have issued `id`: an inline-int id (value
     /// encoded, never allocated) or an index it has actually handed out. The
-    /// dictionary is append-only, so an id it issued stays issued. Backs the
+    /// dictionary never re-issues an index, so an id it issued stays issued
+    /// (a GC-reclaimed index included — it resolves to no term, but it is
+    /// never handed to a different one). Backs the
     /// `debug_assert!` on the id-based store entry points; not a security
     /// boundary — a foreign dictionary of the same size passes.
     pub(crate) fn issued(&self, id: TermId) -> bool {
@@ -632,7 +663,7 @@ impl Dictionary {
             return None;
         }
         let reverse = self.reverse.read();
-        reverse.get((idx - 1) as usize).cloned()
+        reverse.get((idx - 1) as usize).cloned().flatten()
     }
 
     /// Bulk-decode a batch of **inline-int** `TermId`s to `xsd:integer`
@@ -702,7 +733,7 @@ impl Dictionary {
                     if idx == 0 {
                         None
                     } else {
-                        reverse.get((idx - 1) as usize).cloned()
+                        reverse.get((idx - 1) as usize).cloned().flatten()
                     }
                 }
             })
@@ -724,10 +755,66 @@ impl Dictionary {
             return None;
         }
         let reverse = self.reverse.read();
-        match reverse.get((idx - 1) as usize)? {
+        match reverse.get((idx - 1) as usize)?.as_ref()? {
             Term::Literal(lit) => lit.value().trim().parse::<f64>().ok(),
             _ => None,
         }
+    }
+
+    /// Sweep terms no reachable row mentions: drop their lexical bytes and
+    /// their forward-map key, and mark the index free (HDB-121).
+    ///
+    /// `live[i]` marks dictionary index `i + 1` as reachable. Indices at or
+    /// past `live.len()` are left alone, so a term interned while the caller
+    /// was building the mark set is never swept. Callers build the marks from
+    /// the physical rows of a tier snapshot — see [`crate::Store::compact`],
+    /// the only caller; it also states the precondition on in-flight writers.
+    ///
+    /// Returns the number of terms freed.
+    ///
+    /// **A freed index is never re-issued.** The two allocations that dominate
+    /// dictionary footprint are the reverse `Term` and the forward-map key;
+    /// this frees both. What stays is the empty `Option<Term>` slot (a pointer
+    /// pair), which is what keeps every id already handed out meaning exactly
+    /// what it meant.
+    ///
+    /// ponytail: no id reuse. Handing an index back out is only safe once no
+    /// reader can hold the old id, and nothing today establishes that: a
+    /// thread that has interned a term but not yet installed its rows holds an
+    /// id no snapshot version can see, so the tier's `min_pinned` bound —
+    /// which is enough for reclaiming *rows* — does not cover it. Ceiling:
+    /// index space is consumed at the append rate, capped at `MAX_DICT_INDEX`
+    /// (2^60), not at the live-term count. Upgrade path: make id issuance
+    /// visible to the reclaimer (an epoch/refcount registered at `intern` and
+    /// released when the batch commits), then hand `None` slots back out here.
+    /// The free set is implicit — the `None` slots themselves — so no side
+    /// table has to be persisted for that; HDB-57's on-disk dictionary needs
+    /// one tombstone bit per slot to carry it.
+    pub fn gc(&self, live: &[bool]) -> usize {
+        let mut reverse = self.reverse.write();
+        let mut freed = 0u64;
+        SCRATCH.with(|s| {
+            let mut scratch = s.borrow_mut();
+            for (i, marked) in live.iter().enumerate() {
+                if *marked {
+                    continue;
+                }
+                let Some(term) = reverse.get_mut(i).and_then(Option::take) else {
+                    continue; // past the end, or already freed
+                };
+                let id = TermId::new(kind_of(&term), (i as u64) + 1);
+                // The aux ids this key needs already exist (the term was
+                // interned), so `Lookup` cannot miss; it also keeps GC from
+                // minting aux ids, which would change future key bytes.
+                if self.encode_key(&mut scratch, &term, AuxMode::Lookup) {
+                    self.forward
+                        .remove_if(scratch.buf.as_slice(), |_, v| *v == id);
+                }
+                freed += 1;
+            }
+        });
+        self.freed.fetch_add(freed, Ordering::Relaxed);
+        freed as usize
     }
 
     /// Total bytes of forward-map key currently stored, and the number of

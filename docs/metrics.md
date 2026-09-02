@@ -162,7 +162,8 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 | `horndb_storage_triples` | gauge | — | count | live triples in the store **(scrape-time)** |
 | `horndb_storage_graphs` | gauge | — | count | distinct named graphs **(scrape-time)** |
 | `horndb_storage_predicates` | gauge | — | count | distinct predicates **(scrape-time)** |
-| `horndb_storage_dictionary_terms` | gauge | — | count | interned dictionary terms **(scrape-time)** |
+| `horndb_storage_dictionary_terms` | gauge | — | count | dictionary index space consumed — every id ever handed out, monotonic because ids are never re-issued **(scrape-time)** |
+| `horndb_storage_dictionary_terms_live` | gauge | — | count | dictionary terms still resolvable, i.e. total minus the slots `Store::compact()`'s sweep reclaimed (HDB-121). Under append + retract churn the total keeps climbing while this one plateaus; the gap is reclaimed lexical bytes, not a leak **(scrape-time)** |
 | `horndb_storage_tier_bytes_estimated` | gauge | `tier` | bytes | estimated bytes per memory tier **(scrape-time)** |
 
 `phase` values, in the order a bulk load runs them:

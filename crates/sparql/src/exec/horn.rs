@@ -213,6 +213,7 @@ pub struct HornStorageStats {
     pub graphs: u64,
     pub predicates: u64,
     pub dictionary_terms: u64,
+    pub dictionary_terms_live: u64,
     pub bytes_estimated: u64,
 }
 
@@ -518,6 +519,7 @@ impl HornBackend {
             graphs: tier.graphs,
             predicates: tier.predicates,
             dictionary_terms: self.store.dictionary().len() as u64,
+            dictionary_terms_live: self.store.dictionary().live_len() as u64,
             bytes_estimated: tier.bytes_estimated,
         }
     }
