@@ -624,6 +624,14 @@ not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
 - Error contract: first chunk is pre-buffered → early errors are HTTP 400;
   mid-stream errors abort the chunked body (no terminator) — clients detect
   truncation at the protocol level. No format can express a trailing error.
+  A **panic** in the blocking serializer takes the same path (HDB-115): an
+  `AbortBodyOnPanic` drop guard in `server/query.rs` sends `Err` on unwind,
+  so a panic aborts the body instead of dropping `tx` and terminating a
+  truncated document cleanly under a 200. It also logs the query to stderr
+  (there is no per-query id to log) and bumps `query_errors{stage=exec}`.
+  A panic before the headers commit (chunk 1, or the chunk-2 peek) still
+  yields a clean 500, since no bytes were emitted. Covered by
+  `tests/server_http.rs::streaming_error_semantics::serializer_panic_mid_stream_aborts_body`.
 - The read lock is now held until the client drains a streamed SELECT
   (writers wait; readers don't). Accepted until SPEC-02 MVCC. Corollary
   fixed in the same branch: `/update` takes its write lock inside
@@ -634,11 +642,6 @@ not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
 
 Review follow-ups (non-blocking, from the branch's code reviews):
 
-- A panic (not `SparqlError`) in the blocking serializer closure drops `tx`
-  without an `Err`, so the client sees a *cleanly terminated* truncated
-  document (undetectable for CSV/TSV) and the panic is swallowed with the
-  dropped `JoinHandle`. A drop-guard that sends `Err` on unwind would fix
-  both.
 - No ceiling on concurrent streamed SELECTs: each holds a blocking-pool
   thread (default cap 512) for the full drain; slow clients can exhaust
   the pool and queue new SELECTs indefinitely (no timeouts anywhere in
