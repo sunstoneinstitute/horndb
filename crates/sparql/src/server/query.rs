@@ -296,23 +296,23 @@ enum FirstReply {
 /// Execute + decode + serialize a SELECT on a blocking thread, streaming
 /// serialized `Bytes` chunks to the response body over a bounded channel.
 ///
-/// Everything store-touching stays on the one blocking thread: the
-/// `RwLockReadGuard` and the operator tree (`Box<dyn Op>`, which borrows
-/// through the guard) are `!Send`. The first chunk is decoded BEFORE any
-/// bytes are emitted, so build/scan/first-decode errors return a clean 400;
-/// after that, an error aborts the chunked body (see `ChannelBody`).
+/// The store read lock is held only long enough to pin a read view
+/// (`Pinnable::pin_read`, HDB-119); execution and streaming run with no lock
+/// held, so a slow client can no longer block `/update`. The view is a
+/// point-in-time snapshot: an update committed while the body streams is
+/// invisible to this query, whatever it commits.
+///
+/// Everything store-touching stays on the one blocking thread: the operator
+/// tree (`Box<dyn Op>`, which borrows the view) is `!Send`. The first chunk
+/// is decoded BEFORE any bytes are emitted, so build/scan/first-decode
+/// errors return a clean 400; after that, an error aborts the chunked body
+/// (see `ChannelBody`).
 ///
 /// Fast path: when the result fits in a single operator chunk (including
 /// the empty result), the whole document is returned as a plain sized body
 /// (Content-Length, one frame) instead of a chunked channel body. The
 /// chunk-2 peek that detects this happens before headers commit, so a clean
 /// first chunk still commits a 200 even if the peek errors.
-///
-/// Trade-off (accepted, see the 2026-07-06 design spec): the read lock is
-/// held until the client drains the response, so a slow download blocks
-/// writers (not readers). SPEC-02 MVCC removes this; the bounded channel
-/// plus the send-failure-on-disconnect path bound the damage a dead client
-/// can do.
 #[allow(clippy::too_many_arguments)]
 async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
@@ -328,8 +328,9 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
     let store = Arc::clone(&state.store);
 
-    // Declared first so it drops LAST — after the store read guard — and its
-    // `blocking_send` therefore never runs while holding the lock.
+    // Declared first inside the closure so it drops LAST — after the pinned
+    // read view and the operator tree — and therefore stays armed for every
+    // line that can panic.
     let guard = AbortBodyOnPanic {
         tx: tx.clone(),
         query: query.chars().take(200).collect(),
@@ -340,8 +341,10 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         // HDB-118: the permit moves in here and is dropped when this closure
         // returns — i.e. it is held for the WHOLE stream, not just plan+first
         // chunk. That is deliberate: this task owns a blocking-pool thread,
-        // the store read guard and the operator tree for as long as the
-        // client is draining, so releasing at first chunk would cap nothing.
+        // a pinned read view and the operator tree for as long as the client
+        // is draining, so releasing at first chunk would cap nothing. Since
+        // HDB-119 no store lock is among them, but the thread and the pin
+        // still are.
         // Every exit path below returns from the closure (clean finish,
         // client disconnect, error) and a panic unwinds it, so the slot is
         // freed exactly once.
@@ -354,8 +357,12 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         // from being silently attributed to whichever query flushes next
         // on this thread.
         crate::exec::phases::reset();
-        let store = store.read();
-        let rt = Runtime::new(&*store).with_dataset(dataset, default_graph);
+        // The only lock this handler takes, and only for the pin itself.
+        let view = {
+            let store = store.read();
+            store.pin_read()
+        };
+        let rt = Runtime::new(&view).with_dataset(dataset, default_graph);
         let mut ser = select_serializer(fmt);
         let start = Instant::now();
 
@@ -415,7 +422,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             .send(Ok(FirstReply::Streaming(Bytes::from(head))))
             .is_err()
         {
-            return; // client disconnected — release the read lock
+            return; // client disconnected
         }
         if tx
             .blocking_send(Ok(Bytes::from(ser.chunk(&vars, &rows2))))

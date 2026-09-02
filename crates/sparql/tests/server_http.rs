@@ -759,6 +759,12 @@ mod streaming_error_semantics {
             Err(SparqlError::Executor("scan exploded".into()))
         }
     }
+    impl horndb_sparql::exec::Pinnable for FailingScan {
+        type View = FailingScan;
+        fn pin_read(&self) -> FailingScan {
+            FailingScan
+        }
+    }
     impl horndb_sparql::exec::Store for FailingScan {
         fn apply_quads(
             &mut self,
@@ -845,6 +851,12 @@ mod streaming_error_semantics {
             }
         }
     }
+    impl horndb_sparql::exec::Pinnable for DecodeFailsLate {
+        type View = DecodeFailsLate;
+        fn pin_read(&self) -> DecodeFailsLate {
+            DecodeFailsLate
+        }
+    }
     impl horndb_sparql::exec::Store for DecodeFailsLate {
         fn apply_quads(
             &mut self,
@@ -913,6 +925,12 @@ mod streaming_error_semantics {
         fn decode_term(&self, id: TermId) -> horndb_sparql::Result<Term> {
             assert!(id.0 < 8192, "injected serializer panic mid-stream");
             Ok(Term::Iri(format!("http://ex/t{}", id.0)))
+        }
+    }
+    impl horndb_sparql::exec::Pinnable for PanicsLate {
+        type View = PanicsLate;
+        fn pin_read(&self) -> PanicsLate {
+            PanicsLate
         }
     }
     impl horndb_sparql::exec::Store for PanicsLate {
@@ -1052,7 +1070,9 @@ mod lock_poisoning {
     use super::*;
     use horndb_sparql::algebra::TriplePattern;
     use horndb_sparql::exec::mem::MemStore;
-    use horndb_sparql::exec::{AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor};
+    use horndb_sparql::exec::{
+        AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, Pinnable,
+    };
 
     /// Wraps `MemStore`, panicking on the first `apply_quads` call (the
     /// SPARQL Update write path) and delegating normally after. Reads
@@ -1069,6 +1089,17 @@ mod lock_poisoning {
             scope: &ScanScope<'_>,
         ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
             self.inner.scan_bgp(patterns, scope)
+        }
+    }
+
+    /// HDB-119: reads delegate to the inner `MemStore`, so the pinned view
+    /// is just its deep copy — same semantics as `MemStore`'s own impl. The
+    /// injected panic lives on the write path, which a read view never has.
+    impl Pinnable for PanicOnceStore {
+        type View = MemStore;
+
+        fn pin_read(&self) -> MemStore {
+            self.inner.pin_read()
         }
     }
 
@@ -1258,4 +1289,102 @@ async fn request_body_limit_rejects_oversized_post() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// HDB-119: `/query` pins a read view and streams with no lock held, so a
+/// client that stops draining cannot block `/update`.
+///
+/// The SELECT is left parked with its body buffer full (60 000 rows is ~15
+/// chunks, against a channel that buffers 8), then an `INSERT DATA` must
+/// complete. Before HDB-119 the streaming task held the store read guard
+/// until the client drained, and this update waited for it — the timeout is
+/// what that failure looks like.
+///
+/// Second assertion: the parked stream is a point-in-time snapshot, so the
+/// concurrently inserted triple never appears in its body.
+#[tokio::test]
+async fn update_completes_while_a_select_is_still_streaming() {
+    use http_body::Body as _;
+    use std::time::Duration;
+
+    let mut backend = HornBackend::new();
+    backend.insert_algebra_triples_bulk(
+        (0..60_000u32)
+            .map(|i| {
+                (
+                    iri(&format!("http://ex/s{i}")),
+                    iri("http://ex/p"),
+                    iri(&format!("http://ex/o{i}")),
+                )
+            })
+            .collect(),
+    );
+    let state = AppState::<HornBackend> {
+        store: Arc::new(RwLock::new(backend)),
+        cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
+    };
+    let app = build_router(state);
+
+    let select = Request::builder()
+        .uri("/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "text/csv")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(select).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+
+    // One frame only: the rest of the result stays undrained, which is what
+    // used to pin the read lock.
+    let first = std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx))
+        .await
+        .expect("a first frame")
+        .expect("clean frame");
+    assert!(first.into_data().is_ok());
+
+    let update = Request::builder()
+        .method("POST")
+        .uri("/update")
+        .header("content-type", "application/sparql-update")
+        .body(Body::from(
+            "INSERT DATA { <http://ex/mid> <http://ex/p> <http://ex/stream> }".to_string(),
+        ))
+        .unwrap();
+    let resp = tokio::time::timeout(Duration::from_secs(10), app.clone().oneshot(update))
+        .await
+        .expect("/update must not wait for a streaming reader")
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Drain the parked stream: it answers from its pinned version, so the
+    // triple committed above is not in it.
+    let mut rest = Vec::new();
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        if let Ok(data) = frame.expect("clean body").into_data() {
+            rest.extend_from_slice(&data);
+        }
+    }
+    let rest = String::from_utf8(rest).unwrap();
+    assert!(
+        !rest.contains("http://ex/mid"),
+        "a mid-stream commit must be invisible to the pinned query"
+    );
+
+    // A query issued after the commit does see it.
+    let after = Request::builder()
+        .uri("/query?query=SELECT%20%3Fo%20WHERE%20%7B%20%3Chttp%3A%2F%2Fex%2Fmid%3E%20%3Fp%20%3Fo%20%7D")
+        .header("accept", "text/csv")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(after).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(String::from_utf8(body.to_vec())
+        .unwrap()
+        .contains("http://ex/stream"));
 }

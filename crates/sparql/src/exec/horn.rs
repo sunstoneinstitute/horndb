@@ -160,12 +160,13 @@ use crate::exec::scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
 };
 use crate::exec::{
-    AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, GroupCount, Slot, Store,
+    AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, GroupCount, Pinnable, Slot, Store,
 };
 use arrow::array::UInt64Array;
 use horndb_metrics::labels::LoadPhase;
 use horndb_storage::{
-    GraphId, InternedQuad, Store as ColumnStore, StoreSnapshot, TermId, DEFAULT_GRAPH,
+    GraphId, InternedQuad, PinnedSnapshot, Store as ColumnStore, StoreSnapshot, TermId,
+    DEFAULT_GRAPH,
 };
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
@@ -347,15 +348,37 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
         .record_load_phase(phase, elapsed, rows);
 }
 
+/// The memoised WCOJ sources, tagged with the commit version they were built
+/// at (HDB-119). The tag is what makes the memo safe to share between the
+/// writable backend and pinned read views running without the store lock: an
+/// entry is only ever reused by a reader pinned at the *same* version, so a
+/// snapshot built from an older store can never answer a newer query (or the
+/// other way round). Untagged, a reader that started its build before a
+/// commit could insert a stale entry after it and every later query would
+/// read it.
+/// One cached `EXPLAIN` statistics summary: the commit version it was built
+/// at, the snapshot `Arc` it was derived from, and the stats themselves.
+type StatsCacheEntry = (u64, Arc<VecTripleSource>, Arc<SnapshotStats>);
+
+#[derive(Default)]
+struct SnapshotMemo {
+    /// Commit version every entry in `map` was built at.
+    version: u64,
+    map: HashMap<SnapshotScope, Arc<VecTripleSource>>,
+}
+
 pub struct HornBackend {
-    store: ColumnStore,
+    /// Shared with every pinned read view ([`Self::pin_read`]). The storage
+    /// crate takes `&self` for writes and serializes them itself, so sharing
+    /// the handle does not share write access.
+    store: Arc<ColumnStore>,
     /// Lazily-built WCOJ sources, one per [`SnapshotScope`] a query has
     /// asked for. A small `apply_quads` delta is merged into these in place
     /// ([`Self::apply_delta_to_snapshots`]); every other write clears them
     /// wholesale ([`Self::invalidate`]). Most workloads use one entry (the
     /// unqualified default graph); a query mixing `GRAPH` scopes adds one
     /// per distinct scope.
-    snapshots: Mutex<HashMap<SnapshotScope, Arc<VecTripleSource>>>,
+    snapshots: Arc<Mutex<SnapshotMemo>>,
     /// Cached statistics summary derived from a specific snapshot, used by
     /// `EXPLAIN`'s `cardinality_estimate`. Holds the `Arc<VecTripleSource>` the
     /// stats were built from alongside the stats themselves, and is reused only
@@ -369,7 +392,12 @@ pub struct HornBackend {
     /// [`Self::apply_delta_to_snapshots`] both do. Clearing it *before* a merge
     /// is also what lets `Arc::get_mut` succeed at all: the cached `Arc` is a
     /// second strong reference to the very snapshot being merged into.
-    stats_cache: Mutex<Option<(Arc<VecTripleSource>, Arc<SnapshotStats>)>>,
+    stats_cache: Arc<Mutex<Option<StatsCacheEntry>>>,
+    /// `Some` on a pinned read view: every read resolves at that commit
+    /// version instead of the store's latest. `None` on the writable backend
+    /// (the one the server keeps under its `RwLock`), which always reads the
+    /// newest committed state. See [`Self::pin_read`].
+    pin: Option<PinnedSnapshot>,
 }
 
 impl Default for HornBackend {
@@ -381,9 +409,53 @@ impl Default for HornBackend {
 impl HornBackend {
     pub fn new() -> Self {
         Self {
-            store: ColumnStore::in_memory(),
-            snapshots: Mutex::new(HashMap::new()),
-            stats_cache: Mutex::new(None),
+            store: Arc::new(ColumnStore::in_memory()),
+            snapshots: Arc::new(Mutex::new(SnapshotMemo::default())),
+            stats_cache: Arc::new(Mutex::new(None)),
+            pin: None,
+        }
+    }
+
+    /// Pin an owned read view at the store's current commit version
+    /// (HDB-119). O(1): an `Arc` clone of the store handle plus one tier pin.
+    ///
+    /// The view shares the store and the snapshot memo, but reads at its
+    /// pinned version, so it stays valid — and isolated from concurrent
+    /// writers — after the caller drops whatever lock it took this under.
+    /// That is what lets the HTTP `/query` handler stream a result with no
+    /// lock held. The pin also holds compaction back at its version
+    /// (`MemoryTier::compact`), which is what keeps the rows it can still see
+    /// from being reclaimed.
+    ///
+    /// **Read-only.** A view is a `Store` too (the trait is implemented on
+    /// the type, not on the mode), but writing through one would bypass the
+    /// caller's write serialization; the write methods `debug_assert` against
+    /// it.
+    pub fn pin_read(&self) -> HornBackend {
+        HornBackend {
+            store: Arc::clone(&self.store),
+            snapshots: Arc::clone(&self.snapshots),
+            stats_cache: Arc::clone(&self.stats_cache),
+            pin: Some(self.store.pin()),
+        }
+    }
+
+    /// The store view every *read* resolves against: the pinned commit
+    /// version on a read view, the latest committed state on the writable
+    /// backend. Writes keep reading the latest state directly — a write is
+    /// never served from a pinned view.
+    fn snap(&self) -> StoreSnapshot<'_> {
+        match &self.pin {
+            Some(pin) => self.store.snapshot_at(pin),
+            None => self.store.snapshot(),
+        }
+    }
+
+    /// The commit version [`Self::snap`] reads at — the memo tag.
+    fn read_version(&self) -> u64 {
+        match &self.pin {
+            Some(pin) => pin.version(),
+            None => self.store.snapshot().version(),
         }
     }
 
@@ -423,16 +495,14 @@ impl HornBackend {
     }
 
     fn invalidate(&mut self) {
-        self.snapshots
-            .get_mut()
-            .expect("snapshot lock poisoned")
-            .clear();
+        let version = self.store.snapshot().version();
+        let mut memo = self.snapshots.lock().expect("snapshot lock poisoned");
+        memo.map.clear();
+        memo.version = version;
+        drop(memo);
         // Clear the stats cache too: releases the obsolete snapshot's Arc (all six
         // sorted indexes) immediately rather than pinning it until the next estimate.
-        *self
-            .stats_cache
-            .get_mut()
-            .expect("stats_cache lock poisoned") = None;
+        *self.stats_cache.lock().expect("stats_cache lock poisoned") = None;
     }
 
     /// Push a committed quad delta into every memoised snapshot, falling back
@@ -467,8 +537,14 @@ impl HornBackend {
     /// [`SnapshotScope::DefaultStrict`] needs no such check: it reads one fixed
     /// graph, so rows in any other graph simply do not apply to it and are
     /// filtered out.
+    ///
+    /// 5. The memo still carries `base`, the commit version this write started
+    ///    from. A memo tagged anything else was built by a pinned reader
+    ///    running without the store lock (HDB-119): older ⇒ stale, drop it;
+    ///    newer ⇒ it already includes this write, leave it alone.
     fn apply_delta_to_snapshots(
         &mut self,
+        base: u64,
         del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
         add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
     ) {
@@ -477,20 +553,30 @@ impl HornBackend {
         // breaks both halves of that — the extra strong reference would fail
         // `Arc::get_mut` below, and the pointer does not change, so a stale
         // entry would still pass `Arc::ptr_eq`. See the field's doc.
-        *self
-            .stats_cache
-            .get_mut()
-            .expect("stats_cache lock poisoned") = None;
+        *self.stats_cache.lock().expect("stats_cache lock poisoned") = None;
 
-        // Each memoised scope with the row count it currently holds.
+        // Each memoised scope with the row count it currently holds — only if
+        // the memo is the one this write started from (condition 5).
         let cached: Vec<(SnapshotScope, usize)> = {
             let guard = self.snapshots.lock().expect("snapshot lock poisoned");
+            if guard.version > base {
+                return; // built after this commit: already up to date
+            }
+            if guard.version < base {
+                drop(guard);
+                self.invalidate();
+                return;
+            }
             guard
+                .map
                 .iter()
                 .map(|(scope, src)| (scope.clone(), src.total_triples()))
                 .collect()
         };
         if cached.is_empty() {
+            // Nothing to merge, but the empty memo must still carry the new
+            // version so the next reader's tag comparison is against reality.
+            self.invalidate();
             return;
         }
 
@@ -576,19 +662,27 @@ impl HornBackend {
             plans.push((scope, d, a));
         }
 
+        let post = self.store.snapshot().version();
         let merged = {
-            let snapshots = self.snapshots.get_mut().expect("snapshot lock poisoned");
-            plans.iter().all(|(scope, d, a)| {
-                match snapshots.get_mut(scope).and_then(Arc::get_mut) {
-                    Some(src) => {
-                        src.apply_delta(d, a);
-                        true
+            let mut memo = self.snapshots.lock().expect("snapshot lock poisoned");
+            // Re-check under the same lock the merge happens under: a pinned
+            // reader may have re-tagged the memo since `cached` was read.
+            let ok = memo.version == base
+                && plans.iter().all(|(scope, d, a)| {
+                    match memo.map.get_mut(scope).and_then(Arc::get_mut) {
+                        Some(src) => {
+                            src.apply_delta(d, a);
+                            true
+                        }
+                        // A concurrent reader still holds this snapshot, so it
+                        // cannot be mutated in place. Rare; just rebuild.
+                        None => false,
                     }
-                    // A concurrent reader still holds this snapshot, so it
-                    // cannot be mutated in place. Rare; just rebuild.
-                    None => false,
-                }
-            })
+                });
+            if ok {
+                memo.version = post;
+            }
+            ok
         };
         // `all` short-circuits, so an earlier scope may already carry the delta.
         // Each merged snapshot is correct on its own, and `invalidate` drops
@@ -921,7 +1015,7 @@ impl HornBackend {
             return true;
         }
         match resolved {
-            SnapshotScope::OneGraph(g) => self.store.snapshot().graph_len(*g) > 0,
+            SnapshotScope::OneGraph(g) => self.snap().graph_len(*g) > 0,
             // An unknown or dataset-excluded graph name resolved to the empty
             // scope; the whole-store scopes are unreachable for a ground
             // `GRAPH <g>`.
@@ -970,14 +1064,21 @@ impl HornBackend {
         // re-runs, which precede any `SELECT` in the trainmarks driver) never
         // pays to keep an unused twin's delta merged; it starts paying only
         // once a second scope is actually read.
+        let version = self.read_version();
         let twin_src: Option<Arc<VecTripleSource>> = {
             let guard = self.snapshots.lock().expect("snapshot lock poisoned");
-            if let Some(s) = guard.get(scope) {
-                return Arc::clone(s);
+            // Entries built at another commit version answer another store
+            // state — never reusable here (HDB-119).
+            if guard.version != version {
+                None
+            } else {
+                if let Some(s) = guard.map.get(scope) {
+                    return Arc::clone(s);
+                }
+                scope
+                    .default_twin()
+                    .and_then(|twin| guard.map.get(&twin).cloned())
             }
-            scope
-                .default_twin()
-                .and_then(|twin| guard.get(&twin).cloned())
         };
         // Build (or clone) with the lock RELEASED: neither a six-sort-pass
         // rebuild nor an O(n) clone of the twin's already-sorted data must
@@ -995,7 +1096,16 @@ impl HornBackend {
             _ => VecTripleSource::from_triples(self.scope_triples(scope)),
         };
         let mut guard = self.snapshots.lock().expect("snapshot lock poisoned");
-        Arc::clone(guard.entry(scope.clone()).or_insert(Arc::new(built)))
+        if guard.version > version {
+            // Someone reading a newer store owns the memo now; this build is
+            // still correct for *this* reader, it just does not go in.
+            return Arc::new(built);
+        }
+        if guard.version < version {
+            guard.map.clear();
+            guard.version = version;
+        }
+        Arc::clone(guard.map.entry(scope.clone()).or_insert(Arc::new(built)))
     }
 
     /// True when [`SnapshotScope::DefaultStrict`] and [`SnapshotScope::DefaultUnion`]
@@ -1003,7 +1113,7 @@ impl HornBackend {
     /// non-reserved named graph holds data besides the default-graph sentinel
     /// itself. See [`Self::wcoj_snapshot`]'s twin pre-warm.
     fn default_scopes_coincide(&self) -> bool {
-        let snap = self.store.snapshot();
+        let snap = self.snap();
         snap.graphs()
             .into_iter()
             .filter(|g| !reserved_graph(&snap, *g))
@@ -1015,7 +1125,7 @@ impl HornBackend {
     /// two graphs is one row of the union graph (SPEC-28 S3) — enforced by
     /// the snapshot builder's dedup; see [`union_triples`].
     fn scope_triples(&self, scope: &SnapshotScope) -> Vec<WTriple> {
-        let snap = self.store.snapshot();
+        let snap = self.snap();
         match scope {
             SnapshotScope::DefaultStrict => graph_triples(&snap, DEFAULT_GRAPH),
             SnapshotScope::OneGraph(g) => graph_triples(&snap, *g),
@@ -1040,7 +1150,11 @@ impl HornBackend {
     /// `graph_scoped_snapshots_are_not_memoised` bounds.
     #[cfg(test)]
     fn memo_len(&self) -> usize {
-        self.snapshots.lock().expect("snapshot lock poisoned").len()
+        self.snapshots
+            .lock()
+            .expect("snapshot lock poisoned")
+            .map
+            .len()
     }
 
     /// Get-or-build the [`SnapshotStats`] summary for `snapshot`, caching it
@@ -1051,14 +1165,15 @@ impl HornBackend {
     /// a delta merge keeps the snapshot's `Arc` pointer, so `Arc::ptr_eq` on
     /// its own could not tell a stale entry from a fresh one.
     fn snapshot_stats(&self, snapshot: &Arc<VecTripleSource>) -> Arc<SnapshotStats> {
+        let version = self.read_version();
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
-        if let Some((cached_snap, cached_stats)) = guard.as_ref() {
-            if Arc::ptr_eq(cached_snap, snapshot) {
+        if let Some((cached_version, cached_snap, cached_stats)) = guard.as_ref() {
+            if *cached_version == version && Arc::ptr_eq(cached_snap, snapshot) {
                 return Arc::clone(cached_stats);
             }
         }
         let stats = Arc::new(SnapshotStats::from_source(snapshot.as_ref()));
-        *guard = Some((Arc::clone(snapshot), Arc::clone(&stats)));
+        *guard = Some((version, Arc::clone(snapshot), Arc::clone(&stats)));
         stats
     }
 
@@ -1124,6 +1239,16 @@ impl HornBackend {
     }
 }
 
+/// O(1): shares the storage handle and the snapshot memo, pins one commit
+/// version. See [`HornBackend::pin_read`].
+impl Pinnable for HornBackend {
+    type View = HornBackend;
+
+    fn pin_read(&self) -> HornBackend {
+        HornBackend::pin_read(self)
+    }
+}
+
 impl Store for HornBackend {
     /// Resolves `dels` and `adds` against this store's dictionary (dels
     /// non-interning — an unseen graph/term retracts nothing; adds
@@ -1166,13 +1291,15 @@ impl Store for HornBackend {
             add_rows.push((gid, so, po, oo));
         }
 
+        debug_assert!(self.pin.is_none(), "write through a pinned read view");
+        let base = self.store.snapshot().version();
         let report = self
             .store
             .apply_quads(&del_rows, &add_rows)
             .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
 
         if report.retracted > 0 || report.inserted > 0 {
-            self.apply_delta_to_snapshots(&del_rows, &add_rows);
+            self.apply_delta_to_snapshots(base, &del_rows, &add_rows);
         }
         Ok(ApplyCounts {
             retracted: report.retracted,
@@ -1189,6 +1316,7 @@ impl Store for HornBackend {
     /// is the same S6 atomic-batch primitive one layer lower.
     fn clear_graph(&mut self, graph: &spargebra::algebra::GraphTarget) -> Result<usize> {
         use spargebra::algebra::GraphTarget;
+        debug_assert!(self.pin.is_none(), "write through a pinned read view");
         let snap = self.store.snapshot();
         let graphs_to_sweep: Vec<GraphId> = match graph {
             GraphTarget::DefaultGraph => vec![DEFAULT_GRAPH],
@@ -1504,7 +1632,7 @@ impl Executor for HornBackend {
     /// which is out of proportion to a difference that is currently
     /// unobservable; revisit when writes become concurrent with reads.
     fn named_graphs(&self, named: Option<&[String]>) -> Result<Vec<NamedGraph>> {
-        let snap = self.store.snapshot();
+        let snap = self.snap();
         let mut out: Vec<NamedGraph> = Vec::new();
         for g in snap.graphs() {
             // `graph_uri` errors on DEFAULT_GRAPH (a sentinel with no IRI),

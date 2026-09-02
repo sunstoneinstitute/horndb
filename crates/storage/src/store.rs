@@ -95,13 +95,30 @@ impl Store {
     /// is append-only, so term ids in the pinned view never change meaning even
     /// as new terms are interned by other transactions.
     pub fn snapshot(&self) -> StoreSnapshot<'_> {
-        let mt = self
-            .tier
+        StoreSnapshot {
+            tier: self.pin(),
+            dictionary: &self.dictionary,
+        }
+    }
+
+    /// Pin the current tier state as an owned handle, detached from the
+    /// dictionary borrow [`Store::snapshot`] carries. A caller that must keep
+    /// one read version alive across many reads holds this and re-opens it
+    /// with [`Store::snapshot_at`]; the pin is released when it drops.
+    pub fn pin(&self) -> crate::memory_tier::PinnedSnapshot {
+        self.tier
             .as_any()
             .downcast_ref::<MemoryTier>()
-            .expect("Stage-1 store always wraps MemoryTier");
+            .expect("Stage-1 store always wraps MemoryTier")
+            .snapshot()
+    }
+
+    /// Re-open a pin as a full read view: same tier state, same version, no
+    /// re-read of the live pointer. This is what keeps every read of one
+    /// query on a single commit version even as writers commit newer ones.
+    pub fn snapshot_at(&self, pin: &crate::memory_tier::PinnedSnapshot) -> StoreSnapshot<'_> {
         StoreSnapshot {
-            tier: mt.snapshot(),
+            tier: pin.repin(),
             dictionary: &self.dictionary,
         }
     }

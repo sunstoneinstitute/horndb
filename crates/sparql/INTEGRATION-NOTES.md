@@ -632,7 +632,7 @@ not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
   boundary); `run` collects it — signature unchanged. `api::plan_select`
   is the planning-only SELECT entry the streaming handler uses.
 - The `/query` handler streams plain SELECTs: exec+decode+serialize run in
-  `spawn_blocking` (the store read guard and the `Op` tree are `!Send`),
+  `spawn_blocking` (the pinned read view and the `Op` tree are `!Send`),
   serialized `Bytes` cross to a `ChannelBody` over a bounded mpsc.
 - Error contract: first chunk is pre-buffered → early errors are HTTP 400;
   mid-stream errors abort the chunked body (no terminator) — clients detect
@@ -645,11 +645,10 @@ not a SPARQL results document. Coverage: `tests/explain_pragma.rs`,
   A panic before the headers commit (chunk 1, or the chunk-2 peek) still
   yields a clean 500, since no bytes were emitted. Covered by
   `tests/server_http.rs::streaming_error_semantics::serializer_panic_mid_stream_aborts_body`.
-- The read lock is now held until the client drains a streamed SELECT
-  (writers wait; readers don't). Accepted until SPEC-02 MVCC. Corollary
-  fixed in the same branch: `/update` takes its write lock inside
-  `spawn_blocking` — blocking a runtime worker on `write()` while a slow
-  reader drains could otherwise wedge the whole server.
+- The store read lock is held only for the pin, not the drain — see
+  "Pinned read views" below. (`/update` still takes its write lock inside
+  `spawn_blocking`: a tokio worker blocked in `write()` polls no
+  connections.)
 - CONSTRUCT/DESCRIBE streaming deferred (#TODO); UPDATE must stay
   materialized (SPARQL 1.1 §3.1.3 pre-update snapshot semantics).
 
@@ -658,7 +657,8 @@ Review follow-ups (non-blocking, from the branch's code reviews):
 - No ceiling on concurrent streamed SELECTs: each holds a blocking-pool
   thread (default cap 512) for the full drain; slow clients can exhaust
   the pool and queue new SELECTs indefinitely (no timeouts anywhere in
-  Stage 1). SPEC-22 hardening list.
+  Stage 1). SPEC-22 hardening list. (Since HDB-119 such a client no longer
+  holds the store lock too, so it can no longer stall writers.)
 - `api::plan_select` duplicates `execute_query_with`'s Select-arm
   translate→plan sequence. Nothing diverges today (the pushdown rewrite
   lives inside `run_stream`/`build`), but if a rewrite step is ever added
@@ -676,6 +676,47 @@ Review follow-ups (non-blocking, from the branch's code reviews):
   (b0a701b) vs main's 36.2-36.4 nightly cluster - recovered to noise.
 
 Full rationale: `docs/specs/SPEC-22-http-streaming-results.md`.
+
+## Pinned read views (HDB-119)
+
+`/query` used to hold the store read lock until the client had drained the
+streamed body. One slow client blocked every `/update`, and because the lock
+queues writers fairly, that writer then blocked every new reader — a
+livelock under a continuous change feed. SPEC-25 S1 (#225) had since given
+storage per-tuple MVCC, so the read no longer needed the lock at all.
+
+The seam is `exec::Pinnable`: `pin_read()` returns an **owned** `Executor`
+that stays valid after the lock is dropped. `stream_select` takes the read
+lock only to call it; build, execution and streaming run with no lock held,
+so writers never wait on a reader and readers never queue behind a writer.
+
+- **Isolation: snapshot, per query.** Every read of one query resolves at the
+  commit version pinned when it started. An `/update` that commits mid-stream
+  is invisible to the query, whatever it writes — the client sees the result
+  it would have got had the write not happened. A query issued after the
+  commit sees it (read-your-own-writes across requests is unchanged, since
+  `/update` returns only after its batch has committed).
+- **`HornBackend`** shares its `Arc<ColumnStore>` and its snapshot memo with
+  the view and pins one tier version (`horndb_storage::Store::pin` /
+  `snapshot_at`), so a pin is O(1) and holds compaction back at that version.
+  The memo is version-tagged (`SnapshotMemo.version`): with readers running
+  outside the lock, an entry built at one commit version must never answer a
+  query pinned at another — a reader whose build straddles a commit would
+  otherwise leave a stale snapshot behind for every later query. A write
+  merges its delta only into a memo still tagged with the version it started
+  from, and re-tags it; anything else rebuilds. `Arc::get_mut` already
+  declined to merge into a snapshot a reader still holds, so a concurrent
+  reader costs at worst a rebuild, never a wrong answer.
+- **`MemStore`** has no MVCC: its view is a deep copy (`Clone`). O(store) per
+  query, which is fine for the test/reference backend and gives the same
+  point-in-time semantics.
+- Only the streaming SELECT path pins. `run_materialized` (ASK / CONSTRUCT /
+  DESCRIBE / EXPLAIN) still executes under the read lock — it materializes
+  before returning, so it holds the lock for the execution but never for a
+  client-controlled duration.
+- Writing through a pinned view would bypass the caller's write
+  serialization; `HornBackend`'s write methods `debug_assert` against it.
+- Test: `tests/server_http.rs::update_completes_while_a_select_is_still_streaming`.
 
 ## Count pushdown (#128: #144 first cut + 2026-07-06 extensions)
 

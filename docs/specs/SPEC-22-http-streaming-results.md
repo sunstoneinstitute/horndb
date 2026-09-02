@@ -97,6 +97,11 @@ makes `blocking_send` fail, which returns from the blocking closure and
 
 ### Accepted trade-off: the read lock is held while the client drains
 
+**Superseded by HDB-119** (see `crates/sparql/INTEGRATION-NOTES.md`, "Pinned
+read views"): `/query` now takes the read lock only long enough to pin a read
+view and streams with none held. The rest of this section records the original
+Stage-1 reasoning.
+
 Today the guard is scoped to execution only; serialization happens lock-free.
 With streaming, the read guard lives until the last chunk is sent, so a slow
 SELECT download blocks writers (`POST /update` takes the write lock) for its

@@ -29,14 +29,11 @@ pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
         body
     };
 
-    // Streamed SELECTs (`/query`) hold the store read lock for
-    // client-controlled durations (until the client drains the body), so
-    // `write()` can block for a long time. Never block a tokio runtime
-    // worker on it: park the lock wait AND the update execution on the
-    // blocking pool. Otherwise one stalled streaming client plus N
-    // concurrent updates (N = worker threads) wedges every runtime worker
-    // in `write()`, nothing polls connections, the streamed body never
-    // drains, and the read lock never releases — deadlock.
+    // Since HDB-119 a streamed SELECT holds no lock while it streams, so
+    // `write()` no longer waits on a slow client. It can still wait on
+    // another update, or on a materialized query's execution, so keep both
+    // the lock wait and the update itself off the runtime workers: a tokio
+    // worker blocked in `write()` polls no connections.
     let store = Arc::clone(&state.store);
     let result = tokio::task::spawn_blocking(move || {
         let mut store = store.write();
