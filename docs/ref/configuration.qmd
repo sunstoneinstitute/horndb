@@ -288,6 +288,81 @@ environment-variable names.
     performance and efficiency CPU cores. `HORNDB_SIMD__MAX_ISA` still bounds
     the candidate set in either mode.
 
+## Named-graph reasoning views
+
+OWL 2 RL reasoning is off by default. When it is on, HornDB does not reason
+over "everything in the store": it reasons per **view** — a shared vocabulary
+*spine* (your ontologies) plus exactly one data graph. Each view's derived
+triples land in their own **inferred graph** under the reserved
+`https://horndb.io/graph/` namespace, never in the source graph, so reading a
+data graph back returns exactly the quads you wrote to it.
+
+All of these live in the `[reasoning]` section of `config.toml`. They are
+server-scoped and restart-only: there is no per-query override, because two
+queries disagreeing about what was entailed is not a setting, it is a bug.
+
+`[reasoning].enabled` (boolean)
+
+:   **Default:** `false` — no reasoning runs, no reserved graph appears, and
+    the store behaves exactly as it did before views existed.
+
+    **Allowed values:** `true` or `false`. Setting it to `true` requires a
+    binary built with the `reasoner` feature (on by default); otherwise
+    `serve` exits at startup saying so.
+
+`[reasoning].spine` (list of strings)
+
+:   **Default:** `[]` — an empty spine. Each entry is a graph IRI or an IRI
+    **prefix**: `"https://ex.org/vocab/"` selects every graph whose IRI starts
+    with it.
+
+    **Tuning notes:** put your ontologies here. The spine is closed **once**
+    and that closure is shared by every view, so a graph in the spine costs
+    one reasoning run no matter how many views there are. An enabled but empty
+    spine is legal and warned about at startup: with no shared axioms, no
+    `rdfs:subClassOf` (or similar) can fire.
+
+`[reasoning].views.select` (string or list of strings)
+
+:   **Default:** `"all-except-spine"` — every graph that is not a spine graph
+    and not one of HornDB's own reserved graphs gets a view. The default graph
+    gets one too, when it holds anything.
+
+    **Allowed values:** the keyword `"all-except-spine"`, or a list of graph
+    IRIs / IRI prefixes to narrow the set. A pattern that overlaps
+    `[reasoning].spine`, or that reaches into the reserved
+    `https://horndb.io/graph/` namespace, stops `serve` at startup naming both
+    keys — a graph is either spine or a view source, never both.
+
+`[reasoning].views.include_spine` (boolean)
+
+:   **Default:** `true`. Set to `false` to make each view reason over its own
+    graph alone, with no shared axioms.
+
+`[reasoning].default_dataset_includes_inferred` (boolean)
+
+:   **Default:** `false` — inferred graphs stay out of a query that names no
+    dataset, and out of `GRAPH ?g` enumeration. A query still reads any
+    inferred graph by naming it explicitly.
+
+    **Tuning notes:** set to `true` to have queries see entailed triples
+    without naming the inferred graphs. It admits exactly the per-view
+    inferred graphs plus the shared spine-closure graph; HornDB's view
+    *catalog* graph stays hidden either way.
+
+### Reading what the reasoner did
+
+Two reserved graphs are queryable by name at any time:
+
+- `https://horndb.io/graph/views` — the view catalog: one node per view,
+  carrying its source graph, its inferred graph, whether it is currently
+  stale, and whether it is consistent.
+- `https://horndb.io/graph/spine-closure` — what the spine alone entails,
+  stored once rather than copied into every view.
+
+A view that derives a contradiction is flagged `consistent false` in the
+catalog. It does not stop the server, and it does not affect any other view.
+
 ## Metrics endpoint
 
 `GET /metrics` on the server's bind address returns an OpenMetrics text

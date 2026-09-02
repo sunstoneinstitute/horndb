@@ -17,6 +17,8 @@ pub mod error;
 pub mod exec;
 pub mod parser;
 pub mod plan;
+#[cfg(feature = "reasoner")]
+pub mod reasoning;
 pub mod regime;
 pub mod results;
 pub mod update;
