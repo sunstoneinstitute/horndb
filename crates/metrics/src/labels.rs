@@ -119,7 +119,8 @@ pub struct PhaseLabel {
 // they are off by default — see `docs/metrics.md`.
 //
 // `Dedupe` covers `HornBackend::insert_oxrdf_batch_in_graph`'s interning
-// loop. It used to split into four `Dedupe*` sub-phases behind
+// loop, and `HornBackend::load_id_closure`'s intern-once-per-dictionary-entry
+// loop (HDB-117). It used to split into four `Dedupe*` sub-phases behind
 // `HORNDB_DEDUPE_SUBPHASES=1` (HDB-90); that split existed to attribute the
 // loop's cost against `intra_batch`, the in-batch dedup HDB-104 removed as
 // redundant with `MemoryTier::apply_quad_batch`'s own per-predicate dedup —
