@@ -194,6 +194,77 @@ mod tests {
         }
     }
 
+    /// SPEC-29 D9 defaults: reasoning off, empty spine, the shipped default
+    /// view-select template, spine included, materialized output, and no
+    /// inferred graphs in the default dataset.
+    #[test]
+    fn reasoning_defaults() {
+        let cfg = ServerConfig::default();
+        assert!(!cfg.reasoning.enabled);
+        assert!(cfg.reasoning.spine.is_empty());
+        assert_eq!(
+            cfg.reasoning.views.select,
+            ViewSelect::Keyword(ViewSelectKeyword::AllExceptSpine)
+        );
+        assert!(cfg.reasoning.views.include_spine);
+        assert_eq!(cfg.reasoning.views.output, ViewOutput::Graph);
+        assert!(!cfg.reasoning.default_dataset_includes_inferred);
+    }
+
+    /// `reasoning.views.select` is either the keyword or an explicit pattern
+    /// list (SPEC-29 D9); an unrecognized keyword string is rejected rather
+    /// than silently parsing as an empty pattern list.
+    #[test]
+    fn reasoning_parses_both_select_forms() {
+        let keyword: ServerConfig = toml_from(
+            r#"
+            [reasoning.views]
+            select = "all-except-spine"
+            "#,
+        );
+        assert_eq!(
+            keyword.reasoning.views.select,
+            ViewSelect::Keyword(ViewSelectKeyword::AllExceptSpine)
+        );
+
+        let patterns: ServerConfig = toml_from(
+            r#"
+            [reasoning.views]
+            select = ["https://ex/a", "https://ex/b"]
+            "#,
+        );
+        assert_eq!(
+            patterns.reasoning.views.select,
+            ViewSelect::Patterns(vec!["https://ex/a".to_string(), "https://ex/b".to_string()])
+        );
+
+        let err = toml::from_str::<ServerConfig>("[reasoning.views]\nselect = \"nonsense\"\n")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("nonsense"),
+            "error should name the bad value: {err}"
+        );
+    }
+
+    /// `deny_unknown_fields` rejects an unknown `[reasoning]` key, and
+    /// specifically `[reasoning.fanout]` — SPEC-29 D9's `fanout.*` keys are
+    /// P2 and must not silently parse in this P1 slice.
+    #[test]
+    fn reasoning_unknown_key_rejected() {
+        let err = toml::from_str::<ServerConfig>("[reasoning]\nnope = 1\n").unwrap_err();
+        assert!(
+            err.to_string().contains("nope"),
+            "error should name the bad key: {err}"
+        );
+
+        let err = toml::from_str::<ServerConfig>("[reasoning.fanout]\nmax_concurrent_views = 4\n")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("fanout"),
+            "error should name the rejected P2 section: {err}"
+        );
+    }
+
     fn toml_from(s: &str) -> ServerConfig {
         toml::from_str(s).expect("valid config")
     }
@@ -292,16 +363,6 @@ pub enum DefaultGraph {
     Strict,
 }
 
-/// `[reasoning]` — OWL 2 RL reasoning settings: which closure backend
-/// `serve --materialize` uses (HDB-126), and what the server does when
-/// materialization derives the `owl:Nothing` inconsistency marker (HDB-125).
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct Reasoning {
-    pub backend: ReasoningBackend,
-    pub on_inconsistency: OnInconsistency,
-}
-
 /// Inconsistency policy. A serde enum (like `DefaultGraph`), so an
 /// unrecognized value is rejected at load with file+key attribution.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
@@ -382,6 +443,105 @@ impl Default for Reload {
             debounce: HumanDuration(Duration::from_millis(250)),
         }
     }
+}
+
+/// `[reasoning]` — OWL 2 RL reasoning settings: which closure backend
+/// `serve --materialize` uses (HDB-126), what the server does when
+/// materialization derives the `owl:Nothing` inconsistency marker
+/// (HDB-125), and the named-graph reasoning scope below.
+///
+/// Named-graph reasoning scope (SPEC-29 D9). Disabled by default. When
+/// enabled, a shared "spine" of vocabulary/identity graphs closes once and
+/// is reused by one reasoning view per data graph (SPEC-29 D1-D4), instead
+/// of reasoning over the whole store or each graph in isolation.
+///
+/// None of these keys is per-query overridable (SPEC-29 D9): they decide
+/// what gets materialized, so a query cannot be allowed to change them.
+///
+/// Deliberately absent: SPEC-29 D9's table also has `reasoning.fanout.*`
+/// (`max_concurrent_views`, `batch_size`). Those tune incremental fan-out,
+/// which does not exist yet in this P1 slice (P2 work) — they must not
+/// parse here; `[reasoning.fanout]` is rejected by `deny_unknown_fields`
+/// like any other unknown key.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Reasoning {
+    pub backend: ReasoningBackend,
+    pub on_inconsistency: OnInconsistency,
+    /// Turn named-graph reasoning on. Restart-only.
+    pub enabled: bool,
+    /// Graph IRIs / IRI-prefix patterns forming the spine: the shared
+    /// vocabulary and identity graphs, closed once and reused by every view
+    /// (SPEC-29 D3). Restart-only.
+    pub spine: Vec<String>,
+    pub views: Views,
+    /// Whether a query's default dataset (no explicit `FROM`/`FROM NAMED`)
+    /// includes inferred graphs. Hot-reloadable.
+    pub default_dataset_includes_inferred: bool,
+}
+
+/// Which graphs get a reasoning view, and where a view's output goes
+/// (SPEC-29 D9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Views {
+    /// Which graphs get a view: every graph that is not the spine and not
+    /// reserved (the default), or an explicit list of IRI-prefix patterns.
+    pub select: ViewSelect,
+    /// Whether the spine is included in each view's member set. Restart-only.
+    pub include_spine: bool,
+    pub output: ViewOutput,
+}
+
+impl Default for Views {
+    fn default() -> Self {
+        Self {
+            select: ViewSelect::default(),
+            include_spine: true,
+            output: ViewOutput::default(),
+        }
+    }
+}
+
+/// `reasoning.views.select` (SPEC-29 D9): either the keyword
+/// `"all-except-spine"` or an explicit list of IRI-prefix patterns.
+/// Untagged so an unrecognized *keyword* string is still rejected (it
+/// fails both variants) rather than silently falling through to an empty
+/// pattern list — the same file+key rejection [`DefaultGraph`] gets from
+/// being a serde-level enum.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ViewSelect {
+    Keyword(ViewSelectKeyword),
+    Patterns(Vec<String>),
+}
+
+impl Default for ViewSelect {
+    fn default() -> Self {
+        ViewSelect::Keyword(ViewSelectKeyword::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewSelectKeyword {
+    /// Every graph that is not a spine graph and not reserved gets a view
+    /// (SPEC-29 D2's shipped default template).
+    #[default]
+    AllExceptSpine,
+}
+
+/// Where a reasoning view's inferred triples go (SPEC-29 D9).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewOutput {
+    /// Materialize into the view's own inferred named graph (SPEC-29 D4).
+    #[default]
+    Graph,
+    /// No materialized output (a virtual view). Parses here, but is
+    /// rejected at server startup as SPEC-29 P4 work, deferred past this
+    /// P1 slice — that startup check is separate from this config model.
+    None,
 }
 
 /// The per-query settings tier: the bounded subset a query may override,

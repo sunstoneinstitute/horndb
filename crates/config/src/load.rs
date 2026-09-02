@@ -325,4 +325,29 @@ mod env_tests {
             Ok(())
         });
     }
+
+    /// `[reasoning]` follows the same nested env mapping (SPEC-29 D9):
+    /// `HORNDB_REASONING__ENABLED` overrides a `config.toml` that sets it
+    /// `false`.
+    #[test]
+    fn reasoning_enabled_env_override() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "[reasoning]\nenabled = false\n")?;
+            let base = jail.directory().join("config.toml");
+
+            let inputs = LoadInputs {
+                cli_config_path: Some(base.clone()),
+                ..Default::default()
+            };
+            assert!(!load(&inputs).unwrap().reasoning.enabled);
+
+            jail.set_env("HORNDB_REASONING__ENABLED", "true");
+            let inputs = LoadInputs {
+                cli_config_path: Some(base),
+                ..Default::default()
+            };
+            assert!(load(&inputs).unwrap().reasoning.enabled);
+            Ok(())
+        });
+    }
 }
