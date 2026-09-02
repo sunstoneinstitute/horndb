@@ -279,7 +279,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         // from being silently attributed to whichever query flushes next
         // on this thread.
         crate::exec::phases::reset();
-        let store = store.read().unwrap();
+        let store = store.read();
         let rt = Runtime::new(&*store).with_dataset(dataset, default_graph);
         let mut ser = select_serializer(fmt);
         let start = Instant::now();
@@ -404,7 +404,7 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
     // materialised into `ans`, so serialization below holds no lock and
     // never blocks a concurrent writer.
     let ans = {
-        let store = state.store.read().unwrap();
+        let store = state.store.read();
         match execute_query_with(q, &*store, cfg) {
             Ok(a) => a,
             Err(e) => {

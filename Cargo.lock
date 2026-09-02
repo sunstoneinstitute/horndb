@@ -1411,6 +1411,7 @@ dependencies = [
  "oxiri",
  "oxrdf",
  "oxttl",
+ "parking_lot",
  "pin-project-lite",
  "pretty_assertions",
  "proptest",

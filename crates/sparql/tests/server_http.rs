@@ -10,7 +10,8 @@ use horndb_sparql::exec::Store;
 use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
 use horndb_sparql::SparqlConfig;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn iri(s: &str) -> Term {
@@ -903,5 +904,113 @@ mod streaming_error_semantics {
         }
         assert!(data_frames >= 1, "chunk 1 was delivered before the error");
         assert!(saw_error, "the body must surface the mid-stream error");
+    }
+}
+
+/// HDB-114: a panic while the store's write lock is held must not poison it.
+/// `std::sync::RwLock` poisons on exactly this, after which every later
+/// `.read()`/`.write()` panics too — the server looks dead until restart.
+mod lock_poisoning {
+    use super::*;
+    use horndb_sparql::algebra::TriplePattern;
+    use horndb_sparql::exec::mem::MemStore;
+    use horndb_sparql::exec::{AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor};
+
+    /// Wraps `MemStore`, panicking on the first `apply_quads` call (the
+    /// SPARQL Update write path) and delegating normally after. Reads
+    /// delegate straight through, unaffected.
+    struct PanicOnceStore {
+        inner: MemStore,
+        panicked: bool,
+    }
+
+    impl Executor for PanicOnceStore {
+        fn scan_bgp(
+            &self,
+            patterns: &[TriplePattern],
+            scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+            self.inner.scan_bgp(patterns, scope)
+        }
+    }
+
+    impl Store for PanicOnceStore {
+        fn apply_quads(
+            &mut self,
+            dels: Vec<AlgebraQuad>,
+            adds: Vec<AlgebraQuad>,
+        ) -> horndb_sparql::Result<ApplyCounts> {
+            if !self.panicked {
+                self.panicked = true;
+                panic!("injected update-path panic (HDB-114 test)");
+            }
+            self.inner.apply_quads(dels, adds)
+        }
+        fn clear_graph(
+            &mut self,
+            graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            self.inner.clear_graph(graph)
+        }
+        fn graph_exists(&self, graph: &str) -> bool {
+            self.inner.graph_exists(graph)
+        }
+        fn graphs(&self) -> Vec<String> {
+            self.inner.graphs()
+        }
+        fn scan_graph_quads(
+            &self,
+            graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<AlgebraTriple>> {
+            self.inner.scan_graph_quads(graph)
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_update_leaves_lock_usable_for_next_request() {
+        let state = AppState {
+            store: Arc::new(RwLock::new(PanicOnceStore {
+                inner: MemStore::default(),
+                panicked: false,
+            })),
+            cfg: SparqlConfig::default(),
+        };
+        let app = build_router(state);
+
+        // First update panics while the write lock is held: the request
+        // fails, but must not take the whole server down with it.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/update")
+            .header("content-type", "application/sparql-update")
+            .body(Body::from(
+                "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }".to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // A later request must answer normally — proof the lock wasn't
+        // poisoned by the panic above.
+        let req2 = Request::builder()
+            .uri("/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+            .header("accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.clone().oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // And a later update must go through cleanly too (second
+        // `apply_quads` call, past the injected panic).
+        let req3 = Request::builder()
+            .method("POST")
+            .uri("/update")
+            .header("content-type", "application/sparql-update")
+            .body(Body::from(
+                "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }".to_string(),
+            ))
+            .unwrap();
+        let resp3 = app.oneshot(req3).await.unwrap();
+        assert_eq!(resp3.status(), StatusCode::NO_CONTENT);
     }
 }

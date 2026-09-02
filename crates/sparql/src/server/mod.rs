@@ -20,7 +20,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use counting_body::{CountingBody, Direction};
 use horndb_metrics::labels::{Endpoint, EndpointLabel, Method, RequestLabels};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Shared state, generic over the storage backend. Defaults to the
@@ -30,6 +31,11 @@ use std::time::Instant;
 /// The store is wrapped in an `RwLock` so concurrent SPARQL queries
 /// take the read lock and run in parallel, while SPARQL Update takes
 /// the write lock. SPEC-02 will replace this with MVCC.
+///
+/// `parking_lot::RwLock`, not `std::sync::RwLock`: a panic while a
+/// std guard is held poisons the lock, so every later request panics too
+/// (HDB-114). parking_lot never poisons — a panicking handler loses only
+/// its own request.
 ///
 /// `cfg` is the resolved [`SparqlConfig`] (SPEC-26 `[server.limits]`'s
 /// `rdf12` and `default_graph`, PLAN-28-03 Task 2), read by both query
