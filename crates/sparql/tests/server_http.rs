@@ -11,6 +11,7 @@ use horndb_sparql::server::build_router;
 use horndb_sparql::server::AppState;
 use horndb_sparql::SparqlConfig;
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -24,6 +25,7 @@ fn router_with_data() -> axum::Router {
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     build_router(state)
 }
@@ -148,6 +150,7 @@ fn router_with_named_graph() -> axum::Router {
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     build_router(state)
 }
@@ -416,6 +419,7 @@ async fn get_query_returns_json_hornbackend() {
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     let app = build_router(state);
 
@@ -634,6 +638,7 @@ async fn large_select_streams_in_multiple_chunks() {
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     let app = build_router(state);
 
@@ -689,6 +694,7 @@ async fn small_select_replies_with_sized_single_frame_body() {
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     let app = build_router(state);
 
@@ -781,6 +787,7 @@ mod streaming_error_semantics {
         let state = AppState {
             store: Arc::new(RwLock::new(FailingScan)),
             cfg: SparqlConfig::default(),
+            ready: Arc::new(AtomicBool::new(true)),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -939,6 +946,7 @@ mod streaming_error_semantics {
         let state = AppState {
             store: Arc::new(RwLock::new(PanicsLate)),
             cfg: SparqlConfig::default(),
+            ready: Arc::new(AtomicBool::new(true)),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -988,6 +996,7 @@ mod streaming_error_semantics {
         let state = AppState {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
             cfg: SparqlConfig::default(),
+            ready: Arc::new(AtomicBool::new(true)),
         };
         let app = build_router(state);
         // SELECT all three vars so column pruning keeps every column.
@@ -1095,6 +1104,7 @@ mod lock_poisoning {
                 panicked: false,
             })),
             cfg: SparqlConfig::default(),
+            ready: Arc::new(AtomicBool::new(true)),
         };
         let app = build_router(state);
 

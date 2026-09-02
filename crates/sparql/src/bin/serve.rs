@@ -40,6 +40,7 @@ use oxttl::{NTriplesParser, TurtleParser};
 // per document so blank-node labels from different files never collide.
 use horndb_storage::loader::{scope_blank_node, scope_term};
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -86,6 +87,13 @@ struct Cli {
     /// closure (requires the `reasoner` feature, on by default).
     #[arg(long = "materialize", default_value_t = false)]
     materialize: bool,
+
+    /// Override `[server].shutdown_drain` (HDB-124), e.g. `10s`. How long a
+    /// graceful shutdown (SIGTERM/SIGINT) waits for in-flight requests to
+    /// finish before the process force-exits. Wins over the config file;
+    /// leave unset to use the resolved config value (default `30s`).
+    #[arg(long = "shutdown-drain")]
+    shutdown_drain: Option<String>,
 }
 
 /// Map CLI flags onto `horndb_config::LoadInputs`. Only the value flags that
@@ -104,6 +112,7 @@ fn load_inputs(cli: &Cli) -> LoadInputs {
             bind: cli.bind.clone(),
             simd_max_isa: cli.simd_max_isa.clone(),
             simd_autotune: cli.simd_autotune,
+            shutdown_drain: cli.shutdown_drain.clone(),
         },
     }
 }
@@ -168,70 +177,27 @@ async fn main() -> Result<()> {
              (they would collapse into the default graph); load them without --materialize"
         );
     }
-
-    let mut store = HornBackend::new();
-    let total;
-
-    if cli.materialize {
-        #[cfg(feature = "reasoner")]
-        {
-            // Parse all files into an oxrdf::Dataset, then run the OWL 2 RL
-            // closure before loading into the served store.
-            let mut dataset = oxrdf::Dataset::default();
-            let mut input_bytes: u64 = 0;
-            let t = Instant::now();
-            for f in &files {
-                input_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-                let n = collect_into_dataset(&store, f, &mut dataset)
-                    .with_context(|| format!("loading {}", f.display()))?;
-                eprintln!("serve: parsed {n} triples from {}", f.display());
-            }
-            let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset)
-                .context("OWL 2 RL materialization")?;
-            // Record the whole parse+materialize+load span as ONE observation
-            // (no per-file double-count). Note: this branch's
-            // `load_duration_seconds` sample is per-batch, whereas the
-            // non-materialize branch below records one sample per file.
-            horndb_metrics::metrics()
-                .storage
-                .load_bytes
-                .inc_by(input_bytes);
-            horndb_metrics::metrics()
-                .storage
-                .load_duration_seconds
-                .observe(t.elapsed().as_secs_f64());
-            eprintln!(
-                "serve: materialized closure — {} asserted, {} total loaded",
-                stats.asserted, stats.loaded
-            );
-            total = stats.loaded;
-        }
-        #[cfg(not(feature = "reasoner"))]
-        {
-            anyhow::bail!("--materialize requires the `reasoner` feature");
-        }
-    } else {
-        let mut loaded: u64 = 0;
-        for f in &files {
-            // One `load_duration_seconds`/`load_bytes` observation per file
-            // (cf. the materialize branch, which records once per batch).
-            let bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-            let t = Instant::now();
-            let n = load_file(&mut store, f).with_context(|| format!("loading {}", f.display()))?;
-            horndb_metrics::metrics().storage.load_bytes.inc_by(bytes);
-            horndb_metrics::metrics()
-                .storage
-                .load_duration_seconds
-                .observe(t.elapsed().as_secs_f64());
-            eprintln!("serve: loaded {n} triples from {}", f.display());
-            loaded += n;
-        }
-        total = loaded;
+    // Fail fast on a static misconfiguration (materialize requested, feature
+    // off) before the socket binds — same as before HDB-124 moved the actual
+    // load to a background task, where this would only surface after the
+    // process was already answering `/healthz`.
+    if cli.materialize && !cfg!(feature = "reasoner") {
+        anyhow::bail!("--materialize requires the `reasoner` feature");
     }
 
+    // HDB-124: bind and start serving BEFORE the (potentially multi-minute,
+    // no-persistence-yet) data load, so `/healthz` (process up) and `/readyz`
+    // (503 until loaded) are both reachable during the load — a Kubernetes
+    // readiness probe must be able to see "up but not ready", not just
+    // "connection refused", or the pod never leaves the load balancer's
+    // rotation cleanly and a slow load can look indistinguishable from a
+    // dead process.
+    let store = Arc::new(RwLock::new(HornBackend::new()));
+    let ready = Arc::new(AtomicBool::new(false));
     let state = AppState::<HornBackend> {
-        store: Arc::new(RwLock::new(store)),
+        store: Arc::clone(&store),
         cfg: sparql_cfg,
+        ready: Arc::clone(&ready),
     };
 
     // Scrape-time storage size collector: reads a stats snapshot through a
@@ -265,12 +231,156 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding {}", cfg.server.bind))?;
     let local = listener.local_addr().context("reading bound address")?;
-    eprintln!("serve: {total} triples loaded; SPARQL query endpoint at http://{local}/query");
+    eprintln!(
+        "serve: listening at http://{local} — loading {} file(s) in the background; \
+         /readyz reports 503 until the load (and any --materialize pass) finishes",
+        files.len()
+    );
 
-    axum::serve(listener, app)
-        .await
-        .context("axum serve loop")?;
+    // Load on a blocking-pool thread (parsing/materializing is sync CPU/IO
+    // work, not async), then swap the populated store in and flip `ready` —
+    // the "real signal" HDB-124 asks for, set once, at the end of the load.
+    let materialize = cli.materialize;
+    tokio::task::spawn_blocking(move || match run_load(materialize, &files) {
+        Ok((loaded_store, total)) => {
+            *store.write() = loaded_store;
+            ready.store(true, std::sync::atomic::Ordering::Release);
+            eprintln!("serve: {total} triples loaded; ready");
+        }
+        Err(e) => {
+            // The original (pre-HDB-124) behavior treated a load failure as
+            // fatal at startup. The socket is already bound now, so mirror
+            // that by tearing the whole process down rather than serving
+            // forever against an empty, permanently-not-ready store.
+            eprintln!("serve: fatal: data load failed: {e:#}");
+            std::process::exit(1);
+        }
+    });
+
+    let drain = cfg.server.shutdown_drain.0;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    wait_for_shutdown_signal().await;
+    eprintln!("serve: shutdown signal received; draining in-flight requests (up to {drain:?})");
+    // Stop accepting new connections and let in-flight requests finish; a
+    // dropped receiver (task already gone) is fine, `with_graceful_shutdown`
+    // resolves immediately either way.
+    let _ = shutdown_tx.send(());
+
+    match tokio::time::timeout(drain, serve_task).await {
+        Ok(Ok(Ok(()))) => eprintln!("serve: drained cleanly"),
+        Ok(Ok(Err(e))) => return Err(e).context("axum serve loop"),
+        Ok(Err(join_err)) => anyhow::bail!("server task panicked: {join_err}"),
+        Err(_elapsed) => {
+            eprintln!("serve: drain timeout ({drain:?}) exceeded; forcing exit");
+            std::process::exit(1);
+        }
+    }
     Ok(())
+}
+
+/// Wait for SIGTERM or SIGINT (Ctrl+C). `axum::serve(...).with_graceful_shutdown`
+/// stops accepting new connections once this resolves; in-flight requests are
+/// then given up to `[server].shutdown_drain` to finish (enforced by the
+/// `tokio::time::timeout` around the server task in `main`).
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install the Ctrl+C (SIGINT) handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install the SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
+/// Parse `files` and either bulk-load them directly or run OWL 2 RL
+/// materialization first (`materialize`), returning the populated store and
+/// the total triple count. Extracted from `main` so it can run on a
+/// `spawn_blocking` thread (HDB-124: the socket binds before this runs) and
+/// so the parse/materialize/load sequencing stays unit-testable in
+/// isolation from the HTTP boot sequence.
+fn run_load(materialize: bool, files: &[PathBuf]) -> Result<(HornBackend, u64)> {
+    let mut store = HornBackend::new();
+    let total;
+
+    if materialize {
+        #[cfg(feature = "reasoner")]
+        {
+            // Parse all files into an oxrdf::Dataset, then run the OWL 2 RL
+            // closure before loading into the served store.
+            let mut dataset = oxrdf::Dataset::default();
+            let mut input_bytes: u64 = 0;
+            let t = Instant::now();
+            for f in files {
+                input_bytes += std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                let n = collect_into_dataset(&store, f, &mut dataset)
+                    .with_context(|| format!("loading {}", f.display()))?;
+                eprintln!("serve: parsed {n} triples from {}", f.display());
+            }
+            let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset)
+                .context("OWL 2 RL materialization")?;
+            // Record the whole parse+materialize+load span as ONE observation
+            // (no per-file double-count). Note: this branch's
+            // `load_duration_seconds` sample is per-batch, whereas the
+            // non-materialize branch below records one sample per file.
+            horndb_metrics::metrics()
+                .storage
+                .load_bytes
+                .inc_by(input_bytes);
+            horndb_metrics::metrics()
+                .storage
+                .load_duration_seconds
+                .observe(t.elapsed().as_secs_f64());
+            eprintln!(
+                "serve: materialized closure — {} asserted, {} total loaded",
+                stats.asserted, stats.loaded
+            );
+            total = stats.loaded;
+        }
+        #[cfg(not(feature = "reasoner"))]
+        {
+            anyhow::bail!("--materialize requires the `reasoner` feature");
+        }
+    } else {
+        let mut loaded: u64 = 0;
+        for f in files {
+            // One `load_duration_seconds`/`load_bytes` observation per file
+            // (cf. the materialize branch, which records once per batch).
+            let bytes = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            let t = Instant::now();
+            let n = load_file(&mut store, f).with_context(|| format!("loading {}", f.display()))?;
+            horndb_metrics::metrics().storage.load_bytes.inc_by(bytes);
+            horndb_metrics::metrics()
+                .storage
+                .load_duration_seconds
+                .observe(t.elapsed().as_secs_f64());
+            eprintln!("serve: loaded {n} triples from {}", f.display());
+            loaded += n;
+        }
+        total = loaded;
+    }
+
+    Ok((store, total))
 }
 
 /// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
@@ -484,6 +594,7 @@ mod load_inputs_tests {
             simd_max_isa: None,
             simd_autotune: None,
             materialize: false,
+            shutdown_drain: None,
         }
     }
 
@@ -500,6 +611,7 @@ mod load_inputs_tests {
         assert_eq!(inputs.cli_overrides.bind, None);
         assert_eq!(inputs.cli_overrides.simd_max_isa, None);
         assert_eq!(inputs.cli_overrides.simd_autotune, None);
+        assert_eq!(inputs.cli_overrides.shutdown_drain, None);
     }
 
     #[test]
@@ -508,11 +620,13 @@ mod load_inputs_tests {
         cli.bind = Some("0.0.0.0:9".to_string());
         cli.simd_max_isa = Some("scalar".to_string());
         cli.simd_autotune = Some(false);
+        cli.shutdown_drain = Some("10s".to_string());
 
         let inputs = load_inputs(&cli);
         assert_eq!(inputs.cli_overrides.bind.as_deref(), Some("0.0.0.0:9"));
         assert_eq!(inputs.cli_overrides.simd_max_isa.as_deref(), Some("scalar"));
         assert_eq!(inputs.cli_overrides.simd_autotune, Some(false));
+        assert_eq!(inputs.cli_overrides.shutdown_drain.as_deref(), Some("10s"));
     }
 
     #[test]

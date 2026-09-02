@@ -35,6 +35,10 @@ pub struct CliOverrides {
     pub bind: Option<String>,
     pub simd_max_isa: Option<String>,
     pub simd_autotune: Option<bool>,
+    /// `--shutdown-drain` (HDB-124), a `HumanDuration` string (e.g. `"10s"`).
+    /// Kept a raw string here like the other overrides — parsed and
+    /// validated by the model's `HumanDuration` deserializer, not by hand.
+    pub shutdown_drain: Option<String>,
 }
 
 /// Resolve the base config file path and whether it was explicitly requested.
@@ -123,7 +127,7 @@ pub fn load(inputs: &LoadInputs) -> Result<ServerConfig, ConfigError> {
 
     // CLI overrides are the top layer, applied as a typed overlay because figment
     // cannot express "only override when `Some`".
-    Ok(apply_cli_overrides(cfg, &inputs.cli_overrides))
+    apply_cli_overrides(cfg, &inputs.cli_overrides)
 }
 
 /// The environment layer: `HORNDB_`-prefixed vars, restricted to the nested form
@@ -140,7 +144,16 @@ fn env_provider() -> Env {
 
 /// Overlay the `Some` command-line overrides onto a `ServerConfig`. This maps the
 /// flat `CliOverrides` fields onto the nested model, keeping CLI as the top layer.
-fn apply_cli_overrides(mut cfg: ServerConfig, o: &CliOverrides) -> ServerConfig {
+///
+/// Unlike `bind`/`simd_max_isa` (raw strings downstream), `shutdown_drain`'s
+/// model field is a typed `HumanDuration`, so its override is parsed here —
+/// an invalid `--shutdown-drain` value is rejected the same way an invalid
+/// file/env value is (`ConfigError::Invalid`), just attributed to `<cli
+/// overrides>` rather than a file.
+fn apply_cli_overrides(
+    mut cfg: ServerConfig,
+    o: &CliOverrides,
+) -> Result<ServerConfig, ConfigError> {
     if let Some(b) = &o.bind {
         cfg.server.bind = b.clone();
     }
@@ -150,7 +163,13 @@ fn apply_cli_overrides(mut cfg: ServerConfig, o: &CliOverrides) -> ServerConfig 
     if let Some(a) = o.simd_autotune {
         cfg.simd.autotune = a;
     }
-    cfg
+    if let Some(d) = &o.shutdown_drain {
+        cfg.server.shutdown_drain = d.parse().map_err(|message| ConfigError::Invalid {
+            source_desc: "<cli overrides>".to_string(),
+            message: format!("--shutdown-drain {d:?}: {message}"),
+        })?;
+    }
+    Ok(cfg)
 }
 
 /// The `*.toml` fragments across all configured drop-in directories, in apply
@@ -221,6 +240,55 @@ mod env_tests {
                 ..Default::default()
             };
             assert_eq!(load(&inputs).unwrap().server.bind, "4.4.4.4:4");
+            Ok(())
+        });
+    }
+
+    /// HDB-124: `--shutdown-drain` overrides the file/default value, and an
+    /// invalid duration string is rejected with the CLI as the named source
+    /// (mirrors the file-side `out_of_range_value_...` coverage in
+    /// `model.rs`/`serve_config_wiring.rs`).
+    #[test]
+    fn shutdown_drain_cli_override_parses_and_rejects_garbage() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "[server]\nshutdown_drain = \"10s\"\n")?;
+            let base = jail.directory().join("config.toml");
+
+            let inputs = LoadInputs {
+                cli_config_path: Some(base.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                load(&inputs).unwrap().server.shutdown_drain.0,
+                std::time::Duration::from_secs(10)
+            );
+
+            let inputs = LoadInputs {
+                cli_config_path: Some(base.clone()),
+                cli_overrides: CliOverrides {
+                    shutdown_drain: Some("45s".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(
+                load(&inputs).unwrap().server.shutdown_drain.0,
+                std::time::Duration::from_secs(45)
+            );
+
+            let inputs = LoadInputs {
+                cli_config_path: Some(base),
+                cli_overrides: CliOverrides {
+                    shutdown_drain: Some("not-a-duration".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = load(&inputs).unwrap_err().to_string();
+            assert!(
+                err.contains("shutdown-drain") && err.contains("not-a-duration"),
+                "error should name the flag and bad value: {err}"
+            );
             Ok(())
         });
     }

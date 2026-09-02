@@ -35,15 +35,19 @@ fn write_data_file(dir: &Path) -> std::path::PathBuf {
     p
 }
 
-/// Poll-connect until `addr` accepts, or panic after `timeout`.
+/// Poll-connect until `addr` accepts *and* `/readyz` returns 200, or panic
+/// after `timeout`. Since HDB-124 the socket binds before the startup data
+/// load runs (so a readiness probe can observe "up but not ready"), so a bare
+/// connect no longer implies the data is queryable — every test that queries
+/// loaded data must wait for `/readyz`.
 fn wait_for_connect(addr: &str, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        if TcpStream::connect(addr).is_ok() {
+        if TcpStream::connect(addr).is_ok() && http_get(addr, "/readyz").0 == 200 {
             return;
         }
         if Instant::now() >= deadline {
-            panic!("no listener on {addr} within {timeout:?}");
+            panic!("no ready listener on {addr} within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -73,6 +77,26 @@ fn spawn_serve(args: &[&str], env: &[(&str, &str)]) -> ServeGuard {
         cmd.env(k, v);
     }
     ServeGuard(cmd.spawn().unwrap())
+}
+
+/// GET `path`, returning `(status, raw response head+body)`. Same
+/// hand-rolled style as `http_post_sparql_query` below — used by the
+/// HDB-124 coverage to poll `/readyz` and check for the `x-request-id`
+/// response header without a `reqwest` dev-dependency.
+fn http_get(addr: &str, path: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).unwrap();
+    let resp = String::from_utf8_lossy(&resp).into_owned();
+    let status = resp
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    (status, resp)
 }
 
 /// Minimal hand-rolled HTTP/1.1 client (no `reqwest` dev-dependency, matching
@@ -432,4 +456,81 @@ fn invalid_default_graph_exits_nonzero_naming_the_source() {
         stderr.contains("bogus"),
         "stderr should name the bad value: {stderr}"
     );
+}
+
+/// HDB-124, end to end against the real binary: `/healthz` answers while the
+/// socket is up, `/readyz` flips to 200 once the startup load finishes (it
+/// starts false — see `server::health::tests` for that half, unit-level,
+/// since the tiny fixture here loads too fast to reliably observe the false
+/// window over a real socket), every response carries `x-request-id`, and a
+/// SIGTERM drains and exits 0 well inside the configured drain timeout.
+#[test]
+fn healthz_readyz_and_sigterm_drain() {
+    let dir = tempdir().unwrap();
+    let data = write_data_file(dir.path());
+
+    let mut cmd = StdCommand::new(env!("CARGO_BIN_EXE_serve"));
+    cmd.args([
+        "--data",
+        data.to_str().unwrap(),
+        "--bind",
+        "127.0.0.1:18480",
+        // Short so a hung drain fails the test quickly rather than timing
+        // out the whole suite; no in-flight request here, so an orderly
+        // shutdown should finish in well under this.
+        "--shutdown-drain",
+        "2s",
+    ])
+    .env_remove("HORNDB_CONFIG")
+    .env_remove("HORNDB_SERVER__BIND")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    let mut child = cmd.spawn().unwrap();
+
+    wait_for_connect("127.0.0.1:18480", Duration::from_secs(10));
+
+    let (status, _) = http_get("127.0.0.1:18480", "/healthz");
+    assert_eq!(status, 200, "/healthz must answer while the process is up");
+
+    // /readyz must eventually flip to 200 (the real signal set at the end of
+    // the startup load), bounded so a regression to "never ready" fails
+    // instead of hanging.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut ready_status, mut ready_resp) = http_get("127.0.0.1:18480", "/readyz");
+    while ready_status != 200 {
+        if Instant::now() >= deadline {
+            panic!("/readyz never reached 200: last response {ready_resp:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        let r = http_get("127.0.0.1:18480", "/readyz");
+        ready_status = r.0;
+        ready_resp = r.1;
+    }
+    assert!(
+        ready_resp.to_ascii_lowercase().contains("x-request-id"),
+        "every response must carry x-request-id: {ready_resp}"
+    );
+
+    let kill_status = StdCommand::new("kill")
+        .args(["-s", "TERM", &child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to the serve process");
+    assert!(kill_status.success(), "kill -TERM itself failed to run");
+
+    let wait_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(exit) = child.try_wait().unwrap() {
+            assert!(
+                exit.success(),
+                "a clean SIGTERM drain must exit 0, got {exit:?}"
+            );
+            return;
+        }
+        if Instant::now() >= wait_deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve did not exit within 5s of SIGTERM (drain timeout was 2s)");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

@@ -106,7 +106,7 @@ bytemuck = { version = "1", features = ["derive"] }
 spargebra = "0.4"
 regex = "1"
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tower = "0.5"
 hyper = "1"
 pretty_assertions = "1"

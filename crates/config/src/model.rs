@@ -26,6 +26,7 @@ mod tests {
         assert!(!cfg.server.limits.rdf12);
         assert_eq!(cfg.server.limits.max_query_memory, None);
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Union);
+        assert_eq!(cfg.server.shutdown_drain.0, Duration::from_secs(30));
         assert_eq!(cfg.simd.max_isa, None);
         assert!(cfg.simd.autotune);
         assert_eq!(cfg.logging.level, "info");
@@ -38,6 +39,7 @@ mod tests {
             r#"
             [server]
             bind = "0.0.0.0:80"
+            shutdown_drain = "5s"
             [server.limits]
             query_timeout = "5s"
             max_result_rows = 42
@@ -50,6 +52,7 @@ mod tests {
             "#,
         );
         assert_eq!(cfg.server.bind, "0.0.0.0:80");
+        assert_eq!(cfg.server.shutdown_drain.0, Duration::from_secs(5));
         assert_eq!(cfg.server.limits.query_timeout.0, Duration::from_secs(5));
         assert_eq!(cfg.server.limits.max_result_rows, 42);
         assert!(cfg.server.limits.rdf12);
@@ -122,6 +125,9 @@ pub struct Server {
     /// only breaks exact-filename ties (later directory wins). See crate docs.
     pub config_dirs: Vec<PathBuf>,
     pub limits: Limits,
+    /// HDB-124: how long a graceful shutdown (SIGTERM/SIGINT) waits for
+    /// in-flight requests to finish before the process force-exits.
+    pub shutdown_drain: HumanDuration,
 }
 
 impl Default for Server {
@@ -130,6 +136,7 @@ impl Default for Server {
             bind: "127.0.0.1:3840".to_string(),
             config_dirs: vec![PathBuf::from("/etc/horndb/config.d")],
             limits: Limits::default(),
+            shutdown_drain: HumanDuration(Duration::from_secs(30)),
         }
     }
 }
