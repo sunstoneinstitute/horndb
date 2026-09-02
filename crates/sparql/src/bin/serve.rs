@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use horndb_sparql::exec::horn::HornBackend;
-use horndb_sparql::server::{build_router, AppState};
+use horndb_sparql::server::{build_router, AppState, Limits};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -185,6 +185,20 @@ async fn main() -> Result<()> {
         anyhow::bail!("--materialize requires the `reasoner` feature");
     }
 
+    // HDB-118: admission control + request-body cap from `[server.limits]`.
+    // A zero slot count is startup-fatal rather than silently clamped —
+    // `usize` gives serde no lower bound to reject it for us. Checked here,
+    // with the other static misconfigurations, so it fails before the socket
+    // binds.
+    if cfg.server.limits.max_concurrent_queries == 0 {
+        anyhow::bail!("[server.limits].max_concurrent_queries must be at least 1");
+    }
+    let limits = Limits::new(
+        cfg.server.limits.max_concurrent_queries,
+        cfg.server.limits.queue_timeout.0,
+        cfg.server.limits.max_request_body.0 as usize,
+    );
+
     // HDB-124: bind and start serving BEFORE the (potentially multi-minute,
     // no-persistence-yet) data load, so `/healthz` (process up) and `/readyz`
     // (503 until loaded) are both reachable during the load — a Kubernetes
@@ -198,6 +212,7 @@ async fn main() -> Result<()> {
         store: Arc::clone(&store),
         cfg: sparql_cfg,
         ready: Arc::clone(&ready),
+        limits,
     };
 
     // Scrape-time storage size collector: reads a stats snapshot through a

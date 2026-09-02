@@ -26,6 +26,7 @@ fn router_with_data() -> axum::Router {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     build_router(state)
 }
@@ -151,6 +152,7 @@ fn router_with_named_graph() -> axum::Router {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     build_router(state)
 }
@@ -420,6 +422,7 @@ async fn get_query_returns_json_hornbackend() {
         store: Arc::new(RwLock::new(backend)),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     let app = build_router(state);
 
@@ -639,6 +642,7 @@ async fn large_select_streams_in_multiple_chunks() {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     let app = build_router(state);
 
@@ -695,6 +699,7 @@ async fn small_select_replies_with_sized_single_frame_body() {
         store: Arc::new(RwLock::new(s)),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     let app = build_router(state);
 
@@ -788,6 +793,7 @@ mod streaming_error_semantics {
             store: Arc::new(RwLock::new(FailingScan)),
             cfg: SparqlConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
+            limits: Default::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -947,6 +953,7 @@ mod streaming_error_semantics {
             store: Arc::new(RwLock::new(PanicsLate)),
             cfg: SparqlConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
+            limits: Default::default(),
         };
         let app = build_router(state);
         let req = Request::builder()
@@ -997,6 +1004,7 @@ mod streaming_error_semantics {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
             cfg: SparqlConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
+            limits: Default::default(),
         };
         let app = build_router(state);
         // SELECT all three vars so column pruning keeps every column.
@@ -1105,6 +1113,7 @@ mod lock_poisoning {
             })),
             cfg: SparqlConfig::default(),
             ready: Arc::new(AtomicBool::new(true)),
+            limits: Default::default(),
         };
         let app = build_router(state);
 
@@ -1144,4 +1153,109 @@ mod lock_poisoning {
         let resp3 = app.oneshot(req3).await.unwrap();
         assert_eq!(resp3.status(), StatusCode::NO_CONTENT);
     }
+}
+
+/// HDB-118 admission control: with N slots, N+1 concurrent slow queries
+/// produce exactly one 503 carrying `Retry-After`.
+///
+/// "Slow" here is deterministic, not timing-based: each of the first N
+/// responses is a chunked stream whose body is never drained, so its
+/// blocking task parks on a full `STREAM_CHANNEL_CHUNKS` channel and keeps
+/// holding its permit for the rest of the test. Only the last request's
+/// outcome depends on a clock, and it can only go one way — the permits are
+/// still held when its `queue_timeout` expires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn admission_control_sheds_the_query_past_the_slot_cap() {
+    use horndb_sparql::server::Limits;
+    use std::time::Duration;
+
+    const SLOTS: usize = 2;
+    // More than STREAM_CHANNEL_CHUNKS (8) + 2 operator chunks of 4096 rows,
+    // so the serializer blocks on the channel instead of running to
+    // completion and freeing its permit.
+    const TRIPLES: usize = 60_000;
+
+    let mut s = MemStore::default();
+    for i in 0..TRIPLES {
+        s.insert_triple(
+            iri(&format!("http://ex/s{i}")),
+            iri("http://ex/p"),
+            iri(&format!("http://ex/o{i}")),
+        );
+    }
+    let state = AppState {
+        store: Arc::new(RwLock::new(s)),
+        cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
+        limits: Limits::new(SLOTS, Duration::from_millis(100), 4 * 1024 * 1024),
+    };
+    let app = build_router(state);
+
+    let req = || {
+        Request::builder()
+            .uri("/query?query=SELECT%20%3Fs%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D")
+            .header("accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // Hold the responses (and therefore the undrained bodies) alive.
+    let mut held = Vec::new();
+    for _ in 0..SLOTS {
+        held.push(app.clone().oneshot(req()).await.unwrap());
+    }
+    assert!(held.iter().all(|r| r.status() == StatusCode::OK));
+
+    let shed = app.clone().oneshot(req()).await.unwrap();
+    assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(shed.headers()["retry-after"], "1");
+
+    // Dropping a held response drops its receiver, so the blocking task's
+    // next send fails and the slot comes back.
+    held.pop();
+    let ok = app.oneshot(req()).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+}
+
+/// HDB-118: `/query` and `/update` refuse an oversized request body (413).
+#[tokio::test]
+async fn request_body_limit_rejects_oversized_post() {
+    use horndb_sparql::server::Limits;
+    use std::time::Duration;
+
+    let state = AppState {
+        store: Arc::new(RwLock::new(MemStore::default())),
+        cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
+        limits: Limits::new(4, Duration::from_secs(1), 64),
+    };
+    let app = build_router(state);
+
+    let big = "#".repeat(1024) + "\nSELECT ?s WHERE { ?s ?p ?o }";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/query")
+                .header("content-type", "application/sparql-query")
+                .body(Body::from(big.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/update")
+                .header("content-type", "application/sparql-update")
+                .body(Body::from(big))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

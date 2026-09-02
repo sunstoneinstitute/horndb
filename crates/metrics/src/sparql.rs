@@ -1,6 +1,7 @@
 //! SPARQL HTTP + pipeline metrics.
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 use std::time::Duration;
@@ -25,6 +26,12 @@ pub struct SparqlMetrics {
     /// — see `crates/sparql/src/exec/phases.rs`.
     pub exec_phase_nanoseconds: Family<ExecPhaseLabel, Counter>,
     pub exec_phase_rows: Family<ExecPhaseLabel, Counter>,
+    /// HDB-118 admission control: queries currently holding an execution
+    /// permit, and requests shed with 503 because no permit came free within
+    /// `[server.limits].queue_timeout`. Unlabelled — only `/query` is
+    /// admission-controlled, and a rejection has one cause.
+    pub queries_in_flight: Gauge,
+    pub queries_rejected: Counter,
 }
 
 fn latency_hist() -> Histogram {
@@ -44,6 +51,8 @@ impl SparqlMetrics {
             Family::<StageLabel, Histogram>::new_with_constructor(latency_hist);
         let exec_phase_nanoseconds = Family::<ExecPhaseLabel, Counter>::default();
         let exec_phase_rows = Family::<ExecPhaseLabel, Counter>::default();
+        let queries_in_flight = Gauge::default();
+        let queries_rejected = Counter::default();
 
         reg.register(
             "sparql_requests",
@@ -90,6 +99,16 @@ impl SparqlMetrics {
             "Rows handled by each SPARQL execution-time operator phase",
             exec_phase_rows.clone(),
         );
+        reg.register(
+            "sparql_queries_in_flight",
+            "SPARQL queries currently holding an admission-control permit",
+            queries_in_flight.clone(),
+        );
+        reg.register(
+            "sparql_queries_rejected",
+            "SPARQL queries shed with 503 after waiting past the admission queue timeout",
+            queries_rejected.clone(),
+        );
 
         Self {
             requests,
@@ -101,6 +120,8 @@ impl SparqlMetrics {
             stage_duration_seconds,
             exec_phase_nanoseconds,
             exec_phase_rows,
+            queries_in_flight,
+            queries_rejected,
         }
     }
 

@@ -88,8 +88,11 @@ again.
 | `horndb_sparql_stage_duration_seconds` | histogram | `stage` | s `(1e-4 ×3 ×12)` | per-stage pipeline latency; for HTTP-streamed SELECTs, `exec` measures plan→first-result-chunk (no duration metric covers the full body drain; delivered bytes are visible in `horndb_sparql_response_bytes_total`), and non-SELECT `/query` requests record one extra `parse` observation from streaming-path routing |
 | `horndb_sparql_exec_phase_nanoseconds_total` | counter | `phase` | ns | nanoseconds spent in each per-operator SPARQL execution-time phase (`HORNDB_EXEC_PHASES=1` only — zero rows/samples when the flag is off) |
 | `horndb_sparql_exec_phase_rows_total` | counter | `phase` | count | rows each execution-time phase handled |
+| `horndb_sparql_queries_in_flight` | gauge | none | count | `/query` requests currently holding an admission-control permit (HDB-118). A streamed SELECT holds its permit until the client finishes draining the body, so this tracks live executions, not just plan+first-chunk. Ceiling: `[server.limits].max_concurrent_queries`. |
+| `horndb_sparql_queries_rejected_total` | counter | none | count | `/query` requests shed with HTTP 503 + `Retry-After` because no permit came free within `[server.limits].queue_timeout` (HDB-118). Oversized bodies are *not* counted here — they are refused by the body-size layer and appear as `horndb_sparql_requests_total{status="413"}`. |
 
-Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`),
+Emitted by `crates/sparql/src/server/` (request middleware, `counting_body.rs`,
+admission control in `mod.rs`),
 `crates/sparql/src/api.rs` (`timed()`, query-kind classification), and
 `crates/sparql/src/exec/phases.rs` (the exec-phase split, below).
 
