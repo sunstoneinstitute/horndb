@@ -203,7 +203,7 @@ use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
 use horndb_wcoj::source::TripleSource;
 use horndb_wcoj::stats::SnapshotStats;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Cheap size stats for scrape-time metrics (see [`HornBackend::storage_stats`]).
@@ -328,13 +328,35 @@ const SNAPSHOT_DELTA_REBUILD_DIVISOR: usize = 2;
 /// benefits; beyond that the cache is being swept, not reused.
 const STATS_CACHE_MAX_SCOPES: usize = 8;
 
-/// True if `g` is a HornDB-internal graph (SPEC-27 F6 / SPEC-29 D4). The
-/// default-graph sentinel has no IRI (`graph_uri` errors on it) and is never
-/// reserved, so it stays in the union default graph.
-fn reserved_graph(snap: &StoreSnapshot<'_>, g: GraphId) -> bool {
+/// True if `g` must stay OUT of the no-dataset default graph (SPEC-27 F6 /
+/// SPEC-29 D4/D6): it is a HornDB-internal graph that `visible` has not
+/// opted back in. The default-graph sentinel has no IRI (`graph_uri` errors
+/// on it) and is never reserved, so it stays in the union default graph.
+///
+/// `visible` is empty unless `reasoning.default_dataset_includes_inferred`
+/// is set, in which case it holds exactly the per-view inferred graphs plus
+/// the spine-closure graph — never the view catalog (SPEC-29 D6's "and
+/// nothing else").
+fn hidden_reserved(snap: &StoreSnapshot<'_>, g: GraphId, visible: &BTreeSet<String>) -> bool {
     match snap.graph_uri(g) {
-        Ok(OxTerm::NamedNode(n)) => is_reserved_graph(n.as_str()),
+        Ok(OxTerm::NamedNode(n)) => is_reserved_graph(n.as_str()) && !visible.contains(n.as_str()),
         _ => false,
+    }
+}
+
+/// One term in the `Engine::materialized_triples()` lexical convention — the
+/// exact inverse of [`lexical_to_oxrdf`]. `None` for an RDF 1.2 triple term,
+/// which the Stage-1 OWL 2 RL engine does not accept.
+pub(crate) fn oxrdf_to_lexical(t: &OxTerm) -> Option<String> {
+    match t {
+        OxTerm::NamedNode(n) => Some(n.as_str().to_owned()),
+        OxTerm::BlankNode(b) => Some(format!("_:{}", b.as_str())),
+        OxTerm::Literal(l) => Some(match l.language() {
+            Some(lang) => format!("\"{}\"@{lang}", l.value()),
+            None => format!("\"{}\"^^<{}>", l.value(), l.datatype().as_str()),
+        }),
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 
@@ -482,6 +504,18 @@ pub struct HornBackend {
     /// source was opened at, so a write invalidates it with no help from
     /// [`Self::invalidate`] or [`Self::apply_delta_to_snapshots`].
     direct_cache: Arc<Mutex<Option<DirectCacheEntry>>>,
+    /// SPEC-29 D7 routing: every graph this backend has actually mutated
+    /// since [`Self::take_touched_graphs`] last drained the set. Recorded in
+    /// the two write funnels ([`Store::apply_quads`] and
+    /// [`Store::clear_graph`]) rather than in each caller, so no write path
+    /// can forget to report; a no-op batch (SPEC-28 S6 idempotence) records
+    /// nothing, which is what makes a replayed change-feed batch derive
+    /// nothing. Empty and untouched when reasoning is off.
+    touched_graphs: BTreeSet<GraphId>,
+    /// SPEC-29 D6: reserved-namespace graphs nonetheless admitted to the
+    /// no-dataset default union and to `GRAPH ?g` enumeration. See
+    /// [`hidden_reserved`] and [`Self::set_visible_inferred`].
+    visible_inferred: BTreeSet<String>,
 }
 
 /// One cached statistics summary: the store commit version it describes, and
@@ -508,6 +542,8 @@ impl HornBackend {
             pin: None,
             direct_source: direct_source_enabled(),
             direct_cache: Arc::new(Mutex::new(None)),
+            touched_graphs: BTreeSet::new(),
+            visible_inferred: BTreeSet::new(),
         }
     }
 
@@ -534,6 +570,10 @@ impl HornBackend {
             pin: Some(self.store.pin()),
             direct_source: self.direct_source,
             direct_cache: Arc::clone(&self.direct_cache),
+            // Write-only routing state; a read view never records writes.
+            touched_graphs: BTreeSet::new(),
+            // Read-side: the view must hide/admit the same graphs as its parent.
+            visible_inferred: self.visible_inferred.clone(),
         }
     }
 
@@ -563,6 +603,76 @@ impl HornBackend {
     /// two backends that differ only here.
     pub fn set_direct_source(&mut self, on: bool) {
         self.direct_source = on;
+    }
+
+    /// Drain the set of graphs mutated since the last call, as SPARQL graph
+    /// names (`None` = the default-graph sentinel). SPEC-29 D7's routing
+    /// input: the view manager marks the touched graphs' views dirty, bumps
+    /// the spine version if a spine graph is among them, and ignores writes
+    /// to the reserved namespace because those are its own.
+    ///
+    /// Only the two write funnels record here, so bulk loaders that write
+    /// below them (`insert_oxrdf_batch`, `load_lexical_triples`) report
+    /// nothing — the view manager re-scans `graphs()` each pass and picks up
+    /// new source graphs that way.
+    pub fn take_touched_graphs(&mut self) -> Vec<crate::exec::GraphName> {
+        let snap = self.store.snapshot();
+        let out = std::mem::take(&mut self.touched_graphs)
+            .into_iter()
+            .map(|g| match snap.graph_uri(g) {
+                Ok(OxTerm::NamedNode(n)) => Some(n.into_string()),
+                _ => None,
+            })
+            .collect();
+        drop(snap);
+        out
+    }
+
+    /// SPEC-29 D6: admit these reserved-namespace graphs to the no-dataset
+    /// default union and to `GRAPH ?g` enumeration. Pass exactly the per-view
+    /// inferred graphs plus the spine-closure graph; pass an empty set to
+    /// hide them again (the default, and what
+    /// `reasoning.default_dataset_includes_inferred = false` leaves in place).
+    ///
+    /// Invalidates the snapshot memo: the `DefaultUnion` scope's graph set
+    /// changes underneath it.
+    pub fn set_visible_inferred(&mut self, iris: BTreeSet<String>) {
+        if self.visible_inferred != iris {
+            self.visible_inferred = iris;
+            self.invalidate();
+        }
+    }
+
+    /// Every visible triple in `graph` (`None` = the default graph), in the
+    /// `Engine::materialized_triples()` lexical convention — the read side of
+    /// a reasoning view's source scan. Graph-scoped (`scan_graph`), never a
+    /// whole-store filter. An unknown graph IRI reads as empty, matching
+    /// SPEC-28's "unknown graph ⇒ zero rows".
+    pub fn scan_graph_lexical(
+        &self,
+        graph: crate::exec::GraphName,
+    ) -> Result<Vec<(String, String, String)>> {
+        let gid = match graph.as_deref() {
+            None => DEFAULT_GRAPH,
+            Some(iri) => match self.graph_id(iri) {
+                Some(g) => g,
+                None => return Ok(Vec::new()),
+            },
+        };
+        let snap = self.store.snapshot();
+        let rows = snap
+            .scan_graph(gid)
+            .map_err(|e| SparqlError::Executor(format!("scan_graph: {e}")))?;
+        Ok(rows
+            .iter()
+            .filter_map(|(s, p, o)| {
+                Some((
+                    oxrdf_to_lexical(s)?,
+                    oxrdf_to_lexical(p)?,
+                    oxrdf_to_lexical(o)?,
+                ))
+            })
+            .collect())
     }
 
     /// Live triple count across every graph, visibility-filtered (SPEC-25 S1).
@@ -723,7 +833,7 @@ impl HornBackend {
             let mut graphs = snap
                 .graphs()
                 .into_iter()
-                .filter(|g| !reserved_graph(&snap, *g));
+                .filter(|g| !hidden_reserved(&snap, *g, &self.visible_inferred));
             match (graphs.next(), graphs.next()) {
                 (Some(g), None) => Some(g),
                 _ => None,
@@ -1245,8 +1355,9 @@ impl HornBackend {
     /// [`StoreTripleSource`] merges one leaf per predicate and needs those
     /// leaf keys distinct, which holds within one graph but not across a
     /// union of several — see `store_source`'s module docs. `DefaultUnion`
-    /// counts as single-graph exactly when at most one non-reserved graph
-    /// holds data: the single-tenant shape, and every trainmarks/SPB run.
+    /// counts as single-graph exactly when at most one graph visible to it
+    /// holds data (see [`hidden_reserved`]): the single-tenant shape, and
+    /// every trainmarks/SPB run.
     fn direct_graph(&self, scope: &SnapshotScope) -> Option<GraphId> {
         match scope {
             SnapshotScope::DefaultStrict => Some(DEFAULT_GRAPH),
@@ -1256,7 +1367,7 @@ impl HornBackend {
                 let mut live = snap
                     .graphs()
                     .into_iter()
-                    .filter(|g| !reserved_graph(&snap, *g));
+                    .filter(|g| !hidden_reserved(&snap, *g, &self.visible_inferred));
                 match (live.next(), live.next()) {
                     // No graph holds data: any graph id reads empty.
                     (None, _) => Some(DEFAULT_GRAPH),
@@ -1363,7 +1474,7 @@ impl HornBackend {
         let snap = self.snap();
         snap.graphs()
             .into_iter()
-            .filter(|g| !reserved_graph(&snap, *g))
+            .filter(|g| !hidden_reserved(&snap, *g, &self.visible_inferred))
             .all(|g| g == DEFAULT_GRAPH)
     }
 
@@ -1386,7 +1497,7 @@ impl HornBackend {
                 let graphs: Vec<GraphId> = snap
                     .graphs()
                     .into_iter()
-                    .filter(|g| !reserved_graph(&snap, *g))
+                    .filter(|g| !hidden_reserved(&snap, *g, &self.visible_inferred))
                     .collect();
                 union_triples(&snap, &graphs)
             }
@@ -1566,6 +1677,11 @@ impl Store for HornBackend {
 
         if report.retracted > 0 || report.inserted > 0 {
             self.apply_delta_to_snapshots(base, &del_rows, &add_rows);
+            // SPEC-29 D7: record what changed for the view router. Gated on
+            // the batch having changed something, so replaying an identical
+            // change-feed batch marks nothing dirty and derives nothing.
+            self.touched_graphs
+                .extend(del_rows.iter().chain(add_rows.iter()).map(|(g, ..)| *g));
         }
         Ok(ApplyCounts {
             retracted: report.retracted,
@@ -1611,6 +1727,9 @@ impl Store for HornBackend {
             .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
         if report.retracted > 0 {
             self.invalidate();
+            // SPEC-29 D7: `CLEAR`/`DROP` bypasses `apply_quads` (it sweeps
+            // one tier level down), so it reports its own touched graphs.
+            self.touched_graphs.extend(graphs_to_sweep.iter().copied());
         }
         Ok(report.retracted)
     }
@@ -1908,8 +2027,9 @@ impl Executor for HornBackend {
             };
             let iri = n.into_string();
             let admitted = match named {
-                // No `FROM NAMED`: every non-reserved graph.
-                None => !is_reserved_graph(&iri),
+                // No `FROM NAMED`: every non-reserved graph, plus any
+                // reserved graph SPEC-29 D6's flag opted back in.
+                None => !is_reserved_graph(&iri) || self.visible_inferred.contains(&iri),
                 // `FROM NAMED …`: exactly these, reserved included — naming
                 // a reserved graph is the opt-in.
                 Some(list) => list.iter().any(|n| n == &iri),
@@ -3411,5 +3531,136 @@ mod tests {
             .count_bgp_grouped(&plain, &[Var::new("z")], &ScanScope::DEFAULT)
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod reasoning_seam_tests {
+    use super::*;
+    use crate::algebra::Term as ATerm;
+    use crate::exec::Executor;
+
+    fn iri(v: &str) -> OxTerm {
+        OxTerm::NamedNode(NamedNode::new_unchecked(v))
+    }
+
+    /// `oxrdf_to_lexical` is the exact inverse of `lexical_to_oxrdf` for
+    /// every term kind the OWL 2 RL engine accepts. A view derivation reads
+    /// source quads through the first and writes derived ones back through
+    /// the second, so a term that does not survive the round trip is a
+    /// derived triple written against a subtly different subject.
+    #[test]
+    fn lexical_round_trips_every_term_kind() {
+        let terms = [
+            iri("http://ex/s"),
+            OxTerm::BlankNode(BlankNode::new_unchecked("b0")),
+            OxTerm::Literal(Literal::new_simple_literal("plain")),
+            OxTerm::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap()),
+            OxTerm::Literal(Literal::new_typed_literal(
+                "42",
+                NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer"),
+            )),
+            OxTerm::Literal(Literal::new_simple_literal("has \"quotes\" and \\ slash")),
+        ];
+        for t in terms {
+            let key = oxrdf_to_lexical(&t).expect("a supported term kind");
+            assert_eq!(lexical_to_oxrdf(&key), t, "round trip failed for {key}");
+        }
+    }
+
+    /// SPEC-29 D7: the write funnel reports which graphs actually changed,
+    /// and a replayed identical batch reports nothing — that is what makes a
+    /// re-applied change-feed batch derive zero.
+    #[test]
+    fn touched_graphs_report_only_real_changes() {
+        let mut b = HornBackend::new();
+        assert!(b.take_touched_graphs().is_empty(), "nothing written yet");
+
+        let quad = |g: &str| {
+            (
+                Some(g.to_string()),
+                ATerm::Iri("http://ex/s".into()),
+                ATerm::Iri("http://ex/p".into()),
+                ATerm::Iri("http://ex/o".into()),
+            )
+        };
+        b.apply_quads(Vec::new(), vec![quad("http://ex/g1")])
+            .unwrap();
+        assert_eq!(
+            b.take_touched_graphs(),
+            vec![Some("http://ex/g1".to_string())]
+        );
+        assert!(b.take_touched_graphs().is_empty(), "the set drains");
+
+        // Re-applying the identical batch changes nothing (SPEC-28 S6).
+        let counts = b
+            .apply_quads(Vec::new(), vec![quad("http://ex/g1")])
+            .unwrap();
+        assert_eq!((counts.inserted, counts.retracted), (0, 0));
+        assert!(
+            b.take_touched_graphs().is_empty(),
+            "an idempotent no-op must not dirty a view"
+        );
+
+        // `CLEAR` sweeps one tier level down and still reports.
+        b.clear_graph(&spargebra::algebra::GraphTarget::NamedNode(
+            NamedNode::new_unchecked("http://ex/g1"),
+        ))
+        .unwrap();
+        assert_eq!(
+            b.take_touched_graphs(),
+            vec![Some("http://ex/g1".to_string())]
+        );
+    }
+
+    /// SPEC-29 D6: a reserved graph is out of the no-dataset default union
+    /// and out of `GRAPH ?g` enumeration until it is opted back in by IRI —
+    /// and opting one in must not drag the rest of the namespace along.
+    #[test]
+    fn visible_inferred_opts_in_exactly_the_named_reserved_graphs() {
+        let mut b = HornBackend::new();
+        let inferred = "https://horndb.io/graph/inferred/x";
+        let catalog = "https://horndb.io/graph/views";
+        // A distinct subject per graph, so the union's row count names the
+        // graphs in it (a shared triple would be deduped by the snapshot
+        // builder one layer down and hide the difference).
+        for (i, g) in [inferred, catalog, "http://ex/data"].iter().enumerate() {
+            b.insert_oxrdf_in_named_graph(
+                &iri(g),
+                &iri(&format!("http://ex/s{i}")),
+                &iri("http://ex/p"),
+                &iri("http://ex/o"),
+            )
+            .unwrap();
+        }
+
+        let enumerated = |b: &HornBackend| -> Vec<String> {
+            b.named_graphs(None)
+                .unwrap()
+                .into_iter()
+                .map(|n| n.iri)
+                .collect()
+        };
+        assert_eq!(enumerated(&b), vec!["http://ex/data".to_string()]);
+        assert_eq!(
+            b.scope_triples(&SnapshotScope::DefaultUnion).len(),
+            1,
+            "only the non-reserved graph is in the union"
+        );
+
+        b.set_visible_inferred(BTreeSet::from([inferred.to_string()]));
+        assert_eq!(
+            enumerated(&b),
+            vec!["http://ex/data".to_string(), inferred.to_string()],
+            "the opted-in graph enumerates; the catalog graph does not"
+        );
+        assert_eq!(
+            b.scope_triples(&SnapshotScope::DefaultUnion).len(),
+            2,
+            "the opted-in inferred graph joined the union; the catalog did not"
+        );
+
+        b.set_visible_inferred(BTreeSet::new());
+        assert_eq!(enumerated(&b), vec!["http://ex/data".to_string()]);
     }
 }
