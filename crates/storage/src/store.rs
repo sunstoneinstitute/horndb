@@ -448,6 +448,15 @@ impl StoreSnapshot<'_> {
         self.tier.version()
     }
 
+    /// The pinned tier state as a cloneable `Arc`, for a reader that outlives
+    /// this borrow — `horndb-sparql`'s direct partition `TripleSource` holds
+    /// one for the length of a query (HDB-120). Compaction never mutates a
+    /// published `TierSnapshot` (it swaps in freshly built partitions), so an
+    /// `Arc` held past this guard's drop still reads its own consistent view.
+    pub fn tier_arc(&self) -> std::sync::Arc<crate::memory_tier::TierSnapshot> {
+        self.tier.arc()
+    }
+
     /// SPEC-24 S6 as-of token: the commit version this view is pinned to (==
     /// the engine's logical clock, ADR-0018).
     pub fn logical_time(&self) -> u64 {
