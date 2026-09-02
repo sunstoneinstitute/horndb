@@ -13,6 +13,13 @@ pub enum Suite {
     /// <https://www.w3.org/2009/sparql/docs/tests/> (the `syntax-query` /
     /// `syntax-update-1` / `syntax-update-2` sub-suites).
     Sparql11Syntax,
+    /// W3C SPARQL 1.1 query + update *evaluation* suite, read straight from
+    /// the upstream manifest tree (`mf:QueryEvaluationTest` /
+    /// `mf:UpdateEvaluationTest`). Unlike the curated `sparql11` suite this is
+    /// the whole upstream manifest — no cherry-picking (SPEC-00 harness-first).
+    /// Source: <https://www.w3.org/2009/sparql/docs/tests/>, fetched into
+    /// `crates/harness/data/w3c-sparql11-tests/` by `fetch-w3c-suites.sh`.
+    Sparql11Eval,
     /// W3C RDF 1.2 N-Triples syntax tests (positive + negative).
     /// Source: <https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/>.
     Rdf12NTriples,
@@ -29,6 +36,7 @@ impl Suite {
             Suite::Owl2 => "owl2",
             Suite::Sparql11 => "sparql11",
             Suite::Sparql11Syntax => "sparql11-syntax",
+            Suite::Sparql11Eval => "sparql11-eval",
             Suite::Rdf12NTriples => "rdf12-n-triples",
             Suite::SssomMappings => "sssom-mappings",
         }
@@ -74,6 +82,32 @@ pub enum TestKind {
     /// `input` is a SPARQL query/update that the SPARQL 1.1 grammar must
     /// *reject*. Passes iff `spargebra` fails to parse it.
     SparqlSyntaxNegative { input: PathBuf, update: bool },
+    /// W3C `mf:QueryEvaluationTest`: run `query` over the dataset built from
+    /// `data` (the default graph) plus `graph_data` (one named graph per file,
+    /// named by the file's `file://` IRI), then compare the answer against
+    /// `result`. Graded by `crate::sparql_eval`.
+    SparqlQueryEval {
+        query: PathBuf,
+        data: Option<PathBuf>,
+        graph_data: Vec<PathBuf>,
+        result: PathBuf,
+    },
+    /// W3C `mf:UpdateEvaluationTest`: apply `request` to the initial state
+    /// (`data` + `graph_data`) and compare the whole resulting store against
+    /// the expected final state (`result_data` + `result_graph_data`).
+    /// `graph_data` entries are `(file, graph IRI)` — the update suite gives
+    /// each named graph an explicit `rdfs:label`.
+    SparqlUpdateEval {
+        request: PathBuf,
+        data: Option<PathBuf>,
+        graph_data: Vec<(PathBuf, String)>,
+        result_data: Option<PathBuf>,
+        result_graph_data: Vec<(PathBuf, String)>,
+    },
+    /// The manifest entry carries an `rdf:type` this harness does not grade
+    /// (e.g. `mf:ProtocolTest`). Reported as Skipped with the type IRI, so a
+    /// whole-manifest selection stays loadable and the gap stays visible.
+    Unsupported { type_iri: String },
 }
 
 #[derive(Debug, Clone)]

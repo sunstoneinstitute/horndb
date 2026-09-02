@@ -266,6 +266,18 @@ jobs:
       - name: build harness binary (real engine)
         run: cargo build -p horndb-harness --bin harness --profile conformance --features real-engine
 
+      - name: fetch W3C suites (sparql11-eval corpus)
+        # `[suites.sparql11-eval]` grades the upstream SPARQL 1.1 evaluation
+        # manifest tree in place, out of crates/harness/data/ (gitignored), so
+        # the corpus must be on disk before `run`. HARNESS_BIN reuses the
+        # binary built above instead of triggering a second debug build.
+        run: HARNESS_BIN=./target/conformance/harness ./crates/harness/scripts/fetch-w3c-suites.sh
+
+      # Known-red cases are not deselected (SPEC-00 harness-first rule); they
+      # are listed in `expected_failures` in harness/selected.toml, which turns
+      # a failure into a Skip AND turns an unexpected pass into a failure. So
+      # this job goes red on a real regression in either direction, while the
+      # documented gaps (harness/KNOWN-MANIFEST-BUGS.md) do not block CI.
       - name: conformance — Stage-1 selected subset (real engine)
         run: |
           ./target/conformance/harness \

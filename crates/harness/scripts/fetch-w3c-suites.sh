@@ -12,6 +12,15 @@
 # SPARQL:  the 2012 1.1 suite tarball is still served as-is.
 set -euo pipefail
 
+# How to invoke the in-tree extractor/converter below. CI already has an
+# optimized harness binary, so it sets HARNESS_BIN to that path rather than
+# paying for a second, debug build of the workspace.
+if [[ -n "${HARNESS_BIN:-}" ]]; then
+    harness() { "$HARNESS_BIN" "$@"; }
+else
+    harness() { cargo run -p horndb-harness --bin harness -- "$@"; }
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 DATA="$ROOT/crates/harness/data"
@@ -78,15 +87,13 @@ done
 # Materialise the OWL 2 RL manifest into harness-friendly Turtle plus
 # sibling .premise.ttl / .conclusion.ttl files.  Idempotent — the
 # extractor skips cases whose sibling files already exist.
-cargo run -p horndb-harness --bin harness -- \
-    extract-owl2-rl \
+harness extract-owl2-rl \
     --source "$OWL2_DIR/profile-RL.rdf" \
     --out    "$OWL2_DIR"
 
 # Convert the SPARQL suite's RDF/XML manifests to Turtle so the in-tree
 # manifest parser can read them (Task 17 follow-up).
-cargo run -p horndb-harness --bin harness -- \
-    convert-manifests --root "$SPARQL_DIR"
+harness convert-manifests --root "$SPARQL_DIR"
 
 # SPARQL 1.1 *syntax* suite (issue #110). The `[suites.sparql11-syntax]`
 # selection in harness/selected.toml runs a curated, checked-in subset of the
@@ -105,6 +112,15 @@ cargo run -p horndb-harness --bin harness -- \
 if [[ -d "$SPARQL_DIR/syntax-query" ]]; then
     echo "upstream SPARQL syntax sub-suites present under $SPARQL_DIR (see sparql11-syntax notes above)."
 fi
+
+# SPARQL 1.1 *evaluation* suite (`[suites.sparql11-eval]`, HDB-128). Unlike
+# every other suite here it is NOT mirrored into tests/fixtures: the harness
+# reads the extracted tarball directly, via
+#   $SPARQL_DIR/sparql11-test-suite/manifest-all.ttl
+# whose `mf:include` list the manifest reader follows. So running this script is
+# a precondition for `harness run` — without it the suite's manifest is missing
+# and the run errors out. CI's conformance job runs this script (with
+# HARNESS_BIN set) for exactly that reason.
 
 # SPARQL 1.0 `graph/` + `dataset/` evaluation families (SPEC-28 S7, #266).
 #

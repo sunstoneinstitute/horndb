@@ -44,6 +44,31 @@ pub struct SuiteEntry {
     pub manifest: String,
     /// Test IDs that must pass.
     pub include: Vec<String>,
+    /// Cases that are selected (they stay in `include`) but are known to
+    /// fail today. A listed case that fails is reported Skipped with its
+    /// reason; a listed case that *passes* is reported Failed, so the list
+    /// cannot silently rot. This is how a whole-manifest selection stays
+    /// honest without blocking CI on a known gap — SPEC-00 forbids
+    /// de-selecting a case to make a run look better. Each entry needs a
+    /// grouped comment in `harness/KNOWN-MANIFEST-BUGS.md` naming the missing
+    /// feature.
+    #[serde(default)]
+    pub expected_failures: Vec<String>,
+}
+
+/// Match one selection pattern against a case id.
+///
+/// * `"*"`-terminated — substring match on the part before the `*`, so
+///   `"*"` selects a whole manifest and `"entailment/manifest#*"` a whole
+///   sub-suite.
+/// * otherwise — exact match, or a suffix match, so a selection written as
+///   `#agg01` survives moving the workspace root (case ids are absolute
+///   `file://` IRIs).
+pub fn pattern_matches(pattern: &str, id: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => id.contains(prefix),
+        None => id == pattern || id.ends_with(pattern),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

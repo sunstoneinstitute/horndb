@@ -12,6 +12,7 @@
 //! entailment, consistency/inconsistency, plus a minimal SPARQL ASK
 //! variant for SPARQL 1.1 manifests.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,10 @@ use crate::testcase::{Suite, TestCase, TestKind};
 const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const RDFT: &str = "http://www.w3.org/ns/rdftest#";
 const QT: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#";
+/// SPARQL 1.1 Update test vocabulary — `ut:request` / `ut:data` /
+/// `ut:graphData` / `ut:graph`, used by `mf:UpdateEvaluationTest`.
+const UT: &str = "http://www.w3.org/2009/sparql/tests/test-update#";
+const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
 const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
@@ -31,13 +36,39 @@ const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 
 /// Parse a manifest from disk. `suite` is supplied externally because
 /// the harness already knows which directory it is loading.
+///
+/// `mf:include`d sub-manifests are followed depth-first, so pointing at the
+/// upstream `manifest-all.ttl` yields every case in the tree. A manifest is
+/// read at most once per call, so an include cycle terminates.
 pub fn parse(path: &Path, suite: Suite) -> Result<Vec<TestCase>> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    parse_into(path, suite, &mut out, &mut seen)?;
+    Ok(out)
+}
+
+fn parse_into(
+    path: &Path,
+    suite: Suite,
+    out: &mut Vec<TestCase>,
+    seen: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(key) {
+        return Ok(());
+    }
     let bytes = fs::read(path).with_context(|| format!("reading manifest {}", path.display()))?;
     let base = path
         .parent()
         .ok_or_else(|| anyhow!("manifest has no parent dir"))?;
     let graph = parse_turtle(&bytes, &format!("file://{}", path.display()))?;
-    extract_cases(&graph, base, suite)
+    let (cases, includes) = extract_cases(&graph, base, suite)?;
+    out.extend(cases);
+    for inc in includes {
+        parse_into(&inc, suite, out, seen)
+            .with_context(|| format!("via mf:include from {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn parse_turtle(bytes: &[u8], base_iri: &str) -> Result<Graph> {
@@ -75,7 +106,13 @@ fn subjectref_to_subject(s: NamedOrBlankNodeRef<'_>) -> Result<NamedOrBlankNode>
     }
 }
 
-fn extract_cases(graph: &Graph, base: &Path, suite: Suite) -> Result<Vec<TestCase>> {
+/// Project one manifest document into its own cases plus the paths of the
+/// sub-manifests it `mf:include`s.
+fn extract_cases(
+    graph: &Graph,
+    base: &Path,
+    suite: Suite,
+) -> Result<(Vec<TestCase>, Vec<PathBuf>)> {
     // 1. Find the manifest node (typed mf:Manifest).
     let manifest_iri = format!("{MF}Manifest");
     let manifest_type = NamedNodeRef::new(&manifest_iri)?;
@@ -87,14 +124,14 @@ fn extract_cases(graph: &Graph, base: &Path, suite: Suite) -> Result<Vec<TestCas
         .ok_or_else(|| anyhow!("no mf:Manifest in {}", base.display()))?;
     let manifest_subj = subjectref_to_subject(manifest_subj_ref)?;
 
-    // 2. Walk mf:entries list.
+    // 2. Walk mf:entries list. An aggregate manifest (upstream
+    // `manifest-all.ttl`) has only `mf:include`, no entries of its own.
     let entries_iri = format!("{MF}entries");
     let entries_pred = NamedNodeRef::new(&entries_iri)?;
-    let entry_head = graph
-        .object_for_subject_predicate(manifest_subj.as_ref(), entries_pred)
-        .ok_or_else(|| anyhow!("manifest has no mf:entries"))?
-        .into_owned();
-    let entries = read_rdf_list(graph, entry_head)?;
+    let entries = match graph.object_for_subject_predicate(manifest_subj.as_ref(), entries_pred) {
+        Some(head) => read_rdf_list(graph, head.into_owned())?,
+        None => Vec::new(),
+    };
 
     // 3. Project each entry into a TestCase.
     let projector = EntryProjector::new()?;
@@ -103,7 +140,20 @@ fn extract_cases(graph: &Graph, base: &Path, suite: Suite) -> Result<Vec<TestCas
         let entry_subj = term_to_subject(&entry)?;
         out.push(projector.project(graph, &entry_subj, base, suite)?);
     }
-    Ok(out)
+
+    // 4. Collect mf:include'd sub-manifests, if any.
+    let include_iri = format!("{MF}include");
+    let include_pred = NamedNodeRef::new(&include_iri)?;
+    let mut includes = Vec::new();
+    if let Some(head) = graph.object_for_subject_predicate(manifest_subj.as_ref(), include_pred) {
+        for item in read_rdf_list(graph, head.into_owned())? {
+            match item {
+                Term::NamedNode(n) => includes.push(resolve_file(n.as_str(), base)?),
+                other => bail!("mf:include member is not an IRI: {other}"),
+            }
+        }
+    }
+    Ok((out, includes))
 }
 
 struct EntryProjector {
@@ -115,8 +165,14 @@ struct EntryProjector {
     cons_iri: String,
     incons_iri: String,
     qet_iri: String,
+    uet_iri: String,
     qt_query_iri: String,
     qt_data_iri: String,
+    qt_graph_data_iri: String,
+    ut_request_iri: String,
+    ut_data_iri: String,
+    ut_graph_data_iri: String,
+    ut_graph_iri: String,
     syntax_pos_iri: String,
     syntax_neg_iri: String,
     sparql_query_pos_iri: String,
@@ -136,8 +192,14 @@ impl EntryProjector {
             cons_iri: format!("{MF}ConsistencyTest"),
             incons_iri: format!("{MF}InconsistencyTest"),
             qet_iri: format!("{MF}QueryEvaluationTest"),
+            uet_iri: format!("{MF}UpdateEvaluationTest"),
             qt_query_iri: format!("{QT}query"),
             qt_data_iri: format!("{QT}data"),
+            qt_graph_data_iri: format!("{QT}graphData"),
+            ut_request_iri: format!("{UT}request"),
+            ut_data_iri: format!("{UT}data"),
+            ut_graph_data_iri: format!("{UT}graphData"),
+            ut_graph_iri: format!("{UT}graph"),
             // W3C RDF 1.2 N-Triples syntax tests use the rdft: vocabulary
             // rather than mf:*. The syntax-only tests have only an
             // `mf:action`; no `mf:result`.
@@ -243,6 +305,55 @@ fn project_entry(
         .map(|t| t.into_owned());
 
     let kind_str = kind_iri.as_str();
+
+    // The whole-manifest SPARQL 1.1 *evaluation* suite grades the two
+    // evaluation types itself; every other suite keeps the curated Stage-1
+    // projections below (notably `mf:QueryEvaluationTest` -> SparqlAsk).
+    if suite == Suite::Sparql11Eval && (kind_str == p.qet_iri || kind_str == p.uet_iri) {
+        let action_node = action.ok_or_else(|| anyhow!("missing mf:action"))?;
+        let action_subj = term_to_subject(&action_node)?;
+        let kind = if kind_str == p.qet_iri {
+            TestKind::SparqlQueryEval {
+                query: resolve(
+                    graph
+                        .object_for_subject_predicate(
+                            action_subj.as_ref(),
+                            NamedNodeRef::new(&p.qt_query_iri)?,
+                        )
+                        .ok_or_else(|| anyhow!("qt:query missing"))?
+                        .into_owned(),
+                )?,
+                data: opt_file(graph, &action_subj, &p.qt_data_iri, base)?,
+                graph_data: files(graph, &action_subj, &p.qt_graph_data_iri, base)?,
+                result: resolve(result.ok_or_else(|| anyhow!("missing mf:result"))?)?,
+            }
+        } else {
+            let result_subj =
+                term_to_subject(&result.ok_or_else(|| anyhow!("missing mf:result"))?)?;
+            TestKind::SparqlUpdateEval {
+                request: resolve(
+                    graph
+                        .object_for_subject_predicate(
+                            action_subj.as_ref(),
+                            NamedNodeRef::new(&p.ut_request_iri)?,
+                        )
+                        .ok_or_else(|| anyhow!("ut:request missing"))?
+                        .into_owned(),
+                )?,
+                data: opt_file(graph, &action_subj, &p.ut_data_iri, base)?,
+                graph_data: labelled_graphs(graph, &action_subj, p, base)?,
+                result_data: opt_file(graph, &result_subj, &p.ut_data_iri, base)?,
+                result_graph_data: labelled_graphs(graph, &result_subj, p, base)?,
+            }
+        };
+        return Ok(TestCase {
+            id,
+            suite,
+            name,
+            kind,
+        });
+    }
+
     let kind = if kind_str == p.pe_iri {
         TestKind::PositiveEntailment {
             premise: resolve(action.ok_or_else(|| anyhow!("missing mf:action"))?)?,
@@ -319,7 +430,13 @@ fn project_entry(
             expected,
         }
     } else {
-        bail!("unsupported test type for entry {id}: {kind_str}");
+        // Not a type this harness grades (e.g. `mf:ProtocolTest`). Kept as a
+        // case so a whole-manifest selection still loads; the runner reports
+        // it Skipped with the type IRI, which keeps the gap visible instead of
+        // failing the whole manifest load.
+        TestKind::Unsupported {
+            type_iri: kind_str.to_string(),
+        }
     };
 
     Ok(TestCase {
@@ -328,6 +445,71 @@ fn project_entry(
         name,
         kind,
     })
+}
+
+/// Optional single-file object (`qt:data`, `ut:data`).
+fn opt_file(
+    graph: &Graph,
+    subj: &NamedOrBlankNode,
+    pred_iri: &str,
+    base: &Path,
+) -> Result<Option<PathBuf>> {
+    match graph.object_for_subject_predicate(subj.as_ref(), NamedNodeRef::new(pred_iri)?) {
+        Some(TermRef::NamedNode(n)) => Ok(Some(resolve_file(n.as_str(), base)?)),
+        Some(other) => bail!("{pred_iri} is not a file IRI: {other}"),
+        None => Ok(None),
+    }
+}
+
+/// Zero or more plain file objects (`qt:graphData`). The graph each file lands
+/// in is named by the file's own IRI — the convention the query suite's
+/// `GRAPH <relative.ttl>` patterns rely on.
+fn files(
+    graph: &Graph,
+    subj: &NamedOrBlankNode,
+    pred_iri: &str,
+    base: &Path,
+) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for o in graph.objects_for_subject_predicate(subj.as_ref(), NamedNodeRef::new(pred_iri)?) {
+        match o {
+            TermRef::NamedNode(n) => out.push(resolve_file(n.as_str(), base)?),
+            other => bail!("{pred_iri} is not a file IRI: {other}"),
+        }
+    }
+    Ok(out)
+}
+
+/// `ut:graphData [ ut:graph <file> ; rdfs:label "<graph IRI>" ]` — the update
+/// suite's explicitly-named graphs.
+fn labelled_graphs(
+    graph: &Graph,
+    subj: &NamedOrBlankNode,
+    p: &EntryProjector,
+    base: &Path,
+) -> Result<Vec<(PathBuf, String)>> {
+    let gd = NamedNodeRef::new(&p.ut_graph_data_iri)?;
+    let g = NamedNodeRef::new(&p.ut_graph_iri)?;
+    let label = NamedNodeRef::new(RDFS_LABEL)?;
+    let mut out = Vec::new();
+    let entries: Vec<_> = graph
+        .objects_for_subject_predicate(subj.as_ref(), gd)
+        .map(|t| t.into_owned())
+        .collect();
+    for e in entries {
+        let e = term_to_subject(&e)?;
+        let file = match graph.object_for_subject_predicate(e.as_ref(), g) {
+            Some(TermRef::NamedNode(n)) => resolve_file(n.as_str(), base)?,
+            _ => bail!("ut:graphData entry has no ut:graph file IRI"),
+        };
+        let name = match graph.object_for_subject_predicate(e.as_ref(), label) {
+            Some(TermRef::Literal(l)) => l.value().to_string(),
+            Some(TermRef::NamedNode(n)) => n.as_str().to_string(),
+            _ => bail!("ut:graphData entry has no rdfs:label graph name"),
+        };
+        out.push((file, name));
+    }
+    Ok(out)
 }
 
 fn resolve_file(iri: &str, base: &Path) -> Result<PathBuf> {

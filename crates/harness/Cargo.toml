@@ -29,6 +29,12 @@ oxigraph = { workspace = true }
 # `sep-0006`/`sparql-12` features match `horndb-sparql` so the harness and the
 # engine accept exactly the same surface (see crates/sparql/Cargo.toml).
 spargebra = { workspace = true, features = ["sep-0006", "sparql-12"] }
+# SPARQL 1.1 *evaluation* suite (`sparql11-eval`): the harness runs the SPEC-07
+# engine directly, the same way it grades syntax cases with `spargebra`
+# directly. `default-features = false` keeps the HTTP server (axum/tokio) and
+# the optional reasoner out of the harness binary — only the query/update
+# execution path is needed.
+horndb-sparql = { path = "../sparql", default-features = false }
 sparesults = { workspace = true }
 quick-xml = { workspace = true }
 walkdir = { workspace = true }

@@ -11,7 +11,7 @@ use oxttl::NTriplesParser;
 use crate::outcome::{Outcome, Report, Status};
 use crate::rdf::load_turtle_dataset;
 use crate::reasoner::Reasoner;
-use crate::selected::Selected;
+use crate::selected::{pattern_matches, Selected};
 use crate::testcase::{Suite, TestCase, TestKind};
 
 /// Loads each selected suite's manifest, filters down to the selected
@@ -37,6 +37,11 @@ pub fn run_selected(
             // `NegativeSyntaxTest11` / `*UpdateSyntaxTest11`); each case is
             // graded by `spargebra` accept/reject — no data, no reasoner.
             "sparql11-syntax" => Suite::Sparql11Syntax,
+            // W3C SPARQL 1.1 query + update *evaluation* suite, read from the
+            // upstream manifest tree fetched into `crates/harness/data/`.
+            // Selected whole (`include = ["*"]`); known gaps live in the
+            // suite's `expected_failures`, never in a shrunken `include`.
+            "sparql11-eval" => Suite::Sparql11Eval,
             // W3C RDF 1.2 N-Triples syntax tests. The manifest uses the
             // rdft: vocabulary (`TestNTriplesPositiveSyntax` /
             // `TestNTriplesNegativeSyntax`), parsed by the same
@@ -67,7 +72,7 @@ pub fn run_selected(
             if !suite_entry
                 .include
                 .iter()
-                .any(|id| id == &case.id || case.id.ends_with(id.as_str()))
+                .any(|p| pattern_matches(p, &case.id))
             {
                 continue;
             }
@@ -79,10 +84,42 @@ pub fn run_selected(
                 reason: Some(format!("harness error: {e:#}")),
                 duration_ms: start.elapsed().as_millis() as u64,
             });
-            report.push(outcome);
+            let known = suite_entry
+                .expected_failures
+                .iter()
+                .any(|p| pattern_matches(p, &case.id));
+            report.push(apply_expected_failure(outcome, known));
         }
     }
     Ok(report)
+}
+
+/// Reconcile an outcome with the suite's `expected_failures` list.
+///
+/// A known failure becomes a Skip (CI stays green on a documented gap); a
+/// known failure that has started *passing* becomes a Failure, so the list
+/// must be pruned when the gap closes. Both directions of drift are therefore
+/// caught, which a plain pass-count floor would not do.
+fn apply_expected_failure(mut o: Outcome, known: bool) -> Outcome {
+    if !known {
+        return o;
+    }
+    match o.status {
+        Status::Failed => {
+            let why = o.reason.take().unwrap_or_default();
+            o.status = Status::Skipped;
+            o.reason = Some(format!("known failure: {why}"));
+        }
+        Status::Passed => {
+            o.status = Status::Failed;
+            o.reason = Some(
+                "listed in expected_failures but passed — drop it from harness/selected.toml"
+                    .into(),
+            );
+        }
+        Status::Skipped => {}
+    }
+    o
 }
 
 fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
@@ -212,6 +249,39 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 Err(_) => (Status::Passed, None),
             }
         }
+        TestKind::SparqlQueryEval {
+            query,
+            data,
+            graph_data,
+            result,
+        } => match crate::sparql_eval::catch_panic(|| {
+            crate::sparql_eval::run_query_eval(query, data.as_deref(), graph_data, result)
+        })? {
+            None => (Status::Passed, None),
+            Some(reason) => (Status::Failed, Some(reason)),
+        },
+        TestKind::SparqlUpdateEval {
+            request,
+            data,
+            graph_data,
+            result_data,
+            result_graph_data,
+        } => match crate::sparql_eval::catch_panic(|| {
+            crate::sparql_eval::run_update_eval(
+                request,
+                data.as_deref(),
+                graph_data,
+                result_data.as_deref(),
+                result_graph_data,
+            )
+        })? {
+            None => (Status::Passed, None),
+            Some(reason) => (Status::Failed, Some(reason)),
+        },
+        TestKind::Unsupported { type_iri } => (
+            Status::Skipped,
+            Some(format!("test type not graded by this harness: {type_iri}")),
+        ),
         TestKind::SparqlAsk {
             query,
             data,
@@ -347,6 +417,7 @@ mod tests {
             crate::selected::SuiteEntry {
                 manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
+                expected_failures: vec![],
             },
         );
         let selected = Selected {
@@ -477,6 +548,7 @@ mod tests {
             crate::selected::SuiteEntry {
                 manifest: "crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
+                expected_failures: vec![],
             },
         );
         let selected = Selected {

@@ -198,6 +198,22 @@ fn real_main() -> Result<ExitCode> {
             for outcome in &report.outcomes {
                 db.record_outcome(&run_id, outcome)?;
             }
+            // Per-suite trend rows (SPEC-01 F11 drift signal). A suite whose
+            // known failures are allowlisted stays green, so the pass count is
+            // the thing that has to be watched over time:
+            //   harness report --suite sparql11-eval --metric passed
+            let mut per_suite: std::collections::BTreeMap<&str, (f64, f64)> = Default::default();
+            for o in &report.outcomes {
+                let e = per_suite.entry(o.suite.as_str()).or_default();
+                e.1 += 1.0;
+                if o.status == Status::Passed {
+                    e.0 += 1.0;
+                }
+            }
+            for (suite, (passed, selected)) in per_suite {
+                db.record_metric(&run_id, suite, None, "passed", passed, "tests")?;
+                db.record_metric(&run_id, suite, None, "selected", selected, "tests")?;
+            }
             println!(
                 "harness: run_id={} passed={} failed={} skipped={}",
                 run_id,

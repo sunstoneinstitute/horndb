@@ -51,9 +51,12 @@ The canonical selection file is `harness/selected.toml` at the workspace root. I
 carries both the manifest-driven `[suites.*]` entries the harness binary loads and
 the path-based `[sparql_query]` section consumed by `crates/sparql/tests/w3c_suite.rs`.
 
-The harness binary's manifest runner has **no result-set test kind**, so
-`[sparql_query]` — not the `sparql11` suite key — is the repo's query-evaluation
-gate. Each entry names a fixture dir holding `query.rq`, `form`, `expected.srj`,
+Two query-evaluation gates coexist. `[suites.sparql11-eval]` (below) is the
+manifest-driven one and covers the full W3C suite. `[sparql_query]` is the older
+path-based one, consumed by `crates/sparql/tests/w3c_suite.rs` against
+hand-mirrored fixtures; it stays because it also exercises the
+`default_graph`-mode dimension the upstream manifests do not express. Each
+`[sparql_query]` entry names a fixture dir holding `query.rq`, `form`, `expected.srj`,
 and its data as either `data.nt` (default graph) or `data.trig` (named graphs),
 plus an optional `default-graph` file selecting the `default_graph` mode
 (SPEC-28 D2). W3C cases that are mirrored but cannot pass are listed with their
@@ -61,7 +64,8 @@ reason in `harness/KNOWN-MANIFEST-BUGS.md`.
 
 ## Suite keys (`src/runner.rs`)
 
-`owl2`, `owl2-w3c-rl`, `sparql11`, `sparql11-syntax`, `rdf12-n-triples`.
+`owl2`, `owl2-w3c-rl`, `sparql11`, `sparql11-eval`, `sparql11-syntax`,
+`rdf12-n-triples`.
 
 `rdf12-n-triples` runs the W3C RDF 1.2 N-Triples *syntax* tests (4 positive
 `<<( s p o )>>` cases + 6 bad-syntax negatives); it uses
@@ -88,3 +92,57 @@ it fits the SPEC-01 NF1 per-PR budget. Upstream source the subset is drawn from:
 `syntax-update-1/`, `syntax-update-2/`). To grow it, add cases to that fixture dir +
 `harness/selected.toml`; the manifest reader and runner already understand the test
 types (issue #110, part of the SPEC-01 harness epic #10).
+
+`sparql11-eval` runs the W3C SPARQL 1.1 **evaluation** suite —
+`mf:QueryEvaluationTest` + `mf:UpdateEvaluationTest`, graded by executing the
+real SPEC-07 engine (`horndb-sparql`, `default-features = false`) and comparing
+against the case's expected result. Unlike every other suite it is **not**
+mirrored into fixtures: `harness/selected.toml` points at
+`crates/harness/data/w3c-sparql11-tests/sparql11-test-suite/manifest-all.ttl`,
+and the manifest reader follows its `mf:include` list depth-first. So
+`crates/harness/scripts/fetch-w3c-suites.sh` must have run first — without the
+corpus the manifest is missing and `harness run` errors out. CI's conformance
+job runs the script with `HARNESS_BIN=./target/conformance/harness` so it reuses
+the already-built binary instead of a second debug `cargo run`.
+
+Grading details (`src/sparql_eval.rs`): every file IRI is a local `file://` IRI
+and each query/update gets one `BASE <file://…>` line prepended, so a relative
+IRI in the query (`GRAPH <exists02.ttl>`) resolves to the same IRI the
+`qt:graphData` file was loaded under. `qt:data` becomes the default graph and
+`qt:graphData` the named graphs, so queries run in `DefaultGraphMode::Strict`.
+Expected results are read from `.srx`/`.srj` via `sparesults`; other extensions
+report `result format not graded yet: …` (a visible red, not a silent pass).
+Solutions compare as a set of variables plus a sorted multiset of rows, with an
+explicit `xsd:string` datatype normalised away on both sides. An engine panic on
+an upstream query is caught and graded as an ordinary failure.
+
+### `expected_failures` — the known-failure allowlist
+
+`include = ["*"]` selects every case in the tree; SPEC-00's harness-first rule
+forbids narrowing a suite to make a run look better. A case that cannot pass
+today is instead listed in the suite's `expected_failures` array. The runner
+rewrites its outcome:
+
+- listed **and failing** → **Skipped**, reason prefixed `known failure: `;
+- listed **and passing** → **Failed**, "listed in expected_failures but passed —
+  drop it from harness/selected.toml";
+- not listed → unchanged.
+
+That is strictly stronger than a pass-count floor: it catches drift in *both*
+directions and names the exact case. The per-PR conformance job therefore stays
+green on documented gaps but goes red on any real regression, and a fix cannot
+land without its allowlist line being removed in the same change. Patterns match
+a case IRI by exact match, suffix, or `prefix*` substring (`selected::pattern_matches`).
+
+The grouped root-cause triage behind those entries lives in
+`harness/KNOWN-MANIFEST-BUGS.md`.
+
+### Pass-count trend
+
+Every `harness run` records `passed` and `selected` per suite into the SQLite
+trend DB (`target/harness.sqlite`, or `$HARNESS_DB`). Because the allowlist keeps
+the suite green, the pass count is the number to watch over time; the nightly
+workflow runs the suite and publishes
+`harness report --suite sparql11-eval --metric passed` into its step summary.
+These are trend-DB rows, not Prometheus series — they do not belong in
+`docs/metrics.md`.
