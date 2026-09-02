@@ -609,11 +609,12 @@ fn validate_delete_insert(
 ///
 /// **spargebra-`WITH` finding (0.4.6):** `WITH <g>` injects `<g>` into every
 /// DELETE/INSERT template quad whose graph is the default graph, **and** — when
-/// no explicit `USING` is written — sets `using = Some(default:[g])`. It does
-/// **not** wrap the WHERE `pattern` in `GraphPattern::Graph`. So honouring
-/// `using` here scopes the WHERE side to `<g>` exactly as `WITH` intends; no
-/// manual wrapping is needed (wrapping would double-scope). This is why
-/// `USING`/`WITH` share one code path: the WHERE dataset is built from `using`.
+/// no explicit `USING` is written — sets `using = Some(QueryDataset { default:
+/// [g], named: None })` (`parser.rs`, rule `Modify()`). It does **not** wrap the
+/// WHERE `pattern` in `GraphPattern::Graph`. So honouring `using` here scopes
+/// the WHERE side to `<g>` exactly as `WITH` intends; no manual wrapping is
+/// needed (wrapping would double-scope). This is why `USING`/`WITH` share one
+/// code path: the WHERE dataset is built from `using`.
 fn apply_delete_insert<B: FullBackend>(
     store: &mut B,
     cfg: &SparqlConfig,
@@ -635,7 +636,17 @@ fn apply_delete_insert<B: FullBackend>(
     // `USING`/`WITH` set an explicit `default`, that overrides the mode (the
     // dataset's `default` decides), so the mode passed here only matters for
     // the no-clause case.
-    let dataset: DatasetSpec = dataset_spec_from(&using.cloned());
+    let mut dataset: DatasetSpec = dataset_spec_from(&using.cloned());
+    // A bare `WITH <g>` sets the *default* graph only (SPARQL 1.1 Update
+    // §3.1.2); a ground `GRAPH <g>` inside WHERE still reads the whole graph
+    // store. `dataset_spec_from` cannot see that: it gets the query-side rule,
+    // where `FROM` without `FROM NAMED` means "no named graphs". Tell the two
+    // apart by `named`, which spargebra sets to `None` for the WITH-only case
+    // and to `Some(_)` for every `USING`/`USING NAMED` clause, and restore the
+    // unrestricted named set (`None` = every graph) that WITH leaves alone.
+    if using.is_some_and(|u| u.named.is_none()) {
+        dataset.named = None;
+    }
     let rows: Vec<Bindings> = Runtime::new(store)
         .with_dataset(dataset, DefaultGraphMode::Strict)
         .run(&plan)?

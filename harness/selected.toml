@@ -391,4 +391,9 @@ tests = [
     "update_subset/delete-insert-04b",
     "update_subset/delete-insert-05b",
     "update_subset/delete-insert-06b",
+    # delete/ — only the two `dawg-delete-with-*` cases that pin "a bare WITH
+    # sets the default graph only, a ground GRAPH in WHERE still sees its own
+    # graph" (SPARQL 1.1 Update 3.1.2, #281). Rest of the family not mirrored.
+    "update_subset/delete-with-02",
+    "update_subset/delete-with-06",
 ]

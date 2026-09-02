@@ -445,10 +445,20 @@ Routing by construct:
   `DatasetSpec` machinery (`dataset_spec_from`, made `pub(crate)` for this).
   spargebra 0.4.6 desugars a `WITH <g>` clause by injecting `<g>` into every
   default-graph DELETE/INSERT template quad and, absent an explicit `USING`,
-  setting `using = Some(default:[g])` — it does **not** wrap the WHERE
-  pattern in `GraphPattern::Graph`. Honouring `using` when building the WHERE
-  dataset is therefore correct; wrapping the pattern too would double-scope.
-  This finding is a doc comment on `apply_delete_insert`.
+  setting `using = Some(QueryDataset { default: [g], named: None })` — it does
+  **not** wrap the WHERE pattern in `GraphPattern::Graph`. Honouring `using`
+  when building the WHERE dataset is therefore correct; wrapping the pattern
+  too would double-scope. This finding is a doc comment on
+  `apply_delete_insert`.
+
+  One asymmetry that same `QueryDataset` shape hides: `named: None` means
+  "no named graphs" on the query side (`FROM` without `FROM NAMED`, which is
+  what `dataset_spec_from` implements) but "every named graph" for a bare
+  `WITH` (SPARQL 1.1 Update §3.1.2 — `WITH` sets the default graph only, and
+  a ground `GRAPH <other>` in WHERE still reads `<other>`). Any `USING`
+  clause yields `named: Some(_)`, so `apply_delete_insert` tells the two
+  apart on that field and restores the unrestricted named set after calling
+  `dataset_spec_from` (#281; W3C `delete-with-02`/`-06`).
 - **Graph management (D11: a graph exists iff it holds ≥1 visible quad, no
   registry)** — `CREATE <g>`: absent graph succeeds as a no-op, existing
   graph errors unless `SILENT`. `CLEAR`/`DROP <g>`: absent graph errors
