@@ -56,6 +56,51 @@ change rarely.
   stored types. No derived type triple exists. Labels are recomputed on schema
   change, which is rare.
 
+#### Applying the semantic index in HornDB
+
+"Semantic" here means ontology-aware, nothing to do with embeddings. A label is a
+second integer per class or property, chosen by a post-order walk of the hierarchy
+so that a subtree is a contiguous range. Multiple inheritance breaks single
+contiguity, so each class owns a *list* of ranges and a query becomes a few
+`BETWEEN` tests instead of one.
+
+**Keep labels separate from dictionary ids.** The dictionary id is assigned in
+arrival order and appears in every column of every triple. The label is only
+meaningful as a sort key in the two columns that carry a hierarchy: the object of
+`rdf:type` and the predicate column. A relabel then touches those partitions only.
+Schema triples such as `C rdfs:subClassOf D` keep their dictionary ids and never
+move.
+
+**Additive schema changes.** Hand out labels with a stride so that a new leaf class
+takes a label from the gap and nothing else changes. When a gap runs out, or an
+existing class gains a new parent, append the class's ranges to the range lists of
+the new ancestors instead of renumbering. Relabel only as an amortized compaction
+when range lists grow long enough to hurt scans. This is the order-maintenance
+problem of Dietz and Sleator (STOC 1987) and Bender et al. (ESA 2002), and the
+insertable tree labels of ORDPATH (O'Neil et al., SIGMOD 2004). Contiguity is per
+subtree of the merged DAG, so vocabularies extending each other are not a problem.
+
+**Three ways to store the label in the type partition.** Every option keeps the
+term id as the identity of the class everywhere else in the store, and none stores
+a derived type triple.
+
+| Option | Rows hold | Per-row cost | Scan cost | Relabel cost |
+|---|---|---|---|---|
+| 1. Both columns | `(x, class_id, label)`, sorted by `(label, x)` | 16 to 32 bits raw, a few bits after run-length encoding since the column is sorted | None, class ids read directly | Re-sort partition and rewrite label column |
+| 2. Label only | `(x, label)`, sorted by `(label, x)` | None | One dependent array lookup per output row to recover the term id, and the column cannot be joined by term id without translating first | Re-sort partition |
+| 3. Term id only, sorted by label | `(x, class_id)`, physically sorted by `label(class_id)` | None | One array lookup per block to map block min and max term ids into label space | Re-sort partition and rebuild the sparse block index |
+
+The relabel cost is shared by all three, since the sort key changes in each. Under
+additive-only schema changes with gaps and range lists it is rare and can run as a
+background rewrite. The lookup table in options 2 and 3 is one entry per class and
+stays in L1 or L2 for the whole scan.
+
+Ranking: option 3 has no per-row cost and a negligible per-block cost. Option 1
+pays a small compressed column to avoid even that. Option 2 pays the per-row lookup,
+loses term-id joins on the type column, and gains nothing over option 3, so it is
+dominated. The predicate column takes option 3 by default, because predicates are
+few and that column is usually already grouped by predicate.
+
 ### O3. Reachability labellings for transitive rules
 
 This is the correct form of the Bloom-filter instinct. Transitive properties,
