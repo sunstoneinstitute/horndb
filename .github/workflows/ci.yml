@@ -283,6 +283,7 @@ jobs:
           ./target/conformance/harness \
             --engine owlrl \
             run \
+            --require-corpus \
             --junit target/junit.xml
 
       - name: upload junit

@@ -29,7 +29,7 @@ fn real_engine_passes_full_stage1_selection() {
     let sel = Selected::load(&workspace().join("harness/selected.toml")).unwrap();
     let expected: usize = sel.suites.values().map(|s| s.include.len()).sum();
     let mut engine = horndb_owlrl::Engine::new();
-    let report = run_selected(&mut engine, &sel, &workspace(), &|p, s: Suite| {
+    let report = run_selected(&mut engine, &sel, &workspace(), false, &|p, s: Suite| {
         manifest::parse(p, s)
     })
     .unwrap();

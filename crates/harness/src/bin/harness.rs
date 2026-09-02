@@ -67,6 +67,15 @@ enum Cmd {
         /// stub self-test that deliberately includes a failing case).
         #[arg(long)]
         allow_failing: bool,
+        /// Fail the run if a suite marked `fetched = true` in
+        /// `selected.toml` has no manifest on disk. Without it such a suite
+        /// is reported Skipped (jobs that never run
+        /// `crates/harness/scripts/fetch-w3c-suites.sh` still grade the rest
+        /// of the selection); with it — the conformance and nightly jobs,
+        /// which do fetch — a missing corpus is a hard error, so a suite
+        /// cannot silently stop being graded.
+        #[arg(long)]
+        require_corpus: bool,
     },
     /// Query the trend database.
     Report {
@@ -178,6 +187,7 @@ fn real_main() -> Result<ExitCode> {
             selected,
             junit,
             allow_failing,
+            require_corpus,
         } => {
             let sel_path = selected.unwrap_or_else(|| workspace.join("harness/selected.toml"));
             let sel = Selected::load(&sel_path)?;
@@ -192,9 +202,13 @@ fn real_main() -> Result<ExitCode> {
             let run_id = db.start_run(&commit_sha, &hw, engine.name())?;
             info!(run_id = %run_id, "harness run started");
 
-            let report = run_selected(engine.as_mut(), &sel, &workspace, &|p, s| {
-                manifest::parse(p, s)
-            })?;
+            let report = run_selected(
+                engine.as_mut(),
+                &sel,
+                &workspace,
+                require_corpus,
+                &|p, s| manifest::parse(p, s),
+            )?;
             for outcome in &report.outcomes {
                 db.record_outcome(&run_id, outcome)?;
             }

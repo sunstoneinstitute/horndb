@@ -226,7 +226,7 @@ jobs:
         run: |
           set -euo pipefail
           HARNESS_BIN=./target/release/harness ./crates/harness/scripts/fetch-w3c-suites.sh
-          ./target/release/harness --engine owlrl run
+          ./target/release/harness --engine owlrl run --require-corpus
 
       - name: publish sparql11-eval trend
         if: always()

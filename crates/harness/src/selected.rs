@@ -54,6 +54,17 @@ pub struct SuiteEntry {
     /// feature.
     #[serde(default)]
     pub expected_failures: Vec<String>,
+    /// Set when the manifest comes from a corpus *fetched* by
+    /// `crates/harness/scripts/fetch-w3c-suites.sh` (under the gitignored
+    /// `crates/harness/data/`) rather than from a checked-in fixture. Such a
+    /// manifest is legitimately absent in jobs that do not fetch (e.g. the CI
+    /// `tests` job), so the runner reports the suite Skipped with a pointer to
+    /// the script instead of aborting the whole run. Jobs that *do* fetch pass
+    /// `harness run --require-corpus`, which turns the same condition back into
+    /// a hard error so a suite cannot silently stop being graded (SPEC-00
+    /// harness-first rule).
+    #[serde(default)]
+    pub fetched: bool,
 }
 
 /// Match one selection pattern against a case id.

@@ -100,10 +100,28 @@ against the case's expected result. Unlike every other suite it is **not**
 mirrored into fixtures: `harness/selected.toml` points at
 `crates/harness/data/w3c-sparql11-tests/sparql11-test-suite/manifest-all.ttl`,
 and the manifest reader follows its `mf:include` list depth-first. So
-`crates/harness/scripts/fetch-w3c-suites.sh` must have run first — without the
-corpus the manifest is missing and `harness run` errors out. CI's conformance
-job runs the script with `HARNESS_BIN=./target/conformance/harness` so it reuses
-the already-built binary instead of a second debug `cargo run`.
+`crates/harness/scripts/fetch-w3c-suites.sh` must have run first. CI's
+conformance job runs the script with `HARNESS_BIN=./target/conformance/harness`
+so it reuses the already-built binary instead of a second debug `cargo run`.
+
+### Fetched corpora: `fetched = true` and `--require-corpus`
+
+A suite whose manifest comes from a fetched corpus rather than a checked-in
+fixture sets `fetched = true` in its `selected.toml` entry (today only
+`sparql11-eval`). It changes what happens when that manifest is **absent**:
+
+- default (`harness run`) — the suite reports **Skipped** with a reason naming
+  the missing path and `fetch-w3c-suites.sh`, and every other selected suite
+  still grades. Jobs that never fetch (CI's `tests` job, a fresh clone) are
+  therefore unaffected; without this the whole run aborted with exit 2 before
+  grading a single case.
+- `harness run --require-corpus` — the same missing manifest is a **hard
+  error**. CI's conformance job and the nightly W3C step pass it, because they
+  *do* fetch: a suite that silently stopped being graded there would be worse
+  than a red one (SPEC-00 harness-first rule).
+
+Suites without `fetched = true` are unchanged: their manifest is checked in, so
+a missing one is still an immediate error.
 
 Grading details (`src/sparql_eval.rs`): every file IRI is a local `file://` IRI
 and each query/update gets one `BASE <file://…>` line prepended, so a relative

@@ -16,10 +16,16 @@ use crate::testcase::{Suite, TestCase, TestKind};
 
 /// Loads each selected suite's manifest, filters down to the selected
 /// IDs, runs each through `engine`, and produces a [`Report`].
+/// `require_corpus` controls what happens when a suite marked
+/// `fetched = true` in `selected.toml` has no manifest on disk: `false`
+/// (default) reports that suite Skipped and grades the rest of the selection;
+/// `true` (CI's conformance / nightly jobs, `harness run --require-corpus`)
+/// makes it a hard error, so a fetched suite cannot silently stop being graded.
 pub fn run_selected(
     engine: &mut dyn Reasoner,
     selected: &Selected,
     workspace_root: &Path,
+    require_corpus: bool,
     manifest_loader: &dyn Fn(&Path, Suite) -> Result<Vec<TestCase>>,
 ) -> Result<Report> {
     let mut report = Report::new();
@@ -63,6 +69,24 @@ pub fn run_selected(
             }
         };
         let manifest_path = workspace_root.join(&suite_entry.manifest);
+        if suite_entry.fetched && !manifest_path.exists() {
+            let hint = format!(
+                "corpus not fetched: {} is missing — run \
+                 crates/harness/scripts/fetch-w3c-suites.sh",
+                manifest_path.display(),
+            );
+            if require_corpus {
+                anyhow::bail!("suite {suite_name}: {hint}");
+            }
+            report.push(Outcome {
+                test_id: format!("<suite:{suite_name}>"),
+                suite: suite_name.clone(),
+                status: Status::Skipped,
+                reason: Some(format!("{hint} (--require-corpus makes this an error)")),
+                duration_ms: 0,
+            });
+            continue;
+        }
         let cases = manifest_loader(&manifest_path, suite)
             .with_context(|| format!("loading manifest {}", manifest_path.display()))?;
         for case in &cases {
@@ -418,6 +442,7 @@ mod tests {
                 manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
                 expected_failures: vec![],
+                fetched: false,
             },
         );
         let selected = Selected {
@@ -429,7 +454,7 @@ mod tests {
         };
 
         let mut engine = StubReasoner::new();
-        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
             crate::manifest::parse(p, s)
         })
         .unwrap();
@@ -465,6 +490,73 @@ mod tests {
             by_id("negative-subclass-no-instance").status,
             Status::Passed
         );
+    }
+
+    /// A suite marked `fetched = true` whose corpus has not been fetched must
+    /// not abort the whole run: it reports Skipped (naming the fetch script)
+    /// and every other selected suite still grades. With `require_corpus` the
+    /// same condition is a hard error, so a job that *does* fetch cannot go
+    /// green on a suite that silently disappeared.
+    #[test]
+    fn missing_fetched_corpus_skips_without_require_corpus_and_errors_with_it() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            "sparql11-eval".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/data/nope/manifest-all.ttl".to_string(),
+                include: vec!["*".to_string()],
+                expected_failures: vec![],
+                fetched: true,
+            },
+        );
+        // A checked-in suite alongside it: it must still be graded.
+        suites.insert(
+            "owl2".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
+                include: vec!["*".to_string()],
+                expected_failures: vec![],
+                fetched: false,
+            },
+        );
+        let selected = Selected {
+            version: 1,
+            suites,
+            removed: vec![],
+            sparql_query: None,
+            sparql_update: None,
+        };
+
+        let mut engine = StubReasoner::new();
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .expect("a missing fetched corpus must not abort the run");
+        let skipped = report
+            .outcomes
+            .iter()
+            .find(|o| o.test_id == "<suite:sparql11-eval>")
+            .expect("missing corpus must be reported as its own outcome");
+        assert_eq!(skipped.status, Status::Skipped);
+        assert!(
+            skipped
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("fetch-w3c-suites.sh"),
+            "skip reason must name the fetch script, got {:?}",
+            skipped.reason,
+        );
+        assert!(
+            report.outcomes.len() > 1,
+            "the other selected suites must still be graded",
+        );
+
+        let err = run_selected(&mut engine, &selected, &fixtures(), true, &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .expect_err("--require-corpus must turn a missing corpus into a hard error");
+        assert!(format!("{err:#}").contains("corpus not fetched"));
     }
 
     #[test]
@@ -549,6 +641,7 @@ mod tests {
                 manifest: "crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
                 expected_failures: vec![],
+                fetched: false,
             },
         );
         let selected = Selected {
@@ -560,7 +653,7 @@ mod tests {
         };
 
         let mut engine = StubReasoner::new();
-        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
             crate::manifest::parse(p, s)
         })
         .unwrap();

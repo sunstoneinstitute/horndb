@@ -102,9 +102,12 @@ include = [
 # (`mf:QueryEvaluationTest` + `mf:UpdateEvaluationTest`), read straight from
 # the fetched corpus rather than from hand-mirrored fixtures. Run
 # `crates/harness/scripts/fetch-w3c-suites.sh` first; the corpus lives under
-# the gitignored `crates/harness/data/`, so this suite is a no-op (manifest
-# absent -> the run errors) until it has been fetched. CI's conformance job
-# fetches it as a build step.
+# the gitignored `crates/harness/data/`. `fetched = true` records that: when
+# the manifest is absent the suite reports Skipped (naming the fetch script)
+# and the rest of the selection still grades, so a job that does not fetch —
+# e.g. CI's `tests` job — is unaffected. Jobs that DO fetch (CI conformance,
+# nightly) pass `harness run --require-corpus`, which turns the same missing
+# manifest back into a hard error so this suite cannot silently vanish.
 #
 # `include = ["*"]` selects EVERY case in the tree. SPEC-00's harness-first
 # rule forbids narrowing a suite to make a run look better, so a case that
@@ -113,6 +116,7 @@ include = [
 # FAILURE the moment it starts passing (so the list cannot rot). The grouped
 # root-cause triage is in `harness/KNOWN-MANIFEST-BUGS.md`.
 manifest = "crates/harness/data/w3c-sparql11-tests/sparql11-test-suite/manifest-all.ttl"
+fetched = true
 include = ["*"]
 expected_failures = [
     # SPARQL entailment regimes (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine
