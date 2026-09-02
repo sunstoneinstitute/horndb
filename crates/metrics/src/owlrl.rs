@@ -1,6 +1,8 @@
 //! OWL 2 RL materialization metrics (SPEC-04). Emitted by `horndb-owlrl`:
 //! per-rule fire counts and latency at the rule-fire site, and aggregate
-//! counters + per-phase latency once per `materialize_with` call.
+//! counters + per-phase latency once per `materialize_with` call. Plus the
+//! `reasoning_backend` info gauge, set once by `serve` to name the configured
+//! closure backend.
 
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
@@ -8,7 +10,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 
-use crate::labels::{PhaseLabel, RuleLabel};
+use crate::labels::{PhaseLabel, ReasoningBackend, ReasoningBackendLabel, RuleLabel};
 
 #[derive(Clone)]
 pub struct OwlrlMetrics {
@@ -24,6 +26,8 @@ pub struct OwlrlMetrics {
     /// `horndb_reasoning_inconsistent` — deliberately not under the
     /// `owlrl_` prefix: it describes the served closure, not the rule engine.
     pub reasoning_inconsistent: Gauge,
+    /// Info gauge: 1 on the series for the closure backend in use.
+    pub reasoning_backend: Family<ReasoningBackendLabel, Gauge>,
 }
 
 fn latency_hist() -> Histogram {
@@ -42,6 +46,7 @@ impl OwlrlMetrics {
         let rule_pruned = Counter::default();
         let rule_considered = Counter::default();
         let reasoning_inconsistent = Gauge::default();
+        let reasoning_backend = Family::<ReasoningBackendLabel, Gauge>::default();
 
         reg.register(
             "owlrl_rule_fires",
@@ -74,6 +79,11 @@ impl OwlrlMetrics {
             "OWL RL rule evaluations considered (prune denominator)",
             rule_considered.clone(),
         );
+        reg.register(
+            "reasoning_backend",
+            "Configured OWL RL closure backend (1 on the active backend series)",
+            reasoning_backend.clone(),
+        );
 
         reg.register(
             "reasoning_inconsistent",
@@ -90,7 +100,15 @@ impl OwlrlMetrics {
             rule_pruned,
             rule_considered,
             reasoning_inconsistent,
+            reasoning_backend,
         }
+    }
+
+    /// Mark `backend` as the closure backend in use by setting its series to 1.
+    pub fn record_backend(&self, backend: ReasoningBackend) {
+        self.reasoning_backend
+            .get_or_create(&ReasoningBackendLabel { backend })
+            .set(1);
     }
 }
 
@@ -129,6 +147,20 @@ mod tests {
         prometheus_client::encoding::text::encode(&mut buf, &reg).unwrap();
         assert!(
             buf.contains("horndb_reasoning_inconsistent 1"),
+            "got:\n{buf}"
+        );
+    }
+
+    #[test]
+    fn registers_and_encodes_reasoning_backend_gauge() {
+        let mut reg = Registry::with_prefix("horndb");
+        let m = OwlrlMetrics::register(&mut reg);
+        m.record_backend(crate::labels::ReasoningBackend::GraphBlas);
+
+        let mut buf = String::new();
+        prometheus_client::encoding::text::encode(&mut buf, &reg).unwrap();
+        assert!(
+            buf.contains("horndb_reasoning_backend{backend=\"graphblas\"} 1"),
             "got:\n{buf}"
         );
     }

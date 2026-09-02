@@ -40,6 +40,7 @@ mod tests {
         );
         assert_eq!(cfg.simd.max_isa, None);
         assert!(cfg.simd.autotune);
+        assert_eq!(cfg.reasoning.backend, ReasoningBackend::RuleFiring);
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.reload.debounce.0, Duration::from_millis(250));
         assert_eq!(cfg.reasoning.on_inconsistency, OnInconsistency::Warn);
@@ -65,6 +66,7 @@ mod tests {
             max_isa = "scalar"
             autotune = false
             [reasoning]
+            backend = "graphblas"
             on_inconsistency = "reject-startup"
             "#,
         );
@@ -86,9 +88,22 @@ mod tests {
         assert_eq!(cfg.server.limits.max_request_body, ByteSize(1024 * 1024));
         assert_eq!(cfg.simd.max_isa.as_deref(), Some("scalar"));
         assert!(!cfg.simd.autotune);
+        assert_eq!(cfg.reasoning.backend, ReasoningBackend::GraphBlas);
         assert_eq!(
             cfg.reasoning.on_inconsistency,
             OnInconsistency::RejectStartup
+        );
+    }
+
+    /// `[reasoning].backend` is a serde-level enum, so a typo is rejected at
+    /// load time naming the bad value (cf. `default_graph` below).
+    #[test]
+    fn invalid_reasoning_backend_value_is_rejected() {
+        let err =
+            toml::from_str::<ServerConfig>("[reasoning]\nbackend = \"rulefiring\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("rulefiring"),
+            "error should name the bad value: {err}"
         );
     }
 
@@ -139,9 +154,9 @@ mod tests {
 pub struct ServerConfig {
     pub server: Server,
     pub simd: Simd,
+    pub reasoning: Reasoning,
     pub logging: Logging,
     pub reload: Reload,
-    pub reasoning: Reasoning,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,11 +242,13 @@ pub enum DefaultGraph {
     Strict,
 }
 
-/// `[reasoning]` — what the server does when OWL 2 RL materialization derives
-/// the `owl:Nothing` inconsistency marker (HDB-125).
+/// `[reasoning]` — OWL 2 RL reasoning settings: which closure backend
+/// `serve --materialize` uses (HDB-126), and what the server does when
+/// materialization derives the `owl:Nothing` inconsistency marker (HDB-125).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Reasoning {
+    pub backend: ReasoningBackend,
     pub on_inconsistency: OnInconsistency,
 }
 
@@ -266,6 +283,27 @@ impl Default for Simd {
             autotune: true,
         }
     }
+}
+
+/// Which closure backend `serve --materialize` runs the transitive- and
+/// equivalence-shaped OWL 2 RL rules (`scm-sco`, `scm-spo`, `eq-sym`,
+/// `eq-trans`, `prp-trp`) through. Every other rule is compiled rule firing
+/// either way, so `graphblas` is already the hybrid split: GraphBLAS for the
+/// closure rules, compiled rules for the rest.
+///
+/// A typed enum, so an unrecognized value is rejected by figment/serde with
+/// file+key attribution (SPEC-26 S1). `graphblas` additionally needs a
+/// `horndb-sparql` built with the `graphblas` feature; `serve` fails at
+/// startup naming the feature otherwise.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
+pub enum ReasoningBackend {
+    /// In-crate nested-loop rule firing — always available.
+    #[default]
+    #[serde(rename = "rule-firing")]
+    RuleFiring,
+    /// SuiteSparse:GraphBLAS sparse-matrix closure (SPEC-05).
+    #[serde(rename = "graphblas")]
+    GraphBlas,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -84,7 +84,8 @@ fn id_closure_matches_the_lexical_closure() {
 
     // New path: ids across the boundary.
     let mut ids = HornBackend::new();
-    let stats = load_with_reasoning(&mut ids, &data).unwrap();
+    let stats =
+        load_with_reasoning(&mut ids, &data, horndb_owlrl::BackendChoice::RuleFiring).unwrap();
 
     // Old path: the same engine state, decoded to lexical triples and
     // re-parsed. Also the check that `materialized_triples` still works.

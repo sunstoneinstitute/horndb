@@ -145,15 +145,19 @@ pub struct ReasonStats {
 #[cfg(feature = "reasoner")]
 pub const INCONSISTENT_WITNESS_CAP: usize = 20;
 
-/// Run the OWL 2 RL `horndb_owlrl` `Engine` (RuleFiring backend) over
-/// `dataset`'s default graph and load the full materialized closure —
-/// asserted base plus everything inferred — into `backend`.
+/// Run the OWL 2 RL `horndb_owlrl` `Engine` over `dataset`'s default graph and
+/// load the full materialized closure — asserted base plus everything inferred
+/// — into `backend`. `closure` selects which backend closes the transitive- and
+/// equivalence-shaped rules; every other rule is compiled rule firing either
+/// way. The two closures are differentially gated to the same triple set by
+/// `crates/owlrl/tests/closure_backend_differential.rs`.
 #[cfg(feature = "reasoner")]
 pub fn load_with_reasoning(
     backend: &mut HornBackend,
     dataset: &oxrdf::Dataset,
+    closure: horndb_owlrl::BackendChoice,
 ) -> Result<ReasonStats> {
-    let mut engine = horndb_owlrl::integration::Engine::new();
+    let mut engine = horndb_owlrl::integration::Engine::with_backend(closure);
     engine
         .load(dataset)
         .map_err(|e| SparqlError::Executor(format!("owlrl load: {e}")))?;

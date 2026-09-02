@@ -260,8 +260,9 @@ async fn main() -> Result<()> {
     // the "real signal" HDB-124 asks for, set once, at the end of the load.
     let materialize = cli.materialize;
     let on_inconsistency = cfg.reasoning.on_inconsistency;
-    tokio::task::spawn_blocking(
-        move || match run_load(materialize, &files, on_inconsistency) {
+    let reasoning_backend = cfg.reasoning.backend;
+    tokio::task::spawn_blocking(move || {
+        match run_load(materialize, &files, reasoning_backend, on_inconsistency) {
             Ok((loaded_store, total)) => {
                 *store.write() = loaded_store;
                 ready.store(true, std::sync::atomic::Ordering::Release);
@@ -275,8 +276,8 @@ async fn main() -> Result<()> {
                 eprintln!("serve: fatal: data load failed: {e:#}");
                 std::process::exit(1);
             }
-        },
-    );
+        }
+    });
 
     let drain = cfg.server.shutdown_drain.0;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -341,14 +342,15 @@ async fn wait_for_shutdown_signal() {
 /// so the parse/materialize/load sequencing stays unit-testable in
 /// isolation from the HTTP boot sequence.
 ///
-/// `on_inconsistency` is `[reasoning].on_inconsistency`, read from the config
-/// in `main` and passed down because this runs off the main thread. Under
-/// `reject-startup` the error returned here is fatal in the caller — the
-/// socket is already bound by then (HDB-124), so the process exits rather
-/// than never binding.
+/// `reasoning_backend` (`[reasoning].backend`) and `on_inconsistency`
+/// (`[reasoning].on_inconsistency`) are read from the config in `main` and
+/// passed down because this runs off the main thread. Under `reject-startup`
+/// the error returned here is fatal in the caller — the socket is already
+/// bound by then (HDB-124), so the process exits rather than never binding.
 fn run_load(
     materialize: bool,
     files: &[PathBuf],
+    reasoning_backend: horndb_config::ReasoningBackend,
     on_inconsistency: OnInconsistency,
 ) -> Result<(HornBackend, u64)> {
     let mut store = HornBackend::new();
@@ -357,6 +359,15 @@ fn run_load(
     if materialize {
         #[cfg(feature = "reasoner")]
         {
+            // Resolve `[reasoning].backend` before parsing anything: an
+            // unbuildable choice is startup-fatal, not a surprise after a long
+            // load.
+            let (closure, backend_label) = resolve_reasoning_backend(reasoning_backend)?;
+            eprintln!("serve: reasoning backend — {}", backend_label.as_str());
+            horndb_metrics::metrics()
+                .owlrl
+                .record_backend(backend_label);
+
             // Parse all files into an oxrdf::Dataset, then run the OWL 2 RL
             // closure before loading into the served store.
             let mut dataset = oxrdf::Dataset::default();
@@ -368,8 +379,9 @@ fn run_load(
                     .with_context(|| format!("loading {}", f.display()))?;
                 eprintln!("serve: parsed {n} triples from {}", f.display());
             }
-            let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset)
-                .context("OWL 2 RL materialization")?;
+            let stats =
+                horndb_sparql::exec::horn::load_with_reasoning(&mut store, &dataset, closure)
+                    .context("OWL 2 RL materialization")?;
             // Record the whole parse+materialize+load span as ONE observation
             // (no per-file double-count). Note: this branch's
             // `load_duration_seconds` sample is per-batch, whereas the
@@ -391,11 +403,12 @@ fn run_load(
         }
         #[cfg(not(feature = "reasoner"))]
         {
+            let _ = reasoning_backend;
             anyhow::bail!("--materialize requires the `reasoner` feature");
         }
     } else {
-        // No closure without --materialize, so no inconsistency to police.
-        let _ = on_inconsistency;
+        // No closure without --materialize: neither reasoning key applies.
+        let _ = (reasoning_backend, on_inconsistency);
         let mut loaded: u64 = 0;
         for f in files {
             // One `load_duration_seconds`/`load_bytes` observation per file
@@ -459,6 +472,37 @@ fn apply_inconsistency_policy(policy: OnInconsistency, witnesses: &[String]) -> 
             Ok(())
         }
     }
+}
+
+/// Map `[reasoning].backend` onto the `horndb-owlrl` closure backend and its
+/// metrics label. Which backend closes the transitive/equivalence rules is the
+/// only difference — every other OWL 2 RL rule is compiled rule firing either
+/// way, so `graphblas` *is* the hybrid split (GraphBLAS closure + compiled
+/// rules), and the two produce the same triple set
+/// (`crates/owlrl/tests/closure_backend_differential.rs`).
+///
+/// `graphblas` only exists in a binary built with the `graphblas` feature,
+/// which links SuiteSparse:GraphBLAS. Selecting it otherwise is startup-fatal
+/// and names the feature rather than silently falling back to the slow path.
+#[cfg(feature = "reasoner")]
+fn resolve_reasoning_backend(
+    configured: horndb_config::ReasoningBackend,
+) -> Result<(
+    horndb_owlrl::BackendChoice,
+    horndb_metrics::labels::ReasoningBackend,
+)> {
+    use horndb_config::ReasoningBackend as Cfg;
+    use horndb_metrics::labels::ReasoningBackend as Label;
+    Ok(match configured {
+        Cfg::RuleFiring => (horndb_owlrl::BackendChoice::RuleFiring, Label::RuleFiring),
+        #[cfg(feature = "graphblas")]
+        Cfg::GraphBlas => (horndb_owlrl::BackendChoice::GraphBlas, Label::GraphBlas),
+        #[cfg(not(feature = "graphblas"))]
+        Cfg::GraphBlas => anyhow::bail!(
+            "[reasoning].backend = \"graphblas\" requires a build with the `graphblas` feature \
+             (cargo build -p horndb-sparql --features graphblas)"
+        ),
+    })
 }
 
 /// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
@@ -656,6 +700,40 @@ fn collect_into_dataset(
         }
     }
     Ok(count)
+}
+
+#[cfg(all(test, feature = "reasoner"))]
+mod reasoning_backend_tests {
+    use super::*;
+    use horndb_config::ReasoningBackend as Cfg;
+    use horndb_metrics::labels::ReasoningBackend as Label;
+
+    #[test]
+    fn rule_firing_maps_to_the_rule_firing_backend() {
+        let (choice, label) = resolve_reasoning_backend(Cfg::RuleFiring).unwrap();
+        assert_eq!(choice, horndb_owlrl::BackendChoice::RuleFiring);
+        assert_eq!(label.as_str(), Label::RuleFiring.as_str());
+    }
+
+    /// With the `graphblas` feature on, `backend = "graphblas"` resolves to the
+    /// GraphBLAS closure; without it, startup fails naming the feature so the
+    /// operator is never silently served the slow path.
+    #[test]
+    fn graphblas_resolves_or_names_the_missing_feature() {
+        let resolved = resolve_reasoning_backend(Cfg::GraphBlas);
+        #[cfg(feature = "graphblas")]
+        {
+            let (choice, label) = resolved.unwrap();
+            assert_eq!(choice, horndb_owlrl::BackendChoice::GraphBlas);
+            assert_eq!(label.as_str(), Label::GraphBlas.as_str());
+        }
+        #[cfg(not(feature = "graphblas"))]
+        {
+            let err = resolved.unwrap_err().to_string();
+            assert!(err.contains("graphblas"), "{err}");
+            assert!(err.contains("feature"), "{err}");
+        }
+    }
 }
 
 #[cfg(test)]
