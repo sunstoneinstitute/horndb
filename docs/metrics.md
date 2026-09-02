@@ -215,6 +215,23 @@ per `materialize_with` call.
 | `horndb_reasoning_inconsistent` | gauge | — | 0/1 | 1 iff the materialized closure is OWL 2 RL inconsistent (some individual inferred to be `owl:Nothing`). Set once by `serve --materialize` (HDB-125). Registered in `crates/metrics/src/owlrl.rs` but deliberately **not** under the `owlrl_` prefix — it describes the served closure, not the rule engine. |
 | `horndb_reasoning_backend` | gauge | `backend` | count | info gauge: 1 on the closure backend `serve --materialize` used, from `[reasoning].backend`; emitted once at startup |
 
+## Named-graph reasoning views (`crates/metrics/src/reasoning.rs`)
+
+Emitted by `crates/sparql/src/reasoning/` (SPEC-29 P1), behind the `reasoner`
+feature and only when `[reasoning].enabled` is set: once per view derivation,
+plus two gauges the view manager republishes when the dirty set or the spine
+version changes. No labels — P1 serialises derivations, and per-view staleness
+is readable as quads from the view catalog graph
+(`https://horndb.io/graph/views`) rather than as a high-cardinality series.
+
+| Metric (scraped name) | Type | Labels | Unit / buckets | Meaning |
+|---|---|---|---|---|
+| `horndb_reasoning_view_derivations_total` | counter | — | count | view derivations completed (SPEC-29 acceptance 6 reads this to prove one-graph updates do work in exactly one view) |
+| `horndb_reasoning_views_dirty` | gauge | — | count | views marked stale and awaiting re-derivation |
+| `horndb_reasoning_spine_version` | gauge | — | count | current vocabulary-spine version, bumped on any write to a spine graph |
+| `horndb_reasoning_derivation_duration_seconds` | histogram | — | s `(1e-4 ×3 ×12)` | wall-clock of one view derivation (fork + extend + diff + apply) |
+| `horndb_reasoning_spine_build_duration_seconds` | histogram | — | s `(1e-3 ×3 ×12)` | wall-clock of one spine template build, the closure computed once per spine version and shared by every view (SPEC-29 D3) |
+
 ## Incremental maintenance (`crates/metrics/src/incremental.rs`)
 
 Emitted by `crates/incremental/src/circuit.rs` (per tick) and `change_feed.rs`.
