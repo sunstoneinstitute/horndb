@@ -16,6 +16,13 @@ on by default).
   upward).
 - HTTP server tests: `cargo test -p horndb-sparql --features server` — required for
   a full SPARQL pass.
+- `serve --data` loads `.nt`/`.ttl`/`.nq`/`.trig` (HDB-112): `.nq`/`.trig` are dataset
+  (quad) formats — each quad loads into the named graph it carries, not the default
+  graph. `src/bin/serve.rs::load_file` routes them through `update::parse_rdf_bytes`,
+  the same parser call site SPARQL `LOAD` uses (`update.rs::fetch_and_parse`), so the
+  two never drift on format handling. `--materialize` does not yet support these two
+  formats (it collapses everything into one `oxrdf::Dataset` default graph before
+  closure) and refuses them at startup rather than silently dropping the graph split.
 
 ## Aggregation perf profiling
 

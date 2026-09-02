@@ -105,6 +105,63 @@ fn http_post_sparql_query(addr: &str, path: &str, query: &str) -> (u16, String) 
     (status, body)
 }
 
+/// HDB-112: `serve --data` did not collect `.nq`/`.trig` files at all (only
+/// `.nt`/`.ttl`), so a dataset-format catalog — one named graph per
+/// dataset — could not be loaded at server start. Proves the startup path
+/// now routes an `.nq` file's quads to their own named graphs: a two-graph
+/// `.nq` file loads, and a `GRAPH <g> { ... }` query against each graph
+/// returns only that graph's triples.
+#[test]
+fn nquads_data_file_loads_named_graphs() {
+    let dir = tempdir().unwrap();
+    let data = dir.path().join("d.nq");
+    std::fs::write(
+        &data,
+        "<http://ex/a> <http://ex/p> <http://ex/b> <http://ex/g1> .\n\
+         <http://ex/c> <http://ex/p> <http://ex/d> <http://ex/g2> .\n",
+    )
+    .unwrap();
+    let cfg = dir.path().join("config.toml");
+    std::fs::write(&cfg, "[server]\nbind = \"127.0.0.1:18479\"\n").unwrap();
+
+    let _guard = spawn_serve(
+        &[
+            "--data",
+            data.to_str().unwrap(),
+            "--config",
+            cfg.to_str().unwrap(),
+        ],
+        &[],
+    );
+    wait_for_connect("127.0.0.1:18479", Duration::from_secs(10));
+
+    let (status1, body1) = http_post_sparql_query(
+        "127.0.0.1:18479",
+        "/query",
+        "SELECT ?s ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }",
+    );
+    assert_eq!(status1, 200, "body: {body1}");
+    assert!(body1.contains("http://ex/a"), "body: {body1}");
+    assert!(body1.contains("http://ex/b"), "body: {body1}");
+    assert!(
+        !body1.contains("http://ex/c") && !body1.contains("http://ex/d"),
+        "GRAPH <g1> must not see g2's triple: {body1}"
+    );
+
+    let (status2, body2) = http_post_sparql_query(
+        "127.0.0.1:18479",
+        "/query",
+        "SELECT ?s ?o WHERE { GRAPH <http://ex/g2> { ?s <http://ex/p> ?o } }",
+    );
+    assert_eq!(status2, 200, "body: {body2}");
+    assert!(body2.contains("http://ex/c"), "body: {body2}");
+    assert!(body2.contains("http://ex/d"), "body: {body2}");
+    assert!(
+        !body2.contains("http://ex/a") && !body2.contains("http://ex/b"),
+        "GRAPH <g2> must not see g1's triple: {body2}"
+    );
+}
+
 #[test]
 fn binds_config_file_value_when_no_env_or_flag() {
     let dir = tempdir().unwrap();

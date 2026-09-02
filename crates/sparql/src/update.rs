@@ -671,12 +671,7 @@ fn source_extension(source: &str) -> Option<String> {
 
 /// Fetch and parse an RDF document named by `source`, returning its quads as
 /// algebra [`Term`]s tagged by graph. Stage-1 supports `file:` IRIs only.
-/// Triples formats (`.nt`/`.ttl`/default) tag every quad with the default graph
-/// (`None`); dataset formats (`.nq`/`.trig`) tag each quad with its own graph
-/// name, so a plain `LOAD` can route them.
 fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
-    use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
-
     let raw = file_iri_to_path(source)?;
     // A file IRI percent-encodes reserved characters (e.g. a space as `%20`);
     // decode to the real filesystem path before reading.
@@ -684,21 +679,42 @@ fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
 
     let bytes = std::fs::read(&path)
         .map_err(|e| SparqlError::Executor(format!("LOAD reading {path}: {e}")))?;
+    parse_rdf_bytes(&bytes, source_extension(&path).as_deref(), source)
+}
+
+/// Parse an RDF document's `bytes` by `extension` (`"nt"`, `"nq"`, `"trig"`,
+/// or anything else — including `None` — which defaults to Turtle), returning
+/// its quads as algebra [`Term`]s tagged by graph. Triples formats
+/// (`.nt`/`.ttl`/default) tag every quad with the default graph (`None`);
+/// dataset formats (`.nq`/`.trig`) tag each quad with its own graph name.
+/// `base` resolves relative IRIs in Turtle/TriG (N-Triples/N-Quads require
+/// absolute IRIs, so it is unused for those) and labels parse errors.
+///
+/// The one parser call site for both `LOAD` ([`fetch_and_parse`]) and the
+/// `serve --data` startup loader (`crates/sparql/src/bin/serve.rs`), so the
+/// two never drift on format handling.
+pub fn parse_rdf_bytes(
+    bytes: &[u8],
+    extension: Option<&str>,
+    base: &str,
+) -> Result<Vec<AlgebraQuad>> {
+    use oxttl::{NQuadsParser, NTriplesParser, TriGParser, TurtleParser};
+
     let map_err =
-        |e: oxttl::TurtleSyntaxError| SparqlError::Executor(format!("LOAD parsing {path}: {e}"));
+        |e: oxttl::TurtleSyntaxError| SparqlError::Executor(format!("parsing {base}: {e}"));
 
     let mut out: Vec<AlgebraQuad> = Vec::new();
-    match source_extension(&path).as_deref() {
+    match extension {
         // N-Triples/N-Quads require absolute IRIs (no base).
         Some("nt") => {
-            for t in NTriplesParser::new().for_slice(&bytes) {
+            for t in NTriplesParser::new().for_slice(bytes) {
                 let t = t.map_err(map_err)?;
                 let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
                 out.push((None, s, p, o));
             }
         }
         Some("nq") => {
-            for q in NQuadsParser::new().for_slice(&bytes) {
+            for q in NQuadsParser::new().for_slice(bytes) {
                 let q = q.map_err(map_err)?;
                 let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
                 out.push((oxrdf_graph_to_name(&q.graph_name), s, p, o));
@@ -706,8 +722,8 @@ fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
         }
         // Turtle/TriG may carry relative IRIs resolved against the document IRI.
         Some("trig") => {
-            let parser = with_base(TriGParser::new(), source)?;
-            for q in parser.for_slice(&bytes) {
+            let parser = with_base(TriGParser::new(), base)?;
+            for q in parser.for_slice(bytes) {
                 let q = q.map_err(map_err)?;
                 let (s, p, o) = oxrdf_triple_to_terms(&q.subject, &q.predicate, &q.object);
                 out.push((oxrdf_graph_to_name(&q.graph_name), s, p, o));
@@ -715,8 +731,8 @@ fn fetch_and_parse(source: &str) -> Result<Vec<AlgebraQuad>> {
         }
         // `.ttl` and anything else default to Turtle (a triples format).
         _ => {
-            let parser = with_base(TurtleParser::new(), source)?;
-            for t in parser.for_slice(&bytes) {
+            let parser = with_base(TurtleParser::new(), base)?;
+            for t in parser.for_slice(bytes) {
                 let t = t.map_err(map_err)?;
                 let (s, p, o) = oxrdf_triple_to_terms(&t.subject, &t.predicate, &t.object);
                 out.push((None, s, p, o));
