@@ -57,7 +57,10 @@ echo ">> running trainmarks xlarge with HORNDB_EXEC_PHASES=$HORNDB_EXEC_PHASES" 
   --queries-dir "$WORK/queries" \
   --scale xlarge \
   --out "$OUT/exec-phases-results.json" \
-  --timeout-secs 1800 2> >(tee "$LOG" >&2)
+  --timeout-secs 1800 2>"$LOG"
+# Straight redirect, not `2> >(tee ...)`: bash does not wait for a process
+# substitution to finish, so the parser below could read a truncated log.
+cat "$LOG" >&2
 
 python3 - "$LOG" "$(git rev-parse --short HEAD)" > "$SUMMARY" <<'PY'
 import re, sys, collections
