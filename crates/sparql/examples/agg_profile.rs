@@ -39,9 +39,68 @@ fn rows(ans: QueryAnswer) -> usize {
     }
 }
 
+/// Cumulative `sparql_exec_phase_nanoseconds_total{phase=...}` right now.
+/// Only meaningful under `HORNDB_EXEC_PHASES=1`; empty otherwise.
+fn phase_ns() -> Vec<(String, u64)> {
+    let text = horndb_metrics::encode_metrics();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("horndb_sparql_exec_phase_nanoseconds_total{") else {
+            continue;
+        };
+        let Some((labels, value)) = rest.split_once("} ") else {
+            continue;
+        };
+        let Some(phase) = labels.split(',').find_map(|kv| {
+            kv.trim()
+                .strip_prefix("phase=\"")
+                .and_then(|v| v.strip_suffix('"'))
+        }) else {
+            continue;
+        };
+        if let Ok(ns) = value.trim().parse::<u64>() {
+            out.push((phase.to_owned(), ns));
+        }
+    }
+    out
+}
+
+/// Per-operator exec-phase split of the queries just timed, gated on
+/// `HORNDB_EXEC_PHASES=1` (HDB-109). Diffs a snapshot taken before the timed
+/// loop against one taken after, so a query's split is its own and never
+/// borrows the previous label's work. Percentages are of the sum of all
+/// phases including `residual` — which is exactly `exec`, since
+/// `phases::flush` derives `residual` as `exec_elapsed - sum(named)`.
+fn print_phase_split(before: &[(String, u64)], after: &[(String, u64)]) {
+    let pre: std::collections::HashMap<&str, u64> =
+        before.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    let mut deltas: Vec<(&str, u64)> = after
+        .iter()
+        .map(|(k, v)| (k.as_str(), v - pre.get(k.as_str()).copied().unwrap_or(0)))
+        .filter(|(_, ns)| *ns > 0)
+        .collect();
+    if deltas.is_empty() {
+        return;
+    }
+    let total: u64 = deltas.iter().map(|(_, ns)| *ns).sum();
+    deltas.sort_by_key(|(_, ns)| std::cmp::Reverse(*ns));
+    println!(
+        "      exec-phase split (sum = exec = {:.3?}):",
+        std::time::Duration::from_nanos(total)
+    );
+    for (phase, ns) in deltas {
+        println!(
+            "        {phase:<16} {:>10.3?}  {:>5.1}%",
+            std::time::Duration::from_nanos(ns),
+            100.0 * ns as f64 / total as f64
+        );
+    }
+}
+
 fn time_query(label: &str, store: &HornBackend, q: &str, iters: u32) {
     // warm
     let _ = execute_query(q, store).unwrap();
+    let before = phase_ns();
     let t = Instant::now();
     let mut n = 0;
     for _ in 0..iters {
@@ -54,6 +113,7 @@ fn time_query(label: &str, store: &HornBackend, q: &str, iters: u32) {
         "{label:<28} {per:>12.2?}/q  {qps:>9.1} qps   (out rows={n})",
         per = per
     );
+    print_phase_split(&before, &phase_ns());
 }
 
 fn main() {
