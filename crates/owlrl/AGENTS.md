@@ -184,24 +184,48 @@ that genuinely needs leading variable-predicate iteration; it is
 
 `emit_all(rules)` produces a `proc_macro2::TokenStream` containing:
 
-- `pub type FireFn` — alias for `fn(&dyn TripleStore, &Delta) -> Delta`.
+- `pub type FireFn` — alias for `fn(&dyn TripleStore, Option<&dyn TripleStore>) -> Delta`.
+  The second argument is `None` for a naïve full-store join, or `Some(delta)`
+  where `delta` holds the previous round's newly applied triples (semi-naïve).
 - `pub type PredAccessor` — alias for `fn(&Vocabulary) -> TermId`.
 - `pub struct CompiledRule { id, delegated, fire, body_predicates, wildcard_predicate }`.
 - `pub const RULE_COUNT: usize`, `pub const RULE_IDS: &[&str]`.
-- One `pub fn fire_<sanitized_id>(...)` per rule.
+- One `pub fn fire_<sanitized_id>(...)` per rule, plus a private
+  `fn fire_<sanitized_id>_body(...)` for every non-delegated rule.
 - `pub const RULES: &[CompiledRule]` linking everything together.
 
-For a non-delegated rule the function body is a nested-loop expansion
-of the plan:
+For a non-delegated rule, `fire_<id>_body` is a nested-loop expansion of
+the plan with one *source* parameter per plan step (`__src0`, `__src1`,
+…): step `i` iterates or probes `__src{i}`, while `store.contains(&head)`
+always checks the full store. The `fire_<id>` wrapper implements
+classic semi-naïve evaluation (SPEC-15 fix #2): with `delta = None` it
+calls the body once with every source bound to `store`; with
+`Some(delta)` it calls the body once per body atom, binding exactly that
+atom's source to `delta` and the rest to `store`. Every instantiation
+that touches a triple from the previous round is covered by one of the
+variants; instantiations over older triples only were already produced
+in an earlier round.
 
 ```rust
-// fire_cax_sco — illustrative
-pub fn fire_cax_sco(store: &dyn TripleStore, _delta: &Delta) -> Delta {
-    let v = store.vocab();
+// cax-sco — illustrative
+pub fn fire_cax_sco(store: &dyn TripleStore, delta: Option<&dyn TripleStore>) -> Delta {
     let mut out = Delta::new();
-    for __t0 in store.scan_predicate(v.rdfs_sub_class_of) {
+    match delta {
+        None => fire_cax_sco_body(store, &mut out, store, store),
+        Some(delta) => {
+            fire_cax_sco_body(store, &mut out, delta, store); // new subClassOf × all types
+            fire_cax_sco_body(store, &mut out, store, delta); // all subClassOf × new types
+        }
+    }
+    out
+}
+
+fn fire_cax_sco_body(store: &dyn TripleStore, out: &mut Delta,
+                     __src0: &dyn TripleStore, __src1: &dyn TripleStore) {
+    let v = store.vocab();
+    for __t0 in __src0.scan_predicate(v.rdfs_sub_class_of) {
         let c1 = __t0.s; let c2 = __t0.o;
-        for __t1 in store.probe(None, v.rdf_type, Some(c1)) {
+        for __t1 in __src1.probe(None, v.rdf_type, Some(c1)) {
             let x = __t1.s;
             let head = Triple::new(x, v.rdf_type, c2);
             if !store.contains(&head) && !out.contains(&head) {
@@ -209,9 +233,13 @@ pub fn fire_cax_sco(store: &dyn TripleStore, _delta: &Delta) -> Delta {
             }
         }
     }
-    out
 }
 ```
+
+A leading atom with a constant object (`?p rdf:type owl:SymmetricProperty`)
+is emitted as `__src0.probe(None, v.rdf_type, Some(v.owl_symmetric_property))`
+so it reads the `MemStore` object index (SPEC-15 fix #1) rather than
+scanning the whole predicate extent.
 
 For a delegated rule the function body returns `Delta::new()` — the
 runtime calls a `ClosureBackend` instead.
@@ -303,7 +331,11 @@ terminates the loop.
 1. For each rule in `RULES`:
    - Skip if `delegated` (the closure backend handles it).
    - Skip if `rule_relevant(rule, dirty_set) == false`.
-   - Call `rule.fire(store, &Delta::new())`, merge into round delta.
+   - Call `rule.fire(store, prev_delta)`, merge into round delta.
+     `prev_delta` is `None` in round 1 (and always under
+     `FiringStrategy::Naive`, the differential-test oracle); from round 2
+     it is a `MemStore` holding only the previous round's applied triples,
+     built once per round and shared by every rule.
 2. Call `backend.close(store)` once per round, merge into round delta.
 3. Apply the round delta to the store via `insert_inferred`. Track
    the *applied* (genuinely new) triples.
@@ -607,8 +639,9 @@ library is using.
   selected by `MaterializeOpts::parallel` (`ParallelStrategy::Auto` default;
   `Serial` is the differential-test oracle in
   `tests/rdf_type_skew_differential.rs`, benched in `benches/rdf_type_skew.rs`).
-  The **compiled** `rules.toml` rules (`cax-sco`-style) are *not* yet
-  parallelised — that needs a `FireFn` signature change and is Stage-2.
+  The **compiled** `rules.toml` rules (`cax-sco`-style) fire semi-naïvely
+  (one delta-bound variant per body atom, SPEC-15 fix #2, HDB-40) but are
+  *not* yet parallelised across rules — Stage-2.
   See TASKS.md #2/#39.
 - **Proof recording is implemented (SPEC-04 F4, acceptance #5, NF4).**
   Every compiled rule and every `list_rules.rs` rule records its real body
@@ -695,7 +728,7 @@ declaration in the target language:
    member. Single source of truth — do not maintain a parallel
    table.
 2. **For each non-delegated rule**: a function with the contract
-   "given a `TripleStore` (read-only) and an unused `Delta`, return
+   "given a `TripleStore` (read-only) and the previous round's delta (`None` in round 1), return
    a `Delta` of newly derivable triples this round". The function
    must:
    - Iterate the leading pattern via the store's

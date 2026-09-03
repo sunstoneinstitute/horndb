@@ -1,5 +1,5 @@
 ---
-status: draft
+status: implemented
 date: 2026-06-27
 scope: "`owlrl` `rdf:type` object index + genuine semi-naïve firing"
 ---
@@ -8,8 +8,11 @@ scope: "`owlrl` `rdf:type` object index + genuine semi-naïve firing"
 
 > Dated design spec (SPEC-04 F5-adjacent). Targets the LUBM-shaped
 > materialize hotspot split across [#133](https://github.com/sunstoneinstitute/horndb/issues/133)
-> (fix #1, object index) and [#134](https://github.com/sunstoneinstitute/horndb/issues/134)
-> (fix #2, semi-naïve firing).
+> (fix #1, object index, landed 2026-07-07) and [#134](https://github.com/sunstoneinstitute/horndb/issues/134)
+> (fix #2, semi-naïve firing, landed with HDB-40). Fix #2 shipped without
+> the per-round work counters proposed under "New measurement needed":
+> the A/B is wall-clock (`compiled_rules_ms`, `reason_ms`, rounds) plus a
+> closure-parity check, recorded in `docs/benchmarks.md`.
 > Gates on existing benches per the harness-first rule (SPEC-00).
 
 ## Purpose

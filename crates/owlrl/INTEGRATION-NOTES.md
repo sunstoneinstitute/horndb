@@ -99,3 +99,18 @@ suite).
 Stage-1 is insertion-only (SPEC-06 limitation) so the resolved
 `SchemaAxioms` are stable across all semi-naïve rounds inside one
 `materialize` call. Stage-2 will revisit this when retraction lands.
+
+## Semi-naïve firing of the compiled rules (SPEC-15 fix #2, HDB-40)
+
+`FireFn` is `fn(&dyn TripleStore, Option<&dyn TripleStore>) -> Delta`.
+The driver hands each compiled rule the previous round's applied triples
+as a `MemStore` (built once per round; `None` in round 1) and the generated
+wrapper fires one variant per body atom with that atom read from the
+delta. `MaterializeOpts::firing` selects `SemiNaive` (default) or `Naive`
+(every atom from the full store, the oracle in
+`tests/semi_naive_differential.rs`); both give the identical closure in the
+identical number of rounds. `eq-rep-p` under `EqRepPStrategy::Optimized`,
+the list rules and the `ClosureBackend` hand-off are unchanged — they still
+run once per round over the full store, and the dirty-predicate prune
+still runs first. The generated source grew ~45% (one `_body` fn plus an
+n-way wrapper per compiled rule).
