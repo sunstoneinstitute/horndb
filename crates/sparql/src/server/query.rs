@@ -4,7 +4,7 @@
 //!   * POST `application/x-www-form-urlencoded` with `query=`.
 
 use super::stream_body::ChannelBody;
-use super::AppState;
+use super::{AppState, QueryPermit};
 use crate::algebra::DatasetSpec;
 use crate::api::{execute_query_with, plan_select, QueryAnswer};
 use crate::error::SparqlError;
@@ -176,15 +176,38 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };
 
+    // HDB-118 admission control: take an execution slot before touching the
+    // store. Acquired here (not deeper) so both the streaming and the
+    // materialized path are covered by one gate.
+    let Some(permit) = state.limits.acquire().await else {
+        let retry_after = state.limits.queue_timeout.as_secs().max(1).to_string();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", retry_after)],
+            "server busy: no query slot available\n".to_string(),
+        )
+            .into_response();
+    };
+
     // Plain SELECTs stream; everything else (ASK / CONSTRUCT / DESCRIBE /
     // EXPLAIN) keeps the materialized path — their results are small.
     // Planning needs no store access, so it runs here on the async thread.
     match plan_select(q, &cfg) {
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Ok(Some((vars, plan, dataset))) => {
-            stream_select(state, q, vars, plan, dataset, cfg.default_graph, fmt).await
+            stream_select(
+                state,
+                q,
+                vars,
+                plan,
+                dataset,
+                cfg.default_graph,
+                fmt,
+                permit,
+            )
+            .await
         }
-        Ok(None) => run_materialized(state, q, fmt, &cfg).await,
+        Ok(None) => run_materialized(state, q, fmt, &cfg, permit).await,
     }
 }
 
@@ -299,6 +322,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     dataset: DatasetSpec,
     default_graph: DefaultGraphMode,
     fmt: ResultFormat,
+    permit: QueryPermit,
 ) -> axum::response::Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, SparqlError>>(STREAM_CHANNEL_CHUNKS);
     let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
@@ -313,6 +337,15 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
 
     tokio::task::spawn_blocking(move || {
         let _abort_on_panic = guard;
+        // HDB-118: the permit moves in here and is dropped when this closure
+        // returns — i.e. it is held for the WHOLE stream, not just plan+first
+        // chunk. That is deliberate: this task owns a blocking-pool thread,
+        // the store read guard and the operator tree for as long as the
+        // client is draining, so releasing at first chunk would cap nothing.
+        // Every exit path below returns from the closure (clean finish,
+        // client disconnect, error) and a panic unwinds it, so the slot is
+        // freed exactly once.
+        let _permit = permit;
         // HDB-99: discard any per-operator exec-phase data left over on this
         // (tokio blocking-pool, thread-reused) thread from a previous
         // query's trailing chunks — see `exec::phases::reset`. This query's
@@ -441,6 +474,9 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
     q: &str,
     fmt: ResultFormat,
     cfg: &SparqlConfig,
+    // Held for the whole function: unlike the streaming path this executes
+    // and serializes inline, so the slot is free once the response is built.
+    _permit: QueryPermit,
 ) -> axum::response::Response {
     // Scope the read guard to the execution only; results are
     // materialised into `ans`, so serialization below holds no lock and

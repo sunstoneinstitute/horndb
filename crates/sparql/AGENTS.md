@@ -23,6 +23,13 @@ on by default).
   two never drift on format handling. `--materialize` does not yet support these two
   formats (it collapses everything into one `oxrdf::Dataset` default graph before
   closure) and refuses them at startup rather than silently dropping the graph split.
+- `server::Limits` (HDB-118) is admission control for `/query` plus the
+  `/query`+`/update` request-body cap. A permit is taken in `query.rs::run`
+  before either execution path and **moved into the `spawn_blocking` closure**
+  on the streaming path, so it is held until the client has drained the body —
+  that task owns a blocking-pool thread, the store read guard and the operator
+  tree for the whole stream. Releasing at first chunk would cap nothing. If you
+  add another store-touching route, gate it the same way.
 
 ## Operational endpoints (HDB-124)
 

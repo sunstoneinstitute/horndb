@@ -16,6 +16,7 @@ async fn metrics_endpoint_exposes_request_counter() {
         store: Arc::new(RwLock::new(MemStore::default())),
         cfg: SparqlConfig::default(),
         ready: Arc::new(AtomicBool::new(true)),
+        limits: Default::default(),
     };
     let app = build_router(state);
 

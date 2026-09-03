@@ -27,6 +27,17 @@ mod tests {
         assert_eq!(cfg.server.limits.max_query_memory, None);
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Union);
         assert_eq!(cfg.server.shutdown_drain.0, Duration::from_secs(30));
+        assert_eq!(
+            cfg.server.limits.max_concurrent_queries,
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_QUERIES)
+        );
+        assert_eq!(cfg.server.limits.queue_timeout.0, Duration::from_secs(5));
+        assert_eq!(
+            cfg.server.limits.max_request_body,
+            ByteSize(4 * 1024 * 1024)
+        );
         assert_eq!(cfg.simd.max_isa, None);
         assert!(cfg.simd.autotune);
         assert_eq!(cfg.logging.level, "info");
@@ -46,6 +57,9 @@ mod tests {
             rdf12 = true
             max_query_memory = "2GiB"
             default_graph = "strict"
+            max_concurrent_queries = 3
+            queue_timeout = "250ms"
+            max_request_body = "1MiB"
             [simd]
             max_isa = "scalar"
             autotune = false
@@ -61,6 +75,12 @@ mod tests {
             Some(ByteSize(2 * 1024 * 1024 * 1024))
         );
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Strict);
+        assert_eq!(cfg.server.limits.max_concurrent_queries, 3);
+        assert_eq!(
+            cfg.server.limits.queue_timeout.0,
+            Duration::from_millis(250)
+        );
+        assert_eq!(cfg.server.limits.max_request_body, ByteSize(1024 * 1024));
         assert_eq!(cfg.simd.max_isa.as_deref(), Some("scalar"));
         assert!(!cfg.simd.autotune);
     }
@@ -150,7 +170,20 @@ pub struct Limits {
     pub max_query_memory: Option<ByteSize>,
     /// SPEC-28 S3/D2: how the no-dataset default graph is composed.
     pub default_graph: DefaultGraph,
+    /// HDB-118 admission control: how many `/query` requests may execute at
+    /// once. Server-scope, not per-query overridable (it is not in
+    /// [`QuerySettings`]). Defaults to the core count; `0` is rejected.
+    pub max_concurrent_queries: usize,
+    /// How long a request waits for an execution slot before the server
+    /// sheds it with HTTP 503 + `Retry-After` (HDB-118).
+    pub queue_timeout: HumanDuration,
+    /// Cap on the `/query` and `/update` request body. `LOAD` payloads are
+    /// files, not request bodies, so this does not bound bulk ingest.
+    pub max_request_body: ByteSize,
 }
+
+/// Fallback when the core count is unavailable (e.g. a restricted container).
+const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 8;
 
 impl Default for Limits {
     fn default() -> Self {
@@ -160,6 +193,11 @@ impl Default for Limits {
             rdf12: false,
             max_query_memory: None,
             default_graph: DefaultGraph::default(),
+            max_concurrent_queries: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_QUERIES),
+            queue_timeout: HumanDuration(Duration::from_secs(5)),
+            max_request_body: ByteSize(4 * 1024 * 1024),
         }
     }
 }

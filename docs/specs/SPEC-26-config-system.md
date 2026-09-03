@@ -168,6 +168,18 @@ Separate server-scoped config from the bounded set a query may override.
     (serde/figment), which names both the source file and the key — unlike
     the free-string `[simd].max_isa`, checked by hand downstream and naming
     only the value. **Hot-reloadable.**
+
+    Three keys in this section are **server-scope, not query-overridable** —
+    they bound the server as a whole, so they are deliberately absent from
+    `QuerySettings` (HDB-118 admission control): `max_concurrent_queries`
+    (integer, default: the host core count) caps how many `/query` requests
+    execute at once; `queue_timeout` (duration, default `5s`) is how long a
+    request waits for a slot before the server sheds it with HTTP 503 +
+    `Retry-After`; `max_request_body` (byte size, default `4MiB`) caps the
+    `/query` and `/update` request body. `max_concurrent_queries = 0` is
+    startup-fatal — `usize` gives serde no lower bound to reject it. These are
+    **restart-only** (the semaphore and the body-limit layer are built once at
+    startup).
   - `[simd]` — `max_isa` (string, e.g. `"scalar"`; default: auto-detect) and
     `autotune` (bool, default `true`), absorbing the current SIMD knobs — now
     reached via `HORNDB_SIMD__MAX_ISA` / `HORNDB_SIMD__AUTOTUNE` (S1).

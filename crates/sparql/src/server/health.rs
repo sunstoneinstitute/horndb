@@ -47,6 +47,7 @@ mod tests {
             store: Arc::new(RwLock::new(MemStore::default())),
             cfg: SparqlConfig::default(),
             ready: Arc::new(AtomicBool::new(ready)),
+            limits: Default::default(),
         }
     }
 
