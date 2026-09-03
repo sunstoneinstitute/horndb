@@ -32,6 +32,12 @@ pub struct SparqlMetrics {
     /// admission-controlled, and a rejection has one cause.
     pub queries_in_flight: Gauge,
     pub queries_rejected: Counter,
+    /// Full rebuilds of the planner's `SnapshotStats` summary (HDB-123), and
+    /// how long each took. A rebuild scans the whole snapshot, so a healthy
+    /// write-then-read feed keeps this flat: writes merge their delta into the
+    /// cached summary instead, and only drift past the bound forces a rebuild.
+    pub stats_rebuild: Counter,
+    pub stats_rebuild_seconds: Histogram,
 }
 
 fn latency_hist() -> Histogram {
@@ -53,6 +59,8 @@ impl SparqlMetrics {
         let exec_phase_rows = Family::<ExecPhaseLabel, Counter>::default();
         let queries_in_flight = Gauge::default();
         let queries_rejected = Counter::default();
+        let stats_rebuild = Counter::default();
+        let stats_rebuild_seconds = latency_hist();
 
         reg.register(
             "sparql_requests",
@@ -110,6 +118,17 @@ impl SparqlMetrics {
             queries_rejected.clone(),
         );
 
+        reg.register(
+            "sparql_stats_rebuild",
+            "Full planner-statistics (SnapshotStats) rebuilds",
+            stats_rebuild.clone(),
+        );
+        reg.register(
+            "sparql_stats_rebuild_seconds",
+            "Planner-statistics full rebuild latency",
+            stats_rebuild_seconds.clone(),
+        );
+
         Self {
             requests,
             request_duration_seconds,
@@ -122,6 +141,8 @@ impl SparqlMetrics {
             exec_phase_rows,
             queries_in_flight,
             queries_rejected,
+            stats_rebuild,
+            stats_rebuild_seconds,
         }
     }
 

@@ -5,9 +5,9 @@
 //! types, and [`ZeroStats`] — the deliberately conservative fallback used when
 //! no real statistics have been gathered yet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::ids::{Ordering, TermId};
+use crate::ids::{Ordering, TermId, Triple};
 use crate::pattern::{Term, TriplePattern, Var};
 use crate::source::vec_source::{SortedColumns, VecTripleSource};
 
@@ -36,6 +36,11 @@ pub struct Estimate {
 /// memory; the tail folds into an aggregate residual bucket. `1024` is a
 /// data-driven default, tunable later.
 pub const CS_TOP_K: usize = 1024;
+
+/// How far the drift-tolerant tiers of [`SnapshotStats`] may fall behind the
+/// graph before [`SnapshotStats::apply_delta`] gives up and asks for a full
+/// rebuild: `1 / STATS_DRIFT_DIVISOR` of the row count at the last full build.
+pub const STATS_DRIFT_DIVISOR: u64 = 10;
 
 /// One characteristic set: the exact predicate-set shared by a group of subjects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +167,7 @@ impl Stats for ZeroStats {
 /// snapshot rows: correct and cheap at snapshot scale, no HyperLogLog needed.
 /// (HyperLogLog is the future path for the *incremental* estimator, where rows
 /// are not re-scanned.)
+#[derive(Clone)]
 pub struct SnapshotStats {
     total: u64,
     /// Number of distinct predicates in the graph (floored at 1). Computed once
@@ -187,6 +193,11 @@ pub struct SnapshotStats {
     /// Whether the Tier-3 sampling hook is active. `false` by default; flip it on
     /// with [`SnapshotStats::with_sampling`].
     sampling_enabled: bool,
+    /// `total` as of the last full build. The denominator of the drift bound.
+    built_total: u64,
+    /// Rows merged by [`SnapshotStats::apply_delta`] since the last full build.
+    /// The numerator of the drift bound.
+    drift_rows: u64,
 }
 
 /// Number of index-walk samples the Tier-3 hook draws. Small and fixed: this is a
@@ -291,6 +302,8 @@ impl SnapshotStats {
             max_degree,
             sample_rows: Vec::new(),
             sampling_enabled: false,
+            built_total: total,
+            drift_rows: 0,
         }
     }
 
@@ -311,6 +324,122 @@ impl SnapshotStats {
             Vec::new()
         };
         self
+    }
+
+    /// Merge one committed delta into this summary in place, so a small write
+    /// costs `O(delta · log rows)` instead of an `O(rows)` rebuild.
+    ///
+    /// `pre` is the source the delta has **not** been applied to yet — the same
+    /// source [`VecTripleSource::apply_delta`] is about to mutate with the same
+    /// two lists. Delta semantics match it exactly: both sides are sets, a
+    /// delete of an absent row is a no-op, and a row on both lists is deleted
+    /// and re-added, so it ends up present.
+    ///
+    /// What each tier gets:
+    /// * **Exact** — `total`, per-predicate counts, distinct predicates, and
+    ///   both per-predicate NDVs (number of distinct values).
+    /// * **Upper bound** — `max_degree` grows with the delta but never shrinks,
+    ///   so it over-estimates after deletes. It is only ever read as a bound
+    ///   ([`Stats::max_degree`]), so a loose one stays sound.
+    /// * **Stale** — the characteristic-set index is left untouched.
+    ///
+    /// Returns `false` when the caller must drop these stats and rebuild from
+    /// the merged source: either the Tier-3 sampling hook is on (its retained
+    /// row copy cannot be maintained), or the rows merged since the last full
+    /// build now exceed `1 / STATS_DRIFT_DIVISOR` of the graph. That fraction
+    /// is the drift bound on the stale tier.
+    ///
+    // ponytail: the characteristic-set index is rebuilt wholesale rather than
+    // repaired per touched subject. Repairing it means moving a subject
+    // between predicate-set buckets, which is not invertible once its old set
+    // has been folded into the top-K residual bucket. Ceiling: the index lags
+    // the graph by up to 1/STATS_DRIFT_DIVISOR of its rows. Upgrade path is a
+    // per-subject repair with the residual bucket kept exact.
+    pub fn apply_delta(&mut self, pre: &VecTripleSource, dels: &[Triple], adds: &[Triple]) -> bool {
+        // The sampling hook retains its own full row copy; maintaining that is
+        // not worth it for a path that is off by default.
+        if self.sampling_enabled {
+            return false;
+        }
+        let key = |t: &Triple| (t.s, t.p, t.o);
+        let spo = pre.sorted_columns(Ordering::Spo);
+        let requested: HashSet<(TermId, TermId, TermId)> = adds.iter().map(key).collect();
+        let added: HashSet<(TermId, TermId, TermId)> = requested
+            .iter()
+            .copied()
+            .filter(|r| !spo_contains(&spo, *r))
+            .collect();
+        let removed: HashSet<(TermId, TermId, TermId)> = dels
+            .iter()
+            .map(key)
+            .filter(|r| !requested.contains(r) && spo_contains(&spo, *r))
+            .collect();
+        if added.is_empty() && removed.is_empty() {
+            return true;
+        }
+
+        // Net row change per (predicate, subject) and per (predicate, object).
+        // Both NDVs and both degree roles are read off these.
+        let mut per_subject: HashMap<(TermId, TermId), i64> = HashMap::new();
+        let mut per_object: HashMap<(TermId, TermId), i64> = HashMap::new();
+        for &(s, p, o) in &added {
+            *self.predicate_count.entry(p).or_insert(0) += 1;
+            self.total += 1;
+            *per_subject.entry((p, s)).or_insert(0) += 1;
+            *per_object.entry((p, o)).or_insert(0) += 1;
+        }
+        for &(s, p, o) in &removed {
+            let c = self.predicate_count.entry(p).or_insert(0);
+            *c = c.saturating_sub(1);
+            self.total = self.total.saturating_sub(1);
+            *per_subject.entry((p, s)).or_insert(0) -= 1;
+            *per_object.entry((p, o)).or_insert(0) -= 1;
+        }
+
+        // A (predicate, key) group that gains its first row or loses its last
+        // moves that predicate's NDV by exactly one; anything in between leaves
+        // it alone. The group's post-delta size is also its degree on that role.
+        let pso = pre.sorted_columns(Ordering::Pso);
+        let pos = pre.sorted_columns(Ordering::Pos);
+        for (cols, groups, ndv, role_is_subject) in [
+            (&pso, per_subject, &mut self.ndv_subject, true),
+            (&pos, per_object, &mut self.ndv_object, false),
+        ] {
+            for ((p, k), net) in groups {
+                let before = prefix_len(cols, p, k);
+                let after = (before as i64 + net).max(0) as u64;
+                let step = i64::from(after > 0) - i64::from(before > 0);
+                let e = ndv.entry(p).or_insert(0);
+                *e = (*e as i64 + step).max(0) as u64;
+                if after > 0 {
+                    let d = self.max_degree.entry(p).or_insert((0, 0));
+                    if role_is_subject {
+                        d.0 = d.0.max(after);
+                    } else {
+                        d.1 = d.1.max(after);
+                    }
+                }
+            }
+        }
+
+        // A predicate whose last triple went away must leave every map, or
+        // `distinct_predicates` and the NDV denominators keep counting it.
+        let dead: Vec<TermId> = self
+            .predicate_count
+            .iter()
+            .filter(|(_, c)| **c == 0)
+            .map(|(p, _)| *p)
+            .collect();
+        for p in dead {
+            self.predicate_count.remove(&p);
+            self.ndv_subject.remove(&p);
+            self.ndv_object.remove(&p);
+            self.max_degree.remove(&p);
+        }
+        self.distinct_predicates = (self.predicate_count.len() as u64).max(1);
+
+        self.drift_rows += (added.len() + removed.len()) as u64;
+        self.drift_rows.saturating_mul(STATS_DRIFT_DIVISOR) <= self.built_total
     }
 
     /// Tier 1: build the characteristic-set index from the `Spo` ordering.
@@ -610,6 +739,31 @@ impl SnapshotStats {
     }
 }
 
+/// `true` if the `Spo`-sorted `cols` hold row `key`.
+fn spo_contains(cols: &SortedColumns<'_>, key: (TermId, TermId, TermId)) -> bool {
+    let (mut lo, mut hi) = (0usize, cols.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cols.row(mid) < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo < cols.len() && cols.row(lo) == key
+}
+
+/// Number of rows in `cols` whose level-0 value is `a` and level-1 value is
+/// `b`. `cols` must be sorted on those two levels — every ordering is.
+fn prefix_len(cols: &SortedColumns<'_>, a: TermId, b: TermId) -> u64 {
+    let l0 = cols.level(0);
+    let lo = l0.partition_point(|v| *v < a);
+    let hi = lo + l0[lo..].partition_point(|v| *v == a);
+    let l1 = &cols.level(1)[lo..hi];
+    let s = l1.partition_point(|v| *v < b);
+    l1[s..].partition_point(|v| *v == b) as u64
+}
+
 /// Distinct variables of a pattern, in S, P, O order.
 fn pattern_vars(pat: &TriplePattern) -> Vec<Var> {
     let mut out = Vec::new();
@@ -716,6 +870,73 @@ mod tests {
         // Trait defaults.
         assert!(stats.degree_sequence(7, Role::Subject).is_none());
         assert!(stats.sample_join(&[]).is_none());
+    }
+
+    /// The exact tiers of an incrementally-merged summary must agree, term for
+    /// term, with a full rebuild from the merged source. Covers all four delta
+    /// shapes at once: a fresh row, a duplicate add, a no-op delete, and a
+    /// delete that empties a predicate.
+    #[test]
+    fn apply_delta_matches_a_full_rebuild() {
+        let base = vec![
+            Triple::new(1, 10, 100),
+            Triple::new(1, 10, 101),
+            Triple::new(2, 10, 100),
+            Triple::new(3, 10, 101),
+            Triple::new(1, 20, 200),
+        ];
+        let dels = vec![
+            Triple::new(1, 20, 200), // last triple of predicate 20
+            Triple::new(3, 10, 101), // last triple of subject 3
+            Triple::new(9, 99, 999), // absent: a no-op
+        ];
+        let adds = vec![
+            Triple::new(4, 10, 102), // new subject and new object
+            Triple::new(1, 10, 100), // already there: a no-op
+        ];
+
+        let mut src = VecTripleSource::from_triples(base.clone());
+        let mut inc = SnapshotStats::from_source(&src);
+        // A five-row base is far under the drift bound, so the merge is refused
+        // for size, not correctness -- assert the merged values regardless.
+        inc.apply_delta(&src, &dels, &adds);
+        src.apply_delta(&dels, &adds);
+        let full = SnapshotStats::from_source(&src);
+
+        assert_eq!(inc.total_triples(), full.total_triples());
+        assert_eq!(inc.distinct_predicates(), full.distinct_predicates());
+        for p in [10u64, 20, 99] {
+            assert_eq!(
+                inc.predicate_count(p),
+                full.predicate_count(p),
+                "count p{p}"
+            );
+            for pos in [Position::Subject, Position::Object] {
+                assert_eq!(inc.ndv(p, pos), full.ndv(p, pos), "ndv p{p} {pos:?}");
+            }
+        }
+        // `max_degree` is maintained as an upper bound, never lowered.
+        assert!(inc.max_degree(10, Role::Subject) >= full.max_degree(10, Role::Subject));
+    }
+
+    /// The drift bound is what makes the stale characteristic-set index safe:
+    /// merging more than `1 / STATS_DRIFT_DIVISOR` of the rows must refuse.
+    #[test]
+    fn apply_delta_refuses_once_drift_exceeds_the_bound() {
+        let base: Vec<Triple> = (0..100).map(|i| Triple::new(i, 10, 1000 + i)).collect();
+        let src = VecTripleSource::from_triples(base);
+        let mut stats = SnapshotStats::from_source(&src);
+
+        let small: Vec<Triple> = (200..205).map(|i| Triple::new(i, 10, i)).collect();
+        assert!(
+            stats.apply_delta(&src, &[], &small),
+            "5 of 100 rows is under the bound"
+        );
+        let big: Vec<Triple> = (300..320).map(|i| Triple::new(i, 10, i)).collect();
+        assert!(
+            !stats.apply_delta(&src, &[], &big),
+            "25 of 100 rows is over it"
+        );
     }
 
     #[test]
