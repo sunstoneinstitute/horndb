@@ -47,14 +47,22 @@ To start the HTTP server in your own binary:
 ```rust
 use horndb_sparql::server::{build_router, AppState};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::SparqlConfig;
-use std::sync::{Arc, RwLock};
+use horndb_config::Limits;
+use parking_lot::RwLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
+    // `limits` is the `[server.limits]` table (SPEC-26): the defaults each
+    // request's URL/form overrides layer on top of. `admission` is the
+    // separate concurrency gate (HDB-118); `ready` backs `/readyz` and is
+    // `true` up front here because the store is already loaded.
     let state = AppState {
         store: Arc::new(RwLock::new(MemStore::default())),
-        cfg: SparqlConfig::default(),
+        limits: Limits::default(),
+        ready: Arc::new(AtomicBool::new(true)),
+        admission: Default::default(),
     };
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await.unwrap();

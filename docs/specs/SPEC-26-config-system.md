@@ -203,9 +203,9 @@ Separate server-scoped config from the bounded set a query may override.
   ahead of the rest of this tier: `crates/horndb-sparql`'s HTTP layer already
   reads and validates a per-query `default_graph` URL/form override
   (PLAN-28-03 Task 2, ahead of this spec's own S4 whitelist mechanism, which
-  is Phase 2's — [#251](https://github.com/sunstoneinstitute/horndb/issues/251))
-  — the other four keys stay config-only until S4/S5 ship. The
-  override is spelled `default_graph`, the `QuerySettings` field name, not
+  is Phase 2's — [#251](https://github.com/sunstoneinstitute/horndb/issues/251)).
+  Phase 2 has since landed, and all five keys are overridable through the one
+  whitelist. The override is spelled `default_graph`, the `QuerySettings` field name, not
   `default-graph`: every future S4 override key is spelled after its field
   name (e.g. `?query_timeout=30s`), and `default-graph` would sit one suffix
   from the SPARQL 1.1 Protocol's reserved `default-graph-uri`, which SPEC-28
@@ -260,10 +260,11 @@ Let a query override the bounded `QuerySettings` subset, defaulting from
   `crates/sparql/src/server/query.rs` (SPEC-28 phase 3,
   [#266](https://github.com/sunstoneinstitute/horndb/issues/266)), with an
   unparseable value returning 400 naming the key — the precedence and
-  error-handling rules above, hand-wired for one key. When Phase 2
-  ([#251](https://github.com/sunstoneinstitute/horndb/issues/251)) builds the
-  general whitelist, that parse site folds into it; it carries a
-  `// SPEC-26 S4:` comment saying so.
+  error-handling rules above, hand-wired for one key. Phase 2
+  ([#251](https://github.com/sunstoneinstitute/horndb/issues/251)) folded that
+  hand-wired parse site into the general whitelist
+  (`QuerySettings::apply_override`), so `default_graph` now resolves through
+  exactly the same layering as the other four keys.
 
 ### S5. Enforcement wired in this spec
 
@@ -326,7 +327,11 @@ increment is picked up; tracking issues are filed then (use `#TODO` until filed)
    *(tracking: `#TODO`)*
 2. **Query-scoped overrides + enforcement (S4, S5, S6-metrics for rejects).**
    URL-parameter overrides and real enforcement of `query_timeout` /
-   `max_result_rows` / `rdf12`; `max_query_memory` stub. *(tracking: `#TODO`)*
+   `max_result_rows` / `rdf12`; `max_query_memory` stub.
+   *(tracking: [#251](https://github.com/sunstoneinstitute/horndb/issues/251),
+   landed — except the S6 reject metric, which the tracking issue's acceptance
+   criteria did not carry and which is deferred with the rest of the S6 metrics
+   to phase 3; tracking `#TODO`)*
 3. **Live watch and reload (S3, remaining S6 metrics).** The `notify` watcher,
    debounce, `ArcSwap` publish, keep-and-log on bad reload, generation metric,
    hot-vs-restart-only handling. *(tracking: `#TODO`)*
@@ -354,10 +359,12 @@ and is orthogonal to Phase 2.
    With no flag or env var, the server binds the config-file value; setting the
    env var overrides the file, and `--bind` overrides both (config file < env <
    argv).
-5. **Query overrides work and are ordered (S4).** A test proves
+5. **Query overrides work and are ordered (S4).** *Met by phase 2.* A test proves
    `?query_timeout=…` > `[server.limits]` default; an unknown/invalid URL
    parameter yields HTTP 400 naming the key without disturbing server config.
-6. **Enforcement is real (S5).** A `?query_timeout=…` override cancels a
+6. **Enforcement is real (S5).** *Met by phase 2, except the delegated
+   `max_query_memory` (accepted, carried, enforcing nothing — see Non-goals).*
+   A `?query_timeout=…` override cancels a
    long-running query via the `CancelToken`; `max_result_rows` ends an over-cap
    stream with a typed error; `rdf12` per query flips RDF 1.2 acceptance.
    `max_query_memory` is accepted and surfaced but documented as not-yet-enforced.

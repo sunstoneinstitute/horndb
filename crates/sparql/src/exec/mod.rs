@@ -5,6 +5,7 @@
 //! production implementation through the same trait.
 
 pub mod batch;
+pub mod cancel;
 pub use batch::{Batch, KeyPart, Row, Slot};
 pub mod horn;
 pub mod mem;

@@ -195,7 +195,6 @@ use horndb_storage::{
     GraphId, InternedQuad, PinnedSnapshot, Store as ColumnStore, StoreSnapshot, TermId,
     DEFAULT_GRAPH,
 };
-use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
 use horndb_wcoj::ids::Triple as WTriple;
@@ -1816,8 +1815,12 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut rows: Vec<Bindings> = Vec::new();
-        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
-        {
+        for batch in WcojExecutor::for_bgp(
+            &snapshot,
+            &bgp,
+            &Planner::default(),
+            crate::exec::cancel::current(),
+        ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             let schema = batch.schema();
             // Resolve each variable's column once per batch.
@@ -2071,8 +2074,12 @@ impl Executor for HornBackend {
         // known from the value the iterator yields — `enabled()` gates the
         // `Instant::now()` pair so the check costs one branch per arrow
         // batch when the flag is off, never a clock read.
-        let mut wcoj_iter =
-            WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new());
+        let mut wcoj_iter = WcojExecutor::for_bgp(
+            &snapshot,
+            &bgp,
+            &Planner::default(),
+            crate::exec::cancel::current(),
+        );
         loop {
             let scan_t0 = crate::exec::phases::enabled().then(std::time::Instant::now);
             let next = wcoj_iter.next();
@@ -2289,8 +2296,12 @@ impl Executor for HornBackend {
         // count is the sum of batch row counts — no decode, no Row build.
         let bgp = WBgp::new(wpatterns);
         let mut count: usize = 0;
-        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
-        {
+        for batch in WcojExecutor::for_bgp(
+            &snapshot,
+            &bgp,
+            &Planner::default(),
+            crate::exec::cancel::current(),
+        ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             count += batch.num_rows();
         }
@@ -2409,8 +2420,12 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut counts: HashMap<Vec<u64>, usize> = HashMap::new();
-        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
-        {
+        for batch in WcojExecutor::for_bgp(
+            &snapshot,
+            &bgp,
+            &Planner::default(),
+            crate::exec::cancel::current(),
+        ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             let arrow_schema = batch.schema();
             let mut key_cols: Vec<&UInt64Array> = Vec::with_capacity(key_wvars.len());

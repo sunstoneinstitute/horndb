@@ -344,7 +344,7 @@ fn explicit_config_flag_pointing_at_missing_file_exits_nonzero() {
     );
 }
 
-/// PLAN-28-03 Task 2: `AppState.cfg` must reflect the loaded
+/// PLAN-28-03 Task 2: `AppState.limits` must reflect the loaded
 /// `[server.limits]`. `rdf12` is the observable half of `SparqlConfig` at
 /// this point in SPEC-28 phase 3 (`default_graph` is threaded but not yet
 /// consumed by the executor — PLAN-28-03 Task 3): with `rdf12 = true` in the
@@ -384,7 +384,7 @@ fn rdf12_config_flows_to_appstate_cfg() {
 /// The flip side of `rdf12_config_flows_to_appstate_cfg`: with no
 /// `[server.limits].rdf12` set (default `false`), the same triple-term
 /// query must still 400 — proving the earlier test's 200 came from the
-/// config value actually reaching `AppState.cfg`, not from the handler
+/// config value actually reaching `AppState.limits`, not from the handler
 /// ignoring `rdf12` altogether.
 #[test]
 fn rdf12_defaults_to_off_rejecting_triple_term_patterns() {
@@ -409,7 +409,7 @@ fn rdf12_defaults_to_off_rejecting_triple_term_patterns() {
     let (status, body) = http_post_sparql_query("127.0.0.1:18478", "/query", query);
     assert_eq!(
         status, 400,
-        "default AppState.cfg must reject triple-term patterns: {body}"
+        "default AppState.limits must reject triple-term patterns: {body}"
     );
     assert!(body.contains("triple-term"), "body: {body}");
 }
