@@ -27,6 +27,14 @@ on:
         required: false
         default: ""
         type: string
+  # `workflow_dispatch` only works once this file is on the default branch —
+  # GitHub registers dispatchable workflows from `main`, so `gh workflow run
+  # bench.yml --ref <branch>` 404s for a branch-only workflow. Pushing a branch
+  # named `bench-run/<anything>` is the way in before that (and the way in for
+  # anyone who has no dispatch permission): the push runs the branch's own
+  # version of this file, with the input defaults below.
+  push:
+    branches: ["bench-run/**"]
 
 # Serialize with nightly.yml and with other bench dispatches: hornbench has one
 # set of cores and one page cache, and a measurement that shares them is noise.
@@ -66,7 +74,10 @@ jobs:
         env:
           # Via env, not inline `${{ }}`, so a dispatch input cannot be spliced
           # into the shell as code.
-          BENCH_SCRIPT: ${{ inputs.script }}
+          # On a `bench-run/**` push there are no inputs, so fall back to the
+          # full audit pass; a leg subset is then selected by editing BENCHES
+          # in the script on that branch.
+          BENCH_SCRIPT: ${{ inputs.script || 'scripts/bench/audit-pass.sh' }}
           BENCH_ARGS: ${{ inputs.args }}
           BENCH_ENV: ${{ inputs.env }}
         run: |

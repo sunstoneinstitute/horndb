@@ -36,3 +36,4 @@ graphify-out/
 /.quarto/
 **/*.quarto_ipynb
 CLAUDE.local.md
+bench-out/
