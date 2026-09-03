@@ -487,6 +487,60 @@ fn multi_op_update_applies_in_order() {
     assert!(matches!(rows[0].get("s"), Some(Term::Iri(s)) if s == "http://ex/c"));
 }
 
+/// Every `?s` bound by `?s <http://ex/p> ?o`, sorted — enough to tell "the
+/// store is back to its seed" apart from "a coincidentally equal triple count".
+fn subjects<B: FullBackend>(store: &B) -> Vec<String> {
+    let QueryAnswer::Solutions { rows, .. } =
+        execute_query("SELECT ?s WHERE { ?s <http://ex/p> ?o }", store).unwrap()
+    else {
+        panic!("expected solutions");
+    };
+    let mut out: Vec<String> = rows
+        .iter()
+        .map(|r| match r.get("s") {
+            Some(Term::Iri(s)) => s.clone(),
+            other => panic!("expected an IRI subject, got {other:?}"),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn multi_op_failure_rolls_back_earlier_ops<B: FullBackend + Default>() {
+    // The preflight cannot catch this one: `CREATE GRAPH <http://g/1>` is legal
+    // against the pre-update store (the graph is absent there) and fails only
+    // because the first op created it. SPARQL 1.1 §3.1.3 makes the whole
+    // request atomic, so both earlier ops — an insert into a new named graph
+    // and a delete of a pre-existing default-graph triple — must be undone.
+    let mut store: B = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
+    let err = run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/x> <http://ex/p> <http://ex/y> } } ; \
+         DELETE WHERE { <http://ex/a> <http://ex/p> ?o } ; \
+         CREATE GRAPH <http://g/1>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.to_lowercase().contains("already exists"), "{err}");
+    assert_eq!(
+        subjects(&store),
+        vec!["http://ex/a".to_owned()],
+        "a failing op must roll the whole request back to its pre-update state"
+    );
+    assert!(
+        !store.graph_exists("http://g/1"),
+        "the rolled-back insert must leave no named graph behind (D11)"
+    );
+}
+
+#[test]
+fn multi_op_failure_rolls_back_earlier_ops_mem() {
+    multi_op_failure_rolls_back_earlier_ops::<MemStore>();
+}
+#[test]
+fn multi_op_failure_rolls_back_earlier_ops_horn() {
+    multi_op_failure_rolls_back_earlier_ops::<HornBackend>();
+}
+
 // ── Named-graph data updates route to their graph (SPEC-28 phase 4) ──────────
 
 #[test]

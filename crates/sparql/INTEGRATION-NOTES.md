@@ -543,15 +543,28 @@ construct like `SERVICE`/`MINUS` is caught) — and only mutates once the whole
 sequence is known-applyable. One store batch per operation, applied in
 request order, never collapsed.
 
-**Documented limitation.** The preflight reads D11 existence against the
-pre-update store. That is exact for a single operation and for independent
-operations, but a pathological multi-op request that flips one graph's
-existence *between* operations (e.g. an earlier op creates or empties a
-graph a later op then existence-checks) can, in principle, pass preflight
-and still hit an existence error at apply time after an earlier op has
-already mutated the store. Closing this needs store-level rollback, which is
-out of scope here (→ `SPEC-30`); real graph management uses `SILENT` to
-avoid the edge case, and no shipped test exercises it.
+**Rollback covers what preflight cannot see.** The preflight reads D11
+existence against the *pre-update* store. That is exact for a single operation
+and for independent operations, but a multi-op request that flips one graph's
+existence *between* operations (an earlier op creates or empties a graph a
+later op then existence-checks) can pass preflight and still hit an existence
+error at apply time — as can a reserved-graph write through a template graph
+*variable*, which is only known once a WHERE row binds it. `update.rs::Journal`
+closes both. For a request with more than one operation it records, just before
+each write batch, whether every quad that batch is about to touch was visible
+before this request first touched it (`Store::quad_exists` — a point read on
+both backends; a `CLEAR`/`DROP` sweep records the graph's quads as visible
+without any point read). Any failure restores exactly that state in one
+`apply_quads` batch, so the request as a whole mutates nothing.
+
+Operations still apply in request order against the live store, which is what
+keeps read-your-own-writes inside a request: a later WHERE clause reads the
+earlier operations' writes. A working copy would avoid the recording reads, but
+the read seam (`Executor::scan_bgp`) evaluates a whole BGP join at once, so a
+pending delta cannot be layered over its results. A single-operation request is
+already one atomic `apply_quads` batch, so its journal is disabled and costs
+nothing. Test: `update_graph_mgmt.rs::multi_op_failure_rolls_back_earlier_ops_*`
+(both backends).
 
 **Turtle/TriG base IRI.** `LOAD` passes the source IRI as the parser base, so a
 document with relative IRIs (`<s> <p> <o> .`) resolves against its own IRI —

@@ -488,6 +488,13 @@ impl Store for MemStore {
         })
     }
 
+    /// Point read via [`Self::quad_is_live`] — the same membership test
+    /// [`Store::apply_quads`] uses for its idempotency check.
+    fn quad_exists(&self, (g, s, p, o): &AlgebraQuad) -> bool {
+        let key = (term_to_lex(s), term_to_lex(p), term_to_lex(o));
+        self.quad_is_live(g.as_deref(), &key)
+    }
+
     /// SPEC-28 D11: a named graph exists iff it holds at least one triple's
     /// membership.
     fn graph_exists(&self, graph: &str) -> bool {

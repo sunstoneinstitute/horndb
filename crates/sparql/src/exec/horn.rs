@@ -1221,6 +1221,28 @@ impl Store for HornBackend {
         Ok(report.retracted)
     }
 
+    /// Point read against the pinned snapshot
+    /// (`horndb_storage::StoreSnapshot::contains_quad`). Resolution is
+    /// non-interning on every side — an unseen graph or term means the quad
+    /// simply is not there, so nothing is created just to answer a read.
+    fn quad_exists(&self, (g, s, p, o): &AlgebraQuad) -> bool {
+        let Some(gid) = self.resolve_graph_for_delete(g.as_deref()) else {
+            return false;
+        };
+        let (Ok(so), Ok(po), Ok(oo)) = (
+            algebra_to_oxrdf(s),
+            algebra_to_oxrdf(p),
+            algebra_to_oxrdf(o),
+        ) else {
+            return false; // a variable / RDF 1.2 triple term is never stored
+        };
+        let dict = self.store.dictionary();
+        let (Some(si), Some(pi), Some(oi)) = (dict.get(&so), dict.get(&po), dict.get(&oo)) else {
+            return false;
+        };
+        self.store.snapshot().contains_quad(gid, si, pi, oi)
+    }
+
     /// SPEC-28 D11: a named graph exists iff it holds at least one visible
     /// quad at this pinned snapshot.
     fn graph_exists(&self, graph: &str) -> bool {
