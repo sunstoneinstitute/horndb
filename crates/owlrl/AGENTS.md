@@ -707,7 +707,10 @@ library is using.
   post-fixpoint `inject_literal_differences` pass asserts `owl:differentFrom`
   only for the comparable, value-distinct literal pairs the closure made
   `owl:sameAs` (via `prp-fp`, `cls-maxc2`, `eq-trans`, …) and re-runs the
-  fixpoint so `eq-diff1` reports the clash. The conclusions are base axioms
+  fixpoint so `eq-diff1` reports the clash. Dropping the materialised
+  `owl:differentFrom` between never-joined literals is intended: literal-subject
+  triples are not representable in RDF anyway, and `eq-diff1` is the only
+  consumer. The conclusions are base axioms
   the compiled `eq-diff1` / `eq-rep-*` rules then propagate.
   `dt-not-type` also runs a **post-fixpoint**
   pass (`validate_derived_datatype_memberships`) that re-checks literals typed

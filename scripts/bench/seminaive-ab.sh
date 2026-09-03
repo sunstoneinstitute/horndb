@@ -14,7 +14,8 @@
 #
 # LUBM_N defaults to "1"; set `LUBM_N="1 10"` to add LUBM-10. (Before HDB-147
 # the O(k²) dt-eq/dt-diff literal injection made LUBM-1 close to 87 M triples
-# and LUBM-10 OOM the runner; the closure is now ~164 k for LUBM-1.)
+# and LUBM-10 OOM the runner; a laptop smoke run after the fix — diagnostic
+# only, not a recorded number — closes LUBM-1 to ~164 k.)
 #
 # Parity: hash both closures under both strategies and compare. The hash is a
 # streaming, order-independent (count, sum-of-CRC32, total-bytes) triple over

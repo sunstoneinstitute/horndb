@@ -131,10 +131,11 @@ fn dt_diff_distinct_integers_made_sameas_are_inconsistent() {
 /// dt-diff is never materialised pairwise: distinct literals that the closure
 /// never joins get no `owl:differentFrom` triple, and the closure stays O(k)
 /// in the number of distinct literals (HDB-147: LUBM-1's 9,326 literals used
-/// to inject 87 M `owl:differentFrom` triples).
+/// to inject 87 M `owl:differentFrom` triples). K = 2,000 keeps the old
+/// all-pairs code failing by assertion (4 M triples), not by OOM.
 #[test]
 fn dt_diff_is_not_materialised_pairwise() {
-    const K: usize = 10_000;
+    const K: usize = 2_000;
     let mut engine = Engine::new();
     let mut premise = Dataset::new();
     for i in 0..K {
@@ -394,6 +395,24 @@ fn dt_diff_distinct_plain_strings_made_sameas_are_inconsistent() {
         !engine.is_consistent().unwrap(),
         "\"foo\" = \"bar\" is a clash (dt-diff + eq-diff1)"
     );
+}
+
+/// No false clash for the Plain value class: two distinct strings that are
+/// never joined stay consistent.
+#[test]
+fn distinct_plain_strings_never_joined_stay_consistent() {
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    for (s, v) in [("http://ex/a", "foo"), ("http://ex/b", "bar")] {
+        premise.insert(&Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new(s).unwrap()),
+            NamedNode::new("http://ex/p").unwrap(),
+            Literal::new_simple_literal(v),
+            GraphName::DefaultGraph,
+        ));
+    }
+    engine.load(&premise).unwrap();
+    assert!(engine.is_consistent().unwrap());
 }
 
 /// A consistency guard: a well-typed single literal, and value-equal literals,

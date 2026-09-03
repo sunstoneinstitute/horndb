@@ -12,9 +12,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
+use crate::datatype_literals::ValueClass;
 use crate::engine::{materialize_with, MaterializeOpts, Stats};
 use crate::provenance::ProofTree;
 use crate::store::{MemStore, TripleStore};
@@ -542,7 +543,7 @@ fn finish(
     // loaded (so all instance literals are present) and after the dt-type
     // axioms (harmless either way — those are datatype IRIs, not literals).
     // dt-diff runs after the fixpoint instead (`inject_literal_differences`).
-    inject_datatype_literal_axioms(&mut state.store, vocab, &state.dict);
+    let literal_classes = inject_datatype_literal_axioms(&mut state.store, vocab, &state.dict);
     // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
     // restrictions now, while the dictionary can still parse the literal
     // value. The resolved list rides on the store for the firing loop.
@@ -621,7 +622,7 @@ fn finish(
     // fresh asserts count), so this terminates; in the common case neither
     // asserts and no re-run happens.
     loop {
-        let diff = inject_literal_differences(&mut state.store, vocab, &state.dict);
+        let diff = inject_literal_differences(&mut state.store, vocab, &literal_classes);
         let ill = validate_derived_datatype_memberships(&mut state.store, vocab, &state.dict);
         if !(diff || ill) {
             break;
@@ -790,12 +791,15 @@ fn resolve_qual_max_card_restrictions(
 /// are considered — the datatype declarations injected by
 /// [`crate::datatypes`] never appear as objects, so this stays bounded by the
 /// instance literals.
+///
+/// Returns the comparable literals with their value class, for
+/// [`inject_literal_differences`].
 fn inject_datatype_literal_axioms(
     store: &mut MemStore,
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
-) {
-    use crate::datatype_literals::{classify, parse_literal_key, ValueClass};
+) -> FxHashMap<TermId, ValueClass> {
+    use crate::datatype_literals::{classify, parse_literal_key};
 
     let rev = invert_dict(dict);
 
@@ -803,10 +807,10 @@ fn inject_datatype_literal_axioms(
     // a literal iff its lexical key parses as one (`"…"^^<…>` or `"…"@lang`).
     // Dedup by TermId so a literal used many times is classified once.
     let mut buckets: FxHashMap<ValueClass, Vec<TermId>> = FxHashMap::default();
-    let mut seen: FxHashSet<TermId> = FxHashSet::default();
+    let mut classes: FxHashMap<TermId, ValueClass> = FxHashMap::default();
     for t in store.all_triples() {
         let o = t.o;
-        if !seen.insert(o) {
+        if classes.contains_key(&o) {
             continue;
         }
         let Some(key) = rev.get(&o) else { continue };
@@ -815,7 +819,10 @@ fn inject_datatype_literal_axioms(
         };
         match classify(&parsed) {
             // Well-typed and placed into a comparable value class.
-            Ok(Some(vc)) => buckets.entry(vc).or_default().push(o),
+            Ok(Some(vc)) => {
+                buckets.entry(vc.clone()).or_default().push(o);
+                classes.insert(o, vc);
+            }
             // Well-typed but opaque (user datatype / unhandled value space):
             // no cross-lexical reasoning. Distinct TermIds are distinct
             // lexical keys, so we neither sameAs nor differentFrom them.
@@ -838,6 +845,7 @@ fn inject_datatype_literal_axioms(
             }
         }
     }
+    classes
 }
 
 /// Post-materialization `dt-diff`: two comparable literals with different
@@ -850,25 +858,24 @@ fn inject_datatype_literal_axioms(
 /// closure made `owl:sameAs` (via `prp-fp`, `cls-maxc2`, `eq-trans`, …).
 /// The caller re-runs the fixpoint so `eq-diff1` reports the clash.
 ///
-/// Returns `true` iff at least one new triple was asserted.
+/// `classes` is the comparable-literal map from
+/// [`inject_datatype_literal_axioms`]; when it is empty there is nothing to
+/// compare and the `owl:sameAs` scan is skipped. Returns `true` iff at least
+/// one new triple was asserted.
 fn inject_literal_differences(
     store: &mut MemStore,
     vocab: &Vocabulary,
-    dict: &FxHashMap<String, TermId>,
+    classes: &FxHashMap<TermId, ValueClass>,
 ) -> bool {
-    use crate::datatype_literals::{classify, parse_literal_key};
-
-    let rev = invert_dict(dict);
-    let class_of = |id: TermId| {
-        let parsed = parse_literal_key(rev.get(&id)?)?;
-        classify(&parsed).ok().flatten()
-    };
+    if classes.is_empty() {
+        return false;
+    }
     let pairs: Vec<(TermId, TermId)> = store
         .scan_predicate(vocab.owl_same_as)
         .filter(|t| t.s != t.o)
         .filter(|t| {
-            matches!((class_of(t.s), class_of(t.o)),
-                (Some(a), Some(b)) if comparable(&a, &b) && a != b)
+            matches!((classes.get(&t.s), classes.get(&t.o)),
+                (Some(a), Some(b)) if comparable(a, b) && a != b)
         })
         .map(|t| (t.s, t.o))
         .collect();
