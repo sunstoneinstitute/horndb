@@ -122,6 +122,12 @@ fn exec_phases_are_exclusive() {
         "agg_fold",
         "sort",
         "result_encode",
+        // HDB-109: the three phases that used to land in `residual` — the
+        // blocking ops' `drain` extend, `ChunkedBatch::next_chunk`, and the
+        // per-group member free. All three are on a `GROUP BY` query's path.
+        "chunk_pull",
+        "drain_extend",
+        "row_drop",
     ] {
         assert!(
             ns.get(phase).copied().unwrap_or(0) > 0,

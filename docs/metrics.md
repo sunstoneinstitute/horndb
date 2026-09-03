@@ -127,7 +127,10 @@ so it costs nothing measurable when off.
 | `stream_op` | `crates/sparql/src/exec/op/stream.rs` (`Extend`/`Project`/`Filter`/`Distinct`) | the per-chunk transform itself (BIND, projection, FILTER, DISTINCT dedup) — never the child pull that feeds it |
 | `result_encode` | `crates/sparql/src/exec/runtime.rs` (`BindingsStream::next_chunk`, via `Batch::to_bindings`) | decoding one operator chunk's slot rows into the `Bindings` the caller sees |
 | `clock` | `crates/sparql/src/exec/runtime.rs` (`eval_group_native`) | one empty `Instant::now()` interval per group (HDB-90 style): the cost of the instrumentation itself, to subtract from `group_decode`/`agg_fold` |
-| `residual` | `crates/sparql/src/exec/phases.rs` (`flush`) | `exec_elapsed − sum(the other 12 phases)` — everything they don't clock (e.g. `drain`'s `rows.extend`, `ChunkedBatch::next_chunk`'s per-chunk `collect` + `schema.clone()`, the pushdown rewrite in `runtime.rs`) |
+| `chunk_pull` | `crates/sparql/src/exec/op/mod.rs` (`ChunkedBatch::next_chunk`) | handing a materialized `Batch` out one `batch_rows()`-sized chunk at a time: the `collect` that moves the rows plus the per-chunk `schema.clone()`. Times the clone's *allocation* only — the matching free happens later, when the chunk is dropped (typically inside `drain`), so it lands in `residual`, not here. One clock per chunk (HDB-109) |
+| `drain_extend` | `crates/sparql/src/exec/op/blocking.rs` (`drain`) | concatenating a child's chunks into the one `Batch` a blocking operator (`Group`, `OrderBy`, `Union`, a hash join's build side, `PathClosure`) consumes: the row moves and the accumulating `Vec`'s growth reallocations. Never the child's `next()` (HDB-109) |
+| `row_drop` | `crates/sparql/src/exec/runtime.rs` (`eval_group_native`) | per group: freeing that group's member rows and their decoded `Bindings` once the aggregates are folded — one heap free per `Row`'s slot `Vec`. One clock per group (HDB-109) |
+| `residual` | `crates/sparql/src/exec/phases.rs` (`flush`) | `exec_elapsed − sum(the other 15 phases)` — everything they don't clock (e.g. the pushdown rewrite in `runtime.rs`, allocation inside untimed operator plumbing, and the drop of any row batch not covered by `row_drop`) |
 
 `decode_subset` (`exec/runtime.rs`) is shared by several call sites
 (`compute_order_by`, `compute_path_closure`, `eval_group_native`,

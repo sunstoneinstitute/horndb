@@ -21,11 +21,18 @@ use horndb_metrics::labels::ExecPhase;
 use std::collections::HashSet;
 
 /// Pull an op to exhaustion, concatenating its chunks into one `Batch`.
+///
+/// The `extend` is timed as `drain_extend` (HDB-109) — the row moves and the
+/// growth reallocations of the accumulating `Vec` on the blocking operators'
+/// input path, which HDB-99 left outside every named phase. `op.next()` is
+/// deliberately outside the clock: it is the child operator's own work, and
+/// timing it here would break `sum(named) <= exec`.
 pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
     let schema = op.schema().to_vec();
     let mut rows: Vec<Row> = Vec::new();
     while let Some(b) = op.next()? {
-        rows.extend(b.rows);
+        let n = b.rows.len() as u64;
+        phases::timed(ExecPhase::DrainExtend, n, || rows.extend(b.rows));
     }
     Ok(Batch { schema, rows })
 }

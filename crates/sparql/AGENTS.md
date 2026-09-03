@@ -76,6 +76,13 @@ it is fine to run on the laptop — recorded numbers come from the SPB-256 night
 
 ```bash
 cargo run -p horndb-sparql --release --example agg_profile -- [works]
+HORNDB_EXEC_PHASES=1 cargo run -p horndb-sparql --release --example agg_profile
 ```
+
+With `HORNDB_EXEC_PHASES=1` each timed query also prints its per-operator
+exec-phase split (HDB-109), diffed across that query's own timed loop so it
+never borrows a neighbour's work. Same phases as `docs/metrics.md`. Still a
+laptop tool — recorded phase numbers come from
+`scripts/bench/exec-phases.sh` on hornbench.
 
 See `INTEGRATION-NOTES.md` for design decisions.

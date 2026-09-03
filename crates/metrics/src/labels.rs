@@ -195,6 +195,9 @@ label_value_enum!(ExecPhase {
     StreamOp => "stream_op",
     ResultEncode => "result_encode",
     Clock => "clock",
+    ChunkPull => "chunk_pull",
+    DrainExtend => "drain_extend",
+    RowDrop => "row_drop",
     Residual => "residual",
 });
 
