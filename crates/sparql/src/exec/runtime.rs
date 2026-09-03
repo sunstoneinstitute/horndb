@@ -670,6 +670,16 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 Ok(())
             })?;
 
+            // HDB-109: freeing a group's member rows is bulk per-row work
+            // (one heap free per `Row`'s slot `Vec`), and the implicit
+            // end-of-iteration drop left it outside every named phase. Made
+            // explicit so it is attributed rather than landing in `residual`.
+            // One clock per group, never per row (SPEC-17 §5.3).
+            phases::timed(ExecPhase::RowDrop, member_rows, || {
+                drop(members);
+                drop(members_decoded);
+            });
+
             out.push((sort_key, Row(slots)));
         }
         let out_rows = out.len() as u64;

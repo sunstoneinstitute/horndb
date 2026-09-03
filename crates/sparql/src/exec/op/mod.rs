@@ -14,8 +14,10 @@ use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
 use crate::algebra::Var;
 use crate::error::Result;
+use crate::exec::phases;
 use crate::exec::{Batch, Executor, Row};
 use crate::plan::PhysicalPlan;
+use horndb_metrics::labels::ExecPhase;
 
 /// Target rows per emitted chunk. Test builds can shrink this via
 /// `TEST_BATCH_ROWS` to force multi-chunk operator behavior; release builds
@@ -72,16 +74,25 @@ impl ChunkedBatch {
         }
     }
     /// Next `batch_rows()`-sized chunk, or `None` when exhausted (never `Some(empty)`).
+    ///
+    /// Timed as `chunk_pull` (HDB-109): the `collect` and the per-chunk
+    /// `schema.clone()` are real work on every materialized operator's
+    /// output path, and HDB-99 left them outside every named phase. Clocked
+    /// by hand rather than via `phases::timed` because the row count is only
+    /// known after the `collect` — see the `enabled()` note in `phases`. One
+    /// clock per chunk, never per row (SPEC-17 §5.3).
     pub(crate) fn next_chunk(&mut self) -> Option<Batch> {
+        let t0 = phases::enabled().then(std::time::Instant::now);
         let chunk: Vec<Row> = self.rows.by_ref().take(batch_rows()).collect();
-        if chunk.is_empty() {
-            None
-        } else {
-            Some(Batch {
-                schema: self.schema.clone(),
-                rows: chunk,
-            })
+        let out = (!chunk.is_empty()).then(|| Batch {
+            schema: self.schema.clone(),
+            rows: chunk,
+        });
+        if let Some(t0) = t0 {
+            let n = out.as_ref().map_or(0, |b| b.rows.len() as u64);
+            phases::add(ExecPhase::ChunkPull, t0.elapsed().as_nanos() as u64, n);
         }
+        out
     }
     pub(crate) fn schema(&self) -> &[Var] {
         &self.schema

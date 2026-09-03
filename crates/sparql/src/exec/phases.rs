@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 
 /// Every phase this module accumulates directly, in the thread-local
 /// array's index order. `ExecPhase::Residual` is excluded: [`flush`]
-/// derives it as `exec_elapsed - sum(these 12)` rather than accumulating it.
-const PHASE_ORDER: [ExecPhase; 12] = [
+/// derives it as `exec_elapsed - sum(these 15)` rather than accumulating it.
+const PHASE_ORDER: [ExecPhase; 15] = [
     ExecPhase::ScanWcoj,
     ExecPhase::ScanRowBuild,
     ExecPhase::ScanProvenance,
@@ -43,6 +43,9 @@ const PHASE_ORDER: [ExecPhase; 12] = [
     ExecPhase::StreamOp,
     ExecPhase::ResultEncode,
     ExecPhase::Clock,
+    ExecPhase::ChunkPull,
+    ExecPhase::DrainExtend,
+    ExecPhase::RowDrop,
 ];
 
 const N: usize = PHASE_ORDER.len();
@@ -66,6 +69,9 @@ fn index_of(phase: &ExecPhase) -> usize {
         ExecPhase::StreamOp => 9,
         ExecPhase::ResultEncode => 10,
         ExecPhase::Clock => 11,
+        ExecPhase::ChunkPull => 12,
+        ExecPhase::DrainExtend => 13,
+        ExecPhase::RowDrop => 14,
         ExecPhase::Residual => {
             unreachable!("residual is derived by flush(), never accumulated via add()/timed()")
         }
