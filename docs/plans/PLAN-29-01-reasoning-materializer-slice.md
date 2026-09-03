@@ -15,12 +15,17 @@ scope: "SPEC-29 P1 — the reasoning materializer slice: declared views over a o
 > `view_derivation` bench was written (it had not been) and run on `hornbench`,
 > and `docs/benchmarks.md`'s three SPEC-29 rows now carry numbers — single-view
 > re-derivation **5.29 ms**, 19× inside the inherited 100 ms budget; fan-out
-> linear at **0.55 ms/view** over 250 and 1,000 views; **25.5 KiB/view** resident
-> with every view clean.
+> linear at **0.55 ms/view** over 250 and 1,000 views. The memory line is an
+> **upper bound on a per-view share of whole-process RSS** (total RSS with
+> every view clean, divided by view count) -- **25.5 KiB/view** -- not the
+> incremental cost of adding a view, which the bench does not isolate.
 >
 > Two deviations from the plan as written: routing lives in the catalog
 > (`catalog.rs::route`) rather than a separate `router.rs` — the file was not
-> worth its own module; and T7's open harness question resolved to *both*
+> worth its own module; T7's bench builds its own subClassOf-chain corpus
+> rather than growing the PLAN-28-02 synthetic one as Step 1 asked -- the
+> chain gives a controlled derivation depth, which the e-commerce corpus does
+> not; and T7's open harness question resolved to *both*
 > — criterion for the two short measurements, plain one-shot timing for the
 > whole-corpus re-derive and the resident-memory gauge, which criterion cannot
 > express.
@@ -236,11 +241,15 @@ is parsed: unknown keys there stay 400).
 
 ### Task 1: `Engine::load_base` / `fork` / `extend` + the D3 differential
 
+> Tasks 1-6 were implemented and landed under HDB-72
+> ([#269](https://github.com/sunstoneinstitute/horndb/issues/269)); their
+> boxes are ticked retroactively here. Only Task 7 is HDB-144 work.
+
 **Files:**
 - Modify: `crates/owlrl/src/integration.rs` (+ `Clone` on `LoadState`/`MemStore`)
 - Create: `crates/owlrl/tests/spine_factoring.rs`
 
-- [ ] **Step 1: Failing tests** — `fork_extend_equals_joint_load`
+- [x] **Step 1: Failing tests** — `fork_extend_equals_joint_load`
   (property-style over the curated rule-shape fixtures: random split of a
   fixture into S/D; `fork(load_base(S)).extend(D)` vs `load_base(S∪D)` —
   materialized-set equality), `sameas_across_the_split` (an `owl:sameAs`
@@ -248,16 +257,16 @@ is parsed: unknown keys there stay 400).
   (S consistent, D inconsistent → fork reports inconsistent, template
   stays consistent), `extend_is_idempotent` (extend with already-present
   triples derives nothing new).
-- [ ] **Step 2: Verify failure** — `cargo nextest run -p horndb-owlrl
+- [x] **Step 2: Verify failure** — `cargo nextest run -p horndb-owlrl
   spine_factoring` (compile error: methods undefined).
-- [ ] **Step 3: Implement** — per the design; `extend` re-enters the
+- [x] **Step 3: Implement** — per the design; `extend` re-enters the
   generated-rule fixpoint seeded from the newly asserted delta (the
   semi-naive machinery exists — see `semi_naive.rs`; if the entry point
   only supports full runs, a full re-run over the forked store is
   *correct* and acceptable for P1 — note which was done, the bench in
   Task 7 decides if it matters).
-- [ ] **Step 4: Run** — `cargo nextest run -p horndb-owlrl`.
-- [ ] **Step 5: Commit** — `feat(owlrl): Engine fork/extend with
+- [x] **Step 4: Run** — `cargo nextest run -p horndb-owlrl`.
+- [x] **Step 5: Commit** — `feat(owlrl): Engine fork/extend with
   spine-factoring differential (SPEC-29 D3, #269)`.
 
 ### Task 2: `[reasoning]` config
@@ -266,18 +275,18 @@ is parsed: unknown keys there stay 400).
 - Modify: `crates/config/src/model.rs`, `crates/sparql/src/bin/serve.rs`
 - Test: `crates/config` unit tests, `crates/sparql/tests/serve_config_wiring.rs`
 
-- [ ] **Step 1: Failing tests** — defaults (`enabled == false`, etc.),
+- [x] **Step 1: Failing tests** — defaults (`enabled == false`, etc.),
   layering (file < env `HORNDB_REASONING__ENABLED` < argv if a flag is
   added — no new CLI flag this slice), and the three validation cases
   (overlap fatal naming both keys; reserved-pattern fatal; empty-spine
   warning — assert via the validation function's return, not log
   scraping).
-- [ ] **Step 2: Verify failure; implement** (section struct + a
+- [x] **Step 2: Verify failure; implement** (section struct + a
   `validate_reasoning(&Reasoning) -> Result<Vec<Warning>, Error>` called
   from serve startup).
-- [ ] **Step 3: Run** — `cargo nextest run -p horndb-config -p
+- [x] **Step 3: Run** — `cargo nextest run -p horndb-config -p
   horndb-sparql`.
-- [ ] **Step 4: Commit** — `feat(config): [reasoning] section + startup
+- [x] **Step 4: Commit** — `feat(config): [reasoning] section + startup
   validation (SPEC-29 D9, #269)`.
 
 ### Task 3: View catalog, minting, spine closure
@@ -286,17 +295,17 @@ is parsed: unknown keys there stay 400).
 - Create: `crates/sparql/src/reasoning/{mod.rs,catalog.rs,derive.rs}`
 - Test: `crates/sparql/tests/reasoning_views.rs`
 
-- [ ] **Step 1: Failing tests** — `minting_roundtrips_and_is_injective`
+- [x] **Step 1: Failing tests** — `minting_roundtrips_and_is_injective`
   (nasty source IRIs: unicode, `%`, `/`, `#`),
   `catalog_covers_non_spine_non_reserved_graphs`,
   `spine_closure_graph_holds_derived_beyond_asserted` (fixture spine with
   a known closure; the spine-closure graph gets exactly
   closure − asserted), `catalog_quads_readable` (the views graph carries
   the expected nodes after a derivation pass).
-- [ ] **Step 2: Verify failure; implement** — `ViewCatalog` build from
+- [x] **Step 2: Verify failure; implement** — `ViewCatalog` build from
   config + `graphs()`; spine template engine; spine-closure diffing;
   catalog quad emission through `apply_quads`.
-- [ ] **Step 3: Run; Commit** — `feat(sparql): reasoning view catalog +
+- [x] **Step 3: Run; Commit** — `feat(sparql): reasoning view catalog +
   spine closure graph (SPEC-29 D1/D2/D3/D4, #269)`.
 
 ### Task 4: Per-view derivation, routing, worker
@@ -306,7 +315,7 @@ is parsed: unknown keys there stay 400).
 - Modify: `crates/sparql/src/{update.rs,bin/serve.rs,server/mod.rs}`
 - Test: `crates/sparql/tests/reasoning_views.rs`
 
-- [ ] **Step 1: Failing tests** (all through
+- [x] **Step 1: Failing tests** (all through
   `ViewManager::run_until_clean` — no thread timing):
   `view_derives_spine_x_data` (acceptance 1's shape: for fixture S, G —
   `S ∪ G ∪ spine-closure ∪ view-inferred == load_base(S ∪ G)`
@@ -325,14 +334,14 @@ is parsed: unknown keys there stay 400).
   rebuild catalog, all dirty, run to clean — same state),
   `inconsistent_view_flagged_not_fatal`,
   `disabled_means_no_reserved_graphs` (acceptance 10 first half).
-- [ ] **Step 2: Verify failure; implement** — derivation per the 5-step
+- [x] **Step 2: Verify failure; implement** — derivation per the 5-step
   design; the touched-graphs report from `update.rs`; the router +
   worker + `run_until_clean`; metrics emission
   (`crates/metrics/src/reasoning.rs` + `docs/metrics.md` rows in the
   same commit).
-- [ ] **Step 3: Run** — `cargo nextest run -p horndb-sparql --features
+- [x] **Step 3: Run** — `cargo nextest run -p horndb-sparql --features
   "server reasoner"`.
-- [ ] **Step 4: Commit** — `feat(sparql): per-view derivation with
+- [x] **Step 4: Commit** — `feat(sparql): per-view derivation with
   dirty-routing and background worker (SPEC-29 D5/D7-routing, #269)`.
 
 ### Task 5: D6 — `default_dataset_includes_inferred`
@@ -342,15 +351,15 @@ is parsed: unknown keys there stay 400).
   `crates/sparql/src/lib.rs`, server threading
 - Test: `crates/sparql/tests/reasoning_views.rs`
 
-- [ ] **Step 1: Failing tests** — acceptance 5 verbatim: flag off →
+- [x] **Step 1: Failing tests** — acceptance 5 verbatim: flag off →
   unqualified `SELECT` equals reasoning-disabled results and `GRAPH ?g`
   binds no reserved graph while ground `GRAPH <inferred-g>` answers; flag
   on → the union and enumeration gain exactly the inferred graphs + the
   spine-closure graph and nothing else (views catalog and feed graph
   stay invisible to `?g`).
-- [ ] **Step 2: Verify failure; implement** (catalog-supplied IRI list
+- [x] **Step 2: Verify failure; implement** (catalog-supplied IRI list
   into the snapshot scope composition; flag read per query).
-- [ ] **Step 3: Run; Commit** — `feat(sparql):
+- [x] **Step 3: Run; Commit** — `feat(sparql):
   default_dataset_includes_inferred (SPEC-29 D6, #269)`.
 
 ### Task 6: Degenerate case
@@ -358,14 +367,14 @@ is parsed: unknown keys there stay 400).
 **Files:**
 - Test: `crates/sparql/tests/reasoning_views.rs`
 
-- [ ] **Step 1:** `degenerate_default_graph_view_matches_legacy`:
+- [x] **Step 1:** `degenerate_default_graph_view_matches_legacy`:
   no-named-graph corpus; enabled reasoning; assert
   asserted ∪ spine-closure ∪ inferred == `load_with_reasoning`'s
   materialized set (acceptance 10 second half). Also
   `harness selected subset stays green`: `cargo nextest run --workspace`
   with no selection change — reasoning defaults off, so this is the
   no-regression pin.
-- [ ] **Step 2: Commit** — `test(sparql): degenerate single-view parity
+- [x] **Step 2: Commit** — `test(sparql): degenerate single-view parity
   with the legacy materialize path (SPEC-29 acceptance 10, #269)`.
 
 ### Task 7: Bench + docs

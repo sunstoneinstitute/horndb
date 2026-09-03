@@ -298,9 +298,13 @@ const EMPTY_GRAPH_SCOPE: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
 ///
 /// The direct source is correct (`crates/sparql/tests/direct_source_parity.rs`
 /// checks it against the `VecTripleSource` oracle) and cuts the serving
-/// footprint by dropping the per-query copy, but it is **not yet faster**: a
-/// laptop smoke A/B on trainmarks medium put warm reads 2-8x slower than the
-/// copy. The gap is the merged cursor's inner loop, not source construction —
+/// footprint by dropping the per-query copy, but it is **not faster**: the
+/// hornbench A/B (HDB-144, `docs/benchmarks.md`) puts warm reads **1.16-6.14x
+/// slower** on trainmarks xlarge and LDBC SPB-256 `aggregation-qps`
+/// **4.13x slower** (56.60 -> 13.71), for a **4.9%** RSS saving. Neither gate
+/// is met, so the default stays off. (An earlier laptop smoke on trainmarks
+/// medium predicted 2-8x; hornbench confirms the shape.)
+/// The gap is the merged cursor's inner loop, not source construction —
 /// `MergedIter::peek`/`seek` walk a live-leaf list at every step where
 /// `VecIter` indexes one flat column, and `MergedIter` has no `active_run`, so
 /// the k==2 SIMD-intersect fast path in `executor/wcoj.rs::BatchIter` never
