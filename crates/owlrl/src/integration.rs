@@ -15,7 +15,7 @@ use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::backend::RuleFiringBackend;
-use crate::engine::{reset_and_materialize, Stats};
+use crate::engine::{materialize, reset_and_materialize, Stats};
 use crate::provenance::ProofTree;
 use crate::store::{MemStore, TripleStore};
 use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
@@ -152,6 +152,9 @@ pub struct Engine {
     state: Option<LoadState>,
 }
 
+/// `Clone` backs `Engine::fork` (SPEC-29 D3): a fork needs its own dictionary
+/// and store so the two engines can diverge independently after the split.
+#[derive(Clone)]
 struct LoadState {
     dict: FxHashMap<String, TermId>,
     next_id: u64,
@@ -201,117 +204,84 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        // Auto-owl:Thing inference (companion to prp-rfp): every named
-        // individual is implicitly a member of owl:Thing. Cheapest faithful
-        // implementation is a load-time pass over `?x rdf:type
-        // owl:NamedIndividual`, asserting `?x rdf:type owl:Thing`. The
-        // ReflexiveProperty W3C test types its individuals via
-        // `owl:NamedIndividual` rather than `owl:Thing` directly, and
-        // `prp-rfp`'s body requires the latter. See
-        // `crates/owlrl/list_rules.rs` and KNOWN-MANIFEST-BUGS.md.
-        infer_owl_thing_from_named_individuals(&mut state.store, &self.vocab);
-        // dt-type1 / dt-type2: inject the XSD datatype declarations and
-        // subsumption lattice as base axioms. Unconditional — dt-type1's
-        // declarations must be present even for an empty premise
-        // (WebOnt-I5.8-011). Borrow `dict`/`next_id` disjointly from
-        // `store` so the intern closure and the store mutation coexist.
-        {
-            let LoadState {
-                dict,
-                next_id,
-                store,
-                ..
-            } = &mut state;
-            crate::datatypes::inject_datatype_axioms(store, &self.vocab, |iri| {
-                if let Some(&t) = dict.get(iri) {
-                    return t;
-                }
-                let t = TermId(*next_id);
-                *next_id += 1;
-                dict.insert(iri.to_string(), t);
-                t
-            });
-        }
-        // dt-eq / dt-diff / dt-not-type: reason over the *values* of the
-        // instance literals now, while the dictionary can still recover each
-        // literal's datatype and lexical form. Asserts owl:sameAs /
-        // owl:differentFrom / owl:Nothing base facts that the compiled rules
-        // (eq-diff1, eq-rep-*) then propagate. Must run after the data is
-        // loaded (so all instance literals are present) and after the dt-type
-        // axioms (harmless either way — those are datatype IRIs, not literals).
-        inject_datatype_literal_axioms(&mut state.store, &self.vocab, &state.dict);
-        // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
-        // restrictions now, while the dictionary can still parse the literal
-        // value. The resolved list rides on the store for the firing loop.
-        let restrictions = resolve_max_card_restrictions(&state.store, &self.vocab, &state.dict);
-        state.store.set_card_restrictions(restrictions);
-        let qual_restrictions =
-            resolve_qual_max_card_restrictions(&state.store, &self.vocab, &state.dict);
-        state.store.set_qual_card_restrictions(qual_restrictions);
-        let materialize_once = |store: &mut MemStore| match self.backend {
-            BackendChoice::RuleFiring => {
-                let mut backend = RuleFiringBackend::new();
-                reset_and_materialize(store, &mut backend)
-            }
-            #[cfg(feature = "graphblas-backend")]
-            BackendChoice::GraphBlas => {
-                let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
-                reset_and_materialize(store, &mut backend)
-            }
-        };
-        let mut stats = materialize_once(&mut state.store);
-        // Value-space intersection narrowing of `rdfs:range` declarations
-        // (WebOnt-I5.8-008/009-pe, #160): a property declared with two or
-        // more range datatypes whose value spaces intersect into something
-        // narrower than any single declared range gets that narrower range
-        // asserted too. Runs AFTER the first fixpoint (not before) so it also
-        // sees ranges *inferred* during materialization by `scm-rng1`
-        // (broadening — never changes the intersection) / `scm-rng2`
-        // (sub-property range inheritance — can put a genuinely new, distinct
-        // range on a property that had only one asserted), not just the
-        // asserted ones. See `datatype_ranges.rs` for the value-space model,
-        // the "supersets only ⇒ sound" invariant, and why post-materialize is
-        // required for the compositional case. If it asserted anything,
-        // re-run the fixpoint once so `scm-rng1`/`prp-rng` propagate the
-        // narrower range. Borrow `dict`/`next_id` disjointly from `store` in
-        // their own block so the intern closure's mutable borrow of `state`
-        // ends before `materialize_once(&mut state.store)` is called.
-        let added_ranges = {
-            let LoadState {
-                dict,
-                next_id,
-                store,
-                ..
-            } = &mut state;
-            crate::datatype_ranges::derive_range_intersections(store, &self.vocab, |iri| {
-                if let Some(&t) = dict.get(iri) {
-                    return t;
-                }
-                let t = TermId(*next_id);
-                *next_id += 1;
-                dict.insert(iri.to_string(), t);
-                t
-            })
-        };
-        if added_ranges {
-            stats = materialize_once(&mut state.store);
-        }
-        // dt-not-type over *derived* datatype memberships: materialization may
-        // have typed a literal as a narrower datatype via prp-rng / prp-dom
-        // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
-        // `"999" rdf:type xsd:byte`). The load-time pass above only validated
-        // each literal's *intrinsic* datatype, so re-check the materialized
-        // `?lit rdf:type ?D` edges now and assert `?lit rdf:type owl:Nothing`
-        // on any value-space violation. If that asserted anything, re-run the
-        // fixpoint once so the inconsistency propagates through eq-rep-* (e.g. a
-        // named resource `owl:sameAs` the offending literal also becomes
-        // `owl:Nothing`); the re-run is a no-op for the common case where the
-        // initial materialisation found no derived violations.
-        if validate_derived_datatype_memberships(&mut state.store, &self.vocab, &state.dict) {
-            stats = materialize_once(&mut state.store);
-        }
+        let stats = finish(&self.vocab, self.backend, &mut state, true);
         self.last_stats = Some(stats);
         self.state = Some(state);
+        Ok(())
+    }
+
+    /// Discard prior state, load `triples` — lexical `(subject, predicate,
+    /// object)` keys in the same convention
+    /// [`materialized_triples`](Self::materialized_triples) decodes with
+    /// (bare IRIs, `_:`-prefixed blank nodes, N-Triples-style literals) —
+    /// and materialize to fixed point.
+    ///
+    /// Scope-blind: unlike [`load`](Self::load), this never looks at a
+    /// graph name — the caller chooses which graphs' triples to feed in
+    /// (SPEC-29 D1).
+    pub fn load_base(
+        &mut self,
+        triples: impl IntoIterator<Item = (String, String, String)>,
+    ) -> Result<()> {
+        let mut state = LoadState {
+            dict: self.base_dict.clone(),
+            next_id: USER_TERMS_BASE,
+            store: MemStore::new(self.vocab),
+            loaded_count: 0,
+        };
+        for (s, p, o) in triples {
+            let triple = intern_lexical_triple(&mut state, &s, &p, &o);
+            state.store.assert(triple);
+            state.loaded_count += 1;
+        }
+        let stats = finish(&self.vocab, self.backend, &mut state, true);
+        self.last_stats = Some(stats);
+        self.state = Some(state);
+        Ok(())
+    }
+
+    /// Clone the materialized state (dictionary + store + counters — all
+    /// plain maps/vecs) into a new `Engine` a caller can extend without
+    /// disturbing this one. Used to reuse a closed spine across views
+    /// (SPEC-29 D3).
+    pub fn fork(&self) -> Engine {
+        Engine {
+            vocab: self.vocab,
+            base_dict: self.base_dict.clone(),
+            backend: self.backend,
+            last_stats: self.last_stats.clone(),
+            state: self.state.clone(),
+        }
+    }
+
+    /// Assert more lexical triples (same convention as
+    /// [`load_base`](Self::load_base)) into the already-materialized state
+    /// and re-run the rule fixpoint *without* discarding what was already
+    /// inferred.
+    ///
+    /// Relies on SPEC-29 D3: for the monotone OWL 2 RL rule set,
+    /// `lfp(T, lfp(T,S) ∪ D) == lfp(T, S ∪ D)`, so extending an
+    /// already-closed spine with `D` and re-running to fixpoint gives the
+    /// same materialized set as closing `S ∪ D` from scratch — the prior
+    /// inferences are reused, not recomputed. Errors if nothing has been
+    /// loaded yet.
+    pub fn extend(
+        &mut self,
+        triples: impl IntoIterator<Item = (String, String, String)>,
+    ) -> Result<()> {
+        let vocab = self.vocab;
+        let backend = self.backend;
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| anyhow!("extend called before load_base"))?;
+        for (s, p, o) in triples {
+            let triple = intern_lexical_triple(state, &s, &p, &o);
+            state.store.assert(triple);
+            state.loaded_count += 1;
+        }
+        let stats = finish(&vocab, backend, state, false);
+        self.last_stats = Some(stats);
         Ok(())
     }
 
@@ -504,6 +474,136 @@ impl Default for Engine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Shared post-ingest pipeline for [`Engine::load`], [`Engine::load_base`],
+/// and [`Engine::extend`]: the derived-axiom injection passes, restriction
+/// resolution, and the materialize-to-fixpoint loop (re-run whenever a pass
+/// asserts new base facts that could unlock further derivations).
+///
+/// `reset` selects [`reset_and_materialize`] (discard any prior inferred
+/// triples first — `load`/`load_base`) vs. [`materialize`] (build on what is
+/// already inferred — `extend`, SPEC-29 D3).
+fn finish(vocab: &Vocabulary, backend: BackendChoice, state: &mut LoadState, reset: bool) -> Stats {
+    // Auto-owl:Thing inference (companion to prp-rfp): every named
+    // individual is implicitly a member of owl:Thing. Cheapest faithful
+    // implementation is a load-time pass over `?x rdf:type
+    // owl:NamedIndividual`, asserting `?x rdf:type owl:Thing`. The
+    // ReflexiveProperty W3C test types its individuals via
+    // `owl:NamedIndividual` rather than `owl:Thing` directly, and
+    // `prp-rfp`'s body requires the latter. See
+    // `crates/owlrl/list_rules.rs` and KNOWN-MANIFEST-BUGS.md.
+    infer_owl_thing_from_named_individuals(&mut state.store, vocab);
+    // dt-type1 / dt-type2: inject the XSD datatype declarations and
+    // subsumption lattice as base axioms. Unconditional — dt-type1's
+    // declarations must be present even for an empty premise
+    // (WebOnt-I5.8-011). Borrow `dict`/`next_id` disjointly from
+    // `store` so the intern closure and the store mutation coexist.
+    {
+        let LoadState {
+            dict,
+            next_id,
+            store,
+            ..
+        } = state;
+        crate::datatypes::inject_datatype_axioms(store, vocab, |iri| {
+            if let Some(&t) = dict.get(iri) {
+                return t;
+            }
+            let t = TermId(*next_id);
+            *next_id += 1;
+            dict.insert(iri.to_string(), t);
+            t
+        });
+    }
+    // dt-eq / dt-diff / dt-not-type: reason over the *values* of the
+    // instance literals now, while the dictionary can still recover each
+    // literal's datatype and lexical form. Asserts owl:sameAs /
+    // owl:differentFrom / owl:Nothing base facts that the compiled rules
+    // (eq-diff1, eq-rep-*) then propagate. Must run after the data is
+    // loaded (so all instance literals are present) and after the dt-type
+    // axioms (harmless either way — those are datatype IRIs, not literals).
+    inject_datatype_literal_axioms(&mut state.store, vocab, &state.dict);
+    // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
+    // restrictions now, while the dictionary can still parse the literal
+    // value. The resolved list rides on the store for the firing loop.
+    let restrictions = resolve_max_card_restrictions(&state.store, vocab, &state.dict);
+    state.store.set_card_restrictions(restrictions);
+    let qual_restrictions = resolve_qual_max_card_restrictions(&state.store, vocab, &state.dict);
+    state.store.set_qual_card_restrictions(qual_restrictions);
+    let materialize_once = |store: &mut MemStore| -> Stats {
+        match backend {
+            BackendChoice::RuleFiring => {
+                let mut backend = RuleFiringBackend::new();
+                if reset {
+                    reset_and_materialize(store, &mut backend)
+                } else {
+                    materialize(store, &mut backend)
+                }
+            }
+            #[cfg(feature = "graphblas-backend")]
+            BackendChoice::GraphBlas => {
+                let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
+                if reset {
+                    reset_and_materialize(store, &mut backend)
+                } else {
+                    materialize(store, &mut backend)
+                }
+            }
+        }
+    };
+    let mut stats = materialize_once(&mut state.store);
+    // Value-space intersection narrowing of `rdfs:range` declarations
+    // (WebOnt-I5.8-008/009-pe, #160): a property declared with two or
+    // more range datatypes whose value spaces intersect into something
+    // narrower than any single declared range gets that narrower range
+    // asserted too. Runs AFTER the first fixpoint (not before) so it also
+    // sees ranges *inferred* during materialization by `scm-rng1`
+    // (broadening — never changes the intersection) / `scm-rng2`
+    // (sub-property range inheritance — can put a genuinely new, distinct
+    // range on a property that had only one asserted), not just the
+    // asserted ones. See `datatype_ranges.rs` for the value-space model,
+    // the "supersets only ⇒ sound" invariant, and why post-materialize is
+    // required for the compositional case. If it asserted anything,
+    // re-run the fixpoint once so `scm-rng1`/`prp-rng` propagate the
+    // narrower range. Borrow `dict`/`next_id` disjointly from `store` in
+    // their own block so the intern closure's mutable borrow of `state`
+    // ends before `materialize_once(&mut state.store)` is called.
+    let added_ranges = {
+        let LoadState {
+            dict,
+            next_id,
+            store,
+            ..
+        } = state;
+        crate::datatype_ranges::derive_range_intersections(store, vocab, |iri| {
+            if let Some(&t) = dict.get(iri) {
+                return t;
+            }
+            let t = TermId(*next_id);
+            *next_id += 1;
+            dict.insert(iri.to_string(), t);
+            t
+        })
+    };
+    if added_ranges {
+        stats = materialize_once(&mut state.store);
+    }
+    // dt-not-type over *derived* datatype memberships: materialization may
+    // have typed a literal as a narrower datatype via prp-rng / prp-dom
+    // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
+    // `"999" rdf:type xsd:byte`). The load-time pass above only validated
+    // each literal's *intrinsic* datatype, so re-check the materialized
+    // `?lit rdf:type ?D` edges now and assert `?lit rdf:type owl:Nothing`
+    // on any value-space violation. If that asserted anything, re-run the
+    // fixpoint once so the inconsistency propagates through eq-rep-* (e.g. a
+    // named resource `owl:sameAs` the offending literal also becomes
+    // `owl:Nothing`); the re-run is a no-op for the common case where the
+    // initial materialisation found no derived violations.
+    if validate_derived_datatype_memberships(&mut state.store, vocab, &state.dict) {
+        stats = materialize_once(&mut state.store);
+    }
+    stats
 }
 
 /// Invert the dictionary into a `TermId → lexical key` map. The forward dict
@@ -961,6 +1061,21 @@ fn intern_key(state: &mut LoadState, key: &str) -> TermId {
     state.next_id += 1;
     state.dict.insert(key.to_string(), t);
     t
+}
+
+/// Intern a lexical `(s, p, o)` triple whose components already are
+/// canonical dictionary keys — the same convention
+/// [`Engine::materialized_triples`] decodes with (bare IRIs, `_:`-prefixed
+/// blank nodes, N-Triples-style literals). Used by
+/// [`Engine::load_base`]/[`Engine::extend`], which take lexical triples
+/// directly rather than `oxrdf` terms, so round-tripping
+/// `materialized_triples()` output back in interns to the same keys.
+fn intern_lexical_triple(state: &mut LoadState, s: &str, p: &str, o: &str) -> Triple {
+    Triple::new(
+        intern_key(state, s),
+        intern_key(state, p),
+        intern_key(state, o),
+    )
 }
 
 fn intern_named(state: &mut LoadState, iri: &str) -> TermId {

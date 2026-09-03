@@ -1,10 +1,20 @@
 ---
-status: draft
+status: in-progress
 date: 2026-07-29
 scope: "SPEC-29 P1 — the reasoning materializer slice: declared views over a once-closed spine, per-view inferred graphs diffed idempotently through the store boundary, dirty-marking from the update path with background re-derivation, the [reasoning] config section, and the D5/D6 visibility invariants"
 ---
 
 # SPEC-29 P1 — Reasoning materializer slice
+
+> **Landed (HDB-72, [#269](https://github.com/sunstoneinstitute/horndb/issues/269)):**
+> T1–T6. `crates/sparql/src/reasoning/` (view model, catalog, per-view
+> derivation, D7 routing), `Engine::load_base`/`fork`/`extend` in
+> `crates/owlrl/src/integration.rs`, the `[reasoning]` config section, the
+> `reasoning_*` metrics, and the `serve` wiring. **Outstanding: T7** — the
+> `view_derivation` bench must run on `hornbench` before
+> `docs/benchmarks.md`'s SPEC-29 rows carry numbers. Routing lives in the
+> catalog (`catalog.rs::route`) rather than the planned separate `router.rs`;
+> the file was not worth its own module.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

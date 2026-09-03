@@ -14,6 +14,7 @@ pub use error::ConfigError;
 pub use load::{load, CliOverrides, LoadInputs};
 pub use model::{
     DefaultGraph, Limits, Logging, OnInconsistency, QuerySettings, Reasoning, ReasoningBackend,
-    Reload, Server, ServerConfig, Simd, OVERRIDABLE_KEYS,
+    Reload, Server, ServerConfig, Simd, ViewOutput, ViewSelect, ViewSelectKeyword, Views,
+    OVERRIDABLE_KEYS,
 };
 pub use units::{ByteSize, HumanDuration};

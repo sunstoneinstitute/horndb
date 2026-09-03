@@ -193,6 +193,14 @@ criteria. They are the floor each subsystem must hit before it's "done."
 | Compact crosswalk-index footprint | ≤**10 bytes/pair** bidi (NF2, F5) | EF+FOR baseline → rung-4 PGM; measured: pending hornbench (F5/F6 follow-up) |
 | Full-closure materialization vs OxO2 | beat **1.16 M mappings / 17 min** (NF3) | OxO2 (EBI Ontology Xref Service) reference run; measured: pending hornbench (F5/F6 follow-up) |
 
+### SPEC-29 — Named-graph reasoning views (`horndb-sparql`)
+
+| Metric | Target | Baseline |
+|---|---|---|
+| Single-graph update → view visible again | ≤**100 ms** on a 1k-graph corpus (SPEC-06 NF1, inherited) | measured: **pending hornbench** — P1 landed the materializer ([#269](https://github.com/sunstoneinstitute/horndb/issues/269)); the `view_derivation` bench (PLAN-29-01 T7) has not been run |
+| Spine edit → all views converged | linear in view count for P1 (P2 makes fan-out incremental) | measured: **pending hornbench** (same run) |
+| Steady-state memory, all views clean | one spine template, no per-view engine retained | measured: **pending hornbench** (same run) |
+
 ### SPEC-12 — SIMD acceleration layer (`horndb-simd`)
 
 | Metric | Target | Baseline |

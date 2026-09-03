@@ -151,6 +151,21 @@ async fn main() -> Result<()> {
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
 
+    // SPEC-29 D9: `[reasoning]`'s cross-key rules (a pattern reaching into the
+    // reserved namespace, spine/select overlap, an unimplemented phase) are
+    // domain checks serde cannot make, so — like `[simd].max_isa` above — they
+    // land here and are startup-fatal.
+    #[cfg(feature = "reasoner")]
+    for warning in horndb_sparql::reasoning::validate(&cfg.reasoning)
+        .map_err(|e| anyhow::anyhow!("invalid [reasoning] configuration: {e}"))?
+    {
+        eprintln!("serve: warning: {warning}");
+    }
+    #[cfg(not(feature = "reasoner"))]
+    if cfg.reasoning.enabled {
+        anyhow::bail!("[reasoning].enabled requires the `reasoner` feature");
+    }
+
     let mut files: Vec<PathBuf> = Vec::new();
     for path in &cli.data {
         collect_data_files(path, &mut files)
@@ -257,10 +272,42 @@ async fn main() -> Result<()> {
     let materialize = cli.materialize;
     let on_inconsistency = cfg.reasoning.on_inconsistency;
     let reasoning_backend = cfg.reasoning.backend;
+    #[cfg(feature = "reasoner")]
+    let reasoning = cfg.reasoning.clone();
     tokio::task::spawn_blocking(move || {
         match run_load(materialize, &files, reasoning_backend, on_inconsistency) {
             Ok((loaded_store, total)) => {
                 *store.write() = loaded_store;
+                // SPEC-29 P1's view materializer. The first pass runs before
+                // `ready` flips, so the first request that sees /readyz green
+                // already sees derived quads; a background thread then polls
+                // for staleness.
+                #[cfg(feature = "reasoner")]
+                if reasoning.enabled {
+                    let store_arc = Arc::clone(&store);
+                    let mut mgr = horndb_sparql::reasoning::ViewManager::new(&reasoning);
+                    match mgr.run_until_clean(&mut store_arc.write()) {
+                        Ok(derived) => eprintln!("serve: reasoning derived {derived} view(s)"),
+                        Err(e) => {
+                            eprintln!(
+                                "serve: fatal: initial reasoning-view derivation failed: {e}"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    // ponytail: a poll loop that takes the write lock each
+                    // tick. Cheap while clean (one graph list + two small
+                    // scans), and P2 replaces the whole re-derive step with
+                    // the incremental path anyway. Move to a condvar signalled
+                    // by the write funnel if the tick ever shows up in a
+                    // latency profile.
+                    std::thread::spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        if let Err(e) = mgr.run_until_clean(&mut store_arc.write()) {
+                            eprintln!("serve: reasoning derivation failed: {e}");
+                        }
+                    });
+                }
                 ready.store(true, std::sync::atomic::Ordering::Release);
                 eprintln!("serve: {total} triples loaded; ready");
             }

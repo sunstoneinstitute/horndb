@@ -10,6 +10,7 @@ pub mod incremental;
 pub mod labels;
 pub mod ml;
 pub mod owlrl;
+pub mod reasoning;
 pub mod simd;
 pub mod sparql;
 pub mod storage;
@@ -27,6 +28,7 @@ pub struct MetricsState {
     pub owlrl: owlrl::OwlrlMetrics,
     pub incremental: incremental::IncrementalMetrics,
     pub ml: ml::MlMetrics,
+    pub reasoning: reasoning::ReasoningMetrics,
     pub wcoj: wcoj::WcojMetrics,
     pub simd: simd::SimdMetrics,
 }
@@ -40,6 +42,7 @@ impl MetricsState {
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
         let ml = ml::MlMetrics::register(&mut registry);
+        let reasoning = reasoning::ReasoningMetrics::register(&mut registry);
         let wcoj = wcoj::WcojMetrics::register(&mut registry);
         let simd = simd::SimdMetrics::register(&mut registry);
         Self {
@@ -50,6 +53,7 @@ impl MetricsState {
             owlrl,
             incremental,
             ml,
+            reasoning,
             wcoj,
             simd,
         }
