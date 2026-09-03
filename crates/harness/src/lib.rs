@@ -20,6 +20,7 @@ pub mod reasoner;
 pub mod report;
 pub mod runner;
 pub mod selected;
+pub mod sparql_eval;
 pub mod sssom_loader;
 pub mod stub;
 pub mod testcase;

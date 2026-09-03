@@ -44,6 +44,42 @@ pub struct SuiteEntry {
     pub manifest: String,
     /// Test IDs that must pass.
     pub include: Vec<String>,
+    /// Cases that are selected (they stay in `include`) but are known to
+    /// fail today. A listed case that fails is reported Skipped with its
+    /// reason; a listed case that *passes* is reported Failed, so the list
+    /// cannot silently rot. This is how a whole-manifest selection stays
+    /// honest without blocking CI on a known gap — SPEC-00 forbids
+    /// de-selecting a case to make a run look better. Each entry needs a
+    /// grouped comment in `harness/KNOWN-MANIFEST-BUGS.md` naming the missing
+    /// feature.
+    #[serde(default)]
+    pub expected_failures: Vec<String>,
+    /// Set when the manifest comes from a corpus *fetched* by
+    /// `crates/harness/scripts/fetch-w3c-suites.sh` (under the gitignored
+    /// `crates/harness/data/`) rather than from a checked-in fixture. Such a
+    /// manifest is legitimately absent in jobs that do not fetch (e.g. the CI
+    /// `tests` job), so the runner reports the suite Skipped with a pointer to
+    /// the script instead of aborting the whole run. Jobs that *do* fetch pass
+    /// `harness run --require-corpus`, which turns the same condition back into
+    /// a hard error so a suite cannot silently stop being graded (SPEC-00
+    /// harness-first rule).
+    #[serde(default)]
+    pub fetched: bool,
+}
+
+/// Match one selection pattern against a case id.
+///
+/// * `"*"`-terminated — substring match on the part before the `*`, so
+///   `"*"` selects a whole manifest and `"entailment/manifest#*"` a whole
+///   sub-suite.
+/// * otherwise — exact match, or a suffix match, so a selection written as
+///   `#agg01` survives moving the workspace root (case ids are absolute
+///   `file://` IRIs).
+pub fn pattern_matches(pattern: &str, id: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => id.contains(prefix),
+        None => id == pattern || id.ends_with(pattern),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

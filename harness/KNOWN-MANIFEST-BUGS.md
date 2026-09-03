@@ -1,8 +1,11 @@
-> This file has two parts: the **OWL 2 RL** entailment cases the Stage-1
-> reasoner does not cover (below), and the **SPARQL query** cases the
-> SPEC-07/SPEC-28 engine does not cover (at the end). Both follow the same
-> rule — a W3C case that is not in `harness/selected.toml` must be listed
-> here with the specific missing capability that gates it.
+> This file has three parts: the **OWL 2 RL** entailment cases the Stage-1
+> reasoner does not cover (below), the **SPARQL query** cases the
+> SPEC-07/SPEC-28 engine does not cover (middle), and the root-cause triage of
+> the **W3C SPARQL 1.1 evaluation suite** (`sparql11-eval`, at the end). All
+> follow the same rule — a W3C case that is not passing must be listed here
+> with the specific missing capability that gates it, whether it is left out
+> of `harness/selected.toml` or (for `sparql11-eval`) still selected and
+> carried in that suite's `expected_failures` allowlist.
 
 # Known-failing W3C OWL 2 RL cases (Stage-1 engine)
 
@@ -466,3 +469,47 @@ set compared alongside the quad set, **and** the fixture format would need to
 represent an empty-but-existing graph (a `GRAPH <g> {}` block parses to zero
 quads and vanishes) — i.e. carry the expected graph set out of band. That is a
 runner + fixture change, gated on the #261 decision, not a bug fix.
+
+# Known-failing W3C SPARQL 1.1 *evaluation* cases (`sparql11-eval`, HDB-128)
+
+`[suites.sparql11-eval]` in `harness/selected.toml` grades the **whole**
+upstream SPARQL 1.1 evaluation manifest tree (`include = ["*"]`) — 547 cases,
+read in place from the fetched corpus under `crates/harness/data/`. Nothing is
+deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
+look better.
+
+Measured on 2026-09-03 with `--engine owlrl`: **374 pass, 133 fail, 40 skip**.
+The 40 skips are test types the harness does not grade at all
+(`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
+report with the type IRI in the reason.
+
+The 133 reds are listed one-by-one in `expected_failures` in
+`harness/selected.toml`, grouped by the same root causes as below. That list is
+an **allowlist, not an exclusion**: a listed case is still selected and still
+executed; a failure becomes a Skip carrying its reason, and a listed case that
+*passes* is reported as a **FAILURE** telling you to drop the line. So the list
+cannot rot, and CI catches regressions in both directions.
+
+## Engine gaps
+
+| # | Root cause | Where |
+|--:|---|---|
+| 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
+| 25 | **Unimplemented builtins**: `BNODE`, `IRI`, `ENCODE_FOR_URI`, `MD5`, `SHA1/256/512`, `STRDT`, `STRLANG`, `UUID`, `STRUUID`, `RAND`, `NOW`, `TZ`, `TIMEZONE`, and the `xsd:` constructor call form. | `functions/`, `aggregates/agg-err-02` |
+| 11 | **Result literals lose their language tag / datatype.** The string builtins (`CONCAT`, `LCASE`, `UCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) and the comparison operators return a plain literal where SPARQL 1.1 §17.4 requires `@lang` / `xsd:boolean` to be carried through. | `functions/`, `project-expression/` |
+| 10 | **Numeric typing** in arithmetic and aggregates: no xsd type promotion (`1.0 + 2` yields `xsd:integer`, not `xsd:decimal`), decimals summed in `f64` (`11.100000000000001`), `CEIL`/`FLOOR`/`ROUND` retype to `xsd:integer`, and `xsd:double` results are not in canonical lexical form (`2E-1` vs `2.0E-1`). | `aggregates/`, `functions/` |
+| 10 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` works; the expression form does not translate. | `exists/`, `negation/`, `subquery/subquery10` |
+| 7 | **`MINUS`.** `translate` has no `Minus` arm. | `negation/` |
+| 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
+| 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
+| 4 | **`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination graph empty**, so the trailing `DROP GRAPH :g2` errors under SPEC-28 D11 (a graph holding no quad does not exist). | `basic-update/` |
+| 2 | **Expression errors do not unbind.** A failed evaluation returns a value instead of an error, so `IF`/`COALESCE` take the wrong branch. | `functions/if02`, `coalesce01` |
+| 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
+
+## Harness gaps (grading, not the engine)
+
+| # | Root cause | Where |
+|--:|---|---|
+| 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
+| 2 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). | `json-res/jsonres01`, `jsonres02` |
+| 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |

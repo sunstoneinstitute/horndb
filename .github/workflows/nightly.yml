@@ -214,6 +214,29 @@ jobs:
             kill "$(cat /tmp/oxigraph-engine.pid)" 2>/dev/null || true
           fi
 
+      - name: W3C conformance suites (real engine)
+        if: always()
+        # SPEC-01 F11 drift signal for the SPARQL 1.1 evaluation suite
+        # (`sparql11-eval`). Its known failures are allowlisted in
+        # harness/selected.toml so the per-PR conformance job stays green;
+        # that makes the *pass count* the thing to watch over time. Every
+        # `harness run` records `passed`/`selected` per suite into $HARNESS_DB,
+        # so the numbers accumulate into the same 90-day trend window as the
+        # SPB series below.
+        run: |
+          set -euo pipefail
+          HARNESS_BIN=./target/release/harness ./crates/harness/scripts/fetch-w3c-suites.sh
+          ./target/release/harness --engine owlrl run --require-corpus
+
+      - name: publish sparql11-eval trend
+        if: always()
+        run: |
+          ./target/release/harness report --suite sparql11-eval --metric passed
+          {
+            ./target/release/harness report \
+              --suite sparql11-eval --metric passed --format markdown
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: prune trend DB to 90 days
         if: always()
         # Keep the cumulative DB (and the uploaded artifact) to a 90-day

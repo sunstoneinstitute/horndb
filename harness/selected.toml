@@ -97,6 +97,212 @@ include = [
     "#syntax-update-bad-02",
 ]
 
+[suites.sparql11-eval]
+# W3C SPARQL 1.1 *evaluation* suite — the whole upstream manifest tree
+# (`mf:QueryEvaluationTest` + `mf:UpdateEvaluationTest`), read straight from
+# the fetched corpus rather than from hand-mirrored fixtures. Run
+# `crates/harness/scripts/fetch-w3c-suites.sh` first; the corpus lives under
+# the gitignored `crates/harness/data/`. `fetched = true` records that: when
+# the manifest is absent the suite reports Skipped (naming the fetch script)
+# and the rest of the selection still grades, so a job that does not fetch —
+# e.g. CI's `tests` job — is unaffected. Jobs that DO fetch (CI conformance,
+# nightly) pass `harness run --require-corpus`, which turns the same missing
+# manifest back into a hard error so this suite cannot silently vanish.
+#
+# `include = ["*"]` selects EVERY case in the tree. SPEC-00's harness-first
+# rule forbids narrowing a suite to make a run look better, so a case that
+# cannot pass today is listed in `expected_failures` below — still selected,
+# still executed, reported as a Skip with its reason, and reported as a
+# FAILURE the moment it starts passing (so the list cannot rot). The grouped
+# root-cause triage is in `harness/KNOWN-MANIFEST-BUGS.md`.
+manifest = "crates/harness/data/w3c-sparql11-tests/sparql11-test-suite/manifest-all.ttl"
+fetched = true
+include = ["*"]
+expected_failures = [
+    # SPARQL entailment regimes (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine
+    # answers under simple entailment only; `sd:entailmentRegime` is not read.
+    # 28 of the 66 entailment cases already pass because their answer does not
+    # need the regime.
+    "data-sparql11/entailment/manifest#paper-sparqldl-Q1",
+    "data-sparql11/entailment/manifest#paper-sparqldl-Q1-rdfs",
+    "data-sparql11/entailment/manifest#paper-sparqldl-Q2",
+    "data-sparql11/entailment/manifest#paper-sparqldl-Q3",
+    "data-sparql11/entailment/manifest#paper-sparqldl-Q4",
+    "data-sparql11/entailment/manifest#parent10",
+    "data-sparql11/entailment/manifest#parent3",
+    "data-sparql11/entailment/manifest#parent4",
+    "data-sparql11/entailment/manifest#parent5",
+    "data-sparql11/entailment/manifest#parent6",
+    "data-sparql11/entailment/manifest#parent7",
+    "data-sparql11/entailment/manifest#parent8",
+    "data-sparql11/entailment/manifest#parent9",
+    "data-sparql11/entailment/manifest#rdf01",
+    "data-sparql11/entailment/manifest#rdfs01",
+    "data-sparql11/entailment/manifest#rdfs02",
+    "data-sparql11/entailment/manifest#rdfs03",
+    "data-sparql11/entailment/manifest#rdfs04",
+    "data-sparql11/entailment/manifest#rdfs05",
+    "data-sparql11/entailment/manifest#rdfs06",
+    "data-sparql11/entailment/manifest#rdfs07",
+    "data-sparql11/entailment/manifest#rdfs09",
+    "data-sparql11/entailment/manifest#rdfs10",
+    "data-sparql11/entailment/manifest#rdfs11",
+    "data-sparql11/entailment/manifest#simple1",
+    "data-sparql11/entailment/manifest#simple2",
+    "data-sparql11/entailment/manifest#simple3",
+    "data-sparql11/entailment/manifest#simple4",
+    "data-sparql11/entailment/manifest#simple5",
+    "data-sparql11/entailment/manifest#simple6",
+    "data-sparql11/entailment/manifest#simple7",
+    "data-sparql11/entailment/manifest#simple8",
+    "data-sparql11/entailment/manifest#sparqldl-02",
+    "data-sparql11/entailment/manifest#sparqldl-03",
+    "data-sparql11/entailment/manifest#sparqldl-10",
+    "data-sparql11/entailment/manifest#sparqldl-11",
+    "data-sparql11/entailment/manifest#sparqldl-12",
+    "data-sparql11/entailment/manifest#sparqldl-13",
+
+    # SERVICE (federated query). No federation client — SPEC-07 non-goal so far.
+    "data-sparql11/service/manifest#service1",
+    "data-sparql11/service/manifest#service2",
+    "data-sparql11/service/manifest#service3",
+    "data-sparql11/service/manifest#service4a",
+    "data-sparql11/service/manifest#service5",
+    "data-sparql11/service/manifest#service6",
+    "data-sparql11/service/manifest#service7",
+
+    # MINUS. `translate` has no `Minus` arm.
+    "data-sparql11/negation/manifest#full-minuend",
+    "data-sparql11/negation/manifest#partial-minuend",
+    "data-sparql11/negation/manifest#set-equals-1",
+    "data-sparql11/negation/manifest#subset-01",
+    "data-sparql11/negation/manifest#subset-02",
+    "data-sparql11/negation/manifest#subset-03",
+    "data-sparql11/negation/manifest#subset-by-exclusion-minus-1",
+
+    # EXISTS / NOT EXISTS used as a FILTER *expression* (the pattern form in
+    # `negation/` works; the expression form does not translate).
+    "data-sparql11/exists/manifest#exists01",
+    "data-sparql11/exists/manifest#exists02",
+    "data-sparql11/exists/manifest#exists03",
+    "data-sparql11/exists/manifest#exists04",
+    "data-sparql11/exists/manifest#exists05",
+    "data-sparql11/negation/manifest#exists-01",
+    "data-sparql11/negation/manifest#exists-02",
+    "data-sparql11/negation/manifest#subset-by-exclusion-nex-1",
+    "data-sparql11/negation/manifest#temporal-proximity-by-exclusion-nex-1",
+    "data-sparql11/subquery/manifest#subquery10",
+
+    # A sub-SELECT or a property path nested inside `GRAPH ?g` (SPEC-28 S3).
+    "data-sparql11/property-path/manifest#pp35",
+    "data-sparql11/subquery/manifest#subquery01",
+    "data-sparql11/subquery/manifest#subquery02",
+    "data-sparql11/subquery/manifest#subquery03",
+    "data-sparql11/subquery/manifest#subquery04",
+    "data-sparql11/subquery/manifest#subquery05",
+
+    # Unimplemented builtin functions: BNODE, IRI, ENCODE_FOR_URI, MD5, SHA1,
+    # SHA256, SHA512, STRDT, STRLANG, UUID, STRUUID, RAND, NOW, TZ, TIMEZONE,
+    # and the `xsd:` constructor call form.
+    "data-sparql11/aggregates/manifest#agg-err-02",
+    "data-sparql11/functions/manifest#bnode01",
+    "data-sparql11/functions/manifest#bnode02",
+    "data-sparql11/functions/manifest#encode01",
+    "data-sparql11/functions/manifest#iri01",
+    "data-sparql11/functions/manifest#md5-01",
+    "data-sparql11/functions/manifest#md5-02",
+    "data-sparql11/functions/manifest#now01",
+    "data-sparql11/functions/manifest#rand01",
+    "data-sparql11/functions/manifest#sha1-01",
+    "data-sparql11/functions/manifest#sha1-02",
+    "data-sparql11/functions/manifest#sha256-01",
+    "data-sparql11/functions/manifest#sha256-02",
+    "data-sparql11/functions/manifest#sha512-01",
+    "data-sparql11/functions/manifest#sha512-02",
+    "data-sparql11/functions/manifest#strdt01",
+    "data-sparql11/functions/manifest#strdt02",
+    "data-sparql11/functions/manifest#strdt03",
+    "data-sparql11/functions/manifest#strlang01",
+    "data-sparql11/functions/manifest#strlang02",
+    "data-sparql11/functions/manifest#strlang03",
+    "data-sparql11/functions/manifest#struuid01",
+    "data-sparql11/functions/manifest#timezone",
+    "data-sparql11/functions/manifest#tz",
+    "data-sparql11/functions/manifest#uuid01",
+
+    # Harness gap, not an engine gap: the runner grades `.srx`/`.srj` results
+    # only. CONSTRUCT graph results (`.ttl`, needing blank-node-isomorphic
+    # graph comparison) and `.csv`/`.tsv` serialisations are not graded yet.
+    "data-sparql11/construct/manifest#constructwhere01",
+    "data-sparql11/construct/manifest#constructwhere02",
+    "data-sparql11/construct/manifest#constructwhere03",
+    "data-sparql11/construct/manifest#constructwhere04",
+    "data-sparql11/csv-tsv-res/manifest#tsv01",
+    "data-sparql11/csv-tsv-res/manifest#tsv02",
+    "data-sparql11/csv-tsv-res/manifest#tsv03",
+    "data-sparql11/subquery/manifest#subquery12",
+    "data-sparql11/subquery/manifest#subquery14",
+
+    # `INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination
+    # graph empty, so the trailing `DROP GRAPH :g2` errors (SPEC-28 D11: a
+    # graph holding no quad does not exist).
+    "data-sparql11/basic-update/manifest#insert-05a",
+    "data-sparql11/basic-update/manifest#insert-data-same-bnode",
+    "data-sparql11/basic-update/manifest#insert-where-same-bnode",
+    "data-sparql11/basic-update/manifest#insert-where-same-bnode2",
+
+    # Upstream `.srx` head quirk: the result header omits a projected variable
+    # that is unbound in every row, so the variable sets differ even though the
+    # rows match.
+    "data-sparql11/aggregates/manifest#agg-empty-group",
+
+    # Result literals lose their language tag / datatype: the string builtins
+    # (CONCAT, LCASE, UCASE, SUBSTR, STRBEFORE, STRAFTER, REPLACE) and the
+    # comparison operators return a plain literal where SPARQL 1.1 §17.4
+    # requires `@lang` / `xsd:boolean` to be carried through.
+    "data-sparql11/functions/manifest#concat02",
+    "data-sparql11/functions/manifest#lcase01",
+    "data-sparql11/functions/manifest#replace01",
+    "data-sparql11/functions/manifest#strafter01a",
+    "data-sparql11/functions/manifest#strafter02",
+    "data-sparql11/functions/manifest#strbefore01a",
+    "data-sparql11/functions/manifest#strbefore02",
+    "data-sparql11/functions/manifest#substring01",
+    "data-sparql11/functions/manifest#substring02",
+    "data-sparql11/functions/manifest#ucase01",
+    "data-sparql11/project-expression/manifest#projexp01",
+
+    # Numeric typing in arithmetic and aggregates: no xsd type promotion
+    # (`1.0 + 2` yields xsd:integer, not xsd:decimal), decimals are summed in
+    # f64 (`11.100000000000001`), CEIL/FLOOR/ROUND retype to xsd:integer, and
+    # xsd:double results are not in canonical lexical form (`2E-1` vs `2.0E-1`).
+    "data-sparql11/aggregates/manifest#agg-avg-02",
+    "data-sparql11/aggregates/manifest#agg-err-01",
+    "data-sparql11/aggregates/manifest#agg-min-02",
+    "data-sparql11/aggregates/manifest#agg-sum-01",
+    "data-sparql11/aggregates/manifest#agg-sum-02",
+    "data-sparql11/functions/manifest#ceil01",
+    "data-sparql11/functions/manifest#floor01",
+    "data-sparql11/functions/manifest#plus-1",
+    "data-sparql11/functions/manifest#plus-2",
+    "data-sparql11/functions/manifest#round01",
+
+    # Expression errors do not leave the variable unbound: a failed evaluation
+    # returns a value instead of an error, so `IF`/`COALESCE` take the wrong
+    # branch.
+    "data-sparql11/functions/manifest#coalesce01",
+    "data-sparql11/functions/manifest#if02",
+
+    # Blank-node labels are compared literally. Grading these needs a
+    # bijection between the answer's and the expected result's blank nodes
+    # (SPARQL 1.1 result-set isomorphism).
+    "data-sparql11/json-res/manifest#jsonres01",
+    "data-sparql11/json-res/manifest#jsonres02",
+
+    # Property-path evaluation: `pp16` returns 13 of the 15 expected rows.
+    "data-sparql11/property-path/manifest#pp16",
+]
+
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).

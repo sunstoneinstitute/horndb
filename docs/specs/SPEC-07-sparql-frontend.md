@@ -75,6 +75,17 @@ The mode is selected per-query via a non-standard pragma or globally by configur
 
 1. 100% pass on W3C SPARQL 1.1 Query Test Suite, default-entailment ("simple") regime.
 2. 100% pass on W3C SPARQL 1.1 Entailment Regimes test suite, OWL 2 RL/RDF regime.
+
+   Criteria 1 and 2 are graded by the `sparql11-eval` suite in
+   `harness/selected.toml` — the whole upstream query + update evaluation
+   manifest tree (547 cases, `include = ["*"]`), run by CI's conformance job.
+   Both criteria are met when that suite's `expected_failures` allowlist is
+   empty. Baseline at the time the suite was wired up (2026-09-03): 374 pass,
+   133 fail, 40 not-graded test types; every red is triaged by root cause in
+   `harness/KNOWN-MANIFEST-BUGS.md`, and the 38 `entailment/` reds are what
+   gates criterion 2 specifically. The nightly workflow charts the pass count
+   (`harness report --suite sparql11-eval --metric passed`) so the gap to 100%
+   is visible over time.
 3. LDBC SPB SF3 read workload: geometric-mean latency ≤2× GraphDB Enterprise on identical hardware.
 4. Sustained 10K simple-INSERT/sec on warm LUBM-8000 with full SPEC-06 incremental maintenance running.
 5. EXPLAIN on a representative recursive query (`subClassOf+ * 5`) clearly shows the chosen mode (materialized vs backward) and cardinality estimates.

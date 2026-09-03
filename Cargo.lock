@@ -1299,6 +1299,7 @@ dependencies = [
  "clap",
  "hex",
  "horndb-owlrl",
+ "horndb-sparql",
  "insta",
  "oxigraph",
  "oxrdf",

@@ -11,15 +11,21 @@ use oxttl::NTriplesParser;
 use crate::outcome::{Outcome, Report, Status};
 use crate::rdf::load_turtle_dataset;
 use crate::reasoner::Reasoner;
-use crate::selected::Selected;
+use crate::selected::{pattern_matches, Selected};
 use crate::testcase::{Suite, TestCase, TestKind};
 
 /// Loads each selected suite's manifest, filters down to the selected
 /// IDs, runs each through `engine`, and produces a [`Report`].
+/// `require_corpus` controls what happens when a suite marked
+/// `fetched = true` in `selected.toml` has no manifest on disk: `false`
+/// (default) reports that suite Skipped and grades the rest of the selection;
+/// `true` (CI's conformance / nightly jobs, `harness run --require-corpus`)
+/// makes it a hard error, so a fetched suite cannot silently stop being graded.
 pub fn run_selected(
     engine: &mut dyn Reasoner,
     selected: &Selected,
     workspace_root: &Path,
+    require_corpus: bool,
     manifest_loader: &dyn Fn(&Path, Suite) -> Result<Vec<TestCase>>,
 ) -> Result<Report> {
     let mut report = Report::new();
@@ -37,6 +43,11 @@ pub fn run_selected(
             // `NegativeSyntaxTest11` / `*UpdateSyntaxTest11`); each case is
             // graded by `spargebra` accept/reject — no data, no reasoner.
             "sparql11-syntax" => Suite::Sparql11Syntax,
+            // W3C SPARQL 1.1 query + update *evaluation* suite, read from the
+            // upstream manifest tree fetched into `crates/harness/data/`.
+            // Selected whole (`include = ["*"]`); known gaps live in the
+            // suite's `expected_failures`, never in a shrunken `include`.
+            "sparql11-eval" => Suite::Sparql11Eval,
             // W3C RDF 1.2 N-Triples syntax tests. The manifest uses the
             // rdft: vocabulary (`TestNTriplesPositiveSyntax` /
             // `TestNTriplesNegativeSyntax`), parsed by the same
@@ -58,6 +69,24 @@ pub fn run_selected(
             }
         };
         let manifest_path = workspace_root.join(&suite_entry.manifest);
+        if suite_entry.fetched && !manifest_path.exists() {
+            let hint = format!(
+                "corpus not fetched: {} is missing — run \
+                 crates/harness/scripts/fetch-w3c-suites.sh",
+                manifest_path.display(),
+            );
+            if require_corpus {
+                anyhow::bail!("suite {suite_name}: {hint}");
+            }
+            report.push(Outcome {
+                test_id: format!("<suite:{suite_name}>"),
+                suite: suite_name.clone(),
+                status: Status::Skipped,
+                reason: Some(format!("{hint} (--require-corpus makes this an error)")),
+                duration_ms: 0,
+            });
+            continue;
+        }
         let cases = manifest_loader(&manifest_path, suite)
             .with_context(|| format!("loading manifest {}", manifest_path.display()))?;
         for case in &cases {
@@ -67,7 +96,7 @@ pub fn run_selected(
             if !suite_entry
                 .include
                 .iter()
-                .any(|id| id == &case.id || case.id.ends_with(id.as_str()))
+                .any(|p| pattern_matches(p, &case.id))
             {
                 continue;
             }
@@ -79,10 +108,42 @@ pub fn run_selected(
                 reason: Some(format!("harness error: {e:#}")),
                 duration_ms: start.elapsed().as_millis() as u64,
             });
-            report.push(outcome);
+            let known = suite_entry
+                .expected_failures
+                .iter()
+                .any(|p| pattern_matches(p, &case.id));
+            report.push(apply_expected_failure(outcome, known));
         }
     }
     Ok(report)
+}
+
+/// Reconcile an outcome with the suite's `expected_failures` list.
+///
+/// A known failure becomes a Skip (CI stays green on a documented gap); a
+/// known failure that has started *passing* becomes a Failure, so the list
+/// must be pruned when the gap closes. Both directions of drift are therefore
+/// caught, which a plain pass-count floor would not do.
+fn apply_expected_failure(mut o: Outcome, known: bool) -> Outcome {
+    if !known {
+        return o;
+    }
+    match o.status {
+        Status::Failed => {
+            let why = o.reason.take().unwrap_or_default();
+            o.status = Status::Skipped;
+            o.reason = Some(format!("known failure: {why}"));
+        }
+        Status::Passed => {
+            o.status = Status::Failed;
+            o.reason = Some(
+                "listed in expected_failures but passed — drop it from harness/selected.toml"
+                    .into(),
+            );
+        }
+        Status::Skipped => {}
+    }
+    o
 }
 
 fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
@@ -212,6 +273,39 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 Err(_) => (Status::Passed, None),
             }
         }
+        TestKind::SparqlQueryEval {
+            query,
+            data,
+            graph_data,
+            result,
+        } => match crate::sparql_eval::catch_panic(|| {
+            crate::sparql_eval::run_query_eval(query, data.as_deref(), graph_data, result)
+        })? {
+            None => (Status::Passed, None),
+            Some(reason) => (Status::Failed, Some(reason)),
+        },
+        TestKind::SparqlUpdateEval {
+            request,
+            data,
+            graph_data,
+            result_data,
+            result_graph_data,
+        } => match crate::sparql_eval::catch_panic(|| {
+            crate::sparql_eval::run_update_eval(
+                request,
+                data.as_deref(),
+                graph_data,
+                result_data.as_deref(),
+                result_graph_data,
+            )
+        })? {
+            None => (Status::Passed, None),
+            Some(reason) => (Status::Failed, Some(reason)),
+        },
+        TestKind::Unsupported { type_iri } => (
+            Status::Skipped,
+            Some(format!("test type not graded by this harness: {type_iri}")),
+        ),
         TestKind::SparqlAsk {
             query,
             data,
@@ -347,6 +441,8 @@ mod tests {
             crate::selected::SuiteEntry {
                 manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
+                expected_failures: vec![],
+                fetched: false,
             },
         );
         let selected = Selected {
@@ -358,7 +454,7 @@ mod tests {
         };
 
         let mut engine = StubReasoner::new();
-        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
             crate::manifest::parse(p, s)
         })
         .unwrap();
@@ -394,6 +490,73 @@ mod tests {
             by_id("negative-subclass-no-instance").status,
             Status::Passed
         );
+    }
+
+    /// A suite marked `fetched = true` whose corpus has not been fetched must
+    /// not abort the whole run: it reports Skipped (naming the fetch script)
+    /// and every other selected suite still grades. With `require_corpus` the
+    /// same condition is a hard error, so a job that *does* fetch cannot go
+    /// green on a suite that silently disappeared.
+    #[test]
+    fn missing_fetched_corpus_skips_without_require_corpus_and_errors_with_it() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            "sparql11-eval".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/data/nope/manifest-all.ttl".to_string(),
+                include: vec!["*".to_string()],
+                expected_failures: vec![],
+                fetched: true,
+            },
+        );
+        // A checked-in suite alongside it: it must still be graded.
+        suites.insert(
+            "owl2".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
+                include: vec!["*".to_string()],
+                expected_failures: vec![],
+                fetched: false,
+            },
+        );
+        let selected = Selected {
+            version: 1,
+            suites,
+            removed: vec![],
+            sparql_query: None,
+            sparql_update: None,
+        };
+
+        let mut engine = StubReasoner::new();
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .expect("a missing fetched corpus must not abort the run");
+        let skipped = report
+            .outcomes
+            .iter()
+            .find(|o| o.test_id == "<suite:sparql11-eval>")
+            .expect("missing corpus must be reported as its own outcome");
+        assert_eq!(skipped.status, Status::Skipped);
+        assert!(
+            skipped
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("fetch-w3c-suites.sh"),
+            "skip reason must name the fetch script, got {:?}",
+            skipped.reason,
+        );
+        assert!(
+            report.outcomes.len() > 1,
+            "the other selected suites must still be graded",
+        );
+
+        let err = run_selected(&mut engine, &selected, &fixtures(), true, &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .expect_err("--require-corpus must turn a missing corpus into a hard error");
+        assert!(format!("{err:#}").contains("corpus not fetched"));
     }
 
     #[test]
@@ -477,6 +640,8 @@ mod tests {
             crate::selected::SuiteEntry {
                 manifest: "crates/harness/tests/fixtures/sparql11-syntax/manifest.ttl".to_string(),
                 include: cases.iter().map(|c| c.id.clone()).collect(),
+                expected_failures: vec![],
+                fetched: false,
             },
         );
         let selected = Selected {
@@ -488,7 +653,7 @@ mod tests {
         };
 
         let mut engine = StubReasoner::new();
-        let report = run_selected(&mut engine, &selected, &fixtures(), &|p, s| {
+        let report = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
             crate::manifest::parse(p, s)
         })
         .unwrap();
