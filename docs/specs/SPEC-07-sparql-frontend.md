@@ -80,8 +80,8 @@ The mode is selected per-query via a non-standard pragma or globally by configur
    `harness/selected.toml` — the whole upstream query + update evaluation
    manifest tree (547 cases, `include = ["*"]`), run by CI's conformance job.
    Both criteria are met when that suite's `expected_failures` allowlist is
-   empty. Baseline at the time the suite was wired up (2026-09-02): 372 pass,
-   135 fail, 40 not-graded test types; every red is triaged by root cause in
+   empty. Baseline at the time the suite was wired up (2026-09-03): 374 pass,
+   133 fail, 40 not-graded test types; every red is triaged by root cause in
    `harness/KNOWN-MANIFEST-BUGS.md`, and the 38 `entailment/` reds are what
    gates criterion 2 specifically. The nightly workflow charts the pass count
    (`harness report --suite sparql11-eval --metric passed`) so the gap to 100%

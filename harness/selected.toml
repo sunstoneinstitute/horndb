@@ -251,12 +251,6 @@ expected_failures = [
     "data-sparql11/basic-update/manifest#insert-where-same-bnode",
     "data-sparql11/basic-update/manifest#insert-where-same-bnode2",
 
-    # Bare `WITH <g>` scoping. Already fixed on the HDB-129 branch (PR #330);
-    # drop these two lines when that merges — the runner reports a listed
-    # case that starts passing as a FAILURE, so it cannot be forgotten.
-    "data-sparql11/delete/manifest#dawg-delete-with-02",
-    "data-sparql11/delete/manifest#dawg-delete-with-06",
-
     # Upstream `.srx` head quirk: the result header omits a projected variable
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.

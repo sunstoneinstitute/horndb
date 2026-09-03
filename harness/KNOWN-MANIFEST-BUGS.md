@@ -478,12 +478,12 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-02 with `--engine owlrl`: **372 pass, 135 fail, 40 skip**.
+Measured on 2026-09-03 with `--engine owlrl`: **374 pass, 133 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason.
 
-The 135 reds are listed one-by-one in `expected_failures` in
+The 133 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -504,7 +504,6 @@ cannot rot, and CI catches regressions in both directions.
 | 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
 | 4 | **`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination graph empty**, so the trailing `DROP GRAPH :g2` errors under SPEC-28 D11 (a graph holding no quad does not exist). | `basic-update/` |
 | 2 | **Expression errors do not unbind.** A failed evaluation returns a value instead of an error, so `IF`/`COALESCE` take the wrong branch. | `functions/if02`, `coalesce01` |
-| 2 | **Bare `WITH <g>` scoping.** Already fixed on the HDB-129 branch (PR #330); drop the two lines when it merges — the runner turns the resulting unexpected pass into a failure, so it cannot be forgotten. | `delete/dawg-delete-with-02`, `-06` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 
 ## Harness gaps (grading, not the engine)
