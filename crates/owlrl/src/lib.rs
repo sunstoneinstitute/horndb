@@ -67,8 +67,8 @@ pub const COMPILED_RULES_SOURCE: &str =
     include_str!(concat!(env!("OUT_DIR"), "/generated_rules.rs"));
 
 pub use engine::{
-    materialize, materialize_with, reset_and_materialize, EqRepPStrategy, MaterializeOpts,
-    ParallelStrategy, PhaseTimings, Stats,
+    materialize, materialize_with, reset_and_materialize, EqRepPStrategy, FiringStrategy,
+    MaterializeOpts, ParallelStrategy, PhaseTimings, Stats,
 };
 pub use integration::{BackendChoice, Engine, StringProofTree};
 pub use provenance::ProofTree;

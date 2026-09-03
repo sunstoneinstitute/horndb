@@ -95,7 +95,19 @@ fn show_rule(id: &str) -> Result<(), String> {
             "internal error: could not locate `fire_{sanitized}` in compiled source"
         ));
     };
+    print_block(fn_start)?;
+    // A compiled (non-delegated) rule splits into the `fire_<id>` wrapper,
+    // which picks the naïve / semi-naïve variants, and the `fire_<id>_body`
+    // join it calls. Print both so the reader sees the actual loops.
+    if let Some(body_start) = COMPILED_RULES_SOURCE.find(&format!("fn fire_{sanitized}_body(")) {
+        println!();
+        print_block(body_start)?;
+    }
+    Ok(())
+}
 
+/// Print the fn starting at `fn_start`, with its attributes and doc comment.
+fn print_block(fn_start: usize) -> Result<(), String> {
     // Walk backwards to include any leading `#[...]` attributes and the
     // `/// Compiled OWL 2 RL rule: <id>` doc comment.
     let preamble_start = walk_back_to_block_start(COMPILED_RULES_SOURCE, fn_start);
