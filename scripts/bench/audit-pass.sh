@@ -20,7 +20,8 @@
 #   insert_retract  #332 HDB-122 — write latency under a concurrent reader
 #   dict_gc         #333 HDB-121 — dict_gc_churn
 #   view_derivation #337 HDB-72  — SPEC-29 view derivation (PLAN-29-01 T7)
-#   trainmarks      #334 HDB-120 — serving footprint + q1-q6, direct-source A/B
+#   trainmarks      #334 HDB-120 — q1-q6 timings, direct-source A/B
+#   footprint       #334 HDB-120 — serving footprint, isolated (--mem-only)
 #   spb             #334 HDB-120 — SPB-256 aggregation-qps, direct-source A/B
 #
 # Deliberately NOT `set -e`: a leg that dies must leave the others running. Each
@@ -35,7 +36,7 @@ OUT="$REPO_ROOT/bench-out"
 mkdir -p "$OUT"
 SUMMARY="$OUT/SUMMARY.md"
 
-ALL_LEGS="lubm backend stats insert_retract dict_gc view_derivation trainmarks spb"
+ALL_LEGS="lubm backend stats insert_retract dict_gc view_derivation trainmarks footprint spb"
 BENCHES="${BENCHES:-$ALL_LEGS}"
 
 # Persistent scratch on the runner's own disk. The Actions checkout is wiped by
@@ -155,12 +156,17 @@ summarize_lubm() {
   local log="$OUT/lubm.log"
   [ -f "$log" ] || return 0
   # Each run line is a flat JSON object; pull the phase timings out of it.
+  # Label the corpus that actually ran. LUBM-1 generation needs java + Jena
+  # `riot`; neither is on the runner, so the leg falls back to the synthetic
+  # taxonomy corpus. Reporting that as "lubm-1" would be a false record.
+  local corpus="lubm-1"
+  grep -q "falling back to taxonomy" "$log" && corpus="taxonomy d12/40k (LUBM-1 generator unavailable)"
   for k in reason_ms apply_ms total_ms inferred; do
     local med
     med=$(grep -o "\"$k\":[0-9.]*" "$log" | cut -d: -f2 | sort -g | awk '{a[NR]=$1} END{if(NR)print a[int((NR+1)/2)]}')
-    [ -n "$med" ] && row "lubm-1 (HornDB only)" "$k (median of 3)" "$med" "${k##*_}"
+    [ -n "$med" ] && row "$corpus (HornDB only)" "$k (median of 3)" "$med" "${k##*_}"
   done
-  grep -q "NOT MEASURED" "$log" && row "lubm-1 (HornDB only)" "RDFox column" "not measured — RDFox absent on runner" ""
+  grep -q "NOT MEASURED" "$log" && row "$corpus (HornDB only)" "RDFox column" "not measured — RDFox absent on runner" ""
 }
 
 # --------------------------------------------------------------------------
@@ -188,7 +194,7 @@ summarize_backend() {
   local log="$OUT/backend.log"
   [ -f "$log" ] || return 0
   for backend in rulefiring graphblas; do
-    for k in reason_ms total_ms inferred; do
+    for k in closure_backend_ms reason_ms total_ms inferred; do
       local med
       med=$(grep "^$backend run" "$log" | grep -o "\"$k\":[0-9.]*" | cut -d: -f2 \
             | sort -g | awk '{a[NR]=$1} END{if(NR)print a[int((NR+1)/2)]}')
@@ -266,12 +272,6 @@ leg_trainmarks() {
 }
 
 summarize_trainmarks() {
-  # The footprint line goes to stderr, which is folded into the leg log.
-  awk '/^===== MODE=/ { mode = substr($2, 6) }
-       /serving footprint/ { print mode "\t" $0 }' "$OUT/trainmarks.log" 2>/dev/null \
-    | while IFS=$'\t' read -r mode line; do
-        row "trainmarks/$mode" "serving footprint" "${line#*: }" ""
-      done
   local mode
   for mode in vec direct; do
     [ -f "$OUT/trainmarks-$mode.json" ] || continue
@@ -288,6 +288,38 @@ for r in rows:
     print(f'| trainmarks/{mode} | {r.get("scale")} {r.get("operation")} | {val} | {unit} |')
 PY
   done
+}
+
+# --------------------------------------------------------------------------
+# #334 — serving footprint, isolated.
+#
+# Separate from the `trainmarks` leg on purpose. The full trainmarks run builds
+# a second store for the read_ntriples timing and drops it, and snmalloc does
+# not return freed arenas to the OS -- so an RSS sample taken after that run is
+# a whole-process high-water mark, not the memory a served store occupies.
+# `--mem-only` loads once, snapshots once, runs the read queries, then samples.
+# --------------------------------------------------------------------------
+leg_footprint() {
+  cargo build --release -p horndb-bench-trainmarks || return 1
+  local driver="$REPO_ROOT/target/release/bench-trainmarks"
+  local work="$PERSIST/trainmarks"
+  [ -d "$work/data" ] || { echo ">> no corpus at $work/data — run the trainmarks leg first"; return 1; }
+  export HORNDB_LOAD_THREADS="${HORNDB_LOAD_THREADS:-1}"
+  local mode
+  for mode in vec direct; do
+    echo "===== MODE=$mode ====="
+    if [ "$mode" = direct ]; then export HORNDB_DIRECT_SOURCE=1; else unset HORNDB_DIRECT_SOURCE; fi
+    "$driver" --data-dir "$work/data" --queries-dir "$work/queries" \
+      --scale xlarge --out "$OUT/footprint-$mode.json" --timeout-secs 1800 --mem-only || return 1
+  done
+}
+
+summarize_footprint() {
+  awk '/^===== MODE=/ { mode = substr($2, 6) }
+       /serving footprint/ { print mode "\t" $0 }' "$OUT/footprint.log" 2>/dev/null \
+    | while IFS=$'\t' read -r mode line; do
+        row "footprint/$mode" "serving footprint (isolated, --mem-only)" "${line#*: }" ""
+      done
 }
 
 # Block until `serve` reports it has finished loading. See the call site.
@@ -368,6 +400,7 @@ run_leg insert_retract  leg_insert_retract  || true
 run_leg dict_gc         leg_dict_gc         || true
 run_leg view_derivation leg_view_derivation || true
 run_leg trainmarks      leg_trainmarks      || true
+run_leg footprint       leg_footprint       || true
 run_leg spb             leg_spb             || true
 
 echo "== summarizing" >&2
@@ -378,6 +411,7 @@ want insert_retract  && { criterion_rows insert_retract "$OUT/insert_retract.log
 want dict_gc         && { criterion_rows dict_gc "$OUT/dict_gc.log"; criterion_samples dict_gc target/criterion/churn_4x1k_no_gc target/criterion/churn_4x1k_compact_gc; }
 want view_derivation && summarize_view_derivation
 want trainmarks      && summarize_trainmarks
+want footprint       && summarize_footprint
 want spb             && summarize_spb
 
 echo >> "$SUMMARY"
