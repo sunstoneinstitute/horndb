@@ -204,7 +204,7 @@ use horndb_wcoj::pattern::{Bgp as WBgp, Term as WTerm, TriplePattern as WPattern
 use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
 use horndb_wcoj::source::TripleSource;
-use horndb_wcoj::stats::SnapshotStats;
+use horndb_wcoj::stats::{SnapshotStats, Stats, ZeroStats};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -1662,6 +1662,17 @@ impl HornBackend {
     /// field) — the pinned version on a read view, the latest committed state
     /// on the writable backend. A hit costs a hash lookup; a miss is a full
     /// snapshot scan and is counted and timed as `horndb_sparql_stats_rebuild`.
+    /// Statistics the join planner reads for `source`: the cached per-scope
+    /// [`SnapshotStats`] for a copied snapshot. A direct store source has no
+    /// per-predicate counts, so it gets [`ZeroStats`] and the planner routes
+    /// structurally (one WCOJ node in degree order).
+    fn planning_stats(&self, scope: &SnapshotScope, source: &QuerySource) -> Arc<dyn Stats> {
+        match source {
+            QuerySource::Copy(vec) => self.snapshot_stats(scope, vec),
+            QuerySource::Direct(direct) => Arc::new(ZeroStats::new(direct.total_triples() as u64)),
+        }
+    }
+
     fn snapshot_stats(
         &self,
         scope: &SnapshotScope,
@@ -2125,6 +2136,7 @@ impl Executor for HornBackend {
             &snapshot,
             &bgp,
             &Planner::default(),
+            self.planning_stats(&resolved, &snapshot).as_ref(),
             crate::exec::cancel::current(),
         ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
@@ -2385,6 +2397,7 @@ impl Executor for HornBackend {
             &snapshot,
             &bgp,
             &Planner::default(),
+            self.planning_stats(&resolved, &snapshot).as_ref(),
             crate::exec::cancel::current(),
         );
         loop {
@@ -2607,6 +2620,7 @@ impl Executor for HornBackend {
             &snapshot,
             &bgp,
             &Planner::default(),
+            self.planning_stats(&resolved, &snapshot).as_ref(),
             crate::exec::cancel::current(),
         ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
@@ -2731,6 +2745,7 @@ impl Executor for HornBackend {
             &snapshot,
             &bgp,
             &Planner::default(),
+            self.planning_stats(&resolved, &snapshot).as_ref(),
             crate::exec::cancel::current(),
         ) {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;

@@ -384,9 +384,12 @@ lazy tries); keep the `JoinSpec` IR from foreclosing that continuum (no hard bin
 switch). Whole-query GHD decomposition (EmptyHeaded) and adaptive runtime reordering
 (ADOPT) are later items, gated on measured evidence (§6 phase 5).
 
-This stage is where `Planner::choose` and `ExecutionPlan::for_bgp` in `horndb-wcoj` grow
-their real bodies; the SPARQL `JoinPlanning` pass calls into that WCOJ planner for the
-per-BGP `JoinSpec`, keeping the crate dependency direction (`sparql` → `wcoj`) intact.
+This stage is where `Planner::choose` in `horndb-wcoj` grows its real body (phase 4,
+HDB-46). As built, the per-BGP `JoinSpec` is produced at execution time inside
+`HornBackend` — `Executor::for_bgp` takes the `Stats` seam directly — not by a
+registered SPARQL `JoinPlanning` pass; `PassId::JoinPlanning` stays reserved for the
+algebra-level (non-BGP) join ordering, which is not yet built. The crate dependency
+direction (`sparql` → `wcoj`) is unchanged. See §8 #3.
 
 ### 5.6 Runtime filters (sideways information passing) — later phase
 
@@ -464,6 +467,9 @@ first so everything else has a home.
 4. **Cost-based `JoinPlanning`.** Structural cyclic-core hybrid + the i-cost/binary-cost
    connected-subset DP with greedy fallback, AGM guard, per-subplan `ExecutionPlan`,
    late build-side pass. Retires `wcoj_cutover == 4` as a hard rule.
+   **Implemented (HDB-46, `PLAN-23-04`, 2026-09-04)** in `horndb-wcoj`
+   (`planner.rs`, `cost.rs`, `plan.rs::JoinSpec`); the fixed cutover survives only
+   as the `HORNDB_WCOJ_CUTOVER` bisection aid.
 5. **Later (optimizer):** sketches (quantile/count-min) and degree-sequence bound
    tightening (SafeBound/LpBound) behind `Stats`; runtime filters (§5.6); ML
    `PlanAdvisor` validation loop (§5.7); the evidence-gated Free Join / COLT execution
@@ -520,10 +526,21 @@ first so everything else has a home.
 - **AGM cost calibration.** The fractional-edge-cover bound gives an upper bound, not an
   expected size; how loose is it in practice on HornDB workloads, and does it need an
   empirical correction to sit on one scale with the i-cost/binary-cost terms?
+  **Resolved (phase 4, HDB-46): no calibration needed.** The raw bound is never a cost
+  term. `CostModel::card` uses it only as a sound cap on the estimator's expected size
+  (`min(estimate, agm_bound)`), so a loose bound is harmless and a tight one only
+  corrects an over-estimate. It is computed by enumerating half-integral edge covers
+  (exact for arity ≤ 3 hyperedges), capped at 10 patterns.
 - **Where the WCOJ planner ends and the SPARQL planner begins.** `JoinSpec` production
   for a BGP lives in `horndb-wcoj`; the surrounding algebra ordering lives in
   `horndb-sparql`. The exact API between them (does `wcoj` see the `Stats` seam directly,
   or only a digested per-pattern estimate?) needs pinning in the implementation plan.
+  **Resolved (phase 4, HDB-46): `wcoj` sees `Stats` directly.**
+  `Planner::choose(&Bgp, &dyn Stats) -> JoinSpec` and
+  `Executor::for_bgp(source, bgp, planner, &dyn Stats, cancel)`; `HornBackend` passes its
+  cached per-scope `SnapshotStats` (or `ZeroStats` for the direct-store path, which
+  routes structurally). The SPARQL side registers no `JoinPlanning` pass yet; when
+  algebra-level join ordering lands it reuses the same `Stats` object.
 - **Recursive-fixpoint costing (§5.8).** The optimizer's cost model assumes
   non-recursive AGM/hash costing; reasoning rewrites introduce recursion
   (transitive closure, rule fixpoints). How do cost, cardinality, and termination

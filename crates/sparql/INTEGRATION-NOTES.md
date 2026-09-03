@@ -1003,3 +1003,25 @@ caller and the next phases need to know:
   (`harness/selected.toml` `[sparql_update]`; a `rules.txt` in the case dir
   names the rules). All state-driven, no sleeps.
 
+## Cost-based per-BGP join planning (SPEC-23 Phase 4, HDB-46, 2026-09-04)
+
+`HornBackend` hands the join planner real statistics: every
+`WcojExecutor::for_bgp` call (`scan_bgp`, `scan_bgp_ids`, `count_bgp`,
+`count_bgp_grouped`) passes `planning_stats(&resolved, &snapshot)` — the cached
+per-scope `SnapshotStats` for a copied snapshot, `ZeroStats` for the
+`HORNDB_DIRECT_SOURCE` path (no per-predicate counts, so the planner routes
+structurally: one WCOJ node in degree order, the pre-HDB-46 plan). The plan
+itself (`JoinSpec`) is chosen in `horndb-wcoj`; see its `INTEGRATION-NOTES.md`.
+
+Consequences on this side:
+
+- Output column order of a BGP is the planner's variable order, not the
+  pattern's textual order. Every consumer already resolves columns by name
+  (`v<idx>` via `schema.column_with_name`), so nothing here depends on
+  position — keep it that way.
+- `PassId::JoinPlanning` is still unregistered. BGP planning happens at
+  execution time because that is where the `Stats` object lives; a logical
+  pass for algebra-level (non-BGP) join ordering, and EXPLAIN display of the
+  chosen `JoinSpec`, are follow-ups.
+- `HORNDB_WCOJ_CUTOVER=<n>` (read once per process) restores the fixed
+  pattern-count cutover for an A/B on one build.

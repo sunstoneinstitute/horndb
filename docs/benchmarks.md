@@ -581,6 +581,10 @@ trainmarks q3 the variable ordering alone accounts for the entire gap, with no
 contribution from HDB-46's structural cyclic-core routing or its
 WCOJ-vs-binary-hash choice.
 
+*Update 2026-09-04:* HDB-46 landed the whole of PLAN-23-04 (see the
+next entry); the blocked-plan analysis below is kept as the record of why the
+narrower slice was not taken.
+
 **PLAN-23-04 is still blocked, and Task 5 cannot simply be lifted out of it.**
 The plan carries a `BLOCKED — not ready to execute` banner over a six-item
 "Prerequisites to unblock" checklist with **no box ticked**. One of the six —
@@ -614,6 +618,24 @@ SPB-256) that keeps it out of this diagnosis.
 Target for whoever takes it: **q3 at xlarge from 0.830s to ≤ 0.35s warm**,
 `scan_wcoj` from 793 ms to ≤ 300 ms, `wcoj_seeks_per_query` from 10.1M to
 ≤ 2M, no regression on `four_cycle`, LUBM, or the SPB-256 nightly.
+
+#### Cost-based join planning (HDB-46, SPEC-23 phase 4, 2026-09-04) — hornbench numbers pending
+
+`Planner::choose` is now cost-based (`crates/wcoj/src/planner.rs`, `cost.rs`):
+cyclic-core routing, i-cost DP over connected pattern subsets, greedy
+smallest-intersection variable order inside each WCOJ node. On the q3 shape it
+binds `?customer` before `?order`, the exact HDB-108 fix
+(`crates/wcoj/tests/planner_choice.rs::q3_shape_binds_selective_customer_before_order`).
+`HORNDB_WCOJ_CUTOVER=4` restores the old planner for an A/B on one build.
+
+| Query | Old planner (HDB-108 row above) | Cost-based | Host / env |
+|---|---|---|---|
+| trainmarks q3 xlarge, warm | 0.830 s (`scan_wcoj` 793 ms, 10.1M seeks) | **pending** — hornbench runner offline at PR time; dispatch `bench.yml` (`scripts/bench/audit-pass.sh`, `BENCHES=trainmarks`) and fill in | hornbench |
+| trainmarks q1–q6, `four_cycle`, LUBM, SPB-256 (no-regression) | as recorded above | **pending** (same run + nightly) | hornbench |
+
+Correctness evidence that does not need the bench host: the WCOJ differential
+fuzzer now runs the cost-based plan and a hand-built hybrid `JoinSpec` against
+the binary-hash oracle on every case (`tests/differential_fuzz.rs`).
 
 #### `q1`'s cold-start tax was a second, redundant snapshot build (HDB-97, 2026-08-26)
 

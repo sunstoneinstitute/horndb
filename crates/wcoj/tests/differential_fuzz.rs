@@ -16,10 +16,13 @@ use proptest::prelude::*;
 use horndb_wcoj::cancel::CancelToken;
 use horndb_wcoj::executor::binary_hash::BinaryHashExecutor;
 use horndb_wcoj::executor::wcoj::WcojExecutor;
+use horndb_wcoj::executor::Executor;
 use horndb_wcoj::ids::{TermId, Triple};
 use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
-use horndb_wcoj::plan::{ExecutionPlan, PlanKind};
+use horndb_wcoj::plan::{ExecutionPlan, JoinSpec, PlanKind};
+use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
+use horndb_wcoj::stats::SnapshotStats;
 
 const N_VERTICES: u64 = 30;
 const PREDICATES: &[u64] = &[100, 101, 102];
@@ -72,6 +75,77 @@ fn collect_rows(
         }
     }
     out
+}
+
+/// A hand-built hybrid plan: the first two non-ground patterns as one WCOJ
+/// node, hash-joined with a left-deep chain of scans over the rest (ground
+/// patterns included). Exercises every `JoinSpec` node kind of the tree
+/// evaluator, and a cross product when the node and the chain share no var.
+fn hybrid_spec(bgp: &Bgp) -> Option<JoinSpec> {
+    let live: Vec<usize> = (0..bgp.patterns.len())
+        .filter(|&i| !bgp.patterns[i].is_ground())
+        .collect();
+    if live.len() < 2 {
+        return None;
+    }
+    let node = &live[..2];
+    let sub = Bgp::new(node.iter().map(|&i| bgp.patterns[i]).collect());
+    let wcoj = JoinSpec::Wcoj {
+        patterns: node.to_vec(),
+        var_order: sub.variables(),
+    };
+    let rest = (0..bgp.patterns.len()).filter(|i| !node.contains(i));
+    Some(match JoinSpec::left_deep(rest) {
+        None => wcoj,
+        Some(chain) => JoinSpec::HashJoin {
+            build: Box::new(wcoj),
+            probe: Box::new(chain),
+        },
+    })
+}
+
+/// Like `collect_rows`, but columns are looked up by name (`v<n>`) and
+/// emitted in `vars` order: a planned WCOJ emits its own variable order.
+fn collect_rows_named(
+    batches: impl Iterator<Item = horndb_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
+    vars: &[Var],
+) -> BTreeSet<Vec<TermId>> {
+    let mut out = BTreeSet::new();
+    for b in batches {
+        let b = b.unwrap();
+        let cols: Vec<&UInt64Array> = vars
+            .iter()
+            .map(|v| {
+                let (i, _) = b.schema().column_with_name(&format!("v{}", v.0)).unwrap();
+                b.column(i).as_any().downcast_ref::<UInt64Array>().unwrap()
+            })
+            .collect();
+        for r in 0..b.num_rows() {
+            out.insert(cols.iter().map(|c| c.value(r)).collect::<Vec<TermId>>());
+        }
+    }
+    out
+}
+
+/// The cost-based plan and the hand-built hybrid plan against the oracle.
+fn check_planned(src: &VecTripleSource, bgp: &Bgp, oracle: &BTreeSet<Vec<TermId>>) {
+    let vars = bgp.variables();
+    let stats = SnapshotStats::from_source(src);
+    let planned = collect_rows_named(
+        Executor::for_bgp(src, bgp, &Planner::default(), &stats, CancelToken::new()),
+        &vars,
+    );
+    assert_eq!(&planned, oracle, "cost-based plan disagrees with oracle");
+    if let Some(spec) = hybrid_spec(bgp) {
+        let hybrid = collect_rows_named(
+            Executor::for_spec(src, bgp, &spec, CancelToken::new()),
+            &vars,
+        );
+        assert_eq!(
+            &hybrid, oracle,
+            "hybrid spec {spec:?} disagrees with oracle"
+        );
+    }
 }
 
 fn arb_term() -> impl Strategy<Value = Term> {
@@ -160,7 +234,8 @@ proptest! {
         let bh_rows = collect_rows(
             BinaryHashExecutor::new(&src, &bgp, out_vars, CancelToken::new()).into_iter(),
         );
-        prop_assert_eq!(wcoj_rows, bh_rows);
+        prop_assert_eq!(&wcoj_rows, &bh_rows);
+        check_planned(&src, &bgp, &bh_rows);
     }
 
     // SIMD-coverage variant: a wide graph (N_WIDE > SIMD_INTERSECT_MIN_RUN) so
@@ -184,7 +259,8 @@ proptest! {
         let bh_rows = collect_rows(
             BinaryHashExecutor::new(&src, &bgp, out_vars, CancelToken::new()).into_iter(),
         );
-        prop_assert_eq!(wcoj_rows, bh_rows);
+        prop_assert_eq!(&wcoj_rows, &bh_rows);
+        check_planned(&src, &bgp, &bh_rows);
     }
 }
 

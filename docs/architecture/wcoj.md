@@ -211,22 +211,38 @@ global depth into the inner iterator's local depth. It is a concrete type (not
 `Box<dyn TrieIterator>`) so *both* dispatch hops — outer `AdaptiveIter` and inner
 `PatternTrieIter` → source — statically inline on the leapfrog hot path.
 
-## 4. Planning: cutover and variable ordering
+## 4. Planning: cost-based `JoinSpec` (SPEC-23 §5.5, HDB-46)
 
-`ExecutionPlan::for_bgp` (`plan.rs:23`) makes two decisions:
+`Planner::choose(bgp, &dyn Stats)` (`planner.rs`) returns a `JoinSpec`
+(`plan.rs`): a tree of `Scan { pattern }`, `HashJoin { build, probe }` and
+multi-way `Wcoj { patterns, var_order }` nodes. Three layers:
 
-- **Executor kind.** All-ground BGP → `BinaryHash` (short-circuited). Otherwise
-  `≥ wcoj_cutover` (default 4) patterns → `Wcoj`, else `BinaryHash`. The
-  `Planner` (`planner.rs`) is a thin wrapper holding the cutover; the
-  `Cardinality` estimator is threaded through but currently unused — it is the
-  seam where Stage-2 cost-based ordering will land.
-- **Variable ordering.** Variables sorted by **descending degree** (how many
-  patterns mention each), ties broken by first-appearance for determinism.
-  High-degree-first shrinks the search space fastest: the most-constrained
-  variable is intersected across the most patterns at the shallowest depth, so
-  dead prefixes die early.
+- **Structural routing.** GYO ear removal (`CostModel::cyclic_core`) strips
+  patterns that hang off the rest by one variable until only the cyclic core
+  is left. The core is always one WCOJ node; a hash join never splits it.
+- **Cost** (`cost.rs`). WCOJ nodes pay i-cost — for each variable extension,
+  the rows read across the contributing patterns' runs, sized from the
+  per-predicate counts and NDVs in `Stats`; hash joins pay build (weighted)
+  plus probe plus the output. Every node adds a materialisation term. The AGM
+  fractional-edge-cover bound caps each cardinality estimate.
+- **Search.** DP over connected, core-respecting pattern subsets (≤ 10
+  non-ground patterns and a 100k-visit budget, else greedy build-up), then a
+  late pass hashes the smaller side of each join.
 
-The chosen `var_order` *is* the trie's level structure for every pattern.
+**Variable ordering** inside a WCOJ node is greedy: at each depth pick the
+variable with the smallest estimated intersection, tie-broken by descending
+degree (how many patterns mention it) and first appearance. When `Stats` has
+no per-predicate signal (`is_informed() == false`, e.g. `ZeroStats`) the
+planner skips the search and emits one WCOJ node in plain degree order.
+
+`ExecutionPlan::for_bgp(bgp, cutover)` keeps the retired Stage-1 rule
+(`≥ cutover` patterns → WCOJ, else left-deep hash joins) for bisection;
+`HORNDB_WCOJ_CUTOVER=<n>` makes `Planner::default()` use it.
+
+The chosen `var_order` *is* the trie's level structure for every pattern in a
+WCOJ node. A whole-BGP `Wcoj` spec streams straight from the leapfrog
+executor; any other tree runs on the hash-join evaluator
+(`executor/binary_hash.rs`), which materialises each node's rows.
 
 ## 5. The leapfrog single-variable intersection
 

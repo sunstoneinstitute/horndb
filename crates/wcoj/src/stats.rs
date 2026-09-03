@@ -88,6 +88,11 @@ pub struct DegreeSummary;
 pub trait Stats: Send + Sync {
     /// Total number of triples in the graph.
     fn total_triples(&self) -> u64;
+    /// Whether the per-predicate counts carry real signal. The join planner
+    /// routes structurally (no cost search) when this is `false`.
+    fn is_informed(&self) -> bool {
+        true
+    }
     /// Number of triples with predicate `p`.
     fn predicate_count(&self, p: TermId) -> u64;
     /// Number of distinct predicates in the graph (floored at 1). Used as the
@@ -134,6 +139,10 @@ impl ZeroStats {
 impl Stats for ZeroStats {
     fn total_triples(&self) -> u64 {
         self.total
+    }
+
+    fn is_informed(&self) -> bool {
+        false
     }
 
     /// No per-predicate knowledge → assume the whole graph.

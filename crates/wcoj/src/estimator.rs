@@ -44,7 +44,7 @@ const UNBOUND_PRED_BOTH_DIVISOR: u64 = 1000;
 /// repeated `estimate_bgp` over the same patterns is O(1) after the first. The
 /// key is the patterns' content, not their count — one estimator can be reused
 /// across different BGPs (star sub-groups, EXPLAIN) without cross-BGP collision.
-pub struct StatsEstimator<'a, S: Stats> {
+pub struct StatsEstimator<'a, S: Stats + ?Sized> {
     stats: &'a S,
     /// key = 64-bit hash of the ordered `[TriplePattern]` slice.
     memo: RefCell<HashMap<u64, Estimate>>,
@@ -60,7 +60,7 @@ fn bgp_key(patterns: &[TriplePattern]) -> u64 {
     hasher.finish()
 }
 
-impl<'a, S: Stats> StatsEstimator<'a, S> {
+impl<'a, S: Stats + ?Sized> StatsEstimator<'a, S> {
     pub fn new(stats: &'a S) -> Self {
         Self {
             stats,
