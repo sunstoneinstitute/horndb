@@ -1,20 +1,29 @@
 ---
-status: in-progress
+status: executed
 date: 2026-07-29
 scope: "SPEC-29 P1 — the reasoning materializer slice: declared views over a once-closed spine, per-view inferred graphs diffed idempotently through the store boundary, dirty-marking from the update path with background re-derivation, the [reasoning] config section, and the D5/D6 visibility invariants"
 ---
 
 # SPEC-29 P1 — Reasoning materializer slice
 
-> **Landed (HDB-72, [#269](https://github.com/sunstoneinstitute/horndb/issues/269)):**
-> T1–T6. `crates/sparql/src/reasoning/` (view model, catalog, per-view
-> derivation, D7 routing), `Engine::load_base`/`fork`/`extend` in
+> **Executed.** T1–T6 landed with HDB-72
+> ([#269](https://github.com/sunstoneinstitute/horndb/issues/269)):
+> `crates/sparql/src/reasoning/` (view model, catalog, per-view derivation, D7
+> routing), `Engine::load_base`/`fork`/`extend` in
 > `crates/owlrl/src/integration.rs`, the `[reasoning]` config section, the
-> `reasoning_*` metrics, and the `serve` wiring. **Outstanding: T7** — the
-> `view_derivation` bench must run on `hornbench` before
-> `docs/benchmarks.md`'s SPEC-29 rows carry numbers. Routing lives in the
-> catalog (`catalog.rs::route`) rather than the planned separate `router.rs`;
-> the file was not worth its own module.
+> `reasoning_*` metrics, and the `serve` wiring. T7 closed with HDB-144: the
+> `view_derivation` bench was written (it had not been) and run on `hornbench`,
+> and `docs/benchmarks.md`'s three SPEC-29 rows now carry numbers — single-view
+> re-derivation **5.29 ms**, 19× inside the inherited 100 ms budget; fan-out
+> linear at **0.55 ms/view** over 250 and 1,000 views; **25.5 KiB/view** resident
+> with every view clean.
+>
+> Two deviations from the plan as written: routing lives in the catalog
+> (`catalog.rs::route`) rather than a separate `router.rs` — the file was not
+> worth its own module; and T7's open harness question resolved to *both*
+> — criterion for the two short measurements, plain one-shot timing for the
+> whole-corpus re-derive and the resident-memory gauge, which criterion cannot
+> express.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -362,13 +371,11 @@ is parsed: unknown keys there stay 400).
 ### Task 7: Bench + docs
 
 **Files:**
-- Create: `crates/sparql/benches/view_derivation.rs` (feature-gated) or a
-  harness-side bench if the feature plumbing fights criterion — decide at
-  execution, note the choice
+- Create: `crates/sparql/benches/view_derivation.rs` — created under HDB-144; `required-features = ["reasoner"]`
 - Modify: `docs/benchmarks.md`, `docs/architecture.md`,
   `crates/owlrl/AGENTS.md`, this plan
 
-- [ ] **Step 1:** Bench on the PLAN-28-02 synthetic corpus grown with a
+- [x] **Step 1:** Bench on the PLAN-28-02 synthetic corpus grown with a
   vocabulary spine (the spec says the two phases share one corpus):
   measure (a) spine template build, (b) single-view derivation
   end-to-end (fork + extend + diff) on a small graph — the SPEC-06 NF1
@@ -378,15 +385,15 @@ is parsed: unknown keys there stay 400).
   finding goes to #269 (candidates: cheaper fork via persistent
   data structures, or pulling P2's incremental path forward) —
   measured first, not guessed.
-- [ ] **Step 2:** Docs — `docs/architecture.md`: SPEC-29 row → P1
+- [x] **Step 2:** Docs — `docs/architecture.md`: SPEC-29 row → P1
   implemented (P2 fan-out, P3 provenance, P4 virtual outstanding);
   `crates/owlrl/AGENTS.md` §7: the "silently drops named graphs" caveat
   is rewritten — the engine is scope-blind *by contract* now, callers
   own scope via `load_base`/`fork`/`extend`. Flip this plan's status.
-- [ ] **Step 3:** Full verification — fmt, clippy `-D warnings`,
+- [x] **Step 3:** Full verification — fmt, clippy `-D warnings`,
   `cargo nextest run --workspace`, plus the `reasoner`+`server` feature
   matrix.
-- [ ] **Step 4: Commit** — `bench,docs(sparql): view derivation numbers +
+- [x] **Step 4: Commit** — `bench,docs(sparql): view derivation numbers +
   SPEC-29 P1 sync (#269)`.
 
 ---
