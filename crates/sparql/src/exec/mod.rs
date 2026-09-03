@@ -12,6 +12,7 @@ pub mod op;
 pub(crate) mod phases;
 pub mod runtime;
 pub mod scope;
+pub mod store_source;
 pub use scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
     RESERVED_GRAPH_PREFIX,

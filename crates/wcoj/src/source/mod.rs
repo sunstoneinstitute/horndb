@@ -6,6 +6,7 @@
 //! implements `TripleSource`.
 
 pub mod compressed;
+pub mod merged;
 pub mod packed_column;
 pub mod synthetic;
 pub mod vec_source;

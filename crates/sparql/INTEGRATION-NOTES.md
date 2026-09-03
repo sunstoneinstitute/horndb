@@ -234,23 +234,68 @@ store every lookup missed. It also had to be kept in step by every
 write path, which made a store mutated below the funnel (tests, the
 storage loader) silently invisible to it.
 
-### Lazily-rebuilt VecTripleSource snapshot
+### Query source: direct over partitions, VecTripleSource as fallback
 
-BGP execution requires all six sort orderings (SPO, SOP, PSO, POS,
-OSP, OPS). `HornBackend` builds a `VecTripleSource` lazily on the first
-query after any mutation and caches it behind a
-`Mutex<HashMap<SnapshotScope, Arc<…>>>`. Since SPEC-28 phase 3 that map holds
-**at most two** entries, ever: the `union` and the `strict` no-dataset default
-graph. Every other scope — a ground `GRAPH <g>`, a `FROM` list, and each graph
-a `GRAPH ?g` visits — is built and dropped per execution (see the GRAPH
-patterns section above for why).
-The snapshot holds all six orderings eagerly sorted; at ~144 bytes/triple
-steady-state snapshot cost (construction briefly peaks ~168 B/triple
-while the input vec is still alive) this is a documented Stage-1 cost.
-The cache is cleared wholesale on every write (insert or delete).
+BGP execution requires all six sort orderings (SPO, SOP, PSO, POS, OSP, OPS).
 
-A follow-up item exists to replace this with a direct `TripleSource`
-over the columnar partitions, avoiding the full-copy rebuild.
+HDB-120 added `StoreTripleSource` (`src/exec/store_source.rs`), a
+`TripleSource` read straight off `horndb-storage`'s per-predicate columnar
+partitions — no copy of the store is built. It serves a query that reads **one
+graph**, and it is **opt-in**: set `HORNDB_DIRECT_SOURCE=1` (or call
+`HornBackend::set_direct_source(true)`). Default reads still take the
+`VecTripleSource` copy. Why it is not yet the default is at the end of this
+section. Within one partition the predicate is constant, so the partition's
+`(s, o)` / `(o, s)` columns are already in every ordering's component order;
+only the depth of the constant term moves (`Pso|Pos` → depth 0, `Spo|Ops` →
+1, `Sop|Osp` → 2). `horndb_wcoj::source::merged::MergedIter` merges the
+per-predicate blocks into a global trie ordering on the fly. The columns
+arrive as `Arc` clones of the stored Arrow buffers, so an insert-only scope
+copies nothing; the SPEC-25 S1 copy-on-write snapshot already gives a stable
+view, so the source needs no locking of its own. Cost of the merge: each level
+operation is a linear pass over the live leaves rather than one binary search
+over a flat column, and `OrderedTripleIter::active_run` (the SIMD-intersect
+fast path) is not implemented for `MergedIter`.
+
+`MergedIter` needs **distinct leaf keys**, which holds for the predicates of
+one graph but not for a union of several (the same predicate would appear once
+per graph, and a triple in two graphs must yield one row, not two). So a
+genuine multi-graph union — a `FROM` list, or a `DefaultUnion` over more than
+one non-reserved graph — still builds a `VecTripleSource`. `EXPLAIN` does too:
+its cardinality estimate goes through `SnapshotStats::from_source`, which reads
+`VecTripleSource::sorted_columns`.
+
+The `VecTripleSource` path itself is unchanged. It is built lazily and cached
+behind a `Mutex<HashMap<SnapshotScope, Arc<…>>>`; since SPEC-28 phase 3 that
+map holds **at most two** entries, ever: the `union` and the `strict`
+no-dataset default graph. Every other scope is built and dropped per execution
+(see the GRAPH patterns section above for why). It holds all six orderings
+eagerly sorted, at ~144 bytes/triple steady state (construction briefly peaks
+~168 B/triple while the input vec is still alive). The cache is cleared
+wholesale on every write. After HDB-120 far fewer queries populate it, so a
+test that asserts on the memo must warm it deliberately.
+
+**Why the direct source is opt-in.** It is correct —
+`crates/sparql/tests/direct_source_parity.rs` runs the same query battery
+against two backends that differ only in `set_direct_source`, including after
+inserts and retractions — but it is not yet faster. A laptop smoke A/B on
+trainmarks medium (98K triples, warm, best of 3) put it **2-8x slower** than
+the copy on q1-q4/q6, with q5 unchanged. The gap is the merged cursor's inner
+loop, not source construction: `MergedIter::peek`/`seek` walk a live-leaf list
+at every step where `VecIter` indexes one flat column, and `MergedIter` has no
+`active_run`, so `executor/wcoj.rs::BatchIter`'s k==2 SIMD-intersect fast path
+never arms. The follow-up is a single-live-leaf specialization (the common case
+below a bound predicate) plus `active_run`; the default flips when a hornbench
+A/B says it should.
+
+`HornBackend` keeps **one** built `StoreTripleSource` in `direct_cache`, keyed
+by tier version and graph. Building one is not free even though the columns are
+usually `Arc` clones: `PredicatePartition::ordered_at` can only clone while the
+partition has no retractions and the read version is at or above its max begin
+stamp, and otherwise materializes the visible subset per predicate, per call —
+so without the memo a store that has ever served a `DELETE` would pay that copy
+on every query. One entry rather than a map: a query stream almost always reads
+the same graph, and holding one source per graph would put the footprint this
+task exists to cut back on the heap.
 
 ### Batched-insert core (`insert_oxrdf_batch`)
 

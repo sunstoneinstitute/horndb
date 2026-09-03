@@ -185,6 +185,7 @@ use crate::algebra::{TriplePattern, Var};
 use crate::exec::scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
 };
+use crate::exec::store_source::{QuerySource, StoreTripleSource};
 use crate::exec::{
     AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor, GroupCount, Pinnable, Slot, Store,
 };
@@ -291,6 +292,31 @@ impl SnapshotScope {
 /// The empty graph: zero rows, no error. (Distinct from `scope.rs`'s
 /// `EMPTY_GRAPH_SET`, which is the *name* list this resolves from.)
 const EMPTY_GRAPH_SCOPE: SnapshotScope = SnapshotScope::FromUnion(Vec::new());
+
+/// Whether reads go through the direct partition source (HDB-120).
+///
+/// **Off by default — opt in with `HORNDB_DIRECT_SOURCE=1`** (or `on`/`true`).
+///
+/// The direct source is correct (`crates/sparql/tests/direct_source_parity.rs`
+/// checks it against the `VecTripleSource` oracle) and cuts the serving
+/// footprint by dropping the per-query copy, but it is **not yet faster**: a
+/// laptop smoke A/B on trainmarks medium put warm reads 2-8x slower than the
+/// copy. The gap is the merged cursor's inner loop, not source construction —
+/// `MergedIter::peek`/`seek` walk a live-leaf list at every step where
+/// `VecIter` indexes one flat column, and `MergedIter` has no `active_run`, so
+/// the k==2 SIMD-intersect fast path in `executor/wcoj.rs::BatchIter` never
+/// arms. Closing that (a single-live-leaf specialization plus `active_run`) is
+/// the follow-up; the default flips when a hornbench A/B says it should.
+/// Read once per process and cached.
+fn direct_source_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("HORNDB_DIRECT_SOURCE").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
 
 /// A delta touching more than `1 / SNAPSHOT_DELTA_REBUILD_DIVISOR` of a cached
 /// snapshot's rows is not worth merging in place: at that size a full rebuild
@@ -434,11 +460,39 @@ pub struct HornBackend {
     /// (the one the server keeps under its `RwLock`), which always reads the
     /// newest committed state. See [`Self::pin_read`].
     pin: Option<PinnedSnapshot>,
+    /// Whether reads take the direct partition source. Defaults to
+    /// [`direct_source_enabled`]; [`Self::set_direct_source`] overrides it.
+    direct_source: bool,
+
+    /// The last [`StoreTripleSource`] handed to a query, with the tier version
+    /// it was opened at. Shared with every pinned read view ([`Self::pin_read`]),
+    /// the same way the snapshot memo is — a view is built per query, so a
+    /// per-view cache would never hit.
+    ///
+    /// Building one is not free: `PredicatePartition::ordered_at` can only
+    /// `Arc`-clone the stored columns while the partition has no retractions
+    /// and the read version is at or above its max begin stamp — otherwise it
+    /// materializes the visible subset, per predicate, per call. Without this
+    /// memo a store that has ever served a `DELETE` pays that copy on every
+    /// query, which measured 3-8x slower than the `VecTripleSource` path on
+    /// trainmarks (whose q6 deletes before q1..q5 run).
+    ///
+    /// One entry, not a map: a query stream almost always reads the same
+    /// graph, and holding one source per graph would put the footprint this
+    /// task exists to cut back on the heap. Keyed by the tier version the
+    /// source was opened at, so a write invalidates it with no help from
+    /// [`Self::invalidate`] or [`Self::apply_delta_to_snapshots`].
+    direct_cache: Arc<Mutex<Option<DirectCacheEntry>>>,
 }
 
 /// One cached statistics summary: the store commit version it describes, and
 /// the summary itself. Lines up with HDB-119's version-tagged snapshot memo.
 type StatsCacheEntry = (u64, Arc<SnapshotStats>);
+
+/// The one memoised direct source: the tier version it was opened at, the
+/// graph it reads, and the source itself. Version-tagged the same way
+/// [`StatsCacheEntry`] is — see `HornBackend::direct_cache`.
+type DirectCacheEntry = (u64, GraphId, Arc<StoreTripleSource>);
 
 impl Default for HornBackend {
     fn default() -> Self {
@@ -453,6 +507,8 @@ impl HornBackend {
             snapshots: Arc::new(Mutex::new(SnapshotMemo::default())),
             stats_cache: Arc::new(Mutex::new(HashMap::new())),
             pin: None,
+            direct_source: direct_source_enabled(),
+            direct_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -477,6 +533,8 @@ impl HornBackend {
             snapshots: Arc::clone(&self.snapshots),
             stats_cache: Arc::clone(&self.stats_cache),
             pin: Some(self.store.pin()),
+            direct_source: self.direct_source,
+            direct_cache: Arc::clone(&self.direct_cache),
         }
     }
 
@@ -497,6 +555,15 @@ impl HornBackend {
             Some(pin) => pin.version(),
             None => self.store.snapshot().version(),
         }
+    }
+
+    /// Turn the direct partition source on or off for this backend (HDB-120).
+    ///
+    /// The default comes from `HORNDB_DIRECT_SOURCE`. This is the in-process
+    /// form of the same switch: the A/B driver and the parity test both need
+    /// two backends that differ only here.
+    pub fn set_direct_source(&mut self, on: bool) {
+        self.direct_source = on;
     }
 
     /// Live triple count across every graph, visibility-filtered (SPEC-25 S1).
@@ -1135,6 +1202,75 @@ impl HornBackend {
         }
     }
 
+    /// The source one execution of `scope` reads from.
+    ///
+    /// Prefers [`StoreTripleSource`], which reads the columnar partitions in
+    /// place, so nothing copies the store per query (HDB-120). Falls back to
+    /// the memoised [`VecTripleSource`] for a scope the direct source cannot
+    /// serve — see [`Self::direct_graph`] — and, by default, for every scope:
+    /// the direct source is opt-in until a hornbench A/B says it should not be
+    /// (see [`direct_source_enabled`] and the `serving footprint` row in
+    /// `docs/benchmarks.md`).
+    fn query_source(&self, scope: &SnapshotScope) -> QuerySource {
+        if self.direct_source {
+            if let Some(g) = self.direct_graph(scope) {
+                return QuerySource::Direct(self.direct_source_for(g));
+            }
+        }
+        QuerySource::Copy(self.wcoj_snapshot(scope))
+    }
+
+    /// A [`StoreTripleSource`] over `graph` at the version this backend reads
+    /// at, reusing the cached one when both still match — see `direct_cache`.
+    ///
+    /// Goes through [`Self::snap`], so a pinned read view (HDB-119) opens the
+    /// source over *its* tier state, not the store's latest: the returned
+    /// `Arc<TierSnapshot>` is the pinned one, and its `version()` is the
+    /// pinned commit version, which is what keys the cache.
+    fn direct_source_for(&self, graph: GraphId) -> Arc<StoreTripleSource> {
+        let tier = self.snap().tier_arc();
+        let version = tier.version();
+        let mut guard = self.direct_cache.lock().expect("direct cache poisoned");
+        if let Some((v, g, src)) = guard.as_ref() {
+            if *v == version && *g == graph {
+                return Arc::clone(src);
+            }
+        }
+        let src = Arc::new(StoreTripleSource::new(tier, graph));
+        *guard = Some((version, graph, Arc::clone(&src)));
+        src
+    }
+
+    /// The single graph `scope` reads, if it has one.
+    ///
+    /// [`StoreTripleSource`] merges one leaf per predicate and needs those
+    /// leaf keys distinct, which holds within one graph but not across a
+    /// union of several — see `store_source`'s module docs. `DefaultUnion`
+    /// counts as single-graph exactly when at most one non-reserved graph
+    /// holds data: the single-tenant shape, and every trainmarks/SPB run.
+    fn direct_graph(&self, scope: &SnapshotScope) -> Option<GraphId> {
+        match scope {
+            SnapshotScope::DefaultStrict => Some(DEFAULT_GRAPH),
+            SnapshotScope::OneGraph(g) => Some(*g),
+            SnapshotScope::DefaultUnion => {
+                let snap = self.snap();
+                let mut live = snap
+                    .graphs()
+                    .into_iter()
+                    .filter(|g| !reserved_graph(&snap, *g));
+                match (live.next(), live.next()) {
+                    // No graph holds data: any graph id reads empty.
+                    (None, _) => Some(DEFAULT_GRAPH),
+                    (Some(g), None) => Some(g),
+                    _ => None,
+                }
+            }
+            // A one-graph `FROM` already resolved to `OneGraph`; what is left
+            // is the empty set (cheap either way) or a real multi-graph union.
+            SnapshotScope::FromUnion(_) => None,
+        }
+    }
+
     /// Get-or-build the WCOJ snapshot for `scope`.
     ///
     /// **Only the two whole-store scopes are memoised.** They cost O(store)
@@ -1597,7 +1733,7 @@ impl Executor for HornBackend {
             return Ok(Box::new(rows.into_iter()));
         }
 
-        let snapshot = self.wcoj_snapshot(&resolved);
+        let snapshot = self.query_source(&resolved);
         let dict = self.store.dictionary();
 
         // SPARQL variable name -> WCOJ var index, first-appearance order.
@@ -1680,12 +1816,8 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut rows: Vec<Bindings> = Vec::new();
-        for batch in WcojExecutor::for_bgp(
-            snapshot.as_ref(),
-            &bgp,
-            &Planner::default(),
-            CancelToken::new(),
-        ) {
+        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
+        {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             let schema = batch.schema();
             // Resolve each variable's column once per batch.
@@ -1854,7 +1986,7 @@ impl Executor for HornBackend {
             });
         }
 
-        let snapshot = self.wcoj_snapshot(&resolved);
+        let snapshot = self.query_source(&resolved);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -1939,12 +2071,8 @@ impl Executor for HornBackend {
         // known from the value the iterator yields — `enabled()` gates the
         // `Instant::now()` pair so the check costs one branch per arrow
         // batch when the flag is off, never a clock read.
-        let mut wcoj_iter = WcojExecutor::for_bgp(
-            snapshot.as_ref(),
-            &bgp,
-            &Planner::default(),
-            CancelToken::new(),
-        );
+        let mut wcoj_iter =
+            WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new());
         loop {
             let scan_t0 = crate::exec::phases::enabled().then(std::time::Instant::now);
             let next = wcoj_iter.next();
@@ -2085,7 +2213,7 @@ impl Executor for HornBackend {
             )));
         }
 
-        let snapshot = self.wcoj_snapshot(&resolved);
+        let snapshot = self.query_source(&resolved);
         let dict = self.store.dictionary();
 
         let mut var_index: HashMap<String, u8> = HashMap::new();
@@ -2161,12 +2289,8 @@ impl Executor for HornBackend {
         // count is the sum of batch row counts — no decode, no Row build.
         let bgp = WBgp::new(wpatterns);
         let mut count: usize = 0;
-        for batch in WcojExecutor::for_bgp(
-            snapshot.as_ref(),
-            &bgp,
-            &Planner::default(),
-            CancelToken::new(),
-        ) {
+        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
+        {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             count += batch.num_rows();
         }
@@ -2197,7 +2321,7 @@ impl Executor for HornBackend {
             return Ok(None);
         }
 
-        let snapshot = self.wcoj_snapshot(&resolved);
+        let snapshot = self.query_source(&resolved);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -2285,12 +2409,8 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut counts: HashMap<Vec<u64>, usize> = HashMap::new();
-        for batch in WcojExecutor::for_bgp(
-            snapshot.as_ref(),
-            &bgp,
-            &Planner::default(),
-            CancelToken::new(),
-        ) {
+        for batch in WcojExecutor::for_bgp(&snapshot, &bgp, &Planner::default(), CancelToken::new())
+        {
             let batch = batch.map_err(|e| SparqlError::Executor(format!("wcoj: {e}")))?;
             let arrow_schema = batch.schema();
             let mut key_cols: Vec<&UInt64Array> = Vec::with_capacity(key_wvars.len());
@@ -2629,16 +2749,14 @@ mod tests {
             );
         }
 
-        // Warm the one memoisable entry a bare BGP hits (`SnapshotScope::
-        // DefaultUnion`, see `resolve_scope`). Nothing has asked for the
-        // `DefaultStrict` twin yet, so it is not cloned in eagerly (HDB-97's
-        // twin-clone-on-miss is lazy — see `wcoj_snapshot`).
-        let patterns = vec![TriplePattern {
-            subject: Term::Var(Var::new("s")),
-            predicate: Term::Iri("http://ex/p".into()),
-            object: Term::Var(Var::new("o")),
-        }];
-        let _ = b.scan_bgp_ids(&patterns, &ScanScope::DEFAULT).unwrap();
+        // Warm the one memoisable entry (`SnapshotScope::DefaultUnion`, what
+        // a bare BGP resolves to — see `resolve_scope`). Asked for directly:
+        // since HDB-120 a plain read takes the direct partition source, so
+        // only `EXPLAIN` and multi-graph scopes still populate this memo.
+        // Nothing has asked for the `DefaultStrict` twin yet, so it is not
+        // cloned in eagerly (HDB-97's twin-clone-on-miss is lazy — see
+        // `wcoj_snapshot`).
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
         assert_eq!(b.memo_len(), 1, "warm-up: one memoised scope");
         // Capture the snapshot's identity as a raw pointer, then drop the
         // `Arc` clone: `apply_delta_to_snapshots` needs `Arc::get_mut` to
