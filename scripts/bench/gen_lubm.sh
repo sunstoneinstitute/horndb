@@ -4,10 +4,18 @@
 #
 # Fetches the Lehigh UBA1.7 data generator (Java) and the canonical RDF/XML
 # univ-bench.owl ontology, generates N universities, and converts everything to
-# N-Triples via Apache Jena `riot`:
+# N-Triples:
 #
 #   <out>/tbox.nt   the ontology (RDF/XML -> NT)
 #   <out>/abox.nt   the generated instance data (RDF/XML -> NT, concatenated)
+#
+# Needs a JDK (the UBA generator is Java) and one RDF/XML -> N-Triples
+# converter: Apache Jena `riot` if it is on PATH, else python3 + rdflib
+# (`pip install rdflib`). Both produce the same triples; only the lexical
+# layout of the .nt file differs.
+#
+# Hosts with no JDK (the hornbench runner) do not run this script at all:
+# `scripts/bench/get_lubm.sh` downloads a pre-generated tarball instead.
 #
 # All outputs live under the gitignored target/ tree.
 #
@@ -27,14 +35,23 @@ while [[ $# -gt 0 ]]; do
     --universities) UNIV="$2"; shift 2 ;;
     --seed)         SEED="$2"; shift 2 ;;
     --out)          OUT="$2"; shift 2 ;;
-    -h|--help)      sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [[ -n "$OUT" ]] || OUT="$OUTDIR_BASE/lubm/$UNIV"
 
 command -v java >/dev/null || { echo "java not found (UBA generator needs a JDK)" >&2; exit 1; }
-command -v riot >/dev/null || { echo "riot not found (brew install jena)" >&2; exit 1; }
+# RDF/XML -> N-Triples on stdout. Jena `riot` when present, else rdflib.
+if command -v riot >/dev/null; then
+  to_nt() { riot --syntax=RDFXML --output=NT "$1"; }
+elif python3 -c 'import rdflib' 2>/dev/null; then
+  to_nt() { python3 -c 'import sys, rdflib
+sys.stdout.write(rdflib.Graph().parse(sys.argv[1], format="xml").serialize(format="nt"))' "$1"; }
+else
+  echo "no RDF/XML->NT converter: install Apache Jena riot, or 'pip install rdflib'" >&2
+  exit 1
+fi
 
 UBA_DIR="$OUTDIR_BASE/uba"
 UBA_ZIP="$UBA_DIR/uba1.7.zip"
@@ -80,7 +97,7 @@ rm -rf "$GENDIR"; mkdir -p "$GENDIR"
 rm -f "$OUT/generated"\\University*.owl "$OUT/generated"\\log.txt 2>/dev/null || true
 echo ">> generating LUBM-$UNIV (seed $SEED) into $GENDIR" >&2
 # Note: the generator fetches the ontology from -onto <URL> at runtime (it does
-# not use the locally cached copy); the local copy is only for riot -> tbox.nt.
+# not use the locally cached copy); the local copy is only converted to tbox.nt.
 ( cd "$GENDIR" && java -cp "$CP_ROOT" edu.lehigh.swat.bench.uba.Generator \
     -univ "$UNIV" -index 0 -seed "$SEED" -onto "$ONTO_URL" >/dev/null ) \
   || { echo "UBA generator (java) failed — see stderr above" >&2; exit 1; }
@@ -97,13 +114,13 @@ fi
 
 # Convert ontology + all generated files to N-Triples.
 echo ">> converting ontology -> tbox.nt" >&2
-riot --syntax=RDFXML --output=NT "$ONTO_SRC" > "$OUT/tbox.nt"
+to_nt "$ONTO_SRC" > "$OUT/tbox.nt"
 
 echo ">> converting ${#OWL_FILES[@]} ABox files -> abox.nt" >&2
 : > "$OUT/abox.nt"
 for f in "${OWL_FILES[@]}"; do
-  riot --syntax=RDFXML --output=NT "$f" >> "$OUT/abox.nt" \
-    || { echo "riot failed converting $f" >&2; exit 1; }
+  to_nt "$f" >> "$OUT/abox.nt" \
+    || { echo "RDF/XML -> NT conversion failed for $f" >&2; exit 1; }
 done
 
 TBOX_N="$(wc -l < "$OUT/tbox.nt" | tr -d ' ')"
