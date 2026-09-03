@@ -283,6 +283,20 @@ PY
   done
 }
 
+# Block until `serve` reports it has finished loading. See the call site.
+wait_for_ready() {
+  local url="$1" timeout="$2" i
+  for ((i = 0; i < timeout; i++)); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      echo ">> engine ready after ${i}s"
+      return 0
+    fi
+    sleep 1
+  done
+  echo ">> engine never became ready at $url within ${timeout}s"
+  return 1
+}
+
 # --------------------------------------------------------------------------
 # #334 (HDB-120) — SPB-256 aggregation-qps, same A/B. Mirrors nightly.yml's
 # bring-up so the number is comparable with the published trend.
@@ -304,7 +318,13 @@ leg_spb() {
     DATA_FILES="$dataset" RELEASE=1 BIND="$HORNDB_BIND" \
       ./crates/harness/scripts/start-engine.sh > "$OUT/spb-engine-$mode.log" 2>&1 &
     local pid=$!
-    if ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600; then
+    # Liveness, then readiness. `serve` loads the dataset on a background
+    # thread and answers /query with 200 the whole time, so waiting only on
+    # /query starts the driver against an empty store — which is exactly how
+    # the first attempt at this leg produced "no Creative Works were found".
+    # /readyz is the endpoint that reports 503 until the load finishes.
+    if ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600 \
+       && wait_for_ready "http://$HORNDB_BIND/readyz" 900; then
       SPB_DRIVER_JAR="$jar" \
       SPB_SCENARIO="$SPB_ASSETS/spb-nightly.properties" \
       HORNDB_ENDPOINT="http://$HORNDB_BIND/query" \
