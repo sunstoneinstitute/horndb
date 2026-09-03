@@ -220,6 +220,13 @@ update_case!(delete_insert_04b, "delete-insert-04b");
 update_case!(delete_insert_05b, "delete-insert-05b");
 update_case!(delete_insert_06b, "delete-insert-06b");
 
+// W3C `delete/` — the two `dawg-delete-with-*` cases that pin SPARQL 1.1 Update
+// §3.1.2: a bare `WITH <g>` sets only the default graph, so a ground
+// `GRAPH <other>` inside WHERE still sees `<other>` (#281). The rest of the
+// upstream `delete/` family is not mirrored yet.
+update_case!(delete_with_02, "delete-with-02");
+update_case!(delete_with_06, "delete-with-06");
+
 // ── HornBackend leg ──────────────────────────────────────────────────────────
 
 macro_rules! update_case_horn {
@@ -269,3 +276,6 @@ update_case_horn!(delete_insert_04_hornbackend, "delete-insert-04");
 update_case_horn!(delete_insert_04b_hornbackend, "delete-insert-04b");
 update_case_horn!(delete_insert_05b_hornbackend, "delete-insert-05b");
 update_case_horn!(delete_insert_06b_hornbackend, "delete-insert-06b");
+
+update_case_horn!(delete_with_02_hornbackend, "delete-with-02");
+update_case_horn!(delete_with_06_hornbackend, "delete-with-06");

@@ -410,12 +410,21 @@ state); the runner loads the initial state, applies the update, and asserts
 **quad-set equality** of the resulting store against the expected state (mirror
 rules and the re-fetch allowlist: `crates/harness/scripts/fetch-w3c-suites.sh`).
 
-Of the **36** `UpdateEvaluationTest` cases across the six families, **33** are
+Of the **36** `UpdateEvaluationTest` cases across those six families, **33** are
 selected. The 3 left out are all in `clear/`, all for the same reason (D11). The
 `delete-insert/` family additionally has 8 `NegativeSyntaxTest11` entries that
 are *not* evaluation tests — they are graded by the `sparql11-syntax` suite kind
 (spargebra accept/reject), not here, so they are out of scope for this runner
 rather than "excluded".
+
+Two cases from a seventh family, `delete/`, were mirrored later and are also
+selected: `dawg-delete-with-02` and `dawg-delete-with-06` (fixture dirs
+`delete-with-02` / `delete-with-06`, named after their `.ru`). They pin SPARQL
+1.1 Update §3.1.2 — a bare `WITH <g>` sets only the *default* graph, so a ground
+`GRAPH <other>` inside WHERE still reads `<other>`
+([#281](https://github.com/sunstoneinstitute/horndb/issues/281)). The remaining
+17 `delete/` cases are simply **not mirrored yet** — no known failure, nothing
+excluded on grading grounds; mirror them when the family is next grown.
 
 ## Empty-but-existing named graphs under D11 (3 `clear/` cases)
 

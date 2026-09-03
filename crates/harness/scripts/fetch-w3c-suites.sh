@@ -189,9 +189,11 @@ fetch_sparql10 dataset "${SPARQL10_DATASET_FILES[@]}"
 # SPARQL 1.1 UPDATE evaluation families (SPEC-28 phase 4, #267).
 #
 # These come from the SPARQL 1.1 tarball already extracted above (they are NOT
-# a separate fetch): the `add/`, `copy/`, `move/`, `clear/`, `drop/`, and
-# `delete-insert/` sub-suites under
-#   $SPARQL_DIR/sparql11-test-suite/{add,copy,move,clear,drop,delete-insert}/
+# a separate fetch): the `add/`, `copy/`, `move/`, `clear/`, `drop/`,
+# `delete-insert/`, and `delete/` sub-suites under
+#   $SPARQL_DIR/sparql11-test-suite/{add,copy,move,clear,drop,delete-insert,delete}/
+# Of `delete/`, only `delete-with-02` and `delete-with-06` are mirrored (the two
+# WITH-vs-GRAPH cases, issue #281); the rest of that family is not mirrored yet.
 # Each manifest entry is a `ut:UpdateEvaluationTest`: an `mf:action` with a
 # `ut:request` (the `.ru`), a `ut:data` (default-graph state), and zero or more
 # `ut:graphData [ ut:graph <file> ; rdfs:label <IRI> ]` (named-graph state), and
