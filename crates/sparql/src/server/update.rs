@@ -13,6 +13,12 @@ pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    // Refuse to mutate a partly-loaded store (HDB-144); see
+    // `AppState::shed_while_loading`.
+    if let Some(resp) = state.shed_while_loading() {
+        return resp;
+    }
+
     let ctype = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())

@@ -166,6 +166,33 @@ pub struct AppState<B: FullBackend + Send + Sync + 'static = MemStore> {
     pub admission: Limits,
 }
 
+impl<B: FullBackend + Send + Sync + 'static> AppState<B> {
+    /// `Some(503)` while the startup data load is still running (HDB-144).
+    ///
+    /// `serve` binds the listener before the load finishes, so the process is
+    /// reachable — and answers — during a long import. `/readyz` reports that
+    /// correctly, but `/query` and `/update` did not: they served whatever
+    /// fraction of the corpus had landed. A benchmark driver that waits on
+    /// `/query` therefore measured a partly-loaded store and reported it as a
+    /// result, which is how an SPB run came back with "no Creative Works were
+    /// found". A data endpoint must shed the request instead of answering it
+    /// from an incomplete store.
+    pub(crate) fn shed_while_loading(&self) -> Option<Response> {
+        use axum::response::IntoResponse;
+        if self.ready.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1")],
+                "store is still loading\n",
+            )
+                .into_response(),
+        )
+    }
+}
+
 impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
     fn clone(&self) -> Self {
         Self {
