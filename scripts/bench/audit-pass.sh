@@ -211,28 +211,35 @@ leg_insert_retract() {
   cargo bench -p horndb-storage --bench insert_retract -- write_under_concurrent_reader
 }
 
-# The p99 the row wants is not printed by criterion; derive it from the raw
-# per-sample data criterion writes alongside its estimates.
-summarize_insert_retract() {
-  criterion_rows insert_retract "$OUT/insert_retract.log"
-  local d
-  for d in target/criterion/write_under_concurrent_reader/*/new; do
-    [ -f "$d/sample.json" ] || continue
-    local n p99
-    n=$(basename "$(dirname "$d")")
-    p99=$(python3 - "$d/sample.json" <<'PY'
+# Criterion's own output is a confidence interval on the mean, which hides the
+# shape of a bimodal benchmark (stats_incremental is explicitly bimodal, and
+# insert_retract wants a tail percentile). Both need the raw per-sample data
+# criterion writes to target/criterion/**/new/sample.json, so pull min/p99 out
+# of every sample file a leg produced and keep the files in the artifact.
+# $1 = leg name, $2.. = target/criterion subdirectories belonging to that leg
+# (criterion accumulates across legs in one target dir, so an unscoped walk
+# would re-emit every earlier leg's samples).
+criterion_samples() {
+  local leg="$1"; shift
+  local f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    local id
+    id=$(dirname "$(dirname "$f")"); id=${id#target/criterion/}
+    python3 - "$f" "$leg" "$id" >> "$SUMMARY" <<'PY'
 import json, sys
-s = json.load(open(sys.argv[1]))
-# criterion stores total nanoseconds per sample and how many iterations it covered
+path, leg, bench_id = sys.argv[1], sys.argv[2], sys.argv[3]
+s = json.load(open(path))
+# `times` is total nanoseconds per sample, `iters` how many iterations it covered.
 per = sorted(t / i for t, i in zip(s["times"], s["iters"]))
-print(f'{per[min(len(per) - 1, int(round(0.99 * (len(per) - 1))))] / 1000:.2f}')
+def q(p):
+    return per[min(len(per) - 1, int(round(p * (len(per) - 1))))] / 1000.0
+print(f"| {leg} | {bench_id} min (fastest sample) | {q(0):.2f} | µs |")
+print(f"| {leg} | {bench_id} p99 | {q(0.99):.2f} | µs |")
 PY
-) || continue
-    row "insert_retract" "p99 write latency @ $n triples" "$p99" "µs"
-  done
-  # Copy the raw samples into the artifact so the tail is re-derivable.
+  done < <(find "$@" -path '*/new/sample.json' 2>/dev/null | sort)
   mkdir -p "$OUT/criterion-samples"
-  cp -r target/criterion/write_under_concurrent_reader "$OUT/criterion-samples/" 2>/dev/null || true
+  find "$@" -path '*/new/sample.json' -exec cp --parents {} "$OUT/criterion-samples/" \; 2>/dev/null || true
 }
 
 # The one-shot lines the view_derivation bench prints before criterion starts.
@@ -366,9 +373,9 @@ run_leg spb             leg_spb             || true
 echo "== summarizing" >&2
 want lubm            && summarize_lubm
 want backend         && summarize_backend
-want stats           && criterion_rows stats "$OUT/stats.log"
-want insert_retract  && summarize_insert_retract
-want dict_gc         && criterion_rows dict_gc "$OUT/dict_gc.log"
+want stats           && { criterion_rows stats "$OUT/stats.log"; criterion_samples stats target/criterion/stats_incremental; }
+want insert_retract  && { criterion_rows insert_retract "$OUT/insert_retract.log"; criterion_samples insert_retract target/criterion/write_under_concurrent_reader; }
+want dict_gc         && { criterion_rows dict_gc "$OUT/dict_gc.log"; criterion_samples dict_gc target/criterion/churn_4x1k_no_gc target/criterion/churn_4x1k_compact_gc; }
 want view_derivation && summarize_view_derivation
 want trainmarks      && summarize_trainmarks
 want spb             && summarize_spb
