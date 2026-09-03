@@ -290,35 +290,53 @@ fn scan_bgp_ids_diagonal_self_join_matches_scan_bgp() {
     assert_eq!(ids[0].get("x"), Some(&iri("a")));
 }
 
+/// Materialize a `A ⊑ B ⊑ C . pingu a A` chain through `closure` and assert
+/// the closure is both complete (scm-sco chains, then cax-sco) and queryable.
+/// Parameterized over the backend so every `[reasoning].backend` value is
+/// exercised end-to-end through the SPARQL load path, not just in owlrl's own
+/// differential test.
 #[cfg(feature = "reasoner")]
-#[test]
-fn materialized_closure_is_queryable() {
+fn closure_is_queryable(closure: horndb_owlrl::BackendChoice) {
     use oxrdf::{Dataset, GraphName, NamedNode, NamedOrBlankNode, Quad};
     let nn = |s: &str| NamedNode::new(s).unwrap();
     let nb = |s: &str| NamedOrBlankNode::NamedNode(nn(s));
+    let sco = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+    let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     let mut dataset = Dataset::default();
-    // :Penguin rdfs:subClassOf :Bird . :pingu a :Penguin .
-    dataset.insert(&Quad::new(
-        nb("http://ex/Penguin"),
-        nn("http://www.w3.org/2000/01/rdf-schema#subClassOf"),
-        nn("http://ex/Bird"),
-        GraphName::DefaultGraph,
-    ));
-    dataset.insert(&Quad::new(
-        nb("http://ex/pingu"),
-        nn("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"),
-        nn("http://ex/Penguin"),
-        GraphName::DefaultGraph,
-    ));
-    let mut backend = HornBackend::new();
-    let stats = horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset).unwrap();
-    assert!(stats.loaded >= 2);
-    // cax-sco: pingu must now be a Bird, visible through SPARQL.
-    let q = "ASK { <http://ex/pingu> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Bird> }";
-    match execute_query(q, &backend).unwrap() {
-        QueryAnswer::Boolean(b) => assert!(b, "inferred triple must be queryable"),
-        other => panic!("expected boolean, got {other:?}"),
+    // :Penguin ⊑ :Bird ⊑ :Animal . :pingu a :Penguin .
+    for (s, p, o) in [
+        ("http://ex/Penguin", sco, "http://ex/Bird"),
+        ("http://ex/Bird", sco, "http://ex/Animal"),
+        ("http://ex/pingu", ty, "http://ex/Penguin"),
+    ] {
+        dataset.insert(&Quad::new(nb(s), nn(p), nn(o), GraphName::DefaultGraph));
     }
+    let mut backend = HornBackend::new();
+    let stats =
+        horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset, closure).unwrap();
+    assert!(stats.loaded >= 3);
+    // scm-sco (the closure backend's job) then cax-sco: pingu is an Animal.
+    for q in [
+        "ASK { <http://ex/Penguin> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/Animal> }",
+        "ASK { <http://ex/pingu> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Animal> }",
+    ] {
+        match execute_query(q, &backend).unwrap() {
+            QueryAnswer::Boolean(b) => assert!(b, "inferred triple must be queryable: {q}"),
+            other => panic!("expected boolean, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "reasoner")]
+#[test]
+fn materialized_closure_is_queryable() {
+    closure_is_queryable(horndb_owlrl::BackendChoice::RuleFiring);
+}
+
+#[cfg(feature = "graphblas")]
+#[test]
+fn materialized_closure_is_queryable_graphblas() {
+    closure_is_queryable(horndb_owlrl::BackendChoice::GraphBlas);
 }
 
 /// Graph with known per-predicate counts, for the stats-backed estimator:
@@ -470,7 +488,12 @@ fn literal_with_quotes_and_backslashes_survives_reasoner_round_trip() {
         GraphName::DefaultGraph,
     ));
     let mut backend = HornBackend::new();
-    horndb_sparql::exec::horn::load_with_reasoning(&mut backend, &dataset).unwrap();
+    horndb_sparql::exec::horn::load_with_reasoning(
+        &mut backend,
+        &dataset,
+        horndb_owlrl::BackendChoice::RuleFiring,
+    )
+    .unwrap();
     // NB: the local `iri` helper prepends "http://ex/".
     let patterns = vec![pat(iri("x"), iri("p"), var("v"))];
     let rows: Vec<_> = backend

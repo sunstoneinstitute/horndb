@@ -204,6 +204,37 @@ is therefore not documented here.
     `GET /query?query=…&default_graph=strict`. The meaning of each value is the
     same as for the config key above.
 
+## Reasoning
+
+`serve --materialize` runs OWL 2 RL forward chaining before it starts serving.
+The transitive- and equivalence-shaped rules (`rdfs:subClassOf` and
+`rdfs:subPropertyOf` chains, the `owl:sameAs` spine, declared transitive
+properties) can be closed two ways; every other rule is compiled rule firing
+either way. Both produce the same triples — only the cost differs.
+
+`[reasoning].backend` (string)
+
+:   **Default:** `rule-firing`. Environment variable
+    `HORNDB_REASONING__BACKEND`. No command-line flag.
+
+    **Scope:** read once at startup and applied to the `--materialize` pass;
+    fixed for the life of the process. Ignored without `--materialize`.
+
+    **Allowed values:** `rule-firing` — in-engine nested-loop closure, always
+    available. `graphblas` — SuiteSparse:GraphBLAS sparse-matrix closure
+    (SPEC-05), which needs a `serve` built with the `graphblas` cargo feature
+    (the released container image is). Anything else stops `serve` at startup
+    naming the bad value and the file it came from; `graphblas` on a build
+    without the feature stops it naming the feature, rather than quietly
+    falling back to the slow path.
+
+    **Tuning notes:** `graphblas` is the fast path when closure dominates the
+    materialize cost — long `rdfs:subClassOf` / `skos:broader` chains, a large
+    `owl:sameAs` spine. On rule-firing-dominated data (LUBM-shaped, where the
+    cost is compiled rules and `rdf:type` scans) it changes little. The
+    `horndb_reasoning_backend` metric reports which backend a running server
+    used.
+
 ## SIMD kernel selection
 
 HornDB's shared SIMD layer picks a kernel implementation — scalar, AVX2,

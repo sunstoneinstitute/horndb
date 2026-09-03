@@ -22,7 +22,7 @@ WORKDIR /src
 COPY . .
 
 # Build only the server binary and its dependency graph.
-RUN cargo build --release --locked -p horndb-sparql --bin serve --features server \
+RUN cargo build --release --locked -p horndb-sparql --bin serve --features server,graphblas \
     && cp target/release/serve /horndb \
     && strip /horndb
 

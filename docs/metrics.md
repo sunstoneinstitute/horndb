@@ -68,6 +68,7 @@ again.
 | `kind` | `select`, `ask`, `construct`, `describe`, `update` | `sparql_query` |
 | `stage` | `parse`, `translate`, `plan`, `exec` | sparql query-errors / stage-duration |
 | `phase` | `compiled_rules`, `list_rules`, `closure_backend`, `apply` | `owlrl_phase_duration_seconds` |
+| `backend` | `rule-firing`, `graphblas` | `reasoning_backend` — matches the `[reasoning].backend` config value verbatim |
 | `rule` | OWL-RL rule id (string, e.g. `cax-sco`) | `owlrl_rule_fires`, `owlrl_rule_duration_seconds` |
 | `tier` | `dram`, `hbm`, `cxl`, `unknown` | `storage_tier_bytes_estimated` (only `unknown` emitted today — tiering is Stage-3) |
 | `result` | `ok`, `error` | `ml_nl_query` |
@@ -203,6 +204,7 @@ per `materialize_with` call.
 | `horndb_owlrl_rule_pruned_total` | counter | — | count | rule evaluations skipped by the dirty-predicate prune |
 | `horndb_owlrl_rule_considered_total` | counter | — | count | rule evaluations considered (prune denominator) |
 | `horndb_reasoning_inconsistent` | gauge | — | 0/1 | 1 iff the materialized closure is OWL 2 RL inconsistent (some individual inferred to be `owl:Nothing`). Set once by `serve --materialize` (HDB-125). Registered in `crates/metrics/src/owlrl.rs` but deliberately **not** under the `owlrl_` prefix — it describes the served closure, not the rule engine. |
+| `horndb_reasoning_backend` | gauge | `backend` | count | info gauge: 1 on the closure backend `serve --materialize` used, from `[reasoning].backend`; emitted once at startup |
 
 ## Incremental maintenance (`crates/metrics/src/incremental.rs`)
 

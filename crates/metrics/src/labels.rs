@@ -103,6 +103,19 @@ pub struct PhaseLabel {
     pub phase: Phase,
 }
 
+// Which closure backend `serve --materialize` ran the transitive/equivalence
+// rules through. Values match the `[reasoning].backend` config strings verbatim
+// so an operator can grep for exactly what they configured.
+label_value_enum!(ReasoningBackend {
+    RuleFiring => "rule-firing",
+    GraphBlas => "graphblas",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ReasoningBackendLabel {
+    pub backend: ReasoningBackend,
+}
+
 // Phases of a bulk load, timed separately so a slow load can be attributed
 // (SPEC-17 §5.4.1). `Intern` is dictionary interning on both term-based write
 // paths: `Store::apply_quads`, and the bulk loaders' `QuadSink` (HDB-106,

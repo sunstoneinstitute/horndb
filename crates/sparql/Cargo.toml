@@ -10,6 +10,13 @@ publish = false
 default = ["server", "reasoner", "snmalloc"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite", "dep:parking_lot"]
 reasoner = ["dep:horndb-owlrl"]
+# SPEC-05 GraphBLAS closure backend, reachable as `[reasoning].backend =
+# "graphblas"`. Off by default: turning it on makes the build link
+# SuiteSparse:GraphBLAS (cmake + pkg-config), which a plain
+# `cargo build -p horndb-sparql` must not require. Without it, `serve` rejects
+# `backend = "graphblas"` at startup naming this feature. The release image
+# builds with it (see `Dockerfile`).
+graphblas = ["reasoner", "horndb-owlrl/graphblas-backend"]
 # HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
 # Measured on the trainmarks bulk load (hornbench, xlarge): -10.6% on the
 # `parse` phase, -6.3% end-to-end, because a cross-thread free no longer takes
