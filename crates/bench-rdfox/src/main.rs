@@ -80,7 +80,33 @@ enum Cmd {
         /// `*_ms` phase timings let an A/B run attribute the materialize cost.
         #[arg(long = "backend", value_enum, default_value_t = BackendArg::Rulefiring)]
         backend: BackendArg,
+        /// Compiled-rule firing: `semi-naive` (delta-driven, the default) or
+        /// `naive` (full re-join every round; the SPEC-15 fix #2 baseline).
+        #[arg(long = "firing", value_enum, default_value_t = FiringArg::SemiNaive)]
+        firing: FiringArg,
     },
+}
+
+/// Compiled-rule firing strategy selector for the `materialize` subcommand.
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum FiringArg {
+    SemiNaive,
+    Naive,
+}
+
+impl FiringArg {
+    fn strategy(self) -> horndb_owlrl::FiringStrategy {
+        match self {
+            FiringArg::SemiNaive => horndb_owlrl::FiringStrategy::SemiNaive,
+            FiringArg::Naive => horndb_owlrl::FiringStrategy::Naive,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            FiringArg::SemiNaive => "semi-naive",
+            FiringArg::Naive => "naive",
+        }
+    }
 }
 
 /// Closure backend selector for the `materialize` subcommand.
@@ -115,7 +141,8 @@ fn main() -> Result<()> {
             data,
             dump_nt,
             backend,
-        } => run_materialize(&data, dump_nt.as_deref(), backend),
+            firing,
+        } => run_materialize(&data, dump_nt.as_deref(), backend, firing),
     }
 }
 
@@ -208,7 +235,12 @@ fn run_transitive(data: &Path, predicate: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendArg) -> Result<()> {
+fn run_materialize(
+    files: &[PathBuf],
+    dump_nt: Option<&Path>,
+    backend: BackendArg,
+    firing: FiringArg,
+) -> Result<()> {
     let mut dataset = Dataset::new();
     let parse_start = Instant::now();
     let mut input: u64 = 0;
@@ -238,6 +270,10 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendAr
     let parse = parse_start.elapsed();
 
     let mut engine = horndb_owlrl::Engine::with_backend(backend.choice());
+    engine.set_materialize_opts(horndb_owlrl::MaterializeOpts {
+        firing: firing.strategy(),
+        ..Default::default()
+    });
     let reason_start = Instant::now();
     engine.load(&dataset).context("materializing")?;
     let reason = reason_start.elapsed();
@@ -267,6 +303,7 @@ fn run_materialize(files: &[PathBuf], dump_nt: Option<&Path>, backend: BackendAr
     emit(&[
         ("kind", "\"materialize\"".into()),
         ("backend", format!("\"{}\"", backend.label())),
+        ("firing", format!("\"{}\"", firing.label())),
         ("parsed_triples", input.to_string()),
         ("asserted", asserted.to_string()),
         ("inferred", inferred.to_string()),

@@ -122,25 +122,23 @@ criterion_rows() {
 # that comparison directly — the same `horndb-bench materialize` call the
 # script makes — and say plainly that the RDFox column is absent.
 #
-# LUBM-1 generation needs java + Apache Jena `riot`. Where those are missing,
-# fall back to the taxonomy workload from gen_workload.py (pure python), which
-# is the other corpus the RDFox harness uses.
+# The LUBM-1 corpus comes from `get_lubm.sh`: generated locally where a JDK
+# exists, otherwise downloaded from the `bench-corpora` release (hornbench has
+# no JDK). Only if both fail do we fall back to the taxonomy workload from
+# gen_workload.py (pure python), and the summary then says so.
 # --------------------------------------------------------------------------
 leg_lubm() {
   cargo build --release -p horndb-bench-rdfox --bin horndb-bench || return 1
   local hb="$REPO_ROOT/target/release/horndb-bench"
   local dir="$PERSIST/lubm/1"
 
-  if [ ! -f "$dir/abox.nt" ] || [ ! -f "$dir/tbox.nt" ]; then
-    echo ">> generating LUBM-1"
-    scripts/bench/gen_lubm.sh --universities 1 --out "$dir" || {
-      echo ">> LUBM-1 generation failed (needs java + Jena riot); falling back to taxonomy"
-      dir="$PERSIST/taxonomy"
-      mkdir -p "$dir"
-      [ -f "$dir/abox.nt" ] || python3 scripts/bench/gen_workload.py taxonomy 12 40000 "$dir/abox.nt" || return 1
-      : > "$dir/tbox.nt"
-    }
-  fi
+  scripts/bench/get_lubm.sh 1 "$dir" || {
+    echo ">> LUBM-1 unavailable (no JDK and no corpus download); falling back to taxonomy"
+    dir="$PERSIST/taxonomy"
+    mkdir -p "$dir"
+    [ -f "$dir/abox.nt" ] || python3 scripts/bench/gen_workload.py taxonomy 12 40000 "$dir/abox.nt" || return 1
+    : > "$dir/tbox.nt"
+  }
 
   echo ">> RDFox column: NOT MEASURED — RDFox is not installed on this runner"
   echo ">> corpus: $dir"
@@ -156,11 +154,11 @@ summarize_lubm() {
   local log="$OUT/lubm.log"
   [ -f "$log" ] || return 0
   # Each run line is a flat JSON object; pull the phase timings out of it.
-  # Label the corpus that actually ran. LUBM-1 generation needs java + Jena
-  # `riot`; neither is on the runner, so the leg falls back to the synthetic
-  # taxonomy corpus. Reporting that as "lubm-1" would be a false record.
+  # Label the corpus that actually ran. The leg falls back to the synthetic
+  # taxonomy corpus if LUBM-1 could be neither generated nor downloaded, and
+  # reporting that as "lubm-1" would be a false record.
   local corpus="lubm-1"
-  grep -q "falling back to taxonomy" "$log" && corpus="taxonomy d12/40k (LUBM-1 generator unavailable)"
+  grep -q "falling back to taxonomy" "$log" && corpus="taxonomy d12/40k (LUBM-1 unavailable)"
   for k in reason_ms apply_ms total_ms inferred; do
     local med
     med=$(grep -o "\"$k\":[0-9.]*" "$log" | cut -d: -f2 | sort -g | awk '{a[NR]=$1} END{if(NR)print a[int((NR+1)/2)]}')

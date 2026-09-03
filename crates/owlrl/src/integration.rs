@@ -15,7 +15,7 @@ use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::backend::RuleFiringBackend;
-use crate::engine::{materialize, reset_and_materialize, Stats};
+use crate::engine::{materialize_with, MaterializeOpts, Stats};
 use crate::provenance::ProofTree;
 use crate::store::{MemStore, TripleStore};
 use crate::types::{MaxCardRestriction, QualMaxCardRestriction, TermId, Triple};
@@ -145,6 +145,10 @@ pub struct Engine {
     base_dict: FxHashMap<String, TermId>,
     /// Closure backend selection, applied on every [`load`](Self::load).
     backend: BackendChoice,
+    /// Firing/eq-rep-p/parallel knobs passed to every materialize call.
+    /// Default is the production configuration; benches and differential
+    /// tests select the naïve oracles through [`set_materialize_opts`](Self::set_materialize_opts).
+    opts: MaterializeOpts,
     /// Materialize statistics (incl. per-phase timings) from the most recent
     /// [`load`](Self::load). `None` until the first load.
     last_stats: Option<Stats>,
@@ -175,9 +179,16 @@ impl Engine {
             vocab,
             base_dict,
             backend,
+            opts: MaterializeOpts::default(),
             last_stats: None,
             state: None,
         }
+    }
+
+    /// Set the [`MaterializeOpts`] used by every subsequent `load` /
+    /// `load_base` / `extend`.
+    pub fn set_materialize_opts(&mut self, opts: MaterializeOpts) {
+        self.opts = opts;
     }
 
     /// Materialize statistics — including the per-phase wall-clock attribution
@@ -204,7 +215,7 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&self.vocab, self.backend, &mut state, true);
+        let stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -234,7 +245,7 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&self.vocab, self.backend, &mut state, true);
+        let stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -249,6 +260,7 @@ impl Engine {
             vocab: self.vocab,
             base_dict: self.base_dict.clone(),
             backend: self.backend,
+            opts: self.opts,
             last_stats: self.last_stats.clone(),
             state: self.state.clone(),
         }
@@ -271,6 +283,7 @@ impl Engine {
     ) -> Result<()> {
         let vocab = self.vocab;
         let backend = self.backend;
+        let opts = self.opts;
         let state = self
             .state
             .as_mut()
@@ -280,7 +293,7 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&vocab, backend, state, false);
+        let stats = finish(&vocab, backend, opts, state, false);
         self.last_stats = Some(stats);
         Ok(())
     }
@@ -484,7 +497,13 @@ impl Default for Engine {
 /// `reset` selects [`reset_and_materialize`] (discard any prior inferred
 /// triples first — `load`/`load_base`) vs. [`materialize`] (build on what is
 /// already inferred — `extend`, SPEC-29 D3).
-fn finish(vocab: &Vocabulary, backend: BackendChoice, state: &mut LoadState, reset: bool) -> Stats {
+fn finish(
+    vocab: &Vocabulary,
+    backend: BackendChoice,
+    opts: MaterializeOpts,
+    state: &mut LoadState,
+    reset: bool,
+) -> Stats {
     // Auto-owl:Thing inference (companion to prp-rfp): every named
     // individual is implicitly a member of owl:Thing. Cheapest faithful
     // implementation is a load-time pass over `?x rdf:type
@@ -532,24 +551,19 @@ fn finish(vocab: &Vocabulary, backend: BackendChoice, state: &mut LoadState, res
     let qual_restrictions = resolve_qual_max_card_restrictions(&state.store, vocab, &state.dict);
     state.store.set_qual_card_restrictions(qual_restrictions);
     let materialize_once = |store: &mut MemStore| -> Stats {
+        if reset {
+            store.clear_inferred();
+        }
         match backend {
             BackendChoice::RuleFiring => {
-                let mut backend = RuleFiringBackend::new();
-                if reset {
-                    reset_and_materialize(store, &mut backend)
-                } else {
-                    materialize(store, &mut backend)
-                }
+                materialize_with(store, &mut RuleFiringBackend::new(), opts)
             }
             #[cfg(feature = "graphblas-backend")]
-            BackendChoice::GraphBlas => {
-                let mut backend = crate::graphblas_backend::GraphBlasBackend::new();
-                if reset {
-                    reset_and_materialize(store, &mut backend)
-                } else {
-                    materialize(store, &mut backend)
-                }
-            }
+            BackendChoice::GraphBlas => materialize_with(
+                store,
+                &mut crate::graphblas_backend::GraphBlasBackend::new(),
+                opts,
+            ),
         }
     };
     let mut stats = materialize_once(&mut state.store);

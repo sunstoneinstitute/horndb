@@ -5,7 +5,7 @@ use crate::delta::Delta;
 use crate::eq_rep_p_opt::fire_eq_rep_p_canonical;
 use crate::generated::{CompiledRule, RULES};
 use crate::list_rules::{self, SchemaAxioms};
-use crate::store::TripleStore;
+use crate::store::{MemStore, TripleStore};
 use crate::types::TermId;
 use crate::vocab::Vocabulary;
 use rustc_hash::FxHashSet;
@@ -63,12 +63,30 @@ pub enum ParallelStrategy {
     Serial,
 }
 
+/// How the compiled `rules.toml` rules join their body atoms after round 1
+/// (SPEC-04 F3, SPEC-15 fix #2).
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub enum FiringStrategy {
+    /// Semi-naïve (default): from round 2 on, each rule fires one variant per
+    /// body atom, with that atom read from the previous round's newly applied
+    /// triples and the rest from the full store. Same fixpoint as `Naive`,
+    /// without re-deriving every known conclusion each round — see
+    /// `tests/semi_naive_differential.rs`.
+    #[default]
+    SemiNaive,
+    /// Re-join every body atom against the full store every round. Retained
+    /// as the correctness oracle for the differential test.
+    Naive,
+}
+
 /// Tunables for a `materialize` run.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct MaterializeOpts {
     pub eq_rep_p: EqRepPStrategy,
     /// `rdf:type`-skew parallelism for the list rules (SPEC-04 F5).
     pub parallel: ParallelStrategy,
+    /// Delta-driven vs full re-join for the compiled rules.
+    pub firing: FiringStrategy,
 }
 
 /// Run forward chaining to fixed point. Does NOT clear existing inferred
@@ -98,6 +116,11 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
     let axioms = list_rules::resolve(store_as_dyn(store), &vocab);
     // First round: every rule fires; treat all predicates as "dirty".
     let mut dirty: Option<FxHashSet<TermId>> = None;
+    // Previous round's newly applied triples, indexed like the store so the
+    // compiled rules can scan/probe them. `None` on round 1 (nothing applied
+    // yet) and under `FiringStrategy::Naive`; the rules then join every body
+    // atom against the full store.
+    let mut prev_delta: Option<MemStore> = None;
     loop {
         stats.rounds += 1;
         let mut round_delta = Delta::new();
@@ -152,7 +175,8 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
                 .get_or_create(&label)
                 .inc();
             let t_rule = std::time::Instant::now();
-            let d = (rule.fire)(store_as_dyn(store), &Delta::new());
+            let delta = prev_delta.as_ref().map(store_as_dyn);
+            let d = (rule.fire)(store_as_dyn(store), delta);
             horndb_metrics::metrics()
                 .owlrl
                 .rule_duration_seconds
@@ -201,6 +225,11 @@ pub fn materialize_with<S: TripleStore + Sync, B: ClosureBackend>(
             break;
         }
         dirty = Some(applied.dirty_predicates());
+        if opts.firing == FiringStrategy::SemiNaive {
+            let mut d = MemStore::new(vocab);
+            d.assert_all(applied.triples().copied());
+            prev_delta = Some(d);
+        }
     }
     // Emit aggregate counters and per-phase histograms once per
     // materialize_with call, after the loop converges.
