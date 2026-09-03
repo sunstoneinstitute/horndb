@@ -57,7 +57,7 @@ echo ">> running trainmarks xlarge with HORNDB_EXEC_PHASES=$HORNDB_EXEC_PHASES" 
   --queries-dir "$WORK/queries" \
   --scale xlarge \
   --out "$OUT/exec-phases-results.json" \
-  --timeout-secs 1800 2>"$LOG"
+  --timeout-secs 1800 2>"$LOG" || { cat "$LOG" >&2; echo "::error::bench-trainmarks failed — not summarising a partial run" >&2; exit 1; }
 # Straight redirect, not `2> >(tee ...)`: bash does not wait for a process
 # substitution to finish, so the parser below could read a truncated log.
 cat "$LOG" >&2
@@ -87,7 +87,15 @@ def diff(pre, post):
     d = {k: b.get(k, 0) - a.get(k, 0) for k in set(a) | set(b)}
     return {k: v for k, v in d.items() if v > 0}
 
-queries = sorted({m.group(1) for m in (re.match(r'(q\d+)_pre$', l) for l in dumps) if m})
+# The driver's dump labels carry the full query name (`q2_customer_orders_pre`,
+# not `q2_pre`), and the warm pair is `<q>_warm_pre` -> `<q>_warm` — so strip
+# the `_pre` suffix and drop `_warm_pre`, which would otherwise yield a bogus
+# query named `<q>_warm`.
+queries = sorted({l[:-4] for l in dumps
+                  if l.endswith("_pre") and not l.endswith("_warm_pre")})
+if not queries:
+    sys.exit(f"no *_pre exec-phase dumps parsed from {log} — "
+             "was HORNDB_EXEC_PHASES=1 set, and did the queries run?")
 
 print(f"# trainmarks xlarge exec-phase split (`HORNDB_EXEC_PHASES=1`)\n")
 print(f"- commit: `{commit}`")
