@@ -4,8 +4,10 @@
 //! Unlike `datatype_subsumption.rs` (which reasons over datatype IRIs), these
 //! reason over the *values* literals denote: cross-lexical / cross-datatype
 //! equality (`dt-eq`), value disequality (`dt-diff`), and ill-typed literals
-//! (`dt-not-type`). The conclusions are injected at load time and propagated
-//! by the compiled `eq-diff1` / `eq-rep-*` rules.
+//! (`dt-not-type`). `dt-eq` / `dt-not-type` are injected at load time;
+//! `dt-diff` is derived after the fixpoint only for literal pairs the closure
+//! made `owl:sameAs` (HDB-147), and all are propagated by the compiled
+//! `eq-diff1` / `eq-rep-*` rules.
 
 use horndb_owlrl::integration::Engine;
 use oxrdf::{Dataset, GraphName, Literal, NamedNode, NamedOrBlankNode, Quad};
@@ -100,13 +102,15 @@ fn dt_eq_cross_datatype_integers() {
     );
 }
 
-/// dt-diff: two integer literals with different values are `owl:differentFrom`.
+/// dt-diff: two integer literals with different values that the closure makes
+/// `owl:sameAs` (here via `:a owl:sameAs` both, so eq-sym + eq-trans join
+/// them) are `owl:differentFrom`, and eq-diff1 reports the clash.
 #[test]
-fn dt_diff_distinct_integers() {
+fn dt_diff_distinct_integers_made_sameas_are_inconsistent() {
     let mut engine = Engine::new();
     let mut premise = Dataset::new();
-    premise.insert(&lit("http://ex/a", "http://ex/p", "1", XSD_INTEGER));
-    premise.insert(&lit("http://ex/b", "http://ex/p", "2", XSD_INTEGER));
+    premise.insert(&lit("http://ex/a", OWL_SAME_AS, "1", XSD_INTEGER));
+    premise.insert(&lit("http://ex/a", OWL_SAME_AS, "2", XSD_INTEGER));
     engine.load(&premise).unwrap();
 
     assert!(
@@ -116,8 +120,49 @@ fn dt_diff_distinct_integers() {
             OWL_DIFFERENT_FROM,
             &typed_key("2", XSD_INTEGER)
         ),
-        "\"1\" and \"2\" (xsd:integer) should be owl:differentFrom (dt-diff)"
+        "\"1\" and \"2\" (xsd:integer) made owl:sameAs should be owl:differentFrom (dt-diff)"
     );
+    assert!(
+        !engine.is_consistent().unwrap(),
+        "1 = 2 is a clash (dt-diff + eq-diff1)"
+    );
+}
+
+/// dt-diff is never materialised pairwise: distinct literals that the closure
+/// never joins get no `owl:differentFrom` triple, and the closure stays O(k)
+/// in the number of distinct literals (HDB-147: LUBM-1's 9,326 literals used
+/// to inject 87 M `owl:differentFrom` triples).
+#[test]
+fn dt_diff_is_not_materialised_pairwise() {
+    const K: usize = 10_000;
+    let mut engine = Engine::new();
+    let mut premise = Dataset::new();
+    for i in 0..K {
+        premise.insert(&lit(
+            &format!("http://ex/s{i}"),
+            "http://ex/p",
+            &i.to_string(),
+            XSD_INTEGER,
+        ));
+    }
+    engine.load(&premise).unwrap();
+
+    let asserted = engine.asserted_len().unwrap();
+    let total = engine.materialized_len().unwrap();
+    assert_eq!(asserted, K);
+    assert!(
+        total < 2 * K,
+        "closure over {K} distinct integers must stay O(k), got {total} triples"
+    );
+    assert!(
+        !engine
+            .materialized_triples()
+            .unwrap()
+            .iter()
+            .any(|(_, p, _)| p == OWL_DIFFERENT_FROM),
+        "no owl:differentFrom may be materialised between literals that are never owl:sameAs"
+    );
+    assert!(engine.is_consistent().unwrap());
 }
 
 /// dt-not-type: an integer-typed literal whose lexical form is not in the
@@ -319,24 +364,20 @@ fn keys_006_functional_property_literal_collision_is_inconsistent() {
 }
 
 /// Distinct strings under a *plain* literal (no datatype) are still compared as
-/// strings and declared differentFrom — `Literal::new_simple_literal` yields an
-/// `xsd:string`.
+/// strings — `Literal::new_simple_literal` yields an `xsd:string` — so joining
+/// them with `owl:sameAs` is a clash (dt-diff + eq-diff1).
 #[test]
-fn dt_diff_distinct_plain_strings() {
+fn dt_diff_distinct_plain_strings_made_sameas_are_inconsistent() {
     let mut engine = Engine::new();
     let mut premise = Dataset::new();
-    premise.insert(&Quad::new(
-        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/a").unwrap()),
-        NamedNode::new("http://ex/p").unwrap(),
-        Literal::new_simple_literal("foo"),
-        GraphName::DefaultGraph,
-    ));
-    premise.insert(&Quad::new(
-        NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/b").unwrap()),
-        NamedNode::new("http://ex/p").unwrap(),
-        Literal::new_simple_literal("bar"),
-        GraphName::DefaultGraph,
-    ));
+    for s in ["foo", "bar"] {
+        premise.insert(&Quad::new(
+            NamedOrBlankNode::NamedNode(NamedNode::new("http://ex/a").unwrap()),
+            NamedNode::new(OWL_SAME_AS).unwrap(),
+            Literal::new_simple_literal(s),
+            GraphName::DefaultGraph,
+        ));
+    }
     engine.load(&premise).unwrap();
 
     let xsd_string = "http://www.w3.org/2001/XMLSchema#string";
@@ -347,11 +388,11 @@ fn dt_diff_distinct_plain_strings() {
             OWL_DIFFERENT_FROM,
             &typed_key("bar", xsd_string)
         ),
-        "distinct plain strings should be owl:differentFrom (dt-diff)"
+        "distinct plain strings made owl:sameAs should be owl:differentFrom (dt-diff)"
     );
     assert!(
-        engine.is_consistent().unwrap(),
-        "two distinct strings that are never sameAs are consistent"
+        !engine.is_consistent().unwrap(),
+        "\"foo\" = \"bar\" is a clash (dt-diff + eq-diff1)"
     );
 }
 

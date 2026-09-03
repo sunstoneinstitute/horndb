@@ -698,10 +698,18 @@ library is using.
   pass in `integration.rs`. They reason over the *values* literals denote
   (unlike `datatypes.rs`, which reasons over datatype IRIs): value-equal
   literals across lexical forms / the integer tower ⇒ `owl:sameAs` (`dt-eq`);
-  value-distinct comparable literals ⇒ `owl:differentFrom` (`dt-diff`); a
-  lexical form outside its datatype's value space ⇒ `owl:Nothing`
-  (`dt-not-type`). The conclusions are base axioms the compiled `eq-diff1` /
-  `eq-rep-*` rules then propagate. `dt-not-type` also runs a **post-fixpoint**
+  a lexical form outside its datatype's value space ⇒ `owl:Nothing`
+  (`dt-not-type`). The load-time pass buckets literals by canonical value, so
+  it is O(k) in distinct literals and `dt-eq` fires only inside a bucket.
+  `dt-diff` (value-distinct comparable literals ⇒ `owl:differentFrom`) is
+  **never materialised pairwise** — that was O(k²) and produced 87 M junk
+  triples on LUBM-1 (HDB-147). Its only consumer is `eq-diff1`, so the
+  post-fixpoint `inject_literal_differences` pass asserts `owl:differentFrom`
+  only for the comparable, value-distinct literal pairs the closure made
+  `owl:sameAs` (via `prp-fp`, `cls-maxc2`, `eq-trans`, …) and re-runs the
+  fixpoint so `eq-diff1` reports the clash. The conclusions are base axioms
+  the compiled `eq-diff1` / `eq-rep-*` rules then propagate.
+  `dt-not-type` also runs a **post-fixpoint**
   pass (`validate_derived_datatype_memberships`) that re-checks literals typed
   into a *derived* datatype during materialisation (`prp-rng`/`prp-dom`): it
   validates the literal's **intrinsic value** against the derived datatype's
@@ -720,8 +728,6 @@ library is using.
   (`xsd:dateTime`, `xsd:decimal`, user types) stay **opaque** — never
   cross-compared, so no false `sameAs`/`differentFrom`. Full value-space
   *intersection* narrowing (`I5.8-008/009-pe`) remains deferred (#4). See #40.
-  The pairwise comparison is O(k²) in distinct object literals `k`; a
-  value-space-bucketed pass is a Stage-2 optimisation if `k` grows large.
 - **Generated function bodies are O(|body|) nested loops.** This is
   fine for ~50 rules with bodies of length ≤ 4. SPEC-03 will replace
   the plan with leapfrog triejoin for arbitrary body sizes.
