@@ -12,9 +12,10 @@
 
 use anyhow::{anyhow, bail, Result};
 use oxrdf::{Dataset, GraphName, NamedOrBlankNodeRef, Quad, TermRef};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::backend::RuleFiringBackend;
+use crate::datatype_literals::ValueClass;
 use crate::engine::{materialize_with, MaterializeOpts, Stats};
 use crate::provenance::ProofTree;
 use crate::store::{MemStore, TripleStore};
@@ -535,14 +536,14 @@ fn finish(
             t
         });
     }
-    // dt-eq / dt-diff / dt-not-type: reason over the *values* of the
-    // instance literals now, while the dictionary can still recover each
-    // literal's datatype and lexical form. Asserts owl:sameAs /
-    // owl:differentFrom / owl:Nothing base facts that the compiled rules
-    // (eq-diff1, eq-rep-*) then propagate. Must run after the data is
+    // dt-eq / dt-not-type: reason over the *values* of the instance literals
+    // now, while the dictionary can still recover each literal's datatype
+    // and lexical form. Asserts owl:sameAs / owl:Nothing base facts that the
+    // compiled rules (eq-rep-*) then propagate. Must run after the data is
     // loaded (so all instance literals are present) and after the dt-type
     // axioms (harmless either way — those are datatype IRIs, not literals).
-    inject_datatype_literal_axioms(&mut state.store, vocab, &state.dict);
+    // dt-diff runs after the fixpoint instead (`inject_literal_differences`).
+    let literal_classes = inject_datatype_literal_axioms(&mut state.store, vocab, &state.dict);
     // cls-maxc1/cls-maxc2: classify unqualified max-cardinality
     // restrictions now, while the dictionary can still parse the literal
     // value. The resolved list rides on the store for the firing loop.
@@ -603,18 +604,29 @@ fn finish(
     if added_ranges {
         stats = materialize_once(&mut state.store);
     }
-    // dt-not-type over *derived* datatype memberships: materialization may
-    // have typed a literal as a narrower datatype via prp-rng / prp-dom
-    // (e.g. `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒
-    // `"999" rdf:type xsd:byte`). The load-time pass above only validated
-    // each literal's *intrinsic* datatype, so re-check the materialized
-    // `?lit rdf:type ?D` edges now and assert `?lit rdf:type owl:Nothing`
-    // on any value-space violation. If that asserted anything, re-run the
-    // fixpoint once so the inconsistency propagates through eq-rep-* (e.g. a
-    // named resource `owl:sameAs` the offending literal also becomes
-    // `owl:Nothing`); the re-run is a no-op for the common case where the
-    // initial materialisation found no derived violations.
-    if validate_derived_datatype_memberships(&mut state.store, vocab, &state.dict) {
+    // Two literal passes read the fixpoint and may assert new base facts:
+    // - dt-diff (`inject_literal_differences`): `owl:differentFrom` for the
+    //   comparable, value-distinct literal pairs the closure made
+    //   `owl:sameAs`, so eq-diff1 can report the clash.
+    // - dt-not-type over *derived* datatype memberships
+    //   (`validate_derived_datatype_memberships`): materialization may have
+    //   typed a literal as a narrower datatype via prp-rng / prp-dom (e.g.
+    //   `:p rdfs:range xsd:byte` + `:s :p "999"^^xsd:integer` ⇒ `"999"
+    //   rdf:type xsd:byte`); the load-time pass only validated each
+    //   literal's *intrinsic* datatype, so re-check the materialized `?lit
+    //   rdf:type ?D` edges and assert `?lit rdf:type owl:Nothing` on any
+    //   value-space violation.
+    // Whenever either asserted something new, re-run the fixpoint so the
+    // conclusion propagates (eq-diff1; eq-rep-* onto a resource `owl:sameAs`
+    // the offending literal) and re-check. Both passes are idempotent (only
+    // fresh asserts count), so this terminates; in the common case neither
+    // asserts and no re-run happens.
+    loop {
+        let diff = inject_literal_differences(&mut state.store, vocab, &literal_classes);
+        let ill = validate_derived_datatype_memberships(&mut state.store, vocab, &state.dict);
+        if !(diff || ill) {
+            break;
+        }
         stats = materialize_once(&mut state.store);
     }
     stats
@@ -749,8 +761,8 @@ fn resolve_qual_max_card_restrictions(
     out
 }
 
-/// Inject the OWL 2 RL literal-value datatype rules (`dt-eq`, `dt-diff`,
-/// `dt-not-type`) as base axioms over the literals present in the store.
+/// Inject the OWL 2 RL literal-value datatype rules `dt-eq` and `dt-not-type`
+/// as base axioms over the literals present in the store.
 ///
 /// Runs at load time — like [`resolve_max_card_restrictions`] — because the
 /// datatype and parsed value behind a literal `TermId` are only recoverable
@@ -760,39 +772,45 @@ fn resolve_qual_max_card_restrictions(
 /// conclusions once as base facts is sound and lets the existing compiled
 /// rules (`eq-diff1`, `eq-rep-*`) propagate them.
 ///
-/// For each pair of *comparable* literals (see
-/// [`crate::datatype_literals::ValueClass`]):
-/// - same value  ⇒ `l1 owl:sameAs l2`        (`dt-eq`)
-/// - different value ⇒ `l1 owl:differentFrom l2` (`dt-diff`)
+/// Literals are bucketed by canonical value (see
+/// [`crate::datatype_literals::ValueClass`]), so the pass is O(k) in the
+/// number of distinct object literals `k`:
+/// - two literals in the same bucket (distinct lexical forms, one value)
+///   ⇒ `l1 owl:sameAs l2` (`dt-eq`) — buckets are tiny and almost always
+///   singletons on real data;
+/// - a literal whose lexical form is outside its datatype's value space
+///   ⇒ `l rdf:type owl:Nothing` (`dt-not-type`, a global inconsistency).
 ///
-/// and for each literal whose lexical form is outside its datatype's value
-/// space ⇒ `l rdf:type owl:Nothing` (`dt-not-type`, a global inconsistency).
+/// `dt-diff` is deliberately **not** materialised here: all-pairs
+/// `owl:differentFrom` is O(k²) (87 M triples on LUBM-1, HDB-147). Its only
+/// consumer is `eq-diff1`, which needs the pair to also be `owl:sameAs`, so
+/// [`inject_literal_differences`] derives it after the fixpoint for exactly
+/// those pairs.
 ///
 /// Only literals that actually occur as triple **objects** in the loaded data
 /// are considered — the datatype declarations injected by
 /// [`crate::datatypes`] never appear as objects, so this stays bounded by the
-/// instance literals. The pairwise comparison is O(k²) in the number of
-/// distinct object literals `k`; conformance graphs carry a handful, so this
-/// is not a hot path. A value-space-bucketed pass is a Stage-2 optimisation if
-/// `k` ever grows large.
+/// instance literals.
+///
+/// Returns the comparable literals with their value class, for
+/// [`inject_literal_differences`].
 fn inject_datatype_literal_axioms(
     store: &mut MemStore,
     vocab: &Vocabulary,
     dict: &FxHashMap<String, TermId>,
-) {
-    use crate::datatype_literals::{classify, parse_literal_key, ValueClass};
+) -> FxHashMap<TermId, ValueClass> {
+    use crate::datatype_literals::{classify, parse_literal_key};
 
     let rev = invert_dict(dict);
 
-    // Collect the distinct literal object terms actually present in the data.
-    // A term is a literal iff its lexical key parses as one (`"…"^^<…>` or
-    // `"…"@lang`). We dedup by TermId so a literal used many times is
-    // classified once.
-    let mut literals: Vec<(TermId, ValueClass)> = Vec::new();
-    let mut seen: FxHashSet<TermId> = FxHashSet::default();
+    // Bucket the distinct literal object terms by canonical value. A term is
+    // a literal iff its lexical key parses as one (`"…"^^<…>` or `"…"@lang`).
+    // Dedup by TermId so a literal used many times is classified once.
+    let mut buckets: FxHashMap<ValueClass, Vec<TermId>> = FxHashMap::default();
+    let mut classes: FxHashMap<TermId, ValueClass> = FxHashMap::default();
     for t in store.all_triples() {
         let o = t.o;
-        if !seen.insert(o) {
+        if classes.contains_key(&o) {
             continue;
         }
         let Some(key) = rev.get(&o) else { continue };
@@ -801,7 +819,10 @@ fn inject_datatype_literal_axioms(
         };
         match classify(&parsed) {
             // Well-typed and placed into a comparable value class.
-            Ok(Some(vc)) => literals.push((o, vc)),
+            Ok(Some(vc)) => {
+                buckets.entry(vc.clone()).or_default().push(o);
+                classes.insert(o, vc);
+            }
             // Well-typed but opaque (user datatype / unhandled value space):
             // no cross-lexical reasoning. Distinct TermIds are distinct
             // lexical keys, so we neither sameAs nor differentFrom them.
@@ -813,29 +834,57 @@ fn inject_datatype_literal_axioms(
         }
     }
 
-    // Pairwise dt-eq / dt-diff over comparable literals. Two literals are
-    // *comparable* iff their `ValueClass` variants match (e.g. two integers,
-    // two strings) — we never compare across disjoint value spaces.
-    for i in 0..literals.len() {
-        for j in (i + 1)..literals.len() {
-            let (a_id, a_vc) = (&literals[i].0, &literals[i].1);
-            let (b_id, b_vc) = (&literals[j].0, &literals[j].1);
-            if !comparable(a_vc, b_vc) {
-                continue;
-            }
-            if a_vc == b_vc {
-                // dt-eq: symmetric `owl:sameAs` (eq-sym in the closure
-                // backend will mirror it, but assert both directions so the
-                // RuleFiring smoke path is order-independent).
-                store.assert(Triple::new(*a_id, vocab.owl_same_as, *b_id));
-                store.assert(Triple::new(*b_id, vocab.owl_same_as, *a_id));
-            } else {
-                // dt-diff: symmetric `owl:differentFrom`.
-                store.assert(Triple::new(*a_id, vocab.owl_different_from, *b_id));
-                store.assert(Triple::new(*b_id, vocab.owl_different_from, *a_id));
+    // dt-eq: every pair inside a bucket is symmetric `owl:sameAs` (eq-sym in
+    // the closure backend will mirror it, but assert both directions so the
+    // RuleFiring smoke path is order-independent).
+    for ids in buckets.values().filter(|ids| ids.len() > 1) {
+        for (i, &a) in ids.iter().enumerate() {
+            for &b in &ids[i + 1..] {
+                store.assert(Triple::new(a, vocab.owl_same_as, b));
+                store.assert(Triple::new(b, vocab.owl_same_as, a));
             }
         }
     }
+    classes
+}
+
+/// Post-materialization `dt-diff`: two comparable literals with different
+/// values are `owl:differentFrom`.
+///
+/// Instead of asserting that for every literal pair (O(k²)), scan the
+/// materialized `owl:sameAs` edges — the only place `eq-diff1`, the sole
+/// consumer of `owl:differentFrom`, can meet a `dt-diff` conclusion — and
+/// assert symmetric `owl:differentFrom` for exactly the literal pairs the
+/// closure made `owl:sameAs` (via `prp-fp`, `cls-maxc2`, `eq-trans`, …).
+/// The caller re-runs the fixpoint so `eq-diff1` reports the clash.
+///
+/// `classes` is the comparable-literal map from
+/// [`inject_datatype_literal_axioms`]; when it is empty there is nothing to
+/// compare and the `owl:sameAs` scan is skipped. Returns `true` iff at least
+/// one new triple was asserted.
+fn inject_literal_differences(
+    store: &mut MemStore,
+    vocab: &Vocabulary,
+    classes: &FxHashMap<TermId, ValueClass>,
+) -> bool {
+    if classes.is_empty() {
+        return false;
+    }
+    let pairs: Vec<(TermId, TermId)> = store
+        .scan_predicate(vocab.owl_same_as)
+        .filter(|t| t.s != t.o)
+        .filter(|t| {
+            matches!((classes.get(&t.s), classes.get(&t.o)),
+                (Some(a), Some(b)) if comparable(a, b) && a != b)
+        })
+        .map(|t| (t.s, t.o))
+        .collect();
+    let mut any = false;
+    for (a, b) in pairs {
+        any |= store.assert(Triple::new(a, vocab.owl_different_from, b));
+        any |= store.assert(Triple::new(b, vocab.owl_different_from, a));
+    }
+    any
 }
 
 /// Post-materialization `dt-not-type` over *derived* datatype memberships.
@@ -883,9 +932,9 @@ fn validate_derived_datatype_memberships(
             violations.push(t.s);
         }
     }
-    let any = !violations.is_empty();
+    let mut any = false;
     for lit in violations {
-        store.assert(Triple::new(lit, vocab.rdf_type, vocab.owl_nothing));
+        any |= store.assert(Triple::new(lit, vocab.rdf_type, vocab.owl_nothing));
     }
     any
 }

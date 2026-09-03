@@ -12,11 +12,10 @@
 # materialize --firing naive|semi-naive` three times and record the medians,
 # including peak RSS of the process.
 #
-# Why LUBM-1 and not LUBM-10: LUBM-1 is 100,866 asserted triples and closes to
-# 87,027,924 inferred ones — the OWL 2 RL closure over LUBM's literals is
-# hugely expansive — costing 10.2 GiB peak RSS and ~38 s per run. LUBM-10 has
-# ~13x the ABox and the blowup is superlinear, so a single run needs well over
-# 100 GiB. Set `LUBM_N="1 10"` on a host that has the memory.
+# LUBM_N defaults to "1"; set `LUBM_N="1 10"` to add LUBM-10. (Before HDB-147
+# the O(k²) dt-eq/dt-diff literal injection made LUBM-1 close to 87 M triples
+# and LUBM-10 OOM the runner; a laptop smoke run after the fix — diagnostic
+# only, not a recorded number — closes LUBM-1 to ~164 k.)
 #
 # Parity: hash both closures under both strategies and compare. The hash is a
 # streaming, order-independent (count, sum-of-CRC32, total-bytes) triple over
