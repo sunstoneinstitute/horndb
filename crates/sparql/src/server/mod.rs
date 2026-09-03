@@ -1,12 +1,15 @@
 //! Embedded HTTP server exposing SPARQL 1.1 Protocol endpoints.
 //!
-//! Only the `/query` and `/update` endpoints. The Graph Store
-//! Protocol is explicitly out of Stage 1 scope (see SPEC-07 Future
-//! Work).
+//! `/query` and `/update` are the SPARQL 1.1 Protocol surface (the Graph
+//! Store Protocol is explicitly out of Stage 1 scope, see SPEC-07 Future
+//! Work); `/metrics` is the Prometheus scrape target; `/healthz` and
+//! `/readyz` are the Kubernetes liveness/readiness probes (HDB-124).
 
 mod counting_body;
+mod health;
 pub mod metrics_route;
 pub mod query;
+mod request_id;
 mod stream_body;
 pub mod update;
 
@@ -21,6 +24,7 @@ use axum::Router;
 use counting_body::{CountingBody, Direction};
 use horndb_metrics::labels::{Endpoint, EndpointLabel, Method, RequestLabels};
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,12 +45,19 @@ use std::time::Instant;
 /// `rdf12` and `default_graph`, PLAN-28-03 Task 2), read by both query
 /// handlers.
 ///
+/// `ready` backs `GET /readyz` (HDB-124): `false` until the `serve` binary's
+/// startup data load (and any `--materialize` pass) finishes, then flipped
+/// once via `Ordering::Release` in `bin/serve.rs`. A caller that only builds
+/// a router in-process (every test in this crate) should set it `true` up
+/// front — the data is already loaded by construction.
+///
 /// Note: `#[derive(Clone)]` is intentionally avoided here — it would
-/// wrongly require `B: Clone`. The manual impl clones only the `Arc`
+/// wrongly require `B: Clone`. The manual impl clones only the `Arc`s
 /// (`cfg` is `Copy`).
 pub struct AppState<B: FullBackend + Send + Sync + 'static = MemStore> {
     pub store: Arc<RwLock<B>>,
     pub cfg: SparqlConfig,
+    pub ready: Arc<AtomicBool>,
 }
 
 impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
@@ -54,6 +65,7 @@ impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
         Self {
             store: Arc::clone(&self.store),
             cfg: self.cfg,
+            ready: Arc::clone(&self.ready),
         }
     }
 }
@@ -67,13 +79,19 @@ pub fn build_router<B: FullBackend + Send + Sync + 'static>(state: AppState<B>) 
         )
         .route("/update", post(update::handle_update::<B>))
         .route("/metrics", get(metrics_route::handle_metrics))
+        .route("/healthz", get(health::handle_healthz))
+        .route("/readyz", get(health::handle_readyz::<B>))
         .layer(middleware::from_fn(record_request))
         .with_state(state)
 }
 
-/// Instrument every request: record latency, request count, and body bytes.
+/// Instrument every request: attach/generate an `x-request-id`, log an
+/// access line (HDB-124), and record latency, request count, and body bytes
+/// for the known endpoints.
 async fn record_request(req: Request, next: Next) -> Response {
-    let endpoint = match req.uri().path() {
+    let rid = request_id::request_id(req.headers());
+    let path = req.uri().path().to_string();
+    let endpoint = match path.as_str() {
         "/query" => Some(Endpoint::Query),
         "/update" => Some(Endpoint::Update),
         "/metrics" => Some(Endpoint::Metrics),
@@ -88,7 +106,7 @@ async fn record_request(req: Request, next: Next) -> Response {
 
     // When the endpoint is known, wrap request and response bodies so bytes are
     // tallied as the handler reads the request and the client drains the response.
-    let resp = if let Some(ep) = &endpoint {
+    let mut resp = if let Some(ep) = &endpoint {
         let req = {
             let (parts, body) = req.into_parts();
             let counted = CountingBody::new(body, ep.clone(), Direction::Request);
@@ -101,6 +119,19 @@ async fn record_request(req: Request, next: Next) -> Response {
     } else {
         next.run(req).await
     };
+
+    let elapsed = start.elapsed();
+    let status = resp.status().as_u16();
+    // Every response — success or error — carries the request id so a slow
+    // or failed request can be matched back to this access-log line.
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert("x-request-id", hv);
+    }
+    eprintln!(
+        "serve: {} {path} {status} {}ms request_id={rid}",
+        method.as_str(),
+        elapsed.as_millis(),
+    );
 
     if let Some(ep) = endpoint {
         let m = horndb_metrics::metrics();
@@ -115,7 +146,7 @@ async fn record_request(req: Request, next: Next) -> Response {
             .get_or_create(&RequestLabels {
                 endpoint: ep,
                 method,
-                status: resp.status().as_u16(),
+                status,
             })
             .inc();
     }

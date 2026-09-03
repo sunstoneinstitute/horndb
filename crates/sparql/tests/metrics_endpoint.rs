@@ -6,6 +6,7 @@ use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::server::{build_router, AppState};
 use horndb_sparql::SparqlConfig;
 use parking_lot::RwLock;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tower::ServiceExt; // oneshot
 
@@ -14,6 +15,7 @@ async fn metrics_endpoint_exposes_request_counter() {
     let state = AppState::<MemStore> {
         store: Arc::new(RwLock::new(MemStore::default())),
         cfg: SparqlConfig::default(),
+        ready: Arc::new(AtomicBool::new(true)),
     };
     let app = build_router(state);
 
