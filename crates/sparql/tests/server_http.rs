@@ -860,6 +860,127 @@ mod streaming_error_semantics {
         }
     }
 
+    /// Same shape as `DecodeFailsLate`, but the failure is a *panic*, not a
+    /// `SparqlError`, and it lands in chunk 3 — past the chunk-2 peek, so
+    /// the 200 is already committed and the panic unwinds the blocking
+    /// serializer with the body live. Without the abort guard the sender
+    /// would just be dropped, cleanly terminating a truncated document.
+    /// (A panic in chunk 1 or in the chunk-2 peek is still a clean 500:
+    /// no bytes have been emitted yet.)
+    struct PanicsLate;
+
+    impl Executor for PanicsLate {
+        fn scan_bgp(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Box<dyn Iterator<Item = Bindings> + '_>> {
+            unreachable!("scan_bgp_ids is overridden")
+        }
+        fn scan_bgp_ids(
+            &self,
+            _patterns: &[TriplePattern],
+            _scope: &ScanScope<'_>,
+        ) -> horndb_sparql::Result<Batch> {
+            Ok(Batch {
+                schema: vec![Var::new("s"), Var::new("p"), Var::new("o")],
+                // 9000 rows over a 4096-row batch: chunks 1 and 2 are clean,
+                // chunk 3 panics.
+                rows: (0u64..9000)
+                    .map(|i| {
+                        Row(vec![
+                            Slot::Id(TermId(i)),
+                            Slot::Id(TermId(i)),
+                            Slot::Id(TermId(i)),
+                        ])
+                    })
+                    .collect(),
+            })
+        }
+        fn decode_term(&self, id: TermId) -> horndb_sparql::Result<Term> {
+            assert!(id.0 < 8192, "injected serializer panic mid-stream");
+            Ok(Term::Iri(format!("http://ex/t{}", id.0)))
+        }
+    }
+    impl horndb_sparql::exec::Store for PanicsLate {
+        fn apply_quads(
+            &mut self,
+            _dels: Vec<horndb_sparql::exec::AlgebraQuad>,
+            _adds: Vec<horndb_sparql::exec::AlgebraQuad>,
+        ) -> horndb_sparql::Result<horndb_sparql::exec::ApplyCounts> {
+            Ok(horndb_sparql::exec::ApplyCounts::default())
+        }
+        fn clear_graph(
+            &mut self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<usize> {
+            Ok(0)
+        }
+        fn graph_exists(&self, _graph: &str) -> bool {
+            false
+        }
+        fn graphs(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn scan_graph_quads(
+            &self,
+            _graph: &spargebra::algebra::GraphTarget,
+        ) -> horndb_sparql::Result<Vec<horndb_sparql::exec::AlgebraTriple>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// HDB-115: a panic in the blocking serializer must abort the body, not
+    /// hand the client a well-formed short CSV under a 200.
+    #[tokio::test]
+    async fn serializer_panic_mid_stream_aborts_body() {
+        use http_body::Body as _;
+
+        let state = AppState {
+            store: Arc::new(RwLock::new(PanicsLate)),
+            cfg: SparqlConfig::default(),
+        };
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri(
+                "/query?query=SELECT%20%3Fs%20%3Fp%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D",
+            )
+            .header("accept", "text/csv")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "headers already committed");
+
+        let mut body = resp.into_body();
+        let mut delivered: Vec<u8> = Vec::new();
+        let mut saw_error = false;
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame {
+                Ok(f) => {
+                    if let Ok(data) = f.into_data() {
+                        delivered.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_error,
+            "a serializer panic must abort the body; instead the client got a \
+             cleanly terminated {} byte document",
+            delivered.len()
+        );
+        assert!(
+            !delivered.is_empty(),
+            "chunk 1 was delivered before the panic"
+        );
+    }
+
     #[tokio::test]
     async fn exec_error_mid_stream_aborts_body_after_200() {
         use http_body::Body as _;

@@ -182,7 +182,7 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     match plan_select(q, &cfg) {
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         Ok(Some((vars, plan, dataset))) => {
-            stream_select(state, vars, plan, dataset, cfg.default_graph, fmt).await
+            stream_select(state, q, vars, plan, dataset, cfg.default_graph, fmt).await
         }
         Ok(None) => run_materialized(state, q, fmt, &cfg).await,
     }
@@ -229,6 +229,39 @@ fn bump_exec_error() {
         .inc();
 }
 
+/// Aborts the response body if the blocking serializer unwinds. Without
+/// it a panic just drops `tx`, which ends the chunked body *cleanly* — the
+/// client gets a well-formed short document and HTTP 200 with no signal
+/// that rows are missing (undetectable for CSV/TSV). Sending `Err` makes
+/// `ChannelBody` abort instead, so the truncation shows up at the protocol
+/// level like every other mid-stream failure.
+///
+/// The panic payload/backtrace still goes to stderr via the default panic
+/// hook; this only adds the identifying query (the server has no per-query
+/// id to log) and the abort. Nothing here may panic — a panic during
+/// unwind aborts the process.
+struct AbortBodyOnPanic {
+    tx: mpsc::Sender<Result<Bytes, SparqlError>>,
+    /// Truncated at construction: never do fallible work during unwind.
+    query: String,
+}
+
+impl Drop for AbortBodyOnPanic {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        eprintln!(
+            "error: streaming SELECT serializer panicked; aborting response body. query: {}",
+            self.query
+        );
+        bump_exec_error();
+        let _ = self.tx.blocking_send(Err(SparqlError::Executor(
+            "streaming serializer panicked".into(),
+        )));
+    }
+}
+
 /// First reply from the blocking executor: either the whole document
 /// (result fit in one chunk — reply as a plain sized body) or the
 /// pre-buffered head of a multi-chunk stream.
@@ -260,6 +293,7 @@ enum FirstReply {
 #[allow(clippy::too_many_arguments)]
 async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     state: AppState<B>,
+    query: &str,
     vars: Vec<String>,
     plan: PhysicalPlan,
     dataset: DatasetSpec,
@@ -270,7 +304,15 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     let (first_tx, first_rx) = oneshot::channel::<Result<FirstReply, SparqlError>>();
     let store = Arc::clone(&state.store);
 
+    // Declared first so it drops LAST — after the store read guard — and its
+    // `blocking_send` therefore never runs while holding the lock.
+    let guard = AbortBodyOnPanic {
+        tx: tx.clone(),
+        query: query.chars().take(200).collect(),
+    };
+
     tokio::task::spawn_blocking(move || {
+        let _abort_on_panic = guard;
         // HDB-99: discard any per-operator exec-phase data left over on this
         // (tokio blocking-pool, thread-reused) thread from a previous
         // query's trailing chunks — see `exec::phases::reset`. This query's

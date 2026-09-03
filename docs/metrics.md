@@ -84,7 +84,7 @@ again.
 | `horndb_sparql_request_bytes_total` | counter | `endpoint` | bytes | request body bytes (exact at end-of-stream) |
 | `horndb_sparql_response_bytes_total` | counter | `endpoint` | bytes | response body bytes |
 | `horndb_sparql_query_total` | counter | `kind` | count | query/update operations by kind |
-| `horndb_sparql_query_errors_total` | counter | `stage` | count | pipeline errors by stage; `exec` includes mid-stream errors of HTTP-streamed SELECTs (which abort the response body rather than producing a 4xx/5xx) |
+| `horndb_sparql_query_errors_total` | counter | `stage` | count | pipeline errors by stage; `exec` includes mid-stream errors of HTTP-streamed SELECTs, serializer panics included (both abort the response body rather than producing a 4xx/5xx) |
 | `horndb_sparql_stage_duration_seconds` | histogram | `stage` | s `(1e-4 ×3 ×12)` | per-stage pipeline latency; for HTTP-streamed SELECTs, `exec` measures plan→first-result-chunk (no duration metric covers the full body drain; delivered bytes are visible in `horndb_sparql_response_bytes_total`), and non-SELECT `/query` requests record one extra `parse` observation from streaming-path routing |
 | `horndb_sparql_exec_phase_nanoseconds_total` | counter | `phase` | ns | nanoseconds spent in each per-operator SPARQL execution-time phase (`HORNDB_EXEC_PHASES=1` only — zero rows/samples when the flag is off) |
 | `horndb_sparql_exec_phase_rows_total` | counter | `phase` | count | rows each execution-time phase handled |
