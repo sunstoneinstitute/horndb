@@ -369,9 +369,35 @@ pub trait Store {
     }
 }
 
-/// Convenience: a backend that is both an `Executor` and a `Store`.
-pub trait FullBackend: Executor + Store {}
-impl<T: Executor + Store> FullBackend for T {}
+/// Pin a read view that outlives the store lock (HDB-119).
+///
+/// The HTTP server holds one `RwLock` over the backend: without this, a
+/// streamed `SELECT` would keep the read guard until the client drained the
+/// body, so one slow reader blocks every writer (and, since the lock queues
+/// writers fairly, that writer then blocks every new reader). `/query`
+/// instead takes the read lock only long enough to pin a view, and executes
+/// against the view with no lock held.
+///
+/// The view is an owned, read-only `Executor`. What it costs, and how
+/// isolated it is, is the backend's business: `HornBackend` shares its
+/// storage handle and pins one commit version (O(1), fully isolated —
+/// SPEC-25 S1 per-tuple MVCC); `MemStore`, the test backend, deep-copies.
+/// Either way a query sees one point in time, and a write committed
+/// mid-stream is invisible to it.
+pub trait Pinnable {
+    /// The pinned view. `'static` and `Send`: the point is that it outlives
+    /// the guard it was taken under, and travels to a blocking task.
+    type View: Executor + Send + 'static;
+
+    /// Pin the current state. Called with the store lock held; everything
+    /// after runs without it.
+    fn pin_read(&self) -> Self::View;
+}
+
+/// Convenience: a backend that is both an `Executor` and a `Store`, and can
+/// hand out a pinned read view.
+pub trait FullBackend: Executor + Store + Pinnable {}
+impl<T: Executor + Store + Pinnable> FullBackend for T {}
 
 /// Classify a stored lexical value back into the term kind it encodes.
 ///

@@ -345,6 +345,18 @@ impl PinnedSnapshot {
     pub fn arc(&self) -> Arc<TierSnapshot> {
         self.snap.clone()
     }
+
+    /// A second pin on the *same* version — an `Arc` clone plus a pin-count
+    /// bump. Lets a caller that owns one pin hand out as many equivalent
+    /// views as it needs (`Store::snapshot_at`) without re-reading the live
+    /// pointer, which would silently move the view to a newer version.
+    pub fn repin(&self) -> PinnedSnapshot {
+        *self.pins.lock().entry(self.snap.version).or_insert(0) += 1;
+        PinnedSnapshot {
+            snap: self.snap.clone(),
+            pins: self.pins.clone(),
+        }
+    }
 }
 
 impl Drop for PinnedSnapshot {

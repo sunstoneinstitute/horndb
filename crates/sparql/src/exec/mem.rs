@@ -20,7 +20,7 @@ use crate::exec::scope::{
 };
 use crate::exec::{
     classify_lexical, unify_one, AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor,
-    GraphName, Slot, Store,
+    GraphName, Pinnable, Slot, Store,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -427,6 +427,20 @@ impl MemStore {
             // unconstrained leading pattern.
             (None, None, _) => Cow::Owned((0..self.triples.len()).collect()),
         }
+    }
+}
+
+/// `MemStore` has no MVCC: its pinned view is a **deep copy** of the whole
+/// store. That is O(store) per query, which is fine here — `MemStore` is the
+/// test/reference backend (`HornBackend` is the production one) and the
+/// stores it holds are fixture-sized. The semantics are the ones
+/// [`Pinnable`] promises: the copy is a consistent point in time, and a
+/// write committed while a query streams is invisible to it.
+impl Pinnable for MemStore {
+    type View = MemStore;
+
+    fn pin_read(&self) -> MemStore {
+        self.clone()
     }
 }
 

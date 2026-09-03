@@ -86,6 +86,14 @@ checkpoint taken under concurrent writes is internally consistent (NF5).
 Per-tuple visibility (row-level delete) is the next section, delivered under
 `SPEC-25` S1.
 
+`Store::pin()` hands the same pinned tier state out as an **owned**
+`PinnedSnapshot`, detached from the `&Dictionary` borrow `snapshot()` carries;
+`Store::snapshot_at(&pin)` re-opens it as a full `StoreSnapshot` as often as
+needed, always at the pinned version (`PinnedSnapshot::repin`). That is the
+seam a caller needs to keep one read version alive across many reads without
+holding a lock on the store — `horndb-sparql`'s per-query pinned read view
+(HDB-119) is the first user.
+
 ## Partition runs and deferred merge (HDB-84, delivered)
 
 A `PredicatePartition` holds a list of sorted **runs** — blocks of rows whose
