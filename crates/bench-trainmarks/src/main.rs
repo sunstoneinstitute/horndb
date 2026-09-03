@@ -81,6 +81,18 @@ struct Cli {
     /// wanted and the query suite is minutes of irrelevant runtime.
     #[arg(long, default_value_t = false)]
     load_only: bool,
+    /// Measure the serving footprint honestly: load the corpus ONCE, run the
+    /// read queries (which build the query snapshot), then report RSS. Skips
+    /// the write legs, the discarded second load of the `read_ntriples` leg,
+    /// and q6 (the only UPDATE).
+    ///
+    /// Without this, the `[mem]` line at the end of `main` is not a serving
+    /// footprint: the `read_ntriples` leg builds and drops a whole second
+    /// store, and the allocator does not return that arena to the OS, so the
+    /// sampled VmRSS carries a freed store's pages. That inflated the first
+    /// hornbench measurement roughly eightfold (HDB-144).
+    #[arg(long, default_value_t = false)]
+    mem_only: bool,
     /// Preallocate the parse batch for this many triples. 0 (the default)
     /// estimates the count from the file instead; pass a value only to pin it.
     ///
@@ -395,7 +407,7 @@ fn main() -> Result<()> {
 
     // --- write Turtle / N-Triples --- (both skipped under --load-only; the
     // read_ntriples leg below reads the source file, not what these produce)
-    if !cli.load_only {
+    if !cli.load_only && !cli.mem_only {
         let t = Instant::now();
         write_turtle(&backend, &tmp_ttl)?;
         let secs = t.elapsed().as_secs_f64();
@@ -412,12 +424,17 @@ fn main() -> Result<()> {
     }
 
     // --- read N-Triples (discarded; just I/O timing) ---
-    let t = Instant::now();
-    drop(load(&nt, false, cli.reserve_triples)?);
-    let secs = t.elapsed().as_secs_f64();
-    eprintln!("  read_ntriples: {secs:.4}s");
-    results.record("read_ntriples", json!(secs));
-    dump_load_phases("read_ntriples");
+    // Skipped under --mem-only: this builds a second full store and drops it,
+    // and the freed arena stays resident, which is exactly what corrupts the
+    // footprint sample at the end of main.
+    if !cli.mem_only {
+        let t = Instant::now();
+        drop(load(&nt, false, cli.reserve_triples)?);
+        let secs = t.elapsed().as_secs_f64();
+        eprintln!("  read_ntriples: {secs:.4}s");
+        results.record("read_ntriples", json!(secs));
+        dump_load_phases("read_ntriples");
+    }
 
     if cli.load_only {
         eprintln!("  load-only: skipping writes and queries");
@@ -430,44 +447,48 @@ fn main() -> Result<()> {
     // does not affect the read queries (none of q1..q5 read :unitPrice), and
     // running it here lets the read queries share an Arc<HornBackend> across
     // worker threads. Updates are fast and not run under the worker-timeout.
-    {
-        let sql = std::fs::read_to_string(cli.queries_dir.join("q6_delete_insert.rq"))
-            .context("read q6")?;
-        let run = |b: &mut HornBackend| -> (Result<(), String>, f64) {
-            let t = Instant::now();
-            let r = execute_update(&sql, b).map_err(|e| e.to_string());
-            (r, t.elapsed().as_secs_f64())
-        };
-        let (r, secs) = run(&mut backend);
-        match r {
-            Ok(()) => results.record("query_q6_delete_insert_cold", json!(secs)),
-            Err(e) => {
-                eprintln!("    q6_delete_insert: ERROR {e}");
-                results.record(
-                    "query_q6_delete_insert_cold",
-                    Value::String(format!("ERROR: {e}")),
-                );
-                results.record(
-                    "query_q6_delete_insert",
-                    Value::String(format!("ERROR: {e}")),
-                );
-            }
-        }
-        // best of 3 warm (only if cold succeeded)
-        if !results
-            .rows
-            .last()
-            .is_some_and(|r| r["seconds"].is_string())
+    // Skipped under --mem-only: q6 mutates the store, and the footprint
+    // sample is meant to be the store as loaded and queried.
+    if !cli.mem_only {
         {
-            let mut best = f64::INFINITY;
-            for _ in 0..3 {
-                let (r, secs) = run(&mut backend);
-                if r.is_ok() {
-                    best = best.min(secs);
+            let sql = std::fs::read_to_string(cli.queries_dir.join("q6_delete_insert.rq"))
+                .context("read q6")?;
+            let run = |b: &mut HornBackend| -> (Result<(), String>, f64) {
+                let t = Instant::now();
+                let r = execute_update(&sql, b).map_err(|e| e.to_string());
+                (r, t.elapsed().as_secs_f64())
+            };
+            let (r, secs) = run(&mut backend);
+            match r {
+                Ok(()) => results.record("query_q6_delete_insert_cold", json!(secs)),
+                Err(e) => {
+                    eprintln!("    q6_delete_insert: ERROR {e}");
+                    results.record(
+                        "query_q6_delete_insert_cold",
+                        Value::String(format!("ERROR: {e}")),
+                    );
+                    results.record(
+                        "query_q6_delete_insert",
+                        Value::String(format!("ERROR: {e}")),
+                    );
                 }
             }
-            eprintln!("    q6_delete_insert: {best:.4}s (best of 3)");
-            results.record("query_q6_delete_insert", json!(best));
+            // best of 3 warm (only if cold succeeded)
+            if !results
+                .rows
+                .last()
+                .is_some_and(|r| r["seconds"].is_string())
+            {
+                let mut best = f64::INFINITY;
+                for _ in 0..3 {
+                    let (r, secs) = run(&mut backend);
+                    if r.is_ok() {
+                        best = best.min(secs);
+                    }
+                }
+                eprintln!("    q6_delete_insert: {best:.4}s (best of 3)");
+                results.record("query_q6_delete_insert", json!(best));
+            }
         }
     }
 
@@ -535,9 +556,19 @@ fn main() -> Result<()> {
 
     // Serving footprint (HDB-120): RSS with the store loaded AND a query
     // snapshot built, over the triples actually served. This is the number
-    // `docs/benchmarks.md`'s "serving footprint" row reports — the partition
-    // B/quad figure covers the columnar partitions alone and does not include
-    // the per-query source or the dictionary.
+    // `docs/benchmarks.md`'s "serving footprint" row reports.
+    //
+    // Only meaningful under --mem-only. In a full run this process has also
+    // built and dropped a second store (the `read_ntriples` leg) and written
+    // two serialisations, and the allocator keeps those pages, so the sample
+    // is a high-water mark of the whole run rather than a serving footprint.
+    //
+    // Scope of the number: one process, one loaded store, one query snapshot,
+    // whole-process RSS. That is columnar partitions + dictionary + the
+    // per-scope query source + the binary, its stacks and allocator overhead.
+    // It is NOT attributed between those, and it is not comparable with the
+    // partition-only B/quad figure, which is a different scope on a different
+    // corpus.
     {
         let triples = backend.len();
         let rss = rss_mib("VmRSS:");
@@ -547,9 +578,19 @@ fn main() -> Result<()> {
         } else {
             rss * 1024.0 * 1024.0 / triples as f64
         };
+        let peak_per_triple = if triples == 0 {
+            0.0
+        } else {
+            peak * 1024.0 * 1024.0 / triples as f64
+        };
         eprintln!(
-            "  [mem] serving footprint: RSS {rss:.0} MiB over {triples} triples \
-             = {per_triple:.1} B/triple (peak {peak:.0} MiB)"
+            "  [mem] serving footprint{}: RSS {rss:.0} MiB over {triples} triples \
+             = {per_triple:.1} B/triple; peak {peak:.0} MiB = {peak_per_triple:.1} B/triple",
+            if cli.mem_only {
+                ""
+            } else {
+                " (NOT ISOLATED — rerun with --mem-only)"
+            }
         );
     }
 

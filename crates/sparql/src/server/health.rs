@@ -91,4 +91,50 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    /// HDB-144: the data endpoints must shed while the store is still
+    /// loading, not answer from a partly-loaded corpus. Without this, a
+    /// benchmark driver that waits on `/query` measures a fraction of the
+    /// data and reports it as a result.
+    #[tokio::test]
+    async fn query_and_update_shed_until_ready() {
+        for (uri, body) in [("/query?query=ASK%7B%7D", ""), ("/update", "")] {
+            let app = super::super::build_router(state(false));
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method(if uri == "/update" { "POST" } else { "GET" })
+                        .uri(uri)
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{uri} should shed while loading"
+            );
+            assert_eq!(
+                resp.headers()
+                    .get("retry-after")
+                    .map(|v| v.to_str().unwrap()),
+                Some("1"),
+                "{uri} should tell the caller when to retry"
+            );
+        }
+
+        // Same query once the load has finished.
+        let app = super::super::build_router(state(true));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/query?query=ASK%7B%7D")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

@@ -55,6 +55,14 @@ env:
   OXIGRAPH_VERSION: "0.5.9"
   OXIGRAPH_BIND: "127.0.0.1:7878"
 
+# Serialize with bench.yml (and with a second nightly, should one overlap):
+# hornbench has one set of cores and one page cache, and a measurement that
+# shares them is noise. Never cancel in flight -- a half-finished pass wastes
+# an hour and leaves a gap in the trend series.
+concurrency:
+  group: hornbench
+  cancel-in-progress: false
+
 jobs:
   spb-256:
     # Dedicated benchmark machine (self-hosted). Labels match what ops

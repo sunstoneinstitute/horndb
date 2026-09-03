@@ -34,6 +34,31 @@ name **all** jobs (`lint`, `tests`, `conformance`, `python-rdflib-compat`); jobs
 skipped by the gate count as satisfied. `workflows/nightly.yml` runs LDBC
 SPB-256 on a self-hosted runner.
 
+### `workflows/bench.yml` — running a bench on hornbench without ssh
+
+`ssh hornbench` needs an ssh config and network path not everyone has (an agent
+session never has one), but hornbench is always reachable as the self-hosted
+runner labelled `[self-hosted, bench, zen4]`. `workflows/bench.yml` is that
+route: it runs any repo-relative script you name on that runner, uploads
+`bench-out/` as the `bench-<run_id>` artifact, and appends `bench-out/SUMMARY.md`
+to the job summary. It shares a `concurrency: hornbench` group with the nightly
+so the two never measure at the same time, and never cancels a run in flight.
+It reuses nightly.yml's persistent-disk conventions (`CARGO_HOME`, `SCCACHE_DIR`,
+`SPB_ASSETS`) — the Actions checkout is wiped between runs, so anything
+expensive to rebuild must live outside it.
+
+```bash
+gh workflow run bench.yml --ref <branch> -f script=scripts/bench/audit-pass.sh
+gh run watch <id> --exit-status && gh run download <id>
+```
+
+**A workflow is only dispatchable once it is on the default branch.** GitHub
+registers `workflow_dispatch` workflows from `main`, so `gh workflow run` against
+a branch-only workflow returns 404. Until `bench.yml` is on `main` — and for
+anyone without dispatch permission — push a branch named `bench-run/<anything>`
+instead: that push runs the branch's own copy of the workflow, falling back to
+`scripts/bench/audit-pass.sh` because a push carries no inputs.
+
 Two cost controls, added after cache analysis (2026-07): a workflow-level
 `concurrency` group cancels a PR's superseded runs (pushes to `main` are never
 cancelled — a merge burst folds into GitHub's single queued run), and the cargo

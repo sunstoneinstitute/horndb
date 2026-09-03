@@ -102,3 +102,8 @@ criterion = { workspace = true }
 [[bench]]
 name = "stats_incremental"
 harness = false
+
+[[bench]]
+name = "view_derivation"
+harness = false
+required-features = ["reasoner"]

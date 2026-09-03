@@ -191,6 +191,12 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     headers: &HeaderMap,
     settings: QuerySettings,
 ) -> axum::response::Response {
+    // Refuse to answer from a partly-loaded store (HDB-144). Before anything
+    // else, so no work is done for a request that will be shed.
+    if let Some(resp) = state.shed_while_loading() {
+        return resp;
+    }
+
     let accept = headers
         .get("accept")
         .and_then(|v| v.to_str().ok())
