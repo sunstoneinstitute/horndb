@@ -4,6 +4,8 @@
 //! all built on `oxttl` streaming parsers feeding the dictionary + tier in
 //! batches of [`load_batch_triples`]. N-Quads routes each quad to the graph named by
 //! its fourth term (SPEC-02 F7); N-Triples and Turtle load the default graph.
+//! Every entry point renames blank nodes per document before interning them —
+//! see [`scope_blank_node`] (HDB-113).
 pub mod nquads;
 pub mod ntriples;
 pub mod parallel;
@@ -18,7 +20,7 @@ use crate::dictionary::{flush_intern_phases, Dictionary};
 use crate::error::Result;
 use crate::store::Store;
 use crate::term::{GraphId, TermId};
-use oxrdf::{NamedOrBlankNode, Term};
+use oxrdf::{BlankNode, NamedOrBlankNode, Term};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -387,5 +389,41 @@ pub(crate) fn subject_to_term(s: NamedOrBlankNode) -> Term {
     match s {
         NamedOrBlankNode::NamedNode(n) => Term::NamedNode(n),
         NamedOrBlankNode::BlankNode(b) => Term::BlankNode(b),
+    }
+}
+
+// ── Cross-document blank-node scoping (HDB-113) ─────────────────────────────
+//
+// Blank-node labels are scoped to one document in N-Triples/Turtle/N-Quads,
+// but `oxttl` emits a labelled blank node verbatim (`BlankNode::new_unchecked`)
+// and every loader carried that label straight into the dictionary. Loading
+// several files into one store (the normal `serve --data <dir>` deployment)
+// then silently conflated any two files that happened to reuse a label, e.g.
+// `_:b1` in both. [`Store::next_bnode_doc_tag`] hands out one tag per
+// document load; every loader entry point renames each blank node it parses
+// with that tag via [`scope_blank_node`] before interning it, so labels only
+// collide when they came from the same document (preserving intra-document
+// node identity, which the parallel-vs-serial parity tests in
+// `tests/parallel_loader.rs` still pin unchanged).
+
+/// Rename a blank-node label so it can't collide with the same label from a
+/// different document load. Same `tag` + same original label -> same renamed
+/// label; a different tag never produces the same renamed label for a label
+/// that could plausibly appear in real data (the prefix names the tag).
+pub fn scope_blank_node_label(tag: u64, label: &str) -> String {
+    format!("hdb{tag}_{label}")
+}
+
+/// [`scope_blank_node_label`] for an `oxrdf::BlankNode`.
+pub fn scope_blank_node(tag: u64, b: BlankNode) -> BlankNode {
+    BlankNode::new_unchecked(scope_blank_node_label(tag, b.as_str()))
+}
+
+/// [`scope_blank_node`] for a [`Term`]; a named node or literal passes
+/// through unchanged.
+pub fn scope_term(tag: u64, term: Term) -> Term {
+    match term {
+        Term::BlankNode(b) => Term::BlankNode(scope_blank_node(tag, b)),
+        other => other,
     }
 }

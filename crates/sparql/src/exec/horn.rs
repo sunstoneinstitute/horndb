@@ -416,6 +416,12 @@ impl HornBackend {
         self.store.triple_count() == 0
     }
 
+    /// A fresh tag for one document load into this backend's store
+    /// (HDB-113) — see `horndb_storage::Store::next_bnode_doc_tag`.
+    pub fn next_bnode_doc_tag(&self) -> u64 {
+        self.store.next_bnode_doc_tag()
+    }
+
     fn invalidate(&mut self) {
         self.snapshots
             .get_mut()
@@ -1280,6 +1286,12 @@ impl Store for HornBackend {
                 )
             })
             .collect())
+    }
+
+    /// Overrides the trait default (a process-wide counter) to scope the tag
+    /// to this backend's own store, matching the bulk loaders (HDB-113).
+    fn next_bnode_doc_tag(&self) -> u64 {
+        HornBackend::next_bnode_doc_tag(self)
     }
 }
 

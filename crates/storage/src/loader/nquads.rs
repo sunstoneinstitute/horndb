@@ -19,7 +19,8 @@ use crate::loader::parallel::{
     slice_threads,
 };
 use crate::loader::{
-    load_quads_in_graphs, subject_to_term, Batch, LoadStats, Probed, QuadSink, SinkTimer,
+    load_quads_in_graphs, scope_blank_node, scope_term, subject_to_term, Batch, LoadStats, Probed,
+    QuadSink, SinkTimer,
 };
 use crate::store::Store;
 use crate::term::{GraphId, DEFAULT_GRAPH};
@@ -46,18 +47,19 @@ pub fn load_nquads_file(store: &Store, path: &Path) -> Result<LoadStats> {
 
 pub fn load_nquads_reader<R: Read>(store: &Store, reader: R) -> Result<LoadStats> {
     let parser = NQuadsParser::new();
+    let tag = store.next_bnode_doc_tag();
     load_quads_in_graphs(
         store,
-        parser.for_reader(reader).map(|q| {
+        parser.for_reader(reader).map(move |q| {
             let quad = q.map_err(|e| StorageError::NquadsParse(format!("{e}")))?;
             Ok((
                 quad.graph_name,
-                subject_to_term(quad.subject),
+                scope_term(tag, subject_to_term(quad.subject)),
                 Term::NamedNode(quad.predicate),
-                quad.object,
+                scope_term(tag, quad.object),
             ))
         }),
-        graph_id,
+        move |store, g| graph_id(store, tag, g),
     )
 }
 
@@ -77,7 +79,8 @@ pub fn load_nquads_slice_with_threads(
 ) -> Result<LoadStats> {
     let mut sink = QuadSink::new(store);
     let mut timer = SinkTimer::new();
-    for_each_nquads_probed(bytes, threads, store.dictionary(), |batch| {
+    let tag = store.next_bnode_doc_tag();
+    for_each_nquads_probed(bytes, threads, tag, store.dictionary(), |batch| {
         timer.sink(|| {
             // The graph label is interned on this thread, before the row's own
             // terms — the order the unprobed path uses, so graph labels keep
@@ -85,19 +88,19 @@ pub fn load_nquads_slice_with_threads(
             sink.intern_batch(|s| match batch {
                 Batch::Raw(rows) => {
                     for q in rows {
-                        let g = graph_id(store, q.graph_name)?;
+                        let g = graph_id(store, tag, q.graph_name)?;
                         s.push(
                             g,
-                            &subject_to_term(q.subject),
+                            &scope_term(tag, subject_to_term(q.subject)),
                             &Term::NamedNode(q.predicate),
-                            &q.object,
+                            &scope_term(tag, q.object),
                         )?;
                     }
                     Ok(())
                 }
                 Batch::Probed(rows) => {
                     for (graph_name, row) in rows {
-                        let g = graph_id(store, graph_name)?;
+                        let g = graph_id(store, tag, graph_name)?;
                         s.push_probed(g, row)?;
                     }
                     Ok(())
@@ -120,6 +123,7 @@ pub fn load_nquads_slice_with_threads(
 pub(crate) fn for_each_nquads_probed<F>(
     bytes: &[u8],
     threads: usize,
+    tag: u64,
     dict: &Dictionary,
     sink: F,
 ) -> Result<()>
@@ -139,10 +143,14 @@ where
                     .map(|q| {
                         let row = Probed::probe(
                             dict,
-                            subject_to_term(q.subject),
+                            scope_term(tag, subject_to_term(q.subject)),
                             Term::NamedNode(q.predicate),
-                            q.object,
+                            scope_term(tag, q.object),
                         );
+                        // The graph name is scoped later, by `graph_id`
+                        // (interning a graph label also allocates its
+                        // `GraphId`, so it stays on the calling thread — see
+                        // the module doc on `to_graph`).
                         (q.graph_name, row)
                     })
                     .collect(),
@@ -184,12 +192,16 @@ fn nquads_chunks(
 }
 
 /// Map an N-Quads graph term to a [`GraphId`]. The default graph keeps the
-/// reserved sentinel; a named (IRI) or blank-node graph label is interned via
-/// the dictionary so identical labels collapse to the same id.
-fn graph_id(store: &Store, g: GraphName) -> Result<GraphId> {
+/// reserved sentinel; a named (IRI) graph label is interned via the
+/// dictionary so identical labels collapse to the same id. A blank-node graph
+/// label is renamed with `tag` first (HDB-113), same as every other blank
+/// node parsed from this document.
+fn graph_id(store: &Store, tag: u64, g: GraphName) -> Result<GraphId> {
     match g {
         GraphName::DefaultGraph => Ok(DEFAULT_GRAPH),
         GraphName::NamedNode(n) => store.intern_graph_uri(&Term::NamedNode(n)),
-        GraphName::BlankNode(b) => store.intern_graph_uri(&Term::BlankNode(b)),
+        GraphName::BlankNode(b) => {
+            store.intern_graph_uri(&Term::BlankNode(scope_blank_node(tag, b)))
+        }
     }
 }
