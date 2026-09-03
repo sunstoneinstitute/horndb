@@ -4,7 +4,9 @@
 //! closure the server installs over a `Weak` ref to the live store. Nothing is
 //! paid between scrapes. What a scrape itself costs is no longer always small —
 //! see [`StorageSnapshot`].
-use crate::labels::{LoadPhase, LoadPhaseLabel, MemTier, TierLabel};
+use crate::labels::{
+    LoadPhase, LoadPhaseLabel, MemTier, MergeTrigger, MergeTriggerLabel, TierLabel,
+};
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeMetric};
 use prometheus_client::metrics::counter::Counter;
@@ -24,6 +26,12 @@ pub struct StorageMetrics {
     /// [`StorageMetrics::record_load_phase`], never from inside a loop.
     pub load_phase_nanoseconds: Family<LoadPhaseLabel, Counter>,
     pub load_phase_rows: Family<LoadPhaseLabel, Counter>,
+    /// Wall-clock of one partition run merge, and a count of merges by what
+    /// triggered them (HDB-122). The `load_phase_*` pair above sums the same
+    /// work; this is the *distribution*, which is what a tail-latency question
+    /// needs — a p99 of seconds is invisible in a sum.
+    pub partition_merge_seconds: Histogram,
+    pub partition_merges: Family<MergeTriggerLabel, Counter>,
 }
 
 impl StorageMetrics {
@@ -32,6 +40,10 @@ impl StorageMetrics {
         let load_bytes = Counter::default();
         let load_phase_nanoseconds = Family::<LoadPhaseLabel, Counter>::default();
         let load_phase_rows = Family::<LoadPhaseLabel, Counter>::default();
+        // 100 us to ~4.9 h: a small partition merges in microseconds, a 10M-row
+        // one in seconds.
+        let partition_merge_seconds = Histogram::new(exponential_buckets(1e-4, 4.0, 12));
+        let partition_merges = Family::<MergeTriggerLabel, Counter>::default();
         reg.register(
             "storage_load_duration_seconds",
             "RDF load duration",
@@ -52,12 +64,32 @@ impl StorageMetrics {
             "Rows handled by each bulk-load phase",
             load_phase_rows.clone(),
         );
+        reg.register(
+            "storage_partition_merge_seconds",
+            "Duration of one partition run merge",
+            partition_merge_seconds.clone(),
+        );
+        reg.register(
+            "storage_partition_merges",
+            "Partition run merges, by what triggered them",
+            partition_merges.clone(),
+        );
         Self {
             load_duration_seconds,
             load_bytes,
             load_phase_nanoseconds,
             load_phase_rows,
+            partition_merge_seconds,
+            partition_merges,
         }
+    }
+
+    /// Record one partition run merge: how long it took and what triggered it.
+    pub fn record_partition_merge(&self, trigger: MergeTrigger, elapsed: Duration) {
+        self.partition_merge_seconds.observe(elapsed.as_secs_f64());
+        self.partition_merges
+            .get_or_create(&MergeTriggerLabel { trigger })
+            .inc();
     }
 
     /// Record one bulk-load phase: its elapsed time and the rows it handled.

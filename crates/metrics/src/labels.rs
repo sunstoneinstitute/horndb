@@ -161,6 +161,20 @@ pub struct LoadPhaseLabel {
     pub phase: LoadPhase,
 }
 
+// What made a partition merge its runs (HDB-122). `read` is the first read
+// after batched writes — the merge is charged to whichever reader gets there
+// first; `write_cap` is the write that hit `partition::MAX_RUNS` and merged
+// rather than appending another run.
+label_value_enum!(MergeTrigger {
+    Read => "read",
+    WriteCap => "write_cap",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MergeTriggerLabel {
+    pub trigger: MergeTrigger,
+}
+
 // Per-operator SPARQL execution-time phases (HDB-99), splitting the single
 // `exec` pipeline stage so a slow query can be attributed to the operator
 // that actually spent the time. Emitted only when `HORNDB_EXEC_PHASES=1` is

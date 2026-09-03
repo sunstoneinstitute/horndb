@@ -119,15 +119,30 @@ What this changes for callers:
   `apply_quad_batch` rebuilds only the predicates a batch actually deletes
   from; see the next section.
 
-**A read can now stall a write.** The merging thread is a reader. It holds no
-writer lock, and it holds the partition's `runs` mutex for the whole merge — a
-sort of every row, plus a second sort for the object-major layout above
-`hot_threshold`. A concurrent `with_appended_rows` on that same partition waits
-it out: on a 10M-row predicate, order of seconds. The work is not new (the
-pre-HDB-84 tier charged the same sort to the writer, on *every* batch) and it
-runs once per partition version, but the direction is: reader-blocks-writer did
-not exist before. `MemoryTier`'s writer mutex does not bound it, because the
-merging thread never takes that mutex.
+**A read pays for the merge, but no longer blocks a write** (HDB-122). The
+merging thread is a reader, and it still pays the whole cost — a sort of every
+row, plus a second sort for the object-major layout above `hot_threshold`, order
+of seconds on a 10M-row predicate. Between HDB-84 and HDB-122 it also held the
+partition's `runs` mutex for that whole merge, so a concurrent
+`with_appended_rows` or `mark_live` on that partition waited it out: a
+reader-blocks-writer stall that did not exist before, and one `MemoryTier`'s
+writer mutex could not bound because the merging thread never takes that mutex.
+
+The merge now runs outside the mutex: `PredicatePartition::merged_cols` clones
+the run list (`Arc` clones) under the lock, releases it, merges, then re-takes
+the lock to swap the collapsed one-run list in. Two things make the swap safe.
+`OnceLock::get_or_init` runs the merge on exactly one thread per partition, so
+two readers cannot merge concurrently. And a writer never mutates the partition
+it appends to — `with_appended_rows` clones the run list into a **new**
+`PredicatePartition` — so an append in flight during a merge cannot be lost by
+the swap; whether the writer's clone catches the pre- or post-merge list, both
+hold the same rows.
+
+Each merge is timed into `horndb_storage_partition_merge_seconds` and counted by
+`horndb_storage_partition_merges_total{trigger}` (`read` vs `write_cap`), so the
+tail is attributable — see `docs/metrics.md`. A reader still blocks *other
+readers* of the same partition for the merge's duration (they wait on the
+`OnceLock`); that is unchanged and is not a write-path stall.
 
 **Run count is capped** at `partition::MAX_RUNS` (4,096). Two costs grow with
 it — a write clones the run list, and each run carries ~1 KiB of fixed Arrow +

@@ -55,8 +55,10 @@ HDB-84 the tier appends a write as a sorted run and merges a partition's runs
 on the **first read**, and a scrape is a read: the first scrape after a bulk
 load (or any batched write nothing has read yet) pays that merge, once per
 affected partition — order of a second on a 10M-triple store, and it emits a
-`merge_runs` phase sample. Later scrapes are bounded by the partition count
-again.
+`merge_runs` phase sample plus a `storage_partition_merge_seconds` observation
+with `trigger="read"`. Later scrapes are bounded by the partition count again.
+Since HDB-122 the merge runs outside the partition's `runs` mutex, so it no
+longer blocks writers to that partition while it is in flight.
 
 ## Labels
 
@@ -74,6 +76,7 @@ again.
 | `result` | `ok`, `error` | `ml_nl_query` |
 | `kernel` | `intersect`, `lower_bound`, `merge`, `dedup`, `filter_range`, `filter_indices_eq`, `gather` | `simd_kernel_isa` |
 | `isa` | `scalar`, `avx2`, `avx512`, `neon` | `simd_kernel_isa` |
+| `trigger` | `read`, `write_cap` | `storage_partition_merges` — what made a partition merge its runs |
 | `source` | `table`, `calibrated`, `static` | `simd_kernel_isa` — which selection path chose this `(kernel, isa)` (known-CPU table / micro-calibration / static widest) |
 
 ## SPARQL HTTP + pipeline (`crates/metrics/src/sparql.rs`)
@@ -154,6 +157,8 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 | `horndb_storage_load_bytes_total` | counter | — | bytes | bytes read during RDF load |
 | `horndb_storage_load_phase_nanoseconds_total` | counter | `phase` | ns | nanoseconds spent in each bulk-load phase |
 | `horndb_storage_load_phase_rows_total` | counter | `phase` | count | rows each bulk-load phase handled |
+| `horndb_storage_partition_merge_seconds` | histogram | — | s `(1e-4 ×4 ×12)` | wall-clock of **one** partition run merge (HDB-122). `load_phase_nanoseconds{phase="merge_runs"}` sums the same work; this is the distribution, so a p99 of seconds is visible instead of averaged away |
+| `horndb_storage_partition_merges_total` | counter | `trigger` | count | partition run merges, by what triggered them. `trigger="read"` is the first read after batched writes — the merge is charged to whichever reader gets there first, including a `/metrics` scrape; `trigger="write_cap"` is a write that hit `MAX_RUNS` and merged rather than appending |
 | `horndb_storage_triples` | gauge | — | count | live triples in the store **(scrape-time)** |
 | `horndb_storage_graphs` | gauge | — | count | distinct named graphs **(scrape-time)** |
 | `horndb_storage_predicates` | gauge | — | count | distinct predicates **(scrape-time)** |
@@ -173,7 +178,7 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 | `copy_forward` | `crates/storage/src/memory_tier.rs` | carrying existing partition rows forward with their visibility stamps, end-stamping the ones this batch retracts, and collecting the survivors into the sorted `still_visible` list the `merge` phase reads. `apply_quad_batch` only, and since HDB-102 only for the **predicates a batch actually deletes from** — a predicate the batch only adds to takes the append-run path and carries nothing, so an add-only batch (every `INSERT DATA`, every `Store::insert_quads`) contributes zero seconds and zero rows here. `insert_quad_batch` stopped carrying rows forward in HDB-84 and never emits this |
 | `merge` | `crates/storage/src/memory_tier.rs` | deciding which of a batch's added pairs are genuinely new, and staging those (`apply_quad_batch`). Both of that call's paths report here, and they scale differently. On the **rebuild** path (predicates this batch deletes from) it is a linear merge cursor over the sorted `still_visible` list, `O(live rows + adds)` per predicate — it grows with the *partition*, not the batch, and went 0.017s to 0.072s on a 16-call 1M append when HDB-88 introduced the cursor (`docs/benchmarks.md`). On the **append-run** path (HDB-102, predicates this batch only adds to) it is `PredicatePartition::mark_live`: one galloping search per run per added pair, `O(adds · log(rows/adds))` per run and **no** pass over the partition. Since HDB-102 an add-only batch's whole read-side cost sits in this phase rather than in `copy_forward` |
 | `build` | `crates/storage/src/memory_tier.rs` | sorting rows and materialising their Arrow columns. How much it covers depends on the path: the **whole partition** for an `apply_quad_batch` predicate that is being rebuilt (it has deletes), and only the **batch's own new run** for `insert_quad_batch` and for an `apply_quad_batch` predicate on the append-run path (HDB-102). Since HDB-88 the sort is **skipped when the rows already arrive in `(s, o, begin)` order** — which is the case for a bulk insert into an empty partition, since `group` sorted them — leaving only the dedupe scan and the column materialisation |
-| `merge_runs` | `crates/storage/src/partition.rs` | building a partition's readable columns from its sorted runs — the merge sort, plus the object-major sort when the predicate is over `hot_threshold`. This is where `insert_quad_batch`'s former `copy_forward` + whole-partition `build` cost went (HDB-84). Two emission sites: normally the **first read** after batched writes, once per partition; but also from the write itself when a partition hits `MAX_RUNS` runs, and that one nests inside `insert_quad_batch`'s `build` window — **at the cap the same nanoseconds are counted in both phases**, while `build`'s row count still covers only the batch |
+| `merge_runs` | `crates/storage/src/partition.rs` | building a partition's readable columns from its sorted runs — the merge sort, plus the object-major sort when the predicate is over `hot_threshold`. This is where `insert_quad_batch`'s former `copy_forward` + whole-partition `build` cost went (HDB-84). Two emission sites: normally the **first read** after batched writes, once per partition; but also from the write itself when a partition hits `MAX_RUNS` runs, and that one nests inside `insert_quad_batch`'s `build` window — **at the cap the same nanoseconds are counted in both phases**, while `build`'s row count still covers only the batch. The two sites are told apart by `storage_partition_merges{trigger}` |
 | `invalidate` | `crates/sparql/src/exec/horn.rs` | dropping the cached WCOJ snapshots after the write |
 
 The pair is a count+sum summary per SPEC-17 §5.4.1 — mean cost per row for a
