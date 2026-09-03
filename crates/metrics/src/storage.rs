@@ -126,10 +126,15 @@ pub struct StorageSnapshot {
     pub graphs: i64,
     pub predicates: i64,
     pub dictionary_terms: i64,
+    /// Dictionary terms still resolvable, i.e. `dictionary_terms` minus the
+    /// slots the GC reclaimed (HDB-121). The two diverge only after a
+    /// `Store::compact()`; `dictionary_terms` counts index space consumed,
+    /// which is monotonic because ids are never re-issued.
+    pub dictionary_terms_live: i64,
     pub tier_bytes_estimated: i64,
 }
 
-/// Scrape-time collector that emits the five storage size gauges. It holds a
+/// Scrape-time collector that emits the six storage size gauges. It holds a
 /// closure that reads a [`StorageSnapshot`] from the live store (typically by
 /// upgrading a `Weak` ref); when the closure returns `None` (store gone) the
 /// gauges report zero.
@@ -160,6 +165,11 @@ impl Collector for StorageCollector {
                 "storage_dictionary_terms",
                 "Interned dictionary terms",
                 snap.dictionary_terms,
+            ),
+            (
+                "storage_dictionary_terms_live",
+                "Dictionary terms still resolvable (total minus GC-reclaimed)",
+                snap.dictionary_terms_live,
             ),
         ] {
             let g = ConstGauge::new(val);
@@ -197,6 +207,7 @@ mod tests {
                 graphs: 1,
                 predicates: 3,
                 dictionary_terms: 99,
+                dictionary_terms_live: 70,
                 tier_bytes_estimated: 1024,
             })
         })));
@@ -205,6 +216,10 @@ mod tests {
         assert!(buf.contains("horndb_storage_triples 42"), "got:\n{buf}");
         assert!(
             buf.contains("horndb_storage_dictionary_terms 99"),
+            "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_storage_dictionary_terms_live 70"),
             "got:\n{buf}"
         );
         assert!(

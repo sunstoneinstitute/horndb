@@ -83,6 +83,28 @@ impl TierSnapshot {
             .map(|part| part.ordered_at(ord, self.version))
     }
 
+    /// Visit the raw bits of every term id **physically present** in this
+    /// snapshot: each graph id, each predicate id, and the subject and object
+    /// of every row — dead rows included, because a row that is still stored
+    /// is still reachable from some pinned reader's version. Backs the mark
+    /// phase of the dictionary GC ([`crate::Store::compact`]).
+    ///
+    /// O(rows). Only ever called right after `compact()`, which has just
+    /// walked the same rows.
+    pub fn for_each_term_id(&self, mut f: impl FnMut(u64)) {
+        for (g, gs) in self.graphs.iter() {
+            f(g.0);
+            for (p, part) in gs.partitions.iter() {
+                f(p.0);
+                let (subjects, objects) = (part.subjects(), part.objects());
+                for i in 0..part.len() {
+                    f(subjects.value(i));
+                    f(objects.value(i));
+                }
+            }
+        }
+    }
+
     pub fn predicates(&self, graph: GraphId) -> Vec<TermId> {
         self.graphs
             .get(&graph)
@@ -247,6 +269,13 @@ impl MemoryTier {
             snap,
             pins: self.pins.clone(),
         }
+    }
+
+    /// The live version. Bumped by every logical write; compaction leaves it
+    /// alone. The dictionary GC uses it to detect a write that landed while it
+    /// was marking.
+    pub fn version(&self) -> u64 {
+        self.current.read().version
     }
 
     /// Lowest pinned version, or the current version if nothing is pinned.

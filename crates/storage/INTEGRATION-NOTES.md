@@ -80,8 +80,8 @@ it clones the top-level graph map (Arc clones of untouched graphs), rebuilds
 only the affected graphs' partition maps, bumps the version, and atomically
 swaps the live pointer. `Store::snapshot()` / `StoreSnapshot` pin a stable,
 internally-consistent read view; concurrent writers never disturb a pinned
-snapshot, which stays readable until dropped. The dictionary is append-only, so
-pinned term ids never change meaning. HDT export reads one pinned snapshot, so a
+snapshot, which stays readable until dropped. Interning only ever appends and
+no index is re-issued, so pinned term ids never change meaning. HDT export reads one pinned snapshot, so a
 checkpoint taken under concurrent writes is internally consistent (NF5).
 Per-tuple visibility (row-level delete) is the next section, delivered under
 `SPEC-25` S1.
@@ -285,3 +285,49 @@ it directly; `insert_quads` gains the matching shape (`Result<()>` →
 still call them directly, so that path keeps its older "insert always bumps
 the version" behaviour — only writes that go through `apply_quads` get the
 empty-batch-no-bump guarantee.
+
+## Dictionary GC (HDB-121, delivered)
+
+The dictionary used to be purely append-only: deleting every triple that
+mentioned a term freed neither its id nor its lexical bytes, so a continuous
+append + retract workload grew dictionary memory for the life of the process
+however few triples were live. `Store::compact()` now runs a **mark and sweep**
+over the dictionary right after it reclaims dead rows.
+
+- **Mark, not refcount.** `TierSnapshot::for_each_term_id` walks the rows that
+  survived compaction — every graph id, every predicate id, and the subject and
+  object of every *physically present* row, dead-but-unreclaimed rows included.
+  A refcount would have to be maintained on every insert, retract and partition
+  rebuild to save a walk that runs beside a compaction which has just touched
+  the same rows.
+- **Liveness bound: the tier's own `min_pinned`.** `compact()` keeps every row
+  with `end > min_pinned`, so marking what survives it marks everything any
+  pinned reader can still resolve. No second liveness scheme.
+- **What is freed:** the reverse-vector `Term` and the forward-map key — the two
+  allocations that dominate footprint. What stays is an empty `Option<Term>`
+  slot per reclaimed index.
+- **Ids are NOT re-used.** A thread that has interned a term but not yet
+  installed its rows holds an id no snapshot version can see, so `min_pinned`
+  does not cover id reuse the way it covers row reclamation. Reuse would be
+  silent corruption, so the index stays consumed: `Dictionary::len()` (index
+  space, monotonic, still capped at `MAX_DICT_INDEX = 1<<60`) and
+  `Dictionary::live_len()` (resolvable terms) diverge after the first sweep.
+  Upgrade path: register id issuance with the reclaimer (an epoch or refcount
+  taken at `intern`, released when the batch commits), then hand the free slots
+  back out. The free set is implicit — the `None` slots themselves — so nothing
+  extra has to be tracked in memory for that.
+- **Precondition, same reason:** the *sweep* assumes no thread holds a `TermId`
+  it has not yet installed rows for. Every `Store` write path interns and
+  installs inside one call, and the sweep aborts if a write commits while it is
+  marking, so the exposure is the id-based entry points and the bulk loaders'
+  parse-thread interning. Compaction is an explicit, quiesced maintenance call
+  (HDB-63); do not wire it to a timer before closing that gap. Row reclamation
+  carries no such precondition.
+- **HDB-57 (persistent dictionary) needs one tombstone bit per slot** in the
+  on-disk format so a reclaimed index reloads as reclaimed rather than as a
+  live term, plus the free-slot count for the gauge. Nothing here builds or
+  presumes a persistence format.
+
+Metrics: `horndb_storage_dictionary_terms` (index space consumed) versus
+`horndb_storage_dictionary_terms_live` (resolvable terms) — `docs/metrics.md`.
+Test: `tests/dictionary_gc.rs`. Bench: `benches/dict_gc_churn.rs`.

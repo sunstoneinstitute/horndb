@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "graph_scan"
 harness = false
+
+[[bench]]
+name = "dict_gc_churn"
+harness = false
