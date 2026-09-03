@@ -187,6 +187,15 @@ Separate server-scoped config from the bounded set a query may override.
     calibration happen once at startup (`crates/simd/src/dispatch.rs`).
   - `[logging]` — `level` (default `info`). **Hot-reloadable.**
   - `[reload]` — `debounce` (duration, default `250ms`). **Hot-reloadable.**
+  - `[reasoning]` — `on_inconsistency` (enum `warn` | `reject-startup` |
+    `serve-with-flag`, default `warn`): what `serve --materialize` does when
+    OWL 2 RL derives the `owl:Nothing` inconsistency marker. `warn` logs the
+    witnesses and serves; `reject-startup` exits non-zero without ever
+    reporting ready (the startup load runs after the socket binds, HDB-124);
+    `serve-with-flag` serves and stamps `x-horndb-inconsistent: true` on every
+    response. All three publish the `horndb_reasoning_inconsistent` gauge.
+    A typed enum, so a bad value is rejected with file+key attribution.
+    **Restart-only** — materialization happens once at startup.
 - **`QuerySettings`** — the query-scoped tier: the overridable subset
   (`query_timeout`, `max_result_rows`, `rdf12`, `max_query_memory`,
   `default_graph`). It is constructed per query by layering overrides (S4) on

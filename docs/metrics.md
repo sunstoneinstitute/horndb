@@ -202,6 +202,7 @@ per `materialize_with` call.
 | `horndb_owlrl_rounds_total` | counter | — | count | semi-naïve rounds executed |
 | `horndb_owlrl_rule_pruned_total` | counter | — | count | rule evaluations skipped by the dirty-predicate prune |
 | `horndb_owlrl_rule_considered_total` | counter | — | count | rule evaluations considered (prune denominator) |
+| `horndb_reasoning_inconsistent` | gauge | — | 0/1 | 1 iff the materialized closure is OWL 2 RL inconsistent (some individual inferred to be `owl:Nothing`). Set once by `serve --materialize` (HDB-125). Registered in `crates/metrics/src/owlrl.rs` but deliberately **not** under the `owlrl_` prefix — it describes the served closure, not the rule engine. |
 
 ## Incremental maintenance (`crates/metrics/src/incremental.rs`)
 

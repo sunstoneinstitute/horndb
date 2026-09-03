@@ -24,7 +24,7 @@ use axum::Router;
 use counting_body::{CountingBody, Direction};
 use horndb_metrics::labels::{Endpoint, EndpointLabel, Method, RequestLabels};
 use parking_lot::RwLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -108,6 +108,23 @@ impl Drop for QueryPermit {
     fn drop(&mut self) {
         horndb_metrics::metrics().sparql.queries_in_flight.dec();
     }
+}
+
+/// Response header stamped on every response while the served closure is known
+/// to be OWL 2 RL inconsistent (`[reasoning].on_inconsistency = "serve-with-flag"`).
+pub const INCONSISTENT_HEADER: &str = "x-horndb-inconsistent";
+
+/// Whether to stamp [`INCONSISTENT_HEADER`]. Process-global rather than a field
+/// on [`AppState`]: it is a startup fact about the one closure this process
+/// serves, and a static keeps the flag out of every generic handler signature
+/// (same shape as the process-global metrics registry).
+static SERVE_WITH_INCONSISTENT_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Turn the [`INCONSISTENT_HEADER`] stamp on. Called once at startup by
+/// `serve`; there is no way back — the closure does not become consistent
+/// while the process runs.
+pub fn flag_inconsistent() {
+    SERVE_WITH_INCONSISTENT_FLAG.store(true, Ordering::Relaxed);
 }
 
 /// Shared state, generic over the storage backend. Defaults to the
@@ -239,6 +256,12 @@ async fn record_request(req: Request, next: Next) -> Response {
                 status,
             })
             .inc();
+    }
+    if SERVE_WITH_INCONSISTENT_FLAG.load(Ordering::Relaxed) {
+        resp.headers_mut().insert(
+            axum::http::HeaderName::from_static(INCONSISTENT_HEADER),
+            axum::http::HeaderValue::from_static("true"),
+        );
     }
     resp
 }

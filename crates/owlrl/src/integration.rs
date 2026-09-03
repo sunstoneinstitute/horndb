@@ -367,6 +367,34 @@ impl Engine {
         Ok(iter.next().is_none())
     }
 
+    /// The individuals inferred to be `owl:Nothing` — the OWL 2 RL
+    /// inconsistency witnesses behind [`is_consistent`](Self::is_consistent) —
+    /// decoded to lexical form and capped at `limit`. Empty when the closure
+    /// is consistent or nothing has been loaded.
+    ///
+    /// Capped because an inconsistent ontology can make *every* individual an
+    /// `owl:Nothing`; callers log this list, so it must not be unbounded.
+    pub fn inconsistent_individuals(&self, limit: usize) -> Vec<String> {
+        let Some(state) = self.state.as_ref() else {
+            return Vec::new();
+        };
+        let ids: Vec<TermId> = state
+            .store
+            .probe(None, self.vocab.rdf_type, Some(self.vocab.owl_nothing))
+            .map(|t| t.s)
+            .take(limit)
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        // Only pay the O(dict) inversion once we know there is something to
+        // decode — the consistent case (the norm) never builds it.
+        let rev = invert_dict(&state.dict);
+        ids.iter()
+            .filter_map(|id| rev.get(id).map(|s| s.to_string()))
+            .collect()
+    }
+
     /// Return the full materialized triple set (asserted base plus
     /// everything inferred) as lexical `(subject, predicate, object)`
     /// triples, decoded back from the dictionary.

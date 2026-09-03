@@ -3,7 +3,10 @@
 //! built by [`horndb_sparql::server::build_router`].
 //!
 //! Pass `--materialize` to run OWL 2 RL forward-chaining over the loaded data
-//! before serving (requires the `reasoner` feature, on by default).
+//! before serving (requires the `reasoner` feature, on by default). If the
+//! closure turns out to be inconsistent (some individual inferred to be
+//! `owl:Nothing`), `[reasoning].on_inconsistency` decides what happens — see
+//! `apply_inconsistency_policy`.
 //!
 //! The storage and join execution are backed by `horndb-storage` (dictionary
 //! encoding) and `horndb-wcoj` (Leapfrog Triejoin).
@@ -31,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use horndb_config::{CliOverrides, LoadInputs};
+use horndb_config::{CliOverrides, LoadInputs, OnInconsistency};
 #[cfg(feature = "reasoner")]
 use oxrdf::{GraphName, Quad};
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
@@ -256,21 +259,24 @@ async fn main() -> Result<()> {
     // work, not async), then swap the populated store in and flip `ready` —
     // the "real signal" HDB-124 asks for, set once, at the end of the load.
     let materialize = cli.materialize;
-    tokio::task::spawn_blocking(move || match run_load(materialize, &files) {
-        Ok((loaded_store, total)) => {
-            *store.write() = loaded_store;
-            ready.store(true, std::sync::atomic::Ordering::Release);
-            eprintln!("serve: {total} triples loaded; ready");
-        }
-        Err(e) => {
-            // The original (pre-HDB-124) behavior treated a load failure as
-            // fatal at startup. The socket is already bound now, so mirror
-            // that by tearing the whole process down rather than serving
-            // forever against an empty, permanently-not-ready store.
-            eprintln!("serve: fatal: data load failed: {e:#}");
-            std::process::exit(1);
-        }
-    });
+    let on_inconsistency = cfg.reasoning.on_inconsistency;
+    tokio::task::spawn_blocking(
+        move || match run_load(materialize, &files, on_inconsistency) {
+            Ok((loaded_store, total)) => {
+                *store.write() = loaded_store;
+                ready.store(true, std::sync::atomic::Ordering::Release);
+                eprintln!("serve: {total} triples loaded; ready");
+            }
+            Err(e) => {
+                // The original (pre-HDB-124) behavior treated a load failure as
+                // fatal at startup. The socket is already bound now, so mirror
+                // that by tearing the whole process down rather than serving
+                // forever against an empty, permanently-not-ready store.
+                eprintln!("serve: fatal: data load failed: {e:#}");
+                std::process::exit(1);
+            }
+        },
+    );
 
     let drain = cfg.server.shutdown_drain.0;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -334,7 +340,17 @@ async fn wait_for_shutdown_signal() {
 /// `spawn_blocking` thread (HDB-124: the socket binds before this runs) and
 /// so the parse/materialize/load sequencing stays unit-testable in
 /// isolation from the HTTP boot sequence.
-fn run_load(materialize: bool, files: &[PathBuf]) -> Result<(HornBackend, u64)> {
+///
+/// `on_inconsistency` is `[reasoning].on_inconsistency`, read from the config
+/// in `main` and passed down because this runs off the main thread. Under
+/// `reject-startup` the error returned here is fatal in the caller — the
+/// socket is already bound by then (HDB-124), so the process exits rather
+/// than never binding.
+fn run_load(
+    materialize: bool,
+    files: &[PathBuf],
+    on_inconsistency: OnInconsistency,
+) -> Result<(HornBackend, u64)> {
     let mut store = HornBackend::new();
     let total;
 
@@ -370,6 +386,7 @@ fn run_load(materialize: bool, files: &[PathBuf]) -> Result<(HornBackend, u64)> 
                 "serve: materialized closure — {} asserted, {} total loaded",
                 stats.asserted, stats.loaded
             );
+            apply_inconsistency_policy(on_inconsistency, &stats.inconsistent)?;
             total = stats.loaded;
         }
         #[cfg(not(feature = "reasoner"))]
@@ -377,6 +394,8 @@ fn run_load(materialize: bool, files: &[PathBuf]) -> Result<(HornBackend, u64)> 
             anyhow::bail!("--materialize requires the `reasoner` feature");
         }
     } else {
+        // No closure without --materialize, so no inconsistency to police.
+        let _ = on_inconsistency;
         let mut loaded: u64 = 0;
         for f in files {
             // One `load_duration_seconds`/`load_bytes` observation per file
@@ -396,6 +415,50 @@ fn run_load(materialize: bool, files: &[PathBuf]) -> Result<(HornBackend, u64)> 
     }
 
     Ok((store, total))
+}
+
+/// HDB-125: surface an OWL 2 RL inconsistency (some individual inferred to be
+/// `owl:Nothing`) instead of silently serving from an unsound closure.
+///
+/// Always publishes the `horndb_reasoning_inconsistent` gauge and, when
+/// inconsistent, logs the witnesses (already capped by
+/// `load_with_reasoning`). Then applies `[reasoning].on_inconsistency`:
+/// `warn` serves anyway, `reject-startup` returns an error that tears the
+/// process down before it ever reports ready, and `serve-with-flag` serves
+/// with `x-horndb-inconsistent: true` on every response.
+///
+/// The witnesses are logged rather than exposed through the SPEC-27 provenance
+/// view — that view is HDB-66, not yet landed.
+#[cfg(feature = "reasoner")]
+fn apply_inconsistency_policy(policy: OnInconsistency, witnesses: &[String]) -> Result<()> {
+    horndb_metrics::metrics()
+        .owlrl
+        .reasoning_inconsistent
+        .set(i64::from(!witnesses.is_empty()));
+    if witnesses.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "serve: WARNING — OWL 2 RL inconsistency: {} individual(s) inferred to be owl:Nothing \
+         (showing up to {}): {}",
+        witnesses.len(),
+        horndb_sparql::exec::horn::INCONSISTENT_WITNESS_CAP,
+        witnesses.join(", ")
+    );
+    match policy {
+        OnInconsistency::Warn => Ok(()),
+        OnInconsistency::RejectStartup => anyhow::bail!(
+            "refusing to serve an inconsistent closure ([reasoning].on_inconsistency = reject-startup)"
+        ),
+        OnInconsistency::ServeWithFlag => {
+            horndb_sparql::server::flag_inconsistent();
+            eprintln!(
+                "serve: every response will carry {}: true",
+                horndb_sparql::server::INCONSISTENT_HEADER
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA
