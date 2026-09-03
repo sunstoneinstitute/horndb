@@ -159,10 +159,17 @@ pub fn load_with_reasoning(
         .map_err(|e| SparqlError::Executor(format!("owlrl load: {e}")))?;
     let asserted = engine.asserted_len().unwrap_or(0);
     let inconsistent = engine.inconsistent_individuals(INCONSISTENT_WITNESS_CAP);
+    // Ids, not strings: the closure crosses this boundary as engine term
+    // ids plus the engine's dictionary, so the backend interns once per
+    // distinct term instead of decoding, re-parsing and re-interning three
+    // strings per closure triple (HDB-117).
     let triples = engine
-        .materialized_triples()
+        .materialized_triple_ids()
         .ok_or_else(|| SparqlError::Executor("owlrl produced no state".into()))?;
-    let loaded = backend.load_lexical_triples(triples.into_iter())?;
+    let entries = engine
+        .dictionary_entries()
+        .ok_or_else(|| SparqlError::Executor("owlrl produced no state".into()))?;
+    let loaded = backend.load_id_closure(entries, &triples)?;
     Ok(ReasonStats {
         loaded,
         asserted,
@@ -850,13 +857,18 @@ impl HornBackend {
             return Ok(0);
         }
 
-        // Phase 2 (write): one storage call. `entries` is already in the shape
-        // storage wants, so there is nothing to stage and nothing to
-        // re-intern. The returned count is the authoritative number of newly
-        // live quads — storage skips whatever was already visible.
+        self.commit_quad_ids(&entries)
+    }
+
+    /// Phase 2 of every id-level bulk load: one storage call, then one
+    /// snapshot invalidation. `entries` is already in the shape storage
+    /// wants, so there is nothing to stage and nothing to re-intern. The
+    /// returned count is the authoritative number of newly live quads —
+    /// storage skips whatever was already visible.
+    fn commit_quad_ids(&mut self, entries: &[InternedQuad]) -> Result<u64> {
         let inserted = self
             .store
-            .insert_quad_ids(&entries)
+            .insert_quad_ids(entries)
             .map_err(|e| SparqlError::Executor(format!("storage insert: {e}")))?
             as u64;
 
@@ -908,6 +920,49 @@ impl HornBackend {
             })
             .collect();
         self.insert_oxrdf_batch(ox_triples)
+    }
+
+    /// Bulk-load a closure that is already in id form: `entries` gives every
+    /// `(lexical key, id)` pair of the producer's dictionary (keys in the
+    /// `Engine::materialized_triples()` convention), `triples` the closure as
+    /// producer-side `(s, p, o)` ids.
+    ///
+    /// Interns once per *dictionary entry* rather than three times per triple
+    /// — HDB-87's "intern once", applied to the reasoning path (HDB-117).
+    /// A producer id with no entry, or whose key does not intern, drops the
+    /// triples that use it (same skip-defensively stance as
+    /// `Engine::materialized_triples`).
+    pub fn load_id_closure<'a>(
+        &mut self,
+        entries: impl Iterator<Item = (&'a str, u64)>,
+        triples: &[(u64, u64, u64)],
+    ) -> Result<u64> {
+        let t_dedupe = std::time::Instant::now();
+        // Producer ids are dense and small, so a positional table beats a
+        // hash map: one `Vec` index per closure term instead of a hash.
+        let mut remap: Vec<Option<TermId>> = Vec::new();
+        let quads: Vec<InternedQuad> = {
+            let d = self.store.dictionary();
+            for (key, id) in entries {
+                let idx = id as usize;
+                if idx >= remap.len() {
+                    remap.resize(idx + 1, None);
+                }
+                remap[idx] = d.intern(&lexical_to_oxrdf(key)).ok();
+            }
+            triples
+                .iter()
+                .filter_map(|&(s, p, o)| {
+                    let get = |id: u64| *remap.get(id as usize)?;
+                    Some(d.quad_from_ids(DEFAULT_GRAPH, get(s)?, get(p)?, get(o)?))
+                })
+                .collect()
+        };
+        record_load_phase(LoadPhase::Dedupe, t_dedupe.elapsed(), triples.len() as u64);
+        if quads.is_empty() {
+            return Ok(0);
+        }
+        self.commit_quad_ids(&quads)
     }
 
     /// Interning `QuadKey` lookup: creates dictionary entries for any term

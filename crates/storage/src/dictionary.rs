@@ -554,6 +554,23 @@ impl Dictionary {
         Ok(InternedQuad::from_ids(g, s_id, p_id, o_id))
     }
 
+    /// Pair a graph id with three term ids **this dictionary already
+    /// issued** into the [`InternedQuad`] the id-based store entry points
+    /// take. The `&self` receiver is the guard: the only way to hold ids
+    /// worth pairing is to have interned them here.
+    ///
+    /// For callers that carry their own id-level triples and intern each
+    /// distinct term once up front — the reasoner closure path (HDB-117) —
+    /// instead of re-interning three terms per triple via
+    /// [`Dictionary::intern_quad`].
+    pub fn quad_from_ids(&self, g: GraphId, s: TermId, p: TermId, o: TermId) -> InternedQuad {
+        debug_assert!(
+            self.issued(s) && self.issued(p) && self.issued(o),
+            "quad_from_ids called with ids this dictionary never issued"
+        );
+        InternedQuad::from_ids(g, s, p, o)
+    }
+
     /// True if this dictionary could have issued `id`: an inline-int id (value
     /// encoded, never allocated) or an index it has actually handed out. The
     /// dictionary is append-only, so an id it issued stays issued. Backs the

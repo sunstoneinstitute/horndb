@@ -425,6 +425,43 @@ impl Engine {
         Some(out)
     }
 
+    /// Id-level twin of [`materialized_triples`](Self::materialized_triples):
+    /// the same closure, as raw engine term ids, with no dictionary decode
+    /// and no string allocation.
+    ///
+    /// The ids are engine-local. They mean something only together with
+    /// [`dictionary_entries`](Self::dictionary_entries), which gives each id
+    /// its lexical key in the convention `materialized_triples` documents. A
+    /// caller with its own dictionary interns the entries once — dictionary
+    /// sized — and remaps the closure ids, instead of re-parsing and
+    /// re-interning three strings per triple (closure sized). That is what
+    /// the `--materialize` serving path does (HDB-117).
+    ///
+    /// `None` if nothing has been loaded yet.
+    pub fn materialized_triple_ids(&self) -> Option<Vec<(u64, u64, u64)>> {
+        let state = self.state.as_ref()?;
+        Some(
+            state
+                .store
+                .all_triples()
+                .into_iter()
+                .map(|t| (t.s.0, t.p.0, t.o.0))
+                .collect(),
+        )
+    }
+
+    /// Every `(lexical key, engine id)` pair in the current load's
+    /// dictionary — the decode table for
+    /// [`materialized_triple_ids`](Self::materialized_triple_ids). Keys use
+    /// the same lexical convention as
+    /// [`materialized_triples`](Self::materialized_triples).
+    ///
+    /// `None` if nothing has been loaded yet.
+    pub fn dictionary_entries(&self) -> Option<impl Iterator<Item = (&str, u64)> + '_> {
+        let state = self.state.as_ref()?;
+        Some(state.dict.iter().map(|(k, v)| (k.as_str(), v.0)))
+    }
+
     /// Proof tree for the materialised triple `(s, p, o)`, given as lexical
     /// keys per [`materialized_triples`](Self::materialized_triples), with
     /// every node's terms decoded back to their lexical forms.
