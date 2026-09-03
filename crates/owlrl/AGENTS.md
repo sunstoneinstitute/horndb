@@ -239,7 +239,17 @@ fn fire_cax_sco_body(store: &dyn TripleStore, out: &mut Delta,
 A leading atom with a constant object (`?p rdf:type owl:SymmetricProperty`)
 is emitted as `__src0.probe(None, v.rdf_type, Some(v.owl_symmetric_property))`
 so it reads the `MemStore` object index (SPEC-15 fix #1) rather than
-scanning the whole predicate extent.
+scanning the whole predicate extent. Eleven compiled rules take this path
+today: `prp-symp`, `scm-cls`, `scm-cls-thing`, `scm-cls-nothing`, `scm-op`,
+`cls-svf2`, `prp-irp`, `prp-asyp`, `prp-fp`, `prp-ifp`, `prp-rfp`. To re-check
+the list after a `rules.toml` change, grep the generated source for the
+leading-atom probe shape:
+
+```bash
+cargo build -p horndb-owlrl
+awk '/^fn fire_/{fn=$0} /for __t0 in __src0\.probe\(None, v\.[a-z_]+, Some\(v\./{print fn}' \
+  target/debug/build/horndb-owlrl-*/out/generated_rules.rs
+```
 
 For a delegated rule the function body returns `Delta::new()` — the
 runtime calls a `ClosureBackend` instead.

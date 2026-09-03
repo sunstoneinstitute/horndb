@@ -1,5 +1,5 @@
 ---
-status: implemented
+status: partially-implemented
 date: 2026-06-27
 scope: "`owlrl` `rdf:type` object index + genuine semi-naïve firing"
 ---
@@ -9,11 +9,14 @@ scope: "`owlrl` `rdf:type` object index + genuine semi-naïve firing"
 > Dated design spec (SPEC-04 F5-adjacent). Targets the LUBM-shaped
 > materialize hotspot split across [#133](https://github.com/sunstoneinstitute/horndb/issues/133)
 > (fix #1, object index, landed 2026-07-07) and [#134](https://github.com/sunstoneinstitute/horndb/issues/134)
-> (fix #2, semi-naïve firing, landed with HDB-40). Fix #2 shipped without
-> the per-round work counters proposed under "New measurement needed":
-> the A/B is wall-clock (`compiled_rules_ms`, `reason_ms`, rounds) plus a
-> closure-parity check, recorded in `docs/benchmarks.md`.
-> Gates on existing benches per the harness-first rule (SPEC-00).
+> (fix #2, semi-naïve firing, landed with HDB-40). Both code fixes are in;
+> the spec is **partially implemented** because acceptance criterion 3 is
+> not met — the per-round work counters proposed under "New measurement
+> needed" were never added, so the A/B is wall-clock
+> (`compiled_rules_ms`, `reason_ms`, rounds) plus a closure-parity check,
+> recorded in `docs/benchmarks.md`. See "Acceptance criteria" below for the
+> met/unmet split. Gates on existing benches per the harness-first rule
+> (SPEC-00).
 
 ## Purpose
 
@@ -224,6 +227,21 @@ differential gates stay green.
 4. **Combined:** measurable progress toward the Stage-1 LUBM **3×**
    gate (`docs/benchmarks.md`, Stage-1 row). The gate need not fully close
    here, but the compiled-rule + apply share of reason time must fall.
+
+### Status against these criteria (2026-09-04, after HDB-40)
+
+| # | Verdict | Evidence |
+|---|---|---|
+| 1 — differential gates stay green | **met** | `closure_backend_differential`, `rdf_type_skew_differential`, SPEC-04 acceptance #4 and the `owl2` + `owl2-w3c-rl` subsets (118/118) are green. `tests/semi_naive_differential.rs` adds naïve-vs-semi-naïve parity (closure **and** round count) over five corpora, a proptest, both `EqRepPStrategy` values and both closure backends; `scripts/bench/seminaive-ab.sh` `cmp`s the dumped closures on hornbench. |
+| 2 — fix #1 object index moves `compiled_rules_ms` | **met** | `probe(None, p, Some(o))` is O(\|extent\|); ~17 % `compiled_rules_ms` drop recorded in `docs/benchmarks.md` (#133, 2026-07-07). |
+| 3 — per-round delta size + inner-loop iteration counters | **NOT met** | The counters proposed under "New measurement needed" were never added to `engine::Stats` / `PhaseTimings`, and `horndb-bench materialize` does not emit them. The A/B therefore shows wall-clock and round count, not work directly, so "redundant re-derivation is gone" is argued from the code and the parity tests rather than measured. Follow-up: `#TODO`. |
+| 4 — compiled-rule + apply share of reason time must fall | AC4_VERDICT |
+
+The counters (3) are the honest gap. They are a follow-up, not a blocker
+on fix #2's correctness: nothing in the engine depends on them, and the
+parity tests — not the counters — are what prove the semi-naïve loop
+reaches the same closure. This spec goes to `implemented` when they land
+and criterion 4 is settled on a corpus that exercises the intended win.
 
 **New measurement needed (instrument before optimizing):** extend
 `engine::Stats` / `PhaseTimings` with per-round counters —

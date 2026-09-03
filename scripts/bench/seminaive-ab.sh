@@ -5,13 +5,23 @@
 #
 #   gh workflow run bench.yml --ref <branch> -f script=scripts/bench/seminaive-ab.sh
 #
-# Corpora: LUBM-N for each N in $LUBM_N (default "1 10"), obtained by
+# Corpora: LUBM-N for each N in $LUBM_N (default "1"), obtained by
 # `get_lubm.sh` (generated where a JDK exists, else downloaded from the
 # `bench-corpora` release), plus the taxonomy d=12/40k corpus the audit-pass
 # lubm leg uses. For each corpus and each closure backend, run `horndb-bench
 # materialize --firing naive|semi-naive` three times and record the medians,
-# including peak RSS of the process. Parity: dump the closure under both
-# strategies and `cmp` the sorted files.
+# including peak RSS of the process.
+#
+# Why LUBM-1 and not LUBM-10: LUBM-1 is 100,866 asserted triples and closes to
+# 87,027,924 inferred ones — the OWL 2 RL closure over LUBM's literals is
+# hugely expansive — costing 10.2 GiB peak RSS and ~38 s per run. LUBM-10 has
+# ~13x the ABox and the blowup is superlinear, so a single run needs well over
+# 100 GiB. Set `LUBM_N="1 10"` on a host that has the memory.
+#
+# Parity: hash both closures under both strategies and compare. The hash is a
+# streaming, order-independent (count, sum-of-CRC32, total-bytes) triple over
+# `--dump-nt /dev/stdout`, not `sort | cmp` of two files: at 87 M triples those
+# files are ~10 GB each and sorting them killed an earlier run.
 #
 # Output: bench-out/seminaive.log and bench-out/SUMMARY.md (the workflow appends
 # the summary to the job summary and uploads bench-out/).
@@ -35,7 +45,7 @@ mkdir -p "$PERSIST"
   echo
   echo "- commit: \`$(git rev-parse --short HEAD)\`"
   echo "- date (UTC): $(date -u +%Y-%m-%d)"
-  echo "- host: \`$(hostname)\` — $(nproc) cores, $(uname -sr)"
+  echo "- host: \`$(hostname)\` — $(nproc) cores, $(free -g | awk '/^Mem:/{print $2}') GiB RAM, $(uname -sr)"
   echo
   echo "| corpus | backend | firing | reason_ms | compiled_rules_ms | apply_ms | rounds | inferred | peak_rss_mib |"
   echo "|---|---|---|---|---|---|---|---|---|"
@@ -48,7 +58,7 @@ hb="$REPO_ROOT/target/release/horndb-bench"
 # come out in a stable order run to run.
 NAMES=()
 declare -A CORPUS
-for n in ${LUBM_N:-1 10}; do
+for n in ${LUBM_N:-1}; do
   dir="$PERSIST/lubm/$n"
   if scripts/bench/get_lubm.sh "$n" "$dir" 2>&1 | tee -a "$LOG"; then
     NAMES+=("lubm-$n")
@@ -79,6 +89,25 @@ rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 print(p.stdout.strip().rstrip("}") + ",\"peak_rss_kib\":%d}" % rss)' "$@"
 }
 
+# Order-independent fingerprint of the materialized closure under one firing
+# strategy: "<lines> <sum of per-line CRC32, mod 2^64> <total bytes>". Streamed
+# straight off `--dump-nt /dev/stdout`, so nothing the size of the closure ever
+# touches the disk. The trailing JSON stats line is dropped (N-Triples lines
+# start with `<` or `_:`, never `{`).
+closure_hash() {
+  local firing="$1"; shift
+  "$hb" materialize --backend graphblas --firing "$firing" --dump-nt /dev/stdout "$@" \
+    | python3 -c 'import sys, zlib
+n = acc = size = 0
+for line in sys.stdin.buffer:
+    if line[:1] == b"{":
+        continue
+    n += 1
+    acc = (acc + zlib.crc32(line)) & 0xFFFFFFFFFFFFFFFF
+    size += len(line)
+print(n, acc, size)'
+}
+
 for corpus in "${NAMES[@]}"; do
   # shellcheck disable=SC2206
   args=(${CORPUS[$corpus]})
@@ -87,7 +116,9 @@ for corpus in "${NAMES[@]}"; do
       runs=""
       for i in 1 2 3; do
         line=$(run_once "$hb" materialize --backend "$backend" --firing "$firing" "${args[@]}") || exit 1
-        echo "$corpus $backend $firing run$i: $line" >> "$LOG"
+        # Also to stdout: if a later corpus wedges the job, the artifact upload
+        # is skipped and the CI log is the only surviving copy of these numbers.
+        echo "$corpus $backend $firing run$i: $line" | tee -a "$LOG"
         runs+="$line"$'\n'
       done
       row=""
@@ -100,14 +131,14 @@ for corpus in "${NAMES[@]}"; do
     done
   done
   # Parity: identical closure under both strategies (graphblas backend).
-  "$hb" materialize --backend graphblas --firing naive --dump-nt "$OUT/$corpus-naive.nt" "${args[@]}" >/dev/null || exit 1
-  "$hb" materialize --backend graphblas --firing semi-naive --dump-nt "$OUT/$corpus-semi.nt" "${args[@]}" >/dev/null || exit 1
-  if cmp -s <(sort "$OUT/$corpus-naive.nt") <(sort "$OUT/$corpus-semi.nt"); then
-    echo "| $corpus | graphblas | parity | identical closure ($(wc -l < "$OUT/$corpus-semi.nt") triples) | | | | | |" >> "$SUMMARY"
+  n_hash=$(closure_hash naive "${args[@]}") || exit 1
+  s_hash=$(closure_hash semi-naive "${args[@]}") || exit 1
+  echo "$corpus parity: naive=[$n_hash] semi=[$s_hash]" | tee -a "$LOG"
+  if [ "$n_hash" = "$s_hash" ]; then
+    echo "| $corpus | graphblas | parity | identical closure (${n_hash%% *} triples, crc ${n_hash#* }) | | | | | |" >> "$SUMMARY"
   else
-    echo "| $corpus | graphblas | parity | **CLOSURES DIFFER** | | | | | |" >> "$SUMMARY"
+    echo "| $corpus | graphblas | parity | **CLOSURES DIFFER** naive=[$n_hash] semi=[$s_hash] | | | | | |" >> "$SUMMARY"
   fi
-  rm -f "$OUT/$corpus-naive.nt" "$OUT/$corpus-semi.nt"
 done
 
 cat "$SUMMARY"

@@ -10,7 +10,7 @@
 //! hornbench by `scripts/bench/seminaive-ab.sh` (`--dump-nt` under both
 //! strategies, then `cmp`).
 
-use horndb_owlrl::backend::RuleFiringBackend;
+use horndb_owlrl::backend::{ClosureBackend, RuleFiringBackend};
 use horndb_owlrl::store::{MemStore, TripleStore};
 use horndb_owlrl::types::{TermId, Triple};
 use horndb_owlrl::vocab::Vocabulary;
@@ -26,9 +26,11 @@ fn vocab() -> Vocabulary {
     Vocabulary::synthetic(10_000)
 }
 
-/// Closure and round count of `base` under one firing strategy.
-fn closure_with(
+/// Closure and round count of `base` under one firing strategy and one
+/// closure backend.
+fn closure_with_backend<B: ClosureBackend>(
     base: &[Triple],
+    backend: &mut B,
     firing: FiringStrategy,
     eq_rep_p: EqRepPStrategy,
 ) -> (FxHashSet<Triple>, usize) {
@@ -36,7 +38,7 @@ fn closure_with(
     store.assert_all(base.iter().copied());
     let stats = materialize_with(
         &mut store,
-        &mut RuleFiringBackend::new(),
+        backend,
         MaterializeOpts {
             firing,
             eq_rep_p,
@@ -44,6 +46,16 @@ fn closure_with(
         },
     );
     (store.all_triples(), stats.rounds)
+}
+
+/// Closure and round count of `base` under one firing strategy, on the
+/// reference `RuleFiringBackend`.
+fn closure_with(
+    base: &[Triple],
+    firing: FiringStrategy,
+    eq_rep_p: EqRepPStrategy,
+) -> (FxHashSet<Triple>, usize) {
+    closure_with_backend(base, &mut RuleFiringBackend::new(), firing, eq_rep_p)
 }
 
 /// Both firing strategies must agree, under both `eq-rep-p` strategies (the
@@ -187,6 +199,11 @@ fn rdf_type_skew_corpus() {
     assert_strategies_agree("rdf_type_skew n=2000", &rdf_type_skew(&v, 2_000));
 }
 
+/// Do not delete this test or the proptest below as "covered by the taxonomy
+/// / skew corpora": mutating the codegen to drop one delta-bound variant is
+/// caught *only* here and by `random_graphs_agree` (verified by mutation
+/// during review). The single-family corpora still reach the same closure
+/// with a variant missing.
 #[test]
 fn rule_mix_corpus() {
     let v = vocab();
@@ -275,4 +292,51 @@ proptest! {
     fn random_graphs_agree(base in random_base()) {
         assert_strategies_agree("random", &base);
     }
+}
+
+/// Same rule-family mix under the GraphBLAS closure backend
+/// (`BackendChoice::GraphBlas`). The backend feeds its own closure delta back
+/// into the compiled rules each round, so it is a second, differently-shaped
+/// delta source for the semi-naïve loop and needs its own parity check.
+#[cfg(feature = "graphblas-backend")]
+#[test]
+fn rule_mix_corpus_graphblas() {
+    use horndb_owlrl::graphblas_backend::GraphBlasBackend;
+
+    let v = vocab();
+    let base = rule_mix(&v);
+    for eq_rep_p in [EqRepPStrategy::Optimized, EqRepPStrategy::Naive] {
+        let (naive, naive_rounds) = closure_with_backend(
+            &base,
+            &mut GraphBlasBackend::new(),
+            FiringStrategy::Naive,
+            eq_rep_p,
+        );
+        let (semi, semi_rounds) = closure_with_backend(
+            &base,
+            &mut GraphBlasBackend::new(),
+            FiringStrategy::SemiNaive,
+            eq_rep_p,
+        );
+        assert_eq!(
+            naive, semi,
+            "graphblas rule mix ({eq_rep_p:?}): semi-naive closure differs from naive"
+        );
+        assert_eq!(
+            naive_rounds, semi_rounds,
+            "graphblas rule mix ({eq_rep_p:?}): round counts differ"
+        );
+        assert!(
+            closure_contains_chain(&semi, &v),
+            "graphblas rule mix ({eq_rep_p:?}): the mix derived nothing interesting"
+        );
+    }
+}
+
+/// The one derivation every backend must reach on `rule_mix`: the
+/// `cax-sco`/`cax-eqc` chain. Guards the GraphBLAS parity test against
+/// passing on two identically-empty closures.
+#[cfg(feature = "graphblas-backend")]
+fn closure_contains_chain(closure: &FxHashSet<Triple>, v: &Vocabulary) -> bool {
+    closure.contains(&t(1, v.rdf_type.0, 103))
 }
