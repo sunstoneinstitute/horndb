@@ -36,7 +36,8 @@ use horndb_config::{CliOverrides, LoadInputs};
 use oxrdf::{GraphName, Quad};
 use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::time::Instant;
 
 use horndb_sparql::exec::horn::HornBackend;
@@ -230,7 +231,7 @@ async fn main() -> Result<()> {
     horndb_metrics::register_collector(Box::new(horndb_metrics::storage::StorageCollector::new(
         move || {
             let arc = store_weak.upgrade()?;
-            let guard = arc.read().ok()?;
+            let guard = arc.read();
             let s = guard.storage_stats();
             Some(horndb_metrics::storage::StorageSnapshot {
                 triples: s.triples as i64,

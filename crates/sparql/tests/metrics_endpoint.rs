@@ -5,7 +5,8 @@ use axum::http::{Request, StatusCode};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::server::{build_router, AppState};
 use horndb_sparql::SparqlConfig;
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use tower::ServiceExt; // oneshot
 
 #[tokio::test]

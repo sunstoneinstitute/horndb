@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["server", "reasoner", "snmalloc"]
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite", "dep:parking_lot"]
 reasoner = ["dep:horndb-owlrl"]
 # HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
 # Measured on the trainmarks bulk load (hornbench, xlarge): -10.6% on the
@@ -48,6 +48,10 @@ hyper = { workspace = true, optional = true }
 http-body = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 pin-project-lite = { workspace = true, optional = true }
+# The `AppState.store` lock (HDB-114): `std::sync::RwLock` poisons on a panic
+# while a guard is held, so every later request panics too until restart.
+# parking_lot::RwLock never poisons; already a workspace dep (horndb-storage).
+parking_lot = { workspace = true, optional = true }
 # Used only by the `serve` binary (gated on the `server` feature). Kept
 # non-optional for simplicity — they are small, pure-Rust deps and the
 # library code does not reference them.

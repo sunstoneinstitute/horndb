@@ -39,14 +39,21 @@ pub async fn handle_update<B: FullBackend + Send + Sync + 'static>(
     // drains, and the read lock never releases — deadlock.
     let store = Arc::clone(&state.store);
     let result = tokio::task::spawn_blocking(move || {
-        let mut store = store.write().unwrap();
+        let mut store = store.write();
         execute_update(&update, &mut *store)
     })
-    .await
-    .expect("update task panicked");
+    .await;
 
     match result {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        // `JoinError` here means the blocking task panicked (or was
+        // cancelled). The store lock never poisons (parking_lot, HDB-114),
+        // so this request fails cleanly and later requests are unaffected.
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "update task panicked".to_string(),
+        )
+            .into_response(),
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
