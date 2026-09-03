@@ -49,8 +49,10 @@ use horndb_sparql::server::{build_router, AppState};
     about = "Load flat RDF file(s) into the HornBackend store and serve SPARQL 1.1 over HTTP."
 )]
 struct Cli {
-    /// One or more N-Triples (`.nt`) or Turtle (`.ttl`) files, or
-    /// directories containing them, to load into the store. Repeatable.
+    /// One or more N-Triples (`.nt`), Turtle (`.ttl`), N-Quads (`.nq`), or
+    /// TriG (`.trig`) files, or directories containing them, to load into the
+    /// store. Repeatable. `.nq`/`.trig` are dataset (quad) formats: each
+    /// quad loads into the named graph it carries, not the default graph.
     #[arg(long = "data", required = true, num_args = 1..)]
     data: Vec<PathBuf>,
 
@@ -150,7 +152,18 @@ async fn main() -> Result<()> {
             .with_context(|| format!("enumerating {}", path.display()))?;
     }
     if files.is_empty() {
-        anyhow::bail!("no .nt/.ttl files found in the provided --data paths");
+        anyhow::bail!("no .nt/.ttl/.nq/.trig files found in the provided --data paths");
+    }
+    if cli.materialize && files.iter().any(|f| is_dataset_format(f)) {
+        // --materialize parses every file into one oxrdf::Dataset default
+        // graph before closure (see collect_into_dataset below); it does not
+        // yet preserve named graphs from a dataset-format input. Fail fast
+        // with a clear message rather than let NTriplesParser choke on
+        // N-Quads' extra graph term.
+        anyhow::bail!(
+            "--materialize does not yet support .nq/.trig named-graph inputs \
+             (they would collapse into the default graph); load them without --materialize"
+        );
     }
 
     let mut store = HornBackend::new();
@@ -301,8 +314,8 @@ fn record_simd_calibration() {
     }
 }
 
-/// Recursively collect `.nt`/`.ttl` files under `path` (or `path` itself
-/// if it is a regular file).
+/// Recursively collect `.nt`/`.ttl`/`.nq`/`.trig` files under `path` (or
+/// `path` itself if it is a regular file).
 fn collect_data_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let meta = std::fs::metadata(path)?;
     if meta.is_file() {
@@ -317,7 +330,7 @@ fn collect_data_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
                 collect_data_files(&p, out)?;
             } else if matches!(
                 p.extension().and_then(|e| e.to_str()),
-                Some("nt") | Some("ttl")
+                Some("nt") | Some("ttl") | Some("nq") | Some("trig")
             ) {
                 out.push(p);
             }
@@ -326,11 +339,38 @@ fn collect_data_files(path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Parse one file and bulk-insert all triples into the store in a single
-/// batch (O(n) partitions rebuilt, not O(n²)). Returns the number of
-/// newly-live triples. Format is chosen by extension; anything other than
-/// `.ttl` is parsed as N-Triples.
+/// True if `path`'s extension names a dataset (quad) serialization —
+/// `.nq`/`.trig` — as opposed to a triples format (`.nt`/`.ttl`).
+fn is_dataset_format(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("nq") | Some("trig")
+    )
+}
+
+/// Parse one file and bulk-insert its data into the store in a single batch
+/// (O(n) partitions rebuilt, not O(n²)). Returns the number of newly-live
+/// triples/quads. Format is chosen by extension: `.nq`/`.trig` route through
+/// [`horndb_sparql::update::parse_rdf_bytes`] (the same parser call site
+/// `LOAD` uses) so each quad lands in the named graph it carries; anything
+/// else is parsed here directly, `.ttl` as Turtle and everything else
+/// (including `.nt`) as N-Triples, all landing in the default graph.
 fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
+    if is_dataset_format(path) {
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let extension = path.extension().and_then(|e| e.to_str());
+        // A `file://` base IRI (the repo-wide convention, e.g.
+        // `crates/harness/src/rdf.rs`) so a relative IRI in `.trig` resolves;
+        // `.nq` ignores it (N-Quads requires absolute IRIs).
+        let base = format!("file://{}", path.display());
+        let quads = horndb_sparql::update::parse_rdf_bytes(&bytes, extension, &base)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let n = quads.len() as u64;
+        horndb_sparql::exec::Store::apply_quads(store, Vec::new(), quads)
+            .with_context(|| format!("bulk inserting quads from {}", path.display()))?;
+        return Ok(n);
+    }
+
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
     let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
