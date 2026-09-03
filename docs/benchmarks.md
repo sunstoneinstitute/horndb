@@ -30,6 +30,23 @@ provisional and must be re-baselined on hornbench before being treated as
 authoritative. A second x86 host, **`hel01`** (Intel Xeon Gold 5412U,
 Sapphire Rapids), serves as the Intel counterpoint for ISA-sensitive work.
 
+**If you have no ssh to hornbench**, use `.github/workflows/bench.yml` — the
+same machine, reached as the self-hosted runner labelled
+`[self-hosted, bench, zen4]`. It runs any repo-relative script on that host,
+uploads `bench-out/` as an artifact, and appends `bench-out/SUMMARY.md` to the
+job summary. It shares a concurrency group with the nightly, so the two never
+measure at once.
+
+```bash
+gh workflow run bench.yml --ref <branch> -f script=scripts/bench/audit-pass.sh
+gh run watch <id> --exit-status && gh run download <id>
+```
+
+`workflow_dispatch` works only once the workflow file is on `main`; before that,
+push a `bench-run/<name>` branch to trigger the same job. The ssh procedure
+above stays valid and is still the quicker path when you have it. Numbers from
+either route are equally authoritative — it is the same host.
+
 ## Baselines we measure against
 
 | Engine | Role | Source of numbers |

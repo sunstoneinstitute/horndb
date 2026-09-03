@@ -270,23 +270,15 @@ summarize_trainmarks() {
     [ -f "$OUT/trainmarks-$mode.json" ] || continue
     python3 - "$OUT/trainmarks-$mode.json" "$mode" >> "$SUMMARY" <<'PY'
 import json, sys
-doc = json.load(open(sys.argv[1]))
+# bench-trainmarks writes a flat array of {framework, scale, operation, seconds};
+# `seconds` is a number, or a string starting "ERROR:" when the op failed.
+rows = json.load(open(sys.argv[1]))
 mode = sys.argv[2]
-# The upstream trainmarks schema nests per-scale runs; find every query timing
-# without hardcoding a shape that may drift.
-def walk(o, path=()):
-    if isinstance(o, dict):
-        for k, v in o.items():
-            yield from walk(v, path + (str(k),))
-    elif isinstance(o, list):
-        for i, v in enumerate(o):
-            yield from walk(v, path + (str(i),))
-    else:
-        yield path, o
-for path, val in walk(doc):
-    key = "/".join(path)
-    if isinstance(val, (int, float)) and any(t in key.lower() for t in ("q1", "q2", "q3", "q4", "q5", "q6", "load")):
-        print(f"| trainmarks/{mode} | {key} | {val} | |")
+for r in rows:
+    secs = r.get("seconds")
+    val = f"{secs:.4f}" if isinstance(secs, (int, float)) else str(secs)
+    unit = "s" if isinstance(secs, (int, float)) else ""
+    print(f'| trainmarks/{mode} | {r.get("scale")} {r.get("operation")} | {val} | {unit} |')
 PY
   done
 }
