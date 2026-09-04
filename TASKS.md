@@ -55,7 +55,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **CRITICAL** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
 - [x] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
-- [ ] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
+- [v] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226)) — _wip: 961ad028@hel01 · HDB-57-spec-25-s2-persistent-on-disk-dictionary · 2026-09-04T00:31:14Z_
 - [ ] **HIGH** · _Operational_ — SPEC-25 S3: write-ahead log + crash recovery — after #225/#226; SPEC-24 S5 #214 layers on this format ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
 - [ ] **HIGH** · _Operational_ — SPEC-26 Phase 1a: `horndb-config` crate — typed model, layered load, `config.d` merge, validation (PLAN-26-01) ([#249](https://github.com/sunstoneinstitute/horndb/issues/249))
 - [ ] **HIGH** · _Operational_ — SPEC-26 Phase 1b: serve wiring + `[simd]` injection — `--config`/curated flags, `bind` from config, startup validation (PLAN-26-02) — after #249 ([#250](https://github.com/sunstoneinstitute/horndb/issues/250))
@@ -500,7 +500,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   picked up (bench stamp-columns vs. delete-bitmap sidecars, and CoW-map vs.
   in-place append, against the NF4 budget). Gate: SPEC-25 acceptance #1.
 
-- [ ] **SPEC-25 S2: persistent on-disk dictionary.** ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
+- [v] **SPEC-25 S2: persistent on-disk dictionary.** ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
   Durable, append-only id assignments that survive restart: immutable
   memory-mapped base (FST / Marisa-trie / front-coded SSTable — plan decides
   with bench evidence) plus a mutable in-memory overlay merged at checkpoint;
