@@ -56,7 +56,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
 - [x] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
 - [x] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
-- [ ] **HIGH** · _Operational_ — SPEC-25 S3: write-ahead log + crash recovery — after #225/#226; SPEC-24 S5 #214 layers on this format ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
+- [v] **HIGH** · _Operational_ — SPEC-25 S3: write-ahead log + crash recovery — after #225/#226; SPEC-24 S5 #214 layers on this format ([#227](https://github.com/sunstoneinstitute/horndb/issues/227)) — _wip: 961ad028@hel01 · HDB-58-spec-25-s3-write-ahead-log-crash-recover · 2026-09-04T01:42:46Z_
 - [ ] **HIGH** · _Operational_ — SPEC-26 Phase 1a: `horndb-config` crate — typed model, layered load, `config.d` merge, validation (PLAN-26-01) ([#249](https://github.com/sunstoneinstitute/horndb/issues/249))
 - [ ] **HIGH** · _Operational_ — SPEC-26 Phase 1b: serve wiring + `[simd]` injection — `--config`/curated flags, `bind` from config, startup validation (PLAN-26-02) — after #249 ([#250](https://github.com/sunstoneinstitute/horndb/issues/250))
 - [x] **CRITICAL** · _Operational_ — SPEC-26 Phase 2: query-scoped URL-param overrides + enforcement (timeout / row-cap / rdf12; memory stub) — after #250 ([#251](https://github.com/sunstoneinstitute/horndb/issues/251))
@@ -553,7 +553,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   Spec: `docs/specs/SPEC-30-change-feed-materializer.md`.
   Needs decomposition into per-slice leaf issues before pickup.
 
-- [ ] **SPEC-25 S3: write-ahead log + crash recovery.** ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
+- [v] **SPEC-25 S3: write-ahead log + crash recovery.** ([#227](https://github.com/sunstoneinstitute/horndb/issues/227))
   Sequenced, checksummed WAL record per committed batch (insert/retract),
   including the batch's dictionary appends; configurable fsync policy
   (per-record / per-batch / timed, default per-batch); recovery = checkpoint +
