@@ -263,6 +263,22 @@ per-predicate-partition WAL" open question, resolved affirmatively.
   policy) is present. In-memory-only stores (tests, ephemeral use) keep the
   Stage-1 behavior.
 
+**Delivered 2026-09-04 (HDB-58, `PLAN-25-03`).** `Store::open(dir)` /
+`open_with(dir, SyncPolicy)` / `checkpoint()` / `sync_wal()`
+(`crates/storage/src/wal.rs`). One physical log per store directory:
+`MANIFEST` names the generation, `dict.<gen>` is the S2 base, `wal.<gen>` the
+records since it. Every batch — including a net-empty apply, which is logged
+and replayed through the same no-bump path — is one CRC-32C-framed record
+appended before the tier write. Deviations from the text above: the
+checkpoint is a row dump into the new log, not an S4 snapshot (S4 is not
+in yet), so rows the checkpoint carried restart at the checkpoint version
+and dead rows are not carried; replay demands the exact next commit version
+and treats a repeated record as an error rather than a no-op, since the
+single log cannot produce one; fsync policy is per-batch or timed, not
+per-record (the two coincide at one batch). `Store::compact()` logs pending
+dictionary appends before the GC. Not wired to `serve` (HDB-51). Append and
+replay costs: pending hornbench — `docs/benchmarks.md`, `wal` row.
+
 ### S4. Named-graph snapshot export/import
 
 Close the "export errors on named-graph data" hole so quad-bearing stores

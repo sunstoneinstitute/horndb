@@ -460,6 +460,89 @@ impl Dictionary {
         self.base_len as usize
     }
 
+    /// The terms at indices `logged + 1 ..= len()`, in index order — what the
+    /// write-ahead log has not yet recorded (SPEC-25 S3). `logged` is never
+    /// below `base_len` (a base is flushed only from a fully logged
+    /// dictionary). A reclaimed slot in that range is an error: the log must
+    /// see every index before the GC can free it.
+    /// Replay one logged dictionary append: put `term` at exactly `index`,
+    /// the slot the write-ahead log recorded. Never returns an existing id
+    /// the way [`Dictionary::intern`] does: a live store that GC'd the term
+    /// and interned it again gave it a fresh index, and replay does not
+    /// replay compaction, so the stale slot may still hold the term. The
+    /// stale slot is freed here (as the live GC freed it) so the forward key
+    /// and the next flush see one copy.
+    pub(crate) fn replay_append(&self, index: u64, term: &Term) -> Result<()> {
+        if try_inline_int(term).is_some() {
+            return Err(StorageError::Wal(format!(
+                "inline term logged as a dictionary append at index {index}"
+            )));
+        }
+        SCRATCH.with(|s| {
+            let mut scratch = s.borrow_mut();
+            if !self.encode_key(&mut scratch, term, AuxMode::Intern) {
+                return Err(StorageError::InvalidTerm(format!(
+                    "term key could not be encoded: {term}"
+                )));
+            }
+            let stale_base = self.base_get(&mut scratch, term);
+            let mut overlay = self.reverse.write();
+            let next = self.base_len + (overlay.terms.len() as u64) + 1;
+            if next != index {
+                return Err(StorageError::Wal(format!(
+                    "dictionary append logged at index {index} replayed as {next}"
+                )));
+            }
+            if next >= MAX_DICT_INDEX {
+                return Err(StorageError::DictionaryFull(next));
+            }
+            let mut freed = 0;
+            if let Some(old) = self.forward.get(scratch.buf.as_slice()).map(|e| *e) {
+                let slot = (old.payload() - self.base_len - 1) as usize;
+                if overlay.terms.get_mut(slot).and_then(Option::take).is_some() {
+                    freed += 1;
+                }
+            }
+            if let Some(old) = stale_base {
+                if overlay.base_dead.insert(old.payload()) {
+                    freed += 1;
+                }
+            }
+            self.freed.fetch_add(freed, Ordering::Relaxed);
+            overlay.terms.push(Some(term.clone()));
+            self.forward.insert(
+                scratch.buf.as_slice().into(),
+                TermId::new(kind_of(term), next),
+            );
+            Ok(())
+        })
+    }
+
+    pub(crate) fn terms_after(&self, logged: u64) -> Result<Vec<Term>> {
+        let overlay = self.reverse.read();
+        let start = logged.checked_sub(self.base_len).ok_or_else(|| {
+            StorageError::Wal(format!(
+                "logged {logged} indices but the base holds {}",
+                self.base_len
+            ))
+        })? as usize;
+        overlay
+            .terms
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.clone().ok_or_else(|| {
+                    StorageError::Wal(format!(
+                        "dictionary index {} was reclaimed before it was logged",
+                        logged + i as u64 + 1
+                    ))
+                })
+            })
+            .collect()
+    }
+
     /// Indices this dictionary has ever handed out, base included. Monotonic:
     /// it does not drop when [`Dictionary::gc`] reclaims terms, because a
     /// reclaimed index is never re-issued. Use [`Dictionary::live_len`] for

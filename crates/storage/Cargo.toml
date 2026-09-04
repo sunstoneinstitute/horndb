@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "dict_persist"
 harness = false
+
+[[bench]]
+name = "wal_append"
+harness = false

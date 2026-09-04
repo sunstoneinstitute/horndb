@@ -10,7 +10,7 @@
 use horndb_storage::ordering::PartitionAxis;
 use horndb_storage::partition::PredicatePartition;
 use horndb_storage::term::{TermId, TermKind, DEFAULT_GRAPH};
-use horndb_storage::tier::Tier;
+use horndb_storage::tier::TierWrite;
 use horndb_storage::{MemoryTier, Ordering, Store};
 use oxrdf::{NamedNode, Term};
 

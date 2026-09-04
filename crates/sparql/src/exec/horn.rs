@@ -539,8 +539,14 @@ impl Default for HornBackend {
 
 impl HornBackend {
     pub fn new() -> Self {
+        Self::with_store(ColumnStore::in_memory())
+    }
+
+    /// A backend over a caller-built store — `Store::open(dir)` for one that
+    /// survives a restart (SPEC-25 S3), `Store::in_memory()` for [`Self::new`].
+    pub fn with_store(store: ColumnStore) -> Self {
         Self {
-            store: Arc::new(ColumnStore::in_memory()),
+            store: Arc::new(store),
             snapshots: Arc::new(Mutex::new(SnapshotMemo::default())),
             stats_cache: Arc::new(Mutex::new(HashMap::new())),
             pin: None,
@@ -1714,20 +1720,22 @@ impl Store for HornBackend {
                 .collect(),
             GraphTarget::NamedNode(n) => self.graph_id(n.as_str()).into_iter().collect(),
         };
-        let dels: Vec<(GraphId, TermId, TermId, TermId)> = graphs_to_sweep
+        let dict = self.store.dictionary();
+        let dels: Vec<InternedQuad> = graphs_to_sweep
             .iter()
             .flat_map(|&g| {
                 snap.iter_graph_term_ids(g)
-                    .map(move |(s, p, o)| (g, s, p, o))
+                    .map(move |(s, p, o)| dict.quad_from_ids(g, s, p, o))
             })
             .collect();
         if dels.is_empty() {
             return Ok(0);
         }
+        // Through the store, not the tier: the write-ahead log must see the
+        // sweep, or the next logged batch cannot replay (SPEC-25 S3).
         let report = self
             .store
-            .tier()
-            .apply_quad_batch(&dels, &[])
+            .apply_quad_ids(&dels, &[])
             .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
         if report.retracted > 0 {
             self.invalidate();

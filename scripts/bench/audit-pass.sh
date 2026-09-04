@@ -20,6 +20,7 @@
 #   insert_retract  #332 HDB-122 — write latency under a concurrent reader
 #   dict_gc         #333 HDB-121 — dict_gc_churn
 #   dict_persist    HDB-57 — persistent dictionary flush / reopen / base probes (SPEC-25 S2)
+#   wal             HDB-58 — WAL append under each fsync policy, replay (SPEC-25 S3)
 #   view_derivation #337 HDB-72  — SPEC-29 view derivation (PLAN-29-01 T7)
 #   trainmarks      #334 HDB-120 — q1-q6 timings, direct-source A/B
 #   footprint       #334 HDB-120 — serving footprint, isolated (--mem-only)
@@ -37,7 +38,7 @@ OUT="$REPO_ROOT/bench-out"
 mkdir -p "$OUT"
 SUMMARY="$OUT/SUMMARY.md"
 
-ALL_LEGS="lubm backend stats insert_retract dict_gc dict_persist view_derivation trainmarks footprint spb"
+ALL_LEGS="lubm backend stats insert_retract dict_gc dict_persist wal view_derivation trainmarks footprint spb"
 BENCHES="${BENCHES:-$ALL_LEGS}"
 
 # Persistent scratch on the runner's own disk. The Actions checkout is wiped by
@@ -209,6 +210,7 @@ summarize_backend() {
 leg_stats()          { cargo bench -p horndb-sparql  --bench stats_incremental; }
 leg_dict_gc()        { cargo bench -p horndb-storage --bench dict_gc_churn; }
 leg_dict_persist()   { cargo bench -p horndb-storage --bench dict_persist; }
+leg_wal()            { cargo bench -p horndb-storage --bench wal_append; }
 leg_view_derivation() { cargo bench -p horndb-sparql --bench view_derivation; }
 
 # Only the concurrent-reader group is recordable: the file's own header marks
@@ -399,6 +401,7 @@ run_leg stats           leg_stats           || true
 run_leg insert_retract  leg_insert_retract  || true
 run_leg dict_gc         leg_dict_gc         || true
 run_leg dict_persist    leg_dict_persist    || true
+run_leg wal             leg_wal             || true
 run_leg view_derivation leg_view_derivation || true
 run_leg trainmarks      leg_trainmarks      || true
 run_leg footprint       leg_footprint       || true
@@ -411,6 +414,7 @@ want stats           && { criterion_rows stats "$OUT/stats.log"; criterion_sampl
 want insert_retract  && { criterion_rows insert_retract "$OUT/insert_retract.log"; criterion_samples insert_retract target/criterion/write_under_concurrent_reader; }
 want dict_gc         && { criterion_rows dict_gc "$OUT/dict_gc.log"; criterion_samples dict_gc target/criterion/churn_4x1k_no_gc target/criterion/churn_4x1k_compact_gc; }
 want dict_persist    && { criterion_rows dict_persist "$OUT/dict_persist.log"; criterion_samples dict_persist target/criterion/dict_persist target/criterion/dict_persist_probe; }
+want wal             && { criterion_rows wal "$OUT/wal.log"; criterion_samples wal target/criterion/append target/criterion/replay; }
 want view_derivation && summarize_view_derivation
 want trainmarks      && summarize_trainmarks
 want footprint       && summarize_footprint

@@ -1049,7 +1049,7 @@ mod tests {
     fn live_len_matches_len_at_own_version_after_retraction() {
         use crate::memory_tier::MemoryTier;
         use crate::term::DEFAULT_GRAPH;
-        use crate::tier::Tier;
+        use crate::tier::TierWrite;
 
         fn id(payload: u64) -> TermId {
             TermId::new(crate::term::TermKind::Uri, payload)
@@ -1079,7 +1079,7 @@ mod tests {
         use super::*;
         use crate::memory_tier::MemoryTier;
         use crate::term::DEFAULT_GRAPH;
-        use crate::tier::Tier;
+        use crate::tier::TierWrite;
         use proptest::prelude::*;
 
         fn id(payload: u64) -> TermId {

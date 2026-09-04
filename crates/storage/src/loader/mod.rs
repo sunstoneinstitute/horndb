@@ -304,7 +304,7 @@ impl<'a> QuadSink<'a> {
 
     fn flush(&mut self) -> Result<()> {
         let t = Instant::now();
-        let out = self.store.tier().insert_quad_batch(&self.batch);
+        let out = self.store.insert_quad_batch(&self.batch);
         self.flush_ns += t.elapsed().as_nanos() as u64;
         // Clear only on success. A failed insert leaves the batch that failed
         // in place rather than discarding it, which is what the `?` this

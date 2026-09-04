@@ -20,7 +20,7 @@
 //! same quad inside one batch.
 
 use horndb_storage::{
-    memory_tier::MemoryTier, GraphId, Ordering, TermId, TermKind, Tier, DEFAULT_GRAPH,
+    memory_tier::MemoryTier, GraphId, Ordering, TermId, TermKind, Tier, TierWrite, DEFAULT_GRAPH,
 };
 use std::collections::BTreeSet;
 
