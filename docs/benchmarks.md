@@ -2888,14 +2888,14 @@ join never produces a `JoinOp`/`LeftJoin` node — only q4's `OPTIONAL` does.
   does not.)
 - **Residual exceeds the acceptance target (< 15%) on all three streaming
   (non-pushdown) queries** — q2 43.5%, q3 24.6%, q4 33.9% — filed here as
-  its own finding per the acceptance criteria, not papered over. The likely
-  destination, per the design notes in `docs/metrics.md` (not attributed to
-  a named phase — quantifying it is follow-up work, outside HDB-99's
-  instrumented-points scope): `drain()`'s `rows.extend` pulling a
-  `BgpScan`'s chunks together before `Group`/`OrderBy` run, and
-  `ChunkedBatch::next_chunk`'s per-chunk `collect()` + `schema.clone()` on
-  both sides of that pull. (`q1`'s residual is 100% by construction — its
-  `COUNT(*)` `GROUP BY` lowers to the `GroupCountScan` pushdown,
+  its own finding per the acceptance criteria, not papered over. HDB-99's
+  own design notes guessed at a destination (`drain()`'s `rows.extend` and
+  `ChunkedBatch::next_chunk`'s per-chunk `collect()` + `schema.clone()`),
+  but that guess was never measured — see HDB-109/HDB-148 below, which
+  instruments exactly those two call sites and finds they are **not** the
+  residual's driver: combined they explain 3–4% of q2/q4's exec time, not
+  the 44–66% residual carries. (`q1`'s residual is 100% by construction —
+  its `COUNT(*)` `GROUP BY` lowers to the `GroupCountScan` pushdown,
   `plan::pushdown::lower_count_group`, which bypasses
   `scan_bgp_ids`/`eval_group_native` — and every phase timed inside them —
   entirely. `q5`'s residual is 0.7%, comfortably under target.)
@@ -2914,6 +2914,70 @@ night-over-night. `HORNDB_EXEC_PHASES` defaults off and no nightly config
 sets it, so confirming "flag off costs nothing measurable" is a post-merge
 read of the next nightly run against this ~56.50 qps baseline, not something
 this task triggers itself.
+
+#### HDB-99's two named suspects don't explain the residual; it's cold-only on q3 but persists warm on q2/q4 (HDB-109/HDB-148, 2026-09-04)
+
+HDB-99's design notes guessed the residual (above) came from `drain()`'s
+`rows.extend` and `ChunkedBatch::next_chunk`'s per-chunk `collect()` +
+`schema.clone()`, but never measured it. HDB-109 instruments those two call
+sites as new named phases (`chunk_pull`, `drain_extend`), plus a third
+(`row_drop`, timing a dropped row's cleanup) that HDB-99 did not name as a
+suspect. HDB-148 is the actual hornbench re-measurement — the runner was
+offline 2026-09-03 (OOM from the HDB-147 bug) until it re-ran automatically
+once restarted.
+
+`hornbench` (Ryzen 7 7700, 16 threads, Debian 6.12, rustc 1.90.0), commit
+`0cf26c7`, `scripts/bench/exec-phases.sh`, `HORNDB_EXEC_PHASES=1`,
+`HORNDB_LOAD_THREADS=1`, trainmarks xlarge (9,995,000 triples), one cold run
+per query plus a warm re-run pair. Same isolation protocol as HDB-99
+(counters diffed across `qN_pre → qN_cold` and `qN_warm_pre → qN_warm`, not
+across a whole loop iteration).
+
+| phase | q1 (0.512s/0.430s) | q2 (1.313s/1.314s) | q3 (1.233s/0.868s) | q4 (1.637s/1.585s) | q5 (0.324s/0.332s) |
+|---|---|---|---|---|---|
+| `chunk_pull` (cold/warm) | — | 0.002s / 0.002s | 0.000s / 0.000s | 0.003s / 0.003s | 0.000s / 0.000s |
+| `drain_extend` (cold/warm) | — | 0.008s / 0.008s | 0.001s / 0.001s | 0.015s / 0.018s | — |
+| `row_drop` (cold/warm) | — | 0.044s / 0.045s | — | 0.036s / 0.035s | — |
+| **three new phases, % of exec** | — | **4.1% / 4.2%** | **0.1% / 0.1%** | **3.3% / 3.5%** | — |
+| `residual` (cold/warm) | 100.0% / 100.0% | **65.8% / 65.9%** | **29.4% / 0.1%** | **55.4% / 53.8%** | 0.7% / 0.7% |
+
+Full per-phase cold/warm tables are in the HDB-148 run artifact
+(`gh run download 33813869701`); the row above is what the acceptance
+criteria need.
+
+**The two named suspects are not the residual's driver.** Combined,
+`chunk_pull` + `drain_extend` + `row_drop` account for 3.3–4.2% of q2/q4's
+exec time and 0.1% of q3's — nowhere near the 53.8–65.9% residual carries.
+Whatever dominates the residual is still uninstrumented.
+
+**Residual didn't grow — everything else shrank around it.** q2/q4's
+residual *share* rose since the HDB-99 baseline (q2 43.5% → 65.8%, q4 33.9%
+→ 55.4%), but the *absolute* residual barely moved (q2 0.949s → 0.863s, q4
+0.984s → 0.908s, both cold). What changed is the denominator: `group_decode`
+was HDB-99's largest named cost on q2/q4 (43.7%/37.5%) and reads `0.000s` in
+this run on both — [[HDB-100]]'s per-group decode/aggregate fix already
+landed and removed it. `sort` on q3 fell the same way, 22.0% → 1.5–2.1%,
+from [[HDB-101]]. Cutting the named costs around it is why residual now
+looks larger as a fraction, not because it grew.
+
+**New finding: the residual is cold-only on q3, but recurs every query on
+q2/q4.** q3's residual collapses from 29.4% cold to 0.1% warm — a one-time
+cost, most likely something in the first-touch path (stats build, page
+faults, allocator warm-up) rather than per-query work. q2 and q4's residual
+barely moves cold→warm (65.8% → 65.9%, 55.4% → 53.8%), so whatever it is
+there runs on every single query, not just the first. This rules out a
+purely cold-path explanation for q2/q4 and narrows q3 to one.
+
+**Acceptance criteria (HDB-109):** new phases added following HDB-99's
+pattern, `docs/metrics.md` updated in the same commit ([#340](https://github.com/sunstoneinstitute/horndb/pull/340)) — met. Residual
+re-measured on hornbench with the new phases — met (this section). Residual
+still exceeds 15% after instrumentation on q2/q3(cold)/q4 — **true**,
+documented honestly rather than declaring a partial explanation a fix; no
+code change was made, since HDB-109's own scope was diagnosis, not a
+speculative rewrite of an unidentified cost. The next step is a `perf`
+profile of a q2 or q4 cold run to find what's actually inside `residual`, not
+another named-phase guess — no follow-up spike filed yet, since there isn't
+a concrete candidate to scope one around.
 
 #### `intern` becomes a counter, and the parse threads take 41% of it (HDB-106, 2026-09-01)
 
