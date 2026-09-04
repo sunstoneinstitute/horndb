@@ -70,7 +70,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-27: expose OWL 2 RL proofs as a queryable `hprov:` provenance view ([#260](https://github.com/sunstoneinstitute/horndb/issues/260))
 - [ ] **CRITICAL** · _Completeness_ — SPEC-29: named-graph reasoning scope — declared views, shared spine, per-view inferred graphs — after #261 ([#262](https://github.com/sunstoneinstitute/horndb/issues/262))
 - [ ] **HIGH** · _Operational_ — SPEC-30: change-feed materializer — applied-position slot, cursor reconciliation, rebuild-from-zero ([#263](https://github.com/sunstoneinstitute/horndb/issues/263))
-- [v] **HIGH** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212)) — _wip: 961ad028@hel01 · HDB-50-spec-24-s3-change-feed-net-delta-reconci · 2026-09-04T01:09:13Z_
+- [x] **HIGH** · _Completeness_ — SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure — before #213 ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
 - [ ] **HIGH** · _Completeness_ — SPEC-25 S4: named-graph snapshot export/import (quad-set-equality round-trip) ([#228](https://github.com/sunstoneinstitute/horndb/issues/228))
 - [ ] **MEDIUM** · _Performance_ — LDBC SPB nightly: scale to true SF=0.256 (256M triples) + editorial agents ([#125](https://github.com/sunstoneinstitute/horndb/issues/125))
 - [ ] **MEDIUM** · _Completeness_ — SPEC-25 S5: HDT cold tier + tiering seam — after #225/#228; delivers the #148 tier-bytes deferral ([#229](https://github.com/sunstoneinstitute/horndb/issues/229))
@@ -391,7 +391,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   views). After #261. Spec: `docs/specs/SPEC-29-named-graph-reasoning-scope.md`.
   Needs decomposition into per-slice leaf issues before pickup.
 
-- [v] **SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure.** ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
+- [x] **SPEC-24 S3: change-feed net-delta reconciliation + bounded backpressure.** ([#212](https://github.com/sunstoneinstitute/horndb/issues/212))
   Tick-local accumulation keyed `(triple, kind)`; publish only non-zero nets in
   deterministic order; `derived_merged` counts net records (the mixed-tick
   withdraw+re-add transient disappears — the pinned test flips to asserting its
