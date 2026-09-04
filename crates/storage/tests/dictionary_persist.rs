@@ -49,7 +49,7 @@ fn reopen_resolves_both_directions_and_continues_ids() {
 
     let fresh = Dictionary::new();
     let ids: Vec<TermId> = terms.iter().map(|t| fresh.intern(t).unwrap()).collect();
-    let stats = fresh.flush(&path).unwrap();
+    let stats = fresh.flush(&path, 0).unwrap();
     assert_eq!(stats.slots as usize, terms.len());
     assert_eq!(stats.freed, 0);
     drop(fresh);
@@ -91,7 +91,7 @@ fn reopen_resolves_both_directions_and_continues_ids() {
 
     // Second generation: base + overlay merge into one file that reopens.
     let path2 = dir.path().join("dict2.base");
-    let stats = reopened.flush(&path2).unwrap();
+    let stats = reopened.flush(&path2, 0).unwrap();
     assert_eq!(stats.slots as usize, terms.len() + 1);
     let third = Dictionary::open(&path2).unwrap();
     assert_eq!(third.len(), terms.len() + 1);
@@ -109,7 +109,7 @@ fn reopen_keeps_graph_ids() {
     let g = iri("http://ex/graph/1");
     let store = Store::in_memory();
     let gid = store.intern_graph_uri(&g).unwrap();
-    store.dictionary().flush(&path).unwrap();
+    store.flush_dictionary(&path).unwrap();
     drop(store);
 
     let store = Store::with_dictionary(Dictionary::open(&path).unwrap());
@@ -138,7 +138,7 @@ fn reclaimed_indices_reload_as_tombstones_and_are_not_reissued() {
     store.retract_triples(std::slice::from_ref(&gone)).unwrap();
     store.compact();
     assert_eq!(store.dictionary().lookup(gone_id), None);
-    let stats = store.dictionary().flush(&path).unwrap();
+    let stats = store.flush_dictionary(&path).unwrap();
     assert_eq!((stats.slots, stats.freed), (4, 1));
     drop(store);
 
@@ -168,7 +168,7 @@ fn reclaimed_indices_reload_as_tombstones_and_are_not_reissued() {
     assert_eq!(d.live_len(), 1);
     assert_eq!(d.get(&keep.1).map(|id| id.payload()), Some(2));
     let path2 = dir.path().join("dict2.base");
-    let stats = d.flush(&path2).unwrap();
+    let stats = d.flush(&path2, 0).unwrap();
     assert_eq!((stats.slots, stats.freed), (5, 4));
     let third = Dictionary::open(&path2).unwrap();
     assert_eq!((third.len(), third.live_len()), (5, 1));
@@ -206,10 +206,18 @@ fn corpus() -> String {
         )
         .unwrap();
         writeln!(doc, "{s} <http://ex/label> \"étudiant {i}\"@fr{g} .").unwrap();
-        writeln!(doc, "{s} <http://ex/advisor> _:prof{}{g} .", i % 50).unwrap();
+        // No blank nodes: they are document-scoped, so a reload is a new
+        // document whose blank nodes are legitimately fresh ids — see
+        // `distinct_documents_across_reopen_keep_distinct_blank_nodes`.
         writeln!(
             doc,
-            "_:prof{} <http://ex/teaches> <http://ex/course/{}>{g} .",
+            "{s} <http://ex/advisor> <http://ex/prof/{}>{g} .",
+            i % 50
+        )
+        .unwrap();
+        writeln!(
+            doc,
+            "<http://ex/prof/{}> <http://ex/teaches> <http://ex/course/{}>{g} .",
             i % 50,
             i % 90
         )
@@ -236,7 +244,7 @@ fn reload_into_reopened_store_assigns_no_new_ids() {
     let fresh = Store::in_memory();
     load_nquads_reader(&fresh, doc.as_bytes()).unwrap();
     let fresh_len = fresh.dictionary().len();
-    fresh.dictionary().flush(&path).unwrap();
+    fresh.flush_dictionary(&path).unwrap();
 
     let reopened = Store::with_dictionary(Dictionary::open(&path).unwrap());
     assert_eq!(reopened.dictionary().len(), fresh_len);
@@ -272,4 +280,40 @@ fn reload_into_reopened_store_assigns_no_new_ids() {
         tb.sort_unstable_by_key(|t| format!("{t:?}"));
         assert_eq!(ta, tb, "graph {g:?} terms");
     }
+}
+
+/// Blank nodes are document-scoped through `Store::next_bnode_doc_tag`. The
+/// tag travels in the base header, so a document loaded into a reopened
+/// store never shares `_:b1` with a document the base already holds — across
+/// one reopen and across a second.
+#[test]
+fn distinct_documents_across_reopen_keep_distinct_blank_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dict.base");
+    let doc = "_:b1 <http://ex/p> <http://ex/o> .\n";
+    let subject = |store: &Store| {
+        let ids = store.scan_all_term_ids();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].0.kind(), TermKind::Blank);
+        ids[0].0
+    };
+
+    let first = Store::in_memory();
+    load_nquads_reader(&first, doc.as_bytes()).unwrap();
+    let b_first = subject(&first);
+    first.flush_dictionary(&path).unwrap();
+
+    let second = Store::with_dictionary(Dictionary::open(&path).unwrap());
+    load_nquads_reader(&second, doc.as_bytes()).unwrap();
+    let b_second = subject(&second);
+    assert_ne!(b_first, b_second, "second document reused the first tag");
+    assert_eq!(second.dictionary().len(), first.dictionary().len() + 1);
+    second.flush_dictionary(&path).unwrap();
+
+    let third = Store::with_dictionary(Dictionary::open(&path).unwrap());
+    load_nquads_reader(&third, doc.as_bytes()).unwrap();
+    let b_third = subject(&third);
+    assert!(b_third != b_first && b_third != b_second);
+    assert_eq!(third.dictionary().len(), second.dictionary().len() + 1);
+    third.dictionary().verify().unwrap();
 }

@@ -333,15 +333,27 @@ Test: `tests/dictionary_gc.rs`. Bench: `benches/dict_gc_churn.rs`.
 
 ## Persistent dictionary (SPEC-25 S2, delivered)
 
-`Dictionary::flush(path)` writes every index the dictionary has issued to one
-file; `Dictionary::open(path)` maps it back; `Store::with_dictionary` puts an
-empty tier over it. Plan: `docs/plans/PLAN-25-02-persistent-dictionary.md`.
+`Dictionary::flush(path, next_bnode_doc_tag)` — normally reached as
+`Store::flush_dictionary(path)` — writes every index the dictionary has issued
+to one file; `Dictionary::open(path)` maps it back; `Store::with_dictionary`
+puts an empty tier over it. Plan: `docs/plans/PLAN-25-02-persistent-dictionary.md`.
 
 - **Layout** (`dict_base.rs`): 64-byte header, a `u64` offset table, a
   `snapshot::term_codec` arena, an `fst::Map` from those bytes to `TermId`
   bits. id → term is one offset indirection; term → id is the FST. Built under
-  `<path>.tmp` and renamed, so a mapping of the previous file stays valid and
-  a reader never sees a partial file.
+  a unique temp name beside the target (`<name>.<pid>.<n>.tmp`, removed on
+  error), renamed, then the directory is fsynced: `Ok` means the new base is
+  durable, a mapping of the previous file stays valid, and a reader never
+  sees a partial file. `open` checks the header, section lengths, and the two
+  end offsets, with the arithmetic in checked `u64`; a slot whose offsets do
+  not fit the arena reads as `None`, never a panic. `Dictionary::verify()` is
+  the opt-in full check (every offset, FST checksum) — run it after copying a
+  base between hosts.
+- **Blank-node document tag travels in the header** (bytes 56..64).
+  `Store::flush_dictionary` writes the store's `next_bnode_doc_tag` counter
+  and `Store::with_dictionary` seeds from it, so a document loaded into a
+  reopened store never shares `_:b1` with a document the base holds. Test:
+  `distinct_documents_across_reopen_keep_distinct_blank_nodes`.
 - **Base + overlay.** Indices `1..=base_len` resolve through the mapping;
   the in-memory forward/reverse maps hold only what this process interned,
   numbered from `base_len + 1`. A fresh dictionary has `base_len == 0` and
@@ -362,7 +374,10 @@ empty tier over it. Plan: `docs/plans/PLAN-25-02-persistent-dictionary.md`.
   term is absent.
 - **Deferred.** The running process keeps using its overlay after a flush
   (the merged file is for the next `open`), so overlay memory is released at
-  restart, not at checkpoint. The HDB-93 repeat cache (4,096 entries, 4-way,
+  restart, not at checkpoint. Ids interned after the flush are not in the
+  file, and a process reopened on it re-issues them to whatever comes next —
+  S3's WAL must order dictionary appends against the flush so a replayed
+  quad never names an id the base gave to a different term. The HDB-93 repeat cache (4,096 entries, 4-way,
   full-hash) is not in: it sits in front of the base probe and is a
   hornbench-measured latency lever. WAL ordering of dictionary appends is
   SPEC-25 S3.

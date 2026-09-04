@@ -41,7 +41,7 @@ fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("dict_persist");
     g.sample_size(10);
     g.throughput(Throughput::Elements(n as u64));
-    g.bench_function("flush", |b| b.iter(|| dict.flush(&path).unwrap()));
+    g.bench_function("flush", |b| b.iter(|| dict.flush(&path, 0).unwrap()));
     g.bench_function("open", |b| b.iter(|| Dictionary::open(&path).unwrap()));
     g.finish();
 

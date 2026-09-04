@@ -10,6 +10,8 @@ use std::io::Cursor;
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
+// These tags are also the persistent dictionary's on-disk encoding: changing
+// any of them bumps `dict_base::VERSION`.
 const KIND_URI: u8 = 0x00;
 const KIND_BLANK: u8 = 0x01;
 const KIND_PLAIN: u8 = 0x02;

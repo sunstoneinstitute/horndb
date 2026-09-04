@@ -52,6 +52,14 @@ id while the old FST still maps its bytes to the dead id.
       out of range), `get(codec_bytes) -> Option<TermId>`, and
       `write(path, slots: impl Iterator<Item = Option<(&[u8], TermId)>>)`
       building offsets + arena + FST through a temp file and `rename`.
+      Deviation: the item is `Result<Option<(Vec<u8>, TermId)>>` — owned
+      bytes because the keys are sorted for the FST after the arena is
+      written, `Result` so a damaged base slot fails the flush instead of
+      becoming a tombstone. Fix round (PR #343 review): unique temp name
+      `<name>.<pid>.<n>.tmp` + directory fsync, checked header arithmetic
+      and offset sentinels at `open`, opt-in `verify()`, inline-int ids
+      refused, and the blank-node document tag in header bytes 56..64
+      (`Store::flush_dictionary` / `Store::with_dictionary`).
       Move `fst` / `memmap2` from dev-deps to deps in `crates/storage/Cargo.toml`.
 - [x] 2. `dictionary.rs` — `base: Option<MappedBase>`; reverse lock guards
       `Overlay { terms, base_dead: RoaringTreemap }`; `Dictionary::open`,

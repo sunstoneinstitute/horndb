@@ -397,35 +397,62 @@ impl Dictionary {
 
     /// Write every index this dictionary has issued — base and overlay
     /// merged, reclaimed indices as tombstones — as one new base file at
-    /// `path`. Atomic (temp file + rename), so `path` may be the file this
-    /// dictionary is open on. Holds the reverse read lock for the duration:
-    /// terms interned meanwhile are not in the file, and `intern` blocks.
+    /// `path`, with `next_bnode_doc_tag` (the store's counter, see
+    /// [`Store::flush_dictionary`](crate::Store::flush_dictionary)) in the
+    /// header. Atomic (unique temp file + rename + directory fsync), so
+    /// `path` may be the file this dictionary is open on. Holds the reverse
+    /// read lock for the duration: terms interned meanwhile are not in the
+    /// file, and `intern` blocks. A damaged base slot fails the flush rather
+    /// than becoming a tombstone.
     ///
     /// ponytail: the running process keeps using its old base and overlay
     /// after the flush; the merged file is only read by the next `open`.
     /// Ceiling: overlay memory is released at restart, not at checkpoint.
     /// Upgrade path: rebuild the base under the reverse write lock, then
     /// `forward.retain(|_, id| id.payload() > flushed)`.
-    pub fn flush(&self, path: &Path) -> Result<BaseStats> {
+    pub fn flush(&self, path: &Path, next_bnode_doc_tag: u64) -> Result<BaseStats> {
         let overlay = self.reverse.read();
         let base_len = self.base_len;
         let base_slots = (1..=base_len).map(|idx| {
             if overlay.base_dead.contains(idx) {
-                return None;
+                return Ok(None);
             }
-            let bytes = self.base.as_ref()?.term_bytes(idx)?;
-            Some((
-                bytes.to_vec(),
-                TermId::new(term_codec::encoded_kind(bytes)?, idx),
-            ))
+            let base = self.base.as_ref().ok_or_else(|| {
+                StorageError::Snapshot(format!("dictionary base: index {idx} has no base"))
+            })?;
+            let Some(bytes) = base.slot(idx)? else {
+                return Ok(None);
+            };
+            let kind = term_codec::encoded_kind(bytes).ok_or_else(|| {
+                StorageError::Snapshot(format!("dictionary base: index {idx}: unknown term tag"))
+            })?;
+            Ok(Some((bytes.to_vec(), TermId::new(kind, idx))))
         });
         let overlay_slots = overlay.terms.iter().enumerate().map(|(i, slot)| {
-            let term = slot.as_ref()?;
+            let Some(term) = slot.as_ref() else {
+                return Ok(None);
+            };
             let mut bytes = Vec::new();
             term_codec::encode_term(&mut bytes, term);
-            Some((bytes, TermId::new(kind_of(term), base_len + i as u64 + 1)))
+            Ok(Some((
+                bytes,
+                TermId::new(kind_of(term), base_len + i as u64 + 1),
+            )))
         });
-        MappedBase::write(path, base_slots.chain(overlay_slots))
+        MappedBase::write(path, base_slots.chain(overlay_slots), next_bnode_doc_tag)
+    }
+
+    /// The blank-node document tag the base was flushed with; `0` without a
+    /// base. `Store::with_dictionary` seeds its counter from it.
+    pub fn base_bnode_doc_tag(&self) -> u64 {
+        self.base.as_ref().map_or(0, MappedBase::next_bnode_doc_tag)
+    }
+
+    /// Full integrity check of the mapped base (offset table and FST
+    /// checksum) — opt-in because it reads the whole file; `open` checks
+    /// only the header. `Ok` without a base.
+    pub fn verify(&self) -> Result<()> {
+        self.base.as_ref().map_or(Ok(()), MappedBase::verify)
     }
 
     /// Indices the mapped base covers; `0` for a dictionary with no base.
