@@ -639,7 +639,7 @@ impl HornBackend {
             .iter_graph_term_ids(DEFAULT_GRAPH)
             .map(|(s, p, o)| (s.0, p.0, o.0))
             .collect();
-        wiring.apply(&self.store, &base, &[]);
+        wiring.seed(&self.store, &base);
         self.circuit = Some(wiring);
         self.visible_inferred
             .insert(circuit::DERIVED_GRAPH.to_owned());
@@ -1827,19 +1827,23 @@ impl Store for HornBackend {
         // in another graph, which the memo delta below cannot express, so a
         // tick that changed anything drops the memo instead.
         #[cfg(feature = "incremental")]
-        if let (Some(wiring), Some((asserts, retracts))) = (&mut self.circuit, flips) {
-            let derived = wiring.apply(&self.store, &asserts, &retracts);
-            if derived.inserted > 0 || derived.retracted > 0 {
-                self.invalidate();
-                return Ok(ApplyCounts {
-                    retracted: report.retracted,
-                    inserted: report.inserted,
-                });
+        let derived_changed = match (&mut self.circuit, flips) {
+            (Some(wiring), Some((asserts, retracts))) => {
+                let derived = wiring.apply(&self.store, &asserts, &retracts);
+                derived.inserted > 0 || derived.retracted > 0
             }
-        }
+            _ => false,
+        };
+        #[cfg(not(feature = "incremental"))]
+        let derived_changed = false;
 
-        if report.retracted > 0 || report.inserted > 0 {
+        let changed = report.retracted > 0 || report.inserted > 0;
+        if derived_changed {
+            self.invalidate();
+        } else if changed {
             self.apply_delta_to_snapshots(base, &del_rows, &add_rows);
+        }
+        if changed {
             // SPEC-29 D7: record what changed for the view router. Gated on
             // the batch having changed something, so replaying an identical
             // change-feed batch marks nothing dirty and derives nothing.
@@ -1884,6 +1888,18 @@ impl Store for HornBackend {
         if dels.is_empty() {
             return Ok(0);
         }
+        // SPEC-24 S4: the default-graph rows this sweep removes are the
+        // circuit's retracts (every one is present, so no before/after
+        // check is needed).
+        #[cfg(feature = "incremental")]
+        let retracts: Vec<horndb_incremental::TripleId> =
+            if self.circuit.is_some() && graphs_to_sweep.contains(&DEFAULT_GRAPH) {
+                snap.iter_graph_term_ids(DEFAULT_GRAPH)
+                    .map(|(s, p, o)| (s.0, p.0, o.0))
+                    .collect()
+            } else {
+                Vec::new()
+            };
         // Through the store, not the tier: the write-ahead log must see the
         // sweep, or the next logged batch cannot replay (SPEC-25 S3).
         let report = self
@@ -1891,6 +1907,12 @@ impl Store for HornBackend {
             .apply_quad_ids(&dels, &[])
             .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
         if report.retracted > 0 {
+            #[cfg(feature = "incremental")]
+            if let Some(wiring) = &mut self.circuit {
+                if !retracts.is_empty() {
+                    wiring.apply(&self.store, &[], &retracts);
+                }
+            }
             self.invalidate();
             // SPEC-29 D7: `CLEAR`/`DROP` bypasses `apply_quads` (it sweeps
             // one tier level down), so it reports its own touched graphs.

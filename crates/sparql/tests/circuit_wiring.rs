@@ -19,6 +19,7 @@ use horndb_sparql::exec::circuit::DERIVED_GRAPH;
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::Store;
 use horndb_sparql::server::{build_router, AppState};
+use horndb_storage::Store as ColumnStore;
 use oxrdf::{NamedNode, Term as OxTerm};
 use parking_lot::RwLock;
 use spargebra::algebra::GraphTarget;
@@ -406,4 +407,82 @@ fn storage_no_ops_do_not_reach_the_circuit() {
         edges(&b),
         BTreeSet::from([pair("http://ex/b", "http://ex/c")])
     );
+}
+
+/// `CLEAR DEFAULT` reaches the circuit: derived rows go with their support,
+/// and a later insert derives nothing from the cleared triples.
+#[test]
+fn clear_default_withdraws_derived_and_does_not_resurrect() {
+    let mut b = transitive_backend(1 << 10);
+    execute_update(
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> . <http://ex/b> <http://ex/p> <http://ex/c> }",
+        &mut b,
+    )
+    .unwrap();
+    assert!(edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
+    execute_update("CLEAR DEFAULT", &mut b).unwrap();
+    assert!(
+        edges(&b).is_empty(),
+        "derived rows must go with their support"
+    );
+    assert!(b.circuit().unwrap().asserted_base().is_empty());
+    execute_update(
+        "INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }",
+        &mut b,
+    )
+    .unwrap();
+    assert_eq!(
+        edges(&b),
+        BTreeSet::from([pair("http://ex/c", "http://ex/d")]),
+        "cleared triples must not feed new derivations"
+    );
+    assert_derived_graph_mirrors_circuit(&mut b);
+}
+
+/// SPEC-29 D7: an update that derives something still reports its touched
+/// graphs to the view router.
+#[test]
+fn derivation_producing_update_marks_touched_graphs() {
+    let mut b = transitive_backend(1 << 10);
+    execute_update(
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> . <http://ex/b> <http://ex/p> <http://ex/c> }",
+        &mut b,
+    )
+    .unwrap();
+    assert!(
+        edges(&b).contains(&pair("http://ex/a", "http://ex/c")),
+        "precondition: derived"
+    );
+    assert_eq!(b.take_touched_graphs(), vec![None]);
+}
+
+/// A store reopened from its WAL still holds the derived rows the previous
+/// circuit mirrored; attaching a circuit that derives less must remove them.
+#[test]
+fn reopen_from_wal_and_reattach_drops_stale_derived_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut b = HornBackend::with_store(ColumnStore::open(dir.path()).unwrap());
+        let mut c = Circuit::new();
+        c.add_closure_plan(Box::new(TransitiveClosureRule::new(id(&b, P))));
+        b.attach_circuit(c).unwrap();
+        execute_update(
+            "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> . <http://ex/b> <http://ex/p> <http://ex/c> }",
+            &mut b,
+        )
+        .unwrap();
+        assert!(edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
+    }
+    let mut b = HornBackend::with_store(ColumnStore::open(dir.path()).unwrap());
+    b.attach_circuit(Circuit::new()).unwrap(); // no rules: derives nothing
+    assert_eq!(
+        edges(&b),
+        BTreeSet::from([
+            pair("http://ex/a", "http://ex/b"),
+            pair("http://ex/b", "http://ex/c")
+        ]),
+        "stale derived row survived the reattach"
+    );
+    assert!(b.circuit().unwrap().derived_base().is_empty());
+    assert_derived_graph_mirrors_circuit(&mut b);
 }

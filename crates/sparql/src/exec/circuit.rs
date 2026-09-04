@@ -92,18 +92,34 @@ impl Wiring {
             }
             c.tick()
         };
-        // HDB-58 WAL hook: `asserts`/`retracts` are exactly this operation's
-        // net base changes, already committed to storage, and the tick's
-        // records are on the feed. A durable log append belongs right here,
-        // before the derived mirror below.
+        // Durability: the base change is already in the store's write-ahead
+        // log (SPEC-25 S3) and the mirror below goes through the same logged
+        // `Store` entry point, so nothing here needs its own log append.
         let published = report.asserted_merged + report.derived_merged;
         match self.drain(published) {
             Some(records) => {
                 let (dels, adds) = net_derived(&records);
                 self.write(store, &dels, &adds)
             }
-            None => self.resync(store),
+            None => {
+                self.resyncs += 1;
+                self.resync(store)
+            }
         }
+    }
+
+    /// Attach-time seed: assert `base` (the default graph as it stands) in
+    /// one tick, then make the derived graph equal the circuit's derived base
+    /// by diff. Always the diff, never the tick's net: a store reopened from
+    /// its WAL still holds the derived rows a *previous* circuit wrote, and
+    /// only a want/have diff removes the ones this circuit does not derive.
+    pub(crate) fn seed(&mut self, store: &ColumnStore, base: &[TripleId]) -> ApplyReport {
+        let c = self.circuit();
+        for t in base {
+            c.assert_triple(*t);
+        }
+        c.tick();
+        self.resync(store)
     }
 
     /// The `published` records the tick just put on the feed, or `None` if
@@ -120,10 +136,9 @@ impl Wiring {
     }
 
     /// Resubscribe, then make the derived graph equal the circuit's derived
-    /// base (`mult > 0`) with one diff batch. Partial records from the dropped
-    /// subscription are discarded — the base already includes them.
+    /// base (`mult > 0`) with one diff batch. Whatever the old subscription
+    /// still held is discarded — the base already includes it.
     fn resync(&mut self, store: &ColumnStore) -> ApplyReport {
-        self.resyncs += 1;
         let capacity = self.capacity;
         let (rx, want) = {
             let c = self.circuit();
@@ -149,9 +164,8 @@ impl Wiring {
 
     /// Mirror one net derived delta into the derived graph at the id level
     /// (the ids are already dictionary ids, so no decode/re-intern round
-    /// trip). Goes through `Store::apply_quad_ids`, never `Store::tier()`: the
-    /// `Store` entry points are where HDB-58's write-ahead log hooks in, and a
-    /// tier-level write would bypass it.
+    /// trip). Goes through `Store::apply_quad_ids`, a logged `Store` entry
+    /// point (SPEC-25 S3), so the mirror replays with the rest of the store.
     fn write(&self, store: &ColumnStore, dels: &[TripleId], adds: &[TripleId]) -> ApplyReport {
         if dels.is_empty() && adds.is_empty() {
             return ApplyReport::default();

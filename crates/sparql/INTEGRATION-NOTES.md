@@ -979,17 +979,21 @@ caller and the next phases need to know:
   anything drops the memo (`invalidate`) instead of merging the delta. Once
   derived rows exist the union spans two graphs anyway, which already takes
   the rebuild path.
-- **WAL hook (HDB-58, #345).** The one place to append to a write-ahead log
-  is marked in `Wiring::apply`, between the tick and the derived mirror: at
-  that point `asserts`/`retracts` are exactly the operation's net base
-  changes (committed) and the tick's records are on the feed. The mirror
-  itself goes through `Store::apply_quad_ids`, never `Store::tier()`, so it
-  is logged once #345 logs the `Store` entry points.
-- **Not wired yet.** `CLEAR`/`DROP` of the default graph sweeps at the tier
-  level in `clear_graph` and does not reach the circuit, so derived rows
-  survive it until the next tick touches their support. Hook it in once
-  #345's logged sweep lands (the retract list is the sweep's `dels`, default
-  graph only). Also: SPEC-29 views and the circuit are separate pipelines
+- **Durability (SPEC-25 S3, #345).** The base change is in the store's
+  write-ahead log before the tick runs, and the derived mirror goes through
+  `Store::apply_quad_ids` (a logged `Store` entry point, never `tier()`), so
+  both replay on `Store::open`. The circuit itself is not persisted:
+  `attach_circuit` re-asserts the default graph in one tick and then diffs
+  the derived graph against `Circuit::derived_base` (`Wiring::seed` →
+  `resync`), which also removes rows a previous circuit derived and this one
+  does not.
+- **`CLEAR`/`DROP`.** `clear_graph`'s default-graph sweep is the circuit's
+  retract list (every swept row is present, so no before/after check), fed
+  through the same `Wiring::apply` after the logged sweep commits. Named
+  graphs do not enter the circuit. `CLEAR ALL` also sweeps the derived graph
+  itself, and the retract tick that follows withdraws every derived row from
+  the circuit, so store and circuit both end empty.
+- **Not wired yet.** SPEC-29 views and the circuit are separate pipelines
   (`publish` replaces `visible_inferred`, which would hide the derived graph
   if both ran on one backend — `serve` runs neither today).
 - **Tests.** `tests/circuit_wiring.rs` (HTTP end to end through
