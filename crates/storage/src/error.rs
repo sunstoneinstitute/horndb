@@ -18,6 +18,8 @@ pub enum StorageError {
     InvalidTerm(String),
     #[error("snapshot error: {0}")]
     Snapshot(String),
+    #[error("write-ahead log: {0}")]
+    Wal(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

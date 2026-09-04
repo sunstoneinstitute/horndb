@@ -409,8 +409,14 @@ fn record_phase(phase: LoadPhase, elapsed: Duration, rows: u64) {
         .record_load_phase(phase, elapsed, rows);
 }
 
-impl Tier for MemoryTier {
-    fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
+impl MemoryTier {
+    /// [`Tier::insert_quad_batch`] committing at `version` when given (WAL
+    /// replay, SPEC-25 S3) and at `current + 1` otherwise.
+    pub(crate) fn insert_at(
+        &self,
+        quads: &[(GraphId, TermId, TermId, TermId)],
+        version: Option<u64>,
+    ) -> Result<()> {
         if quads.is_empty() {
             return Ok(());
         }
@@ -439,7 +445,7 @@ impl Tier for MemoryTier {
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
         let cur = self.current.read().clone();
-        let new_version = cur.version + 1;
+        let new_version = version.unwrap_or(cur.version + 1);
 
         // Copy-on-write: clone the top-level graph map (Arc clones of untouched
         // graphs), then rebuild only the affected graphs' partition maps.
@@ -488,79 +494,14 @@ impl Tier for MemoryTier {
         Ok(())
     }
 
-    fn retract_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<usize> {
-        if quads.is_empty() {
-            return Ok(0);
-        }
-        let _w = self.writer.lock();
-        let cur = self.current.read().clone();
-        let new_version = cur.version + 1;
-
-        // Group targets by graph, then predicate, as a set of (s, o) to end.
-        let mut by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> = HashMap::new();
-        for &(g, s, p, o) in quads {
-            by_graph
-                .entry(g)
-                .or_default()
-                .entry(p)
-                .or_default()
-                .insert((s.0, o.0));
-        }
-
-        let mut retracted = 0usize;
-        let mut graphs = cur.graphs.clone();
-        for (g, pred_targets) in by_graph {
-            let Some(gs) = graphs.get(&g) else {
-                continue;
-            };
-            let mut new_partitions = gs.partitions.clone();
-            for (p, targets) in pred_targets {
-                let Some(existing) = new_partitions.get(&p) else {
-                    continue;
-                };
-                let mut builder = PartitionBuilder::default();
-                let n = existing.len();
-                for i in 0..n {
-                    let s = existing.subjects().value(i);
-                    let o = existing.objects().value(i);
-                    let begin = existing.begins().value(i);
-                    let mut end = existing.ends().value(i);
-                    // End the single live row matching a target.
-                    if end == UNSET_END && targets.contains(&(s, o)) {
-                        end = new_version;
-                        retracted += 1;
-                    }
-                    builder.append_stamped(TermId(s), TermId(o), begin, end);
-                }
-                new_partitions.insert(
-                    p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
-                );
-            }
-            graphs.insert(
-                g,
-                Arc::new(GraphStore {
-                    partitions: new_partitions,
-                }),
-            );
-        }
-
-        // Only bump the clock / swap if something changed, so a fully-absent
-        // retraction batch is a true no-op (no dead version created).
-        if retracted > 0 {
-            let next = Arc::new(TierSnapshot {
-                version: new_version,
-                graphs,
-            });
-            *self.current.write() = next;
-        }
-        Ok(retracted)
-    }
-
-    fn apply_quad_batch(
+    /// [`Tier::apply_quad_batch`] committing at `version` when given (WAL
+    /// replay) and at `current + 1` otherwise. A net-empty batch does not
+    /// bump the clock either way.
+    pub(crate) fn apply_at(
         &self,
         dels: &[(GraphId, TermId, TermId, TermId)],
         adds: &[(GraphId, TermId, TermId, TermId)],
+        version: Option<u64>,
     ) -> Result<ApplyReport> {
         if dels.is_empty() && adds.is_empty() {
             return Ok(ApplyReport::default());
@@ -620,7 +561,7 @@ impl Tier for MemoryTier {
         // Serialize writers so the read-modify-swap is atomic.
         let _w = self.writer.lock();
         let cur = self.current.read().clone();
-        let new_version = cur.version + 1;
+        let new_version = version.unwrap_or(cur.version + 1);
 
         let mut retracted = 0usize;
         let mut inserted = 0usize;
@@ -847,6 +788,103 @@ impl Tier for MemoryTier {
             retracted,
             inserted,
         })
+    }
+
+    /// Force the live version to `version` without a logical write — the
+    /// WAL checkpoint replay restores the commit clock with it. No-op when
+    /// already there.
+    pub(crate) fn set_version(&self, version: u64) {
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        if cur.version != version {
+            *self.current.write() = Arc::new(TierSnapshot {
+                version,
+                graphs: cur.graphs.clone(),
+            });
+        }
+    }
+}
+
+impl Tier for MemoryTier {
+    fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
+        self.insert_at(quads, None)
+    }
+
+    fn retract_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<usize> {
+        if quads.is_empty() {
+            return Ok(0);
+        }
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let new_version = cur.version + 1;
+
+        // Group targets by graph, then predicate, as a set of (s, o) to end.
+        let mut by_graph: HashMap<GraphId, HashMap<TermId, HashSet<(u64, u64)>>> = HashMap::new();
+        for &(g, s, p, o) in quads {
+            by_graph
+                .entry(g)
+                .or_default()
+                .entry(p)
+                .or_default()
+                .insert((s.0, o.0));
+        }
+
+        let mut retracted = 0usize;
+        let mut graphs = cur.graphs.clone();
+        for (g, pred_targets) in by_graph {
+            let Some(gs) = graphs.get(&g) else {
+                continue;
+            };
+            let mut new_partitions = gs.partitions.clone();
+            for (p, targets) in pred_targets {
+                let Some(existing) = new_partitions.get(&p) else {
+                    continue;
+                };
+                let mut builder = PartitionBuilder::default();
+                let n = existing.len();
+                for i in 0..n {
+                    let s = existing.subjects().value(i);
+                    let o = existing.objects().value(i);
+                    let begin = existing.begins().value(i);
+                    let mut end = existing.ends().value(i);
+                    // End the single live row matching a target.
+                    if end == UNSET_END && targets.contains(&(s, o)) {
+                        end = new_version;
+                        retracted += 1;
+                    }
+                    builder.append_stamped(TermId(s), TermId(o), begin, end);
+                }
+                new_partitions.insert(
+                    p,
+                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                );
+            }
+            graphs.insert(
+                g,
+                Arc::new(GraphStore {
+                    partitions: new_partitions,
+                }),
+            );
+        }
+
+        // Only bump the clock / swap if something changed, so a fully-absent
+        // retraction batch is a true no-op (no dead version created).
+        if retracted > 0 {
+            let next = Arc::new(TierSnapshot {
+                version: new_version,
+                graphs,
+            });
+            *self.current.write() = next;
+        }
+        Ok(retracted)
+    }
+
+    fn apply_quad_batch(
+        &self,
+        dels: &[(GraphId, TermId, TermId, TermId)],
+        adds: &[(GraphId, TermId, TermId, TermId)],
+    ) -> Result<ApplyReport> {
+        self.apply_at(dels, adds, None)
     }
 
     fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {

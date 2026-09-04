@@ -10,7 +10,10 @@ use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
 use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
 use crate::tier::{ApplyReport, Tier, TierStats};
+use crate::wal::{self, Kind, Quad, Record, SyncPolicy, Wal};
 use oxrdf::Term;
+use parking_lot::Mutex;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 #[derive(Debug, Clone, Copy)]
@@ -26,6 +29,10 @@ pub struct Store {
     /// Counts documents loaded into this store (HDB-113 blank-node scoping:
     /// see [`Store::next_bnode_doc_tag`]).
     bnode_doc_tag: AtomicU64,
+    /// The write-ahead log of a store opened with [`Store::open`] (SPEC-25
+    /// S3); `None` for an in-memory store. Its mutex serializes every logged
+    /// write with the append that precedes it, so log order is commit order.
+    wal: Option<Mutex<Wal>>,
 }
 
 impl Store {
@@ -34,6 +41,7 @@ impl Store {
             dictionary: Dictionary::new(),
             tier: Box::new(MemoryTier::new()),
             bnode_doc_tag: AtomicU64::new(0),
+            wal: None,
         }
     }
 
@@ -49,7 +57,184 @@ impl Store {
             dictionary,
             tier: Box::new(MemoryTier::new()),
             bnode_doc_tag,
+            wal: None,
         }
+    }
+
+    /// Open a durable store under `dir` (SPEC-25 S3) with the default
+    /// [`SyncPolicy::EveryBatch`]. Creates the directory on first use;
+    /// otherwise reopens the last checkpoint's dictionary base and replays
+    /// the write-ahead log past it, so the store comes back with the same
+    /// term ids, the same visible quads, and the same commit version it had
+    /// when the last durably-appended batch was written. Compaction is not
+    /// logged, so rows an explicit `compact()` had reclaimed may be back as
+    /// (invisible) dead rows. A torn tail record is dropped; a corrupt record
+    /// before the tail is [`crate::StorageError::Wal`].
+    pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_with(dir, SyncPolicy::default())
+    }
+
+    /// [`Store::open`] with an explicit fsync policy — see [`SyncPolicy`] for
+    /// each policy's data-loss window.
+    pub fn open_with(dir: &Path, policy: SyncPolicy) -> Result<Self> {
+        let mut log = Wal::open(dir, policy)?;
+        let gen = log.generation();
+        let dictionary = if gen == 0 {
+            Dictionary::new()
+        } else {
+            Dictionary::open(&log.dict_path(gen))?
+        };
+        let mut store = Self::with_dictionary(dictionary);
+        let mut seen_batch = false;
+        log.replay(|rec| store.replay(rec, &mut seen_batch))?;
+        log.logged_len = store.dictionary.len() as u64;
+        store.wal = Some(Mutex::new(log));
+        Ok(store)
+    }
+
+    fn replay(&self, rec: Record, seen_batch: &mut bool) -> Result<()> {
+        for (i, term) in rec.dict.iter().enumerate() {
+            self.dictionary
+                .replay_append(rec.dict_first + i as u64, term)?;
+        }
+        self.bnode_doc_tag
+            .fetch_max(rec.bnode_doc_tag, AtomicOrdering::Relaxed);
+        let mt = self.memory_tier();
+        let cur = mt.version();
+        let bad = |what: &str| {
+            crate::StorageError::Wal(format!(
+                "{what} record at version {} after version {cur}",
+                rec.version
+            ))
+        };
+        match rec.kind {
+            Kind::Checkpoint => {
+                if *seen_batch || (cur != 0 && cur != rec.version) {
+                    return Err(bad("checkpoint"));
+                }
+                if !rec.adds.is_empty() {
+                    mt.insert_at(&rec.adds, Some(rec.version))?;
+                }
+                mt.set_version(rec.version);
+            }
+            Kind::Insert | Kind::Apply => {
+                *seen_batch = true;
+                if rec.version != cur + 1 {
+                    return Err(bad("batch"));
+                }
+                if rec.kind == Kind::Insert {
+                    mt.insert_at(&rec.adds, Some(rec.version))?;
+                } else {
+                    mt.apply_at(&rec.dels, &rec.adds, Some(rec.version))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Append a record for the batch about to be written, then run the
+    /// write. The record carries every dictionary index interned since the
+    /// last record and the version the write will mint (`current + 1`; a
+    /// net-empty apply leaves the clock alone, live and on replay alike).
+    /// Without a log this is just the write.
+    fn logged<T>(
+        &self,
+        kind: Kind,
+        dels: &[Quad],
+        adds: &[Quad],
+        write: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let Some(log) = &self.wal else {
+            return write();
+        };
+        if dels.is_empty() && adds.is_empty() {
+            return write();
+        }
+        let mut log = log.lock();
+        self.append_record(&mut log, kind, dels, adds)?;
+        write()
+    }
+
+    fn append_record(&self, log: &mut Wal, kind: Kind, dels: &[Quad], adds: &[Quad]) -> Result<()> {
+        let terms = self.dictionary.terms_after(log.logged_len)?;
+        let body = wal::encode(
+            kind,
+            self.memory_tier().version() + 1,
+            self.bnode_doc_tag.load(AtomicOrdering::Relaxed),
+            log.logged_len + 1,
+            &terms,
+            dels,
+            adds,
+        )?;
+        log.append(&body)?;
+        log.logged_len += terms.len() as u64;
+        Ok(())
+    }
+
+    /// Checkpoint a store opened with [`Store::open`]: flush the dictionary
+    /// base, write the rows visible now as the head of a new log generation,
+    /// switch `MANIFEST` to it, and drop the old generation. Atomic — a crash
+    /// anywhere before the `MANIFEST` rename leaves the previous generation
+    /// intact and complete. Excludes writers for the duration (the dictionary
+    /// flush is O(terms)). Errors on an in-memory store.
+    pub fn checkpoint(&self) -> Result<()> {
+        let mut log = self.wal_or_err()?.lock();
+        let gen = log.generation() + 1;
+        let stats = self.flush_dictionary(&log.dict_path(gen))?;
+        let snap = self.snapshot();
+        let version = snap.version();
+        let tag = self.bnode_doc_tag.load(AtomicOrdering::Relaxed);
+        let mut file = log.start_generation(gen)?;
+        // ponytail: 1M-row chunks keep one record well under the u32 frame;
+        // the whole row set still streams through one Vec at a time.
+        const CHUNK: usize = 1 << 20;
+        let mut chunk: Vec<Quad> = Vec::new();
+        for g in snap.graphs() {
+            for p in snap.tier.predicates(g) {
+                let rows = snap
+                    .tier
+                    .with_predicate(g, p, |part| part.scan_at(version).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for (s, o) in rows {
+                    chunk.push((g, s, p, o));
+                    if chunk.len() == CHUNK {
+                        Wal::write_checkpoint_record(&mut file, version, tag, &chunk)?;
+                        chunk.clear();
+                    }
+                }
+            }
+        }
+        // Always one record, so an emptied store still restores its clock.
+        Wal::write_checkpoint_record(&mut file, version, tag, &chunk)?;
+        drop(snap);
+        log.commit_generation(gen, file, stats.slots)
+    }
+
+    /// Force the write-ahead log to stable storage now — the explicit sync
+    /// under [`SyncPolicy::Every`]. Errors on an in-memory store.
+    pub fn sync_wal(&self) -> Result<()> {
+        self.wal_or_err()?.lock().sync()
+    }
+
+    fn wal_or_err(&self) -> Result<&Mutex<Wal>> {
+        self.wal
+            .as_ref()
+            .ok_or_else(|| crate::StorageError::Wal("store has no write-ahead log".into()))
+    }
+
+    fn memory_tier(&self) -> &MemoryTier {
+        self.tier
+            .as_any()
+            .downcast_ref::<MemoryTier>()
+            .expect("Stage-1 store always wraps MemoryTier")
+    }
+
+    /// `Tier::insert_quad_batch` through the write-ahead log — the bulk
+    /// loaders' flush path.
+    pub(crate) fn insert_quad_batch(&self, quads: &[Quad]) -> Result<()> {
+        self.logged(Kind::Insert, &[], quads, || {
+            self.tier.insert_quad_batch(quads)
+        })
     }
 
     /// [`Dictionary::flush`] with this store's next blank-node document tag,
@@ -74,6 +259,7 @@ impl Store {
             dictionary: Dictionary::new(),
             tier: Box::new(MemoryTier::with_hot_threshold(hot_threshold)),
             bnode_doc_tag: AtomicU64::new(0),
+            wal: None,
         }
     }
 
@@ -130,11 +316,7 @@ impl Store {
     /// one read version alive across many reads holds this and re-opens it
     /// with [`Store::snapshot_at`]; the pin is released when it drops.
     pub fn pin(&self) -> crate::memory_tier::PinnedSnapshot {
-        self.tier
-            .as_any()
-            .downcast_ref::<MemoryTier>()
-            .expect("Stage-1 store always wraps MemoryTier")
-            .snapshot()
+        self.memory_tier().snapshot()
     }
 
     /// Re-open a pin as a full read view: same tier state, same version, no
@@ -154,7 +336,7 @@ impl Store {
             let (s_id, p_id, o_id) = self.dictionary.intern_triple(s, p, o)?;
             quads.push((DEFAULT_GRAPH, s_id, p_id, o_id));
         }
-        self.tier.insert_quad_batch(&quads)
+        self.insert_quad_batch(&quads)
     }
 
     /// Insert (graph, s, p, o) quads (SPEC-28 S6: a thin wrapper over
@@ -183,7 +365,9 @@ impl Store {
             };
             quads.push((DEFAULT_GRAPH, s_id, p_id, o_id));
         }
-        self.tier.retract_quad_batch(&quads)
+        self.logged(Kind::Apply, &quads, &[], || {
+            self.tier.retract_quad_batch(&quads)
+        })
     }
 
     /// Retract (graph, s, p, o) quads (SPEC-28 S6: a thin wrapper over
@@ -265,10 +449,13 @@ impl Store {
             dels.iter().chain(adds).all(|q| self.issued_here(*q)),
             "apply_quad_ids: quad carries ids this store's dictionary never issued"
         );
-        self.tier.apply_quad_batch(
+        let (dels, adds) = (
             InternedQuad::peel_slice(dels),
             InternedQuad::peel_slice(adds),
-        )
+        );
+        self.logged(Kind::Apply, dels, adds, || {
+            self.tier.apply_quad_batch(dels, adds)
+        })
     }
 
     /// Every id in `q` is one this store's dictionary issued. Debug-only
@@ -308,13 +495,19 @@ impl Store {
     /// that gap first. Rows are reclaimed either way — only the dictionary
     /// sweep carries this precondition.
     pub fn compact(&self) {
-        let mt = self
-            .tier
-            .as_any()
-            .downcast_ref::<MemoryTier>()
-            .expect("Stage-1 store always wraps MemoryTier");
+        let mt = self.memory_tier();
         mt.compact();
-        self.gc_dictionary(mt);
+        // A WAL-backed store logs the not-yet-recorded dictionary appends
+        // first (a rows-less record), so the sweep can never free an index
+        // the log has not seen. If that append fails, rows are still
+        // reclaimed and only the dictionary sweep is skipped.
+        let logged = match &self.wal {
+            Some(log) => self.append_record(&mut log.lock(), Kind::Apply, &[], &[]),
+            None => Ok(()),
+        };
+        if logged.is_ok() {
+            self.gc_dictionary(mt);
+        }
     }
 
     /// Mark-and-sweep the dictionary against the rows the tier still holds.

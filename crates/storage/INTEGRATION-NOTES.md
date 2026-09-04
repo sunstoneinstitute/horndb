@@ -376,13 +376,72 @@ puts an empty tier over it. Plan: `docs/plans/PLAN-25-02-persistent-dictionary.m
   (the merged file is for the next `open`), so overlay memory is released at
   restart, not at checkpoint. Ids interned after the flush are not in the
   file, and a process reopened on it re-issues them to whatever comes next —
-  S3's WAL must order dictionary appends against the flush so a replayed
-  quad never names an id the base gave to a different term. The HDB-93 repeat cache (4,096 entries, 4-way,
-  full-hash) is not in: it sits in front of the base probe and is a
-  hornbench-measured latency lever. WAL ordering of dictionary appends is
-  SPEC-25 S3.
+  the WAL (below) orders dictionary appends against the flush so a replayed
+  quad never names an id the base gave to a different term. The HDB-93 repeat
+  cache (4,096 entries, 4-way, full-hash) is not in: it sits in front of the
+  base probe and is a hornbench-measured latency lever.
 
 Tests: `tests/dictionary_persist.rs` (reopen both directions for every term
 kind, `GraphId` stability, tombstones, id continuation, and a differential
 reload into a reopened store that must allocate no ids). Bench:
 `benches/dict_persist.rs` (`audit-pass.sh` leg `dict_persist`).
+
+## Write-ahead log + crash recovery (SPEC-25 S3, delivered)
+
+`Store::open(dir)` (or `open_with(dir, SyncPolicy)`) gives a store that
+survives a kill; `Store::in_memory` and `Store::with_dictionary` have no log
+and behave as before. Plan: `docs/plans/PLAN-25-03-wal-crash-recovery.md`;
+code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
+
+- **Layout.** `dir/MANIFEST` holds the generation number (written as
+  temp + rename + directory fsync — the checkpoint's commit point);
+  `dir/dict.<gen>` is the S2 dictionary base at that checkpoint (absent for
+  gen 0); `dir/wal.<gen>` holds the records since. Files of any other
+  generation are swept on open.
+- **Record.** `[u32 body_len][u32 crc32c][body]`; body = `u8 kind` (1
+  `Insert`, 2 `Apply`, 3 `Checkpoint`), `u64 version`, `u64 bnode_doc_tag`,
+  `u64 dict_first`, `u32` count of `(u32 len, term_codec bytes)` dictionary
+  appends, `u32` count of `(g, s, p, o)` dels, the same for adds.
+  Little-endian; CRC-32C table in-crate.
+- **Write-ahead.** `insert_quad_batch`, `retract`, and `apply` each append
+  one record (version = current + 1, dictionary terms `(logged_len,
+  dict.len()]`) and fsync per policy *before* the tier write. `Insert` and
+  `Apply` replay through the tier's own bump rule (`insert_at` / `apply_at`
+  with the logged version), so stamps match; a net-empty apply is logged
+  and replays as the same no-bump. The loader's `flush` goes through
+  `Store::insert_quad_batch`, so bulk loads are logged too.
+- **Dictionary replay does not `intern`.** `Dictionary::replay_append(index,
+  term)` puts the term at the logged index unconditionally, freeing a stale
+  slot that still holds it (GC is not logged, but a term freed and
+  re-interned before the crash was logged under its new index).
+  `Store::compact()` logs pending appends before running the GC so no
+  unlogged index is freed. Recovery may keep dead rows and dead dictionary
+  slots a pre-crash compaction had reclaimed — "modulo compaction", as the
+  spec allows.
+- **Checkpoint.** `Store::checkpoint()`: flush the dictionary to
+  `dict.<gen+1>`, dump the rows visible at the pinned version as
+  `Checkpoint` records (1M-row chunks, at least one record so the commit
+  clock is carried) into `wal.<gen+1>`, fsync, switch `MANIFEST`, unlink the
+  old generation. Rows the checkpoint carried restart at `begin = checkpoint
+  version` and dead rows are dropped — the physical stamps of pre-checkpoint
+  rows are not bit-identical after a restart, the visible quads and the clock
+  are.
+- **Tail handling.** A record cut short by EOF, or a last record with a bad
+  checksum, is a torn tail: dropped, file truncated to the last good record.
+  A bad checksum with bytes after it is `StorageError::Wal` from `open`, and
+  the file is left alone.
+- **Fsync policy.** `SyncPolicy::EveryBatch` (default, window = nothing) or
+  `SyncPolicy::Every(Duration)` (fsync on the first append after the
+  interval; window = records since the last fsync; no timer thread, so a
+  quiet store stays unsynced until its next append or `Store::sync_wal()`).
+- **Call site for HDB-51 (`serve`).** Replace `Store::in_memory()` with
+  `Store::open(&data_dir)` at startup; call `Store::checkpoint()` on a
+  schedule (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done
+  here. Also not in: a directory lock against two processes, WAL metrics,
+  SPEC-24 S5 `Input` / `TickCommit` record kinds (the kind byte leaves room).
+
+Tests: `tests/wal_recovery.rs` (crash after append with ids, quads, version
+and stamps compared; id differential across recovery; checkpoint → append →
+reopen; torn tail; corrupted middle record; compaction between records;
+timed policy; stale generation sweep). Bench: `benches/wal_append.rs`
+(`audit-pass.sh` leg `wal`).
