@@ -290,7 +290,7 @@ impl Wal {
                 name.strip_prefix(prefix)
                     .and_then(|n| n.parse::<u64>().ok())
                     .is_some_and(|n| n != gen)
-            });
+            }) || (name.starts_with("MANIFEST.") && name.ends_with(".tmp"));
             if stale {
                 let _ = fs::remove_file(entry.path());
             }
@@ -300,6 +300,8 @@ impl Wal {
             .append(true)
             .create(true)
             .open(dir.join(format!("wal.{gen}")))?;
+        // A freshly created `wal.<gen>` needs its directory entry on disk too.
+        fsync_dir(dir)?;
         Ok(Self {
             dir: dir.to_path_buf(),
             gen,

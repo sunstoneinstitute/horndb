@@ -102,6 +102,13 @@ a directory lock against two processes; WAL metrics.
   test compares quads, version and dictionary length across a checkpoint,
   and full stamps only across a plain crash.
 
+- Review round (PR #345): `CLEAR`/`DROP GRAPH` wrote through
+  `Store::tier()` and bypassed the log, so the next batch could never replay.
+  `Tier` is now the read half and `TierWrite` the write half; `Store::tier()`
+  returns `&dyn Tier`, and the sweep goes through `Store::apply_quad_ids`.
+  The directory is fsynced after the first `wal.<gen>` is created;
+  `MANIFEST.*.tmp` leftovers are swept on open.
+
 ## Verification
 
 `cargo fmt --all`; `cargo clippy --workspace --all-targets -- -D warnings`;

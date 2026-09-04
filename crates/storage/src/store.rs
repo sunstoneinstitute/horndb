@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
 use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
-use crate::tier::{ApplyReport, Tier, TierStats};
+use crate::tier::{ApplyReport, Tier, TierStats, TierWrite};
 use crate::wal::{self, Kind, Quad, Record, SyncPolicy, Wal};
 use oxrdf::Term;
 use parking_lot::Mutex;
@@ -25,7 +25,7 @@ pub struct FootprintReport {
 
 pub struct Store {
     dictionary: Dictionary,
-    tier: Box<dyn Tier>,
+    tier: Box<dyn TierWrite>,
     /// Counts documents loaded into this store (HDB-113 blank-node scoping:
     /// see [`Store::next_bnode_doc_tag`]).
     bnode_doc_tag: AtomicU64,
@@ -177,6 +177,11 @@ impl Store {
     /// anywhere before the `MANIFEST` rename leaves the previous generation
     /// intact and complete. Excludes writers for the duration (the dictionary
     /// flush is O(terms)). Errors on an in-memory store.
+    ///
+    /// Pre-checkpoint history is dropped: after a reopen every row the
+    /// checkpoint carried has `begin` = the checkpoint's commit version and
+    /// dead rows are gone, so an as-of read below that version sees an empty
+    /// store. Batches after the checkpoint keep their exact stamps.
     pub fn checkpoint(&self) -> Result<()> {
         let mut log = self.wal_or_err()?.lock();
         let gen = log.generation() + 1;
@@ -286,6 +291,10 @@ impl Store {
         &self.dictionary
     }
 
+    /// Read-only view of the tier. Writes go through the store's entry points
+    /// (`insert_quads`, `retract_quads`, `apply_quads`, [`Store::apply_quad_ids`])
+    /// so the write-ahead log sees every batch — [`crate::TierWrite`] is not
+    /// reachable from here.
     pub fn tier(&self) -> &dyn Tier {
         self.tier.as_ref()
     }

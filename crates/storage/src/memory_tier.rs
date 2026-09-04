@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::partition::{PartitionBuilder, PredicatePartition};
 use crate::term::{GraphId, TermId};
-use crate::tier::{ApplyReport, Tier, TierStats};
+use crate::tier::{ApplyReport, Tier, TierStats, TierWrite};
 use crate::visibility::UNSET_END;
 use horndb_metrics::labels::LoadPhase;
 use parking_lot::{Mutex, RwLock};
@@ -805,7 +805,7 @@ impl MemoryTier {
     }
 }
 
-impl Tier for MemoryTier {
+impl TierWrite for MemoryTier {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()> {
         self.insert_at(quads, None)
     }
@@ -886,7 +886,9 @@ impl Tier for MemoryTier {
     ) -> Result<ApplyReport> {
         self.apply_at(dels, adds, None)
     }
+}
 
+impl Tier for MemoryTier {
     fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
         // Returning `&PredicatePartition` across the snapshot pointer would
         // require a guard-bound borrow. Stage-1 callers use the guarded
@@ -961,7 +963,7 @@ impl MemoryTier {
 mod tests {
     use crate::memory_tier::MemoryTier;
     use crate::term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
-    use crate::tier::Tier;
+    use crate::tier::{Tier, TierWrite};
 
     fn id(payload: u64) -> TermId {
         TermId::new(TermKind::Uri, payload)
@@ -1288,7 +1290,7 @@ mod tests {
 mod apply_quad_batch_tests {
     use crate::memory_tier::MemoryTier;
     use crate::term::{GraphId, TermId, TermKind, DEFAULT_GRAPH};
-    use crate::tier::Tier;
+    use crate::tier::TierWrite;
 
     fn id(payload: u64) -> TermId {
         TermId::new(TermKind::Uri, payload)

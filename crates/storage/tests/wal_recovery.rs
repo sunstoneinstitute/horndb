@@ -487,3 +487,22 @@ fn stale_generation_files_are_swept_on_open() {
     assert_eq!(state(&store), s);
     assert_eq!(dir_files(dir.path()), ["MANIFEST", "wal.0"]);
 }
+
+#[test]
+fn crash_after_manifest_switch_before_unlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    write_history(&store);
+    let old_log = fs::read(dir.path().join("wal.0")).unwrap();
+    store.checkpoint().unwrap();
+    let after = state(&store);
+    std::mem::forget(store);
+    // The checkpoint died after its MANIFEST rename but before the unlink:
+    // the previous generation is still on disk and must be ignored.
+    fs::write(dir.path().join("wal.0"), old_log).unwrap();
+    let reopened = state(&Store::open(dir.path()).unwrap());
+    assert_eq!(reopened.quads, after.quads);
+    assert_eq!(reopened.version, after.version);
+    assert_eq!(reopened.dict_len, after.dict_len);
+    assert_eq!(dir_files(dir.path()), ["MANIFEST", "dict.1", "wal.1"]);
+}

@@ -434,10 +434,17 @@ code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
   `SyncPolicy::Every(Duration)` (fsync on the first append after the
   interval; window = records since the last fsync; no timer thread, so a
   quiet store stays unsynced until its next append or `Store::sync_wal()`).
-- **Call site for HDB-51 (`serve`).** Replace `Store::in_memory()` with
-  `Store::open(&data_dir)` at startup; call `Store::checkpoint()` on a
-  schedule (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done
-  here. Also not in: a directory lock against two processes, WAL metrics,
+- **Every write is logged, by construction.** `Store::tier()` returns
+  `&dyn Tier`, the read half; the write half (`TierWrite`) is only reachable
+  through the store's entry points (`insert_quads`, `retract_quads`,
+  `apply_quads`, `apply_quad_ids`, the loader). A caller holding ids — the
+  SPARQL `CLEAR`/`DROP GRAPH` sweep — uses `Store::apply_quad_ids` with
+  quads from `Dictionary::quad_from_ids`. Replay runs the tier's own insert
+  and apply paths, so it is charged to the `storage_load_phase_*` metrics
+  like a bulk load.
+- **Call site for HDB-51 (`serve`).** `HornBackend::with_store(Store::open(
+  &data_dir)?)` at startup; call `Store::checkpoint()` on a schedule
+  (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done here. Also not in: a directory lock against two processes, WAL metrics,
   SPEC-24 S5 `Input` / `TickCommit` record kinds (the kind byte leaves room).
 
 Tests: `tests/wal_recovery.rs` (crash after append with ids, quads, version

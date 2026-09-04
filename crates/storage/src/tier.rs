@@ -28,6 +28,29 @@ pub struct ApplyReport {
 }
 
 pub trait Tier: Send + Sync + std::any::Any {
+    fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&PredicatePartition>;
+
+    fn predicates(&self, graph: GraphId) -> Vec<TermId>;
+
+    /// The graphs holding at least one visible quad. A graph whose every quad
+    /// has been retracted is not returned — D11 (SPEC-28): a named graph
+    /// exists iff it holds at least one visible quad, so a fully-retracted
+    /// graph ceases to exist rather than lingering as an empty entry.
+    /// Includes `DEFAULT_GRAPH` when it holds data.
+    fn graphs(&self) -> Vec<GraphId>;
+
+    fn triple_count(&self) -> u64;
+
+    fn stats(&self) -> TierStats;
+
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// The write half of a tier. `Store::tier()` hands out `&dyn Tier` only, so
+/// every write from outside the storage crate goes through a `Store` entry
+/// point and its write-ahead log (SPEC-25 S3); a bare `MemoryTier` in a test
+/// or bench is the one place this trait is called directly.
+pub trait TierWrite: Tier {
     fn insert_quad_batch(&self, quads: &[(GraphId, TermId, TermId, TermId)]) -> Result<()>;
 
     /// Retract a batch of quads. Stamps each matching live tuple's `end` at the
@@ -51,21 +74,4 @@ pub trait Tier: Send + Sync + std::any::Any {
         dels: &[(GraphId, TermId, TermId, TermId)],
         adds: &[(GraphId, TermId, TermId, TermId)],
     ) -> Result<ApplyReport>;
-
-    fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&PredicatePartition>;
-
-    fn predicates(&self, graph: GraphId) -> Vec<TermId>;
-
-    /// The graphs holding at least one visible quad. A graph whose every quad
-    /// has been retracted is not returned — D11 (SPEC-28): a named graph
-    /// exists iff it holds at least one visible quad, so a fully-retracted
-    /// graph ceases to exist rather than lingering as an empty entry.
-    /// Includes `DEFAULT_GRAPH` when it holds data.
-    fn graphs(&self) -> Vec<GraphId>;
-
-    fn triple_count(&self) -> u64;
-
-    fn stats(&self) -> TierStats;
-
-    fn as_any(&self) -> &dyn std::any::Any;
 }

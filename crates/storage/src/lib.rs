@@ -47,6 +47,6 @@ pub use partition::{
 pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, InternedQuad, TermId, TermKind, DEFAULT_GRAPH};
-pub use tier::{ApplyReport, Tier, TierStats};
+pub use tier::{ApplyReport, Tier, TierStats, TierWrite};
 pub use visibility::{visible, CommitVersion, LATEST, UNSET_END};
 pub use wal::SyncPolicy;
