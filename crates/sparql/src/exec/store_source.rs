@@ -195,6 +195,10 @@ impl horndb_wcoj::source::OrderedTripleIter for QueryIter<'_> {
     fn active_run(&mut self, depth: u8) -> Option<&[u64]> {
         forward!(self, it => it.active_run(depth))
     }
+    #[inline]
+    fn active_run_ready(&self, depth: u8) -> bool {
+        forward!(self, it => it.active_run_ready(depth))
+    }
 }
 
 impl QuerySource {

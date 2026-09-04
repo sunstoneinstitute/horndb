@@ -1,12 +1,14 @@
 //! horndb-wcoj — Leapfrog Triejoin query executor for RDF triple patterns.
 //!
-//! See `specs/SPEC-03-query-engine.md` for the full design. Stage 0/1 scope:
-//! WCOJ on ≥4 patterns, binary-hash-join fallback, Arrow vectorization,
+//! See `specs/SPEC-03-query-engine.md` for the full design. Ships the
+//! leapfrog executor, a hash-join tree executor for hybrid plans, the
+//! cost-based per-BGP planner (SPEC-23 §5.5), Arrow vectorization and
 //! cancellation. Magic sets and SLG tabling are deferred.
 
 pub mod batch;
 pub mod cancel;
 pub mod cardinality;
+pub mod cost;
 pub mod error;
 pub mod estimator;
 pub mod executor;

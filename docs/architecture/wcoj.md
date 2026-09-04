@@ -211,22 +211,48 @@ global depth into the inner iterator's local depth. It is a concrete type (not
 `Box<dyn TrieIterator>`) so *both* dispatch hops — outer `AdaptiveIter` and inner
 `PatternTrieIter` → source — statically inline on the leapfrog hot path.
 
-## 4. Planning: cutover and variable ordering
+## 4. Planning: cost-based `JoinSpec` (SPEC-23 §5.5, HDB-46)
 
-`ExecutionPlan::for_bgp` (`plan.rs:23`) makes two decisions:
+`Planner::choose(bgp, &dyn Stats)` (`planner.rs`) returns a `JoinSpec`
+(`plan.rs`): a tree of `Scan { pattern }`, `HashJoin { build, probe }` and
+multi-way `Wcoj { patterns, var_order }` nodes. Three layers:
 
-- **Executor kind.** All-ground BGP → `BinaryHash` (short-circuited). Otherwise
-  `≥ wcoj_cutover` (default 4) patterns → `Wcoj`, else `BinaryHash`. The
-  `Planner` (`planner.rs`) is a thin wrapper holding the cutover; the
-  `Cardinality` estimator is threaded through but currently unused — it is the
-  seam where Stage-2 cost-based ordering will land.
-- **Variable ordering.** Variables sorted by **descending degree** (how many
-  patterns mention each), ties broken by first-appearance for determinism.
-  High-degree-first shrinks the search space fastest: the most-constrained
-  variable is intersected across the most patterns at the shallowest depth, so
-  dead prefixes die early.
+- **Structural routing.** GYO ear removal (`CostModel::cyclic_core`) strips
+  patterns that hang off the rest by one variable until only the cyclic core
+  is left. The core is always one WCOJ node; a hash join never splits it.
+- **Cost** (`cost.rs`). WCOJ nodes pay i-cost — for each variable extension,
+  the rows read across the contributing patterns' runs, sized from the
+  per-predicate counts and NDVs in `Stats`; hash joins pay build (weighted)
+  plus probe plus the output. Sub-nodes of a hash tree add a materialisation
+  term per row (the tree evaluator holds every node's rows); a whole-BGP WCOJ
+  node streams and pays none. The AGM fractional-edge-cover bound caps each
+  cardinality estimate (computed for ≤ 5 patterns).
+- **Search.** DP over connected, core-respecting pattern subsets (≤ 5
+  non-ground patterns, else greedy build-up over units: cores plus single
+  patterns), then a late pass hashes the smaller side of each join. The
+  hybrid tree is taken only if it beats whole-BGP WCOJ by `HYBRID_MARGIN`
+  (2×); otherwise the plan is one streaming WCOJ node.
 
-The chosen `var_order` *is* the trie's level structure for every pattern.
+**Variable ordering** inside a WCOJ node is connected degree-first: the next
+variable must share a pattern with the bound prefix; among those, highest
+degree (how many patterns mention it) wins, then the smaller estimated running
+row count, then the cheaper step. The first variable comes from a shortlist
+sweep — the search runs from the degree-first start and from the two most
+selective starts and keeps the cheapest order — which is what binds the
+selective `?customer` before `?order` on the HDB-108 q3 shape. When `Stats`
+has no per-predicate signal (`is_informed() == false`, e.g. `ZeroStats`), or
+the BGP has a single pattern, the planner skips the search and emits one WCOJ
+node in plain degree order. `tests/plan_ab.rs` checks in one process that the
+planned order is within noise of degree order on the SPEC-03 shapes.
+
+`ExecutionPlan::for_bgp(bgp, cutover)` keeps the retired Stage-1 rule
+(`≥ cutover` patterns → WCOJ, else left-deep hash joins) for bisection;
+`HORNDB_WCOJ_CUTOVER=<n>` makes `Planner::default()` use it.
+
+The chosen `var_order` *is* the trie's level structure for every pattern in a
+WCOJ node. A whole-BGP `Wcoj` spec streams straight from the leapfrog
+executor; any other tree runs on the hash-join evaluator
+(`executor/binary_hash.rs`), which materialises each node's rows.
 
 ## 5. The leapfrog single-variable intersection
 
@@ -396,7 +422,12 @@ child descent's `open_level` still binds the right sub-range. One seek per
 
 It falls through to the scalar leapfrog whenever `active_run` is unavailable
 (`k != 2`, run shorter than the SIMD threshold, or a source with no contiguous
-column).
+column). Both iterators are asked `active_run_ready(depth)` — a length check,
+no allocation — before either `active_run` is built. `VecIter::active_run`
+copies and deduplicates its whole level range and drops that copy on every
+`reset`/`up`, so building it for one side and then finding the partner not
+ready cost a ~30k-row copy per outer binding (a ×100 cliff on the triangle
+and 4-cycle for half of all variable orders, found by HDB-46's A/B).
 
 ### 7.2 The contiguous view and the dedup hazard
 

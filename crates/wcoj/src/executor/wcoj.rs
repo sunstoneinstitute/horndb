@@ -113,6 +113,10 @@ impl<I: OrderedTripleIter> TrieIterator for AdaptiveIter<I> {
         self.inner.active_run(local)
     }
     #[inline]
+    fn active_run_ready(&self, depth: u8) -> bool {
+        self.inner.active_run_ready(self.local_for(depth))
+    }
+    #[inline]
     fn open_level(&mut self, depth: u8) {
         let local = self.local_for(depth);
         self.inner.open_level(local);
@@ -510,6 +514,11 @@ impl<'src, S: TripleSource + ?Sized + 'src> BatchIter<'src, S> {
         // `contributing[d]`); `split_at_mut` hands out the disjoint `&mut`
         // borrows `active_run` needs to materialise both views at once.
         let (lo, hi) = if i0 < i1 { (i0, i1) } else { (i1, i0) };
+        // Both sides must qualify before either materialises its view: a wide
+        // level deduplicated for a narrow partner is wasted per outer binding.
+        if !(self.iters[lo].active_run_ready(depth) && self.iters[hi].active_run_ready(depth)) {
+            return;
+        }
         let (left, right) = self.iters.split_at_mut(hi);
         let a = match left[lo].active_run(depth) {
             Some(a) => a,

@@ -9,6 +9,7 @@ use horndb_wcoj::pattern::{Bgp, Term, TriplePattern, Var};
 use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::synthetic::SyntheticGraph;
 use horndb_wcoj::source::TripleSource;
+use horndb_wcoj::stats::ZeroStats;
 
 #[test]
 fn cancellation_returns_within_100ms() {
@@ -57,7 +58,7 @@ fn cancellation_returns_within_100ms() {
     });
 
     let start = Instant::now();
-    let exec = Executor::for_bgp(src_ref, &bgp, &planner, token.clone());
+    let exec = Executor::for_bgp(src_ref, &bgp, &planner, &ZeroStats::new(0), token.clone());
     let mut last_err = None;
     for item in exec {
         if let Err(e) = item {

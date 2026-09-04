@@ -44,7 +44,7 @@ const UNBOUND_PRED_BOTH_DIVISOR: u64 = 1000;
 /// repeated `estimate_bgp` over the same patterns is O(1) after the first. The
 /// key is the patterns' content, not their count — one estimator can be reused
 /// across different BGPs (star sub-groups, EXPLAIN) without cross-BGP collision.
-pub struct StatsEstimator<'a, S: Stats> {
+pub struct StatsEstimator<'a, S: Stats + ?Sized> {
     stats: &'a S,
     /// key = 64-bit hash of the ordered `[TriplePattern]` slice.
     memo: RefCell<HashMap<u64, Estimate>>,
@@ -60,7 +60,7 @@ fn bgp_key(patterns: &[TriplePattern]) -> u64 {
     hasher.finish()
 }
 
-impl<'a, S: Stats> StatsEstimator<'a, S> {
+impl<'a, S: Stats + ?Sized> StatsEstimator<'a, S> {
     pub fn new(stats: &'a S) -> Self {
         Self {
             stats,
@@ -391,6 +391,26 @@ impl<'a, S: Stats> StatsEstimator<'a, S> {
         }
 
         (est.round() as u64).clamp(1, upper_bound)
+    }
+
+    /// Planning-grade estimate: the denominator model for every shape, never
+    /// the characteristic-set star route (tens of microseconds per call, which
+    /// the join planner cannot afford once per pattern subset). Same sound
+    /// upper bound as [`Self::estimate_bgp`]; unmemoised — the planner memoises
+    /// per subset itself.
+    pub fn estimate_bgp_fast(&self, patterns: &[TriplePattern]) -> Estimate {
+        if patterns.len() <= 1 || patterns.iter().any(|p| self.is_structurally_empty(p)) {
+            return self.estimate_bgp(patterns);
+        }
+        let upper_bound = patterns
+            .iter()
+            .map(|p| self.pattern_upper(p))
+            .fold(1u64, |acc, u| acc.saturating_mul(u))
+            .max(1);
+        Estimate {
+            estimate: self.denominator_estimate(patterns).clamp(1, upper_bound),
+            upper_bound,
+        }
     }
 
     /// Test-only: the raw denominator-model estimate, bypassing star routing, so

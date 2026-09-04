@@ -1003,3 +1003,58 @@ caller and the next phases need to know:
   (`harness/selected.toml` `[sparql_update]`; a `rules.txt` in the case dir
   names the rules). All state-driven, no sleeps.
 
+## Cost-based per-BGP join planning (SPEC-23 Phase 4, HDB-46, 2026-09-04)
+
+`HornBackend` hands the join planner real statistics: every
+`WcojExecutor::for_bgp` call (`scan_bgp`, `scan_bgp_ids`, `count_bgp`,
+`count_bgp_grouped`) passes `planning_stats(&resolved, &snapshot)` — the cached
+per-scope `SnapshotStats` for a copied snapshot, `ZeroStats` for the
+`HORNDB_DIRECT_SOURCE` path (no per-predicate counts, so the planner routes
+structurally: one WCOJ node in degree order, the pre-HDB-46 plan). The plan
+itself (`JoinSpec`) is chosen in `horndb-wcoj`; see its `INTEGRATION-NOTES.md`.
+
+**The summary is built off the query path.** `SnapshotStats::from_source`
+costs ~35 ms per 500k triples (plus the count passes), too much to pay on a
+first query. `planning_stats` therefore never builds inline: on a cache miss
+it reserves the scope's slot (`Option<Arc<SnapshotStats>>` = `None`), spawns
+the `horndb-stats` thread to build the summary, and returns `ZeroStats` for
+this query. Queries that arrive while the build runs also get `ZeroStats`;
+the first query after the thread lands gets the real summary. Residual
+cold-start cost, by design:
+
+- Queries in the build window run the structural plan (degree order). A
+  single-pattern BGP always plans structurally, so its plan never changes
+  when the summary lands.
+- A write during the build window merges copy-on-write: the memoised
+  snapshot is cloned (`Arc::make_mut`, O(n)) because the builder still reads
+  the old one, and the delta is queued on the in-flight slot. When the build
+  lands it replays the queued deltas onto the summary against its own
+  pre-merge snapshot, so the memo, the summary, and `stats_rebuild_total`
+  all stay put. The same copy-on-write covers a long-running query pinning
+  the snapshot, which used to force `invalidate` and a full rebuild.
+- The queue holds at most `STATS_PENDING_CAP` (32) deltas; past that the
+  slot is dropped and the next query pays one ordinary rebuild, so the
+  replay (O(delta × store) each, under the cache lock) stays bounded.
+- A build starts only when no `Building` entry is present, so concurrent
+  builds are rare, not impossible: `invalidate()` or a cache clear can drop
+  a live entry and let a fresh build start; the stale one discards itself.
+  A query on a second scope meanwhile plans structurally. A full cache
+  (`STATS_CACHE_MAX_SCOPES = 8`, per-graph `GRAPH ?g` scopes count) is
+  cleared, as `snapshot_stats` does, so a wide sweep keeps getting
+  cost-based plans.
+- `snapshot_stats` (synchronous) remains for EXPLAIN's cardinality estimate.
+- `stats_rebuild_total` / `stats_rebuild_seconds` are recorded from the
+  background thread.
+
+Consequences on this side:
+
+- Output column order of a BGP is the planner's variable order, not the
+  pattern's textual order. Every consumer already resolves columns by name
+  (`v<idx>` via `schema.column_with_name`), so nothing here depends on
+  position — keep it that way.
+- `PassId::JoinPlanning` is still unregistered. BGP planning happens at
+  execution time because that is where the `Stats` object lives; a logical
+  pass for algebra-level (non-BGP) join ordering, and EXPLAIN display of the
+  chosen `JoinSpec`, are follow-ups.
+- `HORNDB_WCOJ_CUTOVER=<n>` (read once per process) restores the fixed
+  pattern-count cutover for an A/B on one build.
