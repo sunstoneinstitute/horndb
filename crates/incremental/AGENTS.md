@@ -13,8 +13,16 @@ DBSP-style Z-set deltas, change feed, checkpointing.
   SPEC-02 storage MVCC is tracked under SPEC-24 S6 (#215, Stage-2 epic #186).
   Treat the code as the source of truth for what currently works.
 
-See `FUTURE-WORK.md` and SPEC-06 for the retraction/MVCC roadmap. The
+- **The change feed nets per tick and bounds its subscribers** (SPEC-24 S3,
+  #212): derived emissions accumulate in `Circuit::pending_derived` (keyed by
+  `(triple, kind)`, fed by the single `emit_derived` funnel) and publish as
+  non-zero nets at tick end; asserted records still publish per record. Route
+  every new derived publish through `emit_derived` or it escapes the netting.
+  `subscribe_bounded(capacity, LagPolicy)` is the consumer-facing subscribe —
+  see `INTEGRATION-NOTES.md` for the API and the policy trade-off.
+
+See `INTEGRATION-NOTES.md` for the consumer-facing contract, and
+`FUTURE-WORK.md` and SPEC-06 for the retraction/MVCC roadmap. The
 Stage-2 contract is `docs/specs/SPEC-24-incremental-stage2.md` (epic #186;
-S1 delivered, remaining phase sub-issues #211–#217): delta-incremental
-closure retraction, change-feed net-delta + backpressure, engine wiring,
+S1–S3 delivered, remaining phase sub-issues #213–#217): engine wiring,
 WAL, MVCC backing, join runtime.

@@ -284,20 +284,15 @@ fn over_retract_then_reassert_to_zero_does_not_rederive_closure() {
     );
 }
 
-/// Finding 2 — DOCUMENT-AND-PIN (cosmetic change-feed precision, final state
-/// already correct). A single MIXED tick that retracts one support path AND
-/// inserts a replacement path for the SAME closure edge produces a transient
-/// `ClosureInferred -1` then `+1` on the change feed (the closure retract pass
-/// zeroes the edge, then the closure insertion pass — running before the rule
-/// fixpoint — re-adds it), and `derived_merged` counts both. The unified tick
-/// (PLAN-24-01) nets only RULE events; closure passes still publish directly,
-/// so this transient may remain until the SPEC-24 S3 net-delta feed. This is
-/// NOT a final-state bug: `derived_base` is correct.
+/// Finding 2 — the SPEC-24 S3 net-delta contract, end to end.
 ///
-/// This test PINS the correct FINAL state. It deliberately does NOT assert on
-/// the transient feed records (that net-delta reconciliation is SPEC-24 S3 —
-/// see `FUTURE-WORK.md`). A fresh subscriber that reads only final state sees
-/// the right answer.
+/// A single MIXED tick that retracts one support path AND inserts a
+/// replacement path for the SAME closure edge used to publish a transient
+/// `ClosureInferred -1` then `+1` (the closure retract pass zeroes the edge,
+/// then the closure insertion pass re-adds it), with `derived_merged` counting
+/// both. Since S3 every derived emission accumulates in a tick-local Z-set
+/// keyed by `(triple, kind)` and only non-zero nets publish, so the transient
+/// is gone. This test pins the correct FINAL state AND asserts that absence.
 ///
 /// Setup: `c=1, d=2, e=3, x=4`, all over predicate `P`. The closure edge under
 /// test is `(c,P,e)`. Path 1 is `c->d->e` (edges `(1,2),(2,3)`); the replacement
@@ -325,10 +320,11 @@ fn mixed_tick_replacement_path_final_state_correct() {
 
     // MIXED tick: retract the d->e edge (breaking path 1) AND insert the
     // replacement path c->x->e in the same tick.
+    let rx = circuit.subscribe();
     circuit.retract_triple((2, P, 3)); // remove d -> e
     circuit.assert_triple((1, P, 4)); // c -> x
     circuit.assert_triple((4, P, 3)); // x -> e
-    circuit.tick();
+    let report = circuit.tick();
 
     // FINAL state must be correct:
     // (c,P,e) still present — now supported by c->x->e.
@@ -358,6 +354,42 @@ fn mixed_tick_replacement_path_final_state_correct() {
     assert!(
         snap.contains(&(1, P, 3)),
         "(c,P,e) must be visible in a fresh post-tick snapshot"
+    );
+
+    // SPEC-24 S3 net-delta contract: (c,P,e) was withdrawn with the old path
+    // and re-derived over the replacement path inside this one tick. The two
+    // emissions net to zero, so the feed must show NOTHING for it — the
+    // Stage-1 `ClosureInferred -1` then `+1` transient is gone.
+    let feed = drain(&rx);
+    let transients: Vec<_> = feed.iter().filter(|r| r.triple == (1, P, 3)).collect();
+    assert!(
+        transients.is_empty(),
+        "same-tick withdraw+re-add must not reach the feed, got {transients:?}"
+    );
+    // Every published derived record is a non-zero net, in `(triple, kind)`
+    // order, and `derived_merged` counts exactly those.
+    let derived: Vec<_> = feed
+        .iter()
+        .filter(|r| !matches!(r.kind, DerivationKind::Asserted))
+        .collect();
+    assert!(derived.iter().all(|r| r.mult != 0), "zero net published");
+    let mut keys: Vec<_> = derived.iter().map(|r| (r.triple, r.kind)).collect();
+    let sorted = {
+        let mut k = keys.clone();
+        k.sort();
+        k
+    };
+    assert_eq!(keys, sorted, "net records must publish in key order");
+    keys.dedup();
+    assert_eq!(
+        keys.len(),
+        derived.len(),
+        "a (triple, kind) published twice"
+    );
+    assert_eq!(
+        report.derived_merged,
+        derived.len(),
+        "derived_merged must count net feed records"
     );
 }
 

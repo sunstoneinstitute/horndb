@@ -92,12 +92,12 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   retraction ticks (shared helper `Circuit::run_closure_insertion_pass`) so it
   never runs twice. Test:
   `tests/retraction_closure.rs::mixed_tick_insert_replacement_path_keeps_rule_consequence`.
-- **Still Stage 2**: change-feed net-delta reconciliation for same-tick closure
-  withdraw+re-add (replacement paths): final `derived_base` state is correct, but
-  the feed shows a transient `ClosureInferred -1` then `+1` and `derived_merged`
-  counts both. A net-zero feed delta needs the closure delta computed against the
-  FINAL post-tick base; pinned by
-  `tests/closure_retraction.rs::mixed_tick_replacement_path_final_state_correct`.
+- **Done (SPEC-24 S3, #212)**: change-feed net-delta reconciliation. Derived
+  emissions accumulate in a tick-local Z-set keyed by `(triple, kind)` and only
+  non-zero nets publish at tick end, so the same-tick closure withdraw+re-add
+  transient is gone;
+  `tests/closure_retraction.rs::mixed_tick_replacement_path_final_state_correct`
+  now asserts its absence.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
   affected-region recompute); **exact warm-store seeded-edge retraction** — a
   rule seeded via `TransitiveClosureRule::seed_closed_edges` uses the *closed*
@@ -123,10 +123,11 @@ with the SPEC-06 requirement ID and the trigger for promotion.
 - **DeltaLog persistence**: currently in-memory; SPEC-02 will add a
   per-predicate WAL in Stage 2. The log's `drain()` interface is
   WAL-compatible.
-- **Backpressure on change feed**: currently unbounded channels.
-  Subscribers that fall behind grow the channel without limit. A
-  bounded variant with a lag policy (drop / slow producer / kill
-  consumer) lands when a real downstream subscriber materialises.
+- **Backpressure on change feed**: done (SPEC-24 S3, #212).
+  `subscribe_bounded(capacity, LagPolicy)` bounds the per-subscriber buffer;
+  `DisconnectSlow` (default) drops a lagging subscriber and counts it,
+  `Block` backpressures the tick. `subscribe()` stays unbounded as an explicit
+  opt-out. See `INTEGRATION-NOTES.md`.
 - **NaryPlan cost model**: current planner is left-deep and naïve.
   Cost-based reordering using SPEC-02's predicate-partition statistics
   is a Stage 2 deliverable.

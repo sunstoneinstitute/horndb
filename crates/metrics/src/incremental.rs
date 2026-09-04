@@ -17,6 +17,9 @@ pub struct IncrementalMetrics {
     pub fixpoint_rounds: Histogram,
     pub distinct_trace_keys: Gauge,
     pub change_feed_subscribers: Gauge,
+    /// Subscribers dropped because their bounded buffer was full
+    /// (`LagPolicy::DisconnectSlow`). SPEC-24 S3.
+    pub change_feed_dropped_subscribers: Counter,
 }
 
 fn latency_hist() -> Histogram {
@@ -37,6 +40,7 @@ impl IncrementalMetrics {
         let fixpoint_rounds = count_hist();
         let distinct_trace_keys = Gauge::default();
         let change_feed_subscribers = Gauge::default();
+        let change_feed_dropped_subscribers = Counter::default();
 
         reg.register(
             "incremental_tick_duration_seconds",
@@ -78,6 +82,11 @@ impl IncrementalMetrics {
             "Live change-feed subscribers",
             change_feed_subscribers.clone(),
         );
+        reg.register(
+            "incremental_change_feed_dropped_subscribers",
+            "Change-feed subscribers dropped for lag (bounded buffer full, total)",
+            change_feed_dropped_subscribers.clone(),
+        );
 
         Self {
             tick_duration_seconds,
@@ -88,6 +97,7 @@ impl IncrementalMetrics {
             fixpoint_rounds,
             distinct_trace_keys,
             change_feed_subscribers,
+            change_feed_dropped_subscribers,
         }
     }
 }

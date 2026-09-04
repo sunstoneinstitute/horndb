@@ -249,6 +249,7 @@ Emitted by `crates/incremental/src/circuit.rs` (per tick) and `change_feed.rs`.
 | `horndb_incremental_fixpoint_rounds` | histogram | — | count `(1 ×2 ×10)` | fixpoint rounds per tick |
 | `horndb_incremental_distinct_trace_keys` | gauge | — | count | rows in the per-rule weight trace (`rule_weights`), set at the end of every tick |
 | `horndb_incremental_change_feed_subscribers` | gauge | — | count | live change-feed subscribers |
+| `horndb_incremental_change_feed_dropped_subscribers_total` | counter | — | count | change-feed subscribers dropped for lag — a bounded subscriber's buffer was full under `LagPolicy::DisconnectSlow` (SPEC-24 S3) |
 
 ## ML / LLM boundary (`crates/metrics/src/ml.rs`)
 
