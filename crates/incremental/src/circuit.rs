@@ -35,7 +35,11 @@
 //!    R1 (overdelete cascade) then R2 (re-derive), buffering rule events and
 //!    publishing only the net transitions afterward — an overdeleted row
 //!    that R2 re-adds produces no feed transient.
-//! 5. Snapshot-cache invalidation + metrics.
+//! 5. Net-delta feed flush (SPEC-24 S3): derived emissions accumulated in a
+//!    tick-local Z-set keyed by `(triple, kind)` publish as non-zero nets
+//!    only, in key order. Asserted records keep per-record publish semantics
+//!    in phase 1 (they are the user's own operations, in the user's order).
+//! 6. Snapshot-cache invalidation + metrics.
 //!
 //! The Stage-1 full recompute (`recompute_rule_closure`) is demoted to a
 //! config-gated debug fallback: `new_with_recompute_fallback()` runs the old
@@ -46,7 +50,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::change_feed::{ChangeFeed, ChangeFeedRx};
+use crate::change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
 use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
 use crate::operator::NaryPlan;
@@ -62,6 +66,12 @@ const MAX_FIXPOINT_ROUNDS: usize = 4096;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickReport {
     pub asserted_merged: usize,
+    /// NET derived records published to the change feed this tick (SPEC-24
+    /// S3) — a row withdrawn and re-derived in the same tick counts zero, so
+    /// this equals what a subscriber receives. It is NOT the amount of
+    /// derivation work done: the
+    /// `horndb_incremental_derived_merged_total` metric keeps that raw
+    /// emission count.
     pub derived_merged: usize,
     pub logical_time: LogicalTime,
 }
@@ -73,6 +83,13 @@ pub struct Circuit {
     plans: Vec<(NaryPlan, RuleId)>,
     closure_plans: Vec<Box<dyn ClosureRule>>,
     feed: ChangeFeed,
+    /// SPEC-24 S3 — tick-local net of derived emissions, keyed by
+    /// `(triple, kind)`. `emit_derived` accumulates here instead of
+    /// publishing; `flush_derived_feed` publishes the non-zero nets in key
+    /// order at tick end, so a same-tick withdraw+re-add never reaches a
+    /// subscriber. Empty between ticks — `tick()` clears it on entry so a
+    /// panic caught mid-tick cannot leak stale emissions into the next one.
+    pending_derived: Zset<(TripleId, DerivationKind)>,
     derived_clock: LogicalTime,
     /// Rule that owns each **rule-materialized** derived row: the keys are
     /// exactly the rows present in `derived_base` because a rule owns them.
@@ -160,6 +177,7 @@ impl Circuit {
             plans: Vec::new(),
             closure_plans: Vec::new(),
             feed: ChangeFeed::new(),
+            pending_derived: Zset::new(),
             derived_clock: 0,
             rule_attr: BTreeMap::new(),
             closure_support: BTreeSet::new(),
@@ -190,6 +208,20 @@ impl Circuit {
 
     pub fn subscribe(&self) -> ChangeFeedRx {
         self.feed.subscribe()
+    }
+
+    /// Subscribe with a bounded buffer and an explicit lag policy (SPEC-24 S3).
+    /// See [`ChangeFeed::subscribe_bounded`].
+    pub fn subscribe_bounded(&self, capacity: usize, policy: LagPolicy) -> ChangeFeedRx {
+        self.feed.subscribe_bounded(capacity, policy)
+    }
+
+    /// Live change-feed subscribers (the value behind the
+    /// `incremental_change_feed_subscribers` gauge). Drops — receiver closed,
+    /// or a `DisconnectSlow` subscriber that lagged — are reflected on the
+    /// next publish.
+    pub fn subscriber_count(&self) -> usize {
+        self.feed.subscriber_count()
     }
 
     pub fn asserted_base(&self) -> &Zset<TripleId> {
@@ -282,25 +314,55 @@ impl Circuit {
         }
     }
 
-    /// Publish one derived delta and advance the derived logical clock.
+    /// Record one derived delta into this tick's net buffer.
     ///
     /// Every derived row — rule- or closure-inferred, added or withdrawn —
-    /// flows through here so the clock-advance/overflow contract and the feed
-    /// publish stay in a single place. Returns 1 so callers can fold it into
-    /// their merged-row count.
+    /// flows through here, so netting the tick (SPEC-24 S3) needs no other
+    /// interception point. Nothing is published until
+    /// [`flush_derived_feed`](Self::flush_derived_feed) runs at tick end.
+    /// Returns 1 so callers can fold it into their raw-emission count (which
+    /// drives snapshot invalidation; the reported `derived_merged` counts net
+    /// records instead).
     fn emit_derived(
         &mut self,
         triple: TripleId,
         mult: Multiplicity,
         kind: DerivationKind,
     ) -> usize {
-        let t = self.derived_clock;
-        self.derived_clock = self
-            .derived_clock
-            .checked_add(1)
-            .expect("derived-clock overflow");
-        self.feed.publish(triple, mult, t, kind);
+        self.pending_derived.add((triple, kind), mult);
         1
+    }
+
+    /// Publish this tick's net derived records — non-zero nets only, in
+    /// `(triple, kind)` key order — and advance the derived logical clock once
+    /// per published record. Returns the number of net records published,
+    /// which is what `TickReport::derived_merged` reports (SPEC-24 S3).
+    fn flush_derived_feed(&mut self) -> usize {
+        // Not `mem::take`: `DerivationKind` has no `Default`, so the derived
+        // `Default` bound on `Zset` does not apply to this key type.
+        let pending = std::mem::replace(&mut self.pending_derived, Zset::new());
+        let mut published = 0usize;
+        for (&(triple, kind), mult) in pending.iter() {
+            // Per (triple, kind) a tick adds or withdraws a row at most once,
+            // so a net record is always ±1. Consumers rely on this (see
+            // INTEGRATION-NOTES.md). Note the per-TRIPLE total can still be
+            // -2 across two different kinds — a closure withdrawal plus a rule
+            // withdrawal of the same row — which is why a consumer must sum
+            // per triple over the whole tick, not react per record.
+            debug_assert!(
+                mult.abs() <= 1,
+                "net derived record for {triple:?}/{kind:?} has |mult| = {} > 1",
+                mult.abs()
+            );
+            let time = self.derived_clock;
+            self.derived_clock = self
+                .derived_clock
+                .checked_add(1)
+                .expect("derived-clock overflow");
+            self.feed.publish(triple, mult, time, kind);
+            published += 1;
+        }
+        published
     }
 
     /// Materialize a rule-owned derived row: add it to `derived_base`, record
@@ -596,6 +658,9 @@ impl Circuit {
 
     pub fn tick(&mut self) -> TickReport {
         let t_tick = std::time::Instant::now();
+        // Defensive: a tick that panicked after an `emit_derived` and was
+        // caught upstream would otherwise republish its emissions here.
+        self.pending_derived = Zset::new();
 
         // ---- Phase 1: drain asserted records ----
         let asserted_records: Vec<_> = self.log.drain().collect();
@@ -778,7 +843,7 @@ impl Circuit {
             derived_merged += merged;
         }
 
-        // ---- Phase 5: snapshot-cache invalidation + metrics ----
+        // ---- Phase 5/6: net feed flush, snapshot-cache invalidation, metrics ----
         //
         // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
         // (O(1), no allocation). The presence set is rebuilt lazily on the next
@@ -791,7 +856,13 @@ impl Circuit {
         // record merged this tick — exactly that inclusive `t`. It advances only
         // when asserted records merged: a derived-only tick adds no new asserted
         // records and leaves it unchanged, and an empty circuit stays at 0.
-        if asserted_merged > 0 || derived_merged > 0 {
+        // SPEC-24 S3: publish the tick's NET derived records. Snapshot
+        // invalidation keys off the RAW emission count — a net-zero tick can
+        // still have moved `closure_support`/`rule_attr` state.
+        let derived_emissions = derived_merged;
+        let derived_merged = self.flush_derived_feed();
+
+        if asserted_merged > 0 || derived_emissions > 0 {
             *self.version_cache.borrow_mut() = None;
             if asserted_merged > 0 {
                 self.version_time = logical_time;
@@ -804,7 +875,14 @@ impl Circuit {
                 .tick_duration_seconds
                 .observe(t_tick.elapsed().as_secs_f64());
             m.incremental.asserted_merged.inc_by(asserted_merged as u64);
-            m.incremental.derived_merged.inc_by(derived_merged as u64);
+            // Deliberately the RAW emission count, not the net: this counter is a
+            // tick-COST signal (how much derivation work the tick did), which the
+            // perftest skill reads. `TickReport::derived_merged` is the net —
+            // what a subscriber actually sees. The two differ on a tick that
+            // withdraws and re-derives the same row.
+            m.incremental
+                .derived_merged
+                .inc_by(derived_emissions as u64);
             m.incremental.closure_withdraw.inc_by(withdraw_n);
             m.incremental.closure_promote.inc_by(promote_n);
             m.incremental.fixpoint_rounds.observe(rounds_run as f64);

@@ -8,7 +8,9 @@ pub type Multiplicity = i64;
 pub type LogicalTime = u64;
 pub type RuleId = u32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// `Ord` gives the change feed a deterministic net-publish order
+/// (SPEC-24 S3): variants sort in declaration order, `RuleInferred` by rule id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DerivationKind {
     Asserted,
     RuleInferred(RuleId),

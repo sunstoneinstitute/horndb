@@ -28,7 +28,8 @@
 //! - [`operator`]: `LinearRule`, `BilinearRule` traits; n-ary tree planner.
 //! - [`delta_log`]: pending `(triple, ±1)` log between checkpoints.
 //! - [`checkpoint`]: merge a delta log into the base store.
-//! - [`change_feed`]: ordered MPMC stream of committed deltas (F9).
+//! - [`change_feed`]: ordered MPMC stream of committed deltas (F9), with
+//!   bounded subscribers and a per-subscriber lag policy (SPEC-24 S3).
 //! - [`circuit`]: top-level `Circuit` builder + tick driver.
 //! - [`snapshot`]: refcounted MVCC reader views pinned at a logical time (F7).
 
@@ -42,7 +43,7 @@ pub mod snapshot;
 pub mod types;
 pub mod zset;
 
-pub use change_feed::{ChangeFeed, ChangeFeedRx};
+pub use change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
 pub use checkpoint::{Checkpoint, CheckpointReport};
 pub use circuit::{Circuit, TickReport};
 pub use closure_plan::{ClosureRetractDelta, ClosureRule, TransitiveClosureRule};

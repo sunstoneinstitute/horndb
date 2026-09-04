@@ -198,6 +198,14 @@ The closure path gets the same treatment on the SPEC-05 boundary:
 
 ### S3. Change-feed net-delta reconciliation + bounded backpressure
 
+> **Status:** delivered (#212). Derived emissions accumulate in
+> `Circuit::pending_derived` (a `Zset<(TripleId, DerivationKind)>` fed by the
+> single `emit_derived` funnel) and publish as non-zero nets at tick end;
+> `ChangeFeed::subscribe_bounded(capacity, LagPolicy)` bounds a subscriber,
+> with `DisconnectSlow` (default) counted on
+> `incremental_change_feed_dropped_subscribers` and `Block` backpressuring the
+> tick. Acceptance 3 below is met. See `crates/incremental/INTEGRATION-NOTES.md`.
+
 - **Net-delta contract.** Within one tick, derived-row emissions accumulate in
   a tick-local Z-set keyed by `(triple, kind)`; at tick end, only non-zero net
   records are published (in deterministic key order — the reason `Zset` sits
