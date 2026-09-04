@@ -24,21 +24,29 @@ use std::collections::HashMap;
 
 use crate::estimator::StatsEstimator;
 use crate::pattern::{Bgp, Term, TriplePattern, Var};
-use crate::plan::degree_order;
+use crate::plan::{degree_order, JoinSpec};
 use crate::stats::{Position, Stats};
 
 /// Cost of hashing one row on a hash join's build side, in row-reads.
 /// ponytail: uncalibrated knob. The unified-memory materialisation term of
 /// SPEC-23 §5.5 — tune on `hornbench` once a hybrid plan is ever chosen.
-pub const HASH_BUILD_WEIGHT: f64 = 4.0;
-/// Cost of writing one row into an intermediate or output buffer.
-pub const MATERIALIZE_WEIGHT: f64 = 1.0;
+pub const HASH_BUILD_WEIGHT: f64 = 8.0;
+/// Cost of writing one row into an intermediate buffer. The tree evaluator
+/// (`executor/binary_hash.rs`) holds every node as `Vec<Vec<TermId>>` — one
+/// heap row per binding — so this is an order of magnitude above a leapfrog
+/// seek, not one. The whole-BGP leapfrog streams into batches and pays none.
+pub const MATERIALIZE_WEIGHT: f64 = 8.0;
+/// A hybrid plan must be estimated at least this many times cheaper than
+/// the whole-BGP leapfrog to replace it: the model's error bars are wider
+/// than any small win, and the leapfrog is the production-proven path.
+pub const HYBRID_MARGIN: f64 = 2.0;
 /// Coarse prior for an unbound-predicate pattern with one endpoint fixed:
 /// the run is `total / this`. Matches the estimator's static prior.
 const UNBOUND_PRED_DIVISOR: f64 = 25.0;
 /// AGM enumeration is `3^k` over the node's patterns; past this many the
-/// bound is skipped (no cap) rather than paid for.
-const AGM_MAX_PATTERNS: usize = 10;
+/// bound is skipped (no cap) rather than paid for. Every DP subset asks, so
+/// `sum over subsets of 3^|S|` is the planning-time driver — keep it small.
+const AGM_MAX_PATTERNS: usize = 5;
 
 /// A bitmask of pattern indices into `Bgp::patterns`. Planning past 64
 /// patterns falls back to structural routing (see `planner.rs`).
@@ -49,6 +57,7 @@ pub struct CostModel<'a, S: Stats + ?Sized> {
     stats: &'a S,
     est: StatsEstimator<'a, S>,
     card_memo: RefCell<HashMap<Mask, f64>>,
+    wcoj_memo: RefCell<HashMap<Mask, WcojCost>>,
 }
 
 /// A costed WCOJ node: its elimination order and the i-cost of running it.
@@ -65,6 +74,7 @@ impl<'a, S: Stats + ?Sized> CostModel<'a, S> {
             stats,
             est: StatsEstimator::new(stats),
             card_memo: RefCell::new(HashMap::new()),
+            wcoj_memo: RefCell::new(HashMap::new()),
         }
     }
 
@@ -85,13 +95,14 @@ impl<'a, S: Stats + ?Sized> CostModel<'a, S> {
             .collect()
     }
 
-    /// Estimated output rows of the sub-BGP `mask`, capped by its AGM bound.
+    /// Estimated output rows of the sub-BGP `mask` (the planning-grade
+    /// [`StatsEstimator::estimate_bgp_fast`]), capped by its AGM bound.
     pub fn card(&self, mask: Mask) -> f64 {
         if let Some(c) = self.card_memo.borrow().get(&mask) {
             return *c;
         }
         let pats = self.patterns_of(mask);
-        let est = self.est.estimate_bgp(&pats).estimate as f64;
+        let est = self.est.estimate_bgp_fast(&pats).estimate as f64;
         let c = est.min(self.agm_bound(mask)).max(0.0);
         self.card_memo.borrow_mut().insert(mask, c);
         c
@@ -224,85 +235,94 @@ impl<'a, S: Stats + ?Sized> CostModel<'a, S> {
         a.min(b) * HASH_BUILD_WEIGHT + a.max(b) + out * MATERIALIZE_WEIGHT
     }
 
-    /// Greedy elimination order and i-cost for one WCOJ node over `patterns`:
-    /// at each depth pick the variable with the smallest estimated
-    /// intersection (fewest rows after extending), ties by that depth's
-    /// i-cost, then descending degree, then first appearance. Uninformed
-    /// statistics collapse this to the structural degree order.
+    /// Cost of a WCOJ node over `mask`: its i-cost, plus materialising its
+    /// rows when it is a sub-node of a hybrid plan (the whole-BGP node
+    /// streams and pays nothing).
+    pub fn wcoj_node_cost(&self, mask: Mask, whole: Mask) -> f64 {
+        let patterns: Vec<usize> = (0..self.bgp.patterns.len())
+            .filter(|i| mask >> i & 1 == 1)
+            .collect();
+        let c = self.wcoj(&patterns).cost;
+        if mask == whole {
+            c
+        } else {
+            c + self.card(mask) * MATERIALIZE_WEIGHT
+        }
+    }
+
+    /// Estimated cost of a whole plan on the model's scale; `whole` is the
+    /// mask of every non-ground pattern.
+    pub fn cost_of(&self, spec: &JoinSpec, whole: Mask) -> f64 {
+        match spec {
+            JoinSpec::Scan { pattern } => self.scan_cost(*pattern),
+            JoinSpec::Wcoj { patterns, .. } => {
+                let mask = patterns.iter().fold(0 as Mask, |m, &i| m | (1 << i));
+                self.wcoj_node_cost(mask, whole)
+            }
+            JoinSpec::HashJoin { build, probe } => {
+                let mask_of =
+                    |s: &JoinSpec| s.patterns().iter().fold(0 as Mask, |m, &i| m | (1 << i));
+                self.cost_of(build, whole)
+                    + self.cost_of(probe, whole)
+                    + self.join_cost(mask_of(build), mask_of(probe))
+            }
+        }
+    }
+
+    /// Elimination order and i-cost for one WCOJ node over `patterns`.
+    ///
+    /// The order is the structural degree order, constrained to stay
+    /// connected: after the first variable, only variables sharing a pattern
+    /// with the bound prefix are candidates (a disconnected pick is a cross
+    /// product at that depth). Among candidates: highest degree first, then
+    /// the smaller estimated intersection — compared by decimal order of
+    /// magnitude only, the granularity the estimator is accurate to (SPEC-23
+    /// §7.3) — then the cheaper depth, then first appearance.
+    ///
+    /// For the whole-BGP node the first variable is also tried as each of the
+    /// two most selective variables (fewest rows when bound first, e.g. a
+    /// `?customer` filtered by a bound country), and the cheapest complete
+    /// order wins — the HDB-108 win a degree-first start cannot see. Sub-nodes
+    /// of a hybrid skip the sweep. Uninformed statistics collapse everything
+    /// to the plain degree order.
     pub fn wcoj(&self, patterns: &[usize]) -> WcojCost {
-        let sub = Bgp::new(patterns.iter().map(|&i| self.bgp.patterns[i]).collect());
-        let all_vars = sub.variables();
         let mask = patterns.iter().fold(0 as Mask, |m, &i| m | (1 << i));
-        if !self.informed() || all_vars.len() <= 1 {
+        if let Some(c) = self.wcoj_memo.borrow().get(&mask) {
+            return c.clone();
+        }
+        let c = self.wcoj_uncached(patterns);
+        self.wcoj_memo.borrow_mut().insert(mask, c.clone());
+        c
+    }
+
+    fn wcoj_uncached(&self, patterns: &[usize]) -> WcojCost {
+        let sub = Bgp::new(patterns.iter().map(|&i| self.bgp.patterns[i]).collect());
+        let vars = sub.variables();
+        if !self.informed() || vars.len() <= 1 {
             return WcojCost {
                 var_order: degree_order(&sub),
                 cost: f64::INFINITY,
             };
         }
-        let degree_rank = degree_order(&sub);
-        let mut order: Vec<Var> = Vec::with_capacity(all_vars.len());
-        let mut rows = 1.0f64;
-        let mut cost = 0.0f64;
-        while order.len() < all_vars.len() {
-            let mut best: Option<(f64, f64, usize, Var)> = None;
-            for &v in &all_vars {
-                if order.contains(&v) {
+        let search = OrderSearch::new(self, &sub, vars);
+        let mut best = search.run(None);
+        let live = self.bgp.patterns.iter().filter(|p| !p.is_ground()).count();
+        if patterns.len() == live {
+            let mut starts: Vec<(i32, usize)> = (0..search.vars.len())
+                .map(|i| (bucket(search.extend(i, &[], 1.0).0), i))
+                .collect();
+            starts.sort_unstable();
+            for &(_, i) in starts.iter().take(2) {
+                if search.vars[i] == best.var_order[0] {
                     continue;
                 }
-                let (out, step) = self.extend(&sub, v, &order, rows);
-                let rank = degree_rank
-                    .iter()
-                    .position(|d| *d == v)
-                    .unwrap_or(usize::MAX);
-                let key = (out, step, rank, v);
-                let better = match best {
-                    None => true,
-                    Some((bo, bs, br, _)) => (out, step, rank) < (bo, bs, br),
-                };
-                if better {
-                    best = Some(key);
+                let c = search.run(Some(i));
+                if c.cost < best.cost {
+                    best = c;
                 }
             }
-            let (out, step, _, v) = best.expect("unordered variable remains");
-            order.push(v);
-            cost += step;
-            rows = out.max(1.0);
         }
-        // Final output row count: the whole node's estimate, not the model's
-        // running product, keeps the two candidates on one scale.
-        cost += self.card(mask) * MATERIALIZE_WEIGHT;
-        WcojCost {
-            var_order: order,
-            cost,
-        }
-    }
-
-    /// Extend a prefix of `rows` bindings over `prefix` by variable `v`:
-    /// returns `(rows after, i-cost of this depth)`.
-    fn extend(&self, sub: &Bgp, v: Var, prefix: &[Var], rows: f64) -> (f64, f64) {
-        let mut runs: Vec<f64> = Vec::new();
-        let mut dom = 1.0f64;
-        for p in &sub.patterns {
-            if p.position_of(v).is_none() {
-                continue;
-            }
-            runs.push(self.run(p, v, prefix));
-            dom = dom.max(self.domain(p, v));
-        }
-        let k = runs.len() as f64;
-        let min_run = runs.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0);
-        let max_run = runs.iter().cloned().fold(0.0, f64::max).max(1.0);
-        // Intersection size: the smallest run, thinned by every other run's
-        // selectivity against the variable's domain.
-        let min_at = runs.iter().position(|r| *r == min_run).unwrap_or(0);
-        let mut inter = min_run;
-        for (i, r) in runs.iter().enumerate() {
-            if i != min_at {
-                inter *= (r / dom).min(1.0);
-            }
-        }
-        let step = rows * (k + k * min_run * (1.0 + (max_run / min_run).log2()));
-        (rows * inter, step)
+        best
     }
 
     /// Candidate run of pattern `p` for variable `v` given the bound prefix:
@@ -351,6 +371,119 @@ impl<'a, S: Stats + ?Sized> CostModel<'a, S> {
             (Term::Var(_), _) => self.stats.total_triples(),
         };
         (d as f64).max(1.0)
+    }
+}
+
+/// Decimal order of magnitude of a row count — the granularity two
+/// estimates are compared at.
+fn bucket(rows: f64) -> i32 {
+    rows.max(1.0).log10().floor() as i32
+}
+
+/// One node's elimination-order search state: its variables (first
+/// appearance order), which patterns mention each, and each pattern's
+/// variables — built once per node so every step is an index walk.
+struct OrderSearch<'m, 'a, S: Stats + ?Sized> {
+    model: &'m CostModel<'a, S>,
+    sub: &'m Bgp,
+    vars: Vec<Var>,
+    by_var: Vec<Vec<usize>>,
+    pat_vars: Vec<Vec<Var>>,
+}
+
+impl<'m, 'a, S: Stats + ?Sized> OrderSearch<'m, 'a, S> {
+    fn new(model: &'m CostModel<'a, S>, sub: &'m Bgp, vars: Vec<Var>) -> Self {
+        let pat_vars: Vec<Vec<Var>> = sub.patterns.iter().map(pattern_vars).collect();
+        let by_var = vars
+            .iter()
+            .map(|v| {
+                (0..sub.patterns.len())
+                    .filter(|&p| pat_vars[p].contains(v))
+                    .collect()
+            })
+            .collect();
+        Self {
+            model,
+            sub,
+            vars,
+            by_var,
+            pat_vars,
+        }
+    }
+
+    /// Connected degree-first order, optionally forced to start at `first`.
+    fn run(&self, first: Option<usize>) -> WcojCost {
+        let n = self.vars.len();
+        let mut order: Vec<Var> = Vec::with_capacity(n);
+        let mut done = vec![false; n];
+        let mut rows = 1.0f64;
+        let mut cost = 0.0f64;
+        if let Some(i) = first {
+            let (out, step) = self.extend(i, &order, rows);
+            order.push(self.vars[i]);
+            done[i] = true;
+            cost += step;
+            rows = out.max(1.0);
+        }
+        while order.len() < n {
+            let touches = |i: usize| {
+                self.by_var[i]
+                    .iter()
+                    .any(|&p| self.pat_vars[p].iter().any(|u| order.contains(u)))
+            };
+            let unbound = || (0..n).filter(|&i| !done[i]);
+            let mut candidates: Vec<usize> = unbound().filter(|&i| touches(i)).collect();
+            if candidates.is_empty() {
+                candidates = unbound().collect();
+            }
+            let mut best: Option<(std::cmp::Reverse<usize>, i32, f64)> = None;
+            let mut pick = (0.0f64, 0.0f64, candidates[0]);
+            for i in candidates {
+                let (out, step) = self.extend(i, &order, rows);
+                let key = (std::cmp::Reverse(self.by_var[i].len()), bucket(out), step);
+                // Strict `<`: first appearance wins ties.
+                if best.is_none_or(|b| key < b) {
+                    best = Some(key);
+                    pick = (out, step, i);
+                }
+            }
+            let (out, step, i) = pick;
+            order.push(self.vars[i]);
+            done[i] = true;
+            cost += step;
+            rows = out.max(1.0);
+        }
+        WcojCost {
+            var_order: order,
+            cost,
+        }
+    }
+
+    /// Extend a prefix of `rows` bindings over `prefix` by variable index
+    /// `i`: returns `(rows after, i-cost of this depth)`.
+    fn extend(&self, i: usize, prefix: &[Var], rows: f64) -> (f64, f64) {
+        let v = self.vars[i];
+        let mut runs: Vec<f64> = Vec::with_capacity(self.by_var[i].len());
+        let mut dom = 1.0f64;
+        for &p in &self.by_var[i] {
+            let p = &self.sub.patterns[p];
+            runs.push(self.model.run(p, v, prefix));
+            dom = dom.max(self.model.domain(p, v));
+        }
+        let k = runs.len() as f64;
+        let min_run = runs.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0);
+        let max_run = runs.iter().cloned().fold(0.0, f64::max).max(1.0);
+        // Intersection size: the smallest run, thinned by every other run's
+        // selectivity against the variable's domain.
+        let min_at = runs.iter().position(|r| *r == min_run).unwrap_or(0);
+        let mut inter = min_run;
+        for (i, r) in runs.iter().enumerate() {
+            if i != min_at {
+                inter *= (r / dom).min(1.0);
+            }
+        }
+        let step = rows * (k + k * min_run * (1.0 + (max_run / min_run).log2()));
+        (rows * inter, step)
     }
 }
 

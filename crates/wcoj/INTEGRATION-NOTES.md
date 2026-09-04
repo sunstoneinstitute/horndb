@@ -36,11 +36,27 @@ no-ML build.
   serve it. `BinaryHashExecutor::new` still builds the left-deep
   scans-only oracle the differential fuzzer depends on — keep it free of
   WCOJ nodes.
-- Cost constants (`cost.rs`): `HASH_BUILD_WEIGHT = 4`, `MATERIALIZE_WEIGHT = 1`,
-  `UNBOUND_PRED_DIVISOR = 25`. Uncalibrated; the AGM bound only caps
-  `card()`. Because the hash side materialises, the model rarely picks a hash
-  join over the leapfrog for connected BGPs — the variable order inside the
-  WCOJ node is where the win lives today (HDB-108 q3).
+- Cost constants (`cost.rs`): `HASH_BUILD_WEIGHT = 8`, `MATERIALIZE_WEIGHT = 8`
+  (charged per row on sub-nodes of a hash tree only; whole-BGP WCOJ streams),
+  `HYBRID_MARGIN = 2` (a hybrid tree must be that much cheaper than whole-BGP
+  WCOJ to be chosen), `UNBOUND_PRED_DIVISOR = 25`, `AGM_MAX_PATTERNS = 5`.
+  Uncalibrated; the AGM bound only caps `card()`. `planner.rs`:
+  `MAX_DP_PATTERNS = 5`, then greedy over units (one core per connected
+  component plus single patterns). Because the hash side materialises, the
+  model rarely picks a hash join over the leapfrog for connected BGPs — the
+  variable order inside the WCOJ node is where the win lives today (HDB-108
+  q3, `?customer` first via the first-variable shortlist sweep in
+  `cost.rs::OrderSearch`).
+- Multi-pattern cardinalities use `StatsEstimator::estimate_bgp_fast`
+  (product of per-pattern bounds, no characteristic-set walk) so a
+  10-pattern star plans in ~100 µs; `estimate_bgp` stays for EXPLAIN and
+  single patterns.
 - `Stats::is_informed()` (default `true`, `false` for `ZeroStats`) gates the
-  search; uninformed stats give one WCOJ node in degree order, the old
-  production plan.
+  search; uninformed stats, and any single-pattern BGP, give one WCOJ node
+  in degree order, the old production plan.
+- `OrderedTripleIter::active_run_ready(depth)` (default `false`) must be
+  cheap and allocation-free: `try_arm_simd` checks it on both sides before
+  building either `active_run`. See `docs/architecture/wcoj.md` §7.1 for the
+  cliff this avoids.
+- An empty BGP is the join identity: `Executor::for_bgp` yields one solution
+  with no bindings.

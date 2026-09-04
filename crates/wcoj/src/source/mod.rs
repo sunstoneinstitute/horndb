@@ -101,4 +101,13 @@ pub trait OrderedTripleIter: Send {
     fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
         None
     }
+
+    /// Would [`Self::active_run`] return `Some` for `depth`? Must be O(1) and
+    /// allocate nothing: the leapfrog asks both sides of a pairwise
+    /// intersection *before* letting either materialise its view, so a wide
+    /// level is never deduplicated for a partner that turns out to be too
+    /// narrow to arm the SIMD path (per outer binding, that was a 100x cliff).
+    fn active_run_ready(&self, _depth: u8) -> bool {
+        false
+    }
 }

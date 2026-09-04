@@ -601,17 +601,21 @@ impl<'a> OrderedTripleIter for VecIter<'a> {
         self.cursor[d] = self.range[d].0;
     }
 
+    #[inline]
+    fn active_run_ready(&self, depth: u8) -> bool {
+        let d = depth as usize;
+        let (lo, hi) = self.range[d];
+        // Short runs stay scalar and opt out of the SIMD intersect fast path.
+        self.cursor[d].max(lo) < hi && hi - lo >= SIMD_INTERSECT_MIN_RUN
+    }
+
     fn active_run(&mut self, depth: u8) -> Option<&[TermId]> {
+        if !self.active_run_ready(depth) {
+            return None;
+        }
         let d = depth as usize;
         let (lo, hi) = self.range[d];
         let start = self.cursor[d].max(lo);
-        if start >= hi {
-            return None;
-        }
-        // Short runs stay scalar and opt out of the SIMD intersect fast path.
-        if hi - lo < SIMD_INTERSECT_MIN_RUN {
-            return None;
-        }
         if d == 2 {
             // Leaf: `open_level(2)` fixed the parent prefix (level0, level1) and
             // the rows are deduplicated triples, so the leaf column over this

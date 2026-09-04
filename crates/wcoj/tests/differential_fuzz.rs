@@ -8,8 +8,6 @@
 //! can load the dataset. Stage-1 case count is 1024 (Stage-2 ramps to 100K
 //! once nightly CI hosts the heavier run).
 
-use std::collections::BTreeSet;
-
 use arrow::array::UInt64Array;
 use proptest::prelude::*;
 
@@ -63,17 +61,19 @@ fn build_source_n(seed: u64, n: u64) -> VecTripleSource {
 
 fn collect_rows(
     batches: impl Iterator<Item = horndb_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
-) -> BTreeSet<Vec<TermId>> {
-    let mut out = BTreeSet::new();
+) -> Vec<Vec<TermId>> {
+    let mut out = Vec::new();
     for b in batches {
         let b = b.unwrap();
         let cols: Vec<&UInt64Array> = (0..b.num_columns())
             .map(|i| b.column(i).as_any().downcast_ref::<UInt64Array>().unwrap())
             .collect();
         for r in 0..b.num_rows() {
-            out.insert(cols.iter().map(|c| c.value(r)).collect::<Vec<TermId>>());
+            out.push(cols.iter().map(|c| c.value(r)).collect::<Vec<TermId>>());
         }
     }
+    // A sorted multiset: a duplicated row is a mismatch, not a no-op.
+    out.sort_unstable();
     out
 }
 
@@ -109,8 +109,8 @@ fn hybrid_spec(bgp: &Bgp) -> Option<JoinSpec> {
 fn collect_rows_named(
     batches: impl Iterator<Item = horndb_wcoj::error::Result<arrow::record_batch::RecordBatch>>,
     vars: &[Var],
-) -> BTreeSet<Vec<TermId>> {
-    let mut out = BTreeSet::new();
+) -> Vec<Vec<TermId>> {
+    let mut out = Vec::new();
     for b in batches {
         let b = b.unwrap();
         let cols: Vec<&UInt64Array> = vars
@@ -121,14 +121,16 @@ fn collect_rows_named(
             })
             .collect();
         for r in 0..b.num_rows() {
-            out.insert(cols.iter().map(|c| c.value(r)).collect::<Vec<TermId>>());
+            out.push(cols.iter().map(|c| c.value(r)).collect::<Vec<TermId>>());
         }
     }
+    // A sorted multiset: a duplicated row is a mismatch, not a no-op.
+    out.sort_unstable();
     out
 }
 
 /// The cost-based plan and the hand-built hybrid plan against the oracle.
-fn check_planned(src: &VecTripleSource, bgp: &Bgp, oracle: &BTreeSet<Vec<TermId>>) {
+fn check_planned(src: &VecTripleSource, bgp: &Bgp, oracle: &[Vec<TermId>]) {
     let vars = bgp.variables();
     let stats = SnapshotStats::from_source(src);
     let planned = collect_rows_named(
@@ -213,10 +215,8 @@ fn arb_bgp_wide() -> impl Strategy<Value = Bgp> {
 }
 
 proptest! {
-    // Stage-1: 256 cases (was 16 while the over-production bug was being
-    // diagnosed). Once SPEC-01 conformance harness can load LUBM-100 the
-    // case count ramps to 100K and the test moves to a nightly job.
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    // Default 256 cases; `PROPTEST_CASES=<n>` scales it (CI and soak runs).
+    #![proptest_config(ProptestConfig::default())]
 
     #[test]
     fn wcoj_matches_binary_hash(seed in any::<u64>(), bgp in arb_bgp()) {

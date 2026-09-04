@@ -123,6 +123,9 @@ impl<'a> LeapfrogJoin<'a> {
             return;
         }
         let depth = self.depth;
+        if !(self.iters[0].active_run_ready(depth) && self.iters[1].active_run_ready(depth)) {
+            return;
+        }
         let (left, right) = self.iters.split_at_mut(1);
         let a = left[0].active_run(depth);
         let b = right[0].active_run(depth);

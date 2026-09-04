@@ -393,6 +393,26 @@ impl<'a, S: Stats + ?Sized> StatsEstimator<'a, S> {
         (est.round() as u64).clamp(1, upper_bound)
     }
 
+    /// Planning-grade estimate: the denominator model for every shape, never
+    /// the characteristic-set star route (tens of microseconds per call, which
+    /// the join planner cannot afford once per pattern subset). Same sound
+    /// upper bound as [`Self::estimate_bgp`]; unmemoised — the planner memoises
+    /// per subset itself.
+    pub fn estimate_bgp_fast(&self, patterns: &[TriplePattern]) -> Estimate {
+        if patterns.len() <= 1 || patterns.iter().any(|p| self.is_structurally_empty(p)) {
+            return self.estimate_bgp(patterns);
+        }
+        let upper_bound = patterns
+            .iter()
+            .map(|p| self.pattern_upper(p))
+            .fold(1u64, |acc, u| acc.saturating_mul(u))
+            .max(1);
+        Estimate {
+            estimate: self.denominator_estimate(patterns).clamp(1, upper_bound),
+            upper_bound,
+        }
+    }
+
     /// Test-only: the raw denominator-model estimate, bypassing star routing, so
     /// a test can compare the denominator model against the CS estimate on the
     /// same star BGP.

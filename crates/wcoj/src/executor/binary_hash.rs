@@ -36,7 +36,10 @@ impl<'src, S: TripleSource + ?Sized + 'src> BinaryHashExecutor<'src, S> {
     /// Reference oracle: left-deep hash joins of plain scans in pattern
     /// order. Never touches the leapfrog executor.
     pub fn new(source: &'src S, bgp: &Bgp, out_vars: Vec<Var>, cancel: CancelToken) -> Self {
-        let spec = JoinSpec::left_deep(0..bgp.patterns.len()).expect("non-empty BGP");
+        let spec = JoinSpec::left_deep(0..bgp.patterns.len()).unwrap_or(JoinSpec::Wcoj {
+            patterns: Vec::new(),
+            var_order: Vec::new(),
+        });
         Self::for_spec(source, bgp, spec, out_vars, cancel)
     }
 
@@ -82,6 +85,10 @@ impl<'src, S: TripleSource + ?Sized + 'src> BinaryHashExecutor<'src, S> {
                 patterns,
                 var_order,
             } => {
+                if patterns.is_empty() {
+                    // The join identity: one row binding nothing.
+                    return Ok((Vec::new(), vec![Vec::new()]));
+                }
                 let sub = Bgp::new(patterns.iter().map(|&i| self.bgp.patterns[i]).collect());
                 let plan = ExecutionPlan {
                     kind: PlanKind::Wcoj,

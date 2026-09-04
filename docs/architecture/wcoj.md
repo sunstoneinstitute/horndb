@@ -223,17 +223,27 @@ multi-way `Wcoj { patterns, var_order }` nodes. Three layers:
 - **Cost** (`cost.rs`). WCOJ nodes pay i-cost — for each variable extension,
   the rows read across the contributing patterns' runs, sized from the
   per-predicate counts and NDVs in `Stats`; hash joins pay build (weighted)
-  plus probe plus the output. Every node adds a materialisation term. The AGM
-  fractional-edge-cover bound caps each cardinality estimate.
-- **Search.** DP over connected, core-respecting pattern subsets (≤ 10
-  non-ground patterns and a 100k-visit budget, else greedy build-up), then a
-  late pass hashes the smaller side of each join.
+  plus probe plus the output. Sub-nodes of a hash tree add a materialisation
+  term per row (the tree evaluator holds every node's rows); a whole-BGP WCOJ
+  node streams and pays none. The AGM fractional-edge-cover bound caps each
+  cardinality estimate (computed for ≤ 5 patterns).
+- **Search.** DP over connected, core-respecting pattern subsets (≤ 5
+  non-ground patterns, else greedy build-up over units: cores plus single
+  patterns), then a late pass hashes the smaller side of each join. The
+  hybrid tree is taken only if it beats whole-BGP WCOJ by `HYBRID_MARGIN`
+  (2×); otherwise the plan is one streaming WCOJ node.
 
-**Variable ordering** inside a WCOJ node is greedy: at each depth pick the
-variable with the smallest estimated intersection, tie-broken by descending
-degree (how many patterns mention it) and first appearance. When `Stats` has
-no per-predicate signal (`is_informed() == false`, e.g. `ZeroStats`) the
-planner skips the search and emits one WCOJ node in plain degree order.
+**Variable ordering** inside a WCOJ node is connected degree-first: the next
+variable must share a pattern with the bound prefix; among those, highest
+degree (how many patterns mention it) wins, then the smaller estimated running
+row count, then the cheaper step. The first variable comes from a shortlist
+sweep — the search runs from the degree-first start and from the two most
+selective starts and keeps the cheapest order — which is what binds the
+selective `?customer` before `?order` on the HDB-108 q3 shape. When `Stats`
+has no per-predicate signal (`is_informed() == false`, e.g. `ZeroStats`), or
+the BGP has a single pattern, the planner skips the search and emits one WCOJ
+node in plain degree order. `tests/plan_ab.rs` checks in one process that the
+planned order is within noise of degree order on the SPEC-03 shapes.
 
 `ExecutionPlan::for_bgp(bgp, cutover)` keeps the retired Stage-1 rule
 (`≥ cutover` patterns → WCOJ, else left-deep hash joins) for bisection;
@@ -412,7 +422,12 @@ child descent's `open_level` still binds the right sub-range. One seek per
 
 It falls through to the scalar leapfrog whenever `active_run` is unavailable
 (`k != 2`, run shorter than the SIMD threshold, or a source with no contiguous
-column).
+column). Both iterators are asked `active_run_ready(depth)` — a length check,
+no allocation — before either `active_run` is built. `VecIter::active_run`
+copies and deduplicates its whole level range and drops that copy on every
+`reset`/`up`, so building it for one side and then finding the partner not
+ready cost a ~30k-row copy per outer binding (a ×100 cliff on the triangle
+and 4-cycle for half of all variable orders, found by HDB-46's A/B).
 
 ### 7.2 The contiguous view and the dedup hazard
 

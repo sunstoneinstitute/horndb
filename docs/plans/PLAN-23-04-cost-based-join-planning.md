@@ -169,12 +169,16 @@ What was built, per task, and where the code diverges from the outline above.
   core is never split by a hash join (`Search::respects_core`).
 - **Tasks 3, 5, 6 — cost model** (`cost.rs`): i-cost per variable extension
   from per-predicate counts and NDVs; hash join = weighted build + probe +
-  output; every node adds a materialisation term; greedy
-  smallest-intersection variable order; AGM bound as a cap on `card`.
+  output; sub-nodes of a hybrid tree add a materialisation term (the
+  whole-BGP leapfrog streams and pays none); connected degree-first variable
+  order with a first-variable shortlist sweep; AGM bound as a cap on `card`,
+  computed only for ≤ 5 patterns. See *Rework after review* below.
 - **Task 4 — search** (`planner.rs`): DP over connected, core-respecting
-  pattern subsets; each subset is costed as one WCOJ node and as every
-  hash-join split of two solved halves. Dual guard: `MAX_DP_PATTERNS = 10`,
-  `DP_WORK_BUDGET = 100_000`; past either, greedy build-up seeded by the core.
+  pattern subsets (one core per connected component); each subset is costed
+  as one WCOJ node and as every hash-join split of two solved halves.
+  `MAX_DP_PATTERNS = 5`; past it, greedy build-up over units (cores plus
+  single patterns). A hybrid tree is taken only if it beats whole-BGP WCOJ by
+  `HYBRID_MARGIN` (2×).
 - **Task 7 — build side** (`planner.rs::assign_build_sides`): late pass,
   smaller estimated side builds.
 - **Task 8 — parity**: `tests/differential_fuzz.rs` runs the cost-based plan
@@ -209,3 +213,80 @@ Deviations:
    locally (fuzzer, sparql suite, conformance harness). The constants
    `HASH_BUILD_WEIGHT` / `MATERIALIZE_WEIGHT` are uncalibrated
    (`ponytail:` comment in `cost.rs`).
+
+### Rework after review (PR #342)
+
+The first cut planned well on paper and lost badly on the executor. Same-process
+A/B (`crates/wcoj/tests/plan_ab.rs`: planned spec vs whole-BGP WCOJ in degree
+order, distinct predicates per pattern, 20k subjects, release build, best of 3;
+**laptop, not recorded in `docs/benchmarks.md`**):
+
+| shape | degree order | planned, before rework | planned, after rework |
+|---|---|---|---|
+| triangle | 20.3 ms | 1936.4 ms (×95.6) | 19.3 ms (×1.00, WCOJ `[0,2,1]`) |
+| 4-cycle | 47.9 ms | 5634.4 ms (×117.6) | 46.1 ms (×1.00) |
+| 4-path | 64.1 ms | 121.6 ms (×1.90, hash tree) | 61.9 ms (×0.98, WCOJ) |
+| 4-star | 23.9 ms | 74.9 ms (×3.14, hash tree) | 25.7 ms (×1.00, WCOJ) |
+| 5-star | 37.5 ms | 92.0 ms (×2.45, hash tree) | 37.5 ms (×1.00, WCOJ) |
+| star + tail | 37.2 ms | 83.0 ms (×2.23, hash tree) | 36.5 ms (×0.99, WCOJ) |
+| knows 2-path + type | 0.4 ms | 0.4 ms (×0.97) | 0.4 ms (×1.00) |
+| HDB-108 q3 (7 patterns) | 21.9 ms | 7.3 ms (×0.33, hash tree) | 2.1 ms (×0.10, WCOJ `?customer` first) |
+
+Planning time: q3 1607 µs → 178 µs; 10-pattern star 96 ms → 114 µs
+(`tests/planner_choice.rs::ten_pattern_star_plans_fast`, bound 200 µs release).
+The "degree order" column moves a little between runs; the two planned columns
+come from separate runs against their own degree baseline.
+
+What changed, per review item:
+
+1. **Executor cliff, not a planning error (root cause of the ×95/×117).**
+   `try_arm_simd` (`executor/wcoj.rs`, `trie/leapfrog.rs`) asked the iterators
+   for `active_run` in pattern-index order. `VecIter::active_run` eagerly
+   builds a deduplicated copy of its whole level range (a ~30k-row predicate
+   block) before the partner is even checked, and the copy is discarded on
+   every `reset`/`up`. Any order where the wide iterator had the lower
+   pattern index paid that copy per outer binding. Fix: a cheap
+   `active_run_ready(depth)` probe on `OrderedTripleIter`/`TrieIterator`
+   (default `false`; `VecIter` checks the run length), and both sides must
+   answer yes before either run is built. Every WCOJ order is now within noise
+   of degree order on the SPEC-03 shapes (`plan_ab.rs`).
+2. **Variable order** (`cost.rs::OrderSearch`): candidates are the unbound
+   variables that share a pattern with the bound prefix; rank by
+   (degree desc, log10 bucket of the running row count, step cost). The
+   first variable is chosen by a shortlist sweep: run the search from the
+   degree-first start and from the two most selective starts, keep the
+   cheapest. That sweep is what keeps the q3 win (`?customer` before
+   `?order`, 22 ms → 2.1 ms) that a pure degree-first order loses.
+3. **Hybrid vs whole-WCOJ**: only sub-nodes of a hash tree pay
+   `MATERIALIZE_WEIGHT` (8) per row; `HASH_BUILD_WEIGHT` is 8; the tree must
+   beat whole-BGP WCOJ by `HYBRID_MARGIN = 2` or the planner returns one WCOJ
+   node. Acyclic 4-5-pattern shapes now stay on the streaming leapfrog.
+4. **Planning time**: `StatsEstimator::estimate_bgp_fast` (product of
+   per-pattern bounds, no characteristic-set walk) for multi-pattern
+   cardinalities; per-mask memo for `card` and for the WCOJ cost; AGM only
+   for ≤ 5 patterns (`AGM_MAX_PATTERNS`); `MAX_DP_PATTERNS = 5` and
+   `DP_WORK_BUDGET` removed (it never tripped — the pattern cap is the guard);
+   greedy attaches units by O(k) estimates.
+5. **Stats off the query path** (`horn.rs::planning_stats`): the first BGP
+   on a scope spawns the `horndb-stats` thread and plans on `ZeroStats`
+   (structural order) until the summary lands; later queries hit the cache.
+   Residual cold-start cost: queries during the build window use the
+   structural plan; a write during the window cannot merge in place and
+   triggers a fresh build; a full cache (`STATS_CACHE_MAX_SCOPES = 8`) starts
+   no build. `snapshot_stats` (sync) stays for EXPLAIN. A single-pattern BGP
+   always gets the structural order, so its plan never depends on whether
+   statistics are ready.
+6. **Fuzzer** compares sorted multisets (duplicate rows are a mismatch) and
+   honours `PROPTEST_CASES`.
+7. **Cores per connected component** (`planner.rs::components`): two
+   vertex-disjoint triangles are two cores; a hash join may split between
+   them, never inside one (`tests/planner_choice.rs::cores_are_per_connected_component`).
+8. **Empty BGP is the join identity** again: one solution with no bindings
+   (`empty_bgp_is_the_join_identity`).
+
+Parity after the rework: WCOJ differential fuzzer at `PROPTEST_CASES=2000`,
+`horndb-wcoj` + `horndb-sparql` (server) test suites, harness sparql11-eval
+unchanged (374 pass / 173 skip / 0 fail), trainmarks q1-q6 on `medium`
+identical between the cost-based planner and `HORNDB_WCOJ_CUTOVER=4` except
+q2's `SUM(total_spend)` last digits, which follow f64 summation order and
+change with any row-order change.

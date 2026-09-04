@@ -538,8 +538,8 @@ first so everything else has a home.
   **Resolved (phase 4, HDB-46): `wcoj` sees `Stats` directly.**
   `Planner::choose(&Bgp, &dyn Stats) -> JoinSpec` and
   `Executor::for_bgp(source, bgp, planner, &dyn Stats, cancel)`; `HornBackend` passes its
-  cached per-scope `SnapshotStats` (or `ZeroStats` for the direct-store path, which
-  routes structurally). The SPARQL side registers no `JoinPlanning` pass yet; when
+  cached per-scope `SnapshotStats` (or `ZeroStats` for the direct-store path and while a
+  scope's summary is still being built on a background thread; both route structurally). The SPARQL side registers no `JoinPlanning` pass yet; when
   algebra-level join ordering lands it reuses the same `Stats` object.
 - **Recursive-fixpoint costing (§5.8).** The optimizer's cost model assumes
   non-recursive AGM/hash costing; reasoning rewrites introduce recursion

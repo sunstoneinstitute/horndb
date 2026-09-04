@@ -1013,6 +1013,27 @@ per-scope `SnapshotStats` for a copied snapshot, `ZeroStats` for the
 structurally: one WCOJ node in degree order, the pre-HDB-46 plan). The plan
 itself (`JoinSpec`) is chosen in `horndb-wcoj`; see its `INTEGRATION-NOTES.md`.
 
+**The summary is built off the query path.** `SnapshotStats::from_source`
+costs ~35 ms per 500k triples (plus the count passes), too much to pay on a
+first query. `planning_stats` therefore never builds inline: on a cache miss
+it reserves the scope's slot (`Option<Arc<SnapshotStats>>` = `None`), spawns
+the `horndb-stats` thread to build the summary, and returns `ZeroStats` for
+this query. Queries that arrive while the build runs also get `ZeroStats`;
+the first query after the thread lands gets the real summary. Residual
+cold-start cost, by design:
+
+- Queries in the build window run the structural plan (degree order). A
+  single-pattern BGP always plans structurally, so its plan never changes
+  when the summary lands.
+- A write during the build window cannot merge into the in-flight summary
+  (the builder owns it); the merge loop drops the slot and the next query
+  starts a fresh build.
+- A full cache (`STATS_CACHE_MAX_SCOPES = 8`, per-graph `GRAPH ?g` scopes
+  count) starts no build: those scopes plan structurally for good.
+- `snapshot_stats` (synchronous) remains for EXPLAIN's cardinality estimate.
+- `stats_rebuild_total` / `stats_rebuild_seconds` are recorded from the
+  background thread.
+
 Consequences on this side:
 
 - Output column order of a BGP is the planner's variable order, not the

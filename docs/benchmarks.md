@@ -622,11 +622,15 @@ Target for whoever takes it: **q3 at xlarge from 0.830s to ≤ 0.35s warm**,
 #### Cost-based join planning (HDB-46, SPEC-23 phase 4, 2026-09-04) — hornbench numbers pending
 
 `Planner::choose` is now cost-based (`crates/wcoj/src/planner.rs`, `cost.rs`):
-cyclic-core routing, i-cost DP over connected pattern subsets, greedy
-smallest-intersection variable order inside each WCOJ node. On the q3 shape it
-binds `?customer` before `?order`, the exact HDB-108 fix
+cyclic-core routing, i-cost DP over connected pattern subsets, connected
+degree-first variable order with a first-variable shortlist sweep inside each
+WCOJ node. On the q3 shape it binds `?customer` before `?order`, the exact
+HDB-108 fix
 (`crates/wcoj/tests/planner_choice.rs::q3_shape_binds_selective_customer_before_order`).
-`HORNDB_WCOJ_CUTOVER=4` restores the old planner for an A/B on one build.
+`HORNDB_WCOJ_CUTOVER=4` restores the old planner for an A/B on one build. A
+same-process laptop A/B (planned vs degree order, SPEC-03 shapes + q3) lives
+in `crates/wcoj/tests/plan_ab.rs` and in PLAN-23-04's rework notes; those
+numbers are not recorded here.
 
 | Query | Old planner (HDB-108 row above) | Cost-based | Host / env |
 |---|---|---|---|

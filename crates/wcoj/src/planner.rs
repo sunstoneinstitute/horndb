@@ -11,10 +11,12 @@
 //!    joins, one additive scale.
 //! 3. **Search**: dynamic programming over connected pattern subsets, each
 //!    realised either as one WCOJ node or as a hash join of two smaller
-//!    subsets (DPccp restricted to core-respecting subsets). DuckDB's dual
-//!    guard — a pattern-count threshold and a work budget — falls back to a
-//!    greedy build-up. Hash build sides are assigned in a late pass so the
-//!    DP state stays symmetric.
+//!    subsets (DPccp restricted to core-respecting subsets). Past
+//!    [`MAX_DP_PATTERNS`] a greedy build-up over units (each cyclic core,
+//!    every other pattern) runs instead. Hash build sides are assigned in a
+//!    late pass so the DP state stays symmetric. Whatever the search finds must beat the
+//!    whole-BGP leapfrog by [`crate::cost::HYBRID_MARGIN`], or the leapfrog
+//!    runs.
 //!
 //! Statistics with no per-predicate signal (`Stats::is_informed() == false`)
 //! skip the cost search: the whole BGP goes to one WCOJ node in structural
@@ -23,20 +25,20 @@
 
 use std::sync::OnceLock;
 
-use crate::cost::{CostModel, Mask};
+use crate::cost::{CostModel, Mask, HYBRID_MARGIN};
 use crate::pattern::Bgp;
-use crate::plan::{ExecutionPlan, JoinSpec};
+use crate::plan::{degree_order, ExecutionPlan, JoinSpec};
 use crate::stats::Stats;
 
-/// Past this many non-ground patterns the DP is skipped for the greedy.
-pub const MAX_DP_PATTERNS: usize = 10;
-/// Subset-pair visits the DP may spend before falling back to the greedy.
-pub const DP_WORK_BUDGET: usize = 100_000;
+/// Past this many non-ground patterns the DP is skipped for the greedy. The
+/// DP costs every connected subset (up to `2^k`, each an estimate plus an
+/// elimination-order search of a few microseconds), so this is the whole
+/// planning-time guard: 5 keeps a dense BGP under ~200 µs in release.
+pub const MAX_DP_PATTERNS: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct Planner {
     pub max_dp_patterns: usize,
-    pub dp_work_budget: usize,
     /// `Some(n)`: the retired fixed cutover (`>= n` patterns → WCOJ).
     pub fixed_cutover: Option<usize>,
 }
@@ -51,7 +53,6 @@ impl Default for Planner {
         });
         Self {
             max_dp_patterns: MAX_DP_PATTERNS,
-            dp_work_budget: DP_WORK_BUDGET,
             fixed_cutover,
         }
     }
@@ -66,13 +67,22 @@ impl Planner {
         let live: Vec<usize> = (0..n).filter(|&i| !bgp.patterns[i].is_ground()).collect();
         let ground: Vec<usize> = (0..n).filter(|&i| bgp.patterns[i].is_ground()).collect();
         if live.is_empty() {
-            // Fully ground: membership tests only, the binary path's job.
+            // Fully ground (or empty): membership tests only, the binary
+            // path's job. An empty BGP is the join identity — one empty row.
             return JoinSpec::from_execution_plan(&ExecutionPlan::for_bgp(bgp, usize::MAX), bgp);
         }
         let model = CostModel::new(bgp, stats);
-        if !model.informed() || n > Mask::BITS as usize {
-            return whole_wcoj(&model, &live, &ground);
+        // A single pattern has no join to plan: its order is structural, so
+        // the plan never depends on whether statistics are ready yet (row
+        // order, and with it ORDER BY tie-breaking, stays put across runs).
+        if !model.informed() || n > Mask::BITS as usize || live.len() == 1 {
+            return JoinSpec::Wcoj {
+                patterns: (0..n).collect(),
+                var_order: degree_order(bgp),
+            };
         }
+        let full: Mask = live.iter().fold(0, |m, &i| m | (1 << i));
+        let adj = adjacency(bgp, &live);
         let core: Mask = model
             .cyclic_core(&live)
             .iter()
@@ -80,18 +90,52 @@ impl Planner {
         let search = Search {
             model: &model,
             live: &live,
-            core,
-            adj: adjacency(bgp, &live),
+            full,
+            cores: components(core, &adj),
+            adj,
         };
-        let mut spec = if live.len() <= self.max_dp_patterns {
-            search.dp(self.dp_work_budget)
+        let found = if live.len() <= self.max_dp_patterns {
+            search.dp()
         } else {
             None
         }
-        .unwrap_or_else(|| search.greedy());
+        .or_else(|| search.greedy());
+        let mut spec = match found {
+            Some(hybrid)
+                if model.cost_of(&hybrid, full) * HYBRID_MARGIN
+                    < model.wcoj_node_cost(full, full) =>
+            {
+                hybrid
+            }
+            _ => return whole_wcoj(&model, &live, &ground),
+        };
         assign_build_sides(&model, &mut spec);
         attach_ground(&model, spec, &live, &ground)
     }
+}
+
+/// Connected components of `mask` under `adj`, as masks.
+fn components(mask: Mask, adj: &[Mask]) -> Vec<Mask> {
+    let mut out = Vec::new();
+    let mut rest = mask;
+    while rest != 0 {
+        let mut seen: Mask = 1 << rest.trailing_zeros();
+        loop {
+            let mut next = seen;
+            for (i, a) in adj.iter().enumerate() {
+                if seen >> i & 1 == 1 {
+                    next |= a & mask;
+                }
+            }
+            if next == seen {
+                break;
+            }
+            seen = next;
+        }
+        out.push(seen);
+        rest &= !seen;
+    }
+    out
 }
 
 /// One WCOJ node over every pattern (ground ones included — the leapfrog
@@ -156,7 +200,10 @@ fn adjacency(bgp: &Bgp, live: &[usize]) -> Vec<Mask> {
 struct Search<'m, 'a, S: Stats + ?Sized> {
     model: &'m CostModel<'a, S>,
     live: &'m [usize],
-    core: Mask,
+    full: Mask,
+    /// One mask per cyclic core (a BGP can hold several, e.g. two
+    /// vertex-disjoint triangles); no hash join ever splits one.
+    cores: Vec<Mask>,
     adj: Vec<Mask>,
 }
 
@@ -188,17 +235,17 @@ impl<S: Stats + ?Sized> Search<'_, '_, S> {
         }
     }
 
-    /// Freitag's rule: a subset either holds the whole cyclic core or none
-    /// of it, so no hash join ever splits the core.
-    fn respects_core(&self, mask: Mask) -> bool {
-        mask & self.core == 0 || mask & self.core == self.core
+    /// Freitag's rule: a subset either holds a whole cyclic core or none of
+    /// it, so no hash join ever splits a core.
+    fn respects_cores(&self, mask: Mask) -> bool {
+        self.cores.iter().all(|&c| mask & c == 0 || mask & c == c)
     }
 
     fn wcoj_node(&self, mask: Mask) -> (f64, JoinSpec) {
         let patterns = self.members(mask);
         let c = self.model.wcoj(&patterns);
         (
-            c.cost,
+            self.model.wcoj_node_cost(mask, self.full),
             JoinSpec::Wcoj {
                 patterns,
                 var_order: c.var_order,
@@ -206,41 +253,38 @@ impl<S: Stats + ?Sized> Search<'_, '_, S> {
         )
     }
 
-    /// DP over connected, core-respecting subsets. `None` when the work
-    /// budget runs out or the BGP is disconnected (a cross product the
-    /// leapfrog handles natively).
-    fn dp(&self, budget: usize) -> Option<JoinSpec> {
-        let full: Mask = self.live.iter().fold(0, |m, &i| m | (1 << i));
+    /// The cheapest single-node realisation of `mask`: a scan for one
+    /// pattern when that is cheaper than a one-pattern leapfrog.
+    fn unit(&self, mask: Mask) -> (f64, JoinSpec) {
+        let wcoj = self.wcoj_node(mask);
+        if mask.count_ones() == 1 {
+            let p = mask.trailing_zeros() as usize;
+            let scan = (self.model.scan_cost(p), JoinSpec::Scan { pattern: p });
+            if scan.0 < wcoj.0 {
+                return scan;
+            }
+        }
+        wcoj
+    }
+
+    /// DP over connected, core-respecting subsets. `None` when the BGP is
+    /// disconnected (a cross product the leapfrog handles natively).
+    fn dp(&self) -> Option<JoinSpec> {
+        let full = self.full;
         let mut best: std::collections::HashMap<Mask, (f64, JoinSpec)> =
             std::collections::HashMap::new();
-        let mut work = 0usize;
         // Enumerate submasks of `full` in increasing popcount so every
         // split's halves are already solved.
         let mut masks: Vec<Mask> = submasks(full).collect();
         masks.sort_by_key(|m| m.count_ones());
         for mask in masks {
-            if mask == 0 || !self.connected(mask) || !self.respects_core(mask) {
+            if mask == 0 || !self.connected(mask) || !self.respects_cores(mask) {
                 continue;
             }
-            let (mut cost, mut spec) = if mask.count_ones() == 1 {
-                let p = mask.trailing_zeros() as usize;
-                let wcoj = self.wcoj_node(mask);
-                let scan = (self.model.scan_cost(p), JoinSpec::Scan { pattern: p });
-                if wcoj.0 <= scan.0 {
-                    wcoj
-                } else {
-                    scan
-                }
-            } else {
-                self.wcoj_node(mask)
-            };
+            let (mut cost, mut spec) = self.unit(mask);
             // Every split into two solved halves that share a variable.
             let rest = mask & (mask - 1); // drop the lowest bit
             for a in submasks(rest) {
-                work += 1;
-                if work > budget {
-                    return None;
-                }
                 let a = a | (mask & !rest); // lowest bit always in `a`: dedups (a, b)
                 let b = mask & !a;
                 if b == 0 {
@@ -266,59 +310,56 @@ impl<S: Stats + ?Sized> Search<'_, '_, S> {
         best.remove(&full).map(|(_, s)| s)
     }
 
-    /// Greedy build-up: seed with the cyclic core as one WCOJ node (or the
-    /// cheapest scan), then repeatedly hash-join the connected pattern whose
-    /// scan costs least; compare against one WCOJ node over everything.
-    fn greedy(&self) -> JoinSpec {
-        let full: Mask = self.live.iter().fold(0, |m, &i| m | (1 << i));
-        let (whole_cost, whole) = self.wcoj_node(full);
-        let (mut cost, mut spec, mut mask) = if self.core != 0 {
-            let (c, s) = self.wcoj_node(self.core);
-            (c, s, self.core)
-        } else {
-            let p = *self
-                .live
+    /// Greedy build-up over units (each cyclic core as one WCOJ node, every
+    /// other pattern on its own): seed with the cheapest unit, then
+    /// repeatedly hash-join the most selective connected unit (fewest
+    /// estimated rows) — one estimate per unit, so a wide BGP plans in
+    /// microseconds; the margin check in `choose` costs the result once.
+    /// `None` only when there is a single unit (nothing to join).
+    fn greedy(&self) -> Option<JoinSpec> {
+        let mut units: Vec<Mask> = self.cores.clone();
+        for &p in self.live {
+            if !self.cores.iter().any(|c| c >> p & 1 == 1) {
+                units.push(1 << p);
+            }
+        }
+        if units.len() < 2 {
+            return None;
+        }
+        let cheapest = |cands: &[Mask], key: &dyn Fn(Mask) -> f64| -> Mask {
+            *cands
                 .iter()
                 .min_by(|&&a, &&b| {
-                    self.model
-                        .scan_cost(a)
-                        .partial_cmp(&self.model.scan_cost(b))
+                    key(a)
+                        .partial_cmp(&key(b))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .expect("live patterns");
-            (
-                self.model.scan_cost(p),
-                JoinSpec::Scan { pattern: p },
-                1 << p,
-            )
+                .expect("non-empty candidates")
         };
-        while mask != full {
-            let mut candidates = self.neighbours(mask) & full;
-            if candidates == 0 {
-                candidates = full & !mask; // disconnected: cross product
-            }
-            let p = self
-                .members(candidates)
-                .into_iter()
-                .min_by(|&a, &b| {
-                    self.model
-                        .join_cost(mask, 1 << a)
-                        .partial_cmp(&self.model.join_cost(mask, 1 << b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .expect("candidate pattern");
-            cost += self.model.scan_cost(p) + self.model.join_cost(mask, 1 << p);
+        let seed = cheapest(&units, &|u| self.unit(u).0);
+        let (_, mut spec) = self.unit(seed);
+        let mut mask = seed;
+        units.retain(|&u| u != seed);
+        while !units.is_empty() {
+            let connected: Vec<Mask> = units
+                .iter()
+                .copied()
+                .filter(|&u| self.neighbours(mask) & u != 0)
+                .collect();
+            let cands = if connected.is_empty() {
+                units.clone()
+            } else {
+                connected
+            };
+            let u = cheapest(&cands, &|u| self.model.card(u));
             spec = JoinSpec::HashJoin {
-                build: Box::new(JoinSpec::Scan { pattern: p }),
+                build: Box::new(self.unit(u).1),
                 probe: Box::new(spec),
             };
-            mask |= 1 << p;
+            mask |= u;
+            units.retain(|&x| x != u);
         }
-        if whole_cost <= cost {
-            whole
-        } else {
-            spec
-        }
+        Some(spec)
     }
 }
 

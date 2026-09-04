@@ -11,15 +11,28 @@ Leapfrog Triejoin executor, trie iterators, planner.
   canonical skewed win case.
 - **Join planning is cost-based (HDB-46, SPEC-23 §5.5).** `Planner::choose(bgp,
   &dyn Stats)` returns a `JoinSpec` tree (`plan.rs`): GYO cyclic core → one WCOJ
-  node, never split; `CostModel` (`cost.rs`) prices WCOJ extensions by i-cost and
-  hash joins by build+probe; DP over connected pattern subsets (≤ 10 patterns,
-  100k-visit budget, else greedy). `ZeroStats` (`is_informed() == false`) skips
-  the search: one WCOJ node in degree order. `HORNDB_WCOJ_CUTOVER=<n>` restores
-  the retired fixed cutover for bisection. The fuzzer runs the planned and a
-  hand-built hybrid spec against the oracle on every case;
-  `tests/planner_choice.rs` pins the structural rules and the HDB-108 q3
-  variable order. `HASH_BUILD_WEIGHT` / `MATERIALIZE_WEIGHT` are uncalibrated
-  knobs — tune on hornbench, never by hand on the laptop.
+  node per connected component, never split; `CostModel` (`cost.rs`) prices
+  WCOJ extensions by i-cost and hash joins by build+probe, with a
+  materialisation term only on sub-nodes of a hash tree; DP over connected
+  pattern subsets (≤ 5 patterns, else greedy over cores and single patterns);
+  a hybrid tree must beat whole-BGP WCOJ by `HYBRID_MARGIN` (2×). Variable
+  order is connected degree-first with a shortlist sweep over the most
+  selective first variables. `ZeroStats` (`is_informed() == false`) and
+  single-pattern BGPs skip the search: one WCOJ node in degree order.
+  `HORNDB_WCOJ_CUTOVER=<n>` restores the retired fixed cutover for bisection.
+  The fuzzer runs the planned and a hand-built hybrid spec against the oracle
+  on every case (sorted multisets, `PROPTEST_CASES` honoured);
+  `tests/planner_choice.rs` pins the structural rules, the HDB-108 q3 order,
+  and planning time (10-pattern star < 200 µs release); `tests/plan_ab.rs`
+  runs planned vs degree order in one process on the SPEC-03 shapes.
+  `HASH_BUILD_WEIGHT` / `MATERIALIZE_WEIGHT` / `HYBRID_MARGIN` are
+  uncalibrated knobs — tune on hornbench, never by hand on the laptop.
+- **SIMD arming must probe both sides first.** `try_arm_simd` calls
+  `active_run_ready(depth)` on both iterators before `active_run` on either:
+  `VecIter::active_run` copies its whole level range and drops the copy on
+  `reset`, so a one-sided build is a per-binding ~30k-row copy (×100 on the
+  triangle for half of all variable orders). Keep the probe cheap and
+  allocation-free.
 - Magic-sets / SLG tabling remain deferred.
 - **`VecTripleSource` is columnar (#239).** Each ordering is three `Vec<TermId>`,
   one per trie level, so a level's values are contiguous and the SIMD primitives

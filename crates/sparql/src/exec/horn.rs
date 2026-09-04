@@ -530,13 +530,27 @@ pub struct HornBackend {
 }
 
 /// One cached statistics summary: the store commit version it describes, and
-/// the summary itself. Lines up with HDB-119's version-tagged snapshot memo.
-type StatsCacheEntry = (u64, Arc<SnapshotStats>);
+/// the summary itself — `None` while a background build for that version is
+/// in flight (see `planning_stats`). Lines up with HDB-119's version-tagged
+/// snapshot memo.
+type StatsCacheEntry = (u64, Option<Arc<SnapshotStats>>);
 
 /// The one memoised direct source: the tier version it was opened at, the
 /// graph it reads, and the source itself. Version-tagged the same way
 /// [`StatsCacheEntry`] is — see `HornBackend::direct_cache`.
 type DirectCacheEntry = (u64, GraphId, Arc<StoreTripleSource>);
+
+/// One full snapshot scan into a [`SnapshotStats`], counted and timed as
+/// `horndb_sparql_stats_rebuild`.
+fn build_stats(snapshot: &VecTripleSource) -> Arc<SnapshotStats> {
+    let started = std::time::Instant::now();
+    let stats = Arc::new(SnapshotStats::from_source(snapshot));
+    let m = &horndb_metrics::metrics().sparql;
+    m.stats_rebuild.inc();
+    m.stats_rebuild_seconds
+        .observe(started.elapsed().as_secs_f64());
+    stats
+}
 
 impl Default for HornBackend {
     fn default() -> Self {
@@ -1043,11 +1057,14 @@ impl HornBackend {
                             // spent) is dropped, and the next estimate
                             // rebuilds it.
                             let keep = match stats_cache.get_mut(scope) {
-                                Some((v, stats)) => {
+                                Some((v, Some(stats))) => {
                                     let ok = Arc::make_mut(stats).apply_delta(src, d, a);
                                     *v = post;
                                     ok
                                 }
+                                // A build in flight describes the pre-merge
+                                // rows; drop its slot so its result is discarded.
+                                Some((_, None)) => false,
                                 None => true,
                             };
                             if !keep {
@@ -1657,22 +1674,68 @@ impl HornBackend {
             .len()
     }
 
-    /// Get-or-build the [`SnapshotStats`] summary for `scope`, caching it
-    /// against the commit version this backend reads at (see the `stats_cache`
-    /// field) — the pinned version on a read view, the latest committed state
-    /// on the writable backend. A hit costs a hash lookup; a miss is a full
-    /// snapshot scan and is counted and timed as `horndb_sparql_stats_rebuild`.
-    /// Statistics the join planner reads for `source`: the cached per-scope
-    /// [`SnapshotStats`] for a copied snapshot. A direct store source has no
-    /// per-predicate counts, so it gets [`ZeroStats`] and the planner routes
-    /// structurally (one WCOJ node in degree order).
+    /// Statistics the join planner reads for `source`. A direct store source
+    /// has no per-predicate counts, so it gets [`ZeroStats`] and the planner
+    /// routes structurally (one WCOJ node in degree order). A copied snapshot
+    /// gets its cached [`SnapshotStats`] when one exists at this version;
+    /// otherwise the build is started on a background thread (one per
+    /// scope and version, marked by a `None` slot) and the query plans with
+    /// [`ZeroStats`] meanwhile — the query path never pays the snapshot scan.
+    ///
+    /// Cold-start residual: queries issued while the build runs (tens of
+    /// milliseconds per million triples) get the structural plan, and a
+    /// write landing in that window cannot merge into the snapshot in place
+    /// (the builder holds it) and rebuilds it instead. When the cache is
+    /// full no build is started, so a wide `GRAPH ?g` sweep plans
+    /// structurally past [`STATS_CACHE_MAX_SCOPES`] scopes.
     fn planning_stats(&self, scope: &SnapshotScope, source: &QuerySource) -> Arc<dyn Stats> {
-        match source {
-            QuerySource::Copy(vec) => self.snapshot_stats(scope, vec),
-            QuerySource::Direct(direct) => Arc::new(ZeroStats::new(direct.total_triples() as u64)),
+        let snapshot = match source {
+            QuerySource::Copy(vec) => vec,
+            QuerySource::Direct(direct) => {
+                return Arc::new(ZeroStats::new(direct.total_triples() as u64))
+            }
+        };
+        let version = self.read_version();
+        let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
+        match guard.get(scope) {
+            Some((v, Some(stats))) if *v == version => {
+                let stats: Arc<dyn Stats> = Arc::<SnapshotStats>::clone(stats);
+                return stats;
+            }
+            Some((v, None)) if *v == version => {} // build in flight
+            _ => {
+                guard.retain(|_, (v, _)| *v == version);
+                if guard.len() < STATS_CACHE_MAX_SCOPES {
+                    guard.insert(scope.clone(), (version, None));
+                    let cache = Arc::clone(&self.stats_cache);
+                    let snapshot = Arc::clone(snapshot);
+                    let key = scope.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("horndb-stats".into())
+                        .spawn(move || {
+                            let stats = build_stats(&snapshot);
+                            let mut guard = cache.lock().expect("stats cache lock poisoned");
+                            if let Some((v, slot @ None)) = guard.get_mut(&key) {
+                                if *v == version {
+                                    *slot = Some(stats);
+                                }
+                            }
+                        });
+                    if spawned.is_err() {
+                        guard.remove(scope);
+                    }
+                }
+            }
         }
+        Arc::new(ZeroStats::new(snapshot.total_triples() as u64))
     }
 
+    /// Get-or-build the [`SnapshotStats`] summary for `scope` synchronously
+    /// (EXPLAIN needs the real estimates now), caching it against the commit
+    /// version this backend reads at (see the `stats_cache` field) — the
+    /// pinned version on a read view, the latest committed state on the
+    /// writable backend. A hit costs a hash lookup; a miss is a full snapshot
+    /// scan, counted and timed as `horndb_sparql_stats_rebuild`.
     fn snapshot_stats(
         &self,
         scope: &SnapshotScope,
@@ -1680,17 +1743,12 @@ impl HornBackend {
     ) -> Arc<SnapshotStats> {
         let version = self.read_version();
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
-        if let Some((v, stats)) = guard.get(scope) {
+        if let Some((v, Some(stats))) = guard.get(scope) {
             if *v == version {
                 return Arc::clone(stats);
             }
         }
-        let started = std::time::Instant::now();
-        let stats = Arc::new(SnapshotStats::from_source(snapshot.as_ref()));
-        let m = &horndb_metrics::metrics().sparql;
-        m.stats_rebuild.inc();
-        m.stats_rebuild_seconds
-            .observe(started.elapsed().as_secs_f64());
+        let stats = build_stats(snapshot);
 
         // Bound the cache: an entry at another version is already dead, and a
         // client naming many `GRAPH <g>` scopes in one version must not grow
@@ -1703,7 +1761,7 @@ impl HornBackend {
         if guard.len() >= STATS_CACHE_MAX_SCOPES {
             guard.clear();
         }
-        guard.insert(scope.clone(), (version, Arc::clone(&stats)));
+        guard.insert(scope.clone(), (version, Some(Arc::clone(&stats))));
         stats
     }
 

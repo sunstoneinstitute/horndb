@@ -263,3 +263,87 @@ fn q3_shape_binds_selective_customer_before_order() {
         "binding order {binds:?} in {spec:?}"
     );
 }
+
+/// Planning cost is bounded: a 10-pattern star (the widest DP the planner
+/// runs before its budget trips) plans in well under a millisecond, so
+/// `GRAPH ?g` re-planning per graph stays negligible.
+#[test]
+fn ten_pattern_star_plans_fast() {
+    let src = source(2_000);
+    let stats = SnapshotStats::from_source(&src);
+    let planner = Planner::default();
+    let bgp = star(10);
+    let _ = planner.choose(&bgp, &stats); // warm
+    let started = std::time::Instant::now();
+    let iters = 20;
+    for _ in 0..iters {
+        let _ = planner.choose(&bgp, &stats);
+    }
+    let per = started.elapsed() / iters;
+    let bound = if cfg!(debug_assertions) {
+        std::time::Duration::from_millis(5)
+    } else {
+        std::time::Duration::from_micros(200)
+    };
+    eprintln!("10-star planning: {per:?} (bound {bound:?})");
+    for k in [3u8, 5, 7] {
+        let bgp = star(k);
+        let started = std::time::Instant::now();
+        for _ in 0..iters {
+            let _ = planner.choose(&bgp, &stats);
+        }
+        eprintln!("{k}-star planning: {:?}", started.elapsed() / iters);
+    }
+    assert!(
+        per <= bound,
+        "10-pattern star planned in {per:?} > {bound:?}"
+    );
+}
+
+/// Two vertex-disjoint triangles are two cyclic cores, not one: each stays
+/// whole in one WCOJ node, and the plan is free to join across them.
+#[test]
+fn cores_are_per_connected_component() {
+    let src = source(200);
+    let stats = SnapshotStats::from_source(&src);
+    let mut ps = triangle().patterns;
+    ps.extend([
+        pat(v(3), 11, v(4)),
+        pat(v(4), 11, v(5)),
+        pat(v(5), 11, v(3)),
+    ]);
+    let bgp = Bgp::new(ps);
+    let spec = Planner::default().choose(&bgp, &stats);
+    assert_valid(&spec, &bgp);
+    fn holds(spec: &JoinSpec, want: &[usize]) -> bool {
+        match spec {
+            JoinSpec::Wcoj { patterns, .. } => want.iter().all(|i| patterns.contains(i)),
+            JoinSpec::Scan { .. } => false,
+            JoinSpec::HashJoin { build, probe } => holds(build, want) || holds(probe, want),
+        }
+    }
+    assert!(holds(&spec, &[0, 1, 2]), "{spec:?}");
+    assert!(holds(&spec, &[3, 4, 5]), "{spec:?}");
+    // One core would force a single six-pattern node; two cores let the
+    // cheaper plan (each triangle once, then a cross product) through.
+    assert!(spec.as_whole_wcoj(&bgp).is_none(), "{spec:?}");
+}
+
+/// An empty BGP is the join identity: one solution with no bindings.
+#[test]
+fn empty_bgp_is_the_join_identity() {
+    use horndb_wcoj::cancel::CancelToken;
+    use horndb_wcoj::executor::Executor;
+    let src = source(50);
+    let stats = SnapshotStats::from_source(&src);
+    let bgp = Bgp::new(vec![]);
+    let spec = Planner::default().choose(&bgp, &stats);
+    assert!(spec.patterns().is_empty(), "{spec:?}");
+    for stats in [&stats as &dyn Stats, &ZeroStats::new(0)] {
+        let rows: usize =
+            Executor::for_bgp(&src, &bgp, &Planner::default(), stats, CancelToken::new())
+                .map(|b| b.unwrap().num_rows())
+                .sum();
+        assert_eq!(rows, 1);
+    }
+}

@@ -106,7 +106,7 @@ impl JoinSpec {
             JoinSpec::Wcoj {
                 patterns,
                 var_order,
-            } if patterns.len() == bgp.patterns.len() => Some(var_order),
+            } if !patterns.is_empty() && patterns.len() == bgp.patterns.len() => Some(var_order),
             _ => None,
         }
     }

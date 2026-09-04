@@ -49,4 +49,10 @@ pub trait TrieIterator {
     fn active_run(&mut self, _depth: u8) -> Option<&[TermId]> {
         None
     }
+
+    /// Cheap pre-check for [`Self::active_run`]: `true` iff it would return
+    /// `Some`. See `OrderedTripleIter::active_run_ready` for why it exists.
+    fn active_run_ready(&self, _depth: u8) -> bool {
+        false
+    }
 }
