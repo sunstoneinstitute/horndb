@@ -37,6 +37,29 @@ impl Store {
         }
     }
 
+    /// An in-memory tier over a dictionary the caller built — the way to
+    /// reopen a store on a persisted dictionary (SPEC-25 S2):
+    /// `Store::with_dictionary(Dictionary::open(path)?)`. The tier starts
+    /// empty; ids the dictionary already issued keep their meaning, so
+    /// re-loading the corpus (or a snapshot) allocates no new ids for terms
+    /// the base holds.
+    pub fn with_dictionary(dictionary: Dictionary) -> Self {
+        let bnode_doc_tag = AtomicU64::new(dictionary.base_bnode_doc_tag());
+        Self {
+            dictionary,
+            tier: Box::new(MemoryTier::new()),
+            bnode_doc_tag,
+        }
+    }
+
+    /// [`Dictionary::flush`] with this store's next blank-node document tag,
+    /// so a store reopened on the file scopes its next document's blank
+    /// nodes away from every document already in the base.
+    pub fn flush_dictionary(&self, path: &std::path::Path) -> Result<crate::BaseStats> {
+        self.dictionary
+            .flush(path, self.bnode_doc_tag.load(AtomicOrdering::Relaxed))
+    }
+
     /// In-memory store with a custom hot-predicate threshold (SPEC-02 F4):
     /// predicates with at least `hot_threshold` live rows materialise the
     /// object-major layout eagerly rather than on the first object-major read.
@@ -67,7 +90,8 @@ impl Store {
     /// first document" independently (e.g. a parallel-parse-vs-serial-parse
     /// comparison of the same bytes into two separate stores) see the same
     /// first tag, so document-scoped renaming does not by itself change
-    /// which store a term lands in.
+    /// which store a term lands in. Persisted by [`Store::flush_dictionary`]
+    /// and restored by [`Store::with_dictionary`].
     pub fn next_bnode_doc_tag(&self) -> u64 {
         self.bnode_doc_tag.fetch_add(1, AtomicOrdering::Relaxed)
     }

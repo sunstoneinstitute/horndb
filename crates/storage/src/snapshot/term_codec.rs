@@ -10,6 +10,8 @@ use std::io::Cursor;
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
+// These tags are also the persistent dictionary's on-disk encoding: changing
+// any of them bumps `dict_base::VERSION`.
 const KIND_URI: u8 = 0x00;
 const KIND_BLANK: u8 = 0x01;
 const KIND_PLAIN: u8 = 0x02;
@@ -96,6 +98,23 @@ pub fn encode_term(buf: &mut Vec<u8>, term: &Term) {
             encode_term(buf, &t.object.clone());
         }
     }
+}
+
+/// The [`TermKind`](crate::term::TermKind) a canonical encoding decodes to,
+/// read off its tag byte without decoding. `None` for an empty slice or an
+/// unknown tag. Matches `dictionary::kind_of` on the decoded term.
+pub fn encoded_kind(bytes: &[u8]) -> Option<crate::term::TermKind> {
+    use crate::term::TermKind;
+    Some(match *bytes.first()? {
+        KIND_URI => TermKind::Uri,
+        KIND_BLANK => TermKind::Blank,
+        KIND_PLAIN => TermKind::PlainLiteral,
+        KIND_LANG | KIND_DIR_LANG => TermKind::LangLiteral,
+        KIND_TYPED => TermKind::TypedLiteral,
+        KIND_INLINE_INT => TermKind::InlineInt,
+        KIND_TRIPLE => TermKind::TripleTerm,
+        _ => return None,
+    })
 }
 
 /// Decode canonical bytes back into a term. The whole slice is one term.

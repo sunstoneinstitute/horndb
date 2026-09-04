@@ -210,6 +210,16 @@ produce a multi-GB dictionary") settled.
   stores), but a *local* fast-path reopen (mmap the dictionary, skip
   re-interning) becomes the normal restart.
 
+**Delivered 2026-09-04 (HDB-57, `PLAN-25-02`).** `Dictionary::flush` /
+`Dictionary::open` / `Store::with_dictionary`; base = `fst::Map` for
+term → id plus a flat offset table over a `term_codec` arena for id → term, in
+one memory-mapped file (`crates/storage/src/dict_base.rs`); the in-memory
+overlay is unchanged and numbers from the base's end, so ids are identical
+with or without a base. Two follow-ups stay open: the running process keeps
+its overlay after a flush (the merged file serves the next open), and the
+HDB-93 repeat cache is not in. Measured probe costs: pending hornbench —
+`docs/benchmarks.md`, `dict_persist` row.
+
 ### S3. Write-ahead log + crash recovery
 
 Durability between checkpoints — the SPEC-02 "Stage 2 may add a

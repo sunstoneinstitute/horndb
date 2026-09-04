@@ -10,10 +10,13 @@
 //!     loaders (`loader::{ntriples, turtle, nquads}`, SPEC-02 F8); N-Quads
 //!     routes to the graph named by its fourth term (SPEC-02 F7).
 //!   * An HDT-derived compact snapshot export/import (`snapshot`, SPEC-02 F9).
+//!   * A persistent dictionary: an immutable memory-mapped base under the
+//!     in-memory overlay (`dict_base`, SPEC-25 S2).
 //!
-//! Out of Stage-1 scope: MVCC, CXL/NVMe tiering, persistent dictionary,
-//! named-graph snapshots, rdfhdt wire-format compatibility, HDT bulk import.
+//! Out of scope here: CXL/NVMe tiering, named-graph snapshots, WAL, rdfhdt
+//! wire-format compatibility, HDT bulk import.
 
+pub(crate) mod dict_base;
 pub mod dictionary;
 pub mod error;
 pub mod loader;
@@ -29,6 +32,7 @@ pub mod visibility;
 // Re-exports below are added incrementally as each module is implemented.
 // See plans/PLAN-02-01-storage.md tasks 2–9.
 
+pub use dict_base::BaseStats;
 pub use dictionary::Dictionary;
 pub use error::StorageError;
 pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
