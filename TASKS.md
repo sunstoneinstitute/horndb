@@ -47,7 +47,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [x] **CRITICAL** · _Completeness_ — SPEC-23 Phase 1: optimizer framework scaffolding — logical IR, binding/type lattice, pass registry ([#201](https://github.com/sunstoneinstitute/horndb/issues/201))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 2: heuristic rewrite passes (Normalize, FilterPullup/Pushdown, ProjectionPushdown) — after #201 ([#202](https://github.com/sunstoneinstitute/horndb/issues/202))
 - [x] **HIGH** · _Performance_ — SPEC-23 Phase 3: layered `Stats` seam + Characteristic-Sets cardinality estimator — after #201 ([#203](https://github.com/sunstoneinstitute/horndb/issues/203))
-- [v] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204)) — _wip: 961ad028@hel01 · HDB-46-spec-23-phase-4-cost-based-joinplanning · 2026-09-04T02:33:09Z_
+- [x] **HIGH** · _Performance_ — SPEC-23 Phase 4: cost-based `JoinPlanning` (retires `wcoj_cutover == 4`) — after #201–#203 ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 6: reasoning in the IR (rewrite passes, delegate nodes, catalog seam) — after #201–#204 ([#206](https://github.com/sunstoneinstitute/horndb/issues/206))
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
 - [x] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
@@ -363,7 +363,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   (coordinate with SPEC-02/06). Spec §5.3–5.4; plan
   `docs/plans/PLAN-23-03-statistics-seam-estimator.md`. Gate: acceptance #3.
 
-- [v] **SPEC-23 Phase 4: cost-based `JoinPlanning`.** ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
+- [x] **SPEC-23 Phase 4: cost-based `JoinPlanning`.** ([#204](https://github.com/sunstoneinstitute/horndb/issues/204))
   Structural cyclic-core hybrid (acyclic → binary hash, cyclic cores → WCOJ;
   per-subplan `ExecutionPlan` mode) + one additive i-cost/binary-cost model +
   connected-subset DP with greedy fallback and AGM guard; retires the fixed
