@@ -229,6 +229,22 @@ The closure path gets the same treatment on the SPEC-05 boundary:
 
 ### S4. Engine wiring — the circuit gets consumers
 
+> **Status:** delivered (#213). `HornBackend::attach_circuit` puts a
+> `Circuit` behind the SPARQL write funnel (`crates/sparql/src/exec/circuit.rs`):
+> each `Store::apply_quads` batch — one per Update operation (SPEC-28 S6) —
+> lowers its net default-graph changes to `assert_triple` / `retract_triple`
+> plus one `tick()`, and the engine consumes its own change feed on the same
+> thread under `LagPolicy::DisconnectSlow`, nets the tick's derived records
+> per triple, and mirrors them into the reserved graph
+> `https://horndb.io/graph/circuit-derived` (admitted to the default union).
+> Rule registration is the seam as specified (`add_plan` /
+> `add_closure_plan`), proven with `TransitiveClosureRule` and a synthetic
+> bilinear rule; the harness case `update_subset/circuit-delete-01` pins
+> acceptance 4. Not yet: `CLEAR`/`DROP` of the default graph reaching the
+> circuit (waits on #345's logged sweep), named-graph views on the circuit
+> (SPEC-29 P2), and `serve` registering rules (E4). Details and the threading
+> argument: `crates/sparql/INTEGRATION-NOTES.md`.
+
 Wire `Circuit` behind the engine's update path so incremental maintenance
 stops being latent:
 
@@ -335,9 +351,9 @@ written when each increment is picked up.
    ([#212](https://github.com/sunstoneinstitute/horndb/issues/212)). Small,
    self-contained, and best landed *before* external subscribers exist.
 4. **S4 — engine wiring**
-   ([#213](https://github.com/sunstoneinstitute/horndb/issues/213)). Update
-   path → circuit → readers; synthetic-rule seam proof; unblocks LUBM-scale
-   acceptance runs (with E4).
+   ([#213](https://github.com/sunstoneinstitute/horndb/issues/213)) —
+   **delivered**. Update path → circuit → readers; synthetic-rule seam
+   proof; unblocks LUBM-scale acceptance runs (with E4).
 5. **S5 — DeltaLog WAL + checkpoint scheduling**
    ([#214](https://github.com/sunstoneinstitute/horndb/issues/214)). Contract
    + crash tests here; on-disk format arrives with E3.

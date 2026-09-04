@@ -1,0 +1,12 @@
+@prefix ex: <http://example.org/> .
+
+ex:a ex:p ex:b .
+ex:c ex:p ex:d .
+ex:d ex:p ex:e .
+
+# The circuit's derived graph (SPEC-24 S4). Before the update it held the six
+# 2-hop-or-longer ex:p paths; deleting ex:b ex:p ex:c withdraws every one that
+# ran through it, leaving only ex:c -> ex:e.
+<https://horndb.io/graph/circuit-derived> {
+    ex:c ex:p ex:e .
+}

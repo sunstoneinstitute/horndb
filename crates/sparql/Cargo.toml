@@ -7,16 +7,21 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["server", "reasoner", "snmalloc"]
+default = ["server", "reasoner", "snmalloc", "incremental"]
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite", "dep:parking_lot"]
 reasoner = ["dep:horndb-owlrl"]
 # SPEC-05 GraphBLAS closure backend, reachable as `[reasoning].backend =
-# "graphblas"`. Off by default: turning it on makes the build link
-# SuiteSparse:GraphBLAS (cmake + pkg-config), which a plain
-# `cargo build -p horndb-sparql` must not require. Without it, `serve` rejects
+# "graphblas"`. Off by default. Without it, `serve` rejects
 # `backend = "graphblas"` at startup naming this feature. The release image
 # builds with it (see `Dockerfile`).
 graphblas = ["reasoner", "horndb-owlrl/graphblas-backend"]
+# SPEC-24 S4 (HDB-51): the DBSP circuit behind `HornBackend`'s write funnel
+# (`exec::circuit`). Default-on so the SPARQL Update -> tick -> query gate runs
+# under `cargo nextest run -p horndb-sparql --features server`. It links
+# SuiteSparse:GraphBLAS through `horndb-incremental -> horndb-closure` (cmake +
+# pkg-config); a GraphBLAS-free build uses `--no-default-features` (as the
+# python, bench-trainmarks and harness crates do).
+incremental = ["dep:horndb-incremental"]
 # HDB-86 E1: snmalloc as the process-wide allocator for this crate's binary.
 # Measured on the trainmarks bulk load (hornbench, xlarge): -10.6% on the
 # `parse` phase, -6.3% end-to-end, because a cross-thread free no longer takes
@@ -65,6 +70,7 @@ parking_lot = { workspace = true, optional = true }
 oxttl = { workspace = true }
 clap = { workspace = true }
 horndb-owlrl = { path = "../owlrl", optional = true }
+horndb-incremental = { path = "../incremental", optional = true }
 horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
 horndb-metrics.workspace = true

@@ -1,7 +1,12 @@
 # `horndb-incremental` — integration notes
 
-What a consumer outside this crate needs to know. The crate has no consumers
-yet; engine wiring is SPEC-24 S4 (#213).
+What a consumer outside this crate needs to know. The first consumer is the
+SPARQL engine (SPEC-24 S4, #213): `horndb-sparql`'s `exec::circuit` puts a
+`Circuit` behind `HornBackend`'s write funnel and subscribes to its own feed
+— see `crates/sparql/INTEGRATION-NOTES.md` ("SPEC-24 S4 — circuit wiring")
+for the threading argument and the derived-row mirror. `ClosureRule` is
+`Send` since then, so a `Circuit` can live inside a backend that is shared
+behind a lock.
 
 ## Change-feed consumer API (SPEC-24 S3)
 

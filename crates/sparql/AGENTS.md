@@ -14,6 +14,11 @@ on by default).
 - Enabling `oxrdf/rdf-12` workspace-wide forces `oxigraph/rdf-12` too (sparopt /
   spareval need their `sparql-12` arms gated on, and Cargo only unifies features
   upward).
+- `incremental` feature (default-on, SPEC-24 S4): `exec::circuit` wires a
+  `horndb-incremental` `Circuit` behind `HornBackend` (`attach_circuit`). It
+  links SuiteSparse:GraphBLAS through `horndb-closure`; `--no-default-features`
+  builds without it. Tests: `tests/circuit_wiring.rs`, and the
+  `circuit-delete-01` case in `tests/w3c_update_suite.rs`.
 - HTTP server tests: `cargo test -p horndb-sparql --features server` — required for
   a full SPARQL pass.
 - `serve --data` loads `.nt`/`.ttl`/`.nq`/`.trig` (HDB-112): `.nq`/`.trig` are dataset

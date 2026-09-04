@@ -24,5 +24,6 @@ DBSP-style Z-set deltas, change feed, checkpointing.
 See `INTEGRATION-NOTES.md` for the consumer-facing contract, and
 `FUTURE-WORK.md` and SPEC-06 for the retraction/MVCC roadmap. The
 Stage-2 contract is `docs/specs/SPEC-24-incremental-stage2.md` (epic #186;
-S1–S3 delivered, remaining phase sub-issues #213–#217): engine wiring,
-WAL, MVCC backing, join runtime.
+S1–S4 delivered, remaining phase sub-issues #214–#217): WAL, MVCC
+backing, join runtime. The engine wiring (S4) lives on the consumer side,
+`crates/sparql/src/exec/circuit.rs`.

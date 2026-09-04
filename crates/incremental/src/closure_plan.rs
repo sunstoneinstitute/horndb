@@ -40,7 +40,7 @@ pub struct ClosureRetractDelta {
 ///
 /// [`apply_insert_delta`]: ClosureRule::apply_insert_delta
 /// [`apply_retract_delta`]: ClosureRule::apply_retract_delta
-pub trait ClosureRule {
+pub trait ClosureRule: Send {
     fn apply_insert_delta(&mut self, asserted_delta: &Zset<TripleId>) -> Vec<TripleId>;
 
     /// Apply the retraction half of a tick's asserted delta: filter for the
