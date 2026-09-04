@@ -1402,6 +1402,7 @@ dependencies = [
  "clap",
  "criterion 0.8.2",
  "horndb-config",
+ "horndb-incremental",
  "horndb-metrics",
  "horndb-owlrl",
  "horndb-simd",

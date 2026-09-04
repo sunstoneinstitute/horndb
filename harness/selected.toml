@@ -602,4 +602,8 @@ tests = [
     # graph" (SPARQL 1.1 Update 3.1.2, #281). Rest of the family not mirrored.
     "update_subset/delete-with-02",
     "update_subset/delete-with-06",
+    # SPEC-24 S4 (HDB-51), not W3C: DELETE DATA against a store with a
+    # registered circuit rule withdraws the derived consequences (HornBackend
+    # leg only; `rules.txt` in the case dir names the rules).
+    "update_subset/circuit-delete-01",
 ]

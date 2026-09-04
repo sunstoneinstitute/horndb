@@ -168,6 +168,13 @@ criteria. They are the floor each subsystem must hit before it's "done."
 > [#210](https://github.com/sunstoneinstitute/horndb/issues/210)); the
 > remaining Stage-2 gaps are in
 > `../crates/incremental/FUTURE-WORK.md`.
+>
+> **SPEC-24 S4 (#213) — measurement pending.** The circuit is wired behind
+> the SPARQL Update path (`crates/sparql/src/exec/circuit.rs`), so the
+> update-latency rows above can now be measured end to end. No numbers are
+> recorded yet: `hornbench` was offline when the wiring landed, and this
+> table takes hornbench numbers only. Run `insert_throughput` plus a
+> SPARQL-Update round trip there via `bench.yml` and fill the rows in.
 
 ### SPEC-07 — SPARQL 1.1 frontend (`horndb-sparql`)
 

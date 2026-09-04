@@ -53,6 +53,14 @@ fn fixtures_root() -> PathBuf {
 
 trait QuadSeed {
     fn seed_quad(&mut self, graph: Option<&oxrdf::NamedNode>, q: &oxrdf::Quad);
+
+    /// Register the circuit rules a case's optional `rules.txt` names
+    /// (SPEC-24 S4, HDB-51): one `transitive <iri>` per line. Only the
+    /// `HornBackend` leg has a circuit, so such cases are listed on that leg
+    /// alone.
+    fn attach_rules(&mut self, rules: &str) {
+        panic!("rules.txt is only supported on the HornBackend leg: {rules}");
+    }
 }
 
 impl QuadSeed for MemStore {
@@ -71,6 +79,28 @@ impl QuadSeed for MemStore {
 }
 
 impl QuadSeed for HornBackend {
+    #[cfg(feature = "incremental")]
+    fn attach_rules(&mut self, rules: &str) {
+        use horndb_incremental::{Circuit, TransitiveClosureRule};
+        let mut circuit = Circuit::new();
+        for line in rules.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let iri = line
+                .strip_prefix("transitive <")
+                .and_then(|r| r.strip_suffix('>'))
+                .unwrap_or_else(|| panic!("rules.txt: unknown rule line {line:?}"));
+            let p = self
+                .intern_term(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                    iri,
+                )))
+                .unwrap();
+            circuit.add_closure_plan(Box::new(TransitiveClosureRule::new(p)));
+        }
+        self.attach_circuit(circuit).unwrap();
+    }
+
     fn seed_quad(&mut self, graph: Option<&oxrdf::NamedNode>, q: &oxrdf::Quad) {
         let s = oxrdf::Term::from(q.subject.clone());
         let p = oxrdf::Term::from(q.predicate.clone());
@@ -138,8 +168,12 @@ fn dump<B: FullBackend>(store: &B) -> HashSet<QuadKey> {
 fn run_one<B: FullBackend + QuadSeed + Default>(name: &str) {
     let dir = fixtures_root().join(name);
 
-    // Initial state → apply the update → final state.
+    // Initial state → (circuit rules, if the case has any) → apply the update
+    // → final state. Rules attach after the seed so they see the whole base.
     let mut store: B = load_trig(&dir.join("data.trig"));
+    if let Ok(rules) = std::fs::read_to_string(dir.join("rules.txt")) {
+        store.attach_rules(&rules);
+    }
     let request = std::fs::read_to_string(dir.join("request.ru")).expect("read request.ru");
     let parsed = parse_update(&request).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
     apply_update(&parsed, &mut store).unwrap_or_else(|e| panic!("{name}: apply: {e}"));
@@ -279,3 +313,9 @@ update_case_horn!(delete_insert_06b_hornbackend, "delete-insert-06b");
 
 update_case_horn!(delete_with_02_hornbackend, "delete-with-02");
 update_case_horn!(delete_with_06_hornbackend, "delete-with-06");
+
+// SPEC-24 S4 (HDB-51), not a W3C case: `DELETE DATA` against a store with a
+// registered circuit rule withdraws the derived consequences. Needs the
+// circuit, so HornBackend leg only, under the `incremental` feature.
+#[cfg(feature = "incremental")]
+update_case_horn!(circuit_delete_01_hornbackend, "circuit-delete-01");

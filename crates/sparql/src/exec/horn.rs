@@ -182,6 +182,8 @@ pub fn load_with_reasoning(
 }
 
 use crate::algebra::{TriplePattern, Var};
+#[cfg(feature = "incremental")]
+use crate::exec::circuit;
 use crate::exec::scope::{
     is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
 };
@@ -520,6 +522,11 @@ pub struct HornBackend {
     /// no-dataset default union and to `GRAPH ?g` enumeration. See
     /// [`hidden_reserved`] and [`Self::set_visible_inferred`].
     visible_inferred: BTreeSet<String>,
+    /// SPEC-24 S4: the DBSP circuit this backend's default-graph writes feed,
+    /// once [`Self::attach_circuit`] has run. `None` on a fresh backend and on
+    /// every pinned read view (a view never writes). See [`circuit`].
+    #[cfg(feature = "incremental")]
+    circuit: Option<circuit::Wiring>,
 }
 
 /// One cached statistics summary: the store commit version it describes, and
@@ -554,6 +561,8 @@ impl HornBackend {
             direct_cache: Arc::new(Mutex::new(None)),
             touched_graphs: BTreeSet::new(),
             visible_inferred: BTreeSet::new(),
+            #[cfg(feature = "incremental")]
+            circuit: None,
         }
     }
 
@@ -584,7 +593,130 @@ impl HornBackend {
             touched_graphs: BTreeSet::new(),
             // Read-side: the view must hide/admit the same graphs as its parent.
             visible_inferred: self.visible_inferred.clone(),
+            #[cfg(feature = "incremental")]
+            circuit: None,
         }
+    }
+
+    /// SPEC-24 S4 (HDB-51): put `circuit` behind this backend's write funnel.
+    /// From here on every `Store::apply_quads` batch lowers its **default
+    /// graph** net changes to `assert_triple` / `retract_triple` plus one
+    /// `tick()`, and the tick's derived delta is mirrored into
+    /// [`circuit::DERIVED_GRAPH`], which this call admits to the default union
+    /// so a following query sees derived rows. Register rules (`add_plan`,
+    /// `add_closure_plan`) on `circuit` first: rule ids are the caller's,
+    /// predicate ids come from [`Self::intern_term`]. Rows already in the
+    /// default graph (a bulk load, which bypasses the funnel) are asserted
+    /// into the circuit here, in one tick.
+    ///
+    /// Not reachable from `serve` yet: E4 (owlrl Z-set rules) registers the
+    /// real rule set; this is the seam it plugs into.
+    #[cfg(feature = "incremental")]
+    pub fn attach_circuit(&mut self, circuit: horndb_incremental::Circuit) -> Result<()> {
+        self.attach_circuit_with_feed_capacity(circuit, circuit::FEED_CAPACITY)
+    }
+
+    /// [`Self::attach_circuit`] with an explicit change-feed capacity. Public
+    /// so a test can force the `DisconnectSlow` resync path with a handful
+    /// of rows instead of `FEED_CAPACITY` of them.
+    #[cfg(feature = "incremental")]
+    pub fn attach_circuit_with_feed_capacity(
+        &mut self,
+        circuit: horndb_incremental::Circuit,
+        capacity: usize,
+    ) -> Result<()> {
+        debug_assert!(self.pin.is_none(), "attach_circuit on a pinned read view");
+        let graph = self
+            .store
+            .intern_graph_uri(&OxTerm::NamedNode(NamedNode::new_unchecked(
+                circuit::DERIVED_GRAPH,
+            )))
+            .map_err(|e| SparqlError::Executor(format!("intern derived graph: {e}")))?;
+        let mut wiring = circuit::Wiring::new(circuit, graph, capacity);
+        let base: Vec<horndb_incremental::TripleId> = self
+            .store
+            .snapshot()
+            .iter_graph_term_ids(DEFAULT_GRAPH)
+            .map(|(s, p, o)| (s.0, p.0, o.0))
+            .collect();
+        wiring.apply(&self.store, &base, &[]);
+        self.circuit = Some(wiring);
+        self.visible_inferred
+            .insert(circuit::DERIVED_GRAPH.to_owned());
+        self.invalidate();
+        Ok(())
+    }
+
+    /// The attached circuit, for registering rules or reading its state.
+    #[cfg(feature = "incremental")]
+    pub fn circuit(&mut self) -> Option<&mut horndb_incremental::Circuit> {
+        self.circuit.as_mut().map(circuit::Wiring::circuit)
+    }
+
+    /// Times the engine's feed subscription was dropped (`DisconnectSlow`)
+    /// and the derived graph rebuilt from the circuit. Zero without a circuit.
+    #[cfg(feature = "incremental")]
+    pub fn circuit_resyncs(&self) -> u64 {
+        self.circuit.as_ref().map_or(0, |w| w.resyncs)
+    }
+
+    /// Intern `term` in this store's dictionary and return its id — the
+    /// predicate id a circuit rule is registered against.
+    #[cfg(feature = "incremental")]
+    pub fn intern_term(&self, term: &OxTerm) -> Result<u64> {
+        self.store
+            .dictionary()
+            .intern(term)
+            .map(|id| id.0)
+            .map_err(|e| SparqlError::Executor(format!("intern: {e}")))
+    }
+
+    /// The default-graph triples `apply_quads`'s batch will flip, as the
+    /// circuit's `(asserts, retracts)`: present-after minus present-before,
+    /// per triple, so a re-insert of a live row or a delete of an absent one
+    /// (both no-ops in storage, SPEC-28 S6) reaches the circuit as nothing,
+    /// and a delete+insert of one row within a batch nets to nothing. Runs
+    /// against the pre-batch snapshot.
+    #[cfg(feature = "incremental")]
+    fn default_graph_flips(
+        &self,
+        del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+        add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+    ) -> Result<(
+        Vec<horndb_incremental::TripleId>,
+        Vec<horndb_incremental::TripleId>,
+    )> {
+        use std::collections::BTreeMap;
+        // triple -> (in dels, in adds)
+        let mut rows: BTreeMap<horndb_incremental::TripleId, (bool, bool)> = BTreeMap::new();
+        for (g, s, p, o) in del_rows {
+            if *g != DEFAULT_GRAPH {
+                continue;
+            }
+            if let Some(k) = self.lookup_key(*g, s, p, o) {
+                rows.entry((k.s, k.p, k.o)).or_default().0 = true;
+            }
+        }
+        for (g, s, p, o) in add_rows {
+            if *g != DEFAULT_GRAPH {
+                continue;
+            }
+            let k = self.intern_key(*g, s, p, o)?;
+            rows.entry((k.s, k.p, k.o)).or_default().1 = true;
+        }
+        let snap = self.store.snapshot();
+        let mut asserts = Vec::new();
+        let mut retracts = Vec::new();
+        for (t, (del, add)) in rows {
+            let before = snap.contains_quad(DEFAULT_GRAPH, TermId(t.0), TermId(t.1), TermId(t.2));
+            let after = (before && !del) || add;
+            match (before, after) {
+                (false, true) => asserts.push(t),
+                (true, false) => retracts.push(t),
+                _ => {}
+            }
+        }
+        Ok((asserts, retracts))
     }
 
     /// The store view every *read* resolves against: the pinned commit
@@ -1679,11 +1811,32 @@ impl Store for HornBackend {
         }
 
         debug_assert!(self.pin.is_none(), "write through a pinned read view");
+        #[cfg(feature = "incremental")]
+        let flips = match self.circuit {
+            Some(_) => Some(self.default_graph_flips(&del_rows, &add_rows)?),
+            None => None,
+        };
         let base = self.store.snapshot().version();
         let report = self
             .store
             .apply_quads(&del_rows, &add_rows)
             .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
+
+        // SPEC-24 S4: one circuit tick per Update operation, right after the
+        // operation's batch committed. The derived mirror is a second commit
+        // in another graph, which the memo delta below cannot express, so a
+        // tick that changed anything drops the memo instead.
+        #[cfg(feature = "incremental")]
+        if let (Some(wiring), Some((asserts, retracts))) = (&mut self.circuit, flips) {
+            let derived = wiring.apply(&self.store, &asserts, &retracts);
+            if derived.inserted > 0 || derived.retracted > 0 {
+                self.invalidate();
+                return Ok(ApplyCounts {
+                    retracted: report.retracted,
+                    inserted: report.inserted,
+                });
+            }
+        }
 
         if report.retracted > 0 || report.inserted > 0 {
             self.apply_delta_to_snapshots(base, &del_rows, &add_rows);

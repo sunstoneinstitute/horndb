@@ -924,3 +924,78 @@ extend it:
 
 Full rationale: `docs/specs/SPEC-23-unified-ir.md` §5.2 (pass registry), §6
 phase 2 (heuristic rewrite passes), §7 (acceptance criteria).
+
+## SPEC-24 S4 — circuit wiring (HDB-51, #213)
+
+`exec::circuit` (feature `incremental`, default-on) puts a
+`horndb_incremental::Circuit` behind `HornBackend`'s write funnel. What a
+caller and the next phases need to know:
+
+- **Entry point.** `HornBackend::attach_circuit(circuit)` (or
+  `attach_circuit_with_feed_capacity`). Register rules on the `Circuit` first
+  (`add_plan` / `add_closure_plan`), over predicate ids from
+  `HornBackend::intern_term`. Attaching asserts every row already in the
+  default graph into the circuit in one tick, so a bulk load that bypassed
+  the funnel is still seen. `serve` does not attach a circuit yet — E4 (owlrl
+  Z-set rules, #188) decides what to register; this is the seam it plugs into.
+- **One tick per Update operation.** `Store::apply_quads` is already one
+  batch per operation (SPEC-28 S6). After the batch commits, the exact
+  default-graph flips — present-after minus present-before, computed against
+  the pre-batch snapshot (`default_graph_flips`) — become `retract_triple` /
+  `assert_triple` calls plus one `tick()`. Storage no-ops (re-insert of a
+  live row, delete of an absent one, delete+insert of a row in one batch)
+  reach the circuit as nothing, so its asserted base stays a set equal to the
+  default graph. Only the default graph enters the circuit; named-graph
+  writes bypass it (SPEC-29 P2 moves the per-view pipeline onto the circuit).
+- **The engine is its own feed consumer.** `Wiring::apply` drains the records
+  the tick just published, sums derived records **per triple** (`Asserted`
+  records are the caller's own writes, already in storage; a tick can carry
+  `RuleInferred` and `ClosureInferred` for one triple, and a withdrawal's
+  total can be −2), and mirrors the net into the reserved graph
+  `exec::circuit::DERIVED_GRAPH` (`https://horndb.io/graph/circuit-derived`)
+  with one idempotent `Store::apply_quad_ids` batch. `attach_circuit` admits
+  that graph to the default union (`set_visible_inferred`-style), so a plain
+  `SELECT` sees derived rows. Derived rows deliberately do not go into the
+  default graph: a user `DELETE DATA` of a derived triple, or `INSERT DATA`
+  of one already derived, would otherwise desynchronise circuit and store.
+- **Threading model (read before changing it).** Tick and drain run on the
+  *same* thread, under the caller's `&mut HornBackend` (the server's
+  `AppState` write lock). That is safe only because the engine subscribes
+  with `LagPolicy::DisconnectSlow`: `tick()` never blocks on this
+  subscriber, and a tick that publishes more than the feed capacity
+  (`FEED_CAPACITY`, 65 536 records) drops the subscription instead.
+  `Wiring::apply` notices (`try_recv` fails before `asserted_merged +
+  derived_merged` records arrived), resubscribes, and rebuilds the derived
+  graph from `Circuit::derived_base` with one diff batch
+  (`HornBackend::circuit_resyncs` counts these). Under `LagPolicy::Block`
+  this same-thread shape deadlocks — the tick would wait for a drain that
+  only starts after the tick returns — so `Block` is not offered. If a
+  background applier thread is ever wanted, it must never take the
+  `AppState` lock (lock-order inversion with the ticking writer); write
+  through a cloned `Arc<ColumnStore>` instead. Read-your-writes across
+  requests holds today because the mirror commits before `/update` returns.
+- **Snapshot memo.** The derived mirror is a second commit in another graph,
+  which `apply_delta_to_snapshots` cannot express, so a tick that changed
+  anything drops the memo (`invalidate`) instead of merging the delta. Once
+  derived rows exist the union spans two graphs anyway, which already takes
+  the rebuild path.
+- **WAL hook (HDB-58, #345).** The one place to append to a write-ahead log
+  is marked in `Wiring::apply`, between the tick and the derived mirror: at
+  that point `asserts`/`retracts` are exactly the operation's net base
+  changes (committed) and the tick's records are on the feed. The mirror
+  itself goes through `Store::apply_quad_ids`, never `Store::tier()`, so it
+  is logged once #345 logs the `Store` entry points.
+- **Not wired yet.** `CLEAR`/`DROP` of the default graph sweeps at the tier
+  level in `clear_graph` and does not reach the circuit, so derived rows
+  survive it until the next tick touches their support. Hook it in once
+  #345's logged sweep lands (the retract list is the sweep's `dels`, default
+  graph only). Also: SPEC-29 views and the circuit are separate pipelines
+  (`publish` replaces `visible_inferred`, which would hide the derived graph
+  if both ran on one backend — `serve` runs neither today).
+- **Tests.** `tests/circuit_wiring.rs` (HTTP end to end through
+  `build_router`, the bilinear-rule seam, feed overflow → resync, attach
+  after bulk load, storage no-ops) and the harness case
+  `update_subset/circuit-delete-01` in `tests/w3c_update_suite.rs`
+  (`harness/selected.toml` `[sparql_update]`; a `rules.txt` in the case dir
+  names the rules). All state-driven, no sleeps.
+
