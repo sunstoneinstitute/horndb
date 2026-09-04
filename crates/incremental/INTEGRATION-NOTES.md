@@ -48,8 +48,41 @@ Per tick, in this order:
 `TickReport::derived_merged` counts the net records published, so it matches
 what a subscriber sees. SPEC-06 acceptance 5 ("every committed delta, in
 order, no gaps or duplicates") is read over these *net* per-tick deltas.
+The `horndb_incremental_derived_merged_total` metric is deliberately the
+*raw* emission count instead — it is a tick-cost signal, not a feed count.
 
-Two consequences for a consumer:
+### Apply a tick by summing per triple — never record by record
+
+**A record is a change to `(triple, kind)`, not to the triple.** The same
+triple can appear twice in one tick under two kinds, and the two records are
+published in `(triple, kind)` key order, which is not a causal order. The case
+that bites: a row whose ownership moves from the closure to a rule publishes
+
+```text
+((s,p,o), RuleInferred(r))   +1     <-- comes first: RuleInferred < ClosureInferred
+((s,p,o), ClosureInferred)   -1
+```
+
+A consumer that updates presence per record adds the triple, then **deletes a
+live triple**. The only correct reading is to accumulate the whole tick and
+sum the multiplicities per triple: present iff the total is > 0.
+
+`DerivationKind`'s `Ord` — `Asserted` < `RuleInferred(id)` (by id) <
+`ClosureInferred` — is **stable API**, since it fixes the publish order.
+Reordering the variants is a breaking change for consumers.
+
+### What `mult` can be
+
+Per record, `mult` is always `+1` or `-1` (`flush_derived_feed` carries a
+`debug_assert`). Per *triple* over a tick, the total is normally in
+`{-1, 0, +1}`, but it can reach `-2`: `withdraw_derived_row` emits `-1`
+unconditionally, so a row withdrawn by the closure retract pass and then again
+by the rule fixpoint under a different kind totals `-2`. This is pre-existing
+Stage-1 behaviour, kept as-is because the sum-per-triple rule above handles it
+correctly (`total <= 0` ⇒ absent). Do not read the magnitude as a reference
+count.
+
+Two more consequences for a consumer:
 
 - Deltas of a tick are only complete once `tick()` returns; there is no
   partial-tick visibility.

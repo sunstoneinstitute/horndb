@@ -102,13 +102,33 @@ impl ChangeFeed {
         });
     }
 
+    /// Fan `rec` out to every subscriber.
+    ///
+    /// **Sends happen outside the subscriber lock.** A `Block` subscriber's
+    /// `send` waits for its consumer, and holding the lock across that wait
+    /// would stall `subscribe` / `subscribe_bounded` / `subscriber_count` —
+    /// a consumer that ticks and drains on one thread (the engine-wiring
+    /// shape) would deadlock, and one `Block` subscriber would head-of-line
+    /// block every later subscriber. So: snapshot the senders under a short
+    /// read lock, send with no lock held, then re-acquire the write lock only
+    /// if someone needs reaping.
+    ///
+    /// Per-subscriber ordering therefore relies on `publish_record` being
+    /// called from ONE thread at a time — which the single publisher path
+    /// through `Circuit::tick` guarantees. Concurrent publishers would
+    /// interleave.
     pub fn publish_record(&self, rec: DeltaRecord) {
+        let targets: Vec<(Sender<DeltaRecord>, LagPolicy)> = {
+            let subs = self.subscribers.read().expect("change-feed lock poisoned");
+            subs.iter().map(|s| (s.tx.clone(), s.policy)).collect()
+        };
+
         let mut dropped_for_lag = 0u64;
-        let count = {
-            let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
-            subs.retain(|s| match s.policy {
-                LagPolicy::Block => s.tx.send(rec).is_ok(),
-                LagPolicy::DisconnectSlow => match s.tx.try_send(rec) {
+        let mut failed: Vec<Sender<DeltaRecord>> = Vec::new();
+        for (tx, policy) in targets {
+            let delivered = match policy {
+                LagPolicy::Block => tx.send(rec).is_ok(),
+                LagPolicy::DisconnectSlow => match tx.try_send(rec) {
                     Ok(()) => true,
                     Err(TrySendError::Full(_)) => {
                         dropped_for_lag += 1;
@@ -116,9 +136,25 @@ impl ChangeFeed {
                     }
                     Err(TrySendError::Disconnected(_)) => false,
                 },
-            });
+            };
+            if !delivered {
+                failed.push(tx);
+            }
+        }
+
+        let count = if failed.is_empty() {
+            // Nothing to reap — do not take the exclusive lock. A subscriber
+            // added while we were sending is simply counted on the next
+            // publish; this is a gauge, not a ledger.
+            self.subscriber_count()
+        } else {
+            let mut subs = self.subscribers.write().expect("change-feed lock poisoned");
+            // Identity by channel, not by index: the Vec may have grown while
+            // the lock was released, and `same_channel` does not care.
+            subs.retain(|s| !failed.iter().any(|f| s.tx.same_channel(f)));
             subs.len()
         };
+
         let m = horndb_metrics::metrics();
         m.incremental.change_feed_subscribers.set(count as i64);
         if dropped_for_lag > 0 {

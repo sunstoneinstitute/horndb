@@ -98,6 +98,11 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   transient is gone;
   `tests/closure_retraction.rs::mixed_tick_replacement_path_final_state_correct`
   now asserts its absence.
+  - **Forward note**: netting discards the intra-tick derivation sequence. A
+    consumer that needs *why* a row moved — SPEC-27 provenance — needs the
+    PRE-net stream, so it will want a second tap beside `pending_derived`
+    (or a provenance sink inside `emit_derived`), not a change to the feed
+    contract. Do not "fix" the netting to serve it.
 - **Still Stage 2**: a fully delta-incremental closure-retraction path (no
   affected-region recompute); **exact warm-store seeded-edge retraction** — a
   rule seeded via `TransitiveClosureRule::seed_closed_edges` uses the *closed*
