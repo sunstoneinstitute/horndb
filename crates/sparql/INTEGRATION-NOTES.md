@@ -1025,11 +1025,18 @@ cold-start cost, by design:
 - Queries in the build window run the structural plan (degree order). A
   single-pattern BGP always plans structurally, so its plan never changes
   when the summary lands.
-- A write during the build window cannot merge into the in-flight summary
-  (the builder owns it); the merge loop drops the slot and the next query
-  starts a fresh build.
-- A full cache (`STATS_CACHE_MAX_SCOPES = 8`, per-graph `GRAPH ?g` scopes
-  count) starts no build: those scopes plan structurally for good.
+- A write during the build window merges copy-on-write: the memoised
+  snapshot is cloned (`Arc::make_mut`, O(n)) because the builder still reads
+  the old one, and the delta is queued on the in-flight slot. When the build
+  lands it replays the queued deltas onto the summary against its own
+  pre-merge snapshot, so the memo, the summary, and `stats_rebuild_total`
+  all stay put. The same copy-on-write covers a long-running query pinning
+  the snapshot, which used to force `invalidate` and a full rebuild.
+- One build runs at a time per cache; a query on a second scope meanwhile
+  plans structurally and the next one starts the build. A full cache
+  (`STATS_CACHE_MAX_SCOPES = 8`, per-graph `GRAPH ?g` scopes count) is
+  cleared, as `snapshot_stats` does, so a wide sweep keeps getting
+  cost-based plans.
 - `snapshot_stats` (synchronous) remains for EXPLAIN's cardinality estimate.
 - `stats_rebuild_total` / `stats_rebuild_seconds` are recorded from the
   background thread.

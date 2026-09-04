@@ -298,7 +298,10 @@ impl<'a, S: Stats + ?Sized> CostModel<'a, S> {
     fn wcoj_uncached(&self, patterns: &[usize]) -> WcojCost {
         let sub = Bgp::new(patterns.iter().map(|&i| self.bgp.patterns[i]).collect());
         let vars = sub.variables();
-        if !self.informed() || vars.len() <= 1 {
+        // A single pattern is a scan, not a join; its node cost is infinite so
+        // `Planner::unit` picks the scan. Several patterns over one variable
+        // are a real intersection and get costed like any other node.
+        if !self.informed() || patterns.len() == 1 || vars.is_empty() {
             return WcojCost {
                 var_order: degree_order(&sub),
                 cost: f64::INFINITY,

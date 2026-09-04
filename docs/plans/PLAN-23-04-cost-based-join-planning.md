@@ -290,3 +290,27 @@ unchanged (374 pass / 173 skip / 0 fail), trainmarks q1-q6 on `medium`
 identical between the cost-based planner and `HORNDB_WCOJ_CUTOVER=4` except
 q2's `SUM(total_spend)` last digits, which follow f64 summation order and
 change with any row-order change.
+
+#### Round 2 (re-review at `33bb7b7`)
+
+1. **Writes during a stats build no longer wipe the snapshot memo.** The
+   builder held the memoised `Arc<VecTripleSource>`, so `Arc::get_mut` failed
+   in `apply_delta_to_snapshots` and every write in the window fell to
+   `invalidate()` — a full snapshot rebuild on the next query. The merge path
+   now copies on write (`Arc::make_mut`), queues the delta on the
+   `StatsSlot::Building` entry, and `land_stats` replays the queue onto the
+   finished summary against the builder's pre-merge snapshot. One build at a
+   time; a full cache is cleared like the sync path. Tests:
+   `write_during_stats_build_keeps_memo_and_lands_merged_stats`,
+   `first_query_builds_stats_in_background`.
+2. **Single-variable multi-pattern nodes are costed.** `wcoj_uncached`
+   returned `INFINITY` for any node with one variable, so a hash tree always
+   "won" `?x a :P . ?x :c :NO . ?x :s :A . ?x :g :F` (19× slower). The gate
+   is now `patterns.len() == 1` (a scan). `plan_ab.rs` gained `attr-star`
+   (type + 3 bound-object filters, 500k subjects): planned = degree order.
+3. **Planning-time test** now measures the DP worst case (5 patterns, 4-cycle
+   plus chord) with a 2 ms release bound; the 10-star is greedy and only
+   printed.
+4. **`plan_ab.rs` tolerance floor** scales with the baseline
+   (`max(baseline/2, 1 ms)`) instead of a flat 10 ms.
+5. **`planning_stats` cache-full policy** matches `snapshot_stats`: clear.

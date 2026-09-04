@@ -264,15 +264,19 @@ fn q3_shape_binds_selective_customer_before_order() {
     );
 }
 
-/// Planning cost is bounded: a 10-pattern star (the widest DP the planner
-/// runs before its budget trips) plans in well under a millisecond, so
-/// `GRAPH ?g` re-planning per graph stays negligible.
+/// Planning cost is bounded at the DP's worst case: `MAX_DP_PATTERNS` (5)
+/// patterns over four variables with a chord, so nearly every subset is
+/// connected and gets costed. Wider BGPs go greedy (cheaper). The bound is
+/// loose on purpose -- this guards against a blow-up, not a few microseconds
+/// of nextest contention.
 #[test]
-fn ten_pattern_star_plans_fast() {
+fn dense_five_pattern_bgp_plans_fast() {
     let src = source(2_000);
     let stats = SnapshotStats::from_source(&src);
     let planner = Planner::default();
-    let bgp = star(10);
+    let mut ps = four_cycle().patterns;
+    ps.push(pat(v(0), 11, v(2)));
+    let bgp = Bgp::new(ps);
     let _ = planner.choose(&bgp, &stats); // warm
     let started = std::time::Instant::now();
     let iters = 20;
@@ -281,12 +285,12 @@ fn ten_pattern_star_plans_fast() {
     }
     let per = started.elapsed() / iters;
     let bound = if cfg!(debug_assertions) {
-        std::time::Duration::from_millis(5)
+        std::time::Duration::from_millis(50)
     } else {
-        std::time::Duration::from_micros(200)
+        std::time::Duration::from_millis(2)
     };
-    eprintln!("10-star planning: {per:?} (bound {bound:?})");
-    for k in [3u8, 5, 7] {
+    eprintln!("dense 5-pattern planning: {per:?} (bound {bound:?})");
+    for k in [3u8, 5, 7, 10] {
         let bgp = star(k);
         let started = std::time::Instant::now();
         for _ in 0..iters {
@@ -296,7 +300,7 @@ fn ten_pattern_star_plans_fast() {
     }
     assert!(
         per <= bound,
-        "10-pattern star planned in {per:?} > {bound:?}"
+        "dense 5-pattern BGP planned in {per:?} > {bound:?}"
     );
 }
 

@@ -47,6 +47,9 @@ no-ML build.
   variable order inside the WCOJ node is where the win lives today (HDB-108
   q3, `?customer` first via the first-variable shortlist sweep in
   `cost.rs::OrderSearch`).
+- A WCOJ node's cost is infinite only for a single pattern (that is a scan,
+  `Planner::unit` picks it); several patterns over one variable are a real
+  intersection and are costed like any node (`plan_ab.rs::attr_star`).
 - Multi-pattern cardinalities use `StatsEstimator::estimate_bgp_fast`
   (product of per-pattern bounds, no characteristic-set walk) so a
   10-pattern star plans in ~100 µs; `estimate_bgp` stays for EXPLAIN and

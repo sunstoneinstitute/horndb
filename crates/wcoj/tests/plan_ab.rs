@@ -17,10 +17,10 @@ use horndb_wcoj::planner::Planner;
 use horndb_wcoj::source::vec_source::VecTripleSource;
 use horndb_wcoj::stats::SnapshotStats;
 
-/// Planned runtime may exceed degree-order runtime by this factor plus
-/// `FLOOR` (timer noise on sub-10 ms runs).
+/// Planned runtime may exceed degree-order runtime by this factor plus a
+/// floor of half the baseline, never under `MIN_FLOOR` (timer noise).
 const TOLERANCE: f64 = 1.5;
-const FLOOR: Duration = Duration::from_millis(10);
+const MIN_FLOOR: Duration = Duration::from_millis(1);
 const TYPE: u64 = 900;
 
 fn n_subjects() -> u64 {
@@ -147,6 +147,39 @@ fn q3() -> (VecTripleSource, Bgp) {
     (VecTripleSource::from_triples(t), bgp)
 }
 
+/// One variable, all objects bound: `?x a :Person . ?x :country :NO .
+/// ?x :status :Active . ?x :gender :F` over 25× the usual subject count.
+/// Every pattern is a filter on the same variable, so the only plan question
+/// is intersect-in-one-node versus hash-join the filters.
+fn attr_star() -> (VecTripleSource, Bgp) {
+    const COUNTRY: u64 = 21;
+    const STATUS: u64 = 22;
+    const GENDER: u64 = 23;
+    let n = n_subjects() * 25;
+    let mut state = 0x1234_5678_9ABC_DEF1u64;
+    let mut rand = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut t = Vec::with_capacity(n as usize * 4);
+    for s in 0..n {
+        let class = if rand() % 10 == 0 { 2 + rand() % 9 } else { 1 };
+        t.push(Triple::new(s, TYPE, 10_000 + class));
+        t.push(Triple::new(s, COUNTRY, 20_000 + rand() % 20));
+        t.push(Triple::new(s, STATUS, 30_000 + rand() % 4));
+        t.push(Triple::new(s, GENDER, 40_000 + rand() % 2));
+    }
+    let bgp = Bgp::new(vec![
+        TriplePattern::new(v(0), Term::Bound(TYPE), Term::Bound(10_001)),
+        TriplePattern::new(v(0), Term::Bound(COUNTRY), Term::Bound(20_000)),
+        TriplePattern::new(v(0), Term::Bound(STATUS), Term::Bound(30_000)),
+        TriplePattern::new(v(0), Term::Bound(GENDER), Term::Bound(40_000)),
+    ]);
+    (VecTripleSource::from_triples(t), bgp)
+}
+
 fn run(src: &VecTripleSource, bgp: &Bgp, spec: &JoinSpec) -> (Duration, usize) {
     let mut best = Duration::MAX;
     let mut rows = 0;
@@ -183,7 +216,7 @@ fn ab(name: &str, src: &VecTripleSource, bgp: &Bgp, failures: &mut Vec<String>) 
         plan_time.as_micros(),
     );
     assert_eq!(rd, rp, "{name}: planned row count differs");
-    if tp > td.mul_f64(TOLERANCE) + FLOOR {
+    if tp > td.mul_f64(TOLERANCE) + td.mul_f64(0.5).max(MIN_FLOOR) {
         failures.push(format!("{name}: planned {tp:?} vs degree {td:?}"));
     }
 }
@@ -197,5 +230,7 @@ fn planned_within_tolerance_of_degree_order() {
     }
     let (src, bgp) = q3();
     ab("q3", &src, &bgp, &mut failures);
+    let (src, bgp) = attr_star();
+    ab("attr-star", &src, &bgp, &mut failures);
     assert!(failures.is_empty(), "regressions: {failures:#?}");
 }

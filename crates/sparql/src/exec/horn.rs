@@ -206,6 +206,7 @@ use horndb_wcoj::source::vec_source::VecTripleSource;
 use horndb_wcoj::source::TripleSource;
 use horndb_wcoj::stats::{SnapshotStats, Stats, ZeroStats};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 /// Cheap size stats for scrape-time metrics (see [`HornBackend::storage_stats`]).
@@ -530,10 +531,55 @@ pub struct HornBackend {
 }
 
 /// One cached statistics summary: the store commit version it describes, and
-/// the summary itself — `None` while a background build for that version is
-/// in flight (see `planning_stats`). Lines up with HDB-119's version-tagged
-/// snapshot memo.
-type StatsCacheEntry = (u64, Option<Arc<SnapshotStats>>);
+/// the summary itself or the build in flight for it (see `planning_stats`).
+/// Lines up with HDB-119's version-tagged snapshot memo.
+type StatsCacheEntry = (u64, StatsSlot);
+
+/// One scope's planner summary. `Building` marks a build in flight on the
+/// `horndb-stats` thread: writes that merge into the snapshot meanwhile queue
+/// their deltas in `pending`, and the builder replays them onto the finished
+/// summary before it lands (`land_stats`). `id` lets a builder whose slot was
+/// dropped and re-created discard its result.
+enum StatsSlot {
+    Building {
+        id: u64,
+        pending: Vec<(Vec<WTriple>, Vec<WTriple>)>,
+    },
+    Ready(Arc<SnapshotStats>),
+}
+
+/// Install a finished summary for `key` unless its `Building` slot is gone
+/// or belongs to a newer build. Deltas that merged while the build ran are
+/// replayed first, against the builder's own pre-merge snapshot; a summary
+/// that refuses one (drift spent) is dropped, and the next query rebuilds.
+fn land_stats(
+    cache: &mut HashMap<SnapshotScope, StatsCacheEntry>,
+    key: &SnapshotScope,
+    id: u64,
+    mut snapshot: Arc<VecTripleSource>,
+    mut stats: Arc<SnapshotStats>,
+) {
+    let pending = match cache.get_mut(key) {
+        Some((
+            _,
+            StatsSlot::Building {
+                id: slot_id,
+                pending,
+            },
+        )) if *slot_id == id => std::mem::take(pending),
+        _ => return,
+    };
+    for (d, a) in &pending {
+        if !Arc::make_mut(&mut stats).apply_delta(&snapshot, d, a) {
+            cache.remove(key);
+            return;
+        }
+        Arc::make_mut(&mut snapshot).apply_delta(d, a);
+    }
+    if let Some((_, slot)) = cache.get_mut(key) {
+        *slot = StatsSlot::Ready(stats);
+    }
+}
 
 /// The one memoised direct source: the tier version it was opened at, the
 /// graph it reads, and the source itself. Version-tagged the same way
@@ -1049,22 +1095,31 @@ impl HornBackend {
             // reader may have re-tagged the memo since `cached` was read.
             let ok = memo.version == base
                 && plans.iter().all(|(scope, d, a)| {
-                    match memo.map.get_mut(scope).and_then(Arc::get_mut) {
-                        Some(src) => {
+                    match memo.map.get_mut(scope) {
+                        Some(arc) => {
+                            // Copy-on-write: a running query or the stats
+                            // builder may still hold this snapshot. Cloning it
+                            // (O(n)) beats the O(n log n) rebuild that
+                            // `invalidate` would cost the next query.
+                            let src = Arc::make_mut(arc);
                             // Stats first: `apply_delta` reads the *pre*-merge
                             // source to tell which rows the delta really
                             // changes. A summary that refuses the merge (drift
                             // spent) is dropped, and the next estimate
                             // rebuilds it.
                             let keep = match stats_cache.get_mut(scope) {
-                                Some((v, Some(stats))) => {
+                                Some((v, StatsSlot::Ready(stats))) => {
                                     let ok = Arc::make_mut(stats).apply_delta(src, d, a);
                                     *v = post;
                                     ok
                                 }
                                 // A build in flight describes the pre-merge
-                                // rows; drop its slot so its result is discarded.
-                                Some((_, None)) => false,
+                                // rows; it replays this delta when it lands.
+                                Some((v, StatsSlot::Building { pending, .. })) => {
+                                    pending.push((d.clone(), a.clone()));
+                                    *v = post;
+                                    true
+                                }
                                 None => true,
                             };
                             if !keep {
@@ -1073,8 +1128,6 @@ impl HornBackend {
                             src.apply_delta(d, a);
                             true
                         }
-                        // A concurrent reader still holds this snapshot, so it
-                        // cannot be mutated in place. Rare; just rebuild.
                         None => false,
                     }
                 });
@@ -1683,11 +1736,11 @@ impl HornBackend {
     /// [`ZeroStats`] meanwhile — the query path never pays the snapshot scan.
     ///
     /// Cold-start residual: queries issued while the build runs (tens of
-    /// milliseconds per million triples) get the structural plan, and a
-    /// write landing in that window cannot merge into the snapshot in place
-    /// (the builder holds it) and rebuilds it instead. When the cache is
-    /// full no build is started, so a wide `GRAPH ?g` sweep plans
-    /// structurally past [`STATS_CACHE_MAX_SCOPES`] scopes.
+    /// milliseconds per million triples) get the structural plan. A write
+    /// landing in that window copies the snapshot (the builder keeps the
+    /// pre-merge one) and queues its delta on the slot for the builder to
+    /// replay, so the memo and the summary both survive. One build runs at a
+    /// time; a full cache is cleared like `snapshot_stats` does.
     fn planning_stats(&self, scope: &SnapshotScope, source: &QuerySource) -> Arc<dyn Stats> {
         let snapshot = match source {
             QuerySource::Copy(vec) => vec,
@@ -1698,15 +1751,37 @@ impl HornBackend {
         let version = self.read_version();
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
         match guard.get(scope) {
-            Some((v, Some(stats))) if *v == version => {
+            Some((v, StatsSlot::Ready(stats))) if *v == version => {
                 let stats: Arc<dyn Stats> = Arc::<SnapshotStats>::clone(stats);
                 return stats;
             }
-            Some((v, None)) if *v == version => {} // build in flight
+            Some((v, StatsSlot::Building { .. })) if *v == version => {} // in flight
             _ => {
                 guard.retain(|_, (v, _)| *v == version);
-                if guard.len() < STATS_CACHE_MAX_SCOPES {
-                    guard.insert(scope.clone(), (version, None));
+                // One build at a time bounds the thread count; the next query
+                // on another scope starts its own once this one lands.
+                // ponytail: a slot dropped mid-build (invalidate, clear) lets a
+                // second thread start before the first exits; both are
+                // O(store) and the stale one discards itself in `land_stats`.
+                let busy = guard
+                    .values()
+                    .any(|(_, s)| matches!(s, StatsSlot::Building { .. }));
+                if !busy {
+                    if guard.len() >= STATS_CACHE_MAX_SCOPES {
+                        guard.clear();
+                    }
+                    static BUILD_ID: AtomicU64 = AtomicU64::new(0);
+                    let id = BUILD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    guard.insert(
+                        scope.clone(),
+                        (
+                            version,
+                            StatsSlot::Building {
+                                id,
+                                pending: Vec::new(),
+                            },
+                        ),
+                    );
                     let cache = Arc::clone(&self.stats_cache);
                     let snapshot = Arc::clone(snapshot);
                     let key = scope.clone();
@@ -1715,11 +1790,7 @@ impl HornBackend {
                         .spawn(move || {
                             let stats = build_stats(&snapshot);
                             let mut guard = cache.lock().expect("stats cache lock poisoned");
-                            if let Some((v, slot @ None)) = guard.get_mut(&key) {
-                                if *v == version {
-                                    *slot = Some(stats);
-                                }
-                            }
+                            land_stats(&mut guard, &key, id, snapshot, stats);
                         });
                     if spawned.is_err() {
                         guard.remove(scope);
@@ -1743,7 +1814,7 @@ impl HornBackend {
     ) -> Arc<SnapshotStats> {
         let version = self.read_version();
         let mut guard = self.stats_cache.lock().expect("stats cache lock poisoned");
-        if let Some((v, Some(stats))) = guard.get(scope) {
+        if let Some((v, StatsSlot::Ready(stats))) = guard.get(scope) {
             if *v == version {
                 return Arc::clone(stats);
             }
@@ -1761,7 +1832,10 @@ impl HornBackend {
         if guard.len() >= STATS_CACHE_MAX_SCOPES {
             guard.clear();
         }
-        guard.insert(scope.clone(), (version, Some(Arc::clone(&stats))));
+        guard.insert(
+            scope.clone(),
+            (version, StatsSlot::Ready(Arc::clone(&stats))),
+        );
         stats
     }
 
@@ -3359,6 +3433,115 @@ mod tests {
             "the query path after a small write must not rebuild the summary"
         );
         assert_eq!(e1, e0 + 1, "the merged summary must see the new row");
+    }
+
+    fn two_thousand_rows() -> HornBackend {
+        let mut b = HornBackend::new();
+        for i in 0..2000 {
+            b.insert_triple(
+                Term::Iri(format!("http://ex/s{i}")),
+                Term::Iri("http://ex/p".into()),
+                Term::Iri(format!("http://ex/o{}", i % 7)),
+            );
+        }
+        b
+    }
+
+    /// A write that lands while the `horndb-stats` builder (or any reader)
+    /// still holds the memoised snapshot must not drop the memo: the merge
+    /// path copies on write, queues the delta on the in-flight slot, and the
+    /// builder replays it when it lands -- one build, no rebuild.
+    #[test]
+    fn write_during_stats_build_keeps_memo_and_lands_merged_stats() {
+        let rebuilds = || horndb_metrics::metrics().sparql.stats_rebuild.get();
+        let mut b = two_thousand_rows();
+        let scope = SnapshotScope::DefaultUnion;
+        // The builder's view: the pre-merge snapshot, pinned outside the memo.
+        let pinned = b.wcoj_snapshot(&scope);
+        let version = b.read_version();
+        b.stats_cache.lock().unwrap().insert(
+            scope.clone(),
+            (
+                version,
+                StatsSlot::Building {
+                    id: 7,
+                    pending: Vec::new(),
+                },
+            ),
+        );
+        let base = rebuilds();
+        crate::update::apply_update(
+            &crate::parser::parse_update(
+                "INSERT DATA { <http://ex/new> <http://ex/p> <http://ex/o0> }",
+            )
+            .unwrap(),
+            &mut b,
+        )
+        .unwrap();
+        assert_eq!(b.memo_len(), 1, "the memo survives a write during a build");
+        assert_eq!(rebuilds(), base, "the write itself builds nothing");
+        let now = b.wcoj_snapshot(&scope);
+        assert_ne!(
+            Arc::as_ptr(&now),
+            Arc::as_ptr(&pinned),
+            "copy-on-write: the pinned snapshot is left alone"
+        );
+        assert_eq!(pinned.total_triples(), 2000);
+        assert_eq!(now.total_triples(), 2001);
+        {
+            let guard = b.stats_cache.lock().unwrap();
+            match guard.get(&scope) {
+                Some((v, StatsSlot::Building { pending, .. })) => {
+                    assert_eq!(*v, b.read_version(), "slot re-tagged to the new version");
+                    assert_eq!(pending.len(), 1, "the delta is queued for the builder");
+                }
+                _ => panic!("the in-flight slot must survive the write"),
+            }
+        }
+        // The builder finishes on its pre-merge snapshot and lands.
+        let stats = build_stats(&pinned);
+        land_stats(&mut b.stats_cache.lock().unwrap(), &scope, 7, pinned, stats);
+        let patterns = vec![TriplePattern {
+            subject: Term::Var(Var::new("s")),
+            predicate: Term::Iri("http://ex/p".into()),
+            object: Term::Var(Var::new("o")),
+        }];
+        let e = b
+            .cardinality_estimate(&patterns, &ScanScope::DEFAULT)
+            .unwrap();
+        assert_eq!(e, 2001, "the landed summary carries the replayed delta");
+        assert_eq!(rebuilds(), base + 1, "one build in total");
+    }
+
+    /// The first query on a scope plans on `ZeroStats` and starts the
+    /// background build; the summary lands on its own, with one build.
+    #[test]
+    fn first_query_builds_stats_in_background() {
+        let rebuilds = || horndb_metrics::metrics().sparql.stats_rebuild.get();
+        let b = two_thousand_rows();
+        let base = rebuilds();
+        let _ = crate::api::execute_query(
+            "SELECT ?s WHERE { ?s <http://ex/p> ?o . ?o <http://ex/p> ?x }",
+            &b,
+        )
+        .unwrap();
+        let landed = || {
+            matches!(
+                b.stats_cache
+                    .lock()
+                    .unwrap()
+                    .get(&SnapshotScope::DefaultUnion),
+                Some((_, StatsSlot::Ready(_)))
+            )
+        };
+        for _ in 0..500 {
+            if landed() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(landed(), "the horndb-stats thread must land the summary");
+        assert_eq!(rebuilds(), base + 1);
     }
 
     /// Mirrors `tests/incremental_snapshot_delta.rs`'s
