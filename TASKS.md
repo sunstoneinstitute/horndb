@@ -52,7 +52,7 @@ When a task is picked up, move it to its own commit / PR and check it off here
 - [ ] **HIGH** · _Completeness_ — SPEC-23 Phase 7: backward-chaining (magic-sets + SLG tabling + SPARQL backward mode) — after #206 ([#207](https://github.com/sunstoneinstitute/horndb/issues/207))
 - [x] **HIGH** · _Completeness_ — SPEC-24 S1: delta-incremental rule retraction — incremental distinct + operator traces ([#210](https://github.com/sunstoneinstitute/horndb/issues/210))
 - [x] **HIGH** · _Completeness_ — SPEC-24 S2: delta-incremental closure retraction + exact warm-store seeded retraction ([#211](https://github.com/sunstoneinstitute/horndb/issues/211))
-- [ ] **CRITICAL** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
+- [v] **CRITICAL** · _Completeness_ — SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers — after #212 ([#213](https://github.com/sunstoneinstitute/horndb/issues/213)) — _wip: 961ad028@hel01 · HDB-51-spec-24-s4-engine-wiring-sparql-update-c · 2026-09-04T02:21:38Z_
 - [ ] **HIGH** · _Completeness_ — SPEC-24 S6: MVCC backing of `Circuit::snapshot` onto SPEC-02 per-tuple visibility — blocked on E3 #187 ([#215](https://github.com/sunstoneinstitute/horndb/issues/215))
 - [x] **HIGH** · _Completeness_ — SPEC-25 S1: per-tuple MVCC visibility + delete path — unblocks SPEC-24 S6 #215 ([#225](https://github.com/sunstoneinstitute/horndb/issues/225))
 - [x] **HIGH** · _Completeness_ — SPEC-25 S2: persistent on-disk dictionary (mmap base + overlay) ([#226](https://github.com/sunstoneinstitute/horndb/issues/226))
@@ -473,7 +473,7 @@ table in `docs/architecture.md`. Full item-level scope lives in each epic issue.
   conservatism. Spec §S2. Gates: SPEC-24 acceptance #2 (differential proptests
   green; seeded-base retraction exact).
 
-- [ ] **SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers.** ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
+- [v] **SPEC-24 S4: engine wiring — SPARQL Update → Circuit → readers.** ([#213](https://github.com/sunstoneinstitute/horndb/issues/213))
   `horndb-incremental` has no consumers in the workspace; SPEC-06 acceptance
   #1–#2 are unrunnable end-to-end. Lower SPARQL Update ops to
   `assert_triple`/`retract_triple` + `tick()`; readers via `Snapshot`; rule
