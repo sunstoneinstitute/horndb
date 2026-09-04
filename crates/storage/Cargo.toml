@@ -17,6 +17,8 @@ bytemuck.workspace = true
 oxttl.workspace = true
 oxrdf.workspace = true
 horndb-simd = { workspace = true }
+fst.workspace = true
+memmap2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -24,8 +26,6 @@ proptest.workspace = true
 criterion.workspace = true
 # HDB-93 spike: candidate term->id base structures (examples/dict_base_bench.rs).
 ptr_hash.workspace = true
-fst.workspace = true
-memmap2.workspace = true
 hashbrown.workspace = true
 
 [[bench]]
@@ -50,4 +50,8 @@ harness = false
 
 [[bench]]
 name = "dict_gc_churn"
+harness = false
+
+[[bench]]
+name = "dict_persist"
 harness = false

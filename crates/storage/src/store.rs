@@ -37,6 +37,20 @@ impl Store {
         }
     }
 
+    /// An in-memory tier over a dictionary the caller built — the way to
+    /// reopen a store on a persisted dictionary (SPEC-25 S2):
+    /// `Store::with_dictionary(Dictionary::open(path)?)`. The tier starts
+    /// empty; ids the dictionary already issued keep their meaning, so
+    /// re-loading the corpus (or a snapshot) allocates no new ids for terms
+    /// the base holds.
+    pub fn with_dictionary(dictionary: Dictionary) -> Self {
+        Self {
+            dictionary,
+            tier: Box::new(MemoryTier::new()),
+            bnode_doc_tag: AtomicU64::new(0),
+        }
+    }
+
     /// In-memory store with a custom hot-predicate threshold (SPEC-02 F4):
     /// predicates with at least `hot_threshold` live rows materialise the
     /// object-major layout eagerly rather than on the first object-major read.

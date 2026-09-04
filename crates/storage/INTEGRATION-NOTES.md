@@ -323,11 +323,51 @@ over the dictionary right after it reclaims dead rows.
   parse-thread interning. Compaction is an explicit, quiesced maintenance call
   (HDB-63); do not wire it to a timer before closing that gap. Row reclamation
   carries no such precondition.
-- **HDB-57 (persistent dictionary) needs one tombstone bit per slot** in the
-  on-disk format so a reclaimed index reloads as reclaimed rather than as a
-  live term, plus the free-slot count for the gauge. Nothing here builds or
-  presumes a persistence format.
+- **The persistent base (next section) carries the tombstones**: a reclaimed
+  index is a zero-length slot in the base file, reloads as reclaimed, and the
+  file header carries the freed count for the gauge.
 
 Metrics: `horndb_storage_dictionary_terms` (index space consumed) versus
 `horndb_storage_dictionary_terms_live` (resolvable terms) — `docs/metrics.md`.
 Test: `tests/dictionary_gc.rs`. Bench: `benches/dict_gc_churn.rs`.
+
+## Persistent dictionary (SPEC-25 S2, delivered)
+
+`Dictionary::flush(path)` writes every index the dictionary has issued to one
+file; `Dictionary::open(path)` maps it back; `Store::with_dictionary` puts an
+empty tier over it. Plan: `docs/plans/PLAN-25-02-persistent-dictionary.md`.
+
+- **Layout** (`dict_base.rs`): 64-byte header, a `u64` offset table, a
+  `snapshot::term_codec` arena, an `fst::Map` from those bytes to `TermId`
+  bits. id → term is one offset indirection; term → id is the FST. Built under
+  `<path>.tmp` and renamed, so a mapping of the previous file stays valid and
+  a reader never sees a partial file.
+- **Base + overlay.** Indices `1..=base_len` resolve through the mapping;
+  the in-memory forward/reverse maps hold only what this process interned,
+  numbered from `base_len + 1`. A fresh dictionary has `base_len == 0` and
+  runs the pre-S2 code on every hit, and a reopened one hands a new term the
+  id it would have got without the restart.
+- **Probe order is overlay, then base — load-bearing.** A base term `gc`
+  reclaimed and later re-interned lives in the overlay under a new id while
+  the base FST still maps its bytes to the dead one. Dead base indices are
+  kept in a `RoaringTreemap` beside the overlay so both directions answer
+  "nothing" for them; the next flush writes them as tombstones.
+- **Keyed on `term_codec`, not the forward-map key.** The HDB-95 key
+  substitutes first-seen side-table ids and is not order-stable across
+  processes; the base uses the self-contained encoding instead. A base probe
+  therefore encodes the term twice on an overlay miss (compact key, then
+  codec), which is the price of keeping the overlay's hit path unchanged.
+- **`get` falls through to the base** even when the term carries a datatype
+  IRI or language tag this process has never seen — that no longer proves the
+  term is absent.
+- **Deferred.** The running process keeps using its overlay after a flush
+  (the merged file is for the next `open`), so overlay memory is released at
+  restart, not at checkpoint. The HDB-93 repeat cache (4,096 entries, 4-way,
+  full-hash) is not in: it sits in front of the base probe and is a
+  hornbench-measured latency lever. WAL ordering of dictionary appends is
+  SPEC-25 S3.
+
+Tests: `tests/dictionary_persist.rs` (reopen both directions for every term
+kind, `GraphId` stability, tombstones, id continuation, and a differential
+reload into a reopened store that must allocate no ids). Bench:
+`benches/dict_persist.rs` (`audit-pass.sh` leg `dict_persist`).

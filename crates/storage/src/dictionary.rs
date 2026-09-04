@@ -6,6 +6,24 @@
 //! Reverse map: `RwLock<Vec<Option<Term>>>` indexed by `payload - 1`; a
 //! `None` slot is a term [`Dictionary::gc`] reclaimed.
 //!
+//! ## The persistent base (SPEC-25 S2)
+//!
+//! A dictionary opened with [`Dictionary::open`] sits on an immutable,
+//! memory-mapped **base** ([`crate::dict_base`]) holding every index a
+//! previous process flushed: indices `1..=base_len` resolve through the base,
+//! and the two maps above — the **overlay** — hold only what this process
+//! interned, numbered from `base_len + 1`. So a fresh dictionary has
+//! `base_len == 0` and runs exactly the code it ran before the base existed,
+//! and a reopened one issues the id a term would have got without the
+//! restart. [`Dictionary::flush`] writes base + overlay as one new base file.
+//!
+//! Probe order is overlay first, then base, and that order is load-bearing: a
+//! base term [`Dictionary::gc`] reclaimed and a later `intern` re-issued lives
+//! in the overlay under a new id, while the base FST still maps its bytes to
+//! the dead one. The base keeps a set of indices reclaimed since it was
+//! written (`Overlay::base_dead`) so a dead base id resolves to nothing in
+//! either direction; the next flush writes them as tombstones.
+//!
 //! ## Append-only, with a sweep (HDB-121)
 //!
 //! Interning only appends, and an index, once handed out, keeps its meaning
@@ -66,12 +84,16 @@
 //! datatype IRI out and is self-contained by design. SPEC-25 S2's mapped
 //! dictionary base must build on that one, not on this.
 
+use crate::dict_base::{BaseStats, MappedBase};
 use crate::error::{Result, StorageError};
+use crate::snapshot::term_codec;
 use crate::term::{GraphId, InternedQuad, TermId, TermKind, KIND_SHIFT, MAX_DICT_INDEX};
 use dashmap::DashMap;
 use oxrdf::{Literal, NamedNodeRef, Term};
 use parking_lot::RwLock;
+use roaring::RoaringTreemap;
 use std::cell::RefCell;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -176,6 +198,9 @@ impl AuxMemo {
 #[derive(Default)]
 struct KeyScratch {
     buf: Vec<u8>,
+    /// `term_codec` bytes for the base probe, so a base lookup allocates
+    /// nothing either.
+    codec: Vec<u8>,
     datatype: AuxMemo,
     language: AuxMemo,
 }
@@ -308,17 +333,30 @@ pub fn flush_intern_phases() {
     intern_phases::flush();
 }
 
+/// Everything the reverse lock guards.
+struct Overlay {
+    /// Reverse map of the overlay, indexed by `payload - 1 - base_len`. A
+    /// `None` slot is a term that [`Dictionary::gc`] reclaimed: its lexical
+    /// bytes and its forward-map key are gone, and the index is free. **Free
+    /// indices are not re-issued** — see [`Dictionary::gc`].
+    terms: Vec<Option<Term>>,
+    /// Base indices [`Dictionary::gc`] reclaimed since the base was written.
+    /// The base file is immutable, so this is the only record until the next
+    /// flush tombstones them.
+    base_dead: RoaringTreemap,
+}
+
 pub struct Dictionary {
     id: u64,
     forward: DashMap<Box<[u8]>, TermId>,
-    /// Reverse map, indexed by `payload - 1`. A `None` slot is a term that
-    /// [`Dictionary::gc`] reclaimed: its lexical bytes and its forward-map key
-    /// are gone, and the index is free. **Free indices are not re-issued** —
-    /// see [`Dictionary::gc`].
-    reverse: RwLock<Vec<Option<Term>>>,
-    /// How many reverse slots are `None`. Cheaper than counting them, and the
-    /// difference from `reverse.len()` is the live-term gauge.
+    reverse: RwLock<Overlay>,
+    /// How many indices resolve to nothing: base tombstones, `base_dead`, and
+    /// `None` overlay slots. Cheaper than counting them, and `len()` minus
+    /// this is the live-term gauge.
     freed: AtomicU64,
+    /// Indices `1..=base_len` resolve through the mapped base (SPEC-25 S2).
+    base: Option<MappedBase>,
+    base_len: u64,
     datatypes: AuxTable,
     languages: AuxTable,
     /// `HORNDB_INTERN_PHASES=1`, resolved once at construction.
@@ -327,23 +365,80 @@ pub struct Dictionary {
 
 impl Dictionary {
     pub fn new() -> Self {
+        Self::with_base(None)
+    }
+
+    fn with_base(base: Option<MappedBase>) -> Self {
+        let (base_len, freed) = base.as_ref().map_or((0, 0), |b| (b.slots(), b.freed()));
         Self {
             id: NEXT_DICT_ID.fetch_add(1, Ordering::Relaxed),
             forward: DashMap::new(),
-            reverse: RwLock::new(Vec::new()),
-            freed: AtomicU64::new(0),
+            reverse: RwLock::new(Overlay {
+                terms: Vec::new(),
+                base_dead: RoaringTreemap::new(),
+            }),
+            freed: AtomicU64::new(freed),
+            base,
+            base_len,
             datatypes: AuxTable::new(),
             languages: AuxTable::new(),
             phases: intern_phases::enabled(),
         }
     }
 
-    /// Indices this dictionary has ever handed out. Monotonic: it does not
-    /// drop when [`Dictionary::gc`] reclaims terms, because a reclaimed index
-    /// is never re-issued. Use [`Dictionary::live_len`] for the number of
-    /// terms currently resolvable.
+    /// Reopen a dictionary on the base file a previous [`Dictionary::flush`]
+    /// wrote. Cost is the mmap plus header validation — nothing is
+    /// re-interned. Every index the file covers resolves both ways (unless it
+    /// was reclaimed before the flush), and the next `intern` of a new term
+    /// gets index `len() + 1`.
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self::with_base(Some(MappedBase::open(path)?)))
+    }
+
+    /// Write every index this dictionary has issued — base and overlay
+    /// merged, reclaimed indices as tombstones — as one new base file at
+    /// `path`. Atomic (temp file + rename), so `path` may be the file this
+    /// dictionary is open on. Holds the reverse read lock for the duration:
+    /// terms interned meanwhile are not in the file, and `intern` blocks.
+    ///
+    /// ponytail: the running process keeps using its old base and overlay
+    /// after the flush; the merged file is only read by the next `open`.
+    /// Ceiling: overlay memory is released at restart, not at checkpoint.
+    /// Upgrade path: rebuild the base under the reverse write lock, then
+    /// `forward.retain(|_, id| id.payload() > flushed)`.
+    pub fn flush(&self, path: &Path) -> Result<BaseStats> {
+        let overlay = self.reverse.read();
+        let base_len = self.base_len;
+        let base_slots = (1..=base_len).map(|idx| {
+            if overlay.base_dead.contains(idx) {
+                return None;
+            }
+            let bytes = self.base.as_ref()?.term_bytes(idx)?;
+            Some((
+                bytes.to_vec(),
+                TermId::new(term_codec::encoded_kind(bytes)?, idx),
+            ))
+        });
+        let overlay_slots = overlay.terms.iter().enumerate().map(|(i, slot)| {
+            let term = slot.as_ref()?;
+            let mut bytes = Vec::new();
+            term_codec::encode_term(&mut bytes, term);
+            Some((bytes, TermId::new(kind_of(term), base_len + i as u64 + 1)))
+        });
+        MappedBase::write(path, base_slots.chain(overlay_slots))
+    }
+
+    /// Indices the mapped base covers; `0` for a dictionary with no base.
+    pub fn base_len(&self) -> usize {
+        self.base_len as usize
+    }
+
+    /// Indices this dictionary has ever handed out, base included. Monotonic:
+    /// it does not drop when [`Dictionary::gc`] reclaims terms, because a
+    /// reclaimed index is never re-issued. Use [`Dictionary::live_len`] for
+    /// the number of terms currently resolvable.
     pub fn len(&self) -> usize {
-        self.reverse.read().len()
+        self.base_len as usize + self.reverse.read().terms.len()
     }
 
     /// Terms currently resolvable — [`Dictionary::len`] minus the slots
@@ -511,8 +606,24 @@ impl Dictionary {
             if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
                 return Ok(*existing);
             }
+            if let Some(existing) = self.base_get(&mut scratch, term) {
+                return Ok(existing);
+            }
             self.intern_miss(&scratch, term)
         })
+    }
+
+    /// The base half of a term → id probe: `None` with no base, for a term
+    /// the base does not hold, or for one it holds under an index
+    /// [`Dictionary::gc`] has since reclaimed. Only reached on an overlay
+    /// miss, so a dictionary without a base never pays for it on a hit.
+    fn base_get(&self, scratch: &mut KeyScratch, term: &Term) -> Option<TermId> {
+        let base = self.base.as_ref()?;
+        scratch.codec.clear();
+        term_codec::encode_term(&mut scratch.codec, term);
+        let id = base.get(&scratch.codec)?;
+        let overlay = self.reverse.read();
+        (!overlay.base_dead.contains(id.payload())).then_some(id)
     }
 
     /// [`Dictionary::intern`] with the [`intern_phases`] split taken. Reached
@@ -528,7 +639,11 @@ impl Dictionary {
             )));
         }
         let t_probe = intern_phases::start();
-        let hit = self.forward.get(scratch.buf.as_slice()).map(|e| *e);
+        let hit = self
+            .forward
+            .get(scratch.buf.as_slice())
+            .map(|e| *e)
+            .or_else(|| self.base_get(scratch, term));
         intern_phases::charge(intern_phases::PROBE, t_probe);
         if let Some(existing) = hit {
             return Ok(existing);
@@ -546,11 +661,11 @@ impl Dictionary {
     /// early-return in the middle, and so the hit path is a short function the
     /// optimiser can keep tight.
     fn intern_miss(&self, scratch: &KeyScratch, term: &Term) -> Result<TermId> {
-        let mut reverse = self.reverse.write();
+        let mut overlay = self.reverse.write();
         if let Some(existing) = self.forward.get(scratch.buf.as_slice()) {
             return Ok(*existing);
         }
-        let next_index = (reverse.len() as u64) + 1;
+        let next_index = self.base_len + (overlay.terms.len() as u64) + 1;
         if next_index >= MAX_DICT_INDEX {
             return Err(StorageError::DictionaryFull(next_index));
         }
@@ -559,7 +674,7 @@ impl Dictionary {
         // Gated inside the miss path, which is ~6% of intern calls, so the
         // branch here does not need hoisting the way the hit path's did.
         let t_rev = self.phases.then(intern_phases::start).flatten();
-        reverse.push(Some(term.clone()));
+        overlay.terms.push(Some(term.clone()));
         intern_phases::charge(intern_phases::REVERSE, t_rev);
         self.forward.insert(scratch.buf.as_slice().into(), id);
         Ok(id)
@@ -641,13 +756,35 @@ impl Dictionary {
         }
         SCRATCH.with(|s| {
             let mut scratch = s.borrow_mut();
-            if !self.encode_key(&mut scratch, term, AuxMode::Lookup) {
-                // An unseen datatype IRI or language tag: the term itself
-                // cannot have been interned either.
+            // An unseen datatype IRI or language tag proves the term is not
+            // in the overlay; the base may still hold it.
+            if self.encode_key(&mut scratch, term, AuxMode::Lookup) {
+                if let Some(id) = self.forward.get(scratch.buf.as_slice()) {
+                    return Some(*id);
+                }
+            }
+            self.base_get(&mut scratch, term)
+        })
+    }
+
+    /// id → term for a dictionary index (never an inline int), under the
+    /// caller's read lock.
+    fn resolve(&self, overlay: &Overlay, idx: u64) -> Option<Term> {
+        if idx == 0 {
+            None
+        } else if idx <= self.base_len {
+            if overlay.base_dead.contains(idx) {
                 return None;
             }
-            self.forward.get(scratch.buf.as_slice()).map(|e| *e)
-        })
+            let bytes = self.base.as_ref()?.term_bytes(idx)?;
+            term_codec::decode_term(bytes).ok()
+        } else {
+            overlay
+                .terms
+                .get((idx - 1 - self.base_len) as usize)
+                .cloned()
+                .flatten()
+        }
     }
 
     pub fn lookup(&self, id: TermId) -> Option<Term> {
@@ -658,12 +795,8 @@ impl Dictionary {
                 NamedNodeRef::new(XSD_INTEGER).unwrap(),
             )));
         }
-        let idx = id.payload();
-        if idx == 0 {
-            return None;
-        }
-        let reverse = self.reverse.read();
-        reverse.get((idx - 1) as usize).cloned().flatten()
+        let overlay = self.reverse.read();
+        self.resolve(&overlay, id.payload())
     }
 
     /// Bulk-decode a batch of **inline-int** `TermId`s to `xsd:integer`
@@ -719,7 +852,7 @@ impl Dictionary {
     /// Bulk lookup over a **mixed** batch: inline ints decode arithmetically,
     /// everything else via the reverse map under a single read lock.
     pub fn lookup_batch(&self, ids: &[TermId]) -> Vec<Option<Term>> {
-        let reverse = self.reverse.read();
+        let overlay = self.reverse.read();
         ids.iter()
             .map(|&id| {
                 if id.kind() == TermKind::InlineInt {
@@ -729,12 +862,7 @@ impl Dictionary {
                         NamedNodeRef::new(XSD_INTEGER).unwrap(),
                     )))
                 } else {
-                    let idx = id.payload();
-                    if idx == 0 {
-                        None
-                    } else {
-                        reverse.get((idx - 1) as usize).cloned().flatten()
-                    }
+                    self.resolve(&overlay, id.payload())
                 }
             })
             .collect()
@@ -750,12 +878,8 @@ impl Dictionary {
         if id.kind() == TermKind::InlineInt {
             return id.as_inline_int().map(|v| v as f64);
         }
-        let idx = id.payload();
-        if idx == 0 {
-            return None;
-        }
-        let reverse = self.reverse.read();
-        match reverse.get((idx - 1) as usize)?.as_ref()? {
+        let overlay = self.reverse.read();
+        match self.resolve(&overlay, id.payload())? {
             Term::Literal(lit) => lit.value().trim().parse::<f64>().ok(),
             _ => None,
         }
@@ -791,15 +915,29 @@ impl Dictionary {
     /// table has to be persisted for that; HDB-57's on-disk dictionary needs
     /// one tombstone bit per slot to carry it.
     pub fn gc(&self, live: &[bool]) -> usize {
-        let mut reverse = self.reverse.write();
+        let mut overlay = self.reverse.write();
         let mut freed = 0u64;
+        let base_len = self.base_len as usize;
+        // Base slots: the file is immutable, so record the index as dead;
+        // the next flush writes the tombstone. A slot the file already
+        // tombstoned was counted in `freed` when the base was opened.
+        for (i, marked) in live.iter().enumerate().take(base_len) {
+            let idx = (i as u64) + 1;
+            let held = self
+                .base
+                .as_ref()
+                .is_some_and(|b| b.term_bytes(idx).is_some());
+            if !*marked && held && overlay.base_dead.insert(idx) {
+                freed += 1;
+            }
+        }
         SCRATCH.with(|s| {
             let mut scratch = s.borrow_mut();
-            for (i, marked) in live.iter().enumerate() {
+            for (i, marked) in live.iter().enumerate().skip(base_len) {
                 if *marked {
                     continue;
                 }
-                let Some(term) = reverse.get_mut(i).and_then(Option::take) else {
+                let Some(term) = overlay.terms.get_mut(i - base_len).and_then(Option::take) else {
                     continue; // past the end, or already freed
                 };
                 let id = TermId::new(kind_of(&term), (i as u64) + 1);

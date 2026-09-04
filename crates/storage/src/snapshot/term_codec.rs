@@ -98,6 +98,23 @@ pub fn encode_term(buf: &mut Vec<u8>, term: &Term) {
     }
 }
 
+/// The [`TermKind`](crate::term::TermKind) a canonical encoding decodes to,
+/// read off its tag byte without decoding. `None` for an empty slice or an
+/// unknown tag. Matches `dictionary::kind_of` on the decoded term.
+pub fn encoded_kind(bytes: &[u8]) -> Option<crate::term::TermKind> {
+    use crate::term::TermKind;
+    Some(match *bytes.first()? {
+        KIND_URI => TermKind::Uri,
+        KIND_BLANK => TermKind::Blank,
+        KIND_PLAIN => TermKind::PlainLiteral,
+        KIND_LANG | KIND_DIR_LANG => TermKind::LangLiteral,
+        KIND_TYPED => TermKind::TypedLiteral,
+        KIND_INLINE_INT => TermKind::InlineInt,
+        KIND_TRIPLE => TermKind::TripleTerm,
+        _ => return None,
+    })
+}
+
 /// Decode canonical bytes back into a term. The whole slice is one term.
 pub fn decode_term(bytes: &[u8]) -> Result<Term> {
     let (term, rest) = decode_term_prefix(bytes)?;
