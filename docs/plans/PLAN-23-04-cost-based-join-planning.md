@@ -314,3 +314,18 @@ change with any row-order change.
 4. **`plan_ab.rs` tolerance floor** scales with the baseline
    (`max(baseline/2, 1 ms)`) instead of a flat 10 ms.
 5. **`planning_stats` cache-full policy** matches `snapshot_stats`: clear.
+
+#### Round 3 (re-review at `6d7a2ef`)
+
+1. The replay queue on `StatsSlot::Building` is capped (`STATS_PENDING_CAP =
+   32`); past it the slot is dropped and the next query rebuilds once, so the
+   replay under the cache lock stays bounded.
+2. The stats-cache merge is gated on the write's base version for both slot
+   kinds (a pinned read view shares the cache and can install an entry at
+   another version); foreign entries are dropped, never re-stamped.
+3. Throwaway parity example removed; stale `Arc::get_mut` comments rewritten
+   for copy-on-write; the "one build at a time" claim softened to what the
+   code enforces.
+
+Follow-ups: drift check before (not after) replay in `land_stats`; revisit
+`plan_ab.rs`'s tolerance for slow shapes (now effectively 2×).

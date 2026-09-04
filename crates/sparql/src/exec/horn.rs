@@ -335,6 +335,11 @@ const SNAPSHOT_DELTA_REBUILD_DIVISOR: usize = 2;
 /// benefits; beyond that the cache is being swept, not reused.
 const STATS_CACHE_MAX_SCOPES: usize = 8;
 
+/// Most deltas a `StatsSlot::Building` entry queues for replay. Replay runs
+/// under the stats-cache lock at O(delta × store) each; past this the slot is
+/// dropped and the next query pays one ordinary rebuild instead.
+const STATS_PENDING_CAP: usize = 32;
+
 /// True if `g` must stay OUT of the no-dataset default graph (SPEC-27 F6 /
 /// SPEC-29 D4/D6): it is a HornDB-internal graph that `visible` has not
 /// opted back in. The default-graph sentinel has no IRI (`graph_uri` errors
@@ -479,9 +484,9 @@ pub struct HornBackend {
     /// [`Self::apply_delta_to_snapshots`]. Entries this cannot maintain (a
     /// graph scope, or one whose drift bound is spent) are dropped instead.
     ///
-    /// Deliberately holds no `Arc<VecTripleSource>`: a second strong reference
-    /// to a memoised snapshot would fail the `Arc::get_mut` an in-place delta
-    /// merge needs.
+    /// Holds no `Arc<VecTripleSource>` of its own; only a background build
+    /// keeps one, and the delta merge copies on write in that case
+    /// (`apply_delta_to_snapshots`).
     stats_cache: Arc<Mutex<HashMap<SnapshotScope, StatsCacheEntry>>>,
     /// `Some` on a pinned read view: every read resolves at that commit
     /// version instead of the store's latest. `None` on the writable backend
@@ -941,8 +946,8 @@ impl HornBackend {
     /// 1. The delta is small — no more than `1 /
     ///    SNAPSHOT_DELTA_REBUILD_DIVISOR` of the snapshot's rows. A bigger one
     ///    is no cheaper to merge than to rebuild.
-    /// 2. Nobody else holds the snapshot, so `Arc::get_mut` can hand out the
-    ///    `&mut` an in-place merge needs.
+    /// 2. The merge is copy-on-write: when a running query or the stats
+    ///    builder still holds the snapshot, `Arc::make_mut` clones it first.
     /// 3. Every add interns. (It already did inside `apply_quads`, so this is a
     ///    dictionary hit; a failure would silently drop a row from the delta.)
     /// 4. For [`SnapshotScope::DefaultUnion`], the union covers exactly one
@@ -1108,6 +1113,10 @@ impl HornBackend {
                             // spent) is dropped, and the next estimate
                             // rebuilds it.
                             let keep = match stats_cache.get_mut(scope) {
+                                // A summary at another version (a pinned read
+                                // view shares this cache) does not describe
+                                // the rows this delta applies to.
+                                Some((v, _)) if *v != base => false,
                                 Some((v, StatsSlot::Ready(stats))) => {
                                     let ok = Arc::make_mut(stats).apply_delta(src, d, a);
                                     *v = post;
@@ -1116,9 +1125,13 @@ impl HornBackend {
                                 // A build in flight describes the pre-merge
                                 // rows; it replays this delta when it lands.
                                 Some((v, StatsSlot::Building { pending, .. })) => {
-                                    pending.push((d.clone(), a.clone()));
-                                    *v = post;
-                                    true
+                                    if pending.len() >= STATS_PENDING_CAP {
+                                        false
+                                    } else {
+                                        pending.push((d.clone(), a.clone()));
+                                        *v = post;
+                                        true
+                                    }
                                 }
                                 None => true,
                             };
@@ -1731,16 +1744,18 @@ impl HornBackend {
     /// has no per-predicate counts, so it gets [`ZeroStats`] and the planner
     /// routes structurally (one WCOJ node in degree order). A copied snapshot
     /// gets its cached [`SnapshotStats`] when one exists at this version;
-    /// otherwise the build is started on a background thread (one per
-    /// scope and version, marked by a `None` slot) and the query plans with
-    /// [`ZeroStats`] meanwhile — the query path never pays the snapshot scan.
+    /// otherwise a build is started on a background thread (marked by a
+    /// [`StatsSlot::Building`] entry) and the query plans with [`ZeroStats`]
+    /// meanwhile — the query path never pays the snapshot scan.
     ///
     /// Cold-start residual: queries issued while the build runs (tens of
     /// milliseconds per million triples) get the structural plan. A write
     /// landing in that window copies the snapshot (the builder keeps the
     /// pre-merge one) and queues its delta on the slot for the builder to
-    /// replay, so the memo and the summary both survive. One build runs at a
-    /// time; a full cache is cleared like `snapshot_stats` does.
+    /// replay (at most [`STATS_PENDING_CAP`] of them), so the memo and the
+    /// summary both survive. A build starts only when no `Building` entry is
+    /// present, which keeps concurrent builds rare, not impossible; a full
+    /// cache is cleared like `snapshot_stats` does.
     fn planning_stats(&self, scope: &SnapshotScope, source: &QuerySource) -> Arc<dyn Stats> {
         let snapshot = match source {
             QuerySource::Copy(vec) => vec,
@@ -3228,10 +3243,10 @@ mod tests {
         let _ = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
         assert_eq!(b.memo_len(), 1, "warm-up: one memoised scope");
         // Capture the snapshot's identity as a raw pointer, then drop the
-        // `Arc` clone: `apply_delta_to_snapshots` needs `Arc::get_mut` to
-        // succeed, which requires the cache to hold the only strong
-        // reference -- a clone kept alive here would force the fallback and
-        // defeat the point of this test.
+        // `Arc` clone: `apply_delta_to_snapshots` merges in place only when
+        // the cache holds the sole strong reference -- a clone kept alive here
+        // would make it copy on write, and the pointer check below would say
+        // nothing about the in-place path.
         let before_ptr = {
             let snap = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
             assert_eq!(snap.total_triples(), 10);
@@ -3300,7 +3315,7 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&strict, &union),
             "each scope must own an independent Arc, so a later delta merge \
-             can `Arc::get_mut` one without the other's strong ref blocking it"
+             into one is in place, not a copy forced by the other's strong ref"
         );
     }
 
@@ -3511,6 +3526,92 @@ mod tests {
             .unwrap();
         assert_eq!(e, 2001, "the landed summary carries the replayed delta");
         assert_eq!(rebuilds(), base + 1, "one build in total");
+    }
+
+    fn building_slot(id: u64) -> StatsSlot {
+        StatsSlot::Building {
+            id,
+            pending: Vec::new(),
+        }
+    }
+
+    fn insert_one(b: &mut HornBackend, i: usize) {
+        crate::update::apply_update(
+            &crate::parser::parse_update(&format!(
+                "INSERT DATA {{ <http://ex/new{i}> <http://ex/p> <http://ex/o0> }}"
+            ))
+            .unwrap(),
+            b,
+        )
+        .unwrap();
+    }
+
+    /// A write stream during a build queues at most `STATS_PENDING_CAP`
+    /// deltas; past that the slot is dropped (one ordinary rebuild later)
+    /// instead of an unbounded replay under the cache lock. The memo itself
+    /// keeps merging either way.
+    #[test]
+    fn write_stream_during_stats_build_drops_the_slot_past_the_cap() {
+        let rebuilds = || horndb_metrics::metrics().sparql.stats_rebuild.get();
+        let mut b = two_thousand_rows();
+        let scope = SnapshotScope::DefaultUnion;
+        let _pinned = b.wcoj_snapshot(&scope);
+        let version = b.read_version();
+        b.stats_cache
+            .lock()
+            .unwrap()
+            .insert(scope.clone(), (version, building_slot(1)));
+        let base = rebuilds();
+        for i in 0..STATS_PENDING_CAP {
+            insert_one(&mut b, i);
+            let guard = b.stats_cache.lock().unwrap();
+            match guard.get(&scope) {
+                Some((_, StatsSlot::Building { pending, .. })) => assert_eq!(pending.len(), i + 1),
+                _ => panic!("slot must survive write {i}"),
+            }
+        }
+        insert_one(&mut b, STATS_PENDING_CAP);
+        assert!(
+            b.stats_cache.lock().unwrap().get(&scope).is_none(),
+            "past the cap the in-flight slot is dropped"
+        );
+        assert_eq!(b.memo_len(), 1, "the snapshot memo keeps merging");
+        assert_eq!(
+            b.wcoj_snapshot(&scope).total_triples() as usize,
+            2000 + STATS_PENDING_CAP + 1
+        );
+        assert_eq!(
+            rebuilds(),
+            base,
+            "dropping the slot builds nothing by itself"
+        );
+    }
+
+    /// A stats entry tagged at a version other than the write's base (a
+    /// pinned read view shares the cache and can install one) must be
+    /// dropped, never merged into and re-stamped as current.
+    #[test]
+    fn stats_at_another_version_are_dropped_not_merged() {
+        let mut b = two_thousand_rows();
+        let scope = SnapshotScope::DefaultUnion;
+        let pinned = b.wcoj_snapshot(&scope);
+        let foreign = b.read_version() + 1000;
+        let ready = StatsSlot::Ready(Arc::new(SnapshotStats::from_source(&pinned)));
+        for (i, (name, slot)) in [("ready", ready), ("building", building_slot(2))]
+            .into_iter()
+            .enumerate()
+        {
+            b.stats_cache
+                .lock()
+                .unwrap()
+                .insert(scope.clone(), (foreign, slot));
+            insert_one(&mut b, i);
+            assert!(
+                b.stats_cache.lock().unwrap().get(&scope).is_none(),
+                "{name}: a foreign-version entry must not be merged into"
+            );
+            assert_eq!(b.memo_len(), 1, "{name}: the snapshot memo still merges");
+        }
     }
 
     /// The first query on a scope plans on `ZeroStats` and starts the

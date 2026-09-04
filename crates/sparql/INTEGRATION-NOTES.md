@@ -1032,8 +1032,13 @@ cold-start cost, by design:
   pre-merge snapshot, so the memo, the summary, and `stats_rebuild_total`
   all stay put. The same copy-on-write covers a long-running query pinning
   the snapshot, which used to force `invalidate` and a full rebuild.
-- One build runs at a time per cache; a query on a second scope meanwhile
-  plans structurally and the next one starts the build. A full cache
+- The queue holds at most `STATS_PENDING_CAP` (32) deltas; past that the
+  slot is dropped and the next query pays one ordinary rebuild, so the
+  replay (O(delta × store) each, under the cache lock) stays bounded.
+- A build starts only when no `Building` entry is present, so concurrent
+  builds are rare, not impossible: `invalidate()` or a cache clear can drop
+  a live entry and let a fresh build start; the stale one discards itself.
+  A query on a second scope meanwhile plans structurally. A full cache
   (`STATS_CACHE_MAX_SCOPES = 8`, per-graph `GRAPH ?g` scopes count) is
   cleared, as `snapshot_stats` does, so a wide sweep keeps getting
   cost-based plans.
