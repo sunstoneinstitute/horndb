@@ -1741,19 +1741,148 @@ fn ebv(t: &Term) -> bool {
     }
 }
 
-/// Wrap a lexical value as a plain (unquoted-form) literal term,
-/// re-applying N-Triples string escapes so the stored form round-trips
-/// through `literal_lexical`.
-fn plain_literal(s: &str) -> Term {
-    let escaped = s
-        .replace('\\', "\\\\")
+/// Apply N-Triples string escapes so a lexical value round-trips through
+/// `literal_lexical` once wrapped in quotes.
+fn escape_ntriples(s: &str) -> String {
+    s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
         .replace('\u{0008}', "\\b")
-        .replace('\u{000C}', "\\f");
-    Term::Literal(format!("\"{escaped}\""))
+        .replace('\u{000C}', "\\f")
+}
+
+/// Wrap a lexical value as a plain (unquoted-form) literal term,
+/// re-applying N-Triples string escapes so the stored form round-trips
+/// through `literal_lexical`.
+fn plain_literal(s: &str) -> Term {
+    Term::Literal(format!("\"{}\"", escape_ntriples(s)))
+}
+
+/// Wrap a lexical value as a language-tagged literal.
+fn lang_literal(s: &str, lang: &str) -> Term {
+    Term::Literal(format!("\"{}\"@{lang}", escape_ntriples(s)))
+}
+
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+
+/// Wrap a lexical value as an explicit `xsd:string`-typed literal.
+fn typed_string_literal(s: &str) -> Term {
+    Term::Literal(format!("\"{}\"^^<{XSD_STRING}>", escape_ntriples(s)))
+}
+
+/// Render an `xsd:boolean` typed literal — the SPARQL 1.1 §17.3 result
+/// type of a comparison/logical expression bound as a value (`BIND`, a
+/// projected expression), rather than used only as a `FILTER` condition.
+fn bool_typed_literal(v: bool) -> Term {
+    Term::Literal(format!("\"{v}\"^^<{XSD_BOOLEAN}>"))
+}
+
+/// A string literal's "kind" per SPARQL 1.1 §17.4.3.1.3: a simple literal
+/// (no annotation), a language-tagged literal, or an explicit
+/// `xsd:string`-typed literal. Several §17.4 string builtins — `SUBSTR`,
+/// `UCASE`, `LCASE`, `STRBEFORE`, `STRAFTER`, `REPLACE` — return "a literal
+/// of the same kind" as one of their arguments, and `CONCAT` derives its own
+/// kind from every argument's; both route through this one type so the
+/// typing rule is encoded once rather than copied into each builtin.
+#[derive(Clone, PartialEq, Eq)]
+enum StrKind {
+    Simple,
+    Lang(String),
+    XsdString,
+}
+
+/// Classify a term's `StrKind`, or `None` if it isn't a "string literal" at
+/// all. Every §17.4.3 string builtin below is typed to take only simple,
+/// language-tagged, or `xsd:string` literals as its string argument(s); a
+/// non-literal term or a literal typed something else (`xsd:integer`, say)
+/// is a type error there, not a value to coerce.
+fn str_kind(t: &Term) -> Option<StrKind> {
+    if term_kind(t) != TermKind::Literal {
+        return None;
+    }
+    let (_, lang, dt) = literal_parts(&lex(t));
+    Some(match (lang, dt) {
+        (Some(l), _) => StrKind::Lang(l),
+        (None, None) => StrKind::Simple,
+        (None, Some(dt)) if dt == XSD_STRING => StrKind::XsdString,
+        (None, Some(_)) => return None,
+    })
+}
+
+/// Build a result literal from a lexical value and a `StrKind` decision —
+/// the inverse of `str_kind`.
+fn literal_with_kind(value: &str, kind: &StrKind) -> Term {
+    match kind {
+        StrKind::Simple => plain_literal(value),
+        StrKind::Lang(l) => lang_literal(value, l),
+        StrKind::XsdString => typed_string_literal(value),
+    }
+}
+
+/// `CONCAT`'s own multi-argument return-kind rule (§17.4.3.12, distinct
+/// from the single-source "same kind" rule the other string builtins use):
+/// a language tag survives only when every argument shares it verbatim;
+/// `xsd:string` only when every argument is explicitly typed `xsd:string`;
+/// a simple literal otherwise.
+fn concat_kind(kinds: &[StrKind]) -> StrKind {
+    if let Some(StrKind::Lang(tag)) = kinds.first() {
+        if kinds
+            .iter()
+            .all(|k| matches!(k, StrKind::Lang(t) if t == tag))
+        {
+            return StrKind::Lang(tag.clone());
+        }
+    }
+    if !kinds.is_empty() && kinds.iter().all(|k| *k == StrKind::XsdString) {
+        return StrKind::XsdString;
+    }
+    StrKind::Simple
+}
+
+/// Argument compatibility for `STRBEFORE`/`STRAFTER` (§17.4.3.1.2, shared
+/// with `STRSTARTS`/`STRENDS`/`CONTAINS` upstream though only wired into
+/// the two functions below today): both simple/`xsd:string`, both
+/// language-tagged with the identical tag, or arg1 language-tagged with
+/// arg2 simple/`xsd:string`. Incompatible arguments are a type error.
+fn str_args_compatible(a: &StrKind, b: &StrKind) -> bool {
+    match (a, b) {
+        (StrKind::Lang(x), StrKind::Lang(y)) => x == y,
+        (StrKind::Lang(_), StrKind::Simple | StrKind::XsdString) => true,
+        (StrKind::Simple | StrKind::XsdString, StrKind::Simple | StrKind::XsdString) => true,
+        _ => false,
+    }
+}
+
+/// Shared `STRBEFORE`/`STRAFTER` logic (§17.4.3.9/.10): find the first
+/// occurrence of `needle`'s lexical form in `hay`'s, after checking
+/// argument compatibility. An empty `needle` is a vacuous match at
+/// position 0. On a match, the kept half is a literal of `hay`'s kind; on
+/// no match (or incompatible arguments raising a type error becomes
+/// `None`), an empty *simple* literal is returned regardless of `hay`'s
+/// kind — the spec's examples are explicit that the no-match case does not
+/// carry `hay`'s language tag or datatype forward.
+fn str_before_after(hay: &Term, needle: &Term, before: bool) -> Option<Term> {
+    let hay_kind = str_kind(hay)?;
+    let needle_kind = str_kind(needle)?;
+    if !str_args_compatible(&hay_kind, &needle_kind) {
+        return None;
+    }
+    let hay_val = literal_value(hay);
+    let needle_val = literal_value(needle);
+    Some(match hay_val.find(&needle_val) {
+        Some(i) => {
+            let split = if before {
+                &hay_val[..i]
+            } else {
+                &hay_val[i + needle_val.len()..]
+            };
+            literal_with_kind(split, &hay_kind)
+        }
+        None => plain_literal(""),
+    })
 }
 
 /// Binary arithmetic over the Stage-1 f64 model. `None` (expression
@@ -2322,8 +2451,9 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
             Term::Var(v) => b.get(v.name()).cloned(),
             other => Some(other.clone()),
         },
-        // Boolean-typed expressions return a typed literal (lexical
-        // form "true"/"false"); good enough for Stage 1 BIND tests.
+        // Comparison/logical expressions return an `xsd:boolean` typed
+        // literal (SPARQL 1.1 §17.3) when bound as a value rather than used
+        // only as a `FILTER` condition — e.g. `BIND(?y = ?z AS ?eq)`.
         Expr::Eq(_, _)
         | Expr::SameTerm(_, _)
         | Expr::Ne(_, _)
@@ -2335,9 +2465,7 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::And(_, _)
         | Expr::Or(_, _)
         | Expr::Not(_)
-        | Expr::Bound(_) => Some(Term::Literal(
-            if eval_expr(e, b)? { "true" } else { "false" }.into(),
-        )),
+        | Expr::Bound(_) => Some(bool_typed_literal(eval_expr(e, b)?)),
         Expr::Add(x, y) => arith(|a, b| a + b, numof(x)?, numof(y)?),
         Expr::Sub(x, y) => arith(|a, b| a - b, numof(x)?, numof(y)?),
         Expr::Mul(x, y) => arith(|a, b| a * b, numof(x)?, numof(y)?),
@@ -2437,10 +2565,15 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
         }),
         Func::StrLen => s(0)?.map(|v| integer_literal(v.chars().count() as i64)),
         Func::SubStr => {
-            let (text, start) = match (s(0)?, num(1)?) {
+            let (source, start) = match (term(0)?, num(1)?) {
                 (Some(t), Some(s)) => (t, s),
                 _ => return Ok(None),
             };
+            let kind = match str_kind(&source) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let text = literal_value(&source);
             // SPARQL SUBSTR is 1-based; len is optional (to end).
             let start = (start.round() as i64 - 1).max(0) as usize;
             let chars: Vec<char> = text.chars().collect();
@@ -2456,10 +2589,20 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
                 },
                 _ => return Ok(None),
             };
-            Some(plain_literal(&taken))
+            Some(literal_with_kind(&taken, &kind))
         }
-        Func::UCase => s(0)?.map(|v| plain_literal(&v.to_uppercase())),
-        Func::LCase => s(0)?.map(|v| plain_literal(&v.to_lowercase())),
+        Func::UCase => match term(0)? {
+            Some(t) => {
+                str_kind(&t).map(|k| literal_with_kind(&literal_value(&t).to_uppercase(), &k))
+            }
+            None => None,
+        },
+        Func::LCase => match term(0)? {
+            Some(t) => {
+                str_kind(&t).map(|k| literal_with_kind(&literal_value(&t).to_lowercase(), &k))
+            }
+            None => None,
+        },
         Func::StrStarts => match (s(0)?, s(1)?) {
             (Some(a), Some(b)) => bool_lit(a.starts_with(&b)),
             _ => None,
@@ -2472,33 +2615,41 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
             (Some(a), Some(b)) => bool_lit(a.contains(&b)),
             _ => None,
         },
-        Func::StrBefore => match (s(0)?, s(1)?) {
-            (Some(a), Some(b)) => Some(plain_literal(
-                a.find(&b).map(|i| &a[..i]).unwrap_or_default(),
-            )),
+        Func::StrBefore => match (term(0)?, term(1)?) {
+            (Some(a), Some(b)) => str_before_after(&a, &b, true),
             _ => None,
         },
-        Func::StrAfter => match (s(0)?, s(1)?) {
-            (Some(a), Some(b)) => Some(plain_literal(
-                a.find(&b).map(|i| &a[i + b.len()..]).unwrap_or_default(),
-            )),
+        Func::StrAfter => match (term(0)?, term(1)?) {
+            (Some(a), Some(b)) => str_before_after(&a, &b, false),
             _ => None,
         },
         Func::Concat => {
             let mut out = String::new();
-            for (i, _) in args.iter().enumerate() {
-                match s(i)? {
-                    Some(v) => out.push_str(&v),
+            let mut kinds = Vec::with_capacity(args.len());
+            for i in 0..args.len() {
+                match term(i)? {
+                    Some(t) => match str_kind(&t) {
+                        Some(k) => {
+                            out.push_str(&literal_value(&t));
+                            kinds.push(k);
+                        }
+                        None => return Ok(None),
+                    },
                     None => return Ok(None),
                 }
             }
-            Some(plain_literal(&out))
+            Some(literal_with_kind(&out, &concat_kind(&kinds)))
         }
         Func::Replace => {
-            let (text, pat, repl) = match (s(0)?, s(1)?, s(2)?) {
+            let (source, pat, repl) = match (term(0)?, s(1)?, s(2)?) {
                 (Some(t), Some(p), Some(r)) => (t, p, r),
                 _ => return Ok(None),
             };
+            let kind = match str_kind(&source) {
+                Some(k) => k,
+                None => return Ok(None),
+            };
+            let text = literal_value(&source);
             let flags = if args.len() == 4 {
                 match s(3)? {
                     Some(f) => f,
@@ -2508,7 +2659,7 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
                 String::new()
             };
             compile_regex(&pat, &flags)
-                .map(|re| plain_literal(&re.replace_all(&text, repl.as_str())))
+                .map(|re| literal_with_kind(&re.replace_all(&text, repl.as_str()), &kind))
         }
         Func::Regex => {
             let (text, pat) = match (s(0)?, s(1)?) {

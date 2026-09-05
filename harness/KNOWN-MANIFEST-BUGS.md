@@ -478,12 +478,12 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-03 with `--engine owlrl`: **374 pass, 133 fail, 40 skip**.
+Measured on 2026-09-05 with `--engine owlrl`: **385 pass, 122 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason.
 
-The 133 reds are listed one-by-one in `expected_failures` in
+The 122 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -496,7 +496,6 @@ cannot rot, and CI catches regressions in both directions.
 |--:|---|---|
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
 | 25 | **Unimplemented builtins**: `BNODE`, `IRI`, `ENCODE_FOR_URI`, `MD5`, `SHA1/256/512`, `STRDT`, `STRLANG`, `UUID`, `STRUUID`, `RAND`, `NOW`, `TZ`, `TIMEZONE`, and the `xsd:` constructor call form. | `functions/`, `aggregates/agg-err-02` |
-| 11 | **Result literals lose their language tag / datatype.** The string builtins (`CONCAT`, `LCASE`, `UCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) and the comparison operators return a plain literal where SPARQL 1.1 §17.4 requires `@lang` / `xsd:boolean` to be carried through. | `functions/`, `project-expression/` |
 | 10 | **Numeric typing** in arithmetic and aggregates: no xsd type promotion (`1.0 + 2` yields `xsd:integer`, not `xsd:decimal`), decimals summed in `f64` (`11.100000000000001`), `CEIL`/`FLOOR`/`ROUND` retype to `xsd:integer`, and `xsd:double` results are not in canonical lexical form (`2E-1` vs `2.0E-1`). | `aggregates/`, `functions/` |
 | 10 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` works; the expression form does not translate. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`MINUS`.** `translate` has no `Minus` arm. | `negation/` |
