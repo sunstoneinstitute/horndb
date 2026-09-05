@@ -1421,10 +1421,25 @@ async fn admission_control_sheds_the_query_past_the_slot_cap() {
     assert_eq!(shed.headers()["retry-after"], "1");
 
     // Dropping a held response drops its receiver, so the blocking task's
-    // next send fails and the slot comes back.
+    // next send fails and the slot comes back — but that happens on the
+    // serializer's blocking-pool thread, with no synchronisation against
+    // this test. Poll with a bounded backoff instead of assuming the slot
+    // is already free by the time the next request lands.
     held.pop();
-    let ok = app.oneshot(req()).await.unwrap();
-    assert_eq!(ok.status(), StatusCode::OK);
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        let resp = app.clone().oneshot(req()).await.unwrap();
+        if resp.status() == StatusCode::OK {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slot was never freed after dropping a held response \
+             (last status: {})",
+            resp.status()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// HDB-118: `/query` and `/update` refuse an oversized request body (413).
