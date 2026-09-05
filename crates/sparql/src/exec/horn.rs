@@ -697,7 +697,7 @@ impl HornBackend {
                 circuit::DERIVED_GRAPH,
             )))
             .map_err(|e| SparqlError::Executor(format!("intern derived graph: {e}")))?;
-        let mut wiring = circuit::Wiring::new(circuit, graph, capacity);
+        let mut wiring = circuit::Wiring::new(circuit, Arc::clone(&self.store), graph, capacity);
         let base: Vec<horndb_incremental::TripleId> = self
             .store
             .snapshot()

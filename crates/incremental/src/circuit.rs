@@ -39,16 +39,17 @@
 //!    tick-local Z-set keyed by `(triple, kind)` publish as non-zero nets
 //!    only, in key order. Asserted records keep per-record publish semantics
 //!    in phase 1 (they are the user's own operations, in the user's order).
-//! 6. Snapshot-cache invalidation + metrics.
+//! 6. Metrics.
 //!
 //! The Stage-1 full recompute (`recompute_rule_closure`) is demoted to a
 //! config-gated debug fallback: `new_with_recompute_fallback()` runs the old
 //! recompute-and-diff regime on retraction ticks, then resyncs the
 //! incremental state from scratch (`resync_incremental_state`).
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+use horndb_storage::{GraphId, Store};
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
 use crate::closure_plan::ClosureRule;
@@ -136,19 +137,17 @@ pub struct Circuit {
     /// `resync_incremental_state`. Insertion-only ticks always use the
     /// unified path.
     recompute_fallback: bool,
-    /// SPEC-06 F7 — lazily-built, cached presence view shared with live
-    /// [`Snapshot`]s. `None` means "stale": the next `snapshot()` rebuilds it
-    /// from the current bases. A state-changing `tick()` invalidates it in O(1)
-    /// (no allocation) so steady-state ticks stay delta-sized; the O(n) build is
-    /// paid only when a reader actually acquires a snapshot, and is reused by
-    /// further acquires until the next tick.
-    version_cache: RefCell<Option<Arc<Zset<TripleId>>>>,
-    /// Logical time the current `version` represents (SPEC-06 F7, INCLUSIVE):
-    /// the last committed asserted-record timestamp. A snapshot reflects every
-    /// record with timestamp ≤ this value. Advances only on ticks that merge
-    /// asserted records (derived-only ticks leave it unchanged; an empty circuit
-    /// stays at 0).
-    version_time: LogicalTime,
+    /// SPEC-24 S6 — the storage view [`Circuit::snapshot`] pins, and the graphs
+    /// whose union is this circuit's `(asserted ∪ derived)` set. `None` until
+    /// [`Circuit::attach_store`] runs: an in-memory-only circuit (unit tests,
+    /// benches) has no reader view.
+    store_view: Option<StoreView>,
+}
+
+/// Where [`Circuit::snapshot`] reads from (SPEC-24 S6, ADR-0018).
+struct StoreView {
+    store: Arc<Store>,
+    graphs: Arc<[GraphId]>,
 }
 
 impl Default for Circuit {
@@ -184,8 +183,7 @@ impl Circuit {
             rule_weights: BTreeMap::new(),
             extent: Zset::new(),
             recompute_fallback,
-            version_cache: RefCell::new(None),
-            version_time: 0,
+            store_view: None,
         }
     }
 
@@ -231,28 +229,39 @@ impl Circuit {
         &self.derived_base
     }
 
-    /// Acquire an MVCC [`Snapshot`] (SPEC-06 F7): a refcounted, consistent
-    /// `(asserted ∪ derived)` view pinned at the current logical time. The
-    /// snapshot survives subsequent `tick()`s until dropped; readers and
-    /// writers never block.
+    /// Bind this circuit's reader view to `store` (SPEC-24 S6). `graphs` are
+    /// the graphs whose union is the circuit's materialized `(asserted ∪
+    /// derived)` set — for the SPEC-24 S4 engine wiring, the default graph
+    /// (asserted rows) plus the derived-mirror graph.
     ///
-    /// Amortized O(1) when the cache is warm (clones an `Arc` of the already
-    /// materialized presence set), O(|asserted| + |derived|) on the first
-    /// acquire after a state-changing `tick()` invalidated the cache. The build
-    /// is paid lazily here rather than on every tick, so steady-state writes
-    /// stay delta-sized.
-    pub fn snapshot(&self) -> Snapshot {
-        let mut cache = self.version_cache.borrow_mut();
-        let view = cache
-            .get_or_insert_with(|| Arc::new(self.materialize_presence()))
-            .clone();
-        Snapshot::new(self.version_time, view)
+    /// The circuit never writes through this handle: the caller that commits
+    /// a tick's batch to storage owns the write path, and this is the read
+    /// side of the same commit versions (ADR-0018, one clock).
+    pub fn attach_store(&mut self, store: Arc<Store>, graphs: Vec<GraphId>) {
+        self.store_view = Some(StoreView {
+            store,
+            graphs: graphs.into(),
+        });
+    }
+
+    /// Acquire an MVCC [`Snapshot`] (SPEC-24 S6): a pinned, consistent
+    /// `(asserted ∪ derived)` view at the store's current commit version.
+    /// O(1) — an `Arc` clone plus a pin-count bump, with no presence set
+    /// materialized in the circuit. The snapshot survives subsequent `tick()`s
+    /// until dropped; readers and writers never block.
+    ///
+    /// `None` until [`Circuit::attach_store`] has bound a store: an
+    /// in-memory-only circuit has nothing to pin (ADR-0018).
+    pub fn snapshot(&self) -> Option<Snapshot> {
+        let view = self.store_view.as_ref()?;
+        Some(Snapshot::new(view.store.pin(), Arc::clone(&view.graphs)))
     }
 
     /// Build the presence-set view `asserted ∪ derived` (each present triple at
     /// multiplicity 1). Positive multiplicities only: a net-zero/negative triple
-    /// is absent. O(|asserted| + |derived|); called lazily from `snapshot()`
-    /// and by the recompute-fallback resync.
+    /// is absent. O(|asserted| + |derived|); used by the recompute-fallback
+    /// resync to rebuild `extent` from scratch. Reader snapshots do NOT go
+    /// through here — they ride storage MVCC (SPEC-24 S6).
     ///
     /// We take only **positive** multiplicities (`m > 0`) — the same presence
     /// rule the whole tick path uses. A net-negative count (a retraction of a
@@ -843,31 +852,17 @@ impl Circuit {
             derived_merged += merged;
         }
 
-        // ---- Phase 5/6: net feed flush, snapshot-cache invalidation, metrics ----
+        // ---- Phase 5/6: net feed flush, metrics ----
         //
-        // SPEC-06 F7: a state-changing tick invalidates the cached snapshot view
-        // (O(1), no allocation). The presence set is rebuilt lazily on the next
-        // snapshot() acquire — so steady-state ticks stay delta-sized and the O(n)
-        // build is only paid when a reader needs it.
+        // SPEC-24 S3: publish the tick's NET derived records.
         //
-        // `version_time` is the **last committed asserted timestamp** (INCLUSIVE):
-        // a snapshot reflects every record with timestamp ≤ `version_time`
-        // (SPEC-06 F7). `logical_time` is the timestamp of the last asserted
-        // record merged this tick — exactly that inclusive `t`. It advances only
-        // when asserted records merged: a derived-only tick adds no new asserted
-        // records and leaves it unchanged, and an empty circuit stays at 0.
-        // SPEC-24 S3: publish the tick's NET derived records. Snapshot
-        // invalidation keys off the RAW emission count — a net-zero tick can
-        // still have moved `closure_support`/`rule_attr` state.
+        // `TickReport::logical_time` is the timestamp of the last asserted
+        // record merged this tick — a per-record counter kept for diagnostics
+        // and for the change feed. It is NOT the reader-visible clock: since
+        // ADR-0018 that is the storage commit version, which
+        // `Snapshot::logical_time()` reports directly.
         let derived_emissions = derived_merged;
         let derived_merged = self.flush_derived_feed();
-
-        if asserted_merged > 0 || derived_emissions > 0 {
-            *self.version_cache.borrow_mut() = None;
-            if asserted_merged > 0 {
-                self.version_time = logical_time;
-            }
-        }
 
         {
             let m = horndb_metrics::metrics();

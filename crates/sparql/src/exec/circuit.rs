@@ -45,8 +45,8 @@ pub const FEED_CAPACITY: usize = 1 << 16;
 
 /// The circuit plus this engine's own subscription to its change feed.
 pub(crate) struct Wiring {
-    /// `Mutex` only for `Sync` (`Circuit` holds a `RefCell`); every access
-    /// goes through `&mut self`, so it is never contended.
+    /// `Mutex` only to keep this struct `Sync` regardless of what `Circuit`
+    /// holds; every access goes through `&mut self`, so it is never contended.
     circuit: Mutex<Circuit>,
     rx: ChangeFeedRx,
     capacity: usize,
@@ -57,8 +57,17 @@ pub(crate) struct Wiring {
 }
 
 impl Wiring {
-    pub(crate) fn new(circuit: Circuit, graph: GraphId, capacity: usize) -> Self {
+    pub(crate) fn new(
+        mut circuit: Circuit,
+        store: std::sync::Arc<ColumnStore>,
+        graph: GraphId,
+        capacity: usize,
+    ) -> Self {
         let rx = circuit.subscribe_bounded(capacity, LagPolicy::DisconnectSlow);
+        // SPEC-24 S6: `Circuit::snapshot()` reads the same store this wiring
+        // writes — the default graph holds the asserted rows, `graph` the
+        // derived mirror.
+        circuit.attach_store(store, vec![horndb_storage::DEFAULT_GRAPH, graph]);
         Self {
             circuit: Mutex::new(circuit),
             rx,
