@@ -6,6 +6,8 @@ on:
     # non-owner re-triggers CI (the gate job below re-evaluates and lets it
     # through). opened/synchronize/reopened are the normal build triggers.
     types: [opened, synchronize, reopened, labeled]
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
@@ -339,3 +341,23 @@ jobs:
       - name: rdflib-compat differential tests
         working-directory: crates/python
         run: python -m pytest tests/ -q
+
+  # Single required check for branch protection / the merge queue. The jobs
+  # above are all conditional on the `gate` decision, so requiring them
+  # directly would block every PR the gate skips (docs-only, unauthorised
+  # fork) forever — GitHub only treats a skipped job as satisfied when
+  # nothing requires it by name. This job aggregates them: skipped counts as
+  # pass (mirrors the gate's own skip semantics), any real failure or
+  # cancellation fails it.
+  checks:
+    needs: [gate, lint, tests, conformance, python-rdflib-compat]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success" or .result == "skipped")' > /dev/null
