@@ -41,7 +41,7 @@ use oxrdf::{NamedOrBlankNode, Term as OxTerm};
 use oxttl::{NTriplesParser, TurtleParser};
 // HDB-113: every file loaded into a `serve --data <dir>` store is renamed
 // per document so blank-node labels from different files never collide.
-use horndb_storage::loader::{scope_blank_node, scope_term};
+use horndb_storage::loader::{load_batch_triples, scope_blank_node, scope_term};
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -658,20 +658,26 @@ fn is_dataset_format(path: &Path) -> bool {
     )
 }
 
-/// Parse one file and bulk-insert its data into the store in a single batch
-/// (O(n) partitions rebuilt, not O(n²)). Returns the number of newly-live
-/// triples/quads. Format is chosen by extension: `.nq`/`.trig` route through
-/// [`horndb_sparql::update::parse_rdf_bytes`] (the same parser call site
-/// `LOAD` uses) so each quad lands in the named graph it carries; anything
-/// else is parsed here directly, `.ttl` as Turtle and everything else
-/// (including `.nt`) as N-Triples, all landing in the default graph.
+/// Parse one file and bulk-insert its data into the store. Returns the number
+/// of newly-live triples/quads. Format is chosen by extension: `.nq`/`.trig`
+/// route through [`horndb_sparql::update::parse_rdf_bytes`] (the same parser
+/// call site `LOAD` uses) so each quad lands in the named graph it carries and
+/// inserts as a single batch; anything else is parsed here directly, `.ttl`
+/// as Turtle and everything else (including `.nt`) as N-Triples, all landing
+/// in the default graph, and streamed into the store every
+/// [`load_batch_triples`] triples rather than collected whole first (HDB-162)
+/// — the same granularity `Store::load_*_file` inserts at, so a `--load` of a
+/// multi-GB file no longer holds it as one `Vec` of owned `oxrdf` terms for
+/// the life of the process.
 ///
 /// Blank-node labels are document-scoped (HDB-113): `serve --data <dir>`
 /// loads several files into one store, so every blank node parsed from this
 /// file is renamed with a fresh per-file tag before it reaches the store —
 /// otherwise `_:b1` in two different files would land on the same node. The
 /// dataset path passes that tag to `parse_rdf_bytes`; the triples path
-/// applies `horndb_storage::loader::scope_blank_node` here.
+/// applies `horndb_storage::loader::scope_blank_node` here. The tag is fixed
+/// once per file, before the flush loop, so every flush chunk of one file
+/// still scopes the same way.
 fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
     if is_dataset_format(path) {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -691,8 +697,15 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
 
     let reader = std::io::BufReader::new(std::fs::File::open(path)?);
     let is_turtle = path.extension().and_then(|e| e.to_str()) == Some("ttl");
-    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::new();
     let tag = store.next_bnode_doc_tag();
+    // HDB-162: flush every `load_batch_triples()` triples — the same
+    // granularity `Store::load_*_file` already inserts at — instead of
+    // collecting the whole file into one `Vec` of owned `oxrdf` terms first.
+    // `tag` is fixed for the whole file above, so every flush chunk still
+    // scopes its blank nodes the same way (HDB-113).
+    let flush_at = load_batch_triples();
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(flush_at);
+    let mut n = 0u64;
     if is_turtle {
         for triple in TurtleParser::new().for_reader(reader) {
             let t = triple.with_context(|| format!("parsing {}", path.display()))?;
@@ -701,6 +714,11 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
                 OxTerm::NamedNode(t.predicate),
                 scope_term(tag, t.object),
             ));
+            if batch.len() >= flush_at {
+                n += store
+                    .insert_oxrdf_batch(std::mem::replace(&mut batch, Vec::with_capacity(flush_at)))
+                    .with_context(|| format!("bulk inserting triples from {}", path.display()))?;
+            }
         }
     } else {
         for triple in NTriplesParser::new().for_reader(reader) {
@@ -710,11 +728,17 @@ fn load_file(store: &mut HornBackend, path: &Path) -> Result<u64> {
                 OxTerm::NamedNode(t.predicate),
                 scope_term(tag, t.object),
             ));
+            if batch.len() >= flush_at {
+                n += store
+                    .insert_oxrdf_batch(std::mem::replace(&mut batch, Vec::with_capacity(flush_at)))
+                    .with_context(|| format!("bulk inserting triples from {}", path.display()))?;
+            }
         }
     }
-    store
+    n += store
         .insert_oxrdf_batch(batch)
-        .with_context(|| format!("bulk inserting triples from {}", path.display()))
+        .with_context(|| format!("bulk inserting triples from {}", path.display()))?;
+    Ok(n)
 }
 
 fn named_or_blank_to_term(tag: u64, n: &NamedOrBlankNode) -> OxTerm {
@@ -876,5 +900,37 @@ mod load_inputs_tests {
     fn absent_config_flag_leaves_cli_config_path_none() {
         let inputs = load_inputs(&bare_cli());
         assert_eq!(inputs.cli_config_path, None);
+    }
+}
+
+#[cfg(test)]
+mod load_file_tests {
+    use super::*;
+    use horndb_sparql::api::{execute_query, QueryAnswer};
+
+    /// HDB-162: `load_file` now flushes into the store every
+    /// `load_batch_triples()` triples instead of collecting the whole file
+    /// first. That must not disturb HDB-113's per-file blank-node scoping —
+    /// two files both using the label `_:b0` must not collapse onto one
+    /// node. `tag` is fixed once per file before the flush loop, so this
+    /// holds regardless of how many times a file's batch flushes.
+    #[test]
+    fn blank_nodes_stay_distinct_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.nt");
+        let f2 = dir.path().join("b.nt");
+        std::fs::write(&f1, "_:b0 <http://ex/p> <http://ex/o1> .\n").unwrap();
+        std::fs::write(&f2, "_:b0 <http://ex/p> <http://ex/o2> .\n").unwrap();
+
+        let mut backend = HornBackend::new();
+        load_file(&mut backend, &f1).unwrap();
+        load_file(&mut backend, &f2).unwrap();
+
+        match execute_query("SELECT DISTINCT ?s WHERE { ?s <http://ex/p> ?o }", &backend).unwrap() {
+            QueryAnswer::Solutions { rows, .. } => {
+                assert_eq!(rows.len(), 2, "the two files' `_:b0` must not collide");
+            }
+            other => panic!("expected solutions, got {other:?}"),
+        }
     }
 }
