@@ -120,8 +120,8 @@ of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
 `SparqlConfig.default_graph` (`lib.rs`, `DefaultGraphMode::{Union, Strict}`)
 comes from `[server.limits].default_graph` — a typed `union | strict` enum in
 `horndb-config`, so a bad value is rejected at startup naming the file and
-key. `serve.rs` puts the whole `[server.limits]` table in `AppState.limits`,
-and each request derives its own `SparqlConfig` from it (see *Per-query
+key. `serve.rs` puts the live config handle in `AppState.config`, and each request
+derives its own `SparqlConfig` from the `[server.limits]` it snapshots (see *Per-query
 settings* below). A single query overrides the mode with the `default_graph`
 URL or form parameter on all three protocol channels (GET, form-POST, direct
 POST); an unparseable value is a 400 naming the key. Spelling:
@@ -132,8 +132,11 @@ same endpoint.
 
 ### Per-query settings (SPEC-26 S4/S5)
 
-`AppState.limits` holds the server-scoped **defaults**. Every `/query`
-request folds the whitelisted URL parameters (and, for a form POST, the body
+`AppState.config` is the live `ServerConfig` (`horndb_config::ConfigHandle`,
+an `ArcSwap` the SPEC-26 S3 reload watcher republishes into). Its
+`[server.limits]` are the server-scoped **defaults**. Every `/query` request
+takes a fresh snapshot — so an operator edit is live for the next request —
+and folds the whitelisted URL parameters (and, for a form POST, the body
 fields, which win) over them into one `horndb_config::QuerySettings`
 (`server/query.rs::resolve_settings`). The whitelist is exactly
 `QuerySettings`' fields; `query`, `default-graph-uri` and `named-graph-uri`
@@ -143,8 +146,10 @@ an unparseable value — is a 400 naming the key, affecting no other query.
 Not to be confused with `AppState.admission` (HDB-118): that is the
 concurrency gate built from three server-only `[server.limits]` keys
 (`max_concurrent_queries`, `queue_timeout`, `max_request_body`), which are
-deliberately outside the per-query whitelist. `AppState.limits` is the whole
-config table.
+deliberately outside the per-query whitelist and are restart-only (the
+semaphore and the body-limit layer are built once at startup, so a reload
+stores a change to them but cannot apply it). `AppState.config` is the whole
+live config.
 
 Enforcement:
 

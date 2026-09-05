@@ -15,6 +15,7 @@ pub mod algebra;
 pub mod api;
 pub mod error;
 pub mod exec;
+pub mod feed;
 pub mod parser;
 pub mod plan;
 #[cfg(feature = "reasoner")]

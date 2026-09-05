@@ -159,8 +159,8 @@ fn checkpoint_export_is_internally_consistent_under_writes() {
 
 /// A pinned snapshot's named-graph view is stable: a named-graph insert that
 /// lands after the snapshot is taken is invisible to it. This is the property
-/// that makes `export_snapshot` race-free — it checks `has_named_graph_data`
-/// and scans the default graph against ONE pinned snapshot.
+/// that makes `export_snapshot` race-free — it enumerates the graphs and scans
+/// each of them against ONE pinned snapshot.
 #[test]
 fn pinned_snapshot_named_graph_view_is_stable() {
     let store = Store::in_memory();

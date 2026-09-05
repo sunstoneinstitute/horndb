@@ -153,12 +153,40 @@ pub fn apply_update<B: FullBackend>(u: &ParsedUpdate, store: &mut B) -> Result<(
     apply_update_with(u, store, &SparqlConfig::default())
 }
 
-/// Apply an update, taking an explicit [`SparqlConfig`].
+/// Apply an update, taking an explicit [`SparqlConfig`]. `feed: None` — the
+/// pre-SPEC-30 call shape, kept for the crate's many existing call sites.
 pub fn apply_update_with<B: FullBackend>(
     u: &ParsedUpdate,
     store: &mut B,
     cfg: &SparqlConfig,
 ) -> Result<()> {
+    apply_update_with_feed(u, store, cfg, None)
+}
+
+/// Apply an update, additionally threading a SPEC-30 applied-position slot
+/// through it. `feed: None` behaves exactly like [`apply_update_with`] — the
+/// slot is left untouched (SPEC-30 §S2: "headers absent -> the update applies
+/// exactly as today").
+///
+/// `feed: Some(fp)`:
+///   1. **Preflight** (D6, before any operation applies):
+///      [`crate::feed::check_feed_id`] refuses the whole request if the slot
+///      already holds a different feed id.
+///   2. The request's operations apply exactly as they do with `feed: None`.
+///   3. **Only if every operation committed** (§S5 — a mid-request error
+///      returns before this point, leaving the slot exactly where it was):
+///      [`crate::feed::advance_slot`] retracts the old slot quads and inserts
+///      the new ones in one further `apply_quads` call.
+pub fn apply_update_with_feed<B: FullBackend>(
+    u: &ParsedUpdate,
+    store: &mut B,
+    cfg: &SparqlConfig,
+    feed: Option<&crate::feed::FeedPosition>,
+) -> Result<()> {
+    if let Some(fp) = feed {
+        crate::feed::check_feed_id(store, fp)?;
+    }
+
     let (ops, source, base_iri) = match u {
         ParsedUpdate::InsertData { inner, source }
         | ParsedUpdate::DeleteData { inner, source }
@@ -228,6 +256,13 @@ pub fn apply_update_with<B: FullBackend>(
             journal.rollback(store);
             return Err(e);
         }
+    }
+
+    // SPEC-30 §S5: the slot advances only once every operation committed. A
+    // request with zero operations still advances it (one slot-only batch) —
+    // headers with no ops is a valid "just record where I am" request.
+    if let Some(fp) = feed {
+        crate::feed::advance_slot(store, fp)?;
     }
     Ok(())
 }
