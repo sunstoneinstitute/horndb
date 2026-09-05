@@ -72,7 +72,17 @@ if [[ " $LEGS " == *" P "* ]]; then
     note "--- exit=$? wall=$(( $(date +%s) - t0 ))s ---"
     tail -8 "$OUT/subst.log" >> "$SUM"
     ls -la "$GEN"/query*SubstParameters.txt 2>&1 | head -15 >> "$SUM"
-  else
+  fi
+  # Fallback: the driver refuses to start without these files. The old set was
+  # built against the 200 k dataset, so its constants are a worse sample of this
+  # corpus - but a stale sample beats a leg that cannot run at all, and it keeps
+  # a slow generation run from costing the whole dispatch.
+  if ! ls "$GEN"/query1SubstParameters.txt >/dev/null 2>&1; then
+    note "no parameters generated - falling back to the old set in $DIST/generated"
+    cp "$DIST"/generated/query*SubstParameters.txt "$GEN"/ 2>&1 >> "$SUM"
+    ls "$GEN"/query*SubstParameters.txt 2>&1 | head -5 >> "$SUM"
+  fi
+  if [ "$ready" != 1 ]; then
     tail -20 "$OUT/serve-subst.log" >> "$SUM"
   fi
   kill $SPID 2>/dev/null; wait $SPID 2>/dev/null; sleep 5
