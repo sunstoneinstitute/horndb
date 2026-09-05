@@ -28,18 +28,41 @@ on by default).
   two never drift on format handling. `--materialize` does not yet support these two
   formats (it collapses everything into one `oxrdf::Dataset` default graph before
   closure) and refuses them at startup rather than silently dropping the graph split.
-- `server::Limits` (HDB-118) is admission control for `/query` plus the
-  `/query`+`/update` request-body cap. A permit is taken in `query.rs::run`
-  before either execution path and **moved into the `spawn_blocking` closure**
+- `server::Limits` (HDB-118) is admission control for `/query` and GSP `GET
+  /graphs`, plus the `/query`+`/update`+`/graphs` request-body cap. A permit is
+  taken in `query.rs::run` before either execution path and **moved into the
+  `spawn_blocking` closure**
   on the streaming path, so it is held until the client has drained the body —
   that task owns a blocking-pool thread, the store read guard and the operator
   tree for the whole stream. Releasing at first chunk would cap nothing. If you
   add another store-touching route, gate it the same way.
 
+## Graph Store Protocol (`/graphs`, SPEC-28 S5)
+
+`server/graph_store.rs` serves the four Graph Store Protocol verbs on one route,
+`/graphs`, with the graph selected by `?graph=<iri>` or `?default`. Read that
+module's header comment before changing it — three rules are load-bearing:
+
+- **`PUT` diffs against base quads only.** The read set is
+  `Store::scan_graph_quads`, which reads asserted quads straight out of storage
+  with no reasoning seam, so a `PUT` never deletes a derived quad (SPEC-29 D5).
+  An empty diff commits nothing.
+- **Reserved graphs are read-only over GSP** — the write verbs call
+  `update.rs::reserved_iri_write_check`, the same closed-namespace rule SPARQL
+  Update uses. Do not re-implement it.
+- **`?default` writes are refused on a `--materialize` store**, because
+  `load_with_reasoning` puts asserted and inferred triples in the default graph
+  indistinguishably. The flag is a one-way process-global (`flag_materialized`),
+  like the inconsistency flag — so its test needs its own test binary
+  (`tests/graph_store_materialized.rs`).
+
+The `sparql11-gsp` conformance suite key and the live-server harness kind that
+drives the W3C `http-rdf-update/` cases are **not** here; they are HDB-165.
+
 ## Operational endpoints (HDB-124)
 
-Alongside `/query`, `/update`, and `/metrics` (`server/mod.rs`), the router serves
-the basics a Kubernetes deployment needs on day one:
+Alongside `/query`, `/update`, `/graphs`, and `/metrics` (`server/mod.rs`), the
+router serves the basics a Kubernetes deployment needs on day one:
 
 - **`GET /healthz`** — always `200`. Proves the process is up and the axum event
   loop answers requests; it does NOT mean the data is loaded. Wire it to a

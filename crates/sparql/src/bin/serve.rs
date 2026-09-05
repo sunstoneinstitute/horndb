@@ -199,6 +199,12 @@ async fn main() -> Result<()> {
     if cli.materialize && !cfg!(feature = "reasoner") {
         anyhow::bail!("--materialize requires the `reasoner` feature");
     }
+    // SPEC-28 S5: the Graph Store Protocol refuses whole-graph writes to
+    // `?default` on a materialized store, where asserted and inferred
+    // triples share the default graph indistinguishably.
+    if cli.materialize {
+        horndb_sparql::server::flag_materialized();
+    }
 
     // HDB-118: admission control + request-body cap from `[server.limits]`.
     // A zero slot count is startup-fatal rather than silently clamped —
