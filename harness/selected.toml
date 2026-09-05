@@ -254,22 +254,6 @@ expected_failures = [
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
 
-    # Result literals lose their language tag / datatype: the string builtins
-    # (CONCAT, LCASE, UCASE, SUBSTR, STRBEFORE, STRAFTER, REPLACE) and the
-    # comparison operators return a plain literal where SPARQL 1.1 §17.4
-    # requires `@lang` / `xsd:boolean` to be carried through.
-    "data-sparql11/functions/manifest#concat02",
-    "data-sparql11/functions/manifest#lcase01",
-    "data-sparql11/functions/manifest#replace01",
-    "data-sparql11/functions/manifest#strafter01a",
-    "data-sparql11/functions/manifest#strafter02",
-    "data-sparql11/functions/manifest#strbefore01a",
-    "data-sparql11/functions/manifest#strbefore02",
-    "data-sparql11/functions/manifest#substring01",
-    "data-sparql11/functions/manifest#substring02",
-    "data-sparql11/functions/manifest#ucase01",
-    "data-sparql11/project-expression/manifest#projexp01",
-
     # Numeric typing in arithmetic and aggregates: no xsd type promotion
     # (`1.0 + 2` yields xsd:integer, not xsd:decimal), decimals are summed in
     # f64 (`11.100000000000001`), CEIL/FLOOR/ROUND retype to xsd:integer, and
