@@ -257,7 +257,9 @@ pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeMap<St
                 walk(inner, out);
             }
             // Structural recursion into every child; leaf nodes are trivially ok.
-            LogicalPlan::Join { left, right } | LogicalPlan::Union { left, right } => {
+            LogicalPlan::Join { left, right }
+            | LogicalPlan::Union { left, right }
+            | LogicalPlan::Minus { left, right } => {
                 walk(left, out);
                 walk(right, out);
             }
@@ -309,6 +311,10 @@ fn coalesce(plan: LogicalPlan) -> LogicalPlan {
             left: Box::new(coalesce(*left)),
             right: Box::new(coalesce(*right)),
             expr,
+        },
+        Minus { left, right } => Minus {
+            left: Box::new(coalesce(*left)),
+            right: Box::new(coalesce(*right)),
         },
         Union { left, right } => Union {
             left: Box::new(coalesce(*left)),

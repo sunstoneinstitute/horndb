@@ -24,7 +24,7 @@ fn router_with_data() -> axum::Router {
     s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -150,7 +150,7 @@ fn router_with_named_graph() -> axum::Router {
     );
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -436,7 +436,7 @@ async fn get_query_returns_json_hornbackend() {
     backend.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -656,7 +656,7 @@ async fn large_select_streams_in_multiple_chunks() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -713,7 +713,7 @@ async fn small_select_replies_with_sized_single_frame_body() {
     }
     let state = AppState {
         store: Arc::new(RwLock::new(s)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -974,7 +974,7 @@ mod streaming_error_semantics {
     async fn exec_error_before_first_chunk_returns_400() {
         let state = AppState {
             store: Arc::new(RwLock::new(FailingScan)),
-            limits: Limits::default(),
+            config: Default::default(),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         };
@@ -1146,7 +1146,7 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(PanicsLate)),
-            limits: Limits::default(),
+            config: Default::default(),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         };
@@ -1197,7 +1197,7 @@ mod streaming_error_semantics {
 
         let state = AppState {
             store: Arc::new(RwLock::new(DecodeFailsLate)),
-            limits: Limits::default(),
+            config: Default::default(),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         };
@@ -1319,7 +1319,7 @@ mod lock_poisoning {
                 inner: MemStore::default(),
                 panicked: false,
             })),
-            limits: Limits::default(),
+            config: Default::default(),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         };
@@ -1395,7 +1395,7 @@ async fn admission_control_sheds_the_query_past_the_slot_cap() {
         store: Arc::new(RwLock::new(s)),
         // `Limits` is `horndb_sparql::server::Limits` in this fn (imported
         // above for `admission`); the config table is inferred here.
-        limits: Default::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Limits::new(SLOTS, Duration::from_millis(100), 4 * 1024 * 1024),
     };
@@ -1437,7 +1437,7 @@ async fn request_body_limit_rejects_oversized_post() {
         store: Arc::new(RwLock::new(MemStore::default())),
         // `Limits` is `horndb_sparql::server::Limits` in this fn (imported
         // above for `admission`); the config table is inferred here.
-        limits: Default::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Limits::new(4, Duration::from_secs(1), 64),
     };
@@ -1502,7 +1502,7 @@ async fn update_completes_while_a_select_is_still_streaming() {
     );
     let state = AppState::<HornBackend> {
         store: Arc::new(RwLock::new(backend)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
@@ -1604,7 +1604,7 @@ mod spec26_query_settings {
         s.insert_triple(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"));
         build_router(AppState {
             store: Arc::new(RwLock::new(s)),
-            limits,
+            config: horndb_config::ConfigHandle::from_limits(limits),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         })
@@ -1621,7 +1621,7 @@ mod spec26_query_settings {
         }
         build_router(AppState {
             store: Arc::new(RwLock::new(s)),
-            limits,
+            config: horndb_config::ConfigHandle::from_limits(limits),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         })
@@ -1709,7 +1709,7 @@ mod spec26_query_settings {
     fn blocking_router(limits: Limits) -> axum::Router {
         build_router(AppState {
             store: Arc::new(RwLock::new(BlocksUntilCancelled)),
-            limits,
+            config: horndb_config::ConfigHandle::from_limits(limits),
             ready: Arc::new(AtomicBool::new(true)),
             admission: Default::default(),
         })

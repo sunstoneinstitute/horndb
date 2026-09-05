@@ -219,6 +219,92 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
     }
 }
 
+/// `MINUS` (SPARQL 1.1 §18.5), probe-side streaming, structurally mirroring
+/// `JoinOp`: the build side (`right`) is drained into a `JoinState` on the
+/// first `next()`, then the probe side (`left`) streams chunk-by-chunk.
+/// Unlike `JoinOp`/`LeftJoinOp`, the output schema is `left`'s alone —
+/// `right`'s columns never surface — and surviving rows pass through
+/// unchanged (`Runtime::probe_minus_chunk` clones them, never merges).
+pub struct MinusOp<'r, E: Executor + ?Sized> {
+    rt: &'r Runtime<'r, E>,
+    left: Box<dyn Op + 'r>,
+    right: Box<dyn Op + 'r>,
+    state: Option<JoinState>,
+    pending: Option<ChunkedBatch>,
+    done: bool,
+    schema: Vec<Var>,
+}
+
+impl<'r, E: Executor + ?Sized> MinusOp<'r, E> {
+    pub fn new(rt: &'r Runtime<'r, E>, left: Box<dyn Op + 'r>, right: Box<dyn Op + 'r>) -> Self {
+        let schema = left.schema().to_vec();
+        Self {
+            rt,
+            left,
+            right,
+            state: None,
+            pending: None,
+            done: false,
+            schema,
+        }
+    }
+}
+
+impl<'r, E: Executor + ?Sized> Op for MinusOp<'r, E> {
+    fn schema(&self) -> &[Var] {
+        &self.schema
+    }
+    fn may_emit_term(&self) -> Vec<bool> {
+        // Output rows are `left` rows verbatim — provenance is `left`'s own.
+        self.left.may_emit_term()
+    }
+    fn next(&mut self) -> Result<Option<Batch>> {
+        loop {
+            // 1. Serve buffered fan-out from the previous probe chunk.
+            if let Some(buf) = self.pending.as_mut() {
+                if let Some(chunk) = buf.next_chunk() {
+                    return Ok(Some(chunk));
+                }
+                self.pending = None;
+            }
+            if self.done {
+                return Ok(None);
+            }
+            // 2. First call: drain the build side (right) and index it. An
+            //    empty build side still streams — every `left` row survives.
+            if self.state.is_none() {
+                let build = drain(&mut self.right)?;
+                let left_may_term = self.left.may_emit_term();
+                let build_rows = build.rows.len() as u64;
+                self.state = Some(phases::timed(ExecPhase::JoinBuild, build_rows, || {
+                    self.rt
+                        .build_join_state(self.left.schema(), &left_may_term, build)
+                })?);
+            }
+            // 3. Stream the probe side, one chunk per iteration.
+            match self.left.next()? {
+                None => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Some(chunk) => {
+                    let st = self.state.as_ref().expect("join state built above");
+                    let chunk_rows = chunk.rows.len() as u64;
+                    let rows = phases::timed(ExecPhase::JoinProbe, chunk_rows, || {
+                        self.rt.probe_minus_chunk(st, &chunk)
+                    })?;
+                    if !rows.is_empty() {
+                        self.pending = Some(ChunkedBatch::new(Batch {
+                            schema: self.schema.clone(),
+                            rows,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Left-outer hash join (OPTIONAL), probe-side streaming (#128): drains the
 /// build side (right, the OPTIONAL pattern) into a `JoinState` on the first
 /// `next()`, then streams the required (left) side chunk-by-chunk.

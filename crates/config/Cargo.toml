@@ -12,8 +12,13 @@ publish = false
 serde = { workspace = true }
 figment = { workspace = true }
 thiserror = { workspace = true }
+# SPEC-26 S3 live reload: the filesystem watcher and the atomic publish cell.
+notify = { workspace = true }
+arc-swap = { workspace = true }
+horndb-metrics = { workspace = true }
 
 [dev-dependencies]
+horndb-metrics = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

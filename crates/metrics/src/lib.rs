@@ -6,6 +6,7 @@
 //! registered with `register_collector`.
 
 pub mod closure;
+pub mod config;
 pub mod feed;
 pub mod incremental;
 pub mod labels;
@@ -33,6 +34,7 @@ pub struct MetricsState {
     pub reasoning: reasoning::ReasoningMetrics,
     pub wcoj: wcoj::WcojMetrics,
     pub simd: simd::SimdMetrics,
+    pub config: config::ConfigMetrics,
 }
 
 impl MetricsState {
@@ -48,6 +50,7 @@ impl MetricsState {
         let reasoning = reasoning::ReasoningMetrics::register(&mut registry);
         let wcoj = wcoj::WcojMetrics::register(&mut registry);
         let simd = simd::SimdMetrics::register(&mut registry);
+        let config = config::ConfigMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
@@ -60,6 +63,7 @@ impl MetricsState {
             reasoning,
             wcoj,
             simd,
+            config,
         }
     }
 

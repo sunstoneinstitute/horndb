@@ -444,11 +444,12 @@ fn multi_op_failing_op_aborts_before_destructive_op() {
 #[test]
 fn multi_op_clear_then_unsupported_where_aborts() {
     // A CLEAR followed by a DELETE WHERE whose WHERE uses an unsupported algebra
-    // construct (MINUS) must abort before the CLEAR mutates — the preflight
-    // translates/plans the WHERE, so the translation failure is caught up front.
+    // construct (SERVICE, HDB-133: MINUS is supported now) must abort before the
+    // CLEAR mutates — the preflight translates/plans the WHERE, so the
+    // translation failure is caught up front.
     let mut store: MemStore = seed(&[("http://ex/a", "http://ex/p", "http://ex/b")]);
     let err = run(
-        "CLEAR DEFAULT ; DELETE { ?s ?p ?o } WHERE { ?s ?p ?o MINUS { ?s ?p ?o } }",
+        "CLEAR DEFAULT ; DELETE { ?s ?p ?o } WHERE { SERVICE <http://ex/svc> { ?s ?p ?o } }",
         &mut store,
     )
     .unwrap_err();

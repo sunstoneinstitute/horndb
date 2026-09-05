@@ -267,3 +267,16 @@ label_value_enum!(FeedOp {
 pub struct FeedOpLabel {
     pub op: FeedOp,
 }
+
+// Outcome of one configuration reload cycle (SPEC-26 S3): the new config
+// validated and was published, or it failed validation and the previous
+// config stayed live.
+label_value_enum!(ReloadResult {
+    Applied => "applied",
+    Rejected => "rejected",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ReloadResultLabel {
+    pub result: ReloadResult,
+}

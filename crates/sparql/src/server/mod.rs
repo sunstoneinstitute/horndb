@@ -139,15 +139,18 @@ pub fn flag_inconsistent() {
 /// (HDB-114). parking_lot never poisons — a panicking handler loses only
 /// its own request.
 ///
-/// `limits` is the resolved `[server.limits]` table (SPEC-26 S2) — the
-/// server-scoped *defaults* for every query-overridable setting. Each
-/// request layers its URL/form overrides on top to get its own
-/// `QuerySettings` (SPEC-26 S4, `query::resolve_settings`); the two of them
-/// that the SPARQL pipeline itself needs (`rdf12`, `default_graph`) become
-/// that request's [`crate::SparqlConfig`]. Not to be confused with
-/// `admission` below: that is this module's [`Limits`] (the concurrency gate
-/// built from three of the same `[server.limits]` keys), this is the whole
-/// config table.
+/// `config` is the live `ServerConfig` (SPEC-26 S3, `horndb_config::ConfigHandle`).
+/// Each request takes a cheap snapshot of it, so an operator edit that the
+/// reload watcher publishes is visible to the very next request without
+/// restarting anything. Its `[server.limits]` table (SPEC-26 S2) holds the
+/// server-scoped *defaults* for every query-overridable setting; the request
+/// layers its URL/form overrides on top to get its own `QuerySettings`
+/// (SPEC-26 S4, `query::resolve_settings`), and the two of those the SPARQL
+/// pipeline itself needs (`rdf12`, `default_graph`) become that request's
+/// [`crate::SparqlConfig`]. Not to be confused with `admission` below: that is
+/// this module's [`Limits`] (the concurrency gate built from three of the same
+/// `[server.limits]` keys), which is restart-only — the semaphore is sized once
+/// at startup.
 ///
 /// `ready` backs `GET /readyz` (HDB-124): `false` until the `serve` binary's
 /// startup data load (and any `--materialize` pass) finishes, then flipped
@@ -160,7 +163,7 @@ pub fn flag_inconsistent() {
 /// the small `limits` table.
 pub struct AppState<B: FullBackend + Send + Sync + 'static = MemStore> {
     pub store: Arc<RwLock<B>>,
-    pub limits: horndb_config::Limits,
+    pub config: horndb_config::ConfigHandle,
     pub ready: Arc<AtomicBool>,
     /// Admission control + request-body cap (HDB-118).
     pub admission: Limits,
@@ -197,7 +200,7 @@ impl<B: FullBackend + Send + Sync + 'static> Clone for AppState<B> {
     fn clone(&self) -> Self {
         Self {
             store: Arc::clone(&self.store),
-            limits: self.limits.clone(),
+            config: self.config.clone(),
             ready: Arc::clone(&self.ready),
             admission: self.admission.clone(),
         }

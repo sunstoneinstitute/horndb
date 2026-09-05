@@ -22,6 +22,10 @@ pub enum ConfigError {
     /// A `config.d` directory was set but could not be read.
     #[error("cannot read config.d directory {dir}: {message}")]
     ConfigDir { dir: PathBuf, message: String },
+
+    /// The live-reload watcher (SPEC-26 S3) could not be established.
+    #[error("cannot watch {path} for config changes: {message}")]
+    Watch { path: PathBuf, message: String },
 }
 
 #[cfg(test)]

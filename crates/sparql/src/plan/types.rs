@@ -176,6 +176,9 @@ pub fn infer(plan: &LogicalPlan) -> VarTypes {
             }
             out
         }
+        // Minus: output is exactly `left`'s rows, unchanged — `right` never
+        // contributes columns or narrows `left`'s types.
+        Minus { left, .. } => infer(left),
         // Union: shared vars union; one-sided vars union-with-UNDEF.
         Union { left, right } => {
             let l = infer(left);
