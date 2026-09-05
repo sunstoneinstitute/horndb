@@ -9,8 +9,10 @@
 #   G  GraphDB Free — bulk-loaded offline (`preload`/`importrdf`). The old
 #      bootstrap POSTs the file over HTTP, which is hours at this scale.
 #   O  Oxigraph — both persisted stores, via the existing bootstrap script.
+#   L  link the new dataset and generation dir into the asset tree under new
+#      names, so the nightly only switches over once every engine is loaded.
 #
-# Knobs: DATASET, LEGS (default "P G O"), GRAPHDB_HEAP.
+# Knobs: DATASET, LEGS (default "P G O L"), GRAPHDB_HEAP.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 OUT="$PWD/bench-out"; mkdir -p "$OUT"
@@ -22,7 +24,7 @@ DATASET="${DATASET:-$WORK/spb-sf256.nt}"
 GEN="${GEN_DIR:-$WORK/generated-sf256}"
 BIND="${HORNDB_BIND:-127.0.0.1:3842}"
 JAR="$DIST/semantic_publishing_benchmark-basic-standard.jar"
-LEGS="${LEGS:-P G O}"
+LEGS="${LEGS:-P G O L}"
 VER="${GRAPHDB_VERSION:-10.8.14}"
 GDB_BASE="${GRAPHDB_HOME_BASE:-/home/bench/graphdb}"
 GDB_HOME="$GDB_BASE/home${VER%%.*}"
@@ -150,6 +152,18 @@ if [[ " $LEGS " == *" O "* ]]; then
   note "--- exit=$? wall=$(( $(date +%s) - t0 ))s ---"
   tail -10 "$OUT/oxigraph.log" >> "$SUM"
   du -sh /home/bench/oxigraph/spb-store /home/bench/oxigraph/spb-store-optimized >> "$SUM" 2>&1
+  end
+fi
+
+# --- L: publish into the asset tree -----------------------------------------
+if [[ " $LEGS " == *" L "* ]]; then
+  sec "L . link the dataset into the SPB asset tree"
+  # New names, so the old 512 k `spb-256.nt` / `generated` stay in place and the
+  # nightly keeps working on them until the workflow change lands.
+  ln -sfn "$DATASET" "$DIST/spb-sf256.nt"
+  ln -sfn "$GEN"     "$DIST/generated-sf256"
+  ls -la "$DIST/spb-sf256.nt" "$DIST/generated-sf256" >> "$SUM" 2>&1
+  ls "$DIST/generated-sf256/" | head -5 >> "$SUM" 2>&1
   end
 fi
 
