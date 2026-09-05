@@ -39,6 +39,12 @@ grep -E '^(aggregationAgents|editorialAgents|datasetSize|creativeWorksPath|query
 ls -la "$DIST/generated-sf256/dataset.info" "$DIST/generated-sf256/query1SubstParameters.txt" >> "$SUM" 2>&1
 end
 
+sec "editorial query templates the agents will execute"
+for f in "$DIST"/data/sparql/editorial/*.txt; do
+  echo "===== $f ====="; head -40 "$f"
+done >> "$SUM" 2>&1
+end
+
 cargo build -p horndb-harness --bin harness --release --features real-engine >"$OUT/build.log" 2>&1 \
   || { note "harness build FAILED"; tail -20 "$OUT/build.log" >> "$SUM"; exit 1; }
 
