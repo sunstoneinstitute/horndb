@@ -478,13 +478,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-05 with `--engine owlrl`: **397 pass, 110 fail, 40 skip**
-(HDB-131 fixed 9 cases: arithmetic and the aggregates now promote xsd numeric
-types and emit canonical lexical forms). The 40 skips are test types the
-harness does not grade at all (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`,
-`mf:CSVResultFormatTest`); they report with the type IRI in the reason.
+Measured on 2026-09-05 with `--engine owlrl`: **401 pass, 106 fail, 40 skip**.
+The 40 skips are test types the harness does not grade at all
+(`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
+report with the type IRI in the reason. Which task fixed what is in the git log
+and in the per-root-cause tables below, not restated here — every branch that
+moved these numbers used to conflict on this paragraph.
 
-The 110 reds are listed one-by-one in `expected_failures` in
+The 106 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -500,7 +501,6 @@ cannot rot, and CI catches regressions in both directions.
 | 14 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` (i.e. `MINUS`) works (HDB-133); the expression form does not translate. Includes 4 `negation/` cases whose `MINUS` right-hand pattern itself contains a `FILTER NOT EXISTS`. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
-| 4 | **`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination graph empty**, so the trailing `DROP GRAPH :g2` errors under SPEC-28 D11 (a graph holding no quad does not exist). | `basic-update/` |
 | 1 | **A comparison operator returns a value where §17.4 requires an expression error**, so `IF` takes the wrong branch and the variable stays bound instead of dropping out. | `functions/if02` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 
@@ -511,3 +511,18 @@ cannot rot, and CI catches regressions in both directions.
 | 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
 | 4 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in a blank node's label (`_:b` vs `_:b0`); every other cell of every row matches. | `json-res/jsonres01`, `jsonres02`, `functions/plus-1`, `plus-2` |
 | 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |
+
+## ~~`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` never reaches its `DROP`~~ — FIXED (HDB-137)
+
+Four `basic-update/` cases (`insert-05a`, `insert-data-same-bnode`,
+`insert-where-same-bnode`, `insert-where-same-bnode2`). The cross-graph copy
+itself always worked; two other bugs stopped the requests:
+
+1. The multi-operation atomicity preflight judged D11 graph existence for
+   *every* operation against the pre-request store, so `DROP GRAPH :g2` was
+   rejected before the earlier `INSERT` that creates `:g2` had run. Existence
+   is now preflighted for the first operation only; later ones are checked at
+   apply time, where the rollback journal already covers a failure.
+2. A blank node in an `INSERT` template was scoped to the solution row but not
+   to the operation, so `_:b` written by two operations of one request landed
+   on the same node. It now also carries a per-operation tag.

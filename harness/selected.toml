@@ -241,14 +241,6 @@ expected_failures = [
     "data-sparql11/subquery/manifest#subquery12",
     "data-sparql11/subquery/manifest#subquery14",
 
-    # `INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination
-    # graph empty, so the trailing `DROP GRAPH :g2` errors (SPEC-28 D11: a
-    # graph holding no quad does not exist).
-    "data-sparql11/basic-update/manifest#insert-05a",
-    "data-sparql11/basic-update/manifest#insert-data-same-bnode",
-    "data-sparql11/basic-update/manifest#insert-where-same-bnode",
-    "data-sparql11/basic-update/manifest#insert-where-same-bnode2",
-
     # Upstream `.srx` head quirk: the result header omits a projected variable
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.

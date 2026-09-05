@@ -55,7 +55,11 @@
 //! `ADD`/`MOVE`/`COPY` hints, then `validate_op` per operation (reserved
 //! namespace, D11 existence, `LOAD` routing/fetch). This is why `COPY <absent>
 //! TO DEFAULT` — which desugars to a destructive `Drop{DEFAULT}` + a copy from
-//! a missing source — never clears the default graph.
+//! a missing source — never clears the default graph. D11 existence is
+//! preflighted for the **first** operation only: the pre-update store is the
+//! one only that operation runs on, so checking it for the rest rejected
+//! requests that are legal in request order (`INSERT { GRAPH <g> … } WHERE
+//! { … } ; DROP GRAPH <g>`).
 //!
 //! *Rollback* ([`Journal`]) covers what preflight cannot see: a later operation
 //! that fails only because an earlier one in the same request changed the store
@@ -228,10 +232,18 @@ pub fn apply_update_with_feed<B: FullBackend>(
     }
 
     // Atomicity part 2: preflight every op for the remaining errors it would
-    // hit at apply time — reserved namespace, D11 existence (against the
-    // pre-update store), `LOAD` routing/fetch. See the module doc.
-    for op in ops {
-        validate_op(op, cfg, store)?;
+    // hit at apply time — reserved namespace, D11 existence, `LOAD`
+    // routing/fetch. See the module doc.
+    //
+    // D11 existence is only knowable up front for the *first* operation: every
+    // later one runs against a store the earlier ones may have changed, so
+    // checking it here rejects requests that are legal in request order —
+    // `INSERT { GRAPH <g> … } WHERE { … } ; DROP GRAPH <g>` creates `<g>`
+    // before it drops it. Later ops keep the store-independent checks, and
+    // have their existence checked at apply time, where [`Journal`] rolls the
+    // whole request back on failure.
+    for (i, op) in ops.iter().enumerate() {
+        validate_op(op, cfg, store, i == 0)?;
     }
 
     // Atomicity part 3: ops apply in request order against the live store (so
@@ -411,19 +423,21 @@ impl Journal {
 /// check, which runs once over the recovered hints in [`apply_update_with`].
 ///
 /// Two apply-time checks read state the preflight cannot see, so they cannot be
-/// mirrored exactly: (a) D11 existence (read here against the *pre-update*
-/// store), and (b) a reserved-graph write through a **variable** template graph
-/// (`resolve_graph_name` can only test it once a WHERE row binds the variable).
-/// In both, the POLICY still fires unconditionally — a reserved write always
-/// errors, a missing/existing graph always errors — so what preflight misses is
-/// only the *timing*: a later op whose D11 existence an earlier op flipped, or
-/// a variable-bound reserved write an earlier op's mutation preceded, fails at
-/// apply time rather than up front. [`Journal`] covers that case — the failure
-/// rolls the whole request back, so the request still mutates nothing.
+/// mirrored exactly: (a) D11 existence, which only the *first* operation reads
+/// against the store it will actually run on — hence `check_existence`, set for
+/// that op alone, since every later one runs against a store the earlier ones
+/// may have changed — and (b) a reserved-graph write through a **variable**
+/// template graph (`resolve_graph_name` can only test it once a WHERE row binds
+/// the variable). In both, the POLICY still fires unconditionally — a reserved
+/// write always errors, a missing/existing graph always errors — so what
+/// preflight misses is only the *timing*: the op fails at apply time rather
+/// than up front. [`Journal`] covers that case — the failure rolls the whole
+/// request back, so the request still mutates nothing.
 fn validate_op<B: FullBackend>(
     op: &GraphUpdateOperation,
     cfg: &SparqlConfig,
     store: &B,
+    check_existence: bool,
 ) -> Result<()> {
     match op {
         GraphUpdateOperation::InsertData { data } => {
@@ -447,15 +461,15 @@ fn validate_op<B: FullBackend>(
             pattern,
         } => validate_delete_insert(delete, insert, pattern, cfg),
         GraphUpdateOperation::Clear { silent, graph } => {
-            validate_clear_drop("CLEAR", *silent, graph, store)
+            validate_clear_drop("CLEAR", *silent, graph, store, check_existence)
         }
         GraphUpdateOperation::Drop { silent, graph } => {
-            validate_clear_drop("DROP", *silent, graph, store)
+            validate_clear_drop("DROP", *silent, graph, store, check_existence)
         }
         GraphUpdateOperation::Create { silent, graph } => {
             let iri = graph.as_str();
             reserved_iri_write_check(iri)?;
-            if store.graph_exists(iri) && !*silent {
+            if check_existence && store.graph_exists(iri) && !*silent {
                 return Err(create_graph_exists_error(iri));
             }
             Ok(())
@@ -499,19 +513,21 @@ fn reserved_iri_write_check(iri: &str) -> Result<()> {
 // ── CLEAR / DROP (D11) ───────────────────────────────────────────────────────
 
 /// Preflight for `CLEAR`/`DROP`: reserved-namespace check (not suppressible),
-/// then D11 existence for a single named target.
+/// then — only while `check_existence` says the store still reads as it did
+/// before the request — D11 existence for a single named target.
 fn validate_clear_drop<B: FullBackend>(
     verb: &str,
     silent: bool,
     graph: &GraphTarget,
     store: &B,
+    check_existence: bool,
 ) -> Result<()> {
     match graph {
         GraphTarget::DefaultGraph | GraphTarget::AllGraphs | GraphTarget::NamedGraphs => Ok(()),
         GraphTarget::NamedNode(n) => {
             let iri = n.as_str();
             reserved_iri_write_check(iri)?;
-            if !store.graph_exists(iri) && !silent {
+            if check_existence && !store.graph_exists(iri) && !silent {
                 return Err(missing_graph_error(verb, iri));
             }
             Ok(())
@@ -701,15 +717,18 @@ fn apply_delete_insert<B: FullBackend>(
             }
         }
     }
-    // Insertions allocate fresh blank nodes per solution row.
+    // Insertions allocate fresh blank nodes: a template blank node is scoped to
+    // this operation *and* to the solution row (SPARQL 1.1 §4.1.4, §3.1.3), so
+    // the same `_:b` written in two operations of one request is two nodes.
+    let scope = store.next_bnode_doc_tag();
     let mut adds: Vec<AlgebraQuad> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         for q in insert {
             if let (Some(g), Some(s), Some(p), Some(o)) = (
                 resolve_graph_name(&q.graph_name, row)?,
-                resolve_term(&q.subject, row, i).and_then(subject_or_skip),
+                resolve_term(&q.subject, row, scope, i).and_then(subject_or_skip),
                 resolve_pred(&q.predicate, row),
-                resolve_term(&q.object, row, i),
+                resolve_term(&q.object, row, scope, i),
             ) {
                 adds.push((g, s, p, o));
             }
@@ -1450,15 +1469,24 @@ fn ground_quad_has_triple_term(q: &GroundQuadPattern) -> bool {
 }
 
 /// Resolve an INSERT-template `TermPattern` against a solution row.
-/// `row_ix` scopes per-solution blank nodes (SPARQL 1.1 §4.1.4). `None` when a
-/// variable slot is unbound (the caller drops the triple).
 ///
-/// Lockstep invariant: mirrors `runtime.rs::construct_triples`'s `resolve_term`.
-fn resolve_term(t: &TermPattern, row: &Bindings, row_ix: usize) -> Option<Term> {
+/// A template blank node gets a label unique to this operation and this row
+/// (SPARQL 1.1 §4.1.4): `scope` is the per-operation tag from
+/// `exec::Store::next_bnode_doc_tag`, `row_ix` the solution index. Without the
+/// per-operation half, `_:b` in two operations of one request — or in two
+/// separate requests — would land on the same node.
+///
+/// `None` when a variable slot is unbound (the caller drops the triple).
+fn resolve_term(t: &TermPattern, row: &Bindings, scope: u64, row_ix: usize) -> Option<Term> {
     match t {
         TermPattern::NamedNode(n) => Some(Term::Iri(n.as_str().to_owned())),
         TermPattern::Literal(l) => Some(Term::Literal(l.to_string())),
-        TermPattern::BlankNode(b) => Some(Term::BlankNode(format!("{}_r{row_ix}", b.as_str()))),
+        TermPattern::BlankNode(b) => Some(Term::BlankNode(
+            horndb_storage::loader::scope_blank_node_label(
+                scope,
+                &format!("{}_r{row_ix}", b.as_str()),
+            ),
+        )),
         TermPattern::Variable(v) => row.get(v.as_str()).cloned(),
         // Rejected up front in `validate_delete_insert`; kept exhaustive.
         TermPattern::Triple(_) => None,

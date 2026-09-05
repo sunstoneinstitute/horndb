@@ -1323,3 +1323,90 @@ fn silent_uchar_escaped_source_clears_dst_mem() {
 fn silent_uchar_escaped_source_clears_dst_horn() {
     silent_uchar_escaped_source_clears_dst::<HornBackend>();
 }
+
+// ── Multi-op requests derive one graph from another (HDB-137) ────────────────
+
+/// `INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … } ; DROP GRAPH :g2` — the W3C
+/// `basic-update/insert-05a` shape. The `DROP` is legal because the earlier
+/// `INSERT` creates `:g2`; the atomicity preflight must not judge its D11
+/// existence against the pre-request store.
+fn cross_graph_insert_where_then_drop<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://g/1"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    run(
+        "INSERT { GRAPH <http://g/2> { ?s ?p ?o } } WHERE { GRAPH <http://g/1> { ?s ?p ?o } } ; \
+         DROP GRAPH <http://g/2>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/1"), 1, "source untouched");
+    assert_eq!(count_graph(&store, "http://g/2"), 0, "destination dropped");
+}
+
+#[test]
+fn cross_graph_insert_where_then_drop_mem() {
+    cross_graph_insert_where_then_drop::<MemStore>();
+}
+#[test]
+fn cross_graph_insert_where_then_drop_horn() {
+    cross_graph_insert_where_then_drop::<HornBackend>();
+}
+
+/// A `DROP` of a graph no operation in the request creates still errors, and
+/// the journal rolls the earlier insert back (§3.1.3).
+fn drop_absent_graph_after_insert_rolls_back<B: FullBackend + Default>() {
+    let mut store = B::default();
+    let err = run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } } ; \
+         DROP GRAPH <http://g/absent>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_graph(&store, "http://g/1"), 0, "request rolled back");
+}
+
+#[test]
+fn drop_absent_graph_after_insert_rolls_back_mem() {
+    drop_absent_graph_after_insert_rolls_back::<MemStore>();
+}
+#[test]
+fn drop_absent_graph_after_insert_rolls_back_horn() {
+    drop_absent_graph_after_insert_rolls_back::<HornBackend>();
+}
+
+/// `_:b` written by two `INSERT … WHERE` operations of one request is two
+/// distinct blank nodes (SPARQL 1.1 §4.1.4), so copying `:g1` into `:g2`
+/// leaves `:g2` with two triples — the W3C `insert-where-same-bnode` shape.
+/// Sharing one label would collapse them into one.
+fn template_bnode_is_fresh_per_operation<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "INSERT { GRAPH <http://g/1> { _:b <http://ex/p> <http://ex/o> } } WHERE {} ; \
+         INSERT { GRAPH <http://g/2> { _:b <http://ex/p> <http://ex/o> } } WHERE {} ; \
+         INSERT { GRAPH <http://g/2> { ?s ?p ?o } } WHERE { GRAPH <http://g/1> { ?s ?p ?o } }",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/1"), 1);
+    assert_eq!(
+        count_graph(&store, "http://g/2"),
+        2,
+        "the two template blank nodes must not collapse into one"
+    );
+}
+
+#[test]
+fn template_bnode_is_fresh_per_operation_mem() {
+    template_bnode_is_fresh_per_operation::<MemStore>();
+}
+#[test]
+fn template_bnode_is_fresh_per_operation_horn() {
+    template_bnode_is_fresh_per_operation::<HornBackend>();
+}
