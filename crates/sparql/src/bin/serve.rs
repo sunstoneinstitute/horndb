@@ -207,6 +207,20 @@ async fn main() -> Result<()> {
         cfg.server.limits.max_request_body.0 as usize,
     );
 
+    // SPEC-26 S3: publish the resolved config behind an `ArcSwap` and start the
+    // file watcher over it. Handlers snapshot the handle per request, so a hot
+    // key (`[server.limits]` bar the three admission keys, `[logging]`,
+    // `[reload]`) edited on disk takes effect on the next request. A restart-only
+    // key is stored — a later restart honours it — and logged as needing a
+    // restart; in particular the watcher never re-applies `[simd]`, whose ISA
+    // selection and calibration already ran above.
+    //
+    // The watcher guard must outlive `axum::serve`: dropping it stops following
+    // file edits.
+    let config_handle = horndb_config::ConfigHandle::new(cfg.clone());
+    let _config_watcher = horndb_config::watch(inputs, config_handle.clone())
+        .context("starting the config reload watcher")?;
+
     // HDB-124: bind and start serving BEFORE the (potentially multi-minute,
     // no-persistence-yet) data load, so `/healthz` (process up) and `/readyz`
     // (503 until loaded) are both reachable during the load — a Kubernetes
@@ -216,14 +230,14 @@ async fn main() -> Result<()> {
     // dead process.
     let store = Arc::new(RwLock::new(HornBackend::new()));
     let ready = Arc::new(AtomicBool::new(false));
-    // SPEC-26 S2: the server holds the `[server.limits]` *defaults*; each
-    // request layers its own URL/form overrides on top (S4). No domain check
-    // is needed here — unlike the free-string `[simd].max_isa` above, every
-    // limits field is typed, so a bad value already failed
-    // `horndb_config::load()`, with file+key attribution.
+    // SPEC-26 S2/S3: the server holds the live config; its `[server.limits]`
+    // are the *defaults* each request layers its own URL/form overrides on top
+    // of (S4). No domain check is needed here — unlike the free-string
+    // `[simd].max_isa` above, every limits field is typed, so a bad value
+    // already failed `horndb_config::load()`, with file+key attribution.
     let state = AppState::<HornBackend> {
         store: Arc::clone(&store),
-        limits: cfg.server.limits.clone(),
+        config: config_handle.clone(),
         ready: Arc::clone(&ready),
         admission,
     };

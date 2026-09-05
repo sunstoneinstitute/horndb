@@ -44,7 +44,7 @@ mod tests {
     fn state(ready: bool) -> AppState<MemStore> {
         AppState {
             store: Arc::new(RwLock::new(MemStore::default())),
-            limits: horndb_config::Limits::default(),
+            config: Default::default(),
             ready: Arc::new(AtomicBool::new(ready)),
             admission: Default::default(),
         }
