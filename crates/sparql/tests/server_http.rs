@@ -755,6 +755,167 @@ async fn small_select_replies_with_sized_single_frame_body() {
     assert_eq!(v["results"]["bindings"].as_array().unwrap().len(), 3);
 }
 
+/// SPEC-30 P1 §S2/§S3 — the applied-position slot's HTTP surface:
+/// `X-HornDB-Feed-Id` / `X-HornDB-Feed-Position` on `POST /update`, and
+/// reading the slot back through an ordinary ground-`GRAPH` query (the S2
+/// read path this plan does not need to build — PLAN-28-03 already ships
+/// it). `PLAN-30-01-applied-position-slot.md` Task 2.
+mod feed_slot_http {
+    use super::*;
+
+    const FEED_QUERY: &str =
+        "/query?query=SELECT%20%3Fp%20%3Fo%20WHERE%20%7B%20GRAPH%20%3Chttps%3A%2F%2Fhorndb.io%2Fgraph%2Ffeed%3E%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20%7D";
+
+    async fn post_update(
+        app: axum::Router,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/update")
+            .header("content-type", "application/sparql-update");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        let resp = app
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// The feed graph's `?p ?o` bindings as `(predicate suffix, value)`
+    /// pairs, read through `/query` — the S2 read-path acceptance.
+    async fn feed_bindings(app: axum::Router) -> Vec<(String, String)> {
+        let req = Request::builder()
+            .uri(FEED_QUERY)
+            .header("accept", "application/sparql-results+json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["results"]["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let p = row["p"]["value"].as_str().unwrap().to_owned();
+                let o = row["o"]["value"].as_str().unwrap().to_owned();
+                (p, o)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn update_with_feed_headers_advances_slot() {
+        let app = router_with_data();
+        let (status, body) = post_update(
+            app.clone(),
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }",
+            &[
+                ("x-horndb-feed-id", "feed-1"),
+                ("x-horndb-feed-position", "tok-1"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "body: {body}");
+
+        let bindings = feed_bindings(app).await;
+        assert!(bindings
+            .iter()
+            .any(|(p, o)| p.ends_with("feed#position") && o == "tok-1"));
+        assert!(bindings
+            .iter()
+            .any(|(p, o)| p.ends_with("feed#id") && o == "feed-1"));
+    }
+
+    #[tokio::test]
+    async fn position_without_id_is_400() {
+        let app = router_with_data();
+        let (status, body) = post_update(
+            app,
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }",
+            &[("x-horndb-feed-position", "tok-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.contains("X-HornDB-Feed-Id"));
+        assert!(body.contains("X-HornDB-Feed-Position"));
+    }
+
+    #[tokio::test]
+    async fn feed_id_mismatch_is_409_naming_both() {
+        let app = router_with_data();
+        let (status, body) = post_update(
+            app.clone(),
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }",
+            &[
+                ("x-horndb-feed-id", "feed-a"),
+                ("x-horndb-feed-position", "tok-1"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "body: {body}");
+
+        let (status, body) = post_update(
+            app,
+            "INSERT DATA { <http://ex/z> <http://ex/p> <http://ex/w> }",
+            &[
+                ("x-horndb-feed-id", "feed-b"),
+                ("x-horndb-feed-position", "tok-2"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        assert!(
+            body.contains("feed-a"),
+            "body must name the slot's id: {body}"
+        );
+        assert!(
+            body.contains("feed-b"),
+            "body must name the request's id: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn slot_survives_within_process() {
+        let app = router_with_data();
+        let (status, _) = post_update(
+            app.clone(),
+            "INSERT DATA { <http://ex/x> <http://ex/p> <http://ex/y> }",
+            &[
+                ("x-horndb-feed-id", "feed-1"),
+                ("x-horndb-feed-position", "tok-1"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // A second request with no feed headers must not disturb the slot.
+        let (status, _) = post_update(
+            app.clone(),
+            "INSERT DATA { <http://ex/z> <http://ex/p> <http://ex/w> }",
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let bindings = feed_bindings(app).await;
+        assert!(bindings
+            .iter()
+            .any(|(p, o)| p.ends_with("feed#position") && o == "tok-1"));
+    }
+}
+
 mod streaming_error_semantics {
     use super::*;
     use horndb_sparql::algebra::{TriplePattern, Var};
