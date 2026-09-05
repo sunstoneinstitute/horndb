@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use horndb_metrics::labels::{ReloadResult, ReloadResultLabel};
@@ -217,16 +217,51 @@ fn watch_error(path: &Path, e: &notify::Error) -> ConfigError {
     }
 }
 
+/// How long to wait before re-reading the sources to confirm the operator has
+/// finished writing. See [`reload_once`].
+const SETTLE_RECHECK: Duration = Duration::from_millis(25);
+
 /// One reload cycle: re-resolve and validate; publish on success, keep the
 /// current config and count a rejection on failure.
 ///
 /// A cycle whose result is byte-for-byte the config already live publishes
 /// nothing and counts nothing — a touched-but-unchanged file, or an event for
 /// an unrelated file in a watched directory, is not a new generation.
+///
+/// **Editing a config file in place is not atomic.** `std::fs::write`, a shell
+/// `>` redirect and most config-management tools truncate first and write
+/// after, so a reload that lands in that window reads an empty or half-written
+/// file. Such a file often still parses — an empty TOML file always does — and
+/// every absent key then silently takes its default, which would publish limits
+/// the operator never wrote and count it as `applied`. Two guards stop that:
+///
+/// 1. A zero-length base file is a truncation in progress, never "the operator
+///    wants all defaults". (At startup an empty file *is* taken at face value;
+///    only a live edit can race with a writer.)
+/// 2. The load has to come back identical twice, [`SETTLE_RECHECK`] apart, so a
+///    file still being extended — a `config.d` fragment a script appends in
+///    chunks, say — is not published mid-write.
+///
+/// Either guard tripping skips the cycle and counts nothing. The write that is
+/// still in flight raises its own filesystem event, which drives the next
+/// attempt.
 fn reload_once(inputs: &LoadInputs, handle: &ConfigHandle) {
     let m = &horndb_metrics::metrics().config;
+    let (base_path, _) = resolve_base_path(inputs);
+    if base_path.metadata().is_ok_and(|md| md.len() == 0) {
+        eprintln!(
+            "config: {} is empty — treating it as a write in progress, not reloading",
+            base_path.display()
+        );
+        return;
+    }
     match load(inputs) {
         Ok(new) => {
+            std::thread::sleep(SETTLE_RECHECK);
+            if load(inputs).ok().as_ref() != Some(&new) {
+                eprintln!("config: sources changed while being read — not reloading yet");
+                return;
+            }
             let old = handle.current();
             if *old == new {
                 return;

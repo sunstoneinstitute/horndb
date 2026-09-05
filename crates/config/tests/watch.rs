@@ -124,6 +124,43 @@ fn invalid_edit_keeps_the_previous_config() {
     assert_eq!(handle.current().server.limits.max_result_rows, 11);
 }
 
+/// HDB-156: editing in place is not atomic — between the truncate and the
+/// write the file is empty, and an empty TOML file parses fine, so every key
+/// would silently take its default. A reload that lands in that window must
+/// publish nothing: the previous config stays live and nothing counts as
+/// `applied`.
+#[test]
+fn truncation_window_is_not_published_as_defaults() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (handle, _w) = start(&dir, "[server.limits]\nmax_result_rows = 10\n");
+
+    // Truncate and stall, the way a loaded machine can stall a `>` redirect
+    // between opening the file and writing it. 400 ms is many debounce
+    // intervals, so the watcher definitely reads the file while it is empty.
+    let mut f = std::fs::File::create(dir.path().join("config.toml")).unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        handle.current().server.limits.max_result_rows,
+        10,
+        "a truncated file must not replace the live config with schema defaults"
+    );
+    assert_eq!(
+        handle.generation(),
+        1,
+        "a truncated read is not a generation"
+    );
+    assert_eq!(reload_count(ReloadResult::Applied), 0);
+
+    // Finishing the write applies the edit the operator actually made.
+    f.write_all(b"[reload]\ndebounce = \"20ms\"\n[server.limits]\nmax_result_rows = 11\n")
+        .unwrap();
+    drop(f);
+    wait_for("the completed write", || handle.generation() == 2);
+    assert_eq!(handle.current().server.limits.max_result_rows, 11);
+}
+
 /// AC4: an atomic rename-into-place save (write temp, rename over the target —
 /// what most editors and config-management tools do) replaces the file's inode.
 /// The watcher must survive it, and must survive a *second* one, which is what

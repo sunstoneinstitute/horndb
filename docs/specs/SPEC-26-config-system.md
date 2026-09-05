@@ -226,6 +226,14 @@ Re-apply config when files change, without dropping the running server.
   handlers read a cheap snapshot per request. On validation failure, **keep the
   current config**, log the error (file + key), and increment the rejected-reload
   metric. A bad edit never takes the server down or leaves it half-applied.
+- **Half-written files.** Editing a config file in place is not atomic: a `>`
+  redirect (and most config-management tools) truncate first and write after, so
+  a reload can land while the file is empty or half-written. An empty TOML file
+  parses fine, so publishing it would silently reset every key to its default.
+  The watcher therefore never reloads from a zero-length base file, and requires
+  the load to come back identical twice a short interval apart. A read that
+  trips either guard publishes nothing and counts nothing — neither `applied`
+  nor `rejected`; the writer's own filesystem event drives the next attempt.
 - **Hot vs restart-only.** `[server.limits]`, `[logging]`, `[reload]` take effect
   on the next request/operation after a successful reload. `[server].bind`,
   `[simd]` (ISA selection and calibration run once at startup), and the `--data`
