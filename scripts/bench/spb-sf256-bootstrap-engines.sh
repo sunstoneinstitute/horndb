@@ -51,7 +51,10 @@ if [[ " $LEGS " == *" P "* ]]; then
   cargo build --release -p horndb-sparql --bin serve --features server >"$OUT/build.log" 2>&1 \
     || { note "BUILD FAILED"; tail -20 "$OUT/build.log" >> "$SUM"; end; exit 1; }
   t0=$(date +%s)
-  ./target/release/serve --bind "$BIND" --data "$DATASET" > "$OUT/serve-subst.log" 2>&1 &
+  # The server's own `[server.limits].query_timeout` defaults to 30s and is what
+  # cancelled these with 504 last time — no driver-side setting can raise it.
+  HORNDB_SERVER__LIMITS__QUERY_TIMEOUT="${HORNDB_QUERY_TIMEOUT:-1800s}" \
+    ./target/release/serve --bind "$BIND" --data "$DATASET" > "$OUT/serve-subst.log" 2>&1 &
   SPID=$!; ready=0
   for i in $(seq 1 5400); do
     curl -fsS "http://$BIND/readyz" >/dev/null 2>&1 && { ready=1; break; }
@@ -112,24 +115,20 @@ if [[ " $LEGS " == *" G "* ]]; then
      ]
    ] .
 TTL
-  note "bulk loaders available:"; ls "$GDB_BASE/graphdb-$VER/bin" >> "$SUM" 2>&1
   export GDB_JAVA_OPTS="-Xmx$HEAP -Dgraphdb.home=$GDB_HOME"
-  LOADED=0
-  for loader in preload importrdf; do
-    bin="$GDB_BASE/graphdb-$VER/bin/$loader"
-    [ -x "$bin" ] || continue
-    note "--- $loader --help ---"; "$bin" --help >> "$SUM" 2>&1
-    note "--- running $loader ---"
-    t0=$(date +%s)
-    if [ "$loader" = preload ]; then
-      "$bin" -f -c "$cfg" "$DATASET" > "$OUT/graphdb-load.log" 2>&1
-    else
-      "$bin" load -f -c "$cfg" -m parallel "$DATASET" > "$OUT/graphdb-load.log" 2>&1
-    fi
-    rc=$?; note "--- $loader exit=$rc wall=$(( $(date +%s) - t0 ))s ---"
-    tail -20 "$OUT/graphdb-load.log" >> "$SUM"
-    [ $rc -eq 0 ] && { LOADED=1; break; }
-  done
+  BIN="$GDB_BASE/graphdb-$VER/bin/importrdf"
+  # `importrdf load` is the online-style loader and refuses a plain .nt dump
+  # ("System transaction must be enabled with the first statement in the file").
+  # `importrdf preload` builds a single non-fragmented repository image and runs
+  # no inference — which is what this A/B wants, since the closure is already
+  # materialized and the repo's ruleset is `empty`.
+  note "--- importrdf preload --help ---"; "$BIN" help preload >> "$SUM" 2>&1
+  rm -rf "$GDB_HOME/data/repositories/$REPO"
+  t0=$(date +%s)
+  "$BIN" preload -f -c "$cfg" "$DATASET" > "$OUT/graphdb-load.log" 2>&1
+  rc=$?; note "--- preload exit=$rc wall=$(( $(date +%s) - t0 ))s ---"
+  tail -20 "$OUT/graphdb-load.log" >> "$SUM"
+  LOADED=0; [ $rc -eq 0 ] && LOADED=1
   if [ "$LOADED" = 1 ]; then
     note "starting GraphDB to verify…"
     nohup "$GDB_BASE/graphdb-$VER/bin/graphdb" -d -p "$PORT" > /tmp/graphdb-verify.log 2>&1
