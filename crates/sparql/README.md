@@ -54,13 +54,14 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    // `limits` is the `[server.limits]` table (SPEC-26): the defaults each
-    // request's URL/form overrides layer on top of. `admission` is the
-    // separate concurrency gate (HDB-118); `ready` backs `/readyz` and is
-    // `true` up front here because the store is already loaded.
+    // `config` is the live `ServerConfig` (SPEC-26): each request snapshots
+    // it, and its `[server.limits]` are the defaults the request's URL/form
+    // overrides layer on top of. `admission` is the separate concurrency gate
+    // (HDB-118); `ready` backs `/readyz` and is `true` up front here because
+    // the store is already loaded.
     let state = AppState {
         store: Arc::new(RwLock::new(MemStore::default())),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };

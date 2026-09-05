@@ -74,6 +74,7 @@ longer blocks writers to that partition while it is in flight.
 | `rule` | OWL-RL rule id (string, e.g. `cax-sco`) | `owlrl_rule_fires`, `owlrl_rule_duration_seconds` |
 | `tier` | `dram`, `hbm`, `cxl`, `unknown` | `storage_tier_bytes_estimated` (only `unknown` emitted today — tiering is Stage-3) |
 | `result` | `ok`, `error` | `ml_nl_query` |
+| `result` | `applied`, `rejected` | `config_reload` — whether the reloaded config validated and was published, or was dropped and the previous one kept |
 | `kernel` | `intersect`, `lower_bound`, `merge`, `dedup`, `filter_range`, `filter_indices_eq`, `gather` | `simd_kernel_isa` |
 | `isa` | `scalar`, `avx2`, `avx512`, `neon` | `simd_kernel_isa` |
 | `trigger` | `read`, `write_cap` | `storage_partition_merges` — what made a partition merge its runs |
@@ -303,3 +304,22 @@ records which path picked it (known-CPU table / micro-calibration / static wides
 > picks `intersect=avx2`, the join hot path still runs scalar gallop for skewed
 > inputs even though the series shows `avx2`. On the two table-pinned hosts
 > (Zen4, Sapphire Rapids) `intersect=scalar`, so there is no discrepancy there.
+
+## Operator configuration (`crates/metrics/src/config.rs`)
+
+Emitted by `horndb-config`'s live watcher (SPEC-26 S3), which re-resolves,
+re-merges and re-validates the whole config on any settled file event. A cycle
+whose result equals the config already live publishes nothing and counts
+nothing, so a touched-but-unchanged file — or an event for an unrelated file in
+a watched directory — is not a new generation.
+
+`config_active_generation` is the metric an operator watches to confirm an edit
+landed: it is `1` for the startup load and goes up by one per applied reload. A
+`rejected` increment with an unchanged generation means the edit did not
+validate and the previous config is still serving traffic.
+
+| Metric (scraped name) | Type | Labels | Unit / buckets | Meaning |
+|---|---|---|---|---|
+| `horndb_config_reload_total` | counter | `result` | count | reload cycles by outcome: `applied` (re-validated and published) or `rejected` (validation failed, previous config kept) |
+| `horndb_config_active_generation` | gauge | — | count | generation of the config currently in effect; `1` at startup, +1 per applied reload |
+| `horndb_config_last_reload_unixtime` | gauge | — | s (unix time) | wall-clock time of the most recent applied reload; `0` if none has happened |

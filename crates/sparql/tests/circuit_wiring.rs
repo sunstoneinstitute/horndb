@@ -8,7 +8,6 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use horndb_config::Limits;
 use horndb_incremental::{
     BilinearRule, Circuit, DeltaRecord, DerivationKind, NaryPlan, RuleId, TransitiveClosureRule,
     TripleId, Zset,
@@ -167,7 +166,7 @@ async fn http_update_ticks_and_query_sees_derived_then_withdrawn() {
     let a_p_c = triple(&b, "http://ex/a", P, "http://ex/c");
     let state = AppState {
         store: Arc::new(RwLock::new(b)),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };
