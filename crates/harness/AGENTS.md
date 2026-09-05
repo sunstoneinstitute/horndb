@@ -131,8 +131,15 @@ IRI in the query (`GRAPH <exists02.ttl>`) resolves to the same IRI the
 Expected results are read from `.srx`/`.srj` via `sparesults`; other extensions
 report `result format not graded yet: …` (a visible red, not a silent pass).
 Solutions compare as a set of variables plus a sorted multiset of rows, with an
-explicit `xsd:string` datatype normalised away on both sides. An engine panic on
-an upstream query is caught and graded as an ordinary failure.
+explicit `xsd:string` datatype normalised away on both sides, and **numeric
+literals compared by value within their datatype** — `"3"` and `"3.0"` are the
+same `xsd:decimal`, `"2E-1"` and `"2.0E-1"` the same `xsd:double`, while
+`xsd:integer` 3 and `xsd:decimal` 3 still differ. The upstream `.srx` files
+were written by several engines over a decade and spell the same value more
+than one way; two cases in the same suite even disagree (`functions/ceil01`
+wants `"3"` where `aggregates/agg-avg-02` wants `"2.0"`), so no single output
+spelling can satisfy both. An engine panic on an upstream query is caught and
+graded as an ordinary failure.
 
 ### `expected_failures` — the known-failure allowlist
 

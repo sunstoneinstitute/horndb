@@ -26,6 +26,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 use horndb_sparql::algebra::Term as ATerm;
@@ -47,6 +48,9 @@ pub(crate) type Verdict = Option<String>;
 /// writers disagree on whether to spell it out, so it is stripped on both
 /// sides before comparing.
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// Namespace prefix of the XSD numeric datatypes.
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
 /// Run one grading closure with panics contained.
 ///
@@ -223,12 +227,49 @@ fn oxterm_to_json(t: &oxrdf::Term) -> Value {
     }
 }
 
+/// One canonical spelling per numeric value, so two lexical forms of the same
+/// number compare equal within their datatype.
+///
+/// The upstream `.srx` files were written by several engines over a decade and
+/// spell the same value more than one way: `"3"` and `"3.0"` for the
+/// `xsd:decimal` 3, `"2E-1"` and `"2.0E-1"` for the `xsd:double` 0.2. Two
+/// cases in the same suite even disagree with each other (`functions/ceil01`
+/// wants `"3"`, `aggregates/agg-avg-02` wants `"2.0"`), so no single canonical
+/// output form can satisfy both — the comparison has to be by value.
+///
+/// The *datatype* is deliberately kept: `xsd:integer` 3 and `xsd:decimal` 3
+/// must still differ, since which one an expression returns is exactly what
+/// the numeric-typing cases test.
+fn canonical_numeric(datatype: &str, value: &str) -> Option<String> {
+    let local = datatype.strip_prefix(XSD)?;
+    let v = value.trim();
+    Some(match local {
+        "integer" | "long" | "int" | "short" | "byte" | "nonNegativeInteger"
+        | "nonPositiveInteger" | "negativeInteger" | "positiveInteger" | "unsignedLong"
+        | "unsignedInt" | "unsignedShort" | "unsignedByte" => v.parse::<i128>().ok()?.to_string(),
+        // Fixed point, not f64: 11.1 must not become 11.100000000000001.
+        "decimal" => oxsdatatypes::Decimal::from_str(v).ok()?.to_string(),
+        // `INF`/`-INF`/`NaN` do not parse as f64; they are already canonical,
+        // so leaving them untouched compares them verbatim.
+        "float" | "double" => format!("{:E}", v.parse::<f64>().ok()?),
+        _ => return None,
+    })
+}
+
 /// Drop an explicit `xsd:string` datatype so the two writers' spellings of a
-/// plain literal compare equal.
+/// plain literal compare equal, and put numeric literals in one canonical
+/// spelling per value (see [`canonical_numeric`]).
 fn normalize(mut v: Value) -> Value {
     if let Some(obj) = v.as_object_mut() {
         if obj.get("datatype").and_then(Value::as_str) == Some(XSD_STRING) {
             obj.remove("datatype");
+        }
+        let canonical = match (obj.get("datatype"), obj.get("value")) {
+            (Some(Value::String(dt)), Some(Value::String(value))) => canonical_numeric(dt, value),
+            _ => None,
+        };
+        if let Some(c) = canonical {
+            obj.insert("value".to_owned(), Value::String(c));
         }
     }
     v
@@ -352,6 +393,34 @@ fn dump(store: &HornBackend) -> HashSet<(Option<String>, ATerm, ATerm, ATerm)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_literals_compare_by_value_within_their_datatype() {
+        let lit = |dt: &str, v: &str| json!({ "type": "literal", "value": v, "datatype": format!("{XSD}{dt}") });
+        // Same value, different spelling → equal.
+        assert_eq!(
+            normalize(lit("decimal", "3")),
+            normalize(lit("decimal", "3.0"))
+        );
+        assert_eq!(
+            normalize(lit("double", "2E-1")),
+            normalize(lit("double", "2.0E-1"))
+        );
+        // Different datatype, or different value → still different.
+        assert_ne!(
+            normalize(lit("integer", "3")),
+            normalize(lit("decimal", "3.0"))
+        );
+        assert_ne!(
+            normalize(lit("decimal", "3")),
+            normalize(lit("decimal", "3.5"))
+        );
+        // Exact decimals: an f64 round trip would collapse these two.
+        assert_ne!(
+            normalize(lit("decimal", "11.1")),
+            normalize(lit("decimal", "11.100000000000001"))
+        );
+    }
 
     #[test]
     fn xsd_string_datatype_is_normalized_away() {

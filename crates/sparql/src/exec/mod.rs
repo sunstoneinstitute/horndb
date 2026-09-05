@@ -11,6 +11,7 @@ pub mod circuit;
 pub use batch::{Batch, KeyPart, Row, Slot};
 pub mod horn;
 pub mod mem;
+pub(crate) mod numeric;
 pub mod op;
 pub(crate) mod phases;
 pub mod runtime;
