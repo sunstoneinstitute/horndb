@@ -38,8 +38,8 @@ to a build with no advisor wired.
 
 ## Snapshot format (SPEC-02 F9)
 
-`snapshot/` exports the default graph of a `Store` to a compact byte
-stream and re-imports it (`Store::export_snapshot` / `import_snapshot`,
+`snapshot/` exports every graph of a `Store` — the default graph plus
+all named graphs — to a compact byte stream and re-imports it (`Store::export_snapshot` / `import_snapshot`,
 free fns `export_snapshot` / `import_snapshot`, accounting via
 `SnapshotStats`). Design decisions that aren't in the spec:
 
@@ -47,9 +47,15 @@ free fns `export_snapshot` / `import_snapshot`, accounting via
   mirrors HDT (Header / Dictionary / Triples) but is our own encoding.
   Cross-tool interop with rdfhdt and friends is an explicit non-goal of
   this increment — do not assume a `.hdt` produced elsewhere will load.
-- **Default graph only.** Export *errors* if the store holds named-graph
-  data (`has_named_graph_data` guard) rather than silently dropping it.
-  Named-graph / quad snapshots are a documented follow-up.
+- **Quads, with a version gate** (SPEC-25 S4). Export covers every graph
+  the pinned snapshot enumerates, and a round trip is exact *quad*-set
+  equality. Two format versions exist: v1 is the Stage-1 layout (one
+  default-graph adjacency block) and is still what a store with no
+  named-graph data writes; v2 replaces that single block with a graphs
+  section. A Stage-1 reader accepts only v1, so it rejects a v2 snapshot
+  through the existing `unsupported snapshot version` path instead of
+  misreading it. `format::read_snapshot_upto` makes that ceiling explicit
+  and is how the compatibility gate is tested.
 - **Operates at the `oxrdf::Term` level**, not the internal `TermId`
   level. This makes the format robust to dictionary id reassignment:
   the dictionary stores terms by their labels, so a round-trip is
@@ -61,7 +67,11 @@ free fns `export_snapshot` / `import_snapshot`, accounting via
   (shared-prefix elision exploits common IRI prefixes); and an SPO
   adjacency list over dense local ids, gap-coded with VByte (LEB128).
   Inline-int terms (`TermKind::InlineInt`) get a compact value-encoded
-  dictionary entry so int-heavy data stays small.
+  dictionary entry so int-heavy data stays small. In v2 the third
+  section is instead `num_graphs` followed, per graph, by
+  `graph_local` (a VByte local id: 0 for the default graph, otherwise
+  the graph name's dictionary local id), the graph's triple count, and
+  that graph's adjacency list — same encoding, applied per graph.
 - **Measured footprint: 5.440 B/triple** on a 40k-triple LUBM-shaped
   synthetic corpus (NF1 budget is ≤6 B/triple). Caveat: the triples
   section dominates and per-id VByte width grows with the id space, so
