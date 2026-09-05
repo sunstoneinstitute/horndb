@@ -270,6 +270,7 @@ async fn main() -> Result<()> {
                 predicates: s.predicates as i64,
                 dictionary_terms: s.dictionary_terms as i64,
                 dictionary_terms_live: s.dictionary_terms_live as i64,
+                dictionary_bytes: s.dictionary_bytes as i64,
                 tier_bytes_estimated: s.bytes_estimated as i64,
             })
         },

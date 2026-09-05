@@ -214,7 +214,42 @@ pub struct SnapshotStats {
 /// `O(sample_rows)` per sample.
 const SAMPLE_K: usize = 64;
 
+/// Approximate heap bytes of a hash map: slot capacity times entry size plus
+/// hashbrown's one control byte per slot. Ignores what the values themselves
+/// own — callers add that where it matters.
+fn map_bytes<K, V, S>(m: &HashMap<K, V, S>) -> u64 {
+    (m.capacity() * (std::mem::size_of::<(K, V)>() + 1)) as u64
+}
+
 impl SnapshotStats {
+    /// Approximate heap bytes this summary owns (HDB-146). Counts the
+    /// per-predicate maps, the characteristic-set index and — when Tier-3
+    /// sampling is on — the retained row copy, which dominates everything else.
+    pub fn approx_bytes(&self) -> u64 {
+        let cs = &self.characteristic_sets;
+        let cs_bytes = (cs.sets.capacity() * std::mem::size_of::<CharacteristicSet>()) as u64
+            + cs.sets
+                .iter()
+                .map(|s| {
+                    (s.predicates.capacity() * std::mem::size_of::<TermId>()
+                        + s.occurrences.capacity() * std::mem::size_of::<(TermId, u64)>())
+                        as u64
+                })
+                .sum::<u64>()
+            + (cs.residual_pred_occ.capacity() * std::mem::size_of::<(TermId, u64)>()) as u64
+            + map_bytes(&cs.by_predicate)
+            + cs.by_predicate
+                .values()
+                .map(|v| (v.capacity() * std::mem::size_of::<usize>()) as u64)
+                .sum::<u64>();
+        map_bytes(&self.predicate_count)
+            + map_bytes(&self.ndv_subject)
+            + map_bytes(&self.ndv_object)
+            + map_bytes(&self.max_degree)
+            + cs_bytes
+            + (self.sample_rows.capacity() * std::mem::size_of::<(TermId, TermId, TermId)>()) as u64
+    }
+
     /// Compute all three statistics tiers by scanning the pinned snapshot once
     /// per ordering.
     ///
