@@ -1,10 +1,13 @@
 //! HDT-derived compact snapshot format (SPEC-02 F9).
 //!
-//! Exports the default graph of a [`Store`] to a compact byte stream and
-//! re-imports it. **Not** wire-compatible with the rdfhdt reference format;
-//! cross-tool interop is out of scope for this increment. Named-graph snapshots
-//! are a documented follow-up — [`export_snapshot`] errors if the store holds
-//! named-graph data rather than silently dropping it.
+//! Exports every graph of a [`Store`] — the default graph plus all named
+//! graphs — to a compact byte stream and re-imports it (SPEC-25 S4).
+//! **Not** wire-compatible with the rdfhdt reference format; cross-tool
+//! interop is out of scope.
+//!
+//! A store with no named-graph data still writes the Stage-1 v1 layout;
+//! named-graph data bumps the version to v2, which Stage-1 readers reject
+//! through the `unsupported snapshot version` path.
 //!
 //! Format spec: docs/plans/PLAN-02-02-hdt-snapshot.md.
 
@@ -14,14 +17,15 @@ pub mod varint;
 
 use crate::error::{Result, StorageError};
 use crate::store::Store;
-use crate::term::{TermId, TermKind};
-use format::LocalTriple;
+use crate::term::{TermId, TermKind, DEFAULT_GRAPH};
+use format::{GraphBlock, LocalTriple};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
 /// Byte accounting for an exported snapshot (drives the NF1 footprint check).
 #[derive(Debug, Clone, Copy)]
 pub struct SnapshotStats {
+    /// Total quads across every graph in the snapshot.
     pub triples: u64,
     pub distinct_terms: u64,
     pub dictionary_bytes: u64,
@@ -39,19 +43,17 @@ impl SnapshotStats {
     }
 }
 
-/// Export the default graph of `store` to `w` in the snapshot format.
+/// Export every graph of `store` to `w` in the snapshot format.
 pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotStats> {
-    // Pin one snapshot for the whole export: the named-graph guard and the
-    // default-graph scan must observe the SAME store state, or a named-graph
-    // insert landing between them could let us emit a default-graph-only
-    // checkpoint from a store that also holds named-graph data (TOCTOU).
+    // Pin one snapshot for the whole export: enumerating the graphs and
+    // scanning each of them must observe the SAME store state, or a write
+    // landing in between could produce an internally inconsistent checkpoint.
     let snap = store.snapshot();
-    if snap.has_named_graph_data() {
-        return Err(StorageError::Snapshot(
-            "named-graph snapshot export not yet supported (default graph only)".into(),
-        ));
+    let graph_ids = snap.graphs();
+    let mut raw = Vec::with_capacity(graph_ids.len());
+    for g in graph_ids {
+        raw.push((g, snap.iter_graph_term_ids(g).collect::<Vec<_>>()));
     }
-    let raw = snap.scan_all_term_ids();
 
     // Collect distinct term ids and their canonical encodings.
     let mut enc_by_id: HashMap<TermId, Vec<u8>> = HashMap::new();
@@ -73,10 +75,15 @@ pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotSta
         enc_by_id.insert(id, buf);
         Ok(())
     };
-    for (s, p, o) in &raw {
-        encode(*s)?;
-        encode(*p)?;
-        encode(*o)?;
+    for (g, triples) in &raw {
+        if *g != DEFAULT_GRAPH {
+            encode(TermId(g.0))?; // the graph name is part of the dictionary
+        }
+        for (s, p, o) in triples {
+            encode(*s)?;
+            encode(*p)?;
+            encode(*o)?;
+        }
     }
 
     // Sort distinct encodings, assign dense local ids (1-based).
@@ -89,18 +96,30 @@ pub fn export_snapshot<W: Write>(store: &Store, w: &mut W) -> Result<SnapshotSta
         terms.push(bytes);
     }
 
-    let mut triples: Vec<LocalTriple> = raw
+    let total_quads: u64 = raw.iter().map(|(_, t)| t.len() as u64).sum();
+    let mut graphs: Vec<GraphBlock> = raw
         .iter()
-        .map(|(s, p, o)| LocalTriple {
-            s: local_of[s],
-            p: local_of[p],
-            o: local_of[o],
+        .map(|(g, triples)| GraphBlock {
+            // Local id 0 is reserved for the default graph, which has no name.
+            graph_local: if *g == DEFAULT_GRAPH {
+                0
+            } else {
+                local_of[&TermId(g.0)]
+            },
+            triples: triples
+                .iter()
+                .map(|(s, p, o)| LocalTriple {
+                    s: local_of[s],
+                    p: local_of[p],
+                    o: local_of[o],
+                })
+                .collect(),
         })
         .collect();
 
-    let (dict_bytes, tri_bytes) = format::write_snapshot(w, &terms, &mut triples)?;
+    let (dict_bytes, tri_bytes) = format::write_snapshot(w, &terms, &mut graphs)?;
     Ok(SnapshotStats {
-        triples: raw.len() as u64,
+        triples: total_quads,
         distinct_terms: terms.len() as u64,
         dictionary_bytes: dict_bytes,
         triples_bytes: tri_bytes,
@@ -115,9 +134,9 @@ pub fn import_snapshot<R: Read>(r: &mut R) -> Result<Store> {
     Ok(store)
 }
 
-/// Import a snapshot from `r`, inserting its default-graph triples into `store`.
+/// Import a snapshot from `r`, inserting its quads into `store`.
 pub fn import_snapshot_into<R: Read>(store: &Store, r: &mut R) -> Result<()> {
-    let (term_bytes, triples) = format::read_snapshot(r)?;
+    let (term_bytes, graphs) = format::read_snapshot(r)?;
     // Decode terms (local id = index + 1).
     let mut terms = Vec::with_capacity(term_bytes.len());
     for bytes in &term_bytes {
@@ -126,18 +145,34 @@ pub fn import_snapshot_into<R: Read>(store: &Store, r: &mut R) -> Result<()> {
     // Resolve a 1-based local id to its decoded term (cloned into the batch).
     let resolve = |local: u64, position: &str| {
         terms
-            .get((local - 1) as usize)
+            .get((local.wrapping_sub(1)) as usize)
             .cloned()
             .ok_or_else(|| StorageError::Snapshot(format!("{position} local id out of range")))
     };
-    let mut batch = Vec::with_capacity(triples.len());
-    for t in &triples {
-        batch.push((
-            resolve(t.s, "subject")?,
-            resolve(t.p, "predicate")?,
-            resolve(t.o, "object")?,
-        ));
+    for block in &graphs {
+        if block.graph_local == 0 {
+            let mut batch = Vec::with_capacity(block.triples.len());
+            for t in &block.triples {
+                batch.push((
+                    resolve(t.s, "subject")?,
+                    resolve(t.p, "predicate")?,
+                    resolve(t.o, "object")?,
+                ));
+            }
+            store.insert_triples(&batch)?;
+        } else {
+            let g = store.intern_graph_uri(&resolve(block.graph_local, "graph")?)?;
+            let mut batch = Vec::with_capacity(block.triples.len());
+            for t in &block.triples {
+                batch.push((
+                    g,
+                    resolve(t.s, "subject")?,
+                    resolve(t.p, "predicate")?,
+                    resolve(t.o, "object")?,
+                ));
+            }
+            store.insert_quads(&batch)?;
+        }
     }
-    store.insert_triples(&batch)?;
     Ok(())
 }
