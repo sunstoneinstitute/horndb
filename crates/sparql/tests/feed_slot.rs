@@ -17,6 +17,7 @@ use horndb_sparql::feed::FeedPosition;
 use horndb_sparql::parser::parse_update;
 use horndb_sparql::update::apply_update_with_feed;
 use horndb_sparql::{Result, SparqlConfig};
+use proptest::prelude::*;
 use spargebra::algebra::GraphTarget;
 use spargebra::term::NamedNode;
 
@@ -428,4 +429,96 @@ fn failing_op_leaves_slot_unadvanced_mem() {
 #[test]
 fn failing_op_leaves_slot_unadvanced_horn() {
     failing_op_leaves_slot_unadvanced::<HornBackend>();
+}
+
+// ── Task 4: D5 contract property test ───────────────────────────────────────
+//
+// D5 (SPEC-30 §S1): the slot must never report a position ahead of surviving
+// data. Modeled as: whenever the slot holds a request's `position` token,
+// every quad that request's own operations asserted is present. Tested here
+// against `MemStore` only — `apply_update_with_feed`, the `Journal`, and
+// `feed.rs`'s advance path are all generic over `B: FullBackend` with no
+// backend-specific branches, and the fixed scenarios above already exercise
+// this same code against both backends, so one backend is enough to fuzz the
+// op-sequencing logic itself.
+
+/// One simulated Update request: `num_ops` distinct single-triple
+/// `INSERT DATA` operations, and optionally which 1-indexed operation's
+/// `apply_quads` call should fail — a fault injected mid-request, modeling a
+/// crash between two operations (§S5).
+#[derive(Debug, Clone)]
+struct FeedStep {
+    num_ops: usize,
+    fail_at: Option<usize>,
+}
+
+fn feed_step_strategy() -> impl Strategy<Value = FeedStep> {
+    (1..=3usize).prop_flat_map(|num_ops| {
+        prop_oneof![Just(None), (1..=num_ops).prop_map(Some)]
+            .prop_map(move |fail_at| FeedStep { num_ops, fail_at })
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn position_never_overstates(steps in proptest::collection::vec(feed_step_strategy(), 1..8)) {
+        let mut store = FaultingBackend::new(MemStore::default(), usize::MAX);
+        let mut committed_position: Option<String> = None;
+        let mut committed_quads: Vec<(String, String, String)> = Vec::new();
+        let mut next_term = 0u32;
+
+        for (i, step) in steps.into_iter().enumerate() {
+            let mut this_request_quads = Vec::new();
+            let mut ops = Vec::new();
+            for _ in 0..step.num_ops {
+                let n = next_term;
+                next_term += 1;
+                let (s, p, o) = (
+                    format!("http://ex/s{n}"),
+                    format!("http://ex/p{n}"),
+                    format!("http://ex/o{n}"),
+                );
+                ops.push(format!("INSERT DATA {{ <{s}> <{p}> <{o}> }}"));
+                this_request_quads.push((s, p, o));
+            }
+            let request = ops.join(" ; ");
+            let position = format!("tok-{i}");
+            let fp = FeedPosition {
+                id: "feed-1".into(),
+                position: position.clone(),
+            };
+
+            store.calls = 0;
+            store.fail_at = step.fail_at.unwrap_or(usize::MAX);
+            let result = apply_feed(&mut store, &request, Some(&fp));
+
+            if step.fail_at.is_some() {
+                prop_assert!(result.is_err(), "fault-injected request must surface the error");
+                for (s, p, o) in &this_request_quads {
+                    prop_assert!(
+                        !data_present(&store, s, p, o),
+                        "a failed request's own data must be rolled back"
+                    );
+                }
+                prop_assert_eq!(slot_position(&store), committed_position.clone());
+            } else {
+                prop_assert!(result.is_ok(), "a clean request must succeed: {:?}", result.err());
+                committed_position = Some(position);
+                committed_quads.extend(this_request_quads);
+                prop_assert_eq!(slot_position(&store), committed_position.clone());
+            }
+
+            // D5 core: whatever token the slot currently reports, every quad
+            // asserted by every request committed so far (up to and including
+            // whichever one set that token) is present.
+            for (s, p, o) in &committed_quads {
+                prop_assert!(
+                    data_present(&store, s, p, o),
+                    "slot advanced past a request whose data is missing: {s} {p} {o}"
+                );
+            }
+        }
+    }
 }
