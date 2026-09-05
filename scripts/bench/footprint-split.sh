@@ -66,8 +66,10 @@ log, commit, host = sys.argv[1], sys.argv[2], sys.argv[3]
 mode = None
 # mode -> [(label, mib, pct, bpt)], plus the footprint line per mode.
 rows = collections.OrderedDict()
+marks = collections.OrderedDict()
 foot = {}
 comp = re.compile(r"\[mem\] (.+?): ([\d.]+) MiB \(([\d.]+)% of RSS, ([\d.]+) B/triple\)")
+timeline = re.compile(r"\[mem\] after (\S+): RSS ([\d.]+) MiB, peak ([\d.]+) MiB")
 unattr = re.compile(r"\[mem\] attributed: ([\d.]+) MiB; unattributed[^:]*: ([\d.]+) MiB \(([\d.]+)% of RSS\)")
 serving = re.compile(r"\[mem\] serving footprint[^:]*: RSS ([\d.]+) MiB over (\d+) triples = ([\d.]+) B/triple")
 for line in open(log, errors="replace"):
@@ -77,6 +79,9 @@ for line in open(log, errors="replace"):
         rows.setdefault(mode, [])
         continue
     if mode is None:
+        continue
+    if m := timeline.search(line):
+        marks.setdefault(mode, []).append((m.group(1), float(m.group(2)), float(m.group(3))))
         continue
     if m := comp.search(line):
         rows[mode].append((m.group(1), float(m.group(2)), float(m.group(3)), float(m.group(4))))
@@ -104,6 +109,13 @@ for mode, comps in rows.items():
     for label, mib, pct, per in comps:
         print(f"| {label} | {mib:.0f} | {pct:.1f}% | " + ("—" if per is None else f"{per:.1f}") + " |")
     print()
+    if marks.get(mode):
+        print("RSS timeline (where the residual is acquired):\n")
+        print("| after | RSS MiB | peak MiB |")
+        print("|---|---:|---:|")
+        for label, r, p in marks[mode]:
+            print(f"| {label} | {r:.0f} | {p:.0f} |")
+        print()
 PY
 
 echo ">> summary:" >&2

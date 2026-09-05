@@ -404,6 +404,15 @@ fn main() -> Result<()> {
     eprintln!("  read_turtle: {secs:.4}s ({} triples)", backend.len());
     results.record("read_turtle", json!(secs));
     dump_load_phases("read_turtle");
+    // HDB-146: sample RSS before any query runs, so the footprint split at the
+    // end can tell load-time retention apart from query-time retention.
+    if cli.mem_only {
+        eprintln!(
+            "  [mem] after load: RSS {:.0} MiB, peak {:.0} MiB",
+            rss_mib("VmRSS:"),
+            rss_mib("VmHWM:")
+        );
+    }
 
     // --- write Turtle / N-Triples --- (both skipped under --load-only; the
     // read_ntriples leg below reads the source file, not what these produce)
@@ -545,6 +554,14 @@ fn main() -> Result<()> {
             }
         }
         dump_exec_phases(&format!("{qname}_warm"));
+        if cli.mem_only {
+            // HDB-146: which query moves RSS, and by how much.
+            eprintln!(
+                "  [mem] after {qname}: RSS {:.0} MiB, peak {:.0} MiB",
+                rss_mib("VmRSS:"),
+                rss_mib("VmHWM:")
+            );
+        }
         if timed_out {
             eprintln!("    {qname}: TIMEOUT on warm run (>{}s)", timeout.as_secs());
             results.record(&format!("query_{qname}"), Value::String("TIMEOUT".into()));
