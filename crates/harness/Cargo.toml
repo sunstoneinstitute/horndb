@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rusqlite = { workspace = true }
 oxrdf = { workspace = true }
+oxsdatatypes = { workspace = true }
 oxrdfio = { workspace = true }
 oxttl = { workspace = true }
 oxigraph = { workspace = true }

@@ -70,6 +70,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # libsqlite3-sys (>0.38.0) ships. See the dependabot bump in git history.
 rusqlite = { version = "0.31", features = ["bundled"] }
 oxrdf = { version = "0.3", features = ["rdf-12"] }
+# XSD value types (integer/decimal/float/double) with XPath arithmetic and
+# canonical lexical forms. Already in the graph as oxrdf's own dependency, so
+# naming it here adds no crate to the build — it just makes it reachable from
+# `horndb-sparql` (SPARQL 1.1 §17.4.1 numeric promotion) and `horndb-harness`
+# (value-based grading of numeric result literals).
+oxsdatatypes = "0.2"
 # RFC 3986 IRI resolution (BASE-relative + prefixed-name expansion) for the
 # ADD/MOVE/COPY SILENT-recovery prologue scan in horndb-sparql.
 #

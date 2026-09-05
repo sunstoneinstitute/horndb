@@ -8,6 +8,7 @@ use crate::algebra::{
     AggFunc, Aggregate, DatasetSpec, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
 };
 use crate::error::{Result, SparqlError};
+use crate::exec::numeric::Numeric;
 use crate::exec::phases;
 use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, ScanScope, Slot};
 use crate::plan::{GraphScope, PhysicalPlan};
@@ -707,6 +708,47 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         }
     }
 
+    /// One member slot's *typed* numeric value, for `SUM`/`AVG` — which need
+    /// the `xsd` type to promote correctly, not just an `f64`.
+    ///
+    /// An inline-int id carries its value in the id itself (SPEC-21), so the
+    /// `xsd:integer` case stays what it was: pure arithmetic on the `TermId`,
+    /// no dictionary lock and no decode at all. Every other id decodes.
+    fn fast_numeric_typed(&self, slot: &Slot) -> Result<Option<Numeric>> {
+        match slot {
+            Slot::Unbound => Ok(None),
+            Slot::Id(id) => match id.as_inline_int() {
+                Some(v) => Ok(Some(Numeric::from_i64(i64::from(v)))),
+                None => Ok(numeric_of(&self.exec.decode_term(*id)?)),
+            },
+            Slot::Term(t) => Ok(numeric_of(t)),
+        }
+    }
+
+    /// Fold column `col` of a group into `(sum, bound-member count)`, shared
+    /// by the `SUM` and `AVG` fast paths. `None` is the expression error: a
+    /// bound member that is not a numeric literal, or an overflow — the same
+    /// rule [`numeric_sum`] applies on the general path.
+    fn fast_sum(&self, col: usize, members: &[Row]) -> Result<Option<(Numeric, usize)>> {
+        let mut sum = Numeric::zero();
+        let mut n = 0usize;
+        for r in members {
+            let slot = &r.0[col];
+            if matches!(slot, Slot::Unbound) {
+                continue;
+            }
+            let Some(v) = self.fast_numeric_typed(slot)? else {
+                return Ok(None);
+            };
+            let Some(next) = sum.add(v) else {
+                return Ok(None);
+            };
+            sum = next;
+            n += 1;
+        }
+        Ok(Some((sum, n)))
+    }
+
     /// Full term decode of one member slot. Used only on the rare path where
     /// a fast MIN/MAX cannot stay numeric (`eval_fast_extreme`'s fallback)
     /// and by the fast path's own winner recovery, so the returned `Term` is
@@ -749,30 +791,13 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     .collect();
                 Some(integer_literal(set.len() as i64))
             }
-            FastAgg::Sum(col) => {
-                let mut sum = 0.0_f64;
-                for r in members {
-                    if let Some(v) = self.fast_numeric(&r.0[*col])? {
-                        sum += v;
-                    }
-                }
-                Some(numeric_term(sum))
-            }
-            FastAgg::Avg(col) => {
-                let mut sum = 0.0_f64;
-                let mut n = 0usize;
-                for r in members {
-                    if let Some(v) = self.fast_numeric(&r.0[*col])? {
-                        sum += v;
-                        n += 1;
-                    }
-                }
-                if n == 0 {
-                    Some(integer_literal(0))
-                } else {
-                    Some(decimal_literal(sum / n as f64))
-                }
-            }
+            FastAgg::Sum(col) => self.fast_sum(*col, members)?.map(|(sum, _)| sum.to_term()),
+            FastAgg::Avg(col) => match self.fast_sum(*col, members)? {
+                // AVG of the empty multiset is 0 (SPARQL 1.1 §18.5.1.4).
+                Some((_, 0)) => Some(integer_literal(0)),
+                Some((sum, n)) => sum.div(Numeric::from_i64(n as i64)).map(Numeric::to_term),
+                None => None,
+            },
             FastAgg::Min(col) => self.eval_fast_extreme(*col, members, true)?,
             FastAgg::Max(col) => self.eval_fast_extreme(*col, members, false)?,
         })
@@ -1756,12 +1781,41 @@ fn plain_literal(s: &str) -> Term {
     Term::Literal(format!("\"{escaped}\""))
 }
 
-/// Binary arithmetic over the Stage-1 f64 model. `None` (expression
-/// error) when either side is non-numeric or on division by zero.
-/// Overflow/NaN edge cases (e.g. inf - inf) are accepted Stage-1 f64-model
-/// behavior and can render as "NaN"/"inf" literals.
-fn arith(op: fn(f64, f64) -> f64, a: Option<f64>, b: Option<f64>) -> Option<Term> {
-    Some(numeric_term(op(a?, b?)))
+/// Binary arithmetic under the SPARQL §17.4.1 operator mapping. `None` is the
+/// expression error: either operand not a numeric literal, or the operation
+/// itself undefined (integer/decimal overflow, exact division by zero).
+fn arith(
+    op: fn(Numeric, Numeric) -> Option<Numeric>,
+    a: Option<Numeric>,
+    b: Option<Numeric>,
+) -> Option<Term> {
+    op(a?, b?).map(Numeric::to_term)
+}
+
+/// A term's numeric value, or `None` when it is not a numeric literal.
+///
+/// Unlike [`numeric_value`] — which coerces any lexical form that parses as
+/// `f64`, the ordering/comparison rule — this is *datatype-driven*: a plain
+/// literal `"1"` is not a number, so `"1" + "2"` is a type error, exactly as
+/// SPARQL 1.1 §17.4.1 requires (W3C `functions/plus-1`).
+pub(crate) fn numeric_of(t: &Term) -> Option<Numeric> {
+    let raw = lex(t);
+    let (value, lang, datatype) = literal_parts(&raw);
+    if lang.is_some() {
+        return None;
+    }
+    Numeric::parse(&value, datatype.as_deref()?)
+}
+
+/// Fold a multiset into its numeric sum. `None` — the expression error — if
+/// any member is not a numeric literal, because `SUM` is defined as a fold of
+/// `op:numeric-add` and a non-numeric operand raises a type error.
+fn numeric_sum(vals: &[Term]) -> Option<Numeric> {
+    let mut acc = Numeric::zero();
+    for t in vals {
+        acc = acc.add(numeric_of(t)?)?;
+    }
+    Some(acc)
 }
 
 /// Split an N-Triples literal raw form into (lexical, lang, datatype).
@@ -1886,18 +1940,17 @@ fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>>
         }
         AggFunc::Sum(e) => {
             let vals = collect_values(e)?;
-            let sum: f64 = vals.iter().filter_map(numeric_value).sum();
-            Some(numeric_term(sum))
+            numeric_sum(&vals).map(Numeric::to_term)
         }
         AggFunc::Avg(e) => {
             let vals = collect_values(e)?;
-            let nums: Vec<f64> = vals.iter().filter_map(numeric_value).collect();
-            if nums.is_empty() {
+            if vals.is_empty() {
+                // AVG of the empty multiset is 0 (SPARQL 1.1 §18.5.1.4).
                 Some(integer_literal(0))
             } else {
-                Some(decimal_literal(
-                    nums.iter().sum::<f64>() / nums.len() as f64,
-                ))
+                numeric_sum(&vals)
+                    .and_then(|sum| sum.div(Numeric::from_i64(vals.len() as i64)))
+                    .map(Numeric::to_term)
             }
         }
         AggFunc::Min(e) => {
@@ -1956,16 +2009,6 @@ fn aggregate_extreme(vals: &[Term], min: bool) -> Option<Term> {
             }
         }
         Some(best.clone())
-    }
-}
-
-/// Render a numeric aggregate result as an integer literal when it has
-/// no fractional part, otherwise a decimal literal.
-fn numeric_term(x: f64) -> Term {
-    if x.fract() == 0.0 && x.abs() < 9.007e15 {
-        integer_literal(x as i64)
-    } else {
-        decimal_literal(x)
     }
 }
 
@@ -2314,8 +2357,8 @@ fn datetime_key(s: &str) -> Option<&str> {
 fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
     // Evaluate an operand to its numeric value; an expression error
     // (non-numeric / unbound) surfaces as `Ok(None)`.
-    let numof = |sub: &Expr| -> Result<Option<f64>> {
-        Ok(eval_expr_to_term(sub, b)?.as_ref().and_then(numeric_value))
+    let numof = |sub: &Expr| -> Result<Option<Numeric>> {
+        Ok(eval_expr_to_term(sub, b)?.as_ref().and_then(numeric_of))
     };
     Ok(match e {
         Expr::Term(t) => match t {
@@ -2338,14 +2381,13 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::Bound(_) => Some(Term::Literal(
             if eval_expr(e, b)? { "true" } else { "false" }.into(),
         )),
-        Expr::Add(x, y) => arith(|a, b| a + b, numof(x)?, numof(y)?),
-        Expr::Sub(x, y) => arith(|a, b| a - b, numof(x)?, numof(y)?),
-        Expr::Mul(x, y) => arith(|a, b| a * b, numof(x)?, numof(y)?),
-        Expr::Div(x, y) => match numof(y)? {
-            Some(d) if d != 0.0 => arith(|a, b| a / b, numof(x)?, Some(d)),
-            _ => None, // division by zero / non-numeric divisor
-        },
-        Expr::Neg(x) => numof(x)?.map(|n| numeric_term(-n)),
+        Expr::Add(x, y) => arith(Numeric::add, numof(x)?, numof(y)?),
+        Expr::Sub(x, y) => arith(Numeric::sub, numof(x)?, numof(y)?),
+        Expr::Mul(x, y) => arith(Numeric::mul, numof(x)?, numof(y)?),
+        // `Numeric::div` is the whole rule: integer/integer yields
+        // xsd:decimal, and division by zero errors for the exact types.
+        Expr::Div(x, y) => arith(Numeric::div, numof(x)?, numof(y)?),
+        Expr::Neg(x) => numof(x)?.and_then(Numeric::neg).map(Numeric::to_term),
         // Stage-1 note: an erroring condition evaluates as false (the
         // crate-wide error→false EBV convention) and takes the else
         // branch, rather than propagating the error as SPARQL §17.4.1.2
@@ -2390,6 +2432,9 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
     let s = |i: usize| -> Result<Option<String>> { Ok(term(i)?.as_ref().map(literal_value)) };
     // The argument as a number.
     let num = |i: usize| -> Result<Option<f64>> { Ok(term(i)?.as_ref().and_then(numeric_value)) };
+    // The argument as a *typed* number, for the operators whose result type
+    // follows the argument's (§17.4.4).
+    let numv = |i: usize| -> Result<Option<Numeric>> { Ok(term(i)?.as_ref().and_then(numeric_of)) };
     let bool_lit = |v: bool| Some(Term::Literal(if v { "true" } else { "false" }.into()));
 
     Ok(match f {
@@ -2525,12 +2570,12 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
             };
             compile_regex(&pat, &flags).and_then(|re| bool_lit(re.is_match(&text)))
         }
-        Func::Abs => num(0)?.map(|n| numeric_term(n.abs())),
-        Func::Ceil => num(0)?.map(|n| numeric_term(n.ceil())),
-        Func::Floor => num(0)?.map(|n| numeric_term(n.floor())),
-        // fn:round rounds half toward positive infinity (ROUND(-2.5) =
-        // -2), unlike Rust's round-half-away-from-zero.
-        Func::Round => num(0)?.map(|n| numeric_term((n + 0.5).floor())),
+        // ABS/CEIL/FLOOR/ROUND all return the argument's own xsd type —
+        // CEIL of an xsd:decimal is an xsd:decimal, not an xsd:integer.
+        Func::Abs => numv(0)?.and_then(Numeric::abs).map(Numeric::to_term),
+        Func::Ceil => numv(0)?.and_then(Numeric::ceil).map(Numeric::to_term),
+        Func::Floor => numv(0)?.and_then(Numeric::floor).map(Numeric::to_term),
+        Func::Round => numv(0)?.and_then(Numeric::round).map(Numeric::to_term),
         Func::IsIri => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Iri)),
         Func::IsBlank => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Blank)),
         Func::IsLiteral => term(0)?.and_then(|t| bool_lit(term_kind(&t) == TermKind::Literal)),
