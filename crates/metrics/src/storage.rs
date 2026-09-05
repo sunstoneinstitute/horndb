@@ -131,6 +131,10 @@ pub struct StorageSnapshot {
     /// `Store::compact()`; `dictionary_terms` counts index space consumed,
     /// which is monotonic because ids are never re-issued.
     pub dictionary_terms_live: i64,
+    /// Approximate heap bytes the term dictionary owns: forward-map keys,
+    /// reverse-map term strings, and both containers' slot overhead (HDB-146).
+    /// O(1) to read — the content totals are maintained at intern/GC time.
+    pub dictionary_bytes: i64,
     pub tier_bytes_estimated: i64,
 }
 
@@ -171,6 +175,11 @@ impl Collector for StorageCollector {
                 "Dictionary terms still resolvable (total minus GC-reclaimed)",
                 snap.dictionary_terms_live,
             ),
+            (
+                "storage_dictionary_bytes",
+                "Approximate heap bytes held by the term dictionary",
+                snap.dictionary_bytes,
+            ),
         ] {
             let g = ConstGauge::new(val);
             let me = enc.encode_descriptor(name, help, None, g.metric_type())?;
@@ -208,6 +217,7 @@ mod tests {
                 predicates: 3,
                 dictionary_terms: 99,
                 dictionary_terms_live: 70,
+                dictionary_bytes: 4096,
                 tier_bytes_estimated: 1024,
             })
         })));
@@ -220,6 +230,10 @@ mod tests {
         );
         assert!(
             buf.contains("horndb_storage_dictionary_terms_live 70"),
+            "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_storage_dictionary_bytes 4096"),
             "got:\n{buf}"
         );
         assert!(

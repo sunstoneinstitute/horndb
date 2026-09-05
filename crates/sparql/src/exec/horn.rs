@@ -218,6 +218,53 @@ pub struct HornStorageStats {
     pub dictionary_terms: u64,
     pub dictionary_terms_live: u64,
     pub bytes_estimated: u64,
+    /// Approximate heap bytes the term dictionary owns (HDB-146). O(1) to
+    /// read — see `horndb_storage::Dictionary::approx_bytes`.
+    pub dictionary_bytes: u64,
+}
+
+/// Where a serving process's heap actually goes (HDB-146), for the components
+/// that can account for themselves. Everything else — allocator retention,
+/// per-query intermediates, the binary and its stacks — is the residual
+/// against RSS, which is the number the footprint measurement reports.
+///
+/// The memoised direct source (`StoreTripleSource`) is deliberately absent:
+/// its leaves may be `Arc`-clones of the partitions' own columns, so counting
+/// them would double-count `partitions`. It is zero on the default read path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemorySplit {
+    /// Columnar partitions, as the tier estimates them.
+    pub partitions: u64,
+    pub dictionary_keys: u64,
+    pub dictionary_terms: u64,
+    pub dictionary_index: u64,
+    /// Every memoised `VecTripleSource`, summed over scopes.
+    pub snapshots: u64,
+    /// Every cached planner summary, summed over scopes.
+    pub stats: u64,
+}
+
+impl MemorySplit {
+    pub fn total(&self) -> u64 {
+        self.partitions
+            + self.dictionary_keys
+            + self.dictionary_terms
+            + self.dictionary_index
+            + self.snapshots
+            + self.stats
+    }
+
+    /// `(label, bytes)` in report order.
+    pub fn rows(&self) -> [(&'static str, u64); 6] {
+        [
+            ("partitions", self.partitions),
+            ("dict keys", self.dictionary_keys),
+            ("dict terms", self.dictionary_terms),
+            ("dict index", self.dictionary_index),
+            ("query snapshots", self.snapshots),
+            ("planner stats", self.stats),
+        ]
+    }
 }
 
 /// A `(graph, subject, predicate, object)` TermId key. A named struct
@@ -904,6 +951,39 @@ impl HornBackend {
             dictionary_terms: self.store.dictionary().len() as u64,
             dictionary_terms_live: self.store.dictionary().live_len() as u64,
             bytes_estimated: tier.bytes_estimated,
+            dictionary_bytes: self.store.dictionary().approx_bytes().total(),
+        }
+    }
+
+    /// Attribute this backend's heap across the components that can account
+    /// for themselves (HDB-146). See [`MemorySplit`] for what is left out.
+    pub fn memory_split(&self) -> MemorySplit {
+        let dict = self.store.dictionary().approx_bytes();
+        let snapshots = self
+            .snapshots
+            .lock()
+            .expect("snapshot lock poisoned")
+            .map
+            .values()
+            .map(|s| s.approx_bytes())
+            .sum();
+        let stats = self
+            .stats_cache
+            .lock()
+            .expect("stats lock poisoned")
+            .values()
+            .map(|(_, slot)| match slot {
+                StatsSlot::Ready(s) => s.approx_bytes(),
+                StatsSlot::Building { .. } => 0,
+            })
+            .sum();
+        MemorySplit {
+            partitions: self.store.stats().bytes_estimated,
+            dictionary_keys: dict.keys,
+            dictionary_terms: dict.terms,
+            dictionary_index: dict.index,
+            snapshots,
+            stats,
         }
     }
 

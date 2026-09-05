@@ -583,6 +583,38 @@ fn main() -> Result<()> {
         } else {
             peak * 1024.0 * 1024.0 / triples as f64
         };
+        // HDB-146: attribute the RSS. Each component accounts for itself; the
+        // rest of RSS is the residual, which is where allocator retention,
+        // per-query intermediates, the binary and its stacks land.
+        let split = backend.memory_split();
+        let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+        for (label, bytes) in split.rows() {
+            eprintln!(
+                "  [mem] {label}: {:.0} MiB ({:.1}% of RSS, {:.1} B/triple)",
+                mib(bytes),
+                if rss > 0.0 {
+                    100.0 * mib(bytes) / rss
+                } else {
+                    0.0
+                },
+                if triples == 0 {
+                    0.0
+                } else {
+                    bytes as f64 / triples as f64
+                },
+            );
+        }
+        let attributed = mib(split.total());
+        eprintln!(
+            "  [mem] attributed: {attributed:.0} MiB; unattributed (allocator \
+             retention + query intermediates): {:.0} MiB ({:.1}% of RSS)",
+            rss - attributed,
+            if rss > 0.0 {
+                100.0 * (rss - attributed) / rss
+            } else {
+                0.0
+            },
+        );
         eprintln!(
             "  [mem] serving footprint{}: RSS {rss:.0} MiB over {triples} triples \
              = {per_triple:.1} B/triple; peak {peak:.0} MiB = {peak_per_triple:.1} B/triple",

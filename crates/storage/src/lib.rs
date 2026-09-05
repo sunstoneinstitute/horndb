@@ -36,7 +36,7 @@ pub(crate) mod wal;
 // See plans/PLAN-02-01-storage.md tasks 2–9.
 
 pub use dict_base::BaseStats;
-pub use dictionary::Dictionary;
+pub use dictionary::{Dictionary, DictionaryBytes};
 pub use error::StorageError;
 pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
 pub use ordering::{Ordering, PartitionAxis};

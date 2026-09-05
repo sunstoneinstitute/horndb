@@ -114,6 +114,14 @@ impl TripleColumns {
         self.levels[0].len()
     }
 
+    /// Heap bytes of the three columns, by allocated capacity.
+    fn approx_bytes(&self) -> u64 {
+        self.levels
+            .iter()
+            .map(|l| (l.capacity() * std::mem::size_of::<TermId>()) as u64)
+            .sum()
+    }
+
     fn view(&self) -> SortedColumns<'_> {
         debug_assert!(
             self.levels[0].len() == self.levels[1].len()
@@ -245,6 +253,19 @@ impl VecTripleSource {
     /// order.
     pub fn sorted_columns(&self, ord: Ordering) -> SortedColumns<'_> {
         self.columns(ord).view()
+    }
+
+    /// Approximate heap bytes: the anchor plus every derived ordering built so
+    /// far (HDB-146). Six orderings x 3 columns x 8 B is 144 B per triple when
+    /// all of them are materialised, which is why this is worth measuring.
+    pub fn approx_bytes(&self) -> u64 {
+        self.anchor.approx_bytes()
+            + self
+                .derived
+                .iter()
+                .filter_map(OnceLock::get)
+                .map(TripleColumns::approx_bytes)
+                .sum::<u64>()
     }
 
     /// Which orderings are materialised right now. Test-only window on the

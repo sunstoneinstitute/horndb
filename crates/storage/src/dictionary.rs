@@ -143,6 +143,17 @@ impl AuxTable {
         self.map.get(s).map(|e| *e)
     }
 
+    /// Approximate heap bytes: both copies of each string (the map key and
+    /// the `order` entry) plus the two containers' slot capacity. A corpus has
+    /// a few dozen aux strings, so the O(n) walk is cheap.
+    fn approx_bytes(&self) -> u64 {
+        let order = self.order.read();
+        let strings: usize = order.iter().map(|s| s.len()).sum();
+        (2 * strings
+            + order.capacity() * std::mem::size_of::<Box<str>>()
+            + self.map.capacity() * (std::mem::size_of::<(Box<str>, u32)>() + 1)) as u64
+    }
+
     fn intern(&self, s: &str) -> u32 {
         if let Some(id) = self.get(s) {
             return id;
@@ -359,8 +370,58 @@ pub struct Dictionary {
     base_len: u64,
     datatypes: AuxTable,
     languages: AuxTable,
+    /// Heap bytes of the forward-map keys, and of the reverse map's `Term`
+    /// strings. Maintained incrementally (`intern_miss` adds, `gc` subtracts)
+    /// so [`Dictionary::approx_bytes`] stays O(1) — it feeds a gauge, and a
+    /// scrape must not walk 10M entries.
+    key_heap: AtomicU64,
+    term_heap: AtomicU64,
     /// `HORNDB_INTERN_PHASES=1`, resolved once at construction.
     phases: bool,
+}
+
+/// Approximate heap bytes a [`Dictionary`] owns, split by what holds them.
+/// The memory-mapped base (SPEC-25 S2) is **not** counted: it is file-backed,
+/// not heap, and its pages are evictable.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DictionaryBytes {
+    /// Forward-map key contents (`Box<[u8]>` payloads).
+    pub keys: u64,
+    /// Reverse-map term contents (IRI / lexical-form / tag strings).
+    pub terms: u64,
+    /// Slot overhead of the two containers plus the aux tables: hash-map
+    /// capacity, reverse-vector capacity, and the inline size of what they hold.
+    pub index: u64,
+}
+
+impl DictionaryBytes {
+    pub fn total(&self) -> u64 {
+        self.keys + self.terms + self.index
+    }
+}
+
+/// Heap bytes the strings inside one `Term` own. Approximate: a datatype IRI
+/// oxrdf keeps as a `&'static str` is counted anyway, which over-counts by a
+/// few bytes on typed literals and never under-counts.
+fn term_heap_bytes(term: &Term) -> u64 {
+    match term {
+        Term::NamedNode(n) => n.as_str().len() as u64,
+        Term::BlankNode(b) => b.as_str().len() as u64,
+        Term::Literal(l) => {
+            (l.value().len() + l.language().map_or(0, str::len)) as u64
+                + if l.datatype().as_str() == XSD_STRING {
+                    0
+                } else {
+                    l.datatype().as_str().len() as u64
+                }
+        }
+        Term::Triple(t) => {
+            std::mem::size_of::<oxrdf::Triple>() as u64
+                + term_heap_bytes(&t.subject.clone().into())
+                + term_heap_bytes(&Term::NamedNode(t.predicate.clone()))
+                + term_heap_bytes(&t.object)
+        }
+    }
 }
 
 impl Dictionary {
@@ -382,6 +443,8 @@ impl Dictionary {
             base_len,
             datatypes: AuxTable::new(),
             languages: AuxTable::new(),
+            key_heap: AtomicU64::new(0),
+            term_heap: AtomicU64::new(0),
             phases: intern_phases::enabled(),
         }
     }
@@ -787,6 +850,10 @@ impl Dictionary {
         overlay.terms.push(Some(term.clone()));
         intern_phases::charge(intern_phases::REVERSE, t_rev);
         self.forward.insert(scratch.buf.as_slice().into(), id);
+        self.key_heap
+            .fetch_add(scratch.buf.len() as u64, Ordering::Relaxed);
+        self.term_heap
+            .fetch_add(term_heap_bytes(term), Ordering::Relaxed);
         Ok(id)
     }
 
@@ -1027,6 +1094,7 @@ impl Dictionary {
     pub fn gc(&self, live: &[bool]) -> usize {
         let mut overlay = self.reverse.write();
         let mut freed = 0u64;
+        let (mut key_heap_freed, mut term_heap_freed) = (0u64, 0u64);
         let base_len = self.base_len as usize;
         // Base slots: the file is immutable, so record the index as dead;
         // the next flush writes the tombstone. A slot the file already
@@ -1051,23 +1119,48 @@ impl Dictionary {
                     continue; // past the end, or already freed
                 };
                 let id = TermId::new(kind_of(&term), (i as u64) + 1);
+                term_heap_freed += term_heap_bytes(&term);
                 // The aux ids this key needs already exist (the term was
                 // interned), so `Lookup` cannot miss; it also keeps GC from
                 // minting aux ids, which would change future key bytes.
-                if self.encode_key(&mut scratch, &term, AuxMode::Lookup) {
-                    self.forward
-                        .remove_if(scratch.buf.as_slice(), |_, v| *v == id);
+                if self.encode_key(&mut scratch, &term, AuxMode::Lookup)
+                    && self
+                        .forward
+                        .remove_if(scratch.buf.as_slice(), |_, v| *v == id)
+                        .is_some()
+                {
+                    key_heap_freed += scratch.buf.len() as u64;
                 }
                 freed += 1;
             }
         });
         self.freed.fetch_add(freed, Ordering::Relaxed);
+        self.key_heap.fetch_sub(key_heap_freed, Ordering::Relaxed);
+        self.term_heap.fetch_sub(term_heap_freed, Ordering::Relaxed);
         freed as usize
     }
 
     /// Total bytes of forward-map key currently stored, and the number of
     /// keys. Test/benchmark instrumentation for the HDB-95 measurement; the
     /// figure excludes the `Box` headers and the map's own slot overhead.
+    /// Approximate heap bytes this dictionary owns (HDB-146). O(1): the two
+    /// content totals are maintained by `intern_miss`/`gc`, and the rest is
+    /// container capacity. See [`DictionaryBytes`] for what is left out.
+    pub fn approx_bytes(&self) -> DictionaryBytes {
+        let overlay = self.reverse.read();
+        let index = self.forward.capacity() as u64
+            * (std::mem::size_of::<(Box<[u8]>, TermId)>() + 1) as u64
+            + overlay.terms.capacity() as u64 * std::mem::size_of::<Option<Term>>() as u64
+            + overlay.base_dead.serialized_size() as u64
+            + self.datatypes.approx_bytes()
+            + self.languages.approx_bytes();
+        DictionaryBytes {
+            keys: self.key_heap.load(Ordering::Relaxed),
+            terms: self.term_heap.load(Ordering::Relaxed),
+            index,
+        }
+    }
+
     pub fn key_bytes(&self) -> (u64, u64) {
         let mut bytes = 0u64;
         let mut keys = 0u64;
@@ -1362,6 +1455,32 @@ mod tests {
         assert_eq!(ids_a, ids_b);
         let payloads: Vec<u64> = ids_a.iter().map(|i| i.payload()).collect();
         assert_eq!(payloads, vec![1, 2, 3, 4, 5]);
+    }
+
+    /// `approx_bytes` must track interned content and land in a sane
+    /// per-term ballpark (HDB-146) — it is the dictionary's share of the
+    /// serving-footprint split, so a wildly wrong constant would misattribute
+    /// the whole measurement.
+    #[test]
+    fn approx_bytes_tracks_interned_terms() {
+        let d = Dictionary::new();
+        let empty = d.approx_bytes().total();
+        const N: u64 = 1000;
+        for i in 0..N {
+            d.intern(&Term::NamedNode(
+                NamedNode::new(format!("http://example.org/term/{i}")).unwrap(),
+            ))
+            .unwrap();
+        }
+        let b = d.approx_bytes();
+        assert!(b.total() > empty, "must grow: {} -> {}", empty, b.total());
+        // Each IRI is 25-27 B; the key is the same bytes plus a one-byte tag.
+        assert!((25 * N..29 * N).contains(&b.terms), "terms: {}", b.terms);
+        assert_eq!(b.keys, b.terms + N, "key = IRI bytes + one tag byte");
+        // Ballpark: ~55 B of content per term, container overhead bounded by a
+        // hash-map slot plus an `Option<Term>` slot.
+        let per_term = b.total() / N;
+        assert!((55..256).contains(&per_term), "B/term: {per_term}");
     }
 
     #[test]
