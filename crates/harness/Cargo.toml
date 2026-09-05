@@ -35,7 +35,16 @@ spargebra = { workspace = true, features = ["sep-0006", "sparql-12"] }
 # directly. `default-features = false` keeps the HTTP server (axum/tokio) and
 # the optional reasoner out of the harness binary — only the query/update
 # execution path is needed.
-horndb-sparql = { path = "../sparql", default-features = false }
+# `server` is on for the `sparql11-gsp` suite (SPEC-28 S5): those cases are
+# HTTP request/response pairs, so `crate::gsp` boots the real axum router on a
+# bound port and drives it. It brings in axum/tokio/parking_lot but not the
+# reasoner or the GraphBLAS-linked incremental backend.
+horndb-sparql = { path = "../sparql", default-features = false, features = ["server"] }
+axum = { workspace = true }
+# `net` + `io-util` are for `gsp.rs`: it binds a listener and speaks HTTP/1.1
+# over a raw socket. `rt-multi-thread` etc. come from the workspace entry.
+tokio = { workspace = true, features = ["net", "io-util"] }
+parking_lot = { workspace = true }
 sparesults = { workspace = true }
 quick-xml = { workspace = true }
 walkdir = { workspace = true }

@@ -20,6 +20,13 @@ pub enum Suite {
     /// Source: <https://www.w3.org/2009/sparql/docs/tests/>, fetched into
     /// `crates/harness/data/w3c-sparql11-tests/` by `fetch-w3c-suites.sh`.
     Sparql11Eval,
+    /// W3C SPARQL 1.1 Graph Store HTTP Protocol suite (SPEC-28 S5).
+    /// Each case is an ordered sequence of HTTP request/response pairs run
+    /// against a live server, not a manifest of files. Source:
+    /// <https://w3c.github.io/rdf-tests/sparql/sparql11/graph-store-protocol/>
+    /// — the machine-readable successor to the deprecated prose tests under
+    /// `http-rdf-update/`, which the case IRIs still name.
+    Sparql11Gsp,
     /// W3C RDF 1.2 N-Triples syntax tests (positive + negative).
     /// Source: <https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax/>.
     Rdf12NTriples,
@@ -37,6 +44,7 @@ impl Suite {
             Suite::Sparql11 => "sparql11",
             Suite::Sparql11Syntax => "sparql11-syntax",
             Suite::Sparql11Eval => "sparql11-eval",
+            Suite::Sparql11Gsp => "sparql11-gsp",
             Suite::Rdf12NTriples => "rdf12-n-triples",
             Suite::SssomMappings => "sssom-mappings",
         }
@@ -104,10 +112,37 @@ pub enum TestKind {
         result_data: Option<PathBuf>,
         result_graph_data: Vec<(PathBuf, String)>,
     },
+    /// W3C `mf:GraphStoreProtocolTest`: an ordered sequence of HTTP
+    /// requests against one live Graph Store Protocol endpoint, each with
+    /// its expected response. State carries from one request to the next, so
+    /// the whole sequence is one case. Graded by `crate::gsp`.
+    GraphStoreProtocol { requests: Vec<GspRequest> },
     /// The manifest entry carries an `rdf:type` this harness does not grade
     /// (e.g. `mf:ProtocolTest`). Reported as Skipped with the type IRI, so a
     /// whole-manifest selection stays loadable and the gap stays visible.
     Unsupported { type_iri: String },
+}
+
+/// One HTTP request of a [`TestKind::GraphStoreProtocol`] sequence, plus what
+/// its response must look like.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GspRequest {
+    pub method: String,
+    /// `ht:absolutePath` verbatim from the manifest, so it still carries the
+    /// upstream `/gsp` endpoint prefix. `crate::gsp` rewrites that prefix to
+    /// the route under test — the manifest tells runners to do exactly that.
+    pub path: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+    /// Status codes the response may carry (`mf:expectedStatus`; a case may
+    /// list several, e.g. `hts:OK, hts:NoContent`).
+    pub expected_status: Vec<u16>,
+    /// Expected response payload (`ht:body`), compared as a graph — parsed
+    /// and canonicalized on both sides, so blank-node labels do not matter.
+    pub expected_body: Option<String>,
+    /// `Content-Type` declared for `expected_body` in the response headers.
+    /// Only picks the parser; it is not itself asserted on the response.
+    pub expected_body_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]

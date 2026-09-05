@@ -48,6 +48,10 @@ pub fn run_selected(
             // Selected whole (`include = ["*"]`); known gaps live in the
             // suite's `expected_failures`, never in a shrunken `include`.
             "sparql11-eval" => Suite::Sparql11Eval,
+            // W3C SPARQL 1.1 Graph Store Protocol suite (SPEC-28 S5). Each
+            // case is a sequence of HTTP requests against a live server that
+            // `crate::gsp` boots on a kernel-assigned port.
+            "sparql11-gsp" => Suite::Sparql11Gsp,
             // W3C RDF 1.2 N-Triples syntax tests. The manifest uses the
             // rdft: vocabulary (`TestNTriplesPositiveSyntax` /
             // `TestNTriplesNegativeSyntax`), parsed by the same
@@ -299,6 +303,10 @@ fn run_one(engine: &mut dyn Reasoner, case: &TestCase) -> Result<Outcome> {
                 result_graph_data,
             )
         })? {
+            None => (Status::Passed, None),
+            Some(reason) => (Status::Failed, Some(reason)),
+        },
+        TestKind::GraphStoreProtocol { requests } => match crate::gsp::run_case(requests)? {
             None => (Status::Passed, None),
             Some(reason) => (Status::Failed, Some(reason)),
         },
