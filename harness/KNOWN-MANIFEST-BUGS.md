@@ -478,14 +478,16 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-05 with `--engine owlrl`: **377 pass, 130 fail, 40 skip**
-(HDB-133: `MINUS` now translates, fixing 3 of its 7 `negation/` cases; the
-other 4 turned out to be blocked on the pre-existing `FILTER NOT EXISTS`
-expression gap — see that row below). The 40 skips are test types the harness
-does not grade at all (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`,
-`mf:CSVResultFormatTest`); they report with the type IRI in the reason.
+Measured on 2026-09-05 with `--engine owlrl`: **381 pass, 126 fail, 40 skip**
+(HDB-137: the four `basic-update/` cases that derive one named graph from
+another now pass — see below. Before that, HDB-133 made `MINUS` translate,
+fixing 3 of its 7 `negation/` cases; the other 4 turned out to be blocked on
+the pre-existing `FILTER NOT EXISTS` expression gap — see that row below). The
+40 skips are test types the harness does not grade at all (`mf:ProtocolTest`,
+`mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they report with the
+type IRI in the reason.
 
-The 133 reds are listed one-by-one in `expected_failures` in
+The 126 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -503,7 +505,6 @@ cannot rot, and CI catches regressions in both directions.
 | 10 | **Numeric typing** in arithmetic and aggregates: no xsd type promotion (`1.0 + 2` yields `xsd:integer`, not `xsd:decimal`), decimals summed in `f64` (`11.100000000000001`), `CEIL`/`FLOOR`/`ROUND` retype to `xsd:integer`, and `xsd:double` results are not in canonical lexical form (`2E-1` vs `2.0E-1`). | `aggregates/`, `functions/` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
-| 4 | **`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination graph empty**, so the trailing `DROP GRAPH :g2` errors under SPEC-28 D11 (a graph holding no quad does not exist). | `basic-update/` |
 | 2 | **Expression errors do not unbind.** A failed evaluation returns a value instead of an error, so `IF`/`COALESCE` take the wrong branch. | `functions/if02`, `coalesce01` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 
@@ -514,3 +515,18 @@ cannot rot, and CI catches regressions in both directions.
 | 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
 | 2 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). | `json-res/jsonres01`, `jsonres02` |
 | 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |
+
+## ~~`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` never reaches its `DROP`~~ — FIXED (HDB-137)
+
+Four `basic-update/` cases (`insert-05a`, `insert-data-same-bnode`,
+`insert-where-same-bnode`, `insert-where-same-bnode2`). The cross-graph copy
+itself always worked; two other bugs stopped the requests:
+
+1. The multi-operation atomicity preflight judged D11 graph existence for
+   *every* operation against the pre-request store, so `DROP GRAPH :g2` was
+   rejected before the earlier `INSERT` that creates `:g2` had run. Existence
+   is now preflighted for the first operation only; later ones are checked at
+   apply time, where the rollback journal already covers a failure.
+2. A blank node in an `INSERT` template was scoped to the solution row but not
+   to the operation, so `_:b` written by two operations of one request landed
+   on the same node. It now also carries a per-operation tag.

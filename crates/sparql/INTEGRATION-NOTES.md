@@ -638,14 +638,20 @@ construct like `SERVICE`/`MINUS` is caught) — and only mutates once the whole
 sequence is known-applyable. One store batch per operation, applied in
 request order, never collapsed.
 
-**Rollback covers what preflight cannot see.** The preflight reads D11
-existence against the *pre-update* store. That is exact for a single operation
-and for independent operations, but a multi-op request that flips one graph's
-existence *between* operations (an earlier op creates or empties a graph a
-later op then existence-checks) can pass preflight and still hit an existence
-error at apply time — as can a reserved-graph write through a template graph
-*variable*, which is only known once a WHERE row binds it. `update.rs::Journal`
-closes both. For a request with more than one operation it records, just before
+**D11 existence is preflighted for the first operation only.** The preflight
+reads the *pre-update* store, which is the store only the first operation
+actually runs on; every later one runs against a store the earlier ones may
+have changed. Checking existence for all of them rejected requests that are
+legal in request order — `INSERT { GRAPH <g> … } WHERE { … } ; DROP GRAPH <g>`
+creates `<g>` before it drops it (W3C `basic-update/insert-05a` and its three
+variants, HDB-137). So `validate_op` takes a `check_existence` flag, set for the
+first operation alone; later operations keep the store-independent checks and
+have their existence checked at apply time.
+
+**Rollback covers what preflight cannot see.** Two error families therefore fire
+at apply time rather than up front: a later operation's D11 existence, and a
+reserved-graph write through a template graph *variable*, which is only known
+once a WHERE row binds it. `update.rs::Journal` closes both. For a request with more than one operation it records, just before
 each write batch, whether every quad that batch is about to touch was visible
 before this request first touched it (`Store::quad_exists` — a point read on
 both backends; a `CLEAR`/`DROP` sweep records the graph's quads as visible
@@ -660,6 +666,17 @@ pending delta cannot be layered over its results. A single-operation request is
 already one atomic `apply_quads` batch, so its journal is disabled and costs
 nothing. Test: `update_graph_mgmt.rs::multi_op_failure_rolls_back_earlier_ops_*`
 (both backends).
+
+**Template blank nodes are scoped per operation, not just per row.** A `_:b` in
+an `INSERT` template is a fresh node for each solution row *and* for each
+operation (SPARQL 1.1 §4.1.4). `apply_delete_insert` takes one
+`Store::next_bnode_doc_tag` per operation and labels template blank nodes
+`hdb<tag>_<label>_r<row>` (reusing `horndb_storage::loader::scope_blank_node_label`,
+the same rename `LOAD` applies to a parsed document). Without the per-operation
+half, `_:b` written by two operations of one request collapsed onto one node
+(W3C `insert-where-same-bnode`, HDB-137). `INSERT DATA` is deliberately *not*
+scoped this way: its quads are one operation, and the same label inside it must
+stay the same node (W3C `insert-data-same-bnode`).
 
 **Turtle/TriG base IRI.** `LOAD` passes the source IRI as the parser base, so a
 document with relative IRIs (`<s> <p> <o> .`) resolves against its own IRI —
