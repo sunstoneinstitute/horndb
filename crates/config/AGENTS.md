@@ -16,6 +16,11 @@ detail; the public API is `load(&LoadInputs) -> Result<ServerConfig, _>`.
   generation counter; `watch(inputs, handle)` arms a `notify` watcher, debounces by
   `[reload].debounce`, then re-runs the whole `load` and republishes. Any settled
   event re-resolves everything, so reload is idempotent and event-shape-agnostic.
+- A reload never publishes from a zero-length base file, and requires two
+  identical loads 25 ms apart, because in-place edits are not atomic (HDB-156):
+  an empty or half-written TOML file still parses, and every absent key would
+  silently take its default. Tripping either guard skips the cycle and counts
+  neither `applied` nor `rejected`.
 - The watcher watches **directories** (the base file's parent, plus each
   `config_dirs` entry), never the file itself: an editor's rename-into-place save
   swaps the inode and would orphan a file watch. Do not "optimize" this to a file
