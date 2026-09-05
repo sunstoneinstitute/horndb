@@ -93,6 +93,12 @@ pub enum PhysicalPlan {
         right: Box<PhysicalPlan>,
         expr: Option<Expr>,
     },
+    /// `MINUS` (SPARQL 1.1 §18.5): anti-join, output schema = `left`'s.
+    /// See `crate::algebra::Algebra::Minus`.
+    Minus {
+        left: Box<PhysicalPlan>,
+        right: Box<PhysicalPlan>,
+    },
     /// Filter rows by a boolean expression.
     Filter {
         expr: Expr,

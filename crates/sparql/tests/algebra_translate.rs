@@ -57,15 +57,21 @@ fn join_of_two_bgps() {
 }
 
 #[test]
-fn rejects_minus() {
-    let q =
-        parse_query("SELECT * WHERE { ?s ?p ?o MINUS { ?s <http://ex/q> ?z } }").expect("parse");
-    let inner = match q {
-        ParsedQuery::Select { inner } => inner,
-        _ => unreachable!(),
+fn minus_translates_to_algebra_minus() {
+    // HDB-133: MINUS lowers to `Algebra::Minus`, an anti-join — not a
+    // rejection, and not a rewrite into `Algebra::Filter`/NOT EXISTS.
+    let alg = alg_of("SELECT * WHERE { ?s ?p ?o MINUS { ?s <http://ex/q> ?z } }");
+    let inner = match alg {
+        Algebra::Project { inner, .. } => *inner,
+        other => panic!("expected Project, got {other:?}"),
     };
-    let err = translate::translate_query(&inner).unwrap_err();
-    assert!(format!("{err}").contains("Minus"), "got: {err}");
+    match inner {
+        Algebra::Minus { left, right } => {
+            assert!(matches!(*left, Algebra::Bgp { .. }), "left: {left:?}");
+            assert!(matches!(*right, Algebra::Bgp { .. }), "right: {right:?}");
+        }
+        other => panic!("expected Minus, got {other:?}"),
+    }
 }
 
 #[test]

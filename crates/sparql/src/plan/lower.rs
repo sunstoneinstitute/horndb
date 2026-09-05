@@ -61,6 +61,10 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
             right: Box::new(lower_scoped(right, scope)?),
             expr: expr.clone(),
         },
+        Algebra::Minus { left, right } => LogicalPlan::Minus {
+            left: Box::new(lower_scoped(left, scope)?),
+            right: Box::new(lower_scoped(right, scope)?),
+        },
         Algebra::Filter { expr, inner } => LogicalPlan::Filter {
             expr: expr.clone(),
             inner: Box::new(lower_scoped(inner, scope)?),
@@ -203,6 +207,13 @@ fn per_graph_barrier(plan: &LogicalPlan, var: &Var) -> Option<&'static str> {
                 .then(|| per_graph_barrier(right, var))
                 .flatten()
         }),
+        // `MINUS`'s right arm is evaluated but never contributes output
+        // columns — same shape as `LeftJoin`'s optional arm for this check.
+        Minus { left, right } => per_graph_barrier(left, var).or_else(|| {
+            (!reads_no_quads(right))
+                .then(|| per_graph_barrier(right, var))
+                .flatten()
+        }),
         Union { left, right } => {
             per_graph_barrier(left, var).or_else(|| per_graph_barrier(right, var))
         }
@@ -300,6 +311,15 @@ fn per_graph_var_divergence(plan: &LogicalPlan, var: &Var) -> Option<&'static st
                 per_graph_var_divergence(left, var).or_else(|| per_graph_var_divergence(right, var))
             }
         }
+        // `MINUS` has no ON expression, but its right arm is the same
+        // "evaluated, never output" shape as `LeftJoin`'s optional arm.
+        Minus { left, right } => {
+            if mentions_var(right, var) {
+                Some("a MINUS that references ?g")
+            } else {
+                per_graph_var_divergence(left, var).or_else(|| per_graph_var_divergence(right, var))
+            }
+        }
         Join { left, right } | Union { left, right } => {
             per_graph_var_divergence(left, var).or_else(|| per_graph_var_divergence(right, var))
         }
@@ -366,7 +386,7 @@ fn mentions_var(plan: &LogicalPlan, var: &Var) -> bool {
                 || mentions_var(left, var)
                 || mentions_var(right, var)
         }
-        Join { left, right } | Union { left, right } => {
+        Join { left, right } | Union { left, right } | Minus { left, right } => {
             mentions_var(left, var) || mentions_var(right, var)
         }
         Project { inner, vars } => vars.contains(var) || mentions_var(inner, var),
@@ -495,9 +515,10 @@ fn reads_no_quads(plan: &LogicalPlan) -> bool {
         | Slice { inner, .. }
         | Group { inner, .. } => reads_no_quads(inner),
         PathClosure { edge, .. } => reads_no_quads(edge),
-        Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
-            reads_no_quads(left) && reads_no_quads(right)
-        }
+        Join { left, right }
+        | LeftJoin { left, right, .. }
+        | Union { left, right }
+        | Minus { left, right } => reads_no_quads(left) && reads_no_quads(right),
     }
 }
 
@@ -517,6 +538,10 @@ pub fn lower_physical(plan: LogicalPlan) -> PhysicalPlan {
             left: Box::new(lower_physical(*left)),
             right: Box::new(lower_physical(*right)),
             expr,
+        },
+        LogicalPlan::Minus { left, right } => PhysicalPlan::Minus {
+            left: Box::new(lower_physical(*left)),
+            right: Box::new(lower_physical(*right)),
         },
         LogicalPlan::Filter { expr, inner } => PhysicalPlan::Filter {
             expr,
