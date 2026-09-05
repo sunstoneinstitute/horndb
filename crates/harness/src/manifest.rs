@@ -20,7 +20,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use oxrdf::{Graph, NamedNodeRef, NamedOrBlankNode, NamedOrBlankNodeRef, Term, TermRef};
 use oxttl::TurtleParser;
 
-use crate::testcase::{Suite, TestCase, TestKind};
+use crate::testcase::{GspRequest, Suite, TestCase, TestKind};
 
 const MF: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-manifest#";
 const RDFT: &str = "http://www.w3.org/ns/rdftest#";
@@ -28,6 +28,13 @@ const QT: &str = "http://www.w3.org/2001/sw/DataAccess/tests/test-query#";
 /// SPARQL 1.1 Update test vocabulary — `ut:request` / `ut:data` /
 /// `ut:graphData` / `ut:graph`, used by `mf:UpdateEvaluationTest`.
 const UT: &str = "http://www.w3.org/2009/sparql/tests/test-update#";
+/// W3C HTTP-in-RDF vocabulary, used by the Graph Store Protocol manifests to
+/// spell out each request/response pair.
+const HT: &str = "http://www.w3.org/2011/http#";
+/// Status-code IRIs (`hts:OK`, `hts:Created`, ...) named by `mf:expectedStatus`.
+const HTS: &str = "http://www.w3.org/2011/http-statusCodes#";
+/// "Representing Content in RDF" — `cnt:chars` holds a request/response body.
+const CNT: &str = "http://www.w3.org/2011/content#";
 const RDFS_LABEL: &str = "http://www.w3.org/2000/01/rdf-schema#label";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
@@ -179,6 +186,7 @@ struct EntryProjector {
     sparql_query_neg_iri: String,
     sparql_update_pos_iri: String,
     sparql_update_neg_iri: String,
+    gsp_iri: String,
 }
 
 impl EntryProjector {
@@ -212,6 +220,9 @@ impl EntryProjector {
             sparql_query_neg_iri: format!("{MF}NegativeSyntaxTest11"),
             sparql_update_pos_iri: format!("{MF}PositiveUpdateSyntaxTest11"),
             sparql_update_neg_iri: format!("{MF}NegativeUpdateSyntaxTest11"),
+            // W3C SPARQL 1.1 Graph Store Protocol test: `mf:action` is an
+            // `ht:Connection` holding an ordered `ht:requests` list.
+            gsp_iri: format!("{MF}GraphStoreProtocolTest"),
         })
     }
 
@@ -305,6 +316,20 @@ fn project_entry(
         .map(|t| t.into_owned());
 
     let kind_str = kind_iri.as_str();
+
+    // Graph Store Protocol cases are HTTP sequences, not files. Gated on the
+    // suite so no other manifest's `mf:GraphStoreProtocolTest` changes shape.
+    if suite == Suite::Sparql11Gsp && kind_str == p.gsp_iri {
+        let action_node = action.ok_or_else(|| anyhow!("missing mf:action"))?;
+        let requests = gsp_requests(graph, &term_to_subject(&action_node)?)
+            .with_context(|| format!("entry {id}"))?;
+        return Ok(TestCase {
+            id,
+            suite,
+            name,
+            kind: TestKind::GraphStoreProtocol { requests },
+        });
+    }
 
     // The whole-manifest SPARQL 1.1 *evaluation* suite grades the two
     // evaluation types itself; every other suite keeps the curated Stage-1
@@ -445,6 +470,123 @@ fn project_entry(
         name,
         kind,
     })
+}
+
+/// Project an `ht:Connection`'s `ht:requests` list into [`GspRequest`]s.
+///
+/// Shape (see the upstream `graph-store-protocol/manifest.ttl` comment):
+/// each `ht:Request` carries `ht:methodName`, `ht:absolutePath`, an optional
+/// `ht:headers` list of `[ht:fieldName ; ht:fieldValue]`, an optional
+/// `ht:body [ cnt:chars "…" ]`, and an `ht:resp` whose `mf:expectedStatus`
+/// names the acceptable status codes.
+fn gsp_requests(graph: &Graph, conn: &NamedOrBlankNode) -> Result<Vec<GspRequest>> {
+    let head = graph
+        .object_for_subject_predicate(conn.as_ref(), NamedNodeRef::new(&format!("{HT}requests"))?)
+        .ok_or_else(|| anyhow!("ht:Connection has no ht:requests"))?
+        .into_owned();
+    let mut out = Vec::new();
+    for item in read_rdf_list(graph, head)? {
+        let req = term_to_subject(&item)?;
+        let resp = term_to_subject(
+            &graph
+                .object_for_subject_predicate(
+                    req.as_ref(),
+                    NamedNodeRef::new(&format!("{HT}resp"))?,
+                )
+                .ok_or_else(|| anyhow!("ht:Request has no ht:resp"))?
+                .into_owned(),
+        )?;
+        let mut expected_status = Vec::new();
+        for o in graph.objects_for_subject_predicate(
+            resp.as_ref(),
+            NamedNodeRef::new(&format!("{MF}expectedStatus"))?,
+        ) {
+            match o {
+                TermRef::NamedNode(n) => expected_status.push(status_code(n.as_str())?),
+                other => bail!("mf:expectedStatus is not an IRI: {other}"),
+            }
+        }
+        if expected_status.is_empty() {
+            bail!("ht:Response has no mf:expectedStatus");
+        }
+        let expected_body = gsp_body(graph, &resp)?;
+        let expected_body_type = expected_body
+            .is_some()
+            .then(|| {
+                gsp_headers(graph, &resp).map(|hs| {
+                    hs.into_iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                        .map(|(_, v)| v)
+                })
+            })
+            .transpose()?
+            .flatten();
+        out.push(GspRequest {
+            method: gsp_literal(graph, &req, &format!("{HT}methodName"))?
+                .ok_or_else(|| anyhow!("ht:Request has no ht:methodName"))?,
+            path: gsp_literal(graph, &req, &format!("{HT}absolutePath"))?
+                .ok_or_else(|| anyhow!("ht:Request has no ht:absolutePath"))?,
+            headers: gsp_headers(graph, &req)?,
+            body: gsp_body(graph, &req)?,
+            expected_status,
+            expected_body,
+            expected_body_type,
+        });
+    }
+    Ok(out)
+}
+
+/// `hts:` status-code IRI to its numeric code. Unknown names are a hard
+/// error: silently dropping one would make a case pass on any status.
+fn status_code(iri: &str) -> Result<u16> {
+    match iri.strip_prefix(HTS) {
+        Some("OK") => Ok(200),
+        Some("Created") => Ok(201),
+        Some("NoContent") => Ok(204),
+        Some("NotFound") => Ok(404),
+        _ => bail!("unrecognised mf:expectedStatus {iri}"),
+    }
+}
+
+fn gsp_literal(graph: &Graph, subj: &NamedOrBlankNode, pred: &str) -> Result<Option<String>> {
+    match graph.object_for_subject_predicate(subj.as_ref(), NamedNodeRef::new(pred)?) {
+        Some(TermRef::Literal(l)) => Ok(Some(l.value().to_string())),
+        Some(other) => bail!("{pred} is not a literal: {other}"),
+        None => Ok(None),
+    }
+}
+
+/// `ht:headers ( [ ht:fieldName "…" ; ht:fieldValue "…" ] … )`.
+fn gsp_headers(graph: &Graph, subj: &NamedOrBlankNode) -> Result<Vec<(String, String)>> {
+    let Some(head) = graph
+        .object_for_subject_predicate(subj.as_ref(), NamedNodeRef::new(&format!("{HT}headers"))?)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for item in read_rdf_list(graph, head.into_owned())? {
+        let h = term_to_subject(&item)?;
+        let name = gsp_literal(graph, &h, &format!("{HT}fieldName"))?
+            .ok_or_else(|| anyhow!("header has no ht:fieldName"))?;
+        let value = gsp_literal(graph, &h, &format!("{HT}fieldValue"))?
+            .ok_or_else(|| anyhow!("header has no ht:fieldValue"))?;
+        out.push((name, value));
+    }
+    Ok(out)
+}
+
+/// `ht:body [ cnt:chars "…" ]`, absent when the message carries no payload.
+fn gsp_body(graph: &Graph, subj: &NamedOrBlankNode) -> Result<Option<String>> {
+    let Some(body) =
+        graph.object_for_subject_predicate(subj.as_ref(), NamedNodeRef::new(&format!("{HT}body"))?)
+    else {
+        return Ok(None);
+    };
+    gsp_literal(
+        graph,
+        &term_to_subject(&body.into_owned())?,
+        &format!("{CNT}chars"),
+    )
 }
 
 /// Optional single-file object (`qt:data`, `ut:data`).

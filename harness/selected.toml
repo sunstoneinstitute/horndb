@@ -265,6 +265,49 @@ expected_failures = [
     "data-sparql11/property-path/manifest#pp16",
 ]
 
+[suites.sparql11-gsp]
+# W3C SPARQL 1.1 Graph Store HTTP Protocol suite (SPEC-28 S5). Each case is an
+# ordered sequence of HTTP requests against a live server, so the runner boots
+# the real axum router on a kernel-assigned port (`crates/harness/src/gsp.rs`)
+# rather than reading files.
+#
+# The corpus is `graph-store-protocol/`, not the `http-rdf-update/` directory
+# SPEC-28 names: the latter holds only prose (its every case is
+# `dawg:Deprecated`, with the request/response written out in a Markdown
+# comment). `graph-store-protocol/` is its machine-readable replacement and
+# keeps the same `http-rdf-update/manifest#` case IRIs. Fetched by
+# `crates/harness/scripts/fetch-w3c-suites.sh` into the gitignored
+# `crates/harness/data/`; `fetched = true` has the same meaning as for
+# `sparql11-eval` above.
+#
+# `include = ["*"]` takes both sub-manifests — indirect graph identification
+# (`?graph=<iri>`, what HornDB implements) and direct (the graph named by the
+# request path, which it does not). The direct cases stay selected and are
+# listed below, per SPEC-00's harness-first rule.
+manifest = "crates/harness/data/w3c-gsp-tests/manifest.ttl"
+fetched = true
+include = ["*"]
+expected_failures = [
+    # Direct graph identification (`mf:DirectGraphIdentification`): the graph
+    # is named by the request path, e.g. `PUT /gsp/person/1.ttl`. HornDB's
+    # `/graphs` route names the graph with `?graph=<iri>` / `?default` only
+    # (SPEC-28 S5), so these four 404 on the first request.
+    "http-rdf-update/manifest#put_get_repeat_direct",
+    "http-rdf-update/manifest#put_delete_get_delete_direct",
+    "http-rdf-update/manifest#post_get_post_get_direct",
+    "http-rdf-update/manifest#head_existing_direct",
+
+    # `multipart/form-data` POST body. S5 accepts the two triples formats
+    # only (415 otherwise); the case's first POST/GET pair passes and it
+    # fails on the third request.
+    "http-rdf-update/manifest#post_get_post_get_indirect",
+
+    # `mf:POSTGraphCreation`: POST to the bare endpoint, server mints a graph
+    # IRI and returns it in `Location`. S5 requires the request to name its
+    # target graph, so this is a 400.
+    "http-rdf-update/manifest#post_get_new_graph",
+]
+
 [suites.owl2-w3c-rl]
 # Synthesised from https://www.w3.org/2009/11/owl-test/profile-RL.rdf
 # by `harness extract-owl2-rl` (see `harness/scripts/fetch-w3c-suites.sh`).

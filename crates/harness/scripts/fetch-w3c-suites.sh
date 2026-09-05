@@ -30,10 +30,12 @@ OWL2_PROFILE_RL_URL="https://www.w3.org/2009/11/owl-test/profile-RL.rdf"
 SPARQL_URL="https://www.w3.org/2009/sparql/docs/tests/sparql11-test-suite-20121023.tar.gz"
 RDF12_NT_BASE="https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax"
 SPARQL10_BASE="https://w3c.github.io/rdf-tests/sparql/sparql10"
+GSP_BASE="https://w3c.github.io/rdf-tests/sparql/sparql11/graph-store-protocol"
 
 OWL2_DIR="$DATA/w3c-owl2-rl-tests"
 SPARQL_DIR="$DATA/w3c-sparql11-tests"
 SPARQL10_DIR="$DATA/w3c-sparql10-tests"
+GSP_DIR="$DATA/w3c-gsp-tests"
 RDF12_NT_DIR="$DATA/rdf12-n-triples"
 RDF12_NT_FIXTURES="$ROOT/crates/harness/tests/fixtures/rdf12-n-triples"
 
@@ -121,6 +123,27 @@ fi
 # a precondition for `harness run` — without it the suite's manifest is missing
 # and the run errors out. CI's conformance job runs this script (with
 # HARNESS_BIN set) for exactly that reason.
+
+# SPARQL 1.1 Graph Store Protocol suite (`[suites.sparql11-gsp]`, SPEC-28 S5).
+#
+# NOT in the 2012 tarball fetched above. That tarball's `http-rdf-update/`
+# directory — which SPEC-28 names — holds only a prose draft (`tests.txt`) and,
+# in the maintained mirror, a manifest whose every case is marked
+# `dawg:Deprecated` with its request/response spelled out in a Markdown
+# `rdfs:comment`. Nothing there is machine-readable. The replacement upstream
+# points at is `graph-store-protocol/`, whose cases use the W3C HTTP-in-RDF
+# vocabulary (`ht:Request` / `ht:Response`) and still carry the old
+# `http-rdf-update/manifest#` case IRIs. That is what we fetch.
+#
+# Like `sparql11-eval`, this corpus is read straight from `data/` rather than
+# mirrored into `tests/fixtures/` — hence `fetched = true` in selected.toml.
+mkdir -p "$GSP_DIR"
+for f in manifest.ttl manifest-direct.ttl manifest-indirect.ttl; do
+    if [[ ! -f "$GSP_DIR/$f" ]]; then
+        echo "fetching graph-store-protocol/${f}…"
+        curl -sSfL "$GSP_BASE/$f" -o "$GSP_DIR/$f"
+    fi
+done
 
 # SPARQL 1.0 `graph/` + `dataset/` evaluation families (SPEC-28 S7, #266).
 #

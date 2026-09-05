@@ -64,8 +64,8 @@ reason in `harness/KNOWN-MANIFEST-BUGS.md`.
 
 ## Suite keys (`src/runner.rs`)
 
-`owl2`, `owl2-w3c-rl`, `sparql11`, `sparql11-eval`, `sparql11-syntax`,
-`rdf12-n-triples`.
+`owl2`, `owl2-w3c-rl`, `sparql11`, `sparql11-eval`, `sparql11-gsp`,
+`sparql11-syntax`, `rdf12-n-triples`.
 
 `rdf12-n-triples` runs the W3C RDF 1.2 N-Triples *syntax* tests (4 positive
 `<<( s p o )>>` cases + 6 bad-syntax negatives); it uses
@@ -104,11 +104,44 @@ and the manifest reader follows its `mf:include` list depth-first. So
 conformance job runs the script with `HARNESS_BIN=./target/conformance/harness`
 so it reuses the already-built binary instead of a second debug `cargo run`.
 
+`sparql11-gsp` runs the W3C SPARQL 1.1 **Graph Store Protocol** suite (SPEC-28
+S5). It is the only suite that does not grade files. Each
+`mf:GraphStoreProtocolTest` is an ordered sequence of HTTP requests, and what
+one request leaves in the store is what the next asserts on, so
+`TestKind::GraphStoreProtocol` runs the whole sequence against one live server:
+`src/gsp.rs` calls `horndb_sparql::server::build_router` over a `HornBackend`
+(the storage path `serve` uses; `MemStore` keeps only a lexical form per term,
+so blank nodes would come back out of it as IRIs), binds `127.0.0.1:0` so the
+kernel picks a free port, and speaks HTTP/1.1 over a plain `TcpStream` —
+`Connection: close` on every request makes the response "read to EOF", so there
+is no chunked or keep-alive framing to implement. One server per case, so state
+carries within a case and never between cases.
+
+Two mappings the upstream manifest asks a runner to make, both in `gsp.rs`:
+every `ht:absolutePath` starts with `/gsp`, rewritten to HornDB's `/graphs`;
+and a response body is compared **graph-isomorphically** (parse both sides,
+`Graph::canonicalize`), not byte-wise, since the payloads are full of blank
+nodes.
+
+Corpus: `graph-store-protocol/{manifest,manifest-direct,manifest-indirect}.ttl`
+from the `rdf-tests` mirror. Note this is **not** the `http-rdf-update/`
+directory SPEC-28 names — that one holds no machine-readable tests (a prose
+`tests.txt` in the tarball; every case in the mirror's manifest is
+`dawg:Deprecated` with its request/response inside a Markdown `rdfs:comment`,
+pointing at `graph-store-protocol/`). The replacement keeps the same
+`http-rdf-update/manifest#` case IRIs, which is why the ids still read that way.
+The manifest reader understands the W3C HTTP-in-RDF vocabulary for these:
+`ht:Connection`/`ht:requests`/`ht:Request`/`ht:resp`, `ht:headers` with
+`ht:fieldName`/`ht:fieldValue`, `ht:body [ cnt:chars … ]`, and
+`mf:expectedStatus` naming `hts:` status IRIs (an unrecognised one is a hard
+error, never a silently-dropped assertion). Like `sparql11-eval` the corpus is
+fetched, not mirrored, so the entry carries `fetched = true`.
+
 ### Fetched corpora: `fetched = true` and `--require-corpus`
 
 A suite whose manifest comes from a fetched corpus rather than a checked-in
-fixture sets `fetched = true` in its `selected.toml` entry (today only
-`sparql11-eval`). It changes what happens when that manifest is **absent**:
+fixture sets `fetched = true` in its `selected.toml` entry (`sparql11-eval`
+and `sparql11-gsp`). It changes what happens when that manifest is **absent**:
 
 - default (`harness run`) — the suite reports **Skipped** with a reason naming
   the missing path and `fetch-w3c-suites.sh`, and every other selected suite

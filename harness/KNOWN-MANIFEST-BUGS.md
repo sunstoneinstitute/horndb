@@ -1,7 +1,8 @@
-> This file has three parts: the **OWL 2 RL** entailment cases the Stage-1
+> This file has four parts: the **OWL 2 RL** entailment cases the Stage-1
 > reasoner does not cover (below), the **SPARQL query** cases the
-> SPEC-07/SPEC-28 engine does not cover (middle), and the root-cause triage of
-> the **W3C SPARQL 1.1 evaluation suite** (`sparql11-eval`, at the end). All
+> SPEC-07/SPEC-28 engine does not cover (middle), the root-cause triage of
+> the **W3C SPARQL 1.1 evaluation suite** (`sparql11-eval`), and the
+> **Graph Store Protocol suite** (`sparql11-gsp`, at the end). All
 > follow the same rule — a W3C case that is not passing must be listed here
 > with the specific missing capability that gates it, whether it is left out
 > of `harness/selected.toml` or (for `sparql11-eval`) still selected and
@@ -526,3 +527,36 @@ itself always worked; two other bugs stopped the requests:
 2. A blank node in an `INSERT` template was scoped to the solution row but not
    to the operation, so `_:b` written by two operations of one request landed
    on the same node. It now also carries a per-operation tag.
+
+---
+
+# Known-failing W3C Graph Store Protocol cases (`sparql11-gsp`, HDB-165)
+
+`[suites.sparql11-gsp]` grades the whole upstream `graph-store-protocol/`
+manifest tree (`include = ["*"]`) — 13 cases, each an ordered sequence of HTTP
+requests run against a live server the harness boots on a bound port
+(`crates/harness/src/gsp.rs`).
+
+Measured on 2026-09-06 with `--engine owlrl`: **7 pass, 0 fail, 6 skip**. The
+6 skips are the `expected_failures` below.
+
+Every one is a **deliberate divergence named by SPEC-28 S5**, not a gap to
+close. The protocol leaves each of these optional, and S5 chose not to
+implement them; do not "fix" the server to pass one of these cases without
+first changing S5.
+
+| # | Why it cannot pass | Cases |
+|--:|---|---|
+| 4 | **Direct graph identification** (`mf:DirectGraphIdentification`) — the graph is named by the request path, e.g. `PUT /gsp/person/1.ttl`. HornDB's `/graphs` route names the graph only with `?graph=<iri>` or `?default` (indirect identification), so these 404 on the first request. | `put_get_repeat_direct`, `put_delete_get_delete_direct`, `post_get_post_get_direct`, `head_existing_direct` |
+| 1 | **`multipart/form-data` request body.** S5 accepts the two triples formats (`text/turtle`, `application/n-triples`) and answers 415 otherwise. The case's first POST/GET pair passes; it fails on the third request. | `post_get_post_get_indirect` |
+| 1 | **`mf:POSTGraphCreation`** — POST to the bare endpoint, server mints a graph IRI and returns it in `Location`. S5 requires every request to name its target graph, so this is a 400. | `post_get_new_graph` |
+
+## Note on the corpus
+
+SPEC-28 names the upstream `http-rdf-update/` directory. That directory holds
+no machine-readable tests: the 2012 tarball ships a prose draft (`tests.txt`),
+and the maintained mirror's `manifest.ttl` marks every case `dawg:Deprecated`
+with its request/response written out inside a Markdown `rdfs:comment`, saying
+to use `../graph-store-protocol/` instead. That is the corpus this suite
+fetches. It keeps the old `http-rdf-update/manifest#` case IRIs, which is why
+the ids above still read that way.
