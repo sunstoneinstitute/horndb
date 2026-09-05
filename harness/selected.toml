@@ -246,30 +246,18 @@ expected_failures = [
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
 
-    # Numeric typing in arithmetic and aggregates: no xsd type promotion
-    # (`1.0 + 2` yields xsd:integer, not xsd:decimal), decimals are summed in
-    # f64 (`11.100000000000001`), CEIL/FLOOR/ROUND retype to xsd:integer, and
-    # xsd:double results are not in canonical lexical form (`2E-1` vs `2.0E-1`).
-    "data-sparql11/aggregates/manifest#agg-avg-02",
-    "data-sparql11/aggregates/manifest#agg-err-01",
-    "data-sparql11/aggregates/manifest#agg-min-02",
-    "data-sparql11/aggregates/manifest#agg-sum-01",
-    "data-sparql11/aggregates/manifest#agg-sum-02",
-    "data-sparql11/functions/manifest#ceil01",
-    "data-sparql11/functions/manifest#floor01",
-    "data-sparql11/functions/manifest#plus-1",
-    "data-sparql11/functions/manifest#plus-2",
-    "data-sparql11/functions/manifest#round01",
-
-    # Expression errors do not leave the variable unbound: a failed evaluation
-    # returns a value instead of an error, so `IF`/`COALESCE` take the wrong
-    # branch.
-    "data-sparql11/functions/manifest#coalesce01",
+    # A comparison operator returns a value where SPARQL 1.1 §17.4 requires an
+    # expression error, so `IF` takes the wrong branch and the variable stays
+    # bound instead of dropping out.
     "data-sparql11/functions/manifest#if02",
 
     # Blank-node labels are compared literally. Grading these needs a
     # bijection between the answer's and the expected result's blank nodes
-    # (SPARQL 1.1 result-set isomorphism).
+    # (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in
+    # a blank node's label (`_:b` vs `_:b0`) since HDB-131 fixed their numeric
+    # typing; every other cell of every row matches.
+    "data-sparql11/functions/manifest#plus-1",
+    "data-sparql11/functions/manifest#plus-2",
     "data-sparql11/json-res/manifest#jsonres01",
     "data-sparql11/json-res/manifest#jsonres02",
 

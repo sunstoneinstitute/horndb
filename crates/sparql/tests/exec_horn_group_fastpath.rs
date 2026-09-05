@@ -84,20 +84,22 @@ fn fast_count_sum_avg_over_scan_columns() {
     assert_eq!(rows.len(), 2, "two categories");
 
     // cat a: bound amounts {10, 20}, one unbound (e3) — COUNT=2, SUM=30, AVG=15.
+    // The fixture is xsd:double, so SUM/AVG stay xsd:double and print in
+    // canonical lexical form (SPARQL 1.1 §17.4.1).
     assert_eq!(val(rows[0].get("cat").unwrap()), "http://ex/a");
     assert_eq!(
         val(rows[0].get("c").unwrap()),
         "2",
         "COUNT skips the unbound member"
     );
-    assert_eq!(val(rows[0].get("s").unwrap()), "30");
-    assert_eq!(val(rows[0].get("avg").unwrap()), "15");
+    assert_eq!(val(rows[0].get("s").unwrap()), "3.0E1");
+    assert_eq!(val(rows[0].get("avg").unwrap()), "1.5E1");
 
     // cat b: single bound amount {5} — COUNT=1, SUM=AVG=5.
     assert_eq!(val(rows[1].get("cat").unwrap()), "http://ex/b");
     assert_eq!(val(rows[1].get("c").unwrap()), "1");
-    assert_eq!(val(rows[1].get("s").unwrap()), "5");
-    assert_eq!(val(rows[1].get("avg").unwrap()), "5");
+    assert_eq!(val(rows[1].get("s").unwrap()), "5.0E0");
+    assert_eq!(val(rows[1].get("avg").unwrap()), "5.0E0");
 }
 
 #[test]
@@ -125,7 +127,7 @@ fn fast_count_distinct_matches_identity_dedup() {
     );
     assert_eq!(
         val(rows[0].get("s").unwrap()),
-        "40",
+        "4.0E1",
         "plain multiset 10+10+20"
     );
 }
@@ -214,14 +216,16 @@ fn scalar_key_grouping_handles_unbound_key_bucket() {
         .expect("one row has ?g bound");
     assert_eq!(val(bound.get("g").unwrap()), "http://ex/g1");
     assert_eq!(val(bound.get("c").unwrap()), "2");
-    assert_eq!(val(bound.get("s").unwrap()), "30");
+    // SUM of two xsd:double values stays xsd:double, in canonical lexical form
+    // (SPARQL 1.1 §17.4.1) — it does not decay to a bare number.
+    assert_eq!(val(bound.get("s").unwrap()), "3.0E1");
 
     let unbound = rows
         .iter()
         .find(|r| r.get("g").is_none())
         .expect("one row has ?g unbound");
     assert_eq!(val(unbound.get("c").unwrap()), "1");
-    assert_eq!(val(unbound.get("s").unwrap()), "100");
+    assert_eq!(val(unbound.get("s").unwrap()), "1.0E2");
 }
 
 #[test]
@@ -255,11 +259,11 @@ fn fast_and_general_aggregates_coexist_in_one_query() {
 
     // sub=x: {e1, e2} — SUM=30, labels L1,L2 (member order).
     assert_eq!(val(rows[0].get("sub").unwrap()), "http://ex/x");
-    assert_eq!(val(rows[0].get("s").unwrap()), "30");
+    assert_eq!(val(rows[0].get("s").unwrap()), "3.0E1");
     assert_eq!(val(rows[0].get("labels").unwrap()), "L1,L2");
 
     // sub=y: {e3} — SUM=5, labels L3.
     assert_eq!(val(rows[1].get("sub").unwrap()), "http://ex/y");
-    assert_eq!(val(rows[1].get("s").unwrap()), "5");
+    assert_eq!(val(rows[1].get("s").unwrap()), "5.0E0");
     assert_eq!(val(rows[1].get("labels").unwrap()), "L3");
 }
