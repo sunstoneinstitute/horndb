@@ -7,6 +7,7 @@
 
 pub mod closure;
 pub mod config;
+pub mod feed;
 pub mod incremental;
 pub mod labels;
 pub mod ml;
@@ -27,6 +28,7 @@ pub struct MetricsState {
     pub closure: closure::ClosureSink,
     pub storage: storage::StorageMetrics,
     pub owlrl: owlrl::OwlrlMetrics,
+    pub feed: feed::FeedMetrics,
     pub incremental: incremental::IncrementalMetrics,
     pub ml: ml::MlMetrics,
     pub reasoning: reasoning::ReasoningMetrics,
@@ -42,6 +44,7 @@ impl MetricsState {
         let closure = closure::ClosureSink::register(&mut registry);
         let storage = storage::StorageMetrics::register(&mut registry);
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
+        let feed = feed::FeedMetrics::register(&mut registry);
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
         let ml = ml::MlMetrics::register(&mut registry);
         let reasoning = reasoning::ReasoningMetrics::register(&mut registry);
@@ -54,6 +57,7 @@ impl MetricsState {
             closure,
             storage,
             owlrl,
+            feed,
             incremental,
             ml,
             reasoning,

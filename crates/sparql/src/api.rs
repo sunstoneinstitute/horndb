@@ -12,7 +12,7 @@ use crate::parser::{parse_query, parse_update, strip_plan_pragmas, ParsedQuery};
 use crate::plan::explain::{explain, ExecutionMode, ExplainFormat};
 use crate::plan::pass::PlanCtx;
 use crate::plan::planner;
-use crate::update::apply_update_with;
+use crate::update::apply_update_with_feed;
 use crate::SparqlConfig;
 use horndb_metrics::labels::{QueryKind, QueryKindLabel, Stage, StageLabel};
 use std::time::Instant;
@@ -281,6 +281,19 @@ pub fn execute_update_with<B: FullBackend>(
     store: &mut B,
     cfg: &SparqlConfig,
 ) -> Result<()> {
+    execute_update_with_feed(update, store, cfg, None)
+}
+
+/// Like [`execute_update_with`], additionally threading a SPEC-30
+/// applied-position slot through the update — see
+/// [`crate::update::apply_update_with_feed`]. `feed: None` behaves exactly
+/// like [`execute_update_with`].
+pub fn execute_update_with_feed<B: FullBackend>(
+    update: &str,
+    store: &mut B,
+    cfg: &SparqlConfig,
+    feed: Option<&crate::feed::FeedPosition>,
+) -> Result<()> {
     let parsed = timed(Stage::Parse, || parse_update(update))?;
     horndb_metrics::metrics()
         .sparql
@@ -289,7 +302,9 @@ pub fn execute_update_with<B: FullBackend>(
             kind: QueryKind::Update,
         })
         .inc();
-    timed(Stage::Exec, || apply_update_with(&parsed, store, cfg))
+    timed(Stage::Exec, || {
+        apply_update_with_feed(&parsed, store, cfg, feed)
+    })
 }
 
 fn projected_vars(alg: &crate::algebra::Algebra) -> Vec<String> {
