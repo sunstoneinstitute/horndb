@@ -65,7 +65,7 @@ if [[ " $LEGS " == *" P "* ]]; then
         -e "s|^endpointUpdateURL=.*|endpointUpdateURL=http://$BIND/update|" \
         -e "s|^generateCreativeWorks=.*|generateCreativeWorks=false|" \
         -e "s|^generateQuerySubstitutionParameters=.*|generateQuerySubstitutionParameters=true|" \
-        -e "s|^querySubstitutionParameters=.*|querySubstitutionParameters=20000|" \
+        -e "s|^querySubstitutionParameters=.*|querySubstitutionParameters=1000|" \
         "$DIST/gen.properties" > "$SCEN"
     t0=$(date +%s)
     ( cd "$DIST" && timeout 5400 java -Xmx8g -jar "$JAR" "$SCEN" ) > "$OUT/subst.log" 2>&1
