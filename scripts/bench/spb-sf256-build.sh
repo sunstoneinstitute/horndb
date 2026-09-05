@@ -9,12 +9,10 @@
 # Creative Works are closed in slices. That is sound here because the SPB
 # ontologies are the only shared premises: CW subjects are disjoint per slice and
 # the reference datasets are not part of the closure input, so no OWL 2 RL rule
-# joins two CWs. Phase V checks exactly that against the stage-2 whole-set count
-# before the full run starts, and aborts if it does not hold.
-#
-# Slices repeat the (small) ontology closure. Those repeats are dropped by the
-# store on load — RDF is a set — so the concatenated file is deliberately not
-# deduplicated; the served triple count is reported alongside the line count.
+# joins two CWs. Slices still overlap — each re-derives the ontology closure and
+# the shared schema triples — so the concatenated file carries duplicate lines,
+# which the store folds away on load (RDF is a set). Phase V proves the union of
+# two slices equals the whole-set closure before the full run starts.
 #
 # Phases: V verify chunking · G generate · M materialize slices · S serve check.
 # Knobs: TARGET_N (default 256000000), CHUNK_FILES (default 178 ~ 8 M triples).
@@ -49,27 +47,29 @@ note ok; end
 
 # --- V: is slicing sound? ---------------------------------------------------
 # Stage 2 closed the whole 8 M calibration set in one process: 16,654,450 lines.
-# Close the same set as two halves; the only legitimate difference is the
-# ontology closure appearing twice.
-sec "V · slice-soundness check on the 8 M calibration set"
+# Close the same set as two halves and check the SET UNION of the halves equals
+# that. Slices legitimately overlap — every slice re-derives the ontology
+# closure and the shared schema triples — so line counts must not be added;
+# only the union has to match. Overlap is fine because an RDF store is a set.
+sec "V . slice-soundness check on the 8 M calibration set"
 CAL="$WORK/generated-cal"
 mapfile -t CALF < <(ls "$CAL"/generatedCreativeWorks-*.nt 2>/dev/null)
 if [ "${#CALF[@]}" -lt 4 ]; then
-  note "SKIPPED — calibration Creative Works missing under $CAL"; end
+  note "SKIPPED - calibration Creative Works missing under $CAL"; end
 else
   half=$(( ${#CALF[@]} / 2 ))
   ./target/release/horndb-bench materialize --dump-nt "$WORK/v-a.nt" --data "${ONTO[@]}" "${CALF[@]:0:$half}" >>"$OUT/verify.log" 2>&1
   ./target/release/horndb-bench materialize --dump-nt "$WORK/v-b.nt" --data "${ONTO[@]}" "${CALF[@]:$half}"    >>"$OUT/verify.log" 2>&1
-  ./target/release/horndb-bench materialize --dump-nt "$WORK/v-o.nt" --data "${ONTO[@]}"                       >>"$OUT/verify.log" 2>&1
-  A=$(wc -l < "$WORK/v-a.nt"); B=$(wc -l < "$WORK/v-b.nt"); O=$(wc -l < "$WORK/v-o.nt")
+  A=$(wc -l < "$WORK/v-a.nt"); B=$(wc -l < "$WORK/v-b.nt")
+  UNION=$(cat "$WORK/v-a.nt" "$WORK/v-b.nt" | LC_ALL=C sort -u -S 8G --parallel=8 -T "$WORK" | wc -l)
   WHOLE=16654450
-  note "half A: $A   half B: $B   ontology-only: $O"
-  note "A + B - ontology = $((A + B - O))   whole-set (stage 2): $WHOLE   delta: $((A + B - O - WHOLE))"
+  note "half A: $A   half B: $B   union: $UNION   whole-set (stage 2): $WHOLE"
+  note "overlap between slices: $((A + B - UNION)) triples ($(awk -v o=$((A+B-UNION)) -v u=$UNION 'BEGIN{printf "%.1f", 100*o/u}')% of the union)"
   rm -f "$WORK/v-a.nt" "$WORK/v-b.nt"
-  if [ "$((A + B - O))" -ne "$WHOLE" ]; then
-    note "ABORT: slicing changes the closure — a rule joins across Creative Works."; end; exit 1
+  if [ "$UNION" -ne "$WHOLE" ]; then
+    note "ABORT: the union of the slices is not the whole-set closure - a rule joins across Creative Works."; end; exit 1
   fi
-  note "slicing is sound."
+  note "slicing is sound; the concatenated file carries the overlap as duplicate lines, which the store folds away on load."
   end
 fi
 
