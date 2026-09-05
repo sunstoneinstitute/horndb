@@ -3360,8 +3360,23 @@ dump outright — `preload`, which builds a single non-fragmented image and runs
 no inference, is the right tool for a pre-materialized closure in an
 `empty`-ruleset repo.
 
-First measured `editorial-qps`: **pending** — see the *Measured* table once the
-first nightly at this scale runs.
+**First `editorial-qps` reading: not yet taken.** The smoke run
+(`scripts/bench/spb-sf256-smoke.sh`, 2026-09-05, 4 aggregation + 2 editorial
+agents over a 300 s period) died ~43 min in, right after the ~26 min load, with
+GitHub reporting *"the self-hosted runner lost communication with the server"*
+— the hornbench runner went offline and stayed offline, and the artifact upload
+never ran, so there are no numbers and no logs from it.
+
+The most likely cause is **memory exhaustion**, unconfirmed. It matters because
+HornDB has **no enforced per-query memory bound**: `[server.limits].max_query_memory`
+is parsed and carried but *not* enforced (`crates/sparql/src/server/query.rs`),
+so the only backstop is `max_concurrent_queries`. The store alone is ~50 GiB of
+the host's 124 GiB, and HDB-146 measured ~578 MiB of query-side allocator
+retention on a 10 M-triple corpus that is never returned to the OS; scaled to
+465 M triples across six concurrent agents that plausibly consumes the
+remaining ~74 GiB. **This has to be settled before the nightly switches over** —
+a benchmark that can take the bench host down is worse than one that runs at
+the wrong scale.
 
 ### Running, internal only (no published numbers)
 
