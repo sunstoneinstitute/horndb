@@ -1214,6 +1214,96 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         }
         Ok(())
     }
+
+    /// Whether MINUS right-side row `b` disqualifies left-side row `a`
+    /// (SPARQL 1.1 §18.5): true iff `a` and `b` are compatible on every
+    /// column they share (`Slot::Unbound` is a wildcard, as in
+    /// `merge_rows_with`) AND at least one shared column is actually bound
+    /// on both sides. That second clause is the domain-intersection guard —
+    /// without it, a `left`/`right` pair that shares no bound variable would
+    /// count as "compatible" (vacuously) and wrongly disqualify every `left`
+    /// row. `shared_cols` is the schema-level shared-column list (from
+    /// `JoinState::merge_plan`), not `JoinState::jvars` (a hash-keying
+    /// subset) — this check must see every shared variable, not just the
+    /// ones selected for indexing.
+    fn minus_disqualifies(&self, a: &Row, b: &Row, shared_cols: &[(usize, usize)]) -> Result<bool> {
+        let decode = |id| self.exec.decode_term(id);
+        let mut shares_bound_var = false;
+        for &(li, ri) in shared_cols {
+            match (&a.0[li], &b.0[ri]) {
+                (Slot::Unbound, _) | (_, Slot::Unbound) => {}
+                (x, y) => {
+                    if !Slot::eq(x, y, decode)? {
+                        return Ok(false);
+                    }
+                    shares_bound_var = true;
+                }
+            }
+        }
+        Ok(shares_bound_var)
+    }
+
+    /// `true` iff any of `st.build.rows[candidates]` disqualifies `a` (see
+    /// `minus_disqualifies`).
+    fn any_minus_disqualifies(
+        &self,
+        a: &Row,
+        st: &JoinState,
+        candidates: &[usize],
+        shared_cols: &[(usize, usize)],
+    ) -> Result<bool> {
+        for &i in candidates {
+            if self.minus_disqualifies(a, &st.build.rows[i], shared_cols)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Probe one left-side chunk against the build state (MINUS, §18.5): a
+    /// survives unchanged unless some build row disqualifies it (see
+    /// `minus_disqualifies`). Unlike `probe_join_chunk`/
+    /// `probe_left_join_chunk`, output rows are `a.clone()` — `right`'s
+    /// columns never surface, so there is no merge and no forced-column
+    /// decode.
+    pub(crate) fn probe_minus_chunk(&self, st: &JoinState, chunk: &Batch) -> Result<Vec<Row>> {
+        let shared_cols: Vec<(usize, usize)> = st
+            .merge_plan
+            .iter()
+            .filter_map(|&(li, ri)| li.zip(ri))
+            .collect();
+        // §18.5 domain-intersection: `left` and `right` share no variable,
+        // so every `right` row's domain is disjoint from every `left` row's
+        // — nothing is ever excluded. Skips the build-side scan entirely
+        // (the naive "compatible ⇒ drop" bug this whole function exists to
+        // avoid would, wrongly, drop everything here instead).
+        if shared_cols.is_empty() {
+            return Ok(chunk.rows.clone());
+        }
+        let mut out = Vec::with_capacity(chunk.rows.len());
+        for a in &chunk.rows {
+            let disqualified = match self.row_join_key(a, &chunk.schema, &st.jvars)? {
+                Some(k) => {
+                    let mut d = false;
+                    if let Some(bucket) = st.index.get(&k) {
+                        d = self.any_minus_disqualifies(a, st, bucket, &shared_cols)?;
+                    }
+                    if !d && !st.unkeyed.is_empty() {
+                        d = self.any_minus_disqualifies(a, st, &st.unkeyed, &shared_cols)?;
+                    }
+                    d
+                }
+                None => {
+                    let all: Vec<usize> = (0..st.build.rows.len()).collect();
+                    self.any_minus_disqualifies(a, st, &all, &shared_cols)?
+                }
+            };
+            if !disqualified {
+                out.push(a.clone());
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Hash-join build state shared by the streaming `JoinOp`/`LeftJoinOp`
@@ -2874,7 +2964,9 @@ mod slot_differential {
     fn contains_inner_join(p: &PhysicalPlan) -> bool {
         match p {
             PhysicalPlan::Join { .. } => true,
-            PhysicalPlan::LeftJoin { left, right, .. } | PhysicalPlan::Union { left, right } => {
+            PhysicalPlan::LeftJoin { left, right, .. }
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 contains_inner_join(left) || contains_inner_join(right)
             }
             PhysicalPlan::Filter { inner, .. }

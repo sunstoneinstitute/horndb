@@ -46,6 +46,9 @@ pub(crate) fn schema(node: &LogicalPlan) -> Vec<Var> {
             }
             out
         }
+        // `MINUS` never adds columns: its output is exactly `left`'s schema
+        // (`right` is evaluated only to decide which `left` rows survive).
+        Minus { left, .. } => schema(left),
         Filter { inner, .. } | Distinct { inner } | Slice { inner, .. } | OrderBy { inner, .. } => {
             schema(inner)
         }
@@ -156,6 +159,10 @@ pub(crate) fn map_children(
             left: Box::new(f(*left)),
             right: Box::new(f(*right)),
             expr,
+        },
+        Minus { left, right } => Minus {
+            left: Box::new(f(*left)),
+            right: Box::new(f(*right)),
         },
         Filter { expr, inner } => Filter {
             expr,
