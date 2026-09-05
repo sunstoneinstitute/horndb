@@ -51,7 +51,10 @@ cargo build -p horndb-harness --bin harness --release --features real-engine >"$
 if [[ " $LEGS " == *" H "* ]]; then
   sec "HornDB"
   t0=$(date +%s)
+  # The server cancels every query at `[server.limits].query_timeout` (default
+  # 30s), which is what returned 504 on this corpus in stage 4.
   DATA_FILES="$DATASET" RELEASE=1 BIND="$BIND" \
+  HORNDB_SERVER__LIMITS__QUERY_TIMEOUT="${HORNDB_QUERY_TIMEOUT:-1800s}" \
     ./crates/harness/scripts/start-engine.sh > "$OUT/horndb-engine.log" 2>&1 &
   EPID=$!; ready=0
   for i in $(seq 1 3600); do
@@ -59,6 +62,24 @@ if [[ " $LEGS " == *" H "* ]]; then
     kill -0 $EPID 2>/dev/null || break; sleep 2
   done
   note "ready=$ready after $(( $(date +%s) - t0 ))s"
+  if [ "$ready" = 1 ] && [ "${GEN_SUBST:-1}" = 1 ]; then
+    # Regenerate the query substitution constants against this corpus while the
+    # store is already up - a separate dispatch would pay the ~26 min load again.
+    # The set in the asset tree was sampled from the old 200 k dataset.
+    SCEN="$DIST/spb-subst.properties"
+    sed -e "s|^creativeWorksPath=.*|creativeWorksPath=$DIST/generated-sf256|" \
+        -e "s|^endpointURL=.*|endpointURL=http://$BIND/query|" \
+        -e "s|^endpointUpdateURL=.*|endpointUpdateURL=http://$BIND/update|" \
+        -e "s|^generateCreativeWorks=.*|generateCreativeWorks=false|" \
+        -e "s|^generateQuerySubstitutionParameters=.*|generateQuerySubstitutionParameters=true|" \
+        -e "s|^querySubstitutionParameters=.*|querySubstitutionParameters=1000|" \
+        "$DIST/gen.properties" > "$SCEN"
+    t0=$(date +%s)
+    ( cd "$DIST" && timeout 3600 java -Xmx8g -jar "$SPB_DRIVER_JAR" "$SCEN" ) > "$OUT/subst.log" 2>&1
+    note "--- substitution parameters exit=$? wall=$(( $(date +%s) - t0 ))s ---"
+    tail -5 "$OUT/subst.log" >> "$SUM"
+    ls -la "$DIST/generated-sf256"/query1SubstParameters.txt >> "$SUM" 2>&1
+  fi
   if [ "$ready" = 1 ]; then
     HORNDB_ENDPOINT="http://$BIND/query" HORNDB_UPDATE_ENDPOINT="http://$BIND/update" \
       ./crates/harness/scripts/run-spb-256.sh > "$OUT/spb-horndb.log" 2>&1

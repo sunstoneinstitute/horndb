@@ -52,6 +52,11 @@ env:
   # entity pool on the heap, so the serving JVM needs a real one. The
   # host has 124 GiB and the A/B legs are brought up one at a time.
   GRAPHDB_HEAP: "32g"
+  # HornDB cancels every query at `[server.limits].query_timeout`, default
+  # 30s. No driver-side setting can raise it, so at SF=0.256 the heavier
+  # aggregation queries came back 504 and scored as errors. Matched to the
+  # scenario's own `queryTimeoutSeconds=300`.
+  HORNDB_SERVER__LIMITS__QUERY_TIMEOUT: "300s"
   # Third + fourth A/B legs: Oxigraph (Rust SPARQL store, no reasoner)
   # serving the same flat closure as HornDB/GraphDB — once from the store
   # as bulk-loaded, once from an `oxigraph optimize`d copy, recorded as
