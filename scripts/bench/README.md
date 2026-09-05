@@ -171,3 +171,4 @@ the only route to the `hornbench` host for anyone without ssh:
 | `spb-sf256-materialize.sh` | Measures what closing and serving an SPB corpus costs (peak RSS, expansion). |
 | `spb-sf256-build.sh` | Builds the SF=0.256 closure: generate 256 M Creative Work triples, close them in slices. |
 | `spb-sf256-bootstrap-engines.sh` | Loads that closure into every nightly A/B engine and publishes it into the asset tree. |
+| `spb-sf256-smoke.sh` | Runs the nightly scenario (editorial agents on) against HornDB and GraphDB for a first reading. |

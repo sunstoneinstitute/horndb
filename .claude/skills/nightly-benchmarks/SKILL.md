@@ -7,7 +7,7 @@ description: Work with HornDB's nightly LDBC SPB-256 benchmark — find runs, gr
 
 The `nightly` workflow (`.github/workflows/nightly.yml`) runs LDBC SPB-256 at 03:00 UTC
 on the self-hosted `hornbench` runner. It serves the flat materialized closure
-`spb-256.nt` (no reasoning) over SPARQL/HTTP and drives it with the LDBC SPB driver,
+`spb-sf256.nt` (no reasoning) over SPARQL/HTTP and drives it with the LDBC SPB driver,
 once against **HornDB**, once against **GraphDB Free**, and twice against **Oxigraph**
 — from the store as bulk-loaded and from an `oxigraph optimize`d copy (the A/B
 reference legs). The four legs run sequentially — each engine is up only for its own
@@ -51,9 +51,15 @@ the count-only subset. `<N>` is the aggregation query-type id (`q1`, `q2`, …):
 | `geo-locations` | count | geo locations (header) |
 | `completed-query-mixes` **or** `completed-query-runs` | count | whichever the driver reported |
 
-> With `editorialAgents=0` (the current nightly scenario) the editorial series are
-> present but zero; they become meaningful once editorial agents are enabled
-> ([#125](https://github.com/sunstoneinstitute/horndb/issues/125)).
+> **Series break at HDB-37 ([#125](https://github.com/sunstoneinstitute/horndb/issues/125)).**
+> Before that change the nightly ran a ~512 k-triple stand-in corpus with
+> `editorialAgents=0`, so `editorial-qps` was recorded as zero and
+> `aggregation-qps` was the headline. Since it, the corpus is the real SF=0.256
+> one (~533 M closure triples) and two editorial agents run alongside four
+> aggregation agents. `editorial-qps` is the headline; `aggregation-qps` is
+> still recorded but its history does **not** span the change — the corpus is
+> 512x bigger and readers now share the store with writers. Compare only
+> within one side of that boundary.
 
 ## The trend DB keeps a 90-day rolling window
 
@@ -106,7 +112,11 @@ sqlite3 /tmp/harness.sqlite "
 
 - Run benchmarks **only** on hornbench (stable env) — see the run-benchmarks memory.
 - Scenario/driver assets are a prepared tree at `$SPB_ASSETS` on the runner; the dataset
-  is `spb-256.nt`. Scripts: `crates/harness/scripts/run-spb-256.sh` (HornDB),
+  is `spb-sf256.nt` (a symlink into `/home/bench/horndb-bench/spb-sf256/`, built by
+  `scripts/bench/spb-sf256-build.sh`; the old `spb-256.nt` stand-in is still beside it).
+  The driver also reads `$SPB_ASSETS/generated-sf256` — `dataset.info` plus the
+  `query<N>SubstParameters.txt` constants, which belong to this corpus and are not
+  interchangeable with another scale. Scripts: `crates/harness/scripts/run-spb-256.sh` (HornDB),
   `run-graphdb-free-spb-256.sh` (GraphDB), `run-oxigraph-spb-256.sh` (Oxigraph).
 - GraphDB / Oxigraph versions are pinned via `GRAPHDB_VERSION` / `OXIGRAPH_VERSION` in
   the workflow, not the runner's install; the per-run `start-*.sh` downloads the pinned
@@ -117,4 +127,7 @@ sqlite3 /tmp/harness.sqlite "
   crates/harness/scripts/bootstrap-oxigraph-spb.sh` builds both. Until then each
   Oxigraph leg self-skips (`start-oxigraph.sh` exits non-zero, `continue-on-error`
   swallows it) and no `oxigraph`/`oxigraph-optimized` rows appear in the trend. Same
-  one-time-bootstrap model as GraphDB.
+  one-time-bootstrap model as GraphDB. At SF=0.256 both the Oxigraph stores and the
+  GraphDB `spb` repo are rebuilt by `scripts/bench/spb-sf256-bootstrap-engines.sh`,
+  which bulk-loads GraphDB offline (`preload`/`importrdf`) instead of POSTing the
+  75 GiB closure over HTTP.
