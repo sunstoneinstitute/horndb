@@ -29,10 +29,17 @@ conformance run + junit report). The tests job compiles with
 `RUSTFLAGS=-D warnings`, so plain rustc warnings still fail it even without
 clippy. All three run every build script, so all three carry the
 vendored-GraphBLAS cache (same key — first run after a GraphBLAS re-vendor builds it
-in each job, then all hit). If branch protection lists required checks, it must
-name **all** jobs (`lint`, `tests`, `conformance`, `python-rdflib-compat`); jobs
-skipped by the gate count as satisfied. `workflows/nightly.yml` runs LDBC
-SPB-256 on a self-hosted runner.
+in each job, then all hit). A final `checks` job aggregates `gate`, `lint`,
+`tests`, `conformance`, and `python-rdflib-compat` — it is the only job branch
+protection and the merge queue should require by name; a job skipped by the
+gate counts as satisfied, so `checks` still passes on a docs-only or
+unauthorised-fork PR. Requiring the conditional jobs directly would instead
+block those PRs forever, since GitHub only treats a skip as satisfied when the
+skipped job is itself the one required. `ci.yml` also triggers on
+`merge_group` (`checks_requested`) so the merge queue's synthetic builds run
+the same checks; the `gate` job already treats any non-`pull_request` event as
+trusted, so merge-group builds skip straight to building. `workflows/nightly.yml`
+runs LDBC SPB-256 on a self-hosted runner.
 
 ### `workflows/bench.yml` — running a bench on hornbench without ssh
 
