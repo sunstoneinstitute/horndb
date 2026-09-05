@@ -349,11 +349,12 @@ fn mixed_tick_replacement_path_final_state_correct() {
     assert_eq!(circuit.asserted_base().get(&(1, P, 4)), 1, "c->x asserted");
     assert_eq!(circuit.asserted_base().get(&(4, P, 3)), 1, "x->e asserted");
 
-    // A fresh subscriber reading only final state via a snapshot sees (c,P,e).
-    let snap = circuit.snapshot();
+    // A reader of final state sees (c,P,e): it is materialized over the
+    // replacement path. (Snapshot presence rides storage MVCC since SPEC-24
+    // S6, so this in-memory-only circuit checks the base directly.)
     assert!(
-        snap.contains(&(1, P, 3)),
-        "(c,P,e) must be visible in a fresh post-tick snapshot"
+        circuit.derived_base().get(&(1, P, 3)) > 0,
+        "(c,P,e) must be present after the tick"
     );
 
     // SPEC-24 S3 net-delta contract: (c,P,e) was withdrawn with the old path

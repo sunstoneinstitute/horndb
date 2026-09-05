@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-07-29
 scope: "SPEC-30 P1 — the applied-position slot as quads in the reserved feed graph riding the request's final store batch, feed-id refusal, the S1 durability contract surfaced at startup, the S5 slot-advance-once rule, and the six horndb_feed_* metrics"
 ---
@@ -156,7 +156,7 @@ startup (`serve.rs`).
 - Modify: `crates/sparql/src/{update.rs,error.rs,lib.rs}`
 - Create: `crates/sparql/tests/feed_slot.rs`
 
-- [ ] **Step 1: Failing tests** (`feed_slot.rs`, both backends, driving
+- [x] **Step 1: Failing tests** (`feed_slot.rs`, both backends, driving
   `apply_update_with` directly with a
   `FeedPosition { id: String, position: String }` parameter):
   `slot_written_with_final_batch` (two-op update + position → slot quads
@@ -172,17 +172,17 @@ startup (`serve.rs`).
   crash-simulation), `zero_op_request_with_position_advances_slot`,
   `no_headers_means_no_slot` (plain update on a slotted store leaves the
   slot alone).
-- [ ] **Step 2: Verify failure** — `cargo nextest run -p horndb-sparql
+- [x] **Step 2: Verify failure** — `cargo nextest run -p horndb-sparql
   feed_slot`.
-- [ ] **Step 3: Implement** — `feed.rs`: the graph/subject/predicate
+- [x] **Step 3: Implement** — `feed.rs`: the graph/subject/predicate
   constants, `read_slot(backend) -> Option<Slot>` (via
   `scan_graph_quads` on the feed graph), `slot_delta(old, new) ->
   (dels, adds)`; `apply_update_with` gains
   `feed: Option<&FeedPosition>` (existing callers pass `None` via the
   old-arity wrapper), preflight id check, append to final batch;
   `SparqlError::FeedIdMismatch`.
-- [ ] **Step 4: Run** — `cargo nextest run -p horndb-sparql`.
-- [ ] **Step 5: Commit** — `feat(sparql): applied-position slot — feed
+- [x] **Step 4: Run** — `cargo nextest run -p horndb-sparql`.
+- [x] **Step 5: Commit** — `feat(sparql): applied-position slot — feed
   quads riding the final update batch (SPEC-30 S2/S5, #270)`.
 
 ### Task 2: HTTP surface
@@ -191,19 +191,19 @@ startup (`serve.rs`).
 - Modify: `crates/sparql/src/server/update.rs`
 - Modify: `crates/sparql/tests/server_http.rs`
 
-- [ ] **Step 1: Failing tests** — `update_with_feed_headers_advances_slot`
+- [x] **Step 1: Failing tests** — `update_with_feed_headers_advances_slot`
   (POST with both headers; then a ground-`GRAPH` query reads the token
   back — this is also the S2 read-path acceptance),
   `position_without_id_is_400`, `feed_id_mismatch_is_409_naming_both`,
   `slot_survives_within_process` (two requests, second reads what the
   first wrote).
-- [ ] **Step 2: Verify failure.**
-- [ ] **Step 3: Implement** — header extraction in `handle_update`
+- [x] **Step 2: Verify failure.**
+- [x] **Step 3: Implement** — header extraction in `handle_update`
   (`HeaderMap` is already a parameter, `server/update.rs:11-15`), the
   409 arm in the status match.
-- [ ] **Step 4: Run** — `cargo nextest run -p horndb-sparql --features
+- [x] **Step 4: Run** — `cargo nextest run -p horndb-sparql --features
   server`.
-- [ ] **Step 5: Commit** — `feat(sparql): feed position headers on /update
+- [x] **Step 5: Commit** — `feat(sparql): feed position headers on /update
   + 409 on feed-id mismatch (SPEC-30 S2/S3, #270)`.
 
 ### Task 3: Metrics
@@ -213,16 +213,16 @@ startup (`serve.rs`).
 - Modify: `crates/metrics/src/{lib.rs,labels.rs}`, `docs/metrics.md`,
   `crates/sparql/src/{feed.rs,bin/serve.rs}`
 
-- [ ] **Step 1: Failing test** — encode-name assertions in `feed.rs`'s
+- [x] **Step 1: Failing test** — encode-name assertions in `feed.rs`'s
   test module (the `incremental.rs:93-121` pattern) for all six series,
   including the `op` label variants.
-- [ ] **Step 2: Verify failure; implement** the module + registration +
+- [x] **Step 2: Verify failure; implement** the module + registration +
   emit sites (slot advance: batches/quads/last-apply; startup:
   recovery-gap = 0-when-absent, generation). Add the six rows to
   `docs/metrics.md` **in this commit**.
-- [ ] **Step 3: Run** — `cargo nextest run -p horndb-metrics -p
+- [x] **Step 3: Run** — `cargo nextest run -p horndb-metrics -p
   horndb-sparql --features server`.
-- [ ] **Step 4: Commit** — `feat(metrics): horndb_feed_* series + docs
+- [x] **Step 4: Commit** — `feat(metrics): horndb_feed_* series + docs
   rows (SPEC-30 S6, #270)`.
 
 ### Task 4: Contract property test + docs
@@ -232,16 +232,16 @@ startup (`serve.rs`).
   `docs/specs/SPEC-30-change-feed-materializer.md` (P1 wording only if
   reality diverged), this plan
 
-- [ ] **Step 1:** Property test `position_never_overstates`: random op
+- [x] **Step 1:** Property test `position_never_overstates`: random op
   sequences with fault injection at random apply indices; invariant —
   whenever the slot holds token T for a request, every quad of that
   request's ops is present (the D5 one-sided guarantee at the only layer
   P1 can test it). Plus `docs/architecture.md`: SPEC-30 row → P1
   implemented (slot + contract; rebuild P2, durability riders P3/P4
   outstanding). Flip this plan's status.
-- [ ] **Step 2:** Full verification — fmt, clippy `-D warnings`,
+- [x] **Step 2:** Full verification — fmt, clippy `-D warnings`,
   `cargo nextest run --workspace`.
-- [ ] **Step 3: Commit** — `test,docs(sparql): D5 position-never-overstates
+- [x] **Step 3: Commit** — `test,docs(sparql): D5 position-never-overstates
   property + SPEC-30 P1 sync (#270)`.
 
 ---

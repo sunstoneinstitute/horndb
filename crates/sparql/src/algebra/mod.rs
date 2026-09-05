@@ -139,7 +139,6 @@ pub enum Func {
 ///
 /// Notable omissions vs the full W3C algebra:
 ///   * Group/Aggregate (no GROUP BY in Stage 1)
-///   * Minus
 ///   * Service
 ///
 /// Property paths lower in [`translate`]: the non-recursive operators
@@ -162,6 +161,20 @@ pub enum Algebra {
         left: Box<Algebra>,
         right: Box<Algebra>,
         expr: Option<Expr>,
+    },
+    /// `MINUS` (SPARQL 1.1 §18.5): an anti-join. `left`'s rows survive
+    /// unchanged except that any row compatible with a `right` row **on a
+    /// variable bound in both** is dropped. Unlike `LeftJoin`/`Join`/`Union`,
+    /// `right`'s columns never appear in the output — `Minus` only ever
+    /// removes `left` rows, it never merges bindings into them. When `left`
+    /// and `right` share no variable, every `right` row's domain is disjoint
+    /// from every `left` row's, so nothing is ever dropped (§18.5's
+    /// domain-intersection clause) — this is deliberately not `LeftJoin`
+    /// with the match negated, nor a rewrite into `FILTER NOT EXISTS`
+    /// (which tests compatibility only, with no domain-intersection guard).
+    Minus {
+        left: Box<Algebra>,
+        right: Box<Algebra>,
     },
     Filter {
         expr: Expr,

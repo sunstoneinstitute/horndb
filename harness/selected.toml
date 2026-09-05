@@ -171,17 +171,11 @@ expected_failures = [
     "data-sparql11/service/manifest#service6",
     "data-sparql11/service/manifest#service7",
 
-    # MINUS. `translate` has no `Minus` arm.
-    "data-sparql11/negation/manifest#full-minuend",
-    "data-sparql11/negation/manifest#partial-minuend",
-    "data-sparql11/negation/manifest#set-equals-1",
-    "data-sparql11/negation/manifest#subset-01",
-    "data-sparql11/negation/manifest#subset-02",
-    "data-sparql11/negation/manifest#subset-03",
-    "data-sparql11/negation/manifest#subset-by-exclusion-minus-1",
-
-    # EXISTS / NOT EXISTS used as a FILTER *expression* (the pattern form in
-    # `negation/` works; the expression form does not translate).
+    # EXISTS / NOT EXISTS used as a FILTER *expression* (HDB-133: MINUS itself
+    # now translates — the pattern form of negation works — but these four
+    # `MINUS { ... FILTER NOT EXISTS { ... } ... }` queries still fail on the
+    # SAME pre-existing gap as the rest of this bucket: the FILTER NOT EXISTS
+    # inside the MINUS's right-hand pattern does not translate).
     "data-sparql11/exists/manifest#exists01",
     "data-sparql11/exists/manifest#exists02",
     "data-sparql11/exists/manifest#exists03",
@@ -189,6 +183,10 @@ expected_failures = [
     "data-sparql11/exists/manifest#exists05",
     "data-sparql11/negation/manifest#exists-01",
     "data-sparql11/negation/manifest#exists-02",
+    "data-sparql11/negation/manifest#set-equals-1",
+    "data-sparql11/negation/manifest#subset-01",
+    "data-sparql11/negation/manifest#subset-02",
+    "data-sparql11/negation/manifest#subset-03",
     "data-sparql11/negation/manifest#subset-by-exclusion-nex-1",
     "data-sparql11/negation/manifest#temporal-proximity-by-exclusion-nex-1",
     "data-sparql11/subquery/manifest#subquery10",

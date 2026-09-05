@@ -81,6 +81,10 @@ horndb-simd.workspace = true
 # which keeps `horndb-config` free of a reverse dependency on this crate.
 horndb-config = { workspace = true }
 arrow = { workspace = true }
+# SPEC-30 P1: `feed::advance_slot` stamps `feed:advancedAt` with the server
+# clock (`OffsetDateTime::now_utc()` formatted RFC 3339). Non-optional: the
+# applied-position slot is not gated on the `server` feature.
+time = { workspace = true }
 
 [[bin]]
 name = "serve"

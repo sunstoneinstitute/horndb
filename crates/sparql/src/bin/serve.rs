@@ -151,6 +151,13 @@ async fn main() -> Result<()> {
     // kernel/ISA each primitive picked as `horndb_simd_kernel_isa` gauges.
     record_simd_calibration();
 
+    // SPEC-30 §S6: the applied-position slot's startup gauges. The P1 store
+    // is fully in-memory (no `--data` file carries a slot), so every process
+    // starts with no slot to recover — `generation` and `recovery_gap_seconds`
+    // are simply 0. They become non-trivial once P3/P4 give the slot
+    // something durable to survive a restart in.
+    record_feed_startup_metrics();
+
     // SPEC-29 D9: `[reasoning]`'s cross-key rules (a pattern reaching into the
     // reserved namespace, spine/select overlap, an unimplemented phase) are
     // domain checks serde cannot make, so — like `[simd].max_isa` above — they
@@ -207,6 +214,20 @@ async fn main() -> Result<()> {
         cfg.server.limits.max_request_body.0 as usize,
     );
 
+    // SPEC-26 S3: publish the resolved config behind an `ArcSwap` and start the
+    // file watcher over it. Handlers snapshot the handle per request, so a hot
+    // key (`[server.limits]` bar the three admission keys, `[logging]`,
+    // `[reload]`) edited on disk takes effect on the next request. A restart-only
+    // key is stored — a later restart honours it — and logged as needing a
+    // restart; in particular the watcher never re-applies `[simd]`, whose ISA
+    // selection and calibration already ran above.
+    //
+    // The watcher guard must outlive `axum::serve`: dropping it stops following
+    // file edits.
+    let config_handle = horndb_config::ConfigHandle::new(cfg.clone());
+    let _config_watcher = horndb_config::watch(inputs, config_handle.clone())
+        .context("starting the config reload watcher")?;
+
     // HDB-124: bind and start serving BEFORE the (potentially multi-minute,
     // no-persistence-yet) data load, so `/healthz` (process up) and `/readyz`
     // (503 until loaded) are both reachable during the load — a Kubernetes
@@ -216,14 +237,14 @@ async fn main() -> Result<()> {
     // dead process.
     let store = Arc::new(RwLock::new(HornBackend::new()));
     let ready = Arc::new(AtomicBool::new(false));
-    // SPEC-26 S2: the server holds the `[server.limits]` *defaults*; each
-    // request layers its own URL/form overrides on top (S4). No domain check
-    // is needed here — unlike the free-string `[simd].max_isa` above, every
-    // limits field is typed, so a bad value already failed
-    // `horndb_config::load()`, with file+key attribution.
+    // SPEC-26 S2/S3: the server holds the live config; its `[server.limits]`
+    // are the *defaults* each request layers its own URL/form overrides on top
+    // of (S4). No domain check is needed here — unlike the free-string
+    // `[simd].max_isa` above, every limits field is typed, so a bad value
+    // already failed `horndb_config::load()`, with file+key attribution.
     let state = AppState::<HornBackend> {
         store: Arc::clone(&store),
-        limits: cfg.server.limits.clone(),
+        config: config_handle.clone(),
         ready: Arc::clone(&ready),
         admission,
     };
@@ -546,6 +567,16 @@ fn resolve_reasoning_backend(
              (cargo build -p horndb-sparql --features graphblas)"
         ),
     })
+}
+
+/// SPEC-30 §S6: the applied-position slot's startup-observability gauges.
+/// Called once, before the store exists — P1's store starts empty every
+/// time (no persistence to recover a slot from), so both values are always
+/// 0 today; a real value is P3/P4's job.
+fn record_feed_startup_metrics() {
+    let feed = &horndb_metrics::metrics().feed;
+    feed.generation.set(0);
+    feed.recovery_gap_seconds.set(0);
 }
 
 /// Run the `horndb-simd` startup calibration and publish the chosen kernel/ISA

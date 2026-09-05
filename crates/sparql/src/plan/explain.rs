@@ -114,6 +114,9 @@ fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize
         PhysicalPlan::Union { left, right } => {
             combine2(left, right, exec, |l, r| l.saturating_add(r))
         }
+        // Minus can only shrink `left`'s row count (or leave it unchanged,
+        // e.g. the disjoint-variable case) — never grow past it.
+        PhysicalPlan::Minus { left, .. } => estimate(left, exec),
         // Filter / Distinct shrink (or keep) the row count; we report the
         // input estimate as an upper bound.
         PhysicalPlan::Filter { inner, .. }
@@ -209,6 +212,7 @@ pub(crate) fn node_label(plan: &PhysicalPlan) -> String {
                 "LeftJoin".to_owned()
             }
         }
+        PhysicalPlan::Minus { .. } => "Minus".to_owned(),
         PhysicalPlan::Filter { .. } => "Filter".to_owned(),
         PhysicalPlan::Union { .. } => "Union".to_owned(),
         PhysicalPlan::Project { vars, .. } => {
@@ -271,7 +275,8 @@ pub(crate) fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
         | PhysicalPlan::Values { .. } => vec![],
         PhysicalPlan::Join { left, right }
         | PhysicalPlan::LeftJoin { left, right, .. }
-        | PhysicalPlan::Union { left, right } => vec![left, right],
+        | PhysicalPlan::Union { left, right }
+        | PhysicalPlan::Minus { left, right } => vec![left, right],
         PhysicalPlan::Filter { inner, .. }
         | PhysicalPlan::Distinct { inner }
         | PhysicalPlan::Project { inner, .. }

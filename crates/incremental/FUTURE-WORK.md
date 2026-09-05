@@ -45,22 +45,19 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   recomputes base-reachability over the affected source region per
   retracted edge rather than threading negative deltas end-to-end.
 
-### F7 — In-flight reader visibility (MVCC)
-- **Done (#46)**: refcounted `Snapshot` handles (`Circuit::snapshot()`,
-  `crate::snapshot::Snapshot`) pin a consistent `(asserted ∪ derived)` view at
-  a logical time across multiple ticks; readers and writers never block. The
-  presence view is built lazily and cached: a state-changing `tick()` only
-  invalidates the cache in O(1) (so steady-state writes stay delta-sized), and
-  `snapshot()` is amortized O(1) (`Arc` clone) but pays one
-  O(|asserted| + |derived|) build on the first acquire after a write.
-- **Still deferred (parent #6)**: backing the snapshot interface onto SPEC-02
-  per-tuple storage MVCC, and point queries against partially-applied in-flight
-  deltas mid-tick.
-- **Possible optimization (parent #6)**: make the first post-write `snapshot()`
-  O(1) too by maintaining the version incrementally with structural sharing
-  (persistent/COW Z-set) instead of rebuilding the presence set. Deferred until
-  post-write reader latency on a warm store is shown to matter — the lazy build
-  keeps the write hot path delta-sized, which is the priority for SPEC-06.
+### F7 — In-flight reader visibility (MVCC) — DELIVERED (storage-backed)
+- **Done (#46, then SPEC-24 S6 / #215)**: `Circuit::attach_store(store, graphs)`
+  binds the reader view to the store the S4 wiring writes (default graph +
+  derived-mirror graph); `Circuit::snapshot()` pins that store's current commit
+  version and returns `Some(Snapshot)`. Acquire is O(1) — an `Arc` clone plus a
+  tier pin-count bump — and the circuit materializes no presence set of its own.
+  `Snapshot::logical_time()` is the storage commit version (ADR-0018: one
+  clock). Readers and writers never block; a pin survives later ticks.
+- **Still deferred**: point queries against partially-applied in-flight deltas
+  mid-tick, and enforcing ADR-0018's "one tick, one storage batch" on the engine
+  write path (today an Update commits its base batch and its derived mirror as
+  two storage versions, so a snapshot between them sees base rows without their
+  consequences).
 
 ### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion + retraction)
 - **Done (2026-06-01, #44)**: `Circuit::add_closure_plan(Box<dyn ClosureRule>)`

@@ -31,7 +31,8 @@
 //! - [`change_feed`]: ordered MPMC stream of committed deltas (F9), with
 //!   bounded subscribers and a per-subscriber lag policy (SPEC-24 S3).
 //! - [`circuit`]: top-level `Circuit` builder + tick driver.
-//! - [`snapshot`]: refcounted MVCC reader views pinned at a logical time (F7).
+//! - [`snapshot`]: reader views pinned on storage's per-tuple MVCC, as of a
+//!   storage commit version (F7, SPEC-24 S6).
 
 pub mod change_feed;
 pub mod checkpoint;
