@@ -78,6 +78,7 @@ longer blocks writers to that partition while it is in flight.
 | `isa` | `scalar`, `avx2`, `avx512`, `neon` | `simd_kernel_isa` |
 | `trigger` | `read`, `write_cap` | `storage_partition_merges` — what made a partition merge its runs |
 | `source` | `table`, `calibrated`, `static` | `simd_kernel_isa` — which selection path chose this `(kernel, isa)` (known-CPU table / micro-calibration / static widest) |
+| `op` | `add`, `del` | `feed_applied_quads` — which half of a slot advance's `apply_quads` call a quad belongs to |
 
 ## SPARQL HTTP + pipeline (`crates/metrics/src/sparql.rs`)
 
@@ -250,6 +251,24 @@ Emitted by `crates/incremental/src/circuit.rs` (per tick) and `change_feed.rs`.
 | `horndb_incremental_distinct_trace_keys` | gauge | — | count | rows in the per-rule weight trace (`rule_weights`), set at the end of every tick |
 | `horndb_incremental_change_feed_subscribers` | gauge | — | count | live change-feed subscribers |
 | `horndb_incremental_change_feed_dropped_subscribers_total` | counter | — | count | change-feed subscribers dropped for lag — a bounded subscriber's buffer was full under `LagPolicy::DisconnectSlow` (SPEC-24 S3) |
+
+## Applied-position slot (`crates/metrics/src/feed.rs`)
+
+SPEC-30 §S6. The applied-position slot is a change-feed consumer's durability
+record — feed id, generation, opaque position token, and wall-clock time — held
+as quads so it commits atomically with the data it describes (§S1). Emitted by
+`crates/sparql/src/feed.rs` (the slot-advance path, on every `apply_update_with_feed`
+call that carries a feed position) and `crates/sparql/src/bin/serve.rs`
+(`record_feed_startup_metrics`, once at startup).
+
+| Metric (scraped name) | Type | Labels | Unit / buckets | Meaning |
+|---|---|---|---|---|
+| `horndb_feed_applied_batches_total` | counter | — | count | slot advances (§S5: one per request that carried a feed position, after every operation in the request committed) |
+| `horndb_feed_applied_quads_total` | counter | `op` | count | slot quads written per advance, split by delete (replacing the prior slot) vs. add (the new slot) |
+| `horndb_feed_last_apply_seconds` | gauge (f64) | — | s | wall-clock cost of the most recent slot advance |
+| `horndb_feed_generation` | gauge | — | count | the slot's generation counter. P1 always reports 0 — the rebuild-from-zero that increments it is P2, out of this plan's scope |
+| `horndb_feed_rebuild_in_progress` | gauge | — | 0/1 | 1 while a rebuild-from-zero is running. P1 always reports 0 — no rebuild exists yet |
+| `horndb_feed_recovery_gap_seconds` | gauge | — | s | set once at startup: 0 when no slot was recovered, which on the P1 (fully in-memory) store is always. A real value is P3/P4's job |
 
 ## ML / LLM boundary (`crates/metrics/src/ml.rs`)
 

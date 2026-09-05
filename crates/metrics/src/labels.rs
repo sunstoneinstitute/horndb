@@ -255,3 +255,15 @@ pub struct SimdKernelLabel {
     pub isa: SimdIsa,
     pub source: SimdSource,
 }
+
+// SPEC-30 §S6: which half of a slot advance's `apply_quads` call a quad
+// counted by `horndb_feed_applied_quads_total` belongs to.
+label_value_enum!(FeedOp {
+    Add => "add",
+    Del => "del",
+});
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct FeedOpLabel {
+    pub op: FeedOp,
+}

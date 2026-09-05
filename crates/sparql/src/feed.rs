@@ -262,8 +262,28 @@ pub fn advance_slot<B: Store>(store: &mut B, feed: &FeedPosition) -> Result<()> 
         advanced_at: now_xsd_datetime(),
     };
     let (dels, adds) = slot_delta(old.as_ref(), &new);
+    let n_dels = dels.len() as u64;
+    let n_adds = adds.len() as u64;
+    let started = std::time::Instant::now();
     store.apply_quads(dels, adds)?;
+    record_advance_metrics(n_dels, n_adds, started.elapsed());
     Ok(())
+}
+
+/// SPEC-30 §S6 emit site: one advance = one `applied_batches` tick, its
+/// del/add quad counts split by the `op` label, and the wall-clock cost as
+/// `last_apply_seconds`.
+fn record_advance_metrics(n_dels: u64, n_adds: u64, elapsed: std::time::Duration) {
+    use horndb_metrics::labels::{FeedOp, FeedOpLabel};
+    let m = &horndb_metrics::metrics().feed;
+    m.applied_batches.inc();
+    m.applied_quads
+        .get_or_create(&FeedOpLabel { op: FeedOp::Del })
+        .inc_by(n_dels);
+    m.applied_quads
+        .get_or_create(&FeedOpLabel { op: FeedOp::Add })
+        .inc_by(n_adds);
+    m.last_apply_seconds.set(elapsed.as_secs_f64());
 }
 
 #[cfg(test)]
