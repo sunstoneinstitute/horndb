@@ -2,7 +2,6 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use horndb_config::Limits;
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::server::{build_router, AppState};
 use parking_lot::RwLock;
@@ -14,7 +13,7 @@ use tower::ServiceExt; // oneshot
 async fn metrics_endpoint_exposes_request_counter() {
     let state = AppState::<MemStore> {
         store: Arc::new(RwLock::new(MemStore::default())),
-        limits: Limits::default(),
+        config: Default::default(),
         ready: Arc::new(AtomicBool::new(true)),
         admission: Default::default(),
     };

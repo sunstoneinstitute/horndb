@@ -43,7 +43,7 @@ pub struct CliOverrides {
 
 /// Resolve the base config file path and whether it was explicitly requested.
 /// Precedence: `cli_config_path` > `env_config_path` > the default path.
-fn resolve_base_path(inputs: &LoadInputs) -> (PathBuf, bool) {
+pub(crate) fn resolve_base_path(inputs: &LoadInputs) -> (PathBuf, bool) {
     if let Some(p) = &inputs.cli_config_path {
         return (p.clone(), true);
     }

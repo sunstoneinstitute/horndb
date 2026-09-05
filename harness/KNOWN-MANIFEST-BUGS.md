@@ -478,12 +478,13 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-05 with `--engine owlrl`: **383 pass, 124 fail, 40 skip**.
-The 40 skips are test types the harness does not grade at all
-(`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
-report with the type IRI in the reason.
+Measured on 2026-09-05 with `--engine owlrl`: **397 pass, 110 fail, 40 skip**
+(HDB-131 fixed 9 cases: arithmetic and the aggregates now promote xsd numeric
+types and emit canonical lexical forms). The 40 skips are test types the
+harness does not grade at all (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`,
+`mf:CSVResultFormatTest`); they report with the type IRI in the reason.
 
-The 124 reds are listed one-by-one in `expected_failures` in
+The 110 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -496,9 +497,7 @@ cannot rot, and CI catches regressions in both directions.
 |--:|---|---|
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
 | 25 | **Unimplemented builtins**: `BNODE`, `IRI`, `ENCODE_FOR_URI`, `MD5`, `SHA1/256/512`, `STRDT`, `STRLANG`, `UUID`, `STRUUID`, `RAND`, `NOW`, `TZ`, `TIMEZONE`, and the `xsd:` constructor call form. | `functions/`, `aggregates/agg-err-02` |
-| 11 | **Result literals lose their language tag / datatype.** The string builtins (`CONCAT`, `LCASE`, `UCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) and the comparison operators return a plain literal where SPARQL 1.1 §17.4 requires `@lang` / `xsd:boolean` to be carried through. | `functions/`, `project-expression/` |
-| 10 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` works; the expression form does not translate. | `exists/`, `negation/`, `subquery/subquery10` |
-| 7 | **`MINUS`.** `translate` has no `Minus` arm. | `negation/` |
+| 14 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` (i.e. `MINUS`) works (HDB-133); the expression form does not translate. Includes 4 `negation/` cases whose `MINUS` right-hand pattern itself contains a `FILTER NOT EXISTS`. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
 | 4 | **`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` leaves the destination graph empty**, so the trailing `DROP GRAPH :g2` errors under SPEC-28 D11 (a graph holding no quad does not exist). | `basic-update/` |

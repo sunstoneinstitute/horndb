@@ -281,10 +281,9 @@ stops being latent:
   `Checkpoint::merge` + WAL truncation, replacing today's
   inline-drain-only behavior.
 
-### S6. MVCC backing of snapshots
+### S6. MVCC backing of snapshots — **delivered**
 
-Back `Circuit::snapshot()` onto SPEC-02 per-tuple visibility once E3 provides
-it:
+Back `Circuit::snapshot()` onto SPEC-02 per-tuple visibility (E3 provides it):
 
 - **Contract the backing must satisfy** (what `snapshot.rs` promises readers
   today): `contains(&TripleId)`, key-ordered `iter()`, `len`/`is_empty`, and
@@ -299,8 +298,13 @@ it:
   rebuild disappears — visibility becomes a per-tuple predicate evaluated at
   scan time in storage — and point queries against partially applied in-flight
   deltas mid-tick (explicitly out of Stage-1 scope) become expressible.
-  Blocked on E3's per-tuple visibility stamps and delete path; until then the
-  in-process snapshot stays.
+- **Delivered.** `Circuit::attach_store(store, graphs)` binds the reader view
+  to the store the S4 wiring writes; `Circuit::snapshot()` pins that store's
+  commit version in O(1) and the circuit materializes no presence set.
+  **Residual:** an Update still commits its base batch and its derived mirror
+  as two storage versions, so ADR-0018's "one tick, one storage batch"
+  invariant is not yet enforced on the engine write path — a snapshot taken
+  between the two sees base rows without their consequences.
 
 ### S7. Bilinear-join runtime — cost model + real joins
 
@@ -358,9 +362,9 @@ written when each increment is picked up.
    ([#214](https://github.com/sunstoneinstitute/horndb/issues/214)). Contract
    + crash tests here; on-disk format arrives with E3.
 6. **S6 — MVCC backing of snapshots**
-   ([#215](https://github.com/sunstoneinstitute/horndb/issues/215)). Blocked
-   on E3 per-tuple visibility; land the version-reconciliation design early so
-   E3 builds the right thing.
+   ([#215](https://github.com/sunstoneinstitute/horndb/issues/215)).
+   **Delivered** on E3's per-tuple visibility, with the storage commit version
+   as the one clock (ADR-0018).
 7. **S7 — bilinear-join runtime**
    ([#216](https://github.com/sunstoneinstitute/horndb/issues/216)).
    Per-predicate leaves, cost model over the SPEC-23 `Stats` seam,
@@ -426,9 +430,10 @@ independent but lowest urgency.
   mitigation — after S4, this would be a breaking change to real consumers.
 - **E3 sequencing.** S5/S6 consume storage deliverables that do not exist
   yet (per-tuple visibility, delete path, WAL format). If E3 slips, S5 can
-  still land the log contract against a file-backed stub; S6 cannot — it
-  stays blocked. The version-reconciliation design is agreed — **ADR-0018**
-  (storage commit version as the shared clock, single typed WAL).
+  still land the log contract against a file-backed stub. S6 has since landed
+  on the delivered E3 primitives. The version-reconciliation design is agreed
+  — **ADR-0018** (storage commit version as the shared clock, single typed
+  WAL).
 - **Tick regime unification could regress insertion latency.** Collapsing the
   two `tick()` regimes (S1) must not slow the insertion-only fast path that
   meets NF1/NF2 today; the criterion benches (`insert_throughput`) gate the

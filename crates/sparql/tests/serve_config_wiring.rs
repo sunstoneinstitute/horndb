@@ -344,7 +344,7 @@ fn explicit_config_flag_pointing_at_missing_file_exits_nonzero() {
     );
 }
 
-/// PLAN-28-03 Task 2: `AppState.limits` must reflect the loaded
+/// PLAN-28-03 Task 2: `AppState.config` must reflect the loaded
 /// `[server.limits]`. `rdf12` is the observable half of `SparqlConfig` at
 /// this point in SPEC-28 phase 3 (`default_graph` is threaded but not yet
 /// consumed by the executor — PLAN-28-03 Task 3): with `rdf12 = true` in the
@@ -384,7 +384,7 @@ fn rdf12_config_flows_to_appstate_cfg() {
 /// The flip side of `rdf12_config_flows_to_appstate_cfg`: with no
 /// `[server.limits].rdf12` set (default `false`), the same triple-term
 /// query must still 400 — proving the earlier test's 200 came from the
-/// config value actually reaching `AppState.limits`, not from the handler
+/// config value actually reaching `AppState.config`, not from the handler
 /// ignoring `rdf12` altogether.
 #[test]
 fn rdf12_defaults_to_off_rejecting_triple_term_patterns() {
@@ -409,7 +409,7 @@ fn rdf12_defaults_to_off_rejecting_triple_term_patterns() {
     let (status, body) = http_post_sparql_query("127.0.0.1:18478", "/query", query);
     assert_eq!(
         status, 400,
-        "default AppState.limits must reject triple-term patterns: {body}"
+        "default AppState.config must reject triple-term patterns: {body}"
     );
     assert!(body.contains("triple-term"), "body: {body}");
 }
@@ -533,4 +533,120 @@ fn healthz_readyz_and_sigterm_drain() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// SPEC-26 S3 (HDB-65) end to end, against the real `serve` binary: a hot key
+/// edited on disk takes effect on the next request, a bad edit keeps the
+/// previous config live, and a changed restart-only key is stored and logged
+/// rather than re-applied.
+///
+/// `rdf12` is the hot key under test because it is cleanly binary over HTTP —
+/// the same triple-term query is a 400 with it off and a 200 with it on, so a
+/// status flip is unambiguous proof the handler read the *new* config.
+#[test]
+fn live_reload_applies_hot_keys_keeps_bad_edits_out_and_flags_restart_only() {
+    const ADDR: &str = "127.0.0.1:18481";
+    const MOVED_ADDR: &str = "127.0.0.1:18482";
+    const TRIPLE_TERM_QUERY: &str =
+        "SELECT ?s WHERE { ?s <http://ex/claims> <<( <http://ex/Bob> <http://ex/age> 30 )>> }";
+
+    let dir = tempdir().unwrap();
+    let data = write_data_file(dir.path());
+    let cfg = dir.path().join("config.toml");
+    let write_cfg = |body: &str| {
+        std::fs::write(
+            &cfg,
+            format!("[reload]\ndebounce = \"50ms\"\n[server]\nbind = \"{ADDR}\"\n{body}"),
+        )
+        .unwrap();
+    };
+    write_cfg("[server.limits]\nrdf12 = false\n");
+
+    // stderr goes to a file rather than /dev/null so the "requires restart"
+    // line is observable — it is the only signal a restart-only change made.
+    let log = dir.path().join("serve.err");
+    let mut cmd = StdCommand::new(env!("CARGO_BIN_EXE_serve"));
+    cmd.args([
+        "--data",
+        data.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+    ])
+    .env_remove("HORNDB_CONFIG")
+    .env_remove("HORNDB_SERVER__BIND")
+    .stdout(Stdio::null())
+    .stderr(Stdio::from(std::fs::File::create(&log).unwrap()));
+    let _guard = ServeGuard(cmd.spawn().unwrap());
+    wait_for_connect(ADDR, Duration::from_secs(10));
+
+    /// Poll `/metrics` until it contains `needle`, or panic.
+    fn wait_for_metric(addr: &str, needle: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (_, body) = http_get(addr, "/metrics");
+            if body.contains(needle) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("metric {needle:?} never appeared; last scrape:\n{body}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    let (status, body) = http_post_sparql_query(ADDR, "/query", TRIPLE_TERM_QUERY);
+    assert_eq!(status, 400, "rdf12 starts off: {body}");
+    assert!(
+        http_get(ADDR, "/metrics")
+            .1
+            .contains("config_active_generation 1"),
+        "the startup config is generation 1"
+    );
+
+    // 1. Hot key: flip rdf12 on. The next request must see it.
+    write_cfg("[server.limits]\nrdf12 = true\n");
+    wait_for_metric(ADDR, "config_active_generation 2");
+    wait_for_metric(ADDR, "config_reload_total{result=\"applied\"} 1");
+    let (status, body) = http_post_sparql_query(ADDR, "/query", TRIPLE_TERM_QUERY);
+    assert_eq!(
+        status, 200,
+        "a hot [server.limits] key must take effect on the next request: {body}"
+    );
+
+    // 2. Bad edit: an unknown key fails validation. The live config must not
+    //    move — if it reverted to the built-in default, rdf12 would be off
+    //    again and the query would 400.
+    write_cfg("[server.limits]\nrdf_twelve = true\n");
+    wait_for_metric(ADDR, "config_reload_total{result=\"rejected\"} 1");
+    let (status, body) = http_post_sparql_query(ADDR, "/query", TRIPLE_TERM_QUERY);
+    assert_eq!(
+        status, 200,
+        "a rejected reload must keep the previous config live: {body}"
+    );
+    assert!(
+        http_get(ADDR, "/metrics")
+            .1
+            .contains("config_active_generation 2"),
+        "a rejected reload is not a new generation"
+    );
+
+    // 3. Restart-only key: a changed bind is stored and logged, never rebound.
+    std::fs::write(
+        &cfg,
+        format!(
+            "[reload]\ndebounce = \"50ms\"\n[server]\nbind = \"{MOVED_ADDR}\"\n\
+             [server.limits]\nrdf12 = true\n"
+        ),
+    )
+    .unwrap();
+    wait_for_metric(ADDR, "config_active_generation 3");
+    assert_not_listening(MOVED_ADDR);
+    let (status, _) = http_post_sparql_query(ADDR, "/query", TRIPLE_TERM_QUERY);
+    assert_eq!(status, 200, "the original bind must keep serving");
+
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        stderr.contains("[server].bind") && stderr.contains("requires restart to take effect"),
+        "a changed restart-only key must say so on stderr:\n{stderr}"
+    );
 }

@@ -3,7 +3,7 @@
 //! at end of stream and never yields a `Some(empty)` chunk mid-stream.
 
 mod blocking;
-use blocking::{GroupOp, JoinOp, LeftJoinOp, OrderByOp, PathClosureOp, UnionOp};
+use blocking::{GroupOp, JoinOp, LeftJoinOp, MinusOp, OrderByOp, PathClosureOp, UnionOp};
 mod source;
 /// The one scan-side helper outside this module needs (`GRAPH ?g`'s
 /// per-graph read); the operators themselves stay private.
@@ -200,6 +200,11 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 let l = self.build(left)?;
                 let r = self.build(right)?;
                 Ok(Box::new(LeftJoinOp::new(self, l, r, expr.clone())))
+            }
+            PhysicalPlan::Minus { left, right } => {
+                let l = self.build(left)?;
+                let r = self.build(right)?;
+                Ok(Box::new(MinusOp::new(self, l, r)))
             }
             PhysicalPlan::Group {
                 inner,

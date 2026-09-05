@@ -42,6 +42,10 @@ fn reference_plan(alg: &Algebra) -> PhysicalPlan {
             right: Box::new(reference_plan(right)),
             expr: expr.clone(),
         },
+        Algebra::Minus { left, right } => PhysicalPlan::Minus {
+            left: Box::new(reference_plan(left)),
+            right: Box::new(reference_plan(right)),
+        },
         Algebra::Filter { expr, inner } => PhysicalPlan::Filter {
             expr: expr.clone(),
             inner: Box::new(reference_plan(inner)),

@@ -35,6 +35,12 @@ pub enum LogicalPlan {
         right: Box<LogicalPlan>,
         expr: Option<Expr>,
     },
+    /// `MINUS` (SPARQL 1.1 §18.5): anti-join. Output is `left`'s schema —
+    /// `right`'s columns never surface. See `crate::algebra::Algebra::Minus`.
+    Minus {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+    },
     /// Boolean filter.
     Filter { expr: Expr, inner: Box<LogicalPlan> },
     /// Union of two compatible subtrees.

@@ -329,7 +329,10 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
                 aggregates: aggs,
             })
         }
-        GraphPattern::Minus { .. } => Err(SparqlError::UnsupportedAlgebra("Minus".into())),
+        GraphPattern::Minus { left, right } => Ok(Algebra::Minus {
+            left: Box::new(translate_pattern(left, cfg)?),
+            right: Box::new(translate_pattern(right, cfg)?),
+        }),
         GraphPattern::Service { .. } => Err(SparqlError::UnsupportedAlgebra("Service".into())),
         GraphPattern::Reduced { .. } => Err(SparqlError::UnsupportedAlgebra("Reduced".into())),
         // SPEC-28 phase 3 (#266): GRAPH scopes `inner` to one named graph

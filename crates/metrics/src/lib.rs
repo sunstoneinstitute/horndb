@@ -6,6 +6,8 @@
 //! registered with `register_collector`.
 
 pub mod closure;
+pub mod config;
+pub mod feed;
 pub mod incremental;
 pub mod labels;
 pub mod ml;
@@ -26,11 +28,13 @@ pub struct MetricsState {
     pub closure: closure::ClosureSink,
     pub storage: storage::StorageMetrics,
     pub owlrl: owlrl::OwlrlMetrics,
+    pub feed: feed::FeedMetrics,
     pub incremental: incremental::IncrementalMetrics,
     pub ml: ml::MlMetrics,
     pub reasoning: reasoning::ReasoningMetrics,
     pub wcoj: wcoj::WcojMetrics,
     pub simd: simd::SimdMetrics,
+    pub config: config::ConfigMetrics,
 }
 
 impl MetricsState {
@@ -40,22 +44,26 @@ impl MetricsState {
         let closure = closure::ClosureSink::register(&mut registry);
         let storage = storage::StorageMetrics::register(&mut registry);
         let owlrl = owlrl::OwlrlMetrics::register(&mut registry);
+        let feed = feed::FeedMetrics::register(&mut registry);
         let incremental = incremental::IncrementalMetrics::register(&mut registry);
         let ml = ml::MlMetrics::register(&mut registry);
         let reasoning = reasoning::ReasoningMetrics::register(&mut registry);
         let wcoj = wcoj::WcojMetrics::register(&mut registry);
         let simd = simd::SimdMetrics::register(&mut registry);
+        let config = config::ConfigMetrics::register(&mut registry);
         Self {
             registry: Mutex::new(registry),
             sparql,
             closure,
             storage,
             owlrl,
+            feed,
             incremental,
             ml,
             reasoning,
             wcoj,
             simd,
+            config,
         }
     }
 

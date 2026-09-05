@@ -171,17 +171,11 @@ expected_failures = [
     "data-sparql11/service/manifest#service6",
     "data-sparql11/service/manifest#service7",
 
-    # MINUS. `translate` has no `Minus` arm.
-    "data-sparql11/negation/manifest#full-minuend",
-    "data-sparql11/negation/manifest#partial-minuend",
-    "data-sparql11/negation/manifest#set-equals-1",
-    "data-sparql11/negation/manifest#subset-01",
-    "data-sparql11/negation/manifest#subset-02",
-    "data-sparql11/negation/manifest#subset-03",
-    "data-sparql11/negation/manifest#subset-by-exclusion-minus-1",
-
-    # EXISTS / NOT EXISTS used as a FILTER *expression* (the pattern form in
-    # `negation/` works; the expression form does not translate).
+    # EXISTS / NOT EXISTS used as a FILTER *expression* (HDB-133: MINUS itself
+    # now translates — the pattern form of negation works — but these four
+    # `MINUS { ... FILTER NOT EXISTS { ... } ... }` queries still fail on the
+    # SAME pre-existing gap as the rest of this bucket: the FILTER NOT EXISTS
+    # inside the MINUS's right-hand pattern does not translate).
     "data-sparql11/exists/manifest#exists01",
     "data-sparql11/exists/manifest#exists02",
     "data-sparql11/exists/manifest#exists03",
@@ -189,6 +183,10 @@ expected_failures = [
     "data-sparql11/exists/manifest#exists05",
     "data-sparql11/negation/manifest#exists-01",
     "data-sparql11/negation/manifest#exists-02",
+    "data-sparql11/negation/manifest#set-equals-1",
+    "data-sparql11/negation/manifest#subset-01",
+    "data-sparql11/negation/manifest#subset-02",
+    "data-sparql11/negation/manifest#subset-03",
     "data-sparql11/negation/manifest#subset-by-exclusion-nex-1",
     "data-sparql11/negation/manifest#temporal-proximity-by-exclusion-nex-1",
     "data-sparql11/subquery/manifest#subquery10",
@@ -255,22 +253,6 @@ expected_failures = [
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
-
-    # Result literals lose their language tag / datatype: the string builtins
-    # (CONCAT, LCASE, UCASE, SUBSTR, STRBEFORE, STRAFTER, REPLACE) and the
-    # comparison operators return a plain literal where SPARQL 1.1 §17.4
-    # requires `@lang` / `xsd:boolean` to be carried through.
-    "data-sparql11/functions/manifest#concat02",
-    "data-sparql11/functions/manifest#lcase01",
-    "data-sparql11/functions/manifest#replace01",
-    "data-sparql11/functions/manifest#strafter01a",
-    "data-sparql11/functions/manifest#strafter02",
-    "data-sparql11/functions/manifest#strbefore01a",
-    "data-sparql11/functions/manifest#strbefore02",
-    "data-sparql11/functions/manifest#substring01",
-    "data-sparql11/functions/manifest#substring02",
-    "data-sparql11/functions/manifest#ucase01",
-    "data-sparql11/project-expression/manifest#projexp01",
 
     # A comparison operator returns a value where SPARQL 1.1 §17.4 requires an
     # expression error, so `IF` takes the wrong branch and the variable stays

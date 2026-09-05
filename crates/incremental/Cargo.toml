@@ -11,8 +11,10 @@ thiserror.workspace = true
 crossbeam-channel.workspace = true
 horndb-closure = { path = "../closure" }
 horndb-metrics.workspace = true
+horndb-storage = { path = "../storage" }
 
 [dev-dependencies]
+oxrdf.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 

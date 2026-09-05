@@ -97,7 +97,7 @@ pub async fn handle_query_get<B: FullBackend + Send + Sync + 'static>(
         )
             .into_response();
     };
-    let settings = match resolve_settings(&state.limits, &[&params]) {
+    let settings = match resolve_settings(&state.config.current().server.limits, &[&params]) {
         Ok(s) => s,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };
@@ -130,7 +130,10 @@ pub async fn handle_query_post<B: FullBackend + Send + Sync + 'static>(
     } else {
         (body, Params::new())
     };
-    let settings = match resolve_settings(&state.limits, &[&params, &body_params]) {
+    let settings = match resolve_settings(
+        &state.config.current().server.limits,
+        &[&params, &body_params],
+    ) {
         Ok(s) => s,
         Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
     };

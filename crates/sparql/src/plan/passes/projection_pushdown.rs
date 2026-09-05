@@ -187,6 +187,27 @@ fn prune(node: LogicalPlan, demanded: &HashSet<String>) -> LogicalPlan {
             };
             restrict(node2, demanded)
         }
+        // `MINUS`'s output is exactly `left`'s schema (`restrict` at the end
+        // narrows it like any other node) — but `right`'s columns never
+        // surface, so only the variables it SHARES with `left` can affect
+        // which `left` rows the anti-join keeps (§18.5's domain-intersection
+        // rule); that shared set, not `demanded`, is the right arm's whole
+        // demand. `left` additionally needs those shared vars even if no
+        // ancestor asked for them, so the anti-join can test them.
+        Minus { left, right } => {
+            let lo = schema(&left);
+            let ro = schema(&right);
+            let shared = intersect(&set_of(&lo), &ro);
+            let mut left_demand = demanded.clone();
+            left_demand.extend(shared.iter().cloned());
+            let pl = prune(*left, &intersect(&left_demand, &lo));
+            let pr = prune(*right, &shared);
+            let node2 = LogicalPlan::Minus {
+                left: Box::new(pl),
+                right: Box::new(pr),
+            };
+            restrict(node2, demanded)
+        }
         // See module doc: never wrap the Union itself, recurse into both
         // arms with the same `demanded` set.
         Union { left, right } => LogicalPlan::Union {

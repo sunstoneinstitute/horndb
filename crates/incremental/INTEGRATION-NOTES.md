@@ -97,8 +97,11 @@ Two more consequences for a consumer:
 ## Other contracts
 
 - `Circuit::snapshot()` gives a stable `(asserted ∪ derived)` read view that
-  survives later ticks; readers and writers never block (SPEC-06 F7). Backing
-  it onto SPEC-02 per-tuple MVCC is SPEC-24 S6 (#215).
+  survives later ticks; readers and writers never block (SPEC-06 F7). It rides
+  SPEC-02/SPEC-25 per-tuple MVCC (SPEC-24 S6, #215): `Circuit::attach_store`
+  binds the store and the graphs whose union is the view, and
+  `Snapshot::logical_time()` is that store's commit version (ADR-0018 — one
+  clock). Without an attached store `snapshot()` returns `None`.
 - `DeltaLog` is in-memory. A crash between checkpoints loses pending deltas
   until the WAL lands (SPEC-24 S5, #214) — see `docs/specs/SPEC-30-change-feed-materializer.md` for
   the durability contract a feed consumer needs.

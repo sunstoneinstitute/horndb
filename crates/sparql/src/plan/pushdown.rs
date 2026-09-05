@@ -366,6 +366,10 @@ fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> Phys
             right: Box::new(f(*right)),
             expr,
         },
+        Minus { left, right } => Minus {
+            left: Box::new(f(*left)),
+            right: Box::new(f(*right)),
+        },
         Union { left, right } => Union {
             left: Box::new(f(*left)),
             right: Box::new(f(*right)),
@@ -463,6 +467,9 @@ pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
             }
             out
         }
+        // `MINUS` never adds columns: output is exactly `left`'s (`right` is
+        // evaluated only to decide which `left` rows survive).
+        Minus { left, .. } => output_vars(left),
         Filter { inner, .. } | Distinct { inner } | Slice { inner, .. } | OrderBy { inner, .. } => {
             output_vars(inner)
         }
@@ -649,6 +656,28 @@ fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
                 left: Box::new(pl),
                 right: Box::new(pr),
                 expr: expr.clone(),
+            };
+            let nat = output_vars(&node2);
+            wrap_if_wider(node2, &nat, demanded)
+        }
+        // `MINUS`'s output is exactly `left`'s (see `output_vars`) — but
+        // `right`'s columns never surface, so only the variables it SHARES
+        // with `left` can affect which `left` rows the anti-join drops
+        // (§18.5's domain-intersection rule); that shared set, not
+        // `demanded`, is the right arm's whole demand. `left` additionally
+        // needs those shared vars even if no ancestor asked for them, so the
+        // anti-join can test them.
+        Minus { left, right } => {
+            let lo = output_vars(left);
+            let ro = output_vars(right);
+            let shared: HashSet<String> = ro.into_iter().filter(|v| lo.contains(v)).collect();
+            let mut left_demand = demanded.clone();
+            left_demand.extend(shared.iter().cloned());
+            let pl = prune(left, &intersect(&left_demand, &lo));
+            let pr = prune(right, &shared);
+            let node2 = Minus {
+                left: Box::new(pl),
+                right: Box::new(pr),
             };
             let nat = output_vars(&node2);
             wrap_if_wider(node2, &nat, demanded)
@@ -979,7 +1008,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => has_count_scan(inner),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => has_count_scan(left) || has_count_scan(right),
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => has_count_scan(left) || has_count_scan(right),
             PhysicalPlan::PathClosure { edge, .. } => has_count_scan(edge),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::GroupCountScan { .. }
@@ -1365,7 +1395,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => has_group_count_scan(inner),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => {
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 has_group_count_scan(left) || has_group_count_scan(right)
             }
             PhysicalPlan::PathClosure { edge, .. } => has_group_count_scan(edge),
@@ -1517,7 +1548,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => count_leaves(inner, out),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => {
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 count_leaves(left, out);
                 count_leaves(right, out);
             }
@@ -1822,7 +1854,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => scan_is_narrowed_to(inner, want),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => {
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 scan_is_narrowed_to(left, want) || scan_is_narrowed_to(right, want)
             }
             PhysicalPlan::PathClosure { edge, .. } => scan_is_narrowed_to(edge, want),
@@ -1849,7 +1882,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => find_bgp_vars(inner, out),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => {
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 find_bgp_vars(left, out);
                 find_bgp_vars(right, out);
             }
@@ -1871,7 +1905,8 @@ mod tests {
             | PhysicalPlan::Group { inner, .. } => distinct_inner(inner),
             PhysicalPlan::Join { left, right }
             | PhysicalPlan::LeftJoin { left, right, .. }
-            | PhysicalPlan::Union { left, right } => {
+            | PhysicalPlan::Union { left, right }
+            | PhysicalPlan::Minus { left, right } => {
                 distinct_inner(left).or_else(|| distinct_inner(right))
             }
             PhysicalPlan::PathClosure { edge, .. } => distinct_inner(edge),

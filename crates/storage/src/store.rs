@@ -611,15 +611,16 @@ impl Store {
         self.snapshot().scan_all_term_ids()
     }
 
-    /// True if any non-default graph holds at least one triple; the snapshot
-    /// format currently covers the default graph only, so export refuses to
-    /// run rather than silently drop data when this is true.
+    /// True if any non-default graph holds at least one triple. Snapshot
+    /// export covers named graphs (SPEC-25 S4), so this is a plain predicate
+    /// on store shape, not a guard.
     pub fn has_named_graph_data(&self) -> bool {
         self.snapshot().has_named_graph_data()
     }
 
-    /// Export the default graph to a writer in the HDT-derived snapshot format
-    /// (SPEC-02 F9). See `crate::snapshot`.
+    /// Export every graph — default plus named — to a writer in the
+    /// HDT-derived snapshot format (SPEC-02 F9, SPEC-25 S4). See
+    /// `crate::snapshot`.
     pub fn export_snapshot<W: std::io::Write>(
         &self,
         w: &mut W,
@@ -627,7 +628,7 @@ impl Store {
         crate::snapshot::export_snapshot(self, w)
     }
 
-    /// Import a snapshot into this store (default graph).
+    /// Import a snapshot into this store, quads and all.
     pub fn import_snapshot<R: std::io::Read>(&self, r: &mut R) -> Result<()> {
         crate::snapshot::import_snapshot_into(self, r)
     }
