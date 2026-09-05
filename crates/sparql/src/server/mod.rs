@@ -1,11 +1,12 @@
 //! Embedded HTTP server exposing SPARQL 1.1 Protocol endpoints.
 //!
-//! `/query` and `/update` are the SPARQL 1.1 Protocol surface (the Graph
-//! Store Protocol is explicitly out of Stage 1 scope, see SPEC-07 Future
-//! Work); `/metrics` is the Prometheus scrape target; `/healthz` and
-//! `/readyz` are the Kubernetes liveness/readiness probes (HDB-124).
+//! `/query` and `/update` are the SPARQL 1.1 Protocol surface; `/graphs` is
+//! the Graph Store Protocol (SPEC-28 S5, `graph_store`); `/metrics` is the
+//! Prometheus scrape target; `/healthz` and `/readyz` are the Kubernetes
+//! liveness/readiness probes (HDB-124).
 
 mod counting_body;
+pub mod graph_store;
 mod health;
 pub mod metrics_route;
 pub mod query;
@@ -126,6 +127,26 @@ pub fn flag_inconsistent() {
     SERVE_WITH_INCONSISTENT_FLAG.store(true, Ordering::Relaxed);
 }
 
+/// Whether this process serves a `--materialize` store. Process-global for
+/// the same reason as [`SERVE_WITH_INCONSISTENT_FLAG`]: it is a startup fact
+/// about the one closure this process serves.
+///
+/// SPEC-28 S5 reads it to refuse Graph Store Protocol writes to `?default`:
+/// `load_with_reasoning` puts asserted and inferred triples into the default
+/// graph indistinguishably, so a whole-graph write there would delete
+/// inferences the client never sent.
+static SERVE_MATERIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Record that this process's store was built with `--materialize`. Called
+/// once at startup by `serve`; like [`flag_inconsistent`], one-way.
+pub fn flag_materialized() {
+    SERVE_MATERIALIZED.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn is_materialized() -> bool {
+    SERVE_MATERIALIZED.load(Ordering::Relaxed)
+}
+
 /// Shared state, generic over the storage backend. Defaults to the
 /// Stage-1 `MemStore` so existing constructors keep compiling; the
 /// `serve` binary instantiates `AppState<HornBackend>`.
@@ -216,6 +237,15 @@ pub fn build_router<B: FullBackend + Send + Sync + 'static>(state: AppState<B>) 
             get(query::handle_query_get::<B>).post(query::handle_query_post::<B>),
         )
         .route("/update", post(update::handle_update::<B>))
+        // SPEC-28 S5. Same body cap as `/update` (413 comes from the
+        // `DefaultBodyLimit` layer below).
+        .route(
+            "/graphs",
+            get(graph_store::handle_get::<B>)
+                .put(graph_store::handle_put::<B>)
+                .post(graph_store::handle_post::<B>)
+                .delete(graph_store::handle_delete::<B>),
+        )
         // Applies to the routes added above only — `/metrics` is registered
         // after it and keeps axum's default. `LOAD` reads files, not request
         // bodies, so bulk ingest is unaffected.
@@ -244,6 +274,9 @@ async fn record_request(req: Request, next: Next) -> Response {
     } else {
         Method::Post
     };
+    // The metrics label only distinguishes GET from "not GET"; the access
+    // log names the real verb, which since SPEC-28 S5 can also be PUT/DELETE.
+    let verb = req.method().as_str().to_owned();
     let start = Instant::now();
 
     // When the endpoint is known, wrap request and response bodies so bytes are
@@ -270,8 +303,7 @@ async fn record_request(req: Request, next: Next) -> Response {
         resp.headers_mut().insert("x-request-id", hv);
     }
     eprintln!(
-        "serve: {} {path} {status} {}ms request_id={rid}",
-        method.as_str(),
+        "serve: {verb} {path} {status} {}ms request_id={rid}",
         elapsed.as_millis(),
     );
 

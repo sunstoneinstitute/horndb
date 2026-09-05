@@ -503,7 +503,7 @@ fn reserved_template_check(g: &GraphNamePattern) -> Result<()> {
     Ok(())
 }
 
-fn reserved_iri_write_check(iri: &str) -> Result<()> {
+pub(crate) fn reserved_iri_write_check(iri: &str) -> Result<()> {
     if is_reserved_graph(iri) {
         return Err(reserved_graph_write_error(iri));
     }
