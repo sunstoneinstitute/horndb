@@ -3341,9 +3341,27 @@ from 5 to 60. The nightly also now waits on `/readyz` rather than `/query`:
 `serve` answers `/query` with 200 the whole time it is loading, and at this
 scale the load takes ~26 minutes.
 
-First measured `editorial-qps`: **pending** — the A/B engines were still being
-bulk-loaded when this row was written. Aggregation numbers at the old scale
-remain in the `aggregation-qps` row in *Measured* above.
+A second server-side limit had to move with it. HornDB cancels every query at
+`[server.limits].query_timeout`, which defaults to **30 s**, and no driver-side
+setting can raise it — at this scale the heavier aggregation queries came back
+`504` and scored as errors. The nightly now sets
+`HORNDB_SERVER__LIMITS__QUERY_TIMEOUT=300s` to match the scenario.
+
+A/B engine load, same host and day:
+
+| engine | load | result |
+|---|---|---|
+| HornDB `serve` | 1,570 s, 51,106 MiB RSS | 465,633,142 triples |
+| GraphDB Free 10.8.14 | `importrdf preload`, **1,341 s**, 31 GB on disk, 104,273,561 entities, 32 g heap | 465,633,141 triples |
+
+GraphDB's count is one lower than HornDB's; the difference has not been
+chased. GraphDB's online loader (`importrdf load`) refuses a flat N-Triples
+dump outright — `preload`, which builds a single non-fragmented image and runs
+no inference, is the right tool for a pre-materialized closure in an
+`empty`-ruleset repo.
+
+First measured `editorial-qps`: **pending** — see the *Measured* table once the
+first nightly at this scale runs.
 
 ### Running, internal only (no published numbers)
 
