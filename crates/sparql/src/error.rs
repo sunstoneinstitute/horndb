@@ -42,6 +42,15 @@ pub enum SparqlError {
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// SPEC-30 D6: the request's feed id does not match the id already
+    /// recorded in the applied-position slot (checked only against a
+    /// non-empty slot — an empty slot adopts the first id given). Raised
+    /// before any operation applies, so the whole request is refused with no
+    /// data written. `server/update.rs` maps this to `409 Conflict` instead
+    /// of the blanket `400` every other variant gets.
+    #[error("feed id mismatch: slot holds {slot:?}, request carries {request:?}")]
+    FeedIdMismatch { slot: String, request: String },
 }
 
 /// Convenience `Result` alias.

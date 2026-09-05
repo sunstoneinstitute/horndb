@@ -1427,6 +1427,7 @@ dependencies = [
  "spargebra",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tower",
 ]
