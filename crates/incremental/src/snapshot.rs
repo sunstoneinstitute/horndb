@@ -1,90 +1,128 @@
-//! SPEC-06 F7 — in-flight reader visibility via MVCC snapshots.
+//! SPEC-24 S6 — reader snapshots backed by SPEC-02/SPEC-25 per-tuple MVCC.
 //!
-//! A [`Snapshot`] pins the materialized `(asserted ∪ derived)` **set** of
-//! triples present in a [`crate::circuit::Circuit`] at the logical time it was
-//! acquired. It is refcount-backed: the pinned view is an immutable `Arc`, so
-//! acquiring is amortized O(1) (an `Arc` clone). The presence view is built
-//! lazily and cached — a state-changing `tick()` invalidates the cache in O(1)
-//! (so steady-state writes stay delta-sized), and the *first* `snapshot()` after
-//! a write pays one O(|asserted| + |derived|) build, reused by later acquires
-//! until the next tick. Because the pinned version is immutable, subsequent
-//! `tick()`s that publish a *new* version leave this handle's view untouched
-//! until it is dropped. Readers (snapshot holders) and writers (`tick`)
-//! therefore never block each other.
+//! A [`Snapshot`] is a pinned, read-only view of the storage tier that holds a
+//! [`Circuit`](crate::circuit::Circuit)'s materialized `(asserted ∪ derived)`
+//! triples — the default graph plus the circuit's derived graph. Acquiring one
+//! pins the tier's current commit version (an `Arc` clone plus a pin-count
+//! bump), so it is O(1) and never rebuilds a presence set in the circuit.
+//! Storage's copy-on-write tier leaves a pinned version untouched while later
+//! ticks commit newer ones, so readers and writers never block each other.
+//!
+//! ## One clock (ADR-0018)
+//!
+//! `logical_time()` is the storage **commit version** the view is pinned to,
+//! not a separate circuit counter. "Snapshot at t" therefore means the same
+//! thing in the circuit and in storage, with no mapping to persist. Version
+//! `0` is the empty store; the first commit is version `1`. The token is
+//! inclusive: the view shows every tuple whose visibility stamp range covers
+//! that version.
 //!
 //! ## Set semantics (presence), not Z-set multiplicity
 //!
-//! This is deliberately a **presence/set view**: a triple is either present or
-//! absent, never present "twice". The underlying engine is a Z-set (records
-//! carry `±1` multiplicities so signed deltas net out — a triple asserted then
-//! retracted is absent), but a reader-facing snapshot of an RDF graph is a
-//! *set* of triples — `(asserted ∪ derived)` is a union, and the rest of the
-//! store queries presence (`get(t) != 0`). Exposing a raw multiplicity (e.g.
-//! `2` for a triple that is both derived and re-asserted, or asserted twice)
-//! would be meaningless to an RDF consumer, so the snapshot collapses to
-//! presence on publish and the query surface here is presence-only. Point
-//! queries against partially-applied in-flight deltas mid-tick stay deferred
-//! under parent #6.
-//!
-//! Scope (issue #46): in-flight reader visibility within `horndb-incremental`.
-//! Full SPEC-02 per-tuple storage MVCC stays deferred under parent #6.
+//! Storage rows are present or absent, never present "twice", so this view is
+//! a set. A triple that is both asserted and derived lives in two graphs and
+//! is still yielded once — [`Snapshot::iter`] merges the graphs and dedupes.
 
 use std::sync::Arc;
 
-use crate::types::{LogicalTime, TripleId};
-use crate::zset::Zset;
+use horndb_storage::{GraphId, PinnedSnapshot, TermId};
 
-/// A consistent, refcounted **set** of the triples present in a
-/// [`Circuit`](crate::circuit::Circuit)'s materialized `(asserted ∪ derived)`
-/// view at a fixed logical time. Cheap to clone (Arc bump). Presence-only — see
-/// the [module docs](self) for why this is a set view rather than a Z-set.
-#[derive(Clone, Debug)]
+use crate::types::{LogicalTime, TripleId};
+
+/// A pinned, MVCC-consistent **set** of the triples a
+/// [`Circuit`](crate::circuit::Circuit) has materialized in storage, as of one
+/// commit version. Cheap to clone (two `Arc` bumps).
+#[derive(Clone)]
 pub struct Snapshot {
-    time: LogicalTime,
-    view: Arc<Zset<TripleId>>,
+    pin: Arc<PinnedSnapshot>,
+    /// The graphs whose union is the circuit's view, in the order given to
+    /// [`Circuit::attach_store`](crate::circuit::Circuit::attach_store).
+    graphs: Arc<[GraphId]>,
+}
+
+impl std::fmt::Debug for Snapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("logical_time", &self.logical_time())
+            .field("graphs", &&*self.graphs)
+            .finish()
+    }
 }
 
 impl Snapshot {
-    /// Construct a snapshot over an already-materialized version. Internal:
-    /// callers go through [`Circuit::snapshot`](crate::circuit::Circuit::snapshot).
-    /// The `view` must already be collapsed to presence (every present triple at
-    /// multiplicity 1); `Circuit::tick` builds it that way.
-    pub(crate) fn new(time: LogicalTime, view: Arc<Zset<TripleId>>) -> Self {
-        Self { time, view }
+    /// Pin `store` at its current commit version. Internal: callers go through
+    /// [`Circuit::snapshot`](crate::circuit::Circuit::snapshot).
+    pub(crate) fn new(pin: PinnedSnapshot, graphs: Arc<[GraphId]>) -> Self {
+        Self {
+            pin: Arc::new(pin),
+            graphs,
+        }
     }
 
-    /// The **inclusive** logical time this snapshot represents: it reflects every
-    /// asserted record with timestamp **≤** `logical_time()` (SPEC-06 F7) — the
-    /// last committed asserted timestamp. It is `0` for the empty view; because
-    /// the first commit's record carries timestamp `0`, the post-first-commit
-    /// view also reports `0`. That is SPEC-faithful: an empty store simply has no
-    /// records, so the two are indistinguishable by logical time alone (use
-    /// `is_empty()`/`contains()` to tell them apart). It is monotonically
-    /// non-decreasing and strictly increases across ticks that commit
-    /// higher-timestamped records, so it remains a usable monotonic "as-of"
-    /// token.
+    /// The **inclusive** as-of token: the storage commit version this view is
+    /// pinned to (ADR-0018 — the engine's one logical clock). Monotonically
+    /// non-decreasing across ticks; `0` is the empty store.
     pub fn logical_time(&self) -> LogicalTime {
-        self.time
+        self.pin.version()
     }
 
-    /// Whether `triple` is present in the pinned set.
+    /// Whether `triple` is visible in any of the view's graphs at the pinned
+    /// version. O(log rows) per graph — a binary search in the predicate
+    /// partition, not a scan.
     pub fn contains(&self, triple: &TripleId) -> bool {
-        self.view.get(triple) != 0
+        let at = self.pin.version();
+        let (s, p, o) = (TermId(triple.0), TermId(triple.1), TermId(triple.2));
+        self.graphs.iter().any(|g| {
+            self.pin
+                .with_predicate(*g, p, |part| part.contains_at(s, o, at))
+                .unwrap_or(false)
+        })
     }
 
-    /// Number of distinct triples present in the pinned set.
+    /// Number of distinct triples visible in the pinned view. O(visible rows):
+    /// the graphs can overlap (a triple both asserted and derived), so this
+    /// counts the deduped merge rather than summing per-graph row counts.
     pub fn len(&self) -> usize {
-        self.view.len()
+        self.iter().count()
     }
 
-    /// Whether the pinned set holds no triples.
+    /// Whether the pinned view holds no triples.
     pub fn is_empty(&self) -> bool {
-        self.view.is_empty()
+        self.iter().next().is_none()
     }
 
-    /// Iterate the triples present in the pinned set (presence view — each
-    /// present triple is yielded exactly once).
-    pub fn iter(&self) -> impl Iterator<Item = &TripleId> {
-        self.view.iter().map(|(triple, _)| triple)
+    /// Key-ordered iteration over the visible triples: predicate id ascending,
+    /// then `(subject, object)` ascending within each predicate — storage's
+    /// own key order. Each distinct triple is yielded exactly once even when
+    /// it is present in more than one of the view's graphs.
+    ///
+    /// One predicate's rows are materialized at a time (to merge the graphs),
+    /// never the whole view.
+    pub fn iter(&self) -> impl Iterator<Item = TripleId> + '_ {
+        let at = self.pin.version();
+        let mut predicates: Vec<TermId> = self
+            .graphs
+            .iter()
+            .flat_map(|g| self.pin.predicates(*g))
+            .collect();
+        predicates.sort_unstable_by_key(|p| p.0);
+        predicates.dedup();
+        predicates.into_iter().flat_map(move |p| {
+            let mut rows: Vec<TripleId> = self
+                .graphs
+                .iter()
+                .filter_map(|g| {
+                    self.pin.with_predicate(*g, p, |part| {
+                        part.scan_at(at)
+                            .map(|(s, o)| (s.0, p.0, o.0))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .flatten()
+                .collect();
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        })
     }
 }

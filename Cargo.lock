@@ -1333,6 +1333,8 @@ dependencies = [
  "crossbeam-channel",
  "horndb-closure",
  "horndb-metrics",
+ "horndb-storage",
+ "oxrdf",
  "proptest",
  "thiserror",
 ]
