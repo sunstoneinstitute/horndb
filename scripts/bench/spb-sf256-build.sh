@@ -46,30 +46,39 @@ cargo build --release -p horndb-bench-rdfox >>"$OUT/build.log" 2>&1 || { note "B
 note ok; end
 
 # --- V: is slicing sound? ---------------------------------------------------
-# Stage 2 closed the whole 8 M calibration set in one process: 16,654,450 lines.
-# Close the same set as two halves and check the SET UNION of the halves equals
-# that. Slices legitimately overlap — every slice re-derives the ontology
-# closure and the shared schema triples — so line counts must not be added;
-# only the union has to match. Overlap is fine because an RDF store is a set.
+# Stage 2 closed the whole 8 M calibration set in one process. Close the same
+# set as two halves and compare sets, not line counts: slices legitimately
+# overlap (each re-derives the ontology closure), and each slice mints its own
+# labels for the ontology's blank nodes, so those lines can never match across
+# runs. The check that matters is that nothing is LOST — every blank-node-free
+# triple of the whole-set closure must appear in the union of the slices.
 sec "V . slice-soundness check on the 8 M calibration set"
 CAL="$WORK/generated-cal"
+WHOLEF="$WORK/closure-cal.nt"
 mapfile -t CALF < <(ls "$CAL"/generatedCreativeWorks-*.nt 2>/dev/null)
-if [ "${#CALF[@]}" -lt 4 ]; then
-  note "SKIPPED - calibration Creative Works missing under $CAL"; end
+if [ "${#CALF[@]}" -lt 4 ] || [ ! -s "$WHOLEF" ]; then
+  note "SKIPPED - stage-2 calibration artefacts missing ($CAL / $WHOLEF)"; end
 else
   half=$(( ${#CALF[@]} / 2 ))
   ./target/release/horndb-bench materialize --dump-nt "$WORK/v-a.nt" --data "${ONTO[@]}" "${CALF[@]:0:$half}" >>"$OUT/verify.log" 2>&1
   ./target/release/horndb-bench materialize --dump-nt "$WORK/v-b.nt" --data "${ONTO[@]}" "${CALF[@]:$half}"    >>"$OUT/verify.log" 2>&1
-  A=$(wc -l < "$WORK/v-a.nt"); B=$(wc -l < "$WORK/v-b.nt")
-  UNION=$(cat "$WORK/v-a.nt" "$WORK/v-b.nt" | LC_ALL=C sort -u -S 8G --parallel=8 -T "$WORK" | wc -l)
-  WHOLE=16654450
-  note "half A: $A   half B: $B   union: $UNION   whole-set (stage 2): $WHOLE"
-  note "overlap between slices: $((A + B - UNION)) triples ($(awk -v o=$((A+B-UNION)) -v u=$UNION 'BEGIN{printf "%.1f", 100*o/u}')% of the union)"
-  rm -f "$WORK/v-a.nt" "$WORK/v-b.nt"
-  if [ "$UNION" -ne "$WHOLE" ]; then
-    note "ABORT: the union of the slices is not the whole-set closure - a rule joins across Creative Works."; end; exit 1
+  SO="LC_ALL=C sort -u -S 8G --parallel=8 -T $WORK"
+  grep -hv '_:' "$WORK/v-a.nt" "$WORK/v-b.nt" | LC_ALL=C sort -u -S 8G --parallel=8 -T "$WORK" > "$WORK/v-union.nb"
+  grep -v  '_:' "$WHOLEF"                     | LC_ALL=C sort -u -S 8G --parallel=8 -T "$WORK" > "$WORK/v-whole.nb"
+  LOST=$(comm -13 "$WORK/v-union.nb" "$WORK/v-whole.nb" | wc -l)
+  EXTRA=$(comm -23 "$WORK/v-union.nb" "$WORK/v-whole.nb" | wc -l)
+  A=$(wc -l < "$WORK/v-a.nt"); B=$(wc -l < "$WORK/v-b.nt"); W=$(wc -l < "$WHOLEF")
+  BN=$(grep -c '_:' "$WHOLEF")
+  note "half A: $A   half B: $B   whole: $W   (blank-node lines in whole: $BN)"
+  note "blank-node-free triples: union $(wc -l < "$WORK/v-union.nb")  whole $(wc -l < "$WORK/v-whole.nb")"
+  note "lost by slicing: $LOST     extra in the sliced union: $EXTRA"
+  rm -f "$WORK/v-a.nt" "$WORK/v-b.nt" "$WORK/v-union.nb" "$WORK/v-whole.nb"
+  if [ "$LOST" -ne 0 ]; then
+    note "ABORT: slicing loses $LOST inferred triples - a rule joins across Creative Works."; end; exit 1
   fi
-  note "slicing is sound; the concatenated file carries the overlap as duplicate lines, which the store folds away on load."
+  note "slicing is sound: no inference is lost. Slices overlap and each re-labels the"
+  note "ontology's blank nodes, so the concatenated file carries duplicate lines; the"
+  note "store folds the duplicates away on load (RDF is a set)."
   end
 fi
 
