@@ -48,9 +48,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use horndb_sparql::api::{execute_query, execute_update, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
-use horndb_storage::loader::load_threads;
 use horndb_storage::loader::ntriples::for_each_ntriples_batch;
 use horndb_storage::loader::turtle::for_each_turtle_batch;
+use horndb_storage::loader::{load_batch_triples, load_threads};
 use oxrdf::{NamedNode, NamedOrBlankNode, Term as OxTerm, Triple};
 use oxttl::{NTriplesSerializer, TurtleSerializer};
 use serde_json::{json, Value};
@@ -93,16 +93,6 @@ struct Cli {
     /// hornbench measurement roughly eightfold (HDB-144).
     #[arg(long, default_value_t = false)]
     mem_only: bool,
-    /// Preallocate the parse batch for this many triples. 0 (the default)
-    /// estimates the count from the file instead; pass a value only to pin it.
-    ///
-    /// The batch reaches ~1 GB at xlarge, so growing it on demand means a
-    /// handful of reallocs of one very large block. glibc serves those from
-    /// `mmap` and grows them with `mremap`, which only edits page tables,
-    /// whereas snmalloc copies — which is why the allocator swap tripled the
-    /// `materialize` phase (0.59s -> 1.77s) until the batch was preallocated.
-    #[arg(long, default_value_t = 0)]
-    reserve_triples: usize,
 }
 
 const FRAMEWORK: &str = "horndb";
@@ -173,74 +163,76 @@ fn read_existing(path: &Path) -> Vec<Value> {
 /// baseline. Turtle only splits when the document clears
 /// `turtle_split_is_safe`; trainmarks files declare every prefix up front, so
 /// it does.
-/// Estimate the triple count of a document from its bytes, for preallocating
-/// the parse batch.
-///
-/// Both formats this driver reads put one triple per line, so the mean line
-/// length over a sample gives the count directly. Sampling a prefix rather than
-/// scanning the whole file keeps this off the measured path; the estimate only
-/// has to be within a factor or so of the truth to remove the repeated doubling
-/// of a ~1 GB `Vec`, and `Vec` still grows if it is short.
-fn estimate_triples(bytes: &[u8]) -> usize {
-    const SAMPLE: usize = 1 << 20;
-    let sample = &bytes[..bytes.len().min(SAMPLE)];
-    let lines = count_newlines(sample);
-    if lines == 0 {
-        return 0;
-    }
-    let mean_line = (sample.len() as f64) / (lines as f64);
-    // +10% headroom: undershooting costs a realloc of the whole block, while
-    // overshooting costs only untouched virtual address space.
-    (((bytes.len() as f64) / mean_line) * 1.1) as usize
-}
-
-fn count_newlines(b: &[u8]) -> usize {
-    b.iter().filter(|&&c| c == b'\n').count()
-}
-
-fn load(path: &Path, turtle: bool, reserve_triples: usize) -> Result<HornBackend> {
+fn load(path: &Path, turtle: bool) -> Result<HornBackend> {
     let bytes = std::fs::read(path).with_context(|| format!("read {path:?}"))?;
     let threads = load_threads();
-    let reserve = if reserve_triples > 0 {
-        reserve_triples
-    } else {
-        estimate_triples(&bytes)
-    };
+    // HDB-158: flush every `load_batch_triples()` (65,536) triples, the same
+    // granularity `Store::load_*_file` inserts at. Before this the driver
+    // collected the whole corpus into one `Vec` of owned `oxrdf` terms first —
+    // 192 B per row, 1.8 GiB of inline enum at trainmarks xlarge before the
+    // string heap — which the allocator never returned, so the `serving
+    // footprint` row measured this buffer more than it measured HornDB.
+    let flush_at = load_batch_triples();
     let t_parse = std::time::Instant::now();
-    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(reserve);
+    let mut backend = HornBackend::new();
+    let mut batch: Vec<(OxTerm, OxTerm, OxTerm)> = Vec::with_capacity(flush_at);
     // Time only the materialisation into `batch`, so `parse` minus this is
     // oxttl tokenisation. The closure runs once per chunk batch, not per
     // triple, and accumulates into a local (SPEC-17 §5.4).
     let mut materialize_ns = 0u64;
-    let mut push = |triples: Vec<Triple>| {
-        let t = std::time::Instant::now();
-        batch.extend(
-            triples
-                .into_iter()
-                .map(|t| (t.subject.into(), t.predicate.into(), t.object)),
-        );
-        materialize_ns += t.elapsed().as_nanos() as u64;
-        Ok(())
-    };
-    if turtle {
-        for_each_turtle_batch(&bytes, None, threads, &mut push)?;
-    } else {
-        for_each_ntriples_batch(&bytes, threads, &mut push)?;
+    // Nanoseconds inside the flushes, which now happen *during* the parse.
+    // Subtracted out of the `parse` phase so it still means parse, not parse
+    // plus intern plus tier — same split `QuadSink::intern_batch` takes.
+    let mut insert_ns = 0u64;
+    let mut parsed = 0u64;
+    let mut insert_err: Option<anyhow::Error> = None;
+    {
+        let mut push = |triples: Vec<Triple>| {
+            let t = std::time::Instant::now();
+            batch.extend(
+                triples
+                    .into_iter()
+                    .map(|t| (t.subject.into(), t.predicate.into(), t.object)),
+            );
+            materialize_ns += t.elapsed().as_nanos() as u64;
+            if batch.len() >= flush_at && insert_err.is_none() {
+                parsed += batch.len() as u64;
+                let t = std::time::Instant::now();
+                let chunk = std::mem::replace(&mut batch, Vec::with_capacity(flush_at));
+                if let Err(e) = backend.insert_oxrdf_batch(chunk) {
+                    insert_err = Some(anyhow::anyhow!("load: {e}"));
+                }
+                insert_ns += t.elapsed().as_nanos() as u64;
+            }
+            Ok(())
+        };
+        if turtle {
+            for_each_turtle_batch(&bytes, None, threads, &mut push)?;
+        } else {
+            for_each_ntriples_batch(&bytes, threads, &mut push)?;
+        }
     }
+    if let Some(e) = insert_err {
+        return Err(e);
+    }
+    parsed += batch.len() as u64;
+    let t = std::time::Instant::now();
+    backend
+        .insert_oxrdf_batch(batch)
+        .map_err(|e| anyhow::anyhow!("load: {e}"))?;
+    insert_ns += t.elapsed().as_nanos() as u64;
     horndb_metrics::metrics().storage.record_load_phase(
         horndb_metrics::labels::LoadPhase::Parse,
-        t_parse.elapsed(),
-        batch.len() as u64,
+        t_parse
+            .elapsed()
+            .saturating_sub(std::time::Duration::from_nanos(insert_ns)),
+        parsed,
     );
     horndb_metrics::metrics().storage.record_load_phase(
         horndb_metrics::labels::LoadPhase::Materialize,
         std::time::Duration::from_nanos(materialize_ns),
-        batch.len() as u64,
+        parsed,
     );
-    let mut backend = HornBackend::new();
-    backend
-        .insert_oxrdf_batch(batch)
-        .map_err(|e| anyhow::anyhow!("load: {e}"))?;
     Ok(backend)
 }
 
@@ -399,7 +391,7 @@ fn main() -> Result<()> {
 
     // --- read Turtle (this backend feeds the queries) ---
     let t = Instant::now();
-    let mut backend = load(&ttl, true, cli.reserve_triples)?;
+    let mut backend = load(&ttl, true)?;
     let secs = t.elapsed().as_secs_f64();
     eprintln!("  read_turtle: {secs:.4}s ({} triples)", backend.len());
     results.record("read_turtle", json!(secs));
@@ -438,7 +430,7 @@ fn main() -> Result<()> {
     // footprint sample at the end of main.
     if !cli.mem_only {
         let t = Instant::now();
-        drop(load(&nt, false, cli.reserve_triples)?);
+        drop(load(&nt, false)?);
         let secs = t.elapsed().as_secs_f64();
         eprintln!("  read_ntriples: {secs:.4}s");
         results.record("read_ntriples", json!(secs));
