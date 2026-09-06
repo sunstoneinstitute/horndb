@@ -215,7 +215,9 @@ fn a_blocked_publisher_does_not_hold_the_subscriber_lock() {
 
     // Both take the subscriber lock. Neither may wait on the parked publisher.
     assert!(feed.subscriber_count() >= 1);
-    feed.subscribe();
+    // Held to the end of the test: dropping the receiver here would make the
+    // parked publisher reap it, an unrelated path for a lock-behaviour test.
+    let _other = feed.subscribe();
 
     // Now let the publisher through.
     assert_eq!(rx.recv().unwrap().time, 7);
