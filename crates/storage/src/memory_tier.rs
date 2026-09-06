@@ -5,13 +5,55 @@ use crate::error::Result;
 use crate::partition::{Partition, PartitionBuilder, PredicatePartition};
 use crate::term::{GraphId, TermId};
 use crate::tier::{ApplyReport, Tier, TierStats, TierWrite};
+use crate::tiering::{PlacementHints, RebalanceReport, TieringConfig};
 use crate::visibility::UNSET_END;
+use dashmap::DashMap;
 use horndb_metrics::labels::LoadPhase;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Per-partition read counters, the input to the placement policy
+/// ([`MemoryTier::rebalance`], SPEC-25 S5). Shared by `Arc` across every
+/// successive [`TierSnapshot`], so the counts survive writes, compaction and
+/// tier moves — they describe access to a `(graph, predicate)` partition, not
+/// to one snapshot's copy of it.
+#[derive(Default)]
+pub struct AccessStats {
+    hits: DashMap<(GraphId, TermId), AtomicU64>,
+}
+
+impl AccessStats {
+    /// Count one read of `(graph, predicate)`.
+    ///
+    /// ponytail: one hash lookup per partition access. Move the counter into
+    /// `Partition` (where the lookup already happened) if a profile shows it.
+    fn hit(&self, graph: GraphId, predicate: TermId) {
+        let key = (graph, predicate);
+        // Fast path: a shard read lock. Only the first access of a partition
+        // takes the shard's write lock.
+        if let Some(c) = self.hits.get(&key) {
+            c.fetch_add(1, AtomicOrdering::Relaxed);
+            return;
+        }
+        self.hits
+            .entry(key)
+            .or_default()
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    /// Every partition's count since the last `take`, zeroing each counter.
+    /// Order is arbitrary (`DashMap` iteration order); the policy sorts.
+    pub fn take(&self) -> Vec<((GraphId, TermId), u64)> {
+        self.hits
+            .iter()
+            .map(|e| (*e.key(), e.value().swap(0, AtomicOrdering::Relaxed)))
+            .collect()
+    }
+}
 
 /// The warm form of `part`, promoting a cold partition into `scratch` first.
 ///
@@ -45,6 +87,9 @@ struct GraphStore {
 pub struct TierSnapshot {
     version: u64,
     graphs: HashMap<GraphId, Arc<GraphStore>>,
+    /// Read counts per partition. Cloned (`Arc`) into every successor
+    /// snapshot, so one instance per tier — see [`AccessStats`].
+    access: Arc<AccessStats>,
 }
 
 impl TierSnapshot {
@@ -52,6 +97,7 @@ impl TierSnapshot {
         Self {
             version: 0,
             graphs: HashMap::new(),
+            access: Arc::new(AccessStats::default()),
         }
     }
 
@@ -69,7 +115,10 @@ impl TierSnapshot {
         self.graphs
             .get(&graph)
             .and_then(|gs| gs.partitions.get(&predicate))
-            .map(|p| f(p))
+            .map(|p| {
+                self.access.hit(graph, predicate);
+                f(p)
+            })
     }
 
     /// Ordered access to a partition in any of the six trie orderings
@@ -84,7 +133,10 @@ impl TierSnapshot {
         self.graphs
             .get(&graph)
             .and_then(|gs| gs.partitions.get(&predicate))
-            .map(|part| part.ordered(ord))
+            .map(|part| {
+                self.access.hit(graph, predicate);
+                part.ordered(ord)
+            })
     }
 
     /// Ordered access to a partition, filtered to rows visible at `self.version`
@@ -99,7 +151,24 @@ impl TierSnapshot {
         self.graphs
             .get(&graph)
             .and_then(|gs| gs.partitions.get(&predicate))
-            .map(|part| part.ordered_at(ord, self.version))
+            .map(|part| {
+                self.access.hit(graph, predicate);
+                part.ordered_at(ord, self.version)
+            })
+    }
+
+    /// Whether `(graph, predicate)` currently lives in the cold tier, or
+    /// `None` if the partition is absent. Placement is observable but not
+    /// controllable (SPEC-02 F6).
+    ///
+    /// Deliberately **not** counted as an access: asking where a partition
+    /// lives must not change where [`MemoryTier::rebalance`] puts it next
+    /// round.
+    pub fn is_cold(&self, graph: GraphId, predicate: TermId) -> Option<bool> {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|part| part.is_cold())
     }
 
     /// Visit the raw bits of every term id **physically present** in this
@@ -256,6 +325,9 @@ pub struct MemoryTier {
     hot_threshold: usize,
     /// version -> number of live pins at that version. Empty ⇒ no pins.
     pins: Arc<Mutex<BTreeMap<u64, usize>>>,
+    /// Consecutive rounds each warm partition has gone unread, as counted by
+    /// [`Self::rebalance`]. Empty until the first round.
+    idle_rounds: Mutex<BTreeMap<(GraphId, TermId), u32>>,
 }
 
 impl MemoryTier {
@@ -276,6 +348,7 @@ impl MemoryTier {
             writer: Mutex::new(()),
             hot_threshold,
             pins: Arc::new(Mutex::new(BTreeMap::new())),
+            idle_rounds: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -376,6 +449,7 @@ impl MemoryTier {
             let next = Arc::new(TierSnapshot {
                 version: cur.version,
                 graphs,
+                access: cur.access.clone(),
             });
             *self.current.write() = next;
         }
@@ -458,6 +532,7 @@ impl MemoryTier {
         *self.current.write() = Arc::new(TierSnapshot {
             version: cur.version,
             graphs,
+            access: cur.access.clone(),
         });
         Ok(true)
     }
@@ -485,12 +560,88 @@ impl MemoryTier {
         *self.current.write() = Arc::new(TierSnapshot {
             version: cur.version,
             graphs,
+            access: cur.access.clone(),
         });
 
         // Best effort: a reader pinned before the swap still holds the
         // mapping, and unlinking leaves that inode alive until it drops.
         let _ = std::fs::remove_file(&path);
         Ok(true)
+    }
+
+    /// One placement round (SPEC-25 S5). Reads the per-partition access counts
+    /// gathered since the previous round and moves partitions between the warm
+    /// and cold tiers:
+    ///
+    /// - warm, at least `cfg.min_rows` visible rows, unread this round → its
+    ///   idle count goes up; on reaching `cfg.demote_after_idle_rounds` it is
+    ///   demoted, unless `hints.keep_warm` holds it back.
+    /// - warm and read this round → idle count back to zero.
+    /// - cold and read this round, or named in `hints.keep_warm` → promoted. A
+    ///   cold read decodes per call, so a partition that is read at all is
+    ///   cheaper warm.
+    ///
+    /// Hints only ever add to what the statistics decide — keep warm, or pull
+    /// warm — and never demote. An empty [`PlacementHints`] therefore gives
+    /// exactly the stats-only placement, which is the `ml.enabled = false`
+    /// contract in `INTEGRATION-NOTES.md` F4.
+    ///
+    /// Partitions are visited in `(graph bits, predicate bits)` order, so a
+    /// round is deterministic. Not a logical write: `demote` and `promote`
+    /// keep the version, and results are unchanged — only cost (SPEC-02 F6).
+    ///
+    /// ponytail: the idle-count lock is held across a demote's file write.
+    /// Only an explicit maintenance caller runs this, so nothing contends for
+    /// it; collect the decisions under the lock and act outside it if that
+    /// stops being true.
+    pub fn rebalance(
+        &self,
+        cfg: &TieringConfig,
+        hints: &PlacementHints,
+    ) -> Result<RebalanceReport> {
+        let cur = self.current.read().clone();
+        let version = cur.version;
+        let counts: HashMap<(GraphId, TermId), u64> = cur.access.take().into_iter().collect();
+        // Walks `graphs` directly rather than through the guarded accessors:
+        // deciding placement must not itself count as an access.
+        let mut parts: Vec<(GraphId, TermId, bool, usize)> = cur
+            .graphs
+            .iter()
+            .flat_map(|(g, gs)| {
+                gs.partitions
+                    .iter()
+                    .map(move |(p, part)| (*g, *p, part.is_cold(), part.len_at(version)))
+            })
+            .collect();
+        parts.sort_unstable_by_key(|(g, p, _, _)| (g.0, p.0));
+        drop(cur);
+
+        let mut idle = self.idle_rounds.lock();
+        let mut report = RebalanceReport::default();
+        for (g, p, is_cold, rows) in parts {
+            let key = (g, p);
+            let read = counts.get(&key).copied().unwrap_or(0) > 0;
+            let keep_warm = hints.keep_warm.contains(&key);
+            if is_cold {
+                if (read || keep_warm) && self.promote(g, p)? {
+                    idle.insert(key, 0);
+                    report.promoted.push(key);
+                }
+            } else if read {
+                idle.insert(key, 0);
+            } else if rows >= cfg.min_rows {
+                let rounds = idle.entry(key).or_insert(0);
+                *rounds += 1;
+                if *rounds >= cfg.demote_after_idle_rounds
+                    && !keep_warm
+                    && self.demote(g, p, &cfg.cold_dir)?
+                {
+                    *rounds = 0;
+                    report.demoted.push(key);
+                }
+            }
+        }
+        Ok(report)
     }
 }
 
@@ -634,6 +785,7 @@ impl MemoryTier {
         let next = Arc::new(TierSnapshot {
             version: new_version,
             graphs,
+            access: cur.access.clone(),
         });
         *self.current.write() = next;
 
@@ -929,6 +1081,7 @@ impl MemoryTier {
             let next = Arc::new(TierSnapshot {
                 version: new_version,
                 graphs,
+                access: cur.access.clone(),
             });
             *self.current.write() = next;
         }
@@ -957,6 +1110,7 @@ impl MemoryTier {
             *self.current.write() = Arc::new(TierSnapshot {
                 version,
                 graphs: cur.graphs.clone(),
+                access: cur.access.clone(),
             });
         }
     }
@@ -1036,6 +1190,7 @@ impl TierWrite for MemoryTier {
             let next = Arc::new(TierSnapshot {
                 version: new_version,
                 graphs,
+                access: cur.access.clone(),
             });
             *self.current.write() = next;
         }

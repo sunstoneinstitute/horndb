@@ -690,6 +690,23 @@ impl Store {
         Ok(demoted)
     }
 
+    /// Run one placement round over every partition: demote the ones that
+    /// have gone unread for `cfg.demote_after_idle_rounds` rounds, promote the
+    /// cold ones that were read (SPEC-25 S5). See
+    /// [`MemoryTier::rebalance`](crate::MemoryTier::rebalance) for the rules.
+    ///
+    /// The trigger is explicit, exactly like [`Self::compact`] — a caller (a
+    /// server timer, a test, the harness) decides the cadence. `hints` biases
+    /// placement toward keeping named partitions warm and is additive: an
+    /// empty [`PlacementHints`] gives the stats-only placement.
+    pub fn rebalance(
+        &self,
+        cfg: &crate::tiering::TieringConfig,
+        hints: &crate::tiering::PlacementHints,
+    ) -> Result<crate::tiering::RebalanceReport> {
+        self.memory_tier().rebalance(cfg, hints)
+    }
+
     pub fn intern_graph_uri(&self, graph_uri: &Term) -> Result<GraphId> {
         let id = self.dictionary.intern(graph_uri)?;
         Ok(GraphId(id.0))
