@@ -87,11 +87,10 @@ Beyond retraction, Stage 1 left five structural gaps, all catalogued in
   only whole-tier copy-on-write versioning (`TierSnapshot.version: u64`) and
   **no delete path at all**.
 - **The join runtime is a placeholder.** `NaryPlan` folds left-deep with no
-  cost model, and every leaf reads the *same whole-base extent* (no
-  per-predicate slicing). The reference joins are O(n²) nested loops in test
-  fixtures. Warm-store closure seeding (`seed_closed_edges`) uses the *closed*
-  extent as a conservative base, so retraction against seeded support is sound
-  but may under-withdraw.
+  cost model. The reference joins are O(n²) nested loops in test fixtures.
+  Warm-store closure seeding (`seed_closed_edges`) uses the *closed* extent as
+  a conservative base, so retraction against seeded support is sound but may
+  under-withdraw.
 
 ## Non-goals
 

@@ -56,6 +56,10 @@ impl BilinearRule for PrpTrpOnP {
         out.add_assign(&self.apply_full(da, db));
         out
     }
+
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(P), Some(P)]
+    }
 }
 
 fn arb_p_triples(n: usize) -> impl Strategy<Value = Zset<TripleId>> {

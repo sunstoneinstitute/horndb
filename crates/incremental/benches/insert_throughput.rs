@@ -39,6 +39,9 @@ impl BilinearRule for TransitiveP {
         out.add_assign(&self.apply_full(da, db));
         out
     }
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(P), Some(P)]
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {

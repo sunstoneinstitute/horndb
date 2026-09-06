@@ -58,6 +58,9 @@ impl BilinearRule for TransitiveOn {
         out.add_assign(&self.apply_full(da, db));
         out
     }
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(self.p), Some(self.p)]
+    }
 }
 
 /// Bilinear cross-predicate join: (?x TYPE ?c) ∧ (?c SC ?d) → (?x TYPE ?d).
@@ -97,6 +100,9 @@ impl BilinearRule for CaxScoRule {
         out.add_assign(&self.apply_full(a, db));
         out.add_assign(&self.apply_full(da, db));
         out
+    }
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(TYPE), Some(SC)]
     }
 }
 

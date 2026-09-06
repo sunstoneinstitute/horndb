@@ -7,6 +7,7 @@
 //! inputs are accepted; bilinear retraction across joins is a Stage 2
 //! deliverable (F6 in SPEC-06).
 
+use crate::extent::PredExtent;
 use crate::types::{RuleId, TripleId};
 use crate::zset::Zset;
 
@@ -34,6 +35,16 @@ pub trait BilinearRule: Send + Sync {
         db: &Zset<TripleId>,
     ) -> Zset<TripleId>;
     fn apply_full(&self, a: &Zset<TripleId>, b: &Zset<TripleId>) -> Zset<TripleId>;
+
+    /// The predicate each leaf (`[left, right]`) reads from the base
+    /// extent. `Some(p)` means the leaf's body pattern has `p` fixed in
+    /// predicate position, so `NaryPlan` binds it to just that predicate's
+    /// slice of the extent (SPEC-24 S7). `None` (the default) means the
+    /// leaf's body pattern has a variable in predicate position (e.g.
+    /// prp-dom's `(?x ?p ?y)`), so it must still read the whole extent.
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [None, None]
+    }
 }
 
 /// F4: n-ary rule planner.
@@ -43,16 +54,26 @@ pub trait BilinearRule: Send + Sync {
 /// input is the base extent. Cost-based reordering is a Stage 2
 /// deliverable.
 ///
-/// All patterns currently bind against the same base extent — the
-/// caller is responsible for slicing per-predicate inputs upstream. A
-/// per-leaf-input variant is a Stage 2 extension if SPEC-04 finds
-/// rules with bodies spanning different predicate partitions.
+/// Each leaf binds to the predicate slice its rule declares via
+/// `BilinearRule::body_predicates` (SPEC-24 S7) — level 0 slices both
+/// sides, level `i >= 1` slices only its right side (its left side is the
+/// running intermediate, never sliced). A rule that declares `None` for a
+/// side reads the whole extent there, unchanged from Stage 1.
 pub struct NaryPlan {
     joins: Vec<Box<dyn BilinearRule>>,
     /// Integrated left-input intermediates for joins[1..] (z⁻¹ state).
     /// None until the first stateful call (lazy cold-start from the base
     /// passed to that call). state[i] is the left input of joins[i+1].
     state: Option<Vec<Zset<TripleId>>>,
+}
+
+/// The slice of `ext` a leaf declaring `pred` reads: `Some(p)` binds to
+/// just `p`'s rows, `None` reads the whole extent.
+fn leaf(ext: &PredExtent, pred: Option<u64>) -> &Zset<TripleId> {
+    match pred {
+        Some(p) => ext.slice(p),
+        None => ext.all(),
+    }
 }
 
 impl NaryPlan {
@@ -73,31 +94,41 @@ impl NaryPlan {
     }
 
     /// Cold-start eval: fold the joins left-to-right starting from the
-    /// base extent.
-    pub fn apply_full(&self, base: &Zset<TripleId>) -> Zset<TripleId> {
+    /// base extent, each leaf bound to its declared predicate slice.
+    pub fn apply_full(&self, base: &PredExtent) -> Zset<TripleId> {
         if self.joins.is_empty() {
-            return base.clone();
+            return base.all().clone();
         }
-        let mut intermediate = self.joins[0].apply_full(base, base);
+        let [lp0, rp0] = self.joins[0].body_predicates();
+        let mut intermediate = self.joins[0].apply_full(leaf(base, lp0), leaf(base, rp0));
         for rule in &self.joins[1..] {
-            intermediate = rule.apply_full(&intermediate, base);
+            let rp = rule.body_predicates()[1];
+            intermediate = rule.apply_full(&intermediate, leaf(base, rp));
         }
         intermediate
     }
 
     /// Delta eval: each join is reduced via F3, the intermediates flow
-    /// through as both base and delta inputs to the next join. Stage 1
-    /// keeps the same `base` for every level for simplicity (correct
-    /// when every body pattern reads the same predicate partition).
-    pub fn apply_delta(&self, base: &Zset<TripleId>, delta: &Zset<TripleId>) -> Zset<TripleId> {
+    /// through as both base and delta inputs to the next join. `delta` is
+    /// sliced the same way `base` is (built into a `PredExtent` once up
+    /// front) so a leaf never sees rows outside its declared predicate.
+    pub fn apply_delta(&self, base: &PredExtent, delta: &Zset<TripleId>) -> Zset<TripleId> {
         if self.joins.is_empty() {
             return delta.clone();
         }
-        let mut int_base = self.joins[0].apply_full(base, base);
-        let mut int_delta = self.joins[0].apply_delta(base, base, delta, delta);
+        let delta_ext = PredExtent::from_zset(delta);
+        let [lp0, rp0] = self.joins[0].body_predicates();
+        let base_l = leaf(base, lp0);
+        let base_r = leaf(base, rp0);
+        let mut int_base = self.joins[0].apply_full(base_l, base_r);
+        let mut int_delta =
+            self.joins[0].apply_delta(base_l, base_r, leaf(&delta_ext, lp0), leaf(&delta_ext, rp0));
         for rule in &self.joins[1..] {
-            let next_base = rule.apply_full(&int_base, base);
-            let next_delta = rule.apply_delta(&int_base, base, &int_delta, delta);
+            let rp = rule.body_predicates()[1];
+            let base_r = leaf(base, rp);
+            let delta_r = leaf(&delta_ext, rp);
+            let next_base = rule.apply_full(&int_base, base_r);
+            let next_delta = rule.apply_delta(&int_base, base_r, &int_delta, delta_r);
             int_base = next_base;
             int_delta = next_delta;
         }
@@ -108,6 +139,8 @@ impl NaryPlan {
     /// input is an integrated intermediate held in `state`, updated in
     /// place instead of recomputed via `apply_full` on every call. This
     /// makes the per-tick cost proportional to the delta, not the extent.
+    /// Each level's right input (base and delta alike) is bound to its
+    /// rule's declared predicate slice (SPEC-24 S7).
     ///
     /// `base` must be the pre-delta extent at every call — same "old-old"
     /// convention as `apply_delta`: `Δ(A⋈B) = ΔA⋈B_old + A_old⋈ΔB +
@@ -117,19 +150,22 @@ impl NaryPlan {
     /// `apply_full` uses.
     pub fn apply_delta_stateful(
         &mut self,
-        base: &Zset<TripleId>,
+        base: &PredExtent,
         delta: &Zset<TripleId>,
     ) -> Zset<TripleId> {
         if self.joins.is_empty() {
             return delta.clone();
         }
+        let delta_ext = PredExtent::from_zset(delta);
         if self.state.is_none() {
             let mut intermediates = Vec::new();
             if self.joins.len() > 1 {
-                let mut prev = self.joins[0].apply_full(base, base);
+                let [lp0, rp0] = self.joins[0].body_predicates();
+                let mut prev = self.joins[0].apply_full(leaf(base, lp0), leaf(base, rp0));
                 intermediates.push(prev.clone());
                 for rule in &self.joins[1..self.joins.len() - 1] {
-                    prev = rule.apply_full(&prev, base);
+                    let rp = rule.body_predicates()[1];
+                    prev = rule.apply_full(&prev, leaf(base, rp));
                     intermediates.push(prev.clone());
                 }
             }
@@ -138,10 +174,18 @@ impl NaryPlan {
         let state = self.state.as_mut().expect("initialized above");
 
         // Level 0: both inputs are the shared base — no stored state.
-        let mut prev_delta = self.joins[0].apply_delta(base, base, delta, delta);
+        let [lp0, rp0] = self.joins[0].body_predicates();
+        let mut prev_delta = self.joins[0].apply_delta(
+            leaf(base, lp0),
+            leaf(base, rp0),
+            leaf(&delta_ext, lp0),
+            leaf(&delta_ext, rp0),
+        );
         // Levels 1..: state[i] is the left input for joins[i + 1].
         for (i, rule) in self.joins[1..].iter().enumerate() {
-            let next_delta = rule.apply_delta(&state[i], base, &prev_delta, delta);
+            let rp = rule.body_predicates()[1];
+            let next_delta =
+                rule.apply_delta(&state[i], leaf(base, rp), &prev_delta, leaf(&delta_ext, rp));
             // Fold this level's delta into its integrated intermediate
             // AFTER use — the delta rule needs the pre-round value.
             state[i].add_assign(&prev_delta);
