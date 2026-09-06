@@ -8,7 +8,9 @@ on:
 # Stable, persisted SPB asset tree on the hornbench runner, OUTSIDE the
 # ephemeral Actions checkout. Prepared once (see TASKS.md). Holds:
 #   - the built LDBC SPB driver JAR,
-#   - spb-256.nt: the flat materialized closure both engines serve,
+#   - spb-sf256.nt: the flat materialized closure every engine serves
+#     (the SF=0.256 one, HDB-37; the older 512 k stand-in `spb-256.nt`
+#     is kept alongside it),
 #   - the queries + substitution params the scenario's relative paths
 #     resolve against (the Ant `dist/` tree).
 # The runner executes as user `bench`, so the job can read these paths.
@@ -45,6 +47,16 @@ env:
   # installed on the runner. start-graphdb-free.sh downloads this version if
   # the runner does not already have it unpacked.
   GRAPHDB_VERSION: "10.8.14"
+  # 8g (start-graphdb-free.sh default) was sized for the 512 k stand-in
+  # closure. The SF=0.256 closure is ~500x that, and GraphDB holds its
+  # entity pool on the heap, so the serving JVM needs a real one. The
+  # host has 124 GiB and the A/B legs are brought up one at a time.
+  GRAPHDB_HEAP: "32g"
+  # HornDB cancels every query at `[server.limits].query_timeout`, default
+  # 30s. No driver-side setting can raise it, so at SF=0.256 the heavier
+  # aggregation queries came back 504 and scored as errors. Matched to the
+  # scenario's own `queryTimeoutSeconds=300`.
+  HORNDB_SERVER__LIMITS__QUERY_TIMEOUT: "300s"
   # Third + fourth A/B legs: Oxigraph (Rust SPARQL store, no reasoner)
   # serving the same flat closure as HornDB/GraphDB — once from the store
   # as bulk-loaded, once from an `oxigraph optimize`d copy, recorded as
@@ -68,7 +80,9 @@ jobs:
     # Dedicated benchmark machine (self-hosted). Labels match what ops
     # configured on hornbench (gh_runner_labels in hetzner-infra).
     runs-on: [self-hosted, bench, zen4]
-    timeout-minutes: 120
+    # SF=0.256 (HDB-37): HornDB re-loads the ~533 M-triple closure at the top
+    # of its leg (~20 min), and there are four legs plus the W3C suites.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -94,13 +108,24 @@ jobs:
         # wait until the query endpoint answers, then run the driver.
         run: |
           set -euo pipefail
-          DATASET="$SPB_ASSETS/spb-256.nt"
+          DATASET="$SPB_ASSETS/spb-sf256.nt"
           test -f "$DATASET" || { echo "::error::SPB dataset missing at $DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
           DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" \
             ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
           echo $! > /tmp/horndb-engine.pid
-          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 180; then
-            echo "::error::HornDB engine did not become ready in 180s"; cat /tmp/horndb-engine.log; exit 1
+          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600; then
+            echo "::error::HornDB engine did not become ready in 600s"; cat /tmp/horndb-engine.log; exit 1
+          fi
+          # Liveness is not readiness. `serve` loads on a background thread and
+          # answers /query with 200 the whole time, so waiting only on /query
+          # starts the driver against a store that is still filling — at
+          # SF=0.256 the load takes ~20 min. /readyz reports 503 until it ends.
+          for i in $(seq 1 2400); do
+            curl -fsS "http://$HORNDB_BIND/readyz" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! curl -fsS "http://$HORNDB_BIND/readyz" >/dev/null 2>&1; then
+            echo "::error::HornDB engine never finished loading $DATASET"; tail -50 /tmp/horndb-engine.log; exit 1
           fi
 
       - name: SPB-256 against HornDB
@@ -260,9 +285,15 @@ jobs:
         # uploaded asset. `always()` so the summary still publishes when
         # the A/B leg was skipped (GraphDB unreachable). The plain-text
         # dump still goes to the build log for quick eyeballing.
+        # Headline metric is `editorial-qps` since HDB-37 turned the editorial
+        # agents on: that is the LDBC-defined SPB throughput number.
+        # `aggregation-qps` is still recorded per leg and still queryable via
+        # `harness report`; it just is not the headline any more.
         run: |
-          ./target/release/harness report --suite ldbc-spb-256 --metric aggregation-qps
+          ./target/release/harness report --suite ldbc-spb-256 --metric editorial-qps
           {
+            ./target/release/harness report \
+              --suite ldbc-spb-256 --metric editorial-qps --format markdown
             ./target/release/harness report \
               --suite ldbc-spb-256 --metric aggregation-qps --format markdown
           } >> "$GITHUB_STEP_SUMMARY"
