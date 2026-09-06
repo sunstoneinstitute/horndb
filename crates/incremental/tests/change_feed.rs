@@ -194,7 +194,9 @@ fn circuit_bounded_subscriber_receives_every_net_record() {
 /// means the publisher's `send` CANNOT complete until this thread calls
 /// `recv`, and this thread does not call `recv` until after the two lock-taking
 /// calls have returned. With the send under the lock, those calls block
-/// forever and the test hangs instead of passing.
+/// forever and the test hangs instead of passing. The rendezvous only orders
+/// the publisher reaching the handover, not `publish_record` pushing the
+/// record, so this test does not check what a late subscriber sees.
 #[test]
 fn a_blocked_publisher_does_not_hold_the_subscriber_lock() {
     let feed = std::sync::Arc::new(ChangeFeed::new());
@@ -213,12 +215,9 @@ fn a_blocked_publisher_does_not_hold_the_subscriber_lock() {
 
     // Both take the subscriber lock. Neither may wait on the parked publisher.
     assert!(feed.subscriber_count() >= 1);
-    let other = feed.subscribe();
+    feed.subscribe();
 
     // Now let the publisher through.
     assert_eq!(rx.recv().unwrap().time, 7);
     publisher.join().unwrap();
-
-    // The late subscriber missed the in-flight record, as expected.
-    assert!(other.try_recv().is_err());
 }
