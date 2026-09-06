@@ -137,9 +137,6 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   deterministic iteration (change-feed ordering). If profiling shows
   iteration is not the bottleneck and lookup dominates, swap to a
   randomised-state HashMap with a stable iteration adapter.
-- **Naïve nested-loop bilinear join**: the reference rule fixtures
-  use O(n²) nested loops. SPEC-04 codegen will emit hash/sort-merge
-  variants per rule shape; the trait surface is unchanged.
 - **Differential test equivalence is set-semantics**: now tightened.
   With F6 landed (#45), acceptance #4 (`tests/acceptance_differential.rs`)
   checks multiplicity equality and covers interleaved insert+retract

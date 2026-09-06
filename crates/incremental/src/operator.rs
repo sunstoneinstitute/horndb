@@ -25,6 +25,11 @@ pub trait LinearRule: Send + Sync {
 /// DBSP decomposition: `Δ(A ⋈ B) = Δ_A ⋈ B + A ⋈ Δ_B + Δ_A ⋈ Δ_B`.
 /// SPEC-04 codegen emits both `apply_full` (cold/Reset path) and
 /// `apply_delta` (steady-state path).
+///
+/// [`crate::kernels::HashJoinRule`] is the reference runtime: a generic
+/// hash join parameterised by two body patterns and a head pattern,
+/// correct for arbitrary multiplicities (SPEC-24 §S7 leaf 2). Construct
+/// one instead of hand-writing a new nested loop against this trait.
 pub trait BilinearRule: Send + Sync {
     fn id(&self) -> RuleId;
     fn apply_delta(

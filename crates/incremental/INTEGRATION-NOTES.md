@@ -116,3 +116,9 @@ Two more consequences for a consumer:
   crash between checkpoints loses the pending deltas — see
   `docs/specs/SPEC-30-change-feed-materializer.md` for the durability contract
   a feed consumer needs.
+- **`kernels::HashJoinRule` (SPEC-24 S7 leaf 2) has a three-variable
+  intermediate ceiling.** `NaryPlan` threads intermediates as
+  `Zset<TripleId>`, so a join's head can carry at most three bound
+  variables. A body whose prefix needs a fourth live variable can't be
+  expressed as a left-deep `NaryPlan` today; widening the intermediate key
+  type on `BilinearRule`/`NaryPlan` is E4 territory.
