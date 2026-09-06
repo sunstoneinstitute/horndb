@@ -102,6 +102,17 @@ Two more consequences for a consumer:
   binds the store and the graphs whose union is the view, and
   `Snapshot::logical_time()` is that store's commit version (ADR-0018 — one
   clock). Without an attached store `snapshot()` returns `None`.
-- `DeltaLog` is in-memory. A crash between checkpoints loses pending deltas
-  until the WAL lands (SPEC-24 S5, #214) — see `docs/specs/SPEC-30-change-feed-materializer.md` for
-  the durability contract a feed consumer needs.
+- `DeltaLog` is in-memory unless you attach an input log. With
+  `Circuit::attach_input_log(store)` (SPEC-24 S5, #214, ADR-0018) every
+  `assert_triple`/`retract_triple` becomes a durable `Input` record in the
+  store's write-ahead log and every tick a `TickCommit` marker, and
+  `Circuit::recover()` — called once, right after attaching and before any new
+  input — replays the log into the same Z-set state. Attaching arms the
+  SPEC-06 F8 checkpoint cadence (`CheckpointPolicy`, default 1 minute or 100K
+  deltas, `Circuit::set_checkpoint_policy` to override, `Circuit::checkpoint`
+  to force one). **A checkpoint truncates the input log**, so the driver that
+  attaches one owns durability of the tick *outcomes*: whatever the ticks
+  produced must be committed to the store by then. Without an input log a
+  crash between checkpoints loses the pending deltas — see
+  `docs/specs/SPEC-30-change-feed-materializer.md` for the durability contract
+  a feed consumer needs.

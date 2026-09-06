@@ -48,10 +48,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
 
-use horndb_storage::{GraphId, Store};
+use horndb_storage::{GraphId, StorageError, Store};
 
 use crate::change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
+use crate::checkpoint::{Checkpoint, CheckpointPolicy};
 use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
 use crate::operator::NaryPlan;
@@ -137,6 +139,13 @@ pub struct Circuit {
     /// `resync_incremental_state`. Insertion-only ticks always use the
     /// unified path.
     recompute_fallback: bool,
+    /// SPEC-06 F8 / SPEC-24 S5 — the checkpoint cadence, and what has
+    /// accumulated since the last one. Armed only once
+    /// [`Circuit::attach_input_log`] has made the log durable: a circuit with
+    /// no input log has nothing to truncate.
+    checkpoint_policy: CheckpointPolicy,
+    deltas_since_checkpoint: usize,
+    last_checkpoint: Instant,
     /// SPEC-24 S6 — the storage view [`Circuit::snapshot`] pins, and the graphs
     /// whose union is this circuit's `(asserted ∪ derived)` set. `None` until
     /// [`Circuit::attach_store`] runs: an in-memory-only circuit (unit tests,
@@ -183,7 +192,96 @@ impl Circuit {
             rule_weights: BTreeMap::new(),
             extent: Zset::new(),
             recompute_fallback,
+            checkpoint_policy: CheckpointPolicy::default(),
+            deltas_since_checkpoint: 0,
+            last_checkpoint: Instant::now(),
             store_view: None,
+        }
+    }
+
+    /// Make the input log durable through `store`'s write-ahead log (SPEC-24
+    /// S5, ADR-0018): every `assert_triple` / `retract_triple` becomes an
+    /// `Input` record and every tick writes a `TickCommit` marker, so a
+    /// crash replays to the same Z-set state. Arms the SPEC-06 F8 checkpoint
+    /// cadence.
+    ///
+    /// The driver that attaches an input log owns durability of the tick
+    /// *outcomes* as well: a checkpoint truncates the log, so whatever the
+    /// ticks produced must already be committed to `store` by then. The
+    /// SPEC-24 S4 engine wiring is that driver.
+    pub fn attach_input_log(&mut self, store: Arc<Store>) -> Result<(), StorageError> {
+        self.log.attach_wal(store)?;
+        self.last_checkpoint = Instant::now();
+        self.deltas_since_checkpoint = 0;
+        Ok(())
+    }
+
+    /// Override the SPEC-06 F8 cadence (default: 1 minute or 100K deltas,
+    /// whichever comes first).
+    pub fn set_checkpoint_policy(&mut self, policy: CheckpointPolicy) {
+        self.checkpoint_policy = policy;
+    }
+
+    /// Re-submit the inputs the attached store recovered at open (ADR-0018):
+    /// each batch a tick marker closed replays as its own tick, and the
+    /// un-ticked tail is left pending for the next [`Circuit::tick`].
+    /// Returns the number of records replayed.
+    ///
+    /// Call it once, right after [`Circuit::attach_input_log`] and before any
+    /// new input: replayed records keep their original logical times.
+    pub fn recover(&mut self) -> usize {
+        let Some(store) = self.log.store() else {
+            return 0;
+        };
+        let recovered = store.take_recovered_inputs();
+        let mut replayed = 0;
+        for batch in &recovered.ticks {
+            for rec in batch {
+                self.log.append_recovered(rec);
+            }
+            replayed += batch.len();
+            self.tick();
+        }
+        for rec in &recovered.pending {
+            self.log.append_recovered(rec);
+        }
+        replayed + recovered.pending.len()
+    }
+
+    /// Checkpoint now (SPEC-06 F8): fold every pending input into the bases,
+    /// persist the attached store, and truncate the input log — the new log
+    /// generation starts from the checkpoint's rows. A no-op without an
+    /// input log.
+    pub fn checkpoint(&mut self) -> Result<(), StorageError> {
+        if self.log.store().is_none() {
+            return Ok(());
+        }
+        // No un-ticked input may cross a checkpoint boundary: truncation
+        // would drop it, and folding it into the base without running the
+        // rules would leave the derived state behind.
+        if !self.log.is_empty() {
+            self.tick();
+        }
+        if let Some(store) = self.log.store() {
+            store.checkpoint()?;
+        }
+        self.deltas_since_checkpoint = 0;
+        self.last_checkpoint = Instant::now();
+        Ok(())
+    }
+
+    /// The F8 scheduler, run at the end of every tick. Panics if the
+    /// checkpoint fails: the log can no longer be truncated, so continuing
+    /// would silently grow it past the point recovery is bounded by.
+    fn maybe_checkpoint(&mut self, deltas: usize) {
+        if self.log.store().is_none() {
+            return;
+        }
+        self.deltas_since_checkpoint += deltas;
+        if self.deltas_since_checkpoint >= self.checkpoint_policy.deltas
+            || self.last_checkpoint.elapsed() >= self.checkpoint_policy.interval
+        {
+            self.checkpoint().expect("SPEC-06 F8 checkpoint");
         }
     }
 
@@ -672,8 +770,11 @@ impl Circuit {
         self.pending_derived = Zset::new();
 
         // ---- Phase 1: drain asserted records ----
-        let asserted_records: Vec<_> = self.log.drain().collect();
-        let asserted_merged = asserted_records.len();
+        //
+        // The records leave the pending log first, so the base advance below
+        // is SPEC-06 F8's collapsing merge over exactly this tick's batch.
+        let mut tick_log = self.log.take_pending();
+        let asserted_records: Vec<_> = tick_log.iter().copied().collect();
         let mut asserted_delta: Zset<TripleId> = Zset::new();
         let mut has_retraction = false;
         for rec in &asserted_records {
@@ -689,8 +790,10 @@ impl Circuit {
             .iter()
             .map(|(t, _)| (*t, self.asserted_base.get(t) > 0))
             .collect();
+        // F8 merge: collapse the batch into the base (`Zset::add` prunes the
+        // rows that reach multiplicity zero), then publish in append order.
+        let asserted_merged = Checkpoint::merge(&mut self.asserted_base, &mut tick_log).merged;
         for rec in &asserted_records {
-            self.asserted_base.add(rec.triple, rec.mult);
             self.feed.publish_record(*rec);
         }
         let logical_time = asserted_records.last().map(|r| r.time).unwrap_or(0);
@@ -885,6 +988,14 @@ impl Circuit {
                 .distinct_trace_keys
                 .set(self.rule_weights.len() as i64);
         }
+
+        // ADR-0018: mark the range this tick drained, so recovery replays it
+        // as one batch instead of re-submitting it as pending input. The
+        // marker syncs the log, so a completed tick is always durable.
+        if asserted_merged > 0 {
+            self.log.commit_tick(logical_time);
+        }
+        self.maybe_checkpoint(asserted_merged + derived_emissions);
         TickReport {
             asserted_merged,
             derived_merged,
