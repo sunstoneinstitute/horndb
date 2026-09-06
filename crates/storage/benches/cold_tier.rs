@@ -140,6 +140,15 @@ fn mapped_bytes(store: &Store, p: TermId) -> u64 {
         .unwrap_or(0)
 }
 
+/// One measured predicate. The two stores intern independently, so the same
+/// predicate has a `TermId` per store.
+struct Pred {
+    name: String,
+    warm_id: TermId,
+    cold_id: TermId,
+    rows: u64,
+}
+
 fn bench_cold_tier(c: &mut Criterion) {
     let (warm, label) = load_corpus();
     let (cold, _) = load_corpus();
@@ -158,30 +167,41 @@ fn bench_cold_tier(c: &mut Criterion) {
     );
 
     // Top predicates by row count, resolved back to ids for the read paths.
+    // Each store has its own dictionary, and a parallel load need not intern
+    // in the same order, so the id is looked up per store rather than shared.
     let top = warm
         .snapshot()
         .top_predicates(TOP_N)
         .expect("top predicates");
-    let top: Vec<(String, TermId, u64)> = top
+    let top: Vec<Pred> = top
         .into_iter()
         .filter_map(|(term, rows)| {
-            let id = warm.dictionary().get(&term)?;
-            Some((term.to_string(), id, rows))
+            Some(Pred {
+                name: term.to_string(),
+                warm_id: warm.dictionary().get(&term)?,
+                cold_id: cold.dictionary().get(&term)?,
+                rows,
+            })
         })
         .collect();
 
-    for (name, id, rows) in &top {
-        let (id, rows) = (*id, *rows);
+    for pred in &top {
+        let Pred {
+            ref name,
+            warm_id,
+            cold_id,
+            rows,
+        } = *pred;
         // NF4 proper: the cold subject-major scan against the same scan over
         // the warm columns — the contiguous encoded scan the clause names.
-        let warm_scan = best_ns(|| scan_rows(&warm, id));
-        let cold_scan = best_ns(|| scan_rows(&cold, id));
+        let warm_scan = best_ns(|| scan_rows(&warm, warm_id));
+        let cold_scan = best_ns(|| scan_rows(&cold, cold_id));
         emit_ratio(name, rows, "scan_at cold/warm", warm_scan, cold_scan, true);
 
         // The object-major axis. Cold decodes and sorts on every call; the
         // honest baseline for that is its own subject-major decode over the
         // same file, so both sides read the same bytes the same way.
-        let cold_obj = best_ns(|| ordered_rows(&cold, id, Ordering::Pos));
+        let cold_obj = best_ns(|| ordered_rows(&cold, cold_id, Ordering::Pos));
         emit_ratio(
             name,
             rows,
@@ -195,7 +215,7 @@ fn bench_cold_tier(c: &mut Criterion) {
         // materialises its object-major columns once (eagerly when hot, lazily
         // otherwise) and hands out `Arc` clones after that, so this ratio
         // measures a cache hit against a decode — not read amplification.
-        let warm_obj = best_ns(|| ordered_rows(&warm, id, Ordering::Pos));
+        let warm_obj = best_ns(|| ordered_rows(&warm, warm_id, Ordering::Pos));
         emit_ratio(
             name,
             rows,
@@ -208,7 +228,7 @@ fn bench_cold_tier(c: &mut Criterion) {
         // Structural amplification: bytes the cold scan touches (one forward
         // pass over the mapped file) against a contiguous encoded scan of the
         // same rows — the warm subject/object columns, two u64 per row.
-        let mapped = mapped_bytes(&cold, id);
+        let mapped = mapped_bytes(&cold, cold_id);
         let encoded = rows * 2 * std::mem::size_of::<u64>() as u64;
         eprintln!(
             "[cold] bytes pred={name} rows={rows} mapped={mapped} encoded={encoded} amp={:.3}",
@@ -220,8 +240,8 @@ fn bench_cold_tier(c: &mut Criterion) {
     // follow-up. Timed as an alternating pair: a second promote in a row is a
     // no-op, so each direction must be measured with the partition in the
     // other state.
-    if let Some((name, id, rows)) = top.first() {
-        let (id, rows) = (*id, *rows);
+    if let Some(pred) = top.first() {
+        let (name, id, rows) = (&pred.name, pred.cold_id, pred.rows);
         let (mut promote, mut demote) = (f64::INFINITY, f64::INFINITY);
         for _ in 0..REPEATS {
             let t = Instant::now();
@@ -242,23 +262,23 @@ fn bench_cold_tier(c: &mut Criterion) {
     // above: an IRI contains slashes, which criterion turns into directories.
     let mut group = c.benchmark_group("cold_tier");
     group.sample_size(10);
-    for (i, (_, id, _)) in top.iter().enumerate() {
-        let id = *id;
+    for (i, pred) in top.iter().enumerate() {
+        let (warm_id, cold_id) = (pred.warm_id, pred.cold_id);
         group.bench_function(format!("scan_at/warm/p{i}"), |b| {
-            b.iter(|| scan_rows(&warm, id))
+            b.iter(|| scan_rows(&warm, warm_id))
         });
         group.bench_function(format!("scan_at/cold/p{i}"), |b| {
-            b.iter(|| scan_rows(&cold, id))
+            b.iter(|| scan_rows(&cold, cold_id))
         });
         group.bench_function(format!("ordered_pos/warm/p{i}"), |b| {
-            b.iter(|| ordered_rows(&warm, id, Ordering::Pos))
+            b.iter(|| ordered_rows(&warm, warm_id, Ordering::Pos))
         });
         group.bench_function(format!("ordered_pos/cold/p{i}"), |b| {
-            b.iter(|| ordered_rows(&cold, id, Ordering::Pos))
+            b.iter(|| ordered_rows(&cold, cold_id, Ordering::Pos))
         });
     }
-    if let Some((_, id, _)) = top.first() {
-        let id = *id;
+    if let Some(pred) = top.first() {
+        let id = pred.cold_id;
         group.bench_function("promote_demote_roundtrip/p0", |b| {
             b.iter(|| {
                 cold.promote(DEFAULT_GRAPH, id).expect("promote");
