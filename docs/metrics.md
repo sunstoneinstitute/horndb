@@ -64,8 +64,8 @@ longer blocks writers to that partition while it is in flight.
 
 | Label | Values | Used by |
 |---|---|---|
-| `endpoint` | `query`, `update`, `metrics` | sparql request/byte/duration families |
-| `method` | `get`, `post` | `sparql_requests` |
+| `endpoint` | `query`, `update`, `graphs`, `metrics` | sparql request/byte/duration families |
+| `method` | `get`, `post` | `sparql_requests` — the Graph Store Protocol's `PUT`/`DELETE` verbs on `endpoint="graphs"` are recorded as `post`; only GET vs. everything-else is split, matching how `/query` and `/update` already share the same two values |
 | `status` | HTTP status code (u16, e.g. `200`, `400`) | `sparql_requests` |
 | `kind` | `select`, `ask`, `construct`, `describe`, `update` | `sparql_query` |
 | `stage` | `parse`, `translate`, `plan`, `exec` | sparql query-errors / stage-duration |

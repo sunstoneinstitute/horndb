@@ -220,6 +220,36 @@ async fn bad_requests() {
     );
 }
 
+/// `?graph=` must be a valid IRI (a scheme-having absolute IRI, not any
+/// string) — a malformed one is a 400 with the IRI parser's own message,
+/// the same treatment a malformed request body already gets. Checked on
+/// all four verbs: each calls `target()` first, so none should intern the
+/// bad value before rejecting it.
+#[tokio::test]
+async fn malformed_graph_iri_is_400() {
+    let app = router();
+    let bad = "/graphs?graph=not-an-iri";
+
+    for (method, ctype) in [
+        ("GET", ""),
+        ("PUT", "text/turtle"),
+        ("POST", "text/turtle"),
+        ("DELETE", ""),
+    ] {
+        let r = send(&app, method, bad, ctype, TRIPLE_A).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{method}");
+        assert!(
+            r.body.contains("scheme"),
+            "{method}: IRI parser message expected: {}",
+            r.body
+        );
+    }
+
+    // The rejected value never reached storage: a well-formed IRI that
+    // merely shares the same request never sees it either.
+    assert_eq!(get(&app, &uri(G), "").await.status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn dataset_media_types_are_415() {
     let app = router();
