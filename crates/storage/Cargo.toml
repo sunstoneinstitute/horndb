@@ -33,6 +33,10 @@ name = "load_lubm"
 harness = false
 
 [[bench]]
+name = "stage1_acceptance"
+harness = false
+
+[[bench]]
 name = "dict_decode"
 harness = false
 

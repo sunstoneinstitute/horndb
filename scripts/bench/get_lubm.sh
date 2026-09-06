@@ -7,8 +7,10 @@
 #   2. gen_lubm.sh — needs a JDK for the UBA generator
 #   3. the pre-generated tarball published as a `bench-corpora` release asset
 #
-# Step 3 is what the hornbench runner uses: it has no JDK, and re-generating
-# LUBM on every bench run would be wasted wall-clock anyway. The assets were
+# Step 3 exists because regenerating LUBM from scratch every bench run wastes
+# wall clock, whatever tooling the host has (hornbench now has OpenJDK 21).
+# Only lubm-1 and lubm-10 are published as release assets today, so any
+# larger scale relies on step 2 succeeding on the host. The assets were
 # produced by this repo's own gen_lubm.sh (UBA1.7, seed 0, index 0).
 #
 # Exits non-zero if all three fail, so callers can pick their own fallback.

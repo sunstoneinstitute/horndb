@@ -14,8 +14,11 @@
 # (`pip install rdflib`). Both produce the same triples; only the lexical
 # layout of the .nt file differs.
 #
-# Hosts with no JDK (the hornbench runner) do not run this script at all:
-# `scripts/bench/get_lubm.sh` downloads a pre-generated tarball instead.
+# `scripts/bench/get_lubm.sh` calls this script first and falls back to a
+# pre-generated tarball only if it fails — regenerating a corpus on every
+# bench run wastes wall clock even where the tooling is available. Today
+# that tarball only covers lubm-1 and lubm-10 (published release assets), so
+# any larger scale must succeed here on the host.
 #
 # All outputs live under the gitignored target/ tree.
 #
