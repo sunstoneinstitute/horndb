@@ -89,7 +89,10 @@ if corpus is None or foot is None:
 
 NF1, NF4 = 6.0, 2.0
 cold_bpt = float(foot["cold_bpt"])
-worst_wall = max((float(r["ratio"]) for r in ratios), default=0.0)
+# Like-for-like rows only: the cache-hit row compares an `Arc` clone against a
+# decode, so folding it in would report a five-digit "worst ratio" that means
+# nothing.
+worst_wall = max((float(r["ratio"]) for r in ratios if r["graded"] == "1"), default=0.0)
 verdict = lambda ok: "**PASS**" if ok else "**MISS**"
 
 print("# cold-tier footprint and read amplification (HDB-181, SPEC-25 S5)\n")
@@ -159,7 +162,7 @@ print(f"**NF1 {'pass' if cold_bpt <= NF1 else 'MISS'}** "
       f"**NF4 {'pass' if worst_bytes <= NF4 else 'MISS'}** "
       f"(worst bytes read {worst_bytes:.2f}x vs <= {NF4:.0f}x).")
 print()
-print(f"Worst wall-clock ratio was {worst_wall:.2f}x. NF4 does not bound it, "
+print(f"Worst like-for-like wall-clock ratio was {worst_wall:.2f}x. NF4 does not bound it, "
       "but a cold object-major read that costs multiples of the cold "
       "subject-major scan is a decode-cost finding in its own right — the cold "
       "file carries one subject-major block, so every object-major read "
