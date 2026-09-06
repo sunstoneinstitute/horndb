@@ -251,7 +251,9 @@ impl Store {
             for p in snap.tier.predicates(g) {
                 let rows = snap
                     .tier
-                    .with_predicate(g, p, |part| part.scan_at(version).collect::<Vec<_>>())
+                    .with_predicate_uncounted(g, p, |part| {
+                        part.scan_at(version).collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 for (s, o) in rows {
                     chunk.push((g, s, p, o));
@@ -962,7 +964,7 @@ impl StoreSnapshot<'_> {
         for p_id in preds {
             let p = self.term(p_id)?;
             self.tier
-                .with_predicate(g, p_id, |part| -> Result<()> {
+                .with_predicate_uncounted(g, p_id, |part| -> Result<()> {
                     for (s_id, o_id) in part.scan_at(version) {
                         out.push((self.term(s_id)?, p.clone(), self.term(o_id)?));
                     }
@@ -985,7 +987,7 @@ impl StoreSnapshot<'_> {
         preds.sort_by_key(|t| t.0);
         preds.into_iter().flat_map(move |p_id| {
             self.tier
-                .with_predicate(g, p_id, |part| {
+                .with_predicate_uncounted(g, p_id, |part| {
                     part.scan_at(version)
                         .map(move |(s, o)| (s, p_id, o))
                         .collect::<Vec<_>>()

@@ -121,6 +121,27 @@ impl TierSnapshot {
             })
     }
 
+    /// The uncounted sibling of [`Self::with_predicate`], for whole-store and
+    /// whole-graph maintenance sweeps that visit every predicate
+    /// (`Store::checkpoint`, `scan_graph`, `iter_graph_term_ids`, and
+    /// `export_snapshot` via the latter): a sweep touching every partition in
+    /// a graph says nothing about any one partition's locality, so it must
+    /// not count as a read that keeps a partition warm (SPEC-25 S5).
+    pub fn with_predicate_uncounted<F, R>(
+        &self,
+        graph: GraphId,
+        predicate: TermId,
+        f: F,
+    ) -> Option<R>
+    where
+        F: FnOnce(&Partition) -> R,
+    {
+        self.graphs
+            .get(&graph)
+            .and_then(|gs| gs.partitions.get(&predicate))
+            .map(|p| f(p))
+    }
+
     /// Ordered access to a partition in any of the six trie orderings
     /// (SPEC-02 F4). The returned [`crate::partition::OrderedColumns`] owns
     /// `Arc` clones of the columns and so outlives this snapshot borrow.
@@ -600,17 +621,25 @@ impl MemoryTier {
         hints: &PlacementHints,
     ) -> Result<RebalanceReport> {
         let cur = self.current.read().clone();
-        let version = cur.version;
         let counts: HashMap<(GraphId, TermId), u64> = cur.access.take().into_iter().collect();
         // Walks `graphs` directly rather than through the guarded accessors:
         // deciding placement must not itself count as an access.
+        //
+        // `live_len()` (O(1)) rather than `len_at(version)` (an O(rows) scan
+        // once a partition has any retraction): every partition here is read
+        // whether or not it moves, so an O(rows) count would make one
+        // rebalance round cost O(total rows in the store) even when nothing
+        // moves. `live_len() == len_at(at)` whenever `at` is at or after the
+        // version that built the partition object, which `cur.version`
+        // always is (copy-on-write hands an older pin a different, earlier
+        // object) — see `PredicatePartition::live_len`'s doc comment.
         let mut parts: Vec<(GraphId, TermId, bool, usize)> = cur
             .graphs
             .iter()
             .flat_map(|(g, gs)| {
                 gs.partitions
                     .iter()
-                    .map(move |(p, part)| (*g, *p, part.is_cold(), part.len_at(version)))
+                    .map(move |(p, part)| (*g, *p, part.is_cold(), part.live_len()))
             })
             .collect();
         parts.sort_unstable_by_key(|(g, p, _, _)| (g.0, p.0));
@@ -627,15 +656,16 @@ impl MemoryTier {
                     idle.insert(key, 0);
                     report.promoted.push(key);
                 }
-            } else if read {
+            } else if read || keep_warm {
+                // `keep_warm` resets the idle count every round it holds,
+                // same as an actual read — hints only ever add, so a hint
+                // withdrawn last round must not leave a stale idle count
+                // behind that demotes on the very next round.
                 idle.insert(key, 0);
             } else if rows >= cfg.min_rows {
                 let rounds = idle.entry(key).or_insert(0);
                 *rounds += 1;
-                if *rounds >= cfg.demote_after_idle_rounds
-                    && !keep_warm
-                    && self.demote(g, p, &cfg.cold_dir)?
-                {
+                if *rounds >= cfg.demote_after_idle_rounds && self.demote(g, p, &cfg.cold_dir)? {
                     *rounds = 0;
                     report.demoted.push(key);
                 }
