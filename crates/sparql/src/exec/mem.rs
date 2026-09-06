@@ -16,7 +16,7 @@
 use crate::algebra::{Term, TriplePattern};
 use crate::error::{Result, SparqlError};
 use crate::exec::scope::{
-    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+    graph_var_needs_a_per_graph_node, is_reserved_graph, NamedGraph, ResolvedScope, ScanScope,
 };
 use crate::exec::{
     classify_lexical, unify_one, AlgebraQuad, AlgebraTriple, ApplyCounts, Bindings, Executor,
@@ -287,7 +287,7 @@ fn graph_filter<'a>(scope: &ScanScope<'a>) -> Result<GraphFilter<'a>> {
         ResolvedScope::DefaultUnion => GraphFilter::AnyNonReserved,
         ResolvedScope::Union(list) => GraphFilter::Named(list.iter().map(String::as_str).collect()),
         ResolvedScope::OneGraph(g) => GraphFilter::Named(HashSet::from([g])),
-        ResolvedScope::PerGraph { var, .. } => return Err(per_graph_needs_the_scan_loop(var)),
+        ResolvedScope::UnboundGraphVar(var) => return Err(graph_var_needs_a_per_graph_node(var)),
     })
 }
 

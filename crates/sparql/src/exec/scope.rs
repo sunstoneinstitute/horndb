@@ -119,15 +119,11 @@ impl<'a> ScanScope<'a> {
                 // Named, but outside the dataset's named set: zero rows.
                 Some(_) => ResolvedScope::Union(NO_GRAPHS),
             },
-            // `GRAPH ?g`: the named set is the dataset's, or every
-            // non-reserved graph when there is no `FROM NAMED`. Note this
-            // reads `dataset.named` — the same field the ground form
-            // filters through — so the two forms can never disagree on
-            // what the named set is.
-            GraphScope::Named(GraphSpec::Var(v)) => ResolvedScope::PerGraph {
-                var: v,
-                named: self.dataset.named.as_deref(),
-            },
+            // `GRAPH ?g` names one graph only through the enclosing
+            // `PerGraph` node, which substitutes the graph it is currently
+            // on before a leaf's scope is ever resolved. Reaching here means
+            // no such node was in force.
+            GraphScope::Named(GraphSpec::Var(v)) => ResolvedScope::UnboundGraphVar(v),
         }
     }
 }
@@ -145,28 +141,11 @@ pub enum ResolvedScope<'a> {
     Union(&'a [String]),
     /// Exactly this graph.
     OneGraph(&'a str),
-    /// `GRAPH ?g`: one scan per named graph, binding `?g` to that graph in
-    /// every row it contributes (D6). This is the only variant that does
-    /// **not** name one set of triples — the scan operator loops over the
-    /// graphs itself (`exec::op::source::scan_scoped`), so a backend's
-    /// single-scope read path never sees it.
-    PerGraph {
-        /// The variable each graph binds.
-        var: &'a Var,
-        /// The named set: `None` = every non-reserved graph the backend
-        /// holds, `Some(list)` = exactly these (reserved included —
-        /// naming one is the opt-in). Empty list = no graphs.
-        named: Option<&'a [String]>,
-    },
-}
-
-impl ResolvedScope<'_> {
-    /// True for `GRAPH ?g`. The count/estimate seams test this to **decline**
-    /// (`Ok(None)`), which routes the caller to the scan fallback — the only
-    /// path that reads one graph at a time and binds the graph column.
-    pub fn is_per_graph(&self) -> bool {
-        matches!(self, ResolvedScope::PerGraph { .. })
-    }
+    /// A `GRAPH ?g` leaf with no enclosing `PerGraph` node in force — a
+    /// planner error, not a graph set. Every read path turns it into
+    /// [`graph_var_needs_a_per_graph_node`] rather than widening the scan
+    /// (SPEC-28 D1).
+    UnboundGraphVar(&'a Var),
 }
 
 /// One graph `GRAPH ?g` enumerates, as [`Executor::named_graphs`] returns it.
@@ -182,18 +161,17 @@ pub struct NamedGraph {
     pub binding: Slot,
 }
 
-/// The error a single-graph read path returns when handed a
-/// [`ResolvedScope::PerGraph`] scope.
+/// The error a read path returns for a [`ResolvedScope::UnboundGraphVar`].
 ///
-/// `GRAPH ?g` is not one set of triples, so `scan_bgp`/`scan_bgp_ids` and the
-/// count seams cannot answer it — the per-graph loop in
-/// `exec::op::source::scan_scoped` calls them once per graph with a
-/// single-graph scope instead. Reaching this means a caller bypassed that
-/// loop; refusing beats answering over the wrong graphs (SPEC-28 D1).
-pub fn per_graph_needs_the_scan_loop(var: &Var) -> SparqlError {
-    SparqlError::Executor(format!(
-        "GRAPH ?{} must be read through the per-graph scan loop, not as one \
-         scoped read (SPEC-28 S3/D6)",
+/// `GRAPH ?g` is not one set of triples. The `PerGraph` operator
+/// (`exec::op::per_graph`) binds `?g` to one graph at a time and hands the
+/// leaves below it that one graph, so a leaf whose scope still holds the
+/// *variable* was built outside any such node — a planner error. Refusing
+/// beats answering over the wrong graphs (SPEC-28 D1).
+pub fn graph_var_needs_a_per_graph_node(var: &Var) -> SparqlError {
+    SparqlError::Planner(format!(
+        "GRAPH ?{} reached a scan with no enclosing PerGraph node \
+         (SPEC-28 S3/D6)",
         var.name()
     ))
 }
@@ -265,28 +243,15 @@ mod tests {
         );
     }
 
-    /// `GRAPH ?g` ranges over the dataset's named set when there is one,
-    /// and over "every non-reserved graph" (`None`) when there is not.
+    /// A `GRAPH ?g` leaf resolved with no `PerGraph` node in force is a
+    /// planner error, never a widened scan (SPEC-28 D1).
     #[test]
-    fn per_graph_carries_the_named_set() {
+    fn a_bare_graph_var_leaf_does_not_resolve_to_a_graph_set() {
         let scoped = GraphScope::Named(GraphSpec::Var(Var::new("g")));
         let no_clause = DatasetSpec::default();
         match ScanScope::new(&scoped, &no_clause, DefaultGraphMode::Union).resolve() {
-            ResolvedScope::PerGraph { var, named } => {
-                assert_eq!(var.name(), "g");
-                assert_eq!(named, None);
-            }
-            other => panic!("expected PerGraph, got {other:?}"),
-        }
-        // `FROM <g1>` alone still sets an (empty) named set — so `GRAPH ?g`
-        // enumerates nothing, rather than falling back to every graph.
-        let from_only = DatasetSpec {
-            default: Some(vec!["http://ex/g1".into()]),
-            named: Some(vec![]),
-        };
-        match ScanScope::new(&scoped, &from_only, DefaultGraphMode::Union).resolve() {
-            ResolvedScope::PerGraph { named, .. } => assert_eq!(named, Some(&[][..])),
-            other => panic!("expected PerGraph, got {other:?}"),
+            ResolvedScope::UnboundGraphVar(v) => assert_eq!(v.name(), "g"),
+            other => panic!("expected UnboundGraphVar, got {other:?}"),
         }
     }
 

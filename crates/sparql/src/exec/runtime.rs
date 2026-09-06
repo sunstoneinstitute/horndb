@@ -50,6 +50,15 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         self.exec
     }
 
+    /// The query's `FROM NAMED` list, or `None` when it has no dataset
+    /// clause. The graph set `GRAPH ?g` enumerates over
+    /// ([`Executor::named_graphs`]).
+    ///
+    /// [`Executor::named_graphs`]: crate::exec::Executor::named_graphs
+    pub(crate) fn named_set(&self) -> Option<&[String]> {
+        self.dataset.named.as_deref()
+    }
+
     /// Pair a scan leaf's plan-level scope with this query's dataset.
     pub(crate) fn scan_scope<'s>(&'s self, graph: &'s GraphScope) -> ScanScope<'s> {
         ScanScope::new(graph, &self.dataset, self.mode)
@@ -81,15 +90,6 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         E: 'r,
     {
         let plan = crate::plan::pushdown::rewrite(plan)?;
-        // Same debug-only postcondition the planner asserts, re-checked after
-        // the pushdown rewrite — it is the other pass that inserts a
-        // narrowing `Project` (SPEC-28 S3/D6). Free in release.
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            crate::plan::lower::per_graph_columns_survive(&plan).is_ok(),
-            "{:?}",
-            crate::plan::lower::per_graph_columns_survive(&plan)
-        );
         let op = self.build(&plan)?;
         Ok(BindingsStream {
             exec: self.exec,
@@ -1226,7 +1226,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// it keeps a join's output stream free of Id∧Term mixing without ever
     /// seeing the whole output. Id→Term decoding is semantically the
     /// identity at the Bindings boundary.
-    fn force_term_columns(&self, rows: &mut [Row], forced: &[bool]) -> Result<()> {
+    pub(crate) fn force_term_columns(&self, rows: &mut [Row], forced: &[bool]) -> Result<()> {
         for (c, &f) in forced.iter().enumerate() {
             if !f {
                 continue;
@@ -3173,6 +3173,7 @@ mod slot_differential {
             | PhysicalPlan::Extend { inner, .. }
             | PhysicalPlan::Group { inner, .. } => contains_inner_join(inner),
             PhysicalPlan::PathClosure { edge, .. } => contains_inner_join(edge),
+            PhysicalPlan::PerGraph { inner, .. } => contains_inner_join(inner),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
             | PhysicalPlan::GroupCountScan { .. }

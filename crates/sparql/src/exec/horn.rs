@@ -185,7 +185,7 @@ use crate::algebra::{TriplePattern, Var};
 #[cfg(feature = "incremental")]
 use crate::exec::circuit;
 use crate::exec::scope::{
-    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+    graph_var_needs_a_per_graph_node, is_reserved_graph, NamedGraph, ResolvedScope, ScanScope,
 };
 use crate::exec::store_source::{QuerySource, StoreTripleSource};
 use crate::exec::{
@@ -295,11 +295,12 @@ impl QuadKey {
 /// dictionary: the graph ids a WCOJ snapshot is built from. Doubles as the
 /// snapshot memo's key, so equal scopes share one built source.
 ///
-/// [`ResolvedScope::PerGraph`] has no variant here on purpose: `GRAPH ?g`
-/// binds a per-row graph column rather than reading one flattened source
-/// (SPEC-28 D6). The scan operator loops over the graphs and calls back in
-/// with a `OneGraph` scope per graph, so a per-graph scope never reaches
-/// [`HornBackend::resolve_scope`] — which refuses it if it somehow does.
+/// `GRAPH ?g` has no variant here on purpose: it binds a per-row graph
+/// column rather than reading one flattened source (SPEC-28 D6). The
+/// `PerGraph` operator substitutes the graph it is currently on before a
+/// leaf's scope is resolved, so [`HornBackend::resolve_scope`] only ever
+/// sees `OneGraph` here — and refuses an unsubstituted graph variable if
+/// one somehow reaches it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SnapshotScope {
     /// Every non-reserved graph, deduped (D2 `union`).
@@ -1592,7 +1593,9 @@ impl HornBackend {
                     _ => SnapshotScope::FromUnion(ids),
                 }
             }
-            ResolvedScope::PerGraph { var, .. } => return Err(per_graph_needs_the_scan_loop(var)),
+            ResolvedScope::UnboundGraphVar(var) => {
+                return Err(graph_var_needs_a_per_graph_node(var))
+            }
         })
     }
 
@@ -2434,7 +2437,8 @@ impl Executor for HornBackend {
     /// it joins an ordinary scan column by raw id.
     ///
     /// Snapshot note: this pins its own store snapshot, and each per-graph
-    /// scan the loop then runs pins another (`scope_triples`), so one
+    /// scan the `PerGraph` operator then runs pins another
+    /// (`scope_triples`), so one
     /// `GRAPH ?g` reads N+1 pinned views rather than the single one SPEC-28
     /// S2 describes. They cannot disagree today — every write takes
     /// `&mut self` and no read holds it, so no write can interleave with a
@@ -2752,12 +2756,7 @@ impl Executor for HornBackend {
     ) -> Result<Option<usize>> {
         // Scope first: every count below is a count *within the scoped
         // snapshot*, so an unsupported scope must refuse here rather than
-        // fall through to a wider count (SPEC-28 S3). `GRAPH ?g` spans
-        // several snapshots — decline, and the caller's scan fallback (the
-        // per-graph loop) supplies the count.
-        if scope.resolve().is_per_graph() {
-            return Ok(None);
-        }
+        // fall through to a wider count (SPEC-28 S3).
         let resolved = self.resolve_scope(scope)?;
         // The empty BGP is the join identity: one solution — zero when the
         // scope is a ground `GRAPH <g>` the dataset does not have.
@@ -2870,11 +2869,7 @@ impl Executor for HornBackend {
         keys: &[Var],
         scope: &ScanScope<'_>,
     ) -> Result<Option<Vec<GroupCount>>> {
-        // See `count_bgp`: resolve the scope before any counting, and
-        // decline `GRAPH ?g` outright.
-        if scope.resolve().is_per_graph() {
-            return Ok(None);
-        }
+        // See `count_bgp`: resolve the scope before any counting.
         let resolved = self.resolve_scope(scope)?;
         if patterns.is_empty() || keys.is_empty() {
             return Ok(None);
@@ -3059,19 +3054,16 @@ mod tests {
             "graph-scoped snapshots must not accumulate in the memo"
         );
 
-        // Same bound for `GRAPH ?g`, which walks every graph in one scan:
-        // it reads each through the same per-graph (uncached) path, so the
-        // memo stays at the one whole-store entry.
-        let var = Var::new("g");
-        let per_graph = GraphScope::Named(GraphSpec::Var(var.clone()));
-        let scope = ScanScope::new(&per_graph, &dataset, crate::DefaultGraphMode::Union);
-        let batch = crate::exec::op::scan_scoped(&b, &patterns, &scope).unwrap();
-        assert_eq!(batch.rows.len(), 20, "one row per graph");
-        assert!(
-            batch.schema.iter().any(|v| v.name() == var.name()),
-            "the scan carries the graph column: {:?}",
-            batch.schema
-        );
+        // Same bound for `GRAPH ?g`: the `PerGraph` operator reads one
+        // graph at a time through this same ground path, so the memo stays
+        // at the one whole-store entry however many graphs it walks.
+        let mut rows = 0;
+        for g in b.named_graphs(None).unwrap() {
+            let scope = GraphScope::Named(GraphSpec::Iri(g.iri));
+            let scope = ScanScope::new(&scope, &dataset, crate::DefaultGraphMode::Union);
+            rows += b.scan_bgp_ids(&patterns, &scope).unwrap().rows.len();
+        }
+        assert_eq!(rows, 20, "one row per graph");
         assert_eq!(
             b.memo_len(),
             1,

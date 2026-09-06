@@ -83,6 +83,11 @@ pub enum LogicalPlan {
         keys: Vec<Var>,
         aggregates: Vec<Aggregate>,
     },
+    /// `GRAPH ?g { P }`: evaluate `inner` once per named graph with `var`
+    /// free, then join `{var -> that graph}` onto that graph's rows
+    /// (SPARQL 1.1 §18.2.2.2, SPEC-28 D6). Output columns are `inner`'s
+    /// plus `var`.
+    PerGraph { var: Var, inner: Box<LogicalPlan> },
     /// Recursive Kleene property path `p+`/`p*`.
     PathClosure {
         subject: Term,

@@ -274,7 +274,8 @@ w3c_case!(path_star_001, "path-star-001");
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/graph/>; each case's
 // dataset is the manifest's `qt:data` (the default graph) + `qt:graphData`
 // (the named graphs), so these run in `strict` mode — see `read_mode`.
-// The 3 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+// The one upstream case left out (`graph-11`) is in
+// `harness/KNOWN-MANIFEST-BUGS.md`.
 w3c_case!(graph_01, "graph-01");
 w3c_case!(graph_02, "graph-02");
 w3c_case!(graph_03, "graph-03");
@@ -288,7 +289,9 @@ w3c_case!(graph_10b, "graph-10b");
 w3c_case!(graph_empty, "graph-empty");
 w3c_case!(graph_exist, "graph-exist");
 w3c_case!(graph_not_exist, "graph-not-exist");
+w3c_case!(graph_optional, "graph-optional");
 w3c_case!(graph_variable_join, "graph-variable-join");
+w3c_case!(graph_variable_scope, "graph-variable-scope");
 
 // W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7). Mirrored from
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/dataset/>; each query
@@ -334,7 +337,8 @@ w3c_case_horn!(path_star_001_hornbackend, "path-star-001");
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/graph/>; each case's
 // dataset is the manifest's `qt:data` (the default graph) + `qt:graphData`
 // (the named graphs), so these run in `strict` mode — see `read_mode`.
-// The 3 upstream cases left out are in `harness/KNOWN-MANIFEST-BUGS.md`.
+// The one upstream case left out (`graph-11`) is in
+// `harness/KNOWN-MANIFEST-BUGS.md`.
 w3c_case_horn!(graph_01_hornbackend, "graph-01");
 w3c_case_horn!(graph_02_hornbackend, "graph-02");
 w3c_case_horn!(graph_03_hornbackend, "graph-03");
@@ -348,7 +352,9 @@ w3c_case_horn!(graph_10b_hornbackend, "graph-10b");
 w3c_case_horn!(graph_empty_hornbackend, "graph-empty");
 w3c_case_horn!(graph_exist_hornbackend, "graph-exist");
 w3c_case_horn!(graph_not_exist_hornbackend, "graph-not-exist");
+w3c_case_horn!(graph_optional_hornbackend, "graph-optional");
 w3c_case_horn!(graph_variable_join_hornbackend, "graph-variable-join");
+w3c_case_horn!(graph_variable_scope_hornbackend, "graph-variable-scope");
 
 // W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7). Mirrored from
 // <https://w3c.github.io/rdf-tests/sparql/sparql10/dataset/>; each query

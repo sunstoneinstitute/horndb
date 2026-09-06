@@ -20,6 +20,12 @@ use crate::algebra::{Aggregate, Expr, GraphSpec, OrderDir, Term, TriplePattern, 
 /// all-graphs scan costs O(store) to answer a question about one small
 /// graph. Nested `GRAPH` overrides the outer scope (innermost wins).
 ///
+/// [`Named(GraphSpec::Var(g))`](GraphScope::Named) means "the graph the
+/// enclosing [`PhysicalPlan::PerGraph`] node is currently on" — never "loop
+/// over the graphs here". A leaf carrying it with no such node in force is a
+/// planner error (SPEC-28 D1), which is what
+/// [`ScanScope::resolve`](crate::exec::ScanScope::resolve) reports.
+///
 /// The scope alone does not name a graph set: [`DefaultGraph`] composition
 /// depends on the query's `FROM`/`FROM NAMED` clause and the `default_graph`
 /// mode. [`crate::exec::ScanScope`] pairs the two for the executor.
@@ -35,11 +41,10 @@ pub enum GraphScope {
 }
 
 impl GraphScope {
-    /// The variable a `GRAPH ?g` scope binds — an **extra output column** of
-    /// every scan leaf carrying this scope (SPEC-28 D6), on top of the
-    /// variables its patterns bind. Every "what does this node produce"
-    /// computation must add it, or a pass that narrows columns will drop the
-    /// graph binding. `None` for the default graph and for ground `GRAPH <g>`.
+    /// The variable of a `GRAPH ?g` scope — the one the enclosing
+    /// [`PhysicalPlan::PerGraph`] node binds. `None` for the default graph
+    /// and for ground `GRAPH <g>`. The scan leaf does **not** output this
+    /// column: the `PerGraph` node produces it (SPEC-28 D6).
     pub fn graph_var(&self) -> Option<&Var> {
         match self {
             GraphScope::Named(GraphSpec::Var(v)) => Some(v),
@@ -144,6 +149,11 @@ pub enum PhysicalPlan {
         keys: Vec<Var>,
         aggregates: Vec<Aggregate>,
     },
+    /// `GRAPH ?g { P }` (SPARQL 1.1 §18.2.2.2, SPEC-28 D6): evaluate `inner`
+    /// once per named graph with `var` free, then join `{var -> that graph}`
+    /// onto that graph's rows. Output columns are `inner`'s plus `var`.
+    /// One node whatever the graph count — the loop is in the operator.
+    PerGraph { var: Var, inner: Box<PhysicalPlan> },
     /// Recursive Kleene property path `p+`/`p*`. `edge` produces the
     /// one-step relation over the hidden endpoint variables
     /// (`?pp_src`, `?pp_dst`); the runtime takes its transitive (and,

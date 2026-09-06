@@ -263,7 +263,9 @@ pub(crate) fn dangling_refs(plan: &LogicalPlan) -> std::collections::BTreeMap<St
                 walk(left, out);
                 walk(right, out);
             }
-            LogicalPlan::Distinct { inner } | LogicalPlan::Slice { inner, .. } => walk(inner, out),
+            LogicalPlan::Distinct { inner }
+            | LogicalPlan::Slice { inner, .. }
+            | LogicalPlan::PerGraph { inner, .. } => walk(inner, out),
             LogicalPlan::PathClosure { edge, .. } => walk(edge, out),
             LogicalPlan::Bgp { .. } | LogicalPlan::Values { .. } => {}
         }
@@ -329,6 +331,10 @@ fn coalesce(plan: LogicalPlan) -> LogicalPlan {
             inner: Box::new(coalesce(*inner)),
         },
         Distinct { inner } => Distinct {
+            inner: Box::new(coalesce(*inner)),
+        },
+        PerGraph { var, inner } => PerGraph {
+            var,
             inner: Box::new(coalesce(*inner)),
         },
         Slice {

@@ -351,57 +351,32 @@ survives the `FROM NAMED` filter and holds at least one quad. Direct pin:
 `empty_group_probes_graph_existence` in `crates/sparql/tests/graph_query.rs`
 (the W3C fixtures alone would not hold it — `graph-exist` passes either way).
 
-## The graph variable is in scope inside the `GRAPH` block (2 cases)
+## ~~The graph variable is in scope inside the `GRAPH` block~~ — FIXED (HDB-74)
 
-SPARQL 1.1 §18.2.2.2 evaluates `GRAPH ?g { P }` as `Graph(?g, eval(P))`:
-`P` is evaluated **first**, with `?g` free, and only then does `Graph`
-bind `?g` to each graph name and drop rows where `P` already bound `?g` to
-something else. HornDB carries the graph scope as a column on each scan
-leaf inside the block (SPEC-28 D5/D6), so `?g` is bound *before* anything
-above the leaf runs. For a `P` that merely mentions `?g` in a pattern the
-two agree (the column joins by equality — that is `graph-variable-join`,
-which is selected and green). They diverge when `P` tests or optionally
-binds `?g`. Closing the gap means evaluating the whole block per graph, not
-just its scan leaves — the machinery SPEC-28 phase 3 deliberately did not
-build.
+`graph-variable-scope` and `graph-optional` are now **green** and listed in
+`selected.toml`.
 
-Both cases are **refused**, not answered — HornDB returns an "unsupported
-algebra construct" error naming the construct and §18.2.2.2. They still fail
-the manifest (a refusal is not the expected result set), but they fail
-honestly, which is what SPEC-28 D1 requires.
+SPARQL 1.1 §18.2.2.2 evaluates `GRAPH ?g { P }` as `Graph(?g, eval(P))`: `P`
+is evaluated **first**, with `?g` free, and only then does `Graph` bind `?g`
+to each graph name and drop rows where `P` already bound `?g` to something
+else. HornDB used to carry the graph scope as a column on each scan leaf
+inside the block, which binds `?g` *before* anything above the leaf runs.
+That agreed with the spec for a `P` that merely mentions `?g` in a pattern
+(the column joins by equality — `graph-variable-join`), and diverged as soon
+as `P` tested or optionally bound it, so both cases below were refused.
 
-- `graph-variable-scope` — `GRAPH ?g { FILTER (BOUND(?g)) }`. The filter must
-  see `?g` unbound and reject, giving 0 rows. Leaf-binding puts the filter
-  above a scan that already bound `?g`, which used to return one row per
-  named graph (2). Now refused: *"a FILTER that references ?g inside
-  GRAPH ?g"*.
-- `graph-optional` — `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }`. The `?g`
-  inside the OPTIONAL is a free variable of the inner group, so the OPTIONAL
-  matches on the object and `Graph` then keeps only the rows where that
-  object *is* the graph name (1 row). Leaf-binding scopes the OPTIONAL's own
-  scan instead, changing both what the OPTIONAL matches and which left rows
-  survive; that used to return 4 rows. Now refused: *"an OPTIONAL that
-  references ?g inside GRAPH ?g"*.
+SPEC-28's S3 amendment replaced the scan column with a `PerGraph` plan node
+(`exec::op::per_graph`): it evaluates the whole block once per named graph
+with `?g` free, then joins `{?g -> that graph}` onto that graph's rows. Both
+cases now answer the spec's result, and so do the shapes the old rule refused
+alongside them — a sub-`SELECT`, an aggregate, or a property path inside
+`GRAPH ?g` (`subquery01`..`subquery05`, `property-path/pp35`).
 
-The refusal rule (`plan::lower::per_graph_var_divergence`) allows `?g` only
-where the data supplies it and an inner join combines it — a triple-pattern
-position or a `VALUES` column, joined upward through `Join`, `Union`, or an
-`OPTIONAL`'s left arm. That is exactly the case where "the leaf keeps rows
-whose `?g` equals this graph" *is* the post-join, and it is why
-`graph-variable-join` stays selected and green. (For a `VALUES`-supplied `?g`
-only the `Join` case reaches this rule: `plan::lower::per_graph_barrier` runs
-first and refuses a `VALUES` arm of a `Union` or of an `OPTIONAL`'s left side,
-because neither carries the graph column up.) Every other use — any expression
-(`FILTER`, `BIND`, an `OPTIONAL` condition, `ORDER BY`), a `BIND` *to* `?g`,
-or any mention inside an `OPTIONAL`'s right arm — refuses.
-
-Lifting either refusal needs the graph variable joined **after** the block is
-evaluated rather than bound on the scan leaf: evaluate `P` per graph with
-`?g` free, then join `{?g → thatGraph}`. That is the per-graph block
-evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
-column), so it is a design change, not a bug fix. That design is SPEC-28's S3
-amendment (HDB-171, the `PerGraph` node); HDB-74 implements it and moves both
-cases into `selected.toml`.
+- `graph-variable-scope` — `GRAPH ?g { FILTER (BOUND(?g)) }` is 0 rows: the
+  filter sees `?g` unbound. Leaf-binding returned one row per named graph.
+- `graph-optional` — `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }` is 1 row:
+  the OPTIONAL matches on the object and the post-join keeps only the row
+  whose object *is* the graph name. Leaf-binding returned 4.
 
 # Known-failing W3C SPARQL Update cases
 
@@ -484,14 +459,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-05 with `--engine owlrl`: **401 pass, 106 fail, 40 skip**.
+Measured on 2026-09-06 with `--engine owlrl`: **407 pass, 100 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason. Which task fixed what is in the git log
 and in the per-root-cause tables below, not restated here — every branch that
 moved these numbers used to conflict on this paragraph.
 
-The 106 reds are listed one-by-one in `expected_failures` in
+The 100 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -506,7 +481,6 @@ cannot rot, and CI catches regressions in both directions.
 | 25 | **Unimplemented builtins**: `BNODE`, `IRI`, `ENCODE_FOR_URI`, `MD5`, `SHA1/256/512`, `STRDT`, `STRLANG`, `UUID`, `STRUUID`, `RAND`, `NOW`, `TZ`, `TIMEZONE`, and the `xsd:` constructor call form. | `functions/`, `aggregates/agg-err-02` |
 | 14 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` (i.e. `MINUS`) works (HDB-133); the expression form does not translate. Includes 4 `negation/` cases whose `MINUS` right-hand pattern itself contains a `FILTER NOT EXISTS`. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
-| 6 | **Sub-`SELECT` or property path nested inside `GRAPH ?g`** (SPEC-28 S3). | `subquery/`, `property-path/pp35` |
 | 1 | **A comparison operator returns a value where §17.4 requires an expression error**, so `IF` takes the wrong branch and the variable stays bound instead of dropping out. | `functions/if02` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 

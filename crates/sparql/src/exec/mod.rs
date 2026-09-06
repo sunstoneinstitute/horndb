@@ -18,7 +18,7 @@ pub mod runtime;
 pub mod scope;
 pub mod store_source;
 pub use scope::{
-    is_reserved_graph, per_graph_needs_the_scan_loop, NamedGraph, ResolvedScope, ScanScope,
+    graph_var_needs_a_per_graph_node, is_reserved_graph, NamedGraph, ResolvedScope, ScanScope,
     RESERVED_GRAPH_PREFIX,
 };
 
@@ -108,12 +108,12 @@ pub trait Executor {
     }
 
     /// The graphs `GRAPH ?g` enumerates, in a deterministic order (SPEC-28
-    /// S3/D6). The scan operator calls this once per `GRAPH ?g` leaf, then
-    /// scans each graph on its own — which is why this returns graph *names*
-    /// and never a widened scope.
+    /// S3/D6). The `PerGraph` operator calls this once per instantiation and
+    /// evaluates its block in each graph in turn — which is why this returns
+    /// graph *names* and never a widened scope. It is the **only** place the
+    /// implementation may enumerate graphs.
     ///
-    /// `named` is the query's `FROM NAMED` set as
-    /// [`ResolvedScope::PerGraph`] carries it: `None` = every non-reserved
+    /// `named` is the query's `FROM NAMED` set: `None` = every non-reserved
     /// graph the backend holds; `Some(list)` = exactly those of `list` the
     /// backend holds, reserved ones included (naming one is the opt-in).
     /// The default graph is never in the result (D3), and a name matching

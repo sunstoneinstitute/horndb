@@ -366,12 +366,12 @@ it. This amendment does not settle D11.
   holds one graph's block result at a time.
 - *Not measured yet — open question.* The per-iteration overhead at the
   platform's scale (thousands of graphs, a handful of operators per block)
-  has not been measured. HDB-74 must bench `GRAPH ?g { ?s ?p ?o }` and one
+  has not been measured. HDB-172 must bench `GRAPH ?g { ?s ?p ?o }` and one
   join-plus-filter block on the ≥1000-graph corpus acceptance criterion 4
   already calls for, before and after, on `hornbench`, and record both in
   `docs/benchmarks.md`. The single-BGP shape must not regress beyond noise;
   a regression there means the operator-reuse fix above, not a return to
-  leaf-binding.
+  leaf-binding. HDB-74 lands the operator; the measurement is HDB-172's.
 - *Deferred optimisation, not required:* when `?g` is already bound above the
   node — `{ ?g :says :hi } GRAPH ?g { … }`, or `FILTER(?g = <g1>)` directly
   above it — the loop still visits every graph and the join or filter above
@@ -896,8 +896,8 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
   bare `GRAPH ?g { ?s ?p ?o }` that is the same |G| scans as today plus one
   small allocation per graph; for a richer block it is one allocation per
   operator per graph. The amendment's point 3 names the experiment and the
-  fallback (reuse the tree, re-run only the scans); HDB-74 runs it before
-  merging.
+  fallback (reuse the tree, re-run only the scans); HDB-172 runs it on
+  `hornbench` once HDB-74 has landed the operator.
 - **Pushdown regressions are silent by nature.** The count and group-count
   shortcuts exist to avoid materializing rows. If one of them ignores a graph
   scope it returns a plausible number, not an error — the exact failure mode S1
