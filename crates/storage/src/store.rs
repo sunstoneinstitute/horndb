@@ -86,6 +86,12 @@ impl Store {
         } else {
             Dictionary::open(&log.dict_path(gen))?
         };
+        // ponytail: cold placement is not durable. Nothing records which
+        // predicates were demoted, so replay rebuilds every partition warm and
+        // any leftover cold file is stale — drop the whole directory rather
+        // than leave orphans behind. Durable placement needs a manifest entry;
+        // the placement-policy task re-demotes after a reopen.
+        let _ = std::fs::remove_dir_all(dir.join("cold"));
         let mut store = Self::with_dictionary(dictionary);
         let mut seen_batch = false;
         let mut recovered = RecoveredInputs::default();
@@ -615,6 +621,43 @@ impl Store {
             return; // a write landed mid-mark; its terms may be unmarked
         }
         self.dictionary.gc(&marks);
+    }
+
+    /// Demote one predicate partition to a cold, memory-mapped file under
+    /// `cold_dir` (SPEC-25 S5). Placement is by hand for now — no policy picks
+    /// the victim. Not a logical write: see [`MemoryTier::demote`].
+    ///
+    /// Cold placement is **not durable**: [`Store::open`] deletes `<dir>/cold`
+    /// and replays every partition warm.
+    pub fn demote(&self, g: GraphId, p: TermId, cold_dir: &Path) -> Result<bool> {
+        self.memory_tier().demote(g, p, cold_dir)
+    }
+
+    /// Bring one cold partition back into memory and delete its file.
+    pub fn promote(&self, g: GraphId, p: TermId) -> Result<bool> {
+        self.memory_tier().promote(g, p)
+    }
+
+    /// Demote every warm partition in every graph, in `(graph, predicate)` id
+    /// order. Returns how many were actually demoted (a partition with no
+    /// visible rows is skipped).
+    pub fn demote_all(&self, cold_dir: &Path) -> Result<usize> {
+        let mt = self.memory_tier();
+        let snap = mt.snapshot();
+        let mut targets: Vec<(GraphId, TermId)> = snap
+            .graphs()
+            .into_iter()
+            .flat_map(|g| snap.predicates(g).into_iter().map(move |p| (g, p)))
+            .collect();
+        drop(snap);
+        targets.sort_by_key(|(g, p)| (g.0, p.0));
+        let mut demoted = 0usize;
+        for (g, p) in targets {
+            if mt.demote(g, p, cold_dir)? {
+                demoted += 1;
+            }
+        }
+        Ok(demoted)
     }
 
     pub fn intern_graph_uri(&self, graph_uri: &Term) -> Result<GraphId> {

@@ -469,3 +469,50 @@ and stamps compared; id differential across recovery; checkpoint → append →
 reopen; torn tail; corrupted middle record; compaction between records;
 timed policy; stale generation sweep). Bench: `benches/wal_append.rs`
 (`audit-pass.sh` leg `wal`).
+
+## Cold partitions (SPEC-25 S5, first leaf delivered)
+
+SPEC-25 S5 asks for "a read-only `Tier` impl over the snapshot encoding". The
+tree does not support that reading. `Tier`'s only data accessor,
+`Tier::predicate`, returns `None` on `MemoryTier` and nothing calls it; every
+real read goes through `MemoryTier::snapshot()` and the `TierSnapshot`
+accessors. **So the seam is the partition, not the tier.** `partition::Partition`
+is a `Warm(PredicatePartition) | Cold(ColdPartition)` enum, and a `GraphStore`
+maps each predicate to one. `TierSnapshot` stays the single snapshot type every
+caller already uses; a second `Tier` impl would give the executor nothing to
+call.
+
+The whole-store snapshot encoding (`snapshot/format.rs`) is not reusable
+either: it is a `Read` stream with one front-coded dictionary of per-snapshot
+dense local ids and no offsets. `cold.rs` defines a per-partition file over
+global `TermId` bits that reuses the varint codec and the adjacency shape (see
+its module docs for the byte layout). Only the subject-major block is stored;
+object-major reads decode and re-sort transiently, the same shape
+`PredicatePartition::ordered_at` already uses on its filtered branch. A second
+block would roughly double the file.
+
+**Why a cold partition needs no visibility stamps.** `MemoryTier::demote`
+encodes exactly the rows visible at the version it runs at, and swaps the new
+`TierSnapshot` in at that *same* version — demotion is maintenance, not a
+logical write, like `compact()`. Every read goes through a pinned
+`TierSnapshot` and passes that snapshot's own version as `at`; there is no API
+to read a snapshot at any other version (`Store::snapshot_at` takes a pin, not
+a number). So a snapshot that can see the cold partition was created at or
+after the swap and its version is `>=` the encoded one. A reader pinned before
+the swap keeps its own older `Arc<GraphStore>` and still sees the warm
+partition, unchanged.
+
+**Writes never land cold.** `insert_at`, `apply_at` and `retract_quad_batch`
+route a cold partition through `warm_for_write`, which promotes it back to a
+`PredicatePartition` first — they need the stamp columns, which only warm has.
+That is also what keeps the paragraph above true: a retraction after a demotion
+promotes, so no row in a cold file is ever end-stamped behind its back.
+
+**Not durable.** Nothing records which predicates were demoted, so `Store::open`
+deletes `<dir>/cold` and replays every partition warm. Durable placement needs a
+manifest record; see the `ponytail:` comment in `Store::open_with`.
+
+Placement policy, access statistics, the `HotSetAdvisor` bias, and splitting
+`TierStats.bytes_estimated` into per-tier values are separate tasks. Today a
+cold partition's `estimated_bytes()` is its mapped file length and it is summed
+into the existing single `bytes_estimated`.

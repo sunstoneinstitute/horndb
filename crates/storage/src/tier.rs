@@ -5,7 +5,7 @@
 //! interface without touching call sites.
 
 use crate::error::Result;
-use crate::partition::PredicatePartition;
+use crate::partition::Partition;
 use crate::term::{GraphId, TermId};
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -28,7 +28,7 @@ pub struct ApplyReport {
 }
 
 pub trait Tier: Send + Sync + std::any::Any {
-    fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&PredicatePartition>;
+    fn predicate(&self, graph: GraphId, predicate: TermId) -> Option<&Partition>;
 
     fn predicates(&self, graph: GraphId) -> Vec<TermId>;
 

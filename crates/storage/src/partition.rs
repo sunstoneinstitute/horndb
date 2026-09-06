@@ -830,6 +830,21 @@ pub struct OrderedColumns {
 }
 
 impl OrderedColumns {
+    /// Wrap two already-sorted columns. Used by
+    /// [`crate::cold::ColdPartition::ordered`], which decodes them out of a
+    /// mapped file rather than sharing a warm partition's Arrow buffers.
+    pub(crate) fn new(
+        axis: PartitionAxis,
+        level0: Arc<UInt64Array>,
+        level1: Arc<UInt64Array>,
+    ) -> Self {
+        Self {
+            axis,
+            level0,
+            level1,
+        }
+    }
+
     pub fn axis(&self) -> PartitionAxis {
         self.axis
     }
@@ -935,6 +950,117 @@ impl PartitionBuilder {
             cols: once,
             hot_threshold,
             object_major,
+        }
+    }
+}
+
+/// What a graph maps a predicate to: either the warm, writable columnar
+/// partition or a cold, read-only memory-mapped one (SPEC-25 S5).
+///
+/// The inherent methods below are the whole read surface every caller uses;
+/// they delegate to the variant. Cold partitions carry no visibility stamps —
+/// see [`crate::cold`] for why the `_at` methods can ignore their version.
+pub enum Partition {
+    Warm(PredicatePartition),
+    Cold(crate::cold::ColdPartition),
+}
+
+impl Partition {
+    /// The warm partition, or `None` when this one is cold. Write paths and
+    /// compaction use it: both need the stamp columns, which only warm has.
+    pub fn as_warm(&self) -> Option<&PredicatePartition> {
+        match self {
+            Partition::Warm(p) => Some(p),
+            Partition::Cold(_) => None,
+        }
+    }
+
+    pub fn is_cold(&self) -> bool {
+        matches!(self, Partition::Cold(_))
+    }
+
+    /// Physically stored rows, dead MVCC history included.
+    pub fn len(&self) -> usize {
+        match self {
+            Partition::Warm(p) => p.len(),
+            Partition::Cold(c) => c.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Rows visible at `at`.
+    pub fn len_at(&self, at: CommitVersion) -> usize {
+        match self {
+            Partition::Warm(p) => p.len_at(at),
+            Partition::Cold(c) => c.len(),
+        }
+    }
+
+    /// Rows not yet retracted. See [`PredicatePartition::live_len`].
+    pub fn live_len(&self) -> usize {
+        match self {
+            Partition::Warm(p) => p.live_len(),
+            Partition::Cold(c) => c.len(),
+        }
+    }
+
+    /// True if any stored row has been retracted. Always false when cold: a
+    /// demotion encodes only visible rows, and a retraction promotes first.
+    pub fn has_retractions(&self) -> bool {
+        match self {
+            Partition::Warm(p) => p.has_retractions(),
+            Partition::Cold(_) => false,
+        }
+    }
+
+    /// Every stored row, subject-major, dead history included.
+    pub fn scan(&self) -> Box<dyn Iterator<Item = (TermId, TermId)> + '_> {
+        match self {
+            Partition::Warm(p) => Box::new(p.scan()),
+            Partition::Cold(c) => Box::new(c.scan()),
+        }
+    }
+
+    /// Rows visible at `at`, subject-major.
+    pub fn scan_at(&self, at: CommitVersion) -> Box<dyn Iterator<Item = (TermId, TermId)> + '_> {
+        match self {
+            Partition::Warm(p) => Box::new(p.scan_at(at)),
+            Partition::Cold(c) => Box::new(c.scan()),
+        }
+    }
+
+    /// Is `(subject, object)` visible at `at`?
+    pub fn contains_at(&self, subject: TermId, object: TermId, at: CommitVersion) -> bool {
+        match self {
+            Partition::Warm(p) => p.contains_at(subject, object, at),
+            Partition::Cold(c) => c.contains(subject, object),
+        }
+    }
+
+    /// Latest-live ordered access. See [`PredicatePartition::ordered`].
+    pub fn ordered(&self, ord: Ordering) -> OrderedColumns {
+        self.ordered_at(ord, LATEST)
+    }
+
+    /// Ordered access to rows visible at `at`.
+    pub fn ordered_at(&self, ord: Ordering, at: CommitVersion) -> OrderedColumns {
+        match self {
+            Partition::Warm(p) => p.ordered_at(ord, at),
+            Partition::Cold(c) => c.ordered(ord),
+        }
+    }
+
+    /// Footprint in bytes: the warm columns, or the cold file's mapped length.
+    ///
+    /// Both land in the tier's single `bytes_estimated` for now; splitting it
+    /// per tier is a separate task (SPEC-25 S5, HDB-179).
+    pub fn estimated_bytes(&self) -> u64 {
+        match self {
+            Partition::Warm(p) => p.estimated_bytes(),
+            Partition::Cold(c) => c.mapped_bytes(),
         }
     }
 }
