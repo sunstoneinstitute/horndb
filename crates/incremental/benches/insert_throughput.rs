@@ -28,17 +28,16 @@ fn transitive_p() -> HashJoinRule {
 
 fn bench_insert(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert");
-    // HDB-174 measurement (2026-09-06, this laptop, debug-instrumented probe,
-    // not release/hornbench): a chain's transitive closure is a complete
-    // order over its N+1 nodes, so `Circuit::tick`'s doubling fixpoint joins
-    // extents that converge to ~N²/2 rows against each other. The total
-    // number of (i, mid, j) compositions the bilinear self-join must sum is
-    // Θ(N³) regardless of join algorithm (hash join only removes
-    // non-matching candidates; on a converged chain almost every candidate
-    // matches). Measured: N=1,000 takes ~35 s; N=10,000 is projected at
-    // ~1,000× that (hours), not "seconds". Flagged to the task's requester —
-    // see the HDB-174 completion report.
-    for &n in &[100u64, 1_000, 10_000] {
+    // ponytail: the sweep stays small because this fixture is cubic by
+    // *shape*, not by join algorithm. A chain's transitive closure is a
+    // complete order over its N+1 nodes, so the closing rounds self-join
+    // two ~N**2/2-row extents and the bilinear decomposition must sum
+    // C(N+1, 3) ~ N**3/6 compositions. Hash-joining (HDB-174) only drops
+    // non-matching candidates, and on a converged chain almost every
+    // candidate matches: measured N=1,000 is ~35 s per iteration, so
+    // N=10,000 is hours. Growing this sweep needs a sparser fixture whose
+    // closure does not saturate (HDB-182), not a faster kernel.
+    for &n in &[10u64, 50, 100] {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
                 let mut circuit = Circuit::new();

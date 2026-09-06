@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 32ef6471f768d081ac1c7cc639f90bf95eee624200f98ef9e78e4bfedfb6dbff # shrinks to a = Zset { inner: {} }, da = Zset { inner: {(0, 7, 0): 1} }, b = Zset { inner: {} }, db = Zset { inner: {(0, 22, 2): -1} }
+cc 4d2015474d3d0ddbde13621d575b1371dce4779a198d9f4eae8099424e7da542 # shrinks to a = Zset { inner: {} }, da = Zset { inner: {(0, 7, 2): 1} }, b = Zset { inner: {(2, 7, 0): 2} }, db = Zset { inner: {} }
