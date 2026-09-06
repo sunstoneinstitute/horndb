@@ -399,7 +399,9 @@ Lifting either refusal needs the graph variable joined **after** the block is
 evaluated rather than bound on the scan leaf: evaluate `P` per graph with
 `?g` free, then join `{?g → thatGraph}`. That is the per-graph block
 evaluation SPEC-28 phase 3 deliberately did not build (D5/D6 chose the scan
-column), so it is a design change, not a bug fix.
+column), so it is a design change, not a bug fix. That design is SPEC-28's S3
+amendment (HDB-171, the `PerGraph` node); HDB-74 implements it and moves both
+cases into `selected.toml`.
 
 # Known-failing W3C SPARQL Update cases
 

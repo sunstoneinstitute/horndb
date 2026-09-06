@@ -106,8 +106,8 @@ N-Quads loader routes each quad to its named graph. Above that line, nothing is.
 | D2 | When a query names no dataset, the default graph is the **union of all non-reserved graphs** (default), switchable to `strict` — the reserved sentinel graph alone. Graphs under the reserved `https://horndb.io/graph/` namespace (SPEC-27 F6, SPEC-29 D4) are never in the union; they enter the default dataset only when SPEC-29's `reasoning.default_dataset_includes_inferred` is set. | SPARQL 1.1 §13.2 leaves the no-`FROM` dataset implementation-defined. The consuming platform writes 100% of its data into named graphs, so `strict` makes every unqualified query return empty. Excluding reserved graphs keeps asserted and inferred data from blending by default (SPEC-29 D6). A deployment that mirrors another store, or is differentially compared against one, should set `strict` (see Risks). |
 | D3 | `GRAPH ?g { … }` ranges over **named graphs only** and never binds `?g` to the default graph. | SPARQL 1.1 §13.3. The default graph's sentinel is not an IRI and has no lexical form to bind. Holds in both D2 modes: under `union` a sentinel-graph quad is visible to an unqualified BGP but not through `GRAPH ?g`. |
 | D4 | A query that **does** name a dataset gets exact SPARQL 1.1 semantics. The D2 mode only decides the no-dataset case. | Conformance is not negotiable where the standard is definite. D2 exercises freedom only where the standard grants it. |
-| D5 | The logical algebra gains `Algebra::Graph { name, inner }`; the planner **pushes the graph scope onto the scan node**, never applies it as a post-filter. | With thousands of small graphs, post-filtering an all-graphs scan costs O(store) to answer a question about one small graph — the platform's single hottest shape. |
-| D6 | A variable-graph scan emits `?g` as an extra **scan column**, rather than lowering to a `Union` over `graphs()`. | Plan size must not grow with graph count. A thousand-arm union is unplannable and defeats every cardinality estimate. |
+| D5 | The logical algebra gains `Algebra::Graph { name, inner }`; the planner **pushes the graph scope onto the scan node**, never applies it as a post-filter. *Unchanged by the HDB-171 amendment:* inside a `PerGraph` node (D6) every scan leaf is scoped to the one graph the node is currently on. | With thousands of small graphs, post-filtering an all-graphs scan costs O(store) to answer a question about one small graph — the platform's single hottest shape. |
+| D6 | **Amended (HDB-171).** `GRAPH ?g { P }` lowers to one **`PerGraph` node** that evaluates the whole block `P` once per named graph with `?g` free, then joins `{?g → that graph}` onto that graph's rows — rather than to a `Union` over `graphs()`, and no longer as an extra column on the scan leaf (phase 3's form, recorded in S3). | Plan size must not grow with graph count: one node, `P` appears once. A thousand-arm union is unplannable and defeats every cardinality estimate. Binding `?g` on the leaf answers SPARQL 1.1 §18.2.2.2 wrongly whenever `P` reads `?g` or has a column-narrowing node in it; evaluating `P` per graph with `?g` free *is* §18.2.2.2. |
 | D7 | Partitions stay keyed **per `(graph, predicate)`**. No graph column is added inside a partition. | This is already `MemoryTier`'s shape, and it makes a ground-graph scan a map probe followed by an unchanged SPEC-02 F3/F4 `(s_id, o_id)` scan. The WCOJ trie iterators are untouched. |
 | D8 | The GSP surface mirrors `graph-server` §5 **minus branches**, and adds `?default`. `ETag`/`If-Match` conditional writes are **not** implemented. | HornDB has one lineage, so there is no branch path segment and no branch head to condition on. `graph-server` returns 400 for `?default` because its model has no default graph; HornDB has one (SPEC-02 F7), so it serves it. |
 | D9 | Idempotence is enforced **at the store boundary**, not by callers. | The consuming change feed is at-least-once and replays on restart. One enforcement point is one place to be right; every caller getting it right is a standing bug source. |
@@ -193,9 +193,10 @@ a cost proportional to the graph.
   which, with D11, already satisfies SPEC-29's constraint 3 (derived graphs must
   be nameable). No further change is needed for it.
 - **Variable form.** `GRAPH ?g { P }` evaluates `P` over each named graph and
-  binds `?g` to that graph's IRI. Physically this is one scan carrying the graph
-  id as an output column (D6), not a union of per-graph plans (D5/D6). `?g`
-  never binds the default graph (D3).
+  binds `?g` to that graph's IRI. Physically this is one `PerGraph` node
+  evaluating `P` once per graph (D6 as amended by HDB-171 — see the S3
+  amendment below; phase 3 shipped it as a graph column on the scan leaf), not
+  a union of per-graph plans. `?g` never binds the default graph (D3).
 - **Dataset construction.** `FROM <g>` builds the default graph as the RDF merge
   of the named `FROM` graphs; `FROM NAMED <g>` populates the set `GRAPH ?g`
   ranges over. A query with `FROM NAMED` but no `FROM` has an **empty** default
@@ -262,7 +263,184 @@ name is bound on the scan leaf, not joined on after the block is evaluated.
 Lifting either refusal means evaluating the whole block once per graph with `?g`
 free and joining the graph name on afterwards — a design change against D5/D6,
 not a bug fix. `harness/KNOWN-MANIFEST-BUGS.md` names the W3C cases each
-refusal costs.
+refusal costs. **The amendment below makes that design change; both families
+lift when HDB-74 implements it.**
+
+#### S3 amendment (HDB-171) — per-graph block evaluation
+
+SPARQL 1.1 §18.2.2.2 defines `GRAPH ?g { P }` as: for every named graph `g`
+in the dataset, evaluate `P` with `g` as the active graph and `?g` **free**,
+then join each result with the one-row solution `{?g → g}` (which drops rows
+where `P` bound `?g` to something else). Phase 3 fused that join into the scan
+leaves. This amendment evaluates it as written, and keeps the plan-size
+invariant D6 was protecting.
+
+**1. Plan shape.** The logical and physical plans gain one unary node:
+
+```
+PerGraph { var: ?g, inner: P }
+```
+
+`Algebra::Graph { name: Var(?g), inner }` lowers to `PerGraph` with `inner`
+lowered beneath it. The ground form `GRAPH <g>` is unchanged: no node, scope
+stamped on the leaves. Inside `PerGraph`, `Algebra::Graph` still does not
+survive lowering — every scan leaf under it keeps
+`GraphScope::Named(GraphSpec::Var(?g))`, but that scope now means "the graph
+the enclosing `PerGraph(?g)` is currently on", not "loop over the graphs and
+emit a column". A nested `GRAPH <h>` inside the block scopes its own leaves to
+`h` (innermost wins, as today); a nested `GRAPH ?h` is a second `PerGraph`
+node inside the first.
+
+Output columns of `PerGraph` = output columns of `P` ∪ `{?g}`. The
+`{?g → g}` join happens in the `PerGraph` operator, on each row `P` produced
+for graph `g`: if `P`'s schema has no `?g`, the column is appended bound to
+`g`; if it has one, a row survives only when its `?g` is unbound or equal to
+`g`, and is then set to `g`. This is the `bound_by_bgp` logic the scan loop
+(`exec::op::source::scan_scoped`) has today, moved up one level and applied to
+the block's result instead of one leaf's.
+
+The runtime already builds operators by walking the physical plan
+(`Runtime::build`), and a `BgpScan` runs its scan when its operator is built
+(`ScanOp::new`). The `PerGraph` operator therefore needs no new executor seam:
+on its first `next()` it fetches the graph list (point 2), and for each graph
+in turn it sets that graph as the active graph for `?g`, builds `P`'s operator
+tree (the leaves scan that one graph, through the same
+`ResolvedScope::OneGraph` path a ground `GRAPH <g>` uses), streams and
+post-joins its rows, and drops the tree before moving to the next graph. A
+scan leaf carrying `GraphSpec::Var(?g)` with no enclosing `PerGraph(?g)` in
+force is a planner error, never a widened scan (D1).
+
+What goes away: `ResolvedScope::PerGraph` and the loop in `scan_scoped`, the
+count/estimate seams' `is_per_graph` decline (a leaf under `PerGraph` resolves
+to `OneGraph`, which they already handle), the debug postcondition
+`per_graph_columns_survive` (the column is now structural, produced by the
+node, so no pass can narrow it away), and both refusal predicates (point 4).
+
+**2. Where the graph list comes from.** `Executor::named_graphs(named)` —
+the seam phase 3 already built: the graphs holding at least one visible quad
+(D11), filtered to the query's `FROM NAMED` set when there is one, otherwise
+every non-reserved graph plus any reserved graph SPEC-29 D6's flag opts in,
+sorted by IRI. `PerGraph` calls it once per instantiation and iterates the
+result. It is the **only** place the implementation may enumerate graphs.
+
+*Interaction with D11 / HDB-80.* Under D11 as written, a graph with no visible
+quads is not enumerated, so a block that can produce rows without reading a
+quad — `GRAPH ?g {}`, `GRAPH ?g { VALUES … }`, `GRAPH ?g { BIND(…) }`,
+`GRAPH ?g { FILTER(…) }`, `GRAPH ?g { OPTIONAL { … } }` — yields nothing for
+an empty-but-existing graph. That is D11's answer, not this amendment's. If
+HDB-80 replaces D11 with an explicit graph-existence set, `named_graphs()`
+grows to return those graphs and `PerGraph` visits them with no change to the
+plan shape; the quad-free block shapes above then yield one row per empty
+graph, which is what §18.2.2.2 says. HDB-80 therefore **constrains** HDB-74
+(enumerate through `named_graphs()` and nowhere else) but does **not block**
+it. This amendment does not settle D11.
+
+**3. Cost as graph count |G| grows.**
+
+- *Plan size:* O(|P|), independent of |G|. One `PerGraph` node; `P` appears
+  once. The `EXPLAIN` of `GRAPH ?g { ?s ?p ?o }` over any number of graphs
+  shows one `PerGraph` and one `BgpScan`.
+- *Runtime:* |G| iterations. Iteration `g` costs one build of `P`'s operator
+  tree (O(number of operators in `P`) allocations) plus `P`'s own evaluation
+  over graph `g` alone — each leaf is a `(graph, predicate)` partition probe
+  (D7), so it is proportional to `g`'s matching data, never to the store.
+  Total: `O(|G| · |P|)` fixed overhead + Σ_g cost(P over g). For a block that
+  is a single BGP this is the same |G| scan calls the phase-3 leaf loop makes
+  today; the join, filter and closure work of a richer block is done per
+  graph over that graph's rows, so Σ_g of small inputs replaces one join over
+  the merged inputs — never more total work, and a per-graph property-path
+  closure is both smaller and the only correct answer.
+- *What gets worse:* (a) the per-iteration fixed overhead now covers every
+  operator in `P`, not one scan — `|G| × |P|` small allocations, which at
+  thousands of graphs is measurable but not a change of order; (b) any part of
+  `P` that does not read the active graph — a `VALUES` block, a `BIND`, a
+  nested ground `GRAPH <h>` — is re-evaluated |G| times, so its cost multiplies
+  by |G| where today it is paid once; (c) a `PerGraph(?h)` nested inside a
+  `PerGraph(?g)` enumerates graphs |G| times, O(|G|²) enumeration calls. All
+  three are the price of the spec's semantics, and none is a common platform
+  shape. If (a) shows up in measurement, the fix is internal to the operator
+  (build `P`'s tree once and re-run only its scans per graph) and does not
+  change the plan shape.
+- *What gets better:* peak memory. Today `scan_scoped` materializes every
+  graph's rows into one batch before anything above it runs; `PerGraph`
+  holds one graph's block result at a time.
+- *Not measured yet — open question.* The per-iteration overhead at the
+  platform's scale (thousands of graphs, a handful of operators per block)
+  has not been measured. HDB-74 must bench `GRAPH ?g { ?s ?p ?o }` and one
+  join-plus-filter block on the ≥1000-graph corpus acceptance criterion 4
+  already calls for, before and after, on `hornbench`, and record both in
+  `docs/benchmarks.md`. The single-BGP shape must not regress beyond noise;
+  a regression there means the operator-reuse fix above, not a return to
+  leaf-binding.
+- *Deferred optimisation, not required:* when `?g` is already bound above the
+  node — `{ ?g :says :hi } GRAPH ?g { … }`, or `FILTER(?g = <g1>)` directly
+  above it — the loop still visits every graph and the join or filter above
+  discards the rest, exactly as the phase-3 leaf loop does. A planner rewrite
+  that feeds a ground `?g` into `PerGraph`'s graph list is spec-preserving and
+  cheap; build it when a measured workload needs it.
+
+**4. Which refusals lift, and in what order.** Both families, in the same
+change. The `PerGraph` node is the one mechanism that fixes both: family 1
+(a barrier between the wrapper and its leaves — `Project`, `Distinct`,
+`Group`, `Slice`, `PathClosure`, a nested `GRAPH`, a `VALUES` arm not joined
+against a scoped one) lifts because `P` no longer has to carry a column to the
+top, the node appends it; family 2 (`P` reading `?g` — any expression,
+`BIND(… AS ?g)`, `?g` in an `OPTIONAL`'s or `MINUS`'s right arm) lifts because
+`?g` is free while `P` runs. Staging them would leave a barrier check guarding
+a subtree that no longer carries anything, for no gain. HDB-74 deletes
+`plan::lower::per_graph_barrier` and `plan::lower::per_graph_var_divergence`
+together (with `mentions_var` and `reads_no_quads`, which only they use).
+
+The shapes that answer today keep the same answers. Where `?g` appears only in
+triple positions or `VALUES` columns and is combined by `Join`, `Union`, or the
+left arm of a `LeftJoin`, filtering each side by `?g = g` before the operator
+(leaf-binding) equals filtering after it (post-join), so the pinned
+must-keep-answering tests are unaffected by construction.
+
+**5. What stays refused, and on what principle.** Nothing in the `GRAPH ?g`
+family: per-graph evaluation is §18.2.2.2 by construction, so there is no
+shape left where HornDB would answer differently from the spec. D1's
+principle stands and keeps one guard: a backend whose `named_graphs()` is the
+refusing default (it cannot enumerate its graphs) still refuses `GRAPH ?g`
+rather than answer over the wrong graphs. The pushdown rule stands too — a
+count seam that meets a scope it was not taught declines, never widens.
+
+**6. The gate.**
+
+- W3C `[sparql_query]` (`harness/selected.toml`): `graph-variable-scope`
+  (`GRAPH ?g { FILTER(BOUND(?g)) }`, expected **0 rows**) and `graph-optional`
+  (`GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }`, expected **1 row**) move
+  from `harness/KNOWN-MANIFEST-BUGS.md` into the selection: 26 of 29 cases,
+  the remaining 3 being the blank-node grading cases, unrelated to `GRAPH`.
+- W3C `sparql11-eval` `expected_failures`: the six entries under "a
+  sub-SELECT or a property path nested inside `GRAPH ?g`" —
+  `subquery/manifest#subquery01`..`05` and `property-path/manifest#pp35`
+  (HDB-135) — are removed and must pass. One that still fails has a second
+  cause; triage it under HDB-135, do not re-list it under this one.
+- `crates/sparql/tests/graph_query.rs`: `graph_var_read_inside_the_block_refuses`
+  and `unsupported_shapes_inside_graph_var_refuse` invert from must-refuse to
+  must-answer, with expected rows derived by hand from §18.2.2.2 over their
+  fixtures and identical on both backends. The correct answers the second
+  test's comment already derives stand (per-graph closure: `x→y` in g1 and
+  `y→z` in g2, no `x→z`; the ground-endpoint path: one row per graph holding
+  the triple; the aggregating sub-SELECT: g1 → 2, g2 → 3). Two worth spelling
+  out: `GRAPH ?g { ?s ?p ?o FILTER(?g = <g1>) }` is **0 rows** (the filter sees
+  `?g` unbound), and `GRAPH ?g { GRAPH <g1> { ?s ?p ?o } }` is g1's rows
+  **once per named graph** with `?g` bound to that graph — 4 rows on the
+  fixture, not 2. `graph_var_is_one_scan_node_whatever_the_graph_count` grows
+  an assertion: exactly one `PerGraph` node in the `EXPLAIN` text. Every
+  test in the must-keep-answering set — `graph_var_bound_by_the_pattern_itself`,
+  `graph_var_join_with_ground_var`, `values_inside_graph_var_answers`,
+  `graph_var_beside_an_optional_still_answers`, `graph_var_binds_per_row`,
+  `graph_var_count_counts_every_graph`, `distinct_and_limit_above_graph_var_still_answer`,
+  `empty_group_probes_graph_existence` — keeps its current expected rows.
+  `plan::lower::tests::postcondition_catches_a_narrowed_graph_column` goes with
+  the postcondition it tests. The pushdown differential battery's
+  "refuses under `GRAPH ?g`" leg becomes an answers-identically leg.
+- Docs in the same change: `crates/sparql/INTEGRATION-NOTES.md` ("Two families
+  of `GRAPH ?g` query are refused") and the matching section of
+  `harness/KNOWN-MANIFEST-BUGS.md` are rewritten to the new behaviour;
+  `docs/architecture.md`'s `GRAPH` row flips to implemented.
 
 ### S4. Update — named-graph writes and graph management
 
@@ -518,8 +696,16 @@ and each phase grows the subset per S7. Phases 1–4 have implementation plans
    asserted-vs-derived separation, without which S5's `?default` restriction
    stands.
 
+6. **S3 amendment — per-graph block evaluation.** *(HDB-74; design HDB-171)*
+   The `PerGraph` node, the removal of both `GRAPH ?g` refusal families, and
+   the gate in the S3 amendment's point 6. Grows `[sparql_query]` by
+   `graph-variable-scope` and `graph-optional` and drops six
+   `sparql11-eval` expected failures (HDB-135). Constrained by, not blocked
+   by, HDB-80 (D11).
+
 Phase 1 stands alone. Phases 3, 4, and 5 all depend on phase 2; 3 and 4 are
-independent of each other; 5 depends on 4 for its write path.
+independent of each other; 5 depends on 4 for its write path. Phase 6 depends
+on phase 3 only.
 
 Phase 5 is **independent of the data-platform integration path** and blocks
 nothing on it: that platform writes through `/update` and reads through
@@ -535,12 +721,15 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
    a 200 carrying default-graph rows. Verified before phase 3 lands and
    superseded by criterion 2 after it.
 2. **`GRAPH` evaluates correctly (S3).** *Met by phase 3, with the two refused
-   `GRAPH ?g` shapes S3 names.* The `[sparql_query]` selection (not `sparql11`
-   — see S7's amendment) includes the W3C `graph/` and `dataset/` families and
-   is green on both backends: 24 of 29 cases, the other 5 in
-   `harness/KNOWN-MANIFEST-BUGS.md`. `GRAPH ?g` binds `?g` to each named graph
-   and never to the default graph. A `FROM NAMED`-only query has an empty
-   default graph.
+   `GRAPH ?g` shapes S3 names; fully met by phase 6.* The `[sparql_query]`
+   selection (not `sparql11` — see S7's amendment) includes the W3C `graph/`
+   and `dataset/` families and is green on both backends: 24 of 29 cases
+   after phase 3, 26 of 29 after phase 6 (the S3 amendment's gate), the rest
+   in `harness/KNOWN-MANIFEST-BUGS.md`. `GRAPH ?g` binds `?g` to each named
+   graph and never to the default graph, and evaluates its block per graph
+   with `?g` free (§18.2.2.2) while the plan holds one `PerGraph` node
+   whatever the graph count. A `FROM NAMED`-only query has an empty default
+   graph.
 3. **The default-graph mode is real and switchable (S3/D2).** *Met by phase 3,
    pinned by `crates/sparql/tests/graph_query.rs` — no W3C case grades it.*
    On a store whose
@@ -592,7 +781,11 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
   distinguish an empty-but-existing graph from an absent one will fail. The
   fallback is a small explicit graph-existence set in the tier, independent of
   quad count. Settle this the moment the `clear/` and `drop/` manifests are
-  fetched and graded — before building on D11, not after.
+  fetched and graded — before building on D11, not after. *Phase 4 outcome:*
+  3 `clear/` cases excluded, judged not material (`harness/KNOWN-MANIFEST-BUGS.md`);
+  the decision is HDB-80's. The S3 amendment's `PerGraph` node reads the graph
+  list through `named_graphs()` alone, so whichever way HDB-80 goes it changes
+  that one seam, not the plan.
 - **Thousands of small graphs versus per-partition overhead.** D7 makes the
   partition key `(graph, predicate)`. The platform expects thousands of graphs,
   each small, each with a handful of predicates — so the store holds a very
@@ -611,6 +804,13 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
   estimator work was done — estimates stayed coarse (a whole-store upper bound
   is valid under any scope) and are structurally kept off the result path.
   Better estimates for many-graph plans remain open.
+- **`PerGraph`'s per-iteration overhead at thousands of graphs is unmeasured.**
+  The S3 amendment rebuilds the block's operator tree once per graph. For a
+  bare `GRAPH ?g { ?s ?p ?o }` that is the same |G| scans as today plus one
+  small allocation per graph; for a richer block it is one allocation per
+  operator per graph. The amendment's point 3 names the experiment and the
+  fallback (reuse the tree, re-run only the scans); HDB-74 runs it before
+  merging.
 - **Pushdown regressions are silent by nature.** The count and group-count
   shortcuts exist to avoid materializing rows. If one of them ignores a graph
   scope it returns a plausible number, not an error — the exact failure mode S1
