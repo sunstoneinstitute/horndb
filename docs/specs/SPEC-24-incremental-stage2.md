@@ -263,7 +263,18 @@ stops being latent:
   update-path integration; E4 owns which rules are registered; E3 owns where
   derived rows persist.
 
-### S5. Durability — DeltaLog WAL + checkpoint scheduling
+### S5. Durability — DeltaLog WAL + checkpoint scheduling — **delivered**
+
+> **Status:** delivered (#214, HDB-52). `Input` and `TickCommit` records ride
+> the SPEC-25 S3 log (`Store::log_input` / `log_tick_commit` /
+> `take_recovered_inputs`); `Circuit::attach_input_log` makes appends durable
+> and arms the F8 cadence (`CheckpointPolicy`), `Circuit::recover` replays the
+> log — a batch a marker closed replays as its own tick, the un-ticked tail
+> comes back pending — and `Circuit::checkpoint` persists the store and
+> truncates the log by rolling its generation. `Circuit::tick` advances the
+> asserted base through `Checkpoint::merge`. Gate:
+> `crates/incremental/tests/wal_recovery.rs::kill_and_replay_reproduces_pre_crash_zset`.
+> Still E3's: the on-disk format and the per-predicate-partition layout.
 
 - **WAL seam.** `DeltaLog` gets a write-ahead-log backing behind its existing
   append/drain shape: `append` becomes a sequenced, durably-appended record
@@ -359,8 +370,12 @@ written when each increment is picked up.
    **delivered**. Update path → circuit → readers; synthetic-rule seam
    proof; unblocks LUBM-scale acceptance runs (with E4).
 5. **S5 — DeltaLog WAL + checkpoint scheduling**
-   ([#214](https://github.com/sunstoneinstitute/horndb/issues/214)). Contract
-   + crash tests here; on-disk format arrives with E3.
+   ([#214](https://github.com/sunstoneinstitute/horndb/issues/214)) —
+   **delivered** (HDB-52). `Input` / `TickCommit` records in the SPEC-25 S3
+   log, `Circuit::attach_input_log` / `recover`, and the F8 cadence driving
+   `Checkpoint::merge` plus truncation. Crash test:
+   `crates/incremental/tests/wal_recovery.rs`. The on-disk format and the
+   per-predicate-partition layout still arrive with E3.
 6. **S6 — MVCC backing of snapshots**
    ([#215](https://github.com/sunstoneinstitute/horndb/issues/215)).
    **Delivered** on E3's per-tuple visibility, with the storage commit version

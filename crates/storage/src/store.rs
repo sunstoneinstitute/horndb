@@ -10,7 +10,9 @@ use crate::memory_tier::MemoryTier;
 use crate::ordering::Ordering;
 use crate::term::{GraphId, InternedQuad, TermId, DEFAULT_GRAPH};
 use crate::tier::{ApplyReport, Tier, TierStats, TierWrite};
-use crate::wal::{self, Kind, Quad, Record, SyncPolicy, Wal};
+use crate::wal::{
+    self, BatchRecord, InputRecord, Kind, Quad, Record, RecoveredInputs, SyncPolicy, Wal,
+};
 use oxrdf::Term;
 use parking_lot::Mutex;
 use std::path::Path;
@@ -86,13 +88,33 @@ impl Store {
         };
         let mut store = Self::with_dictionary(dictionary);
         let mut seen_batch = false;
-        log.replay(|rec| store.replay(rec, &mut seen_batch))?;
+        let mut recovered = RecoveredInputs::default();
+        log.replay(|rec| store.replay(rec, &mut seen_batch, &mut recovered))?;
         log.logged_len = store.dictionary.len() as u64;
+        log.recovered = recovered;
         store.wal = Some(Mutex::new(log));
         Ok(store)
     }
 
-    fn replay(&self, rec: Record, seen_batch: &mut bool) -> Result<()> {
+    fn replay(
+        &self,
+        rec: Record,
+        seen_batch: &mut bool,
+        recovered: &mut RecoveredInputs,
+    ) -> Result<()> {
+        let rec: BatchRecord = match rec {
+            Record::Batch(b) => b,
+            // SPEC-24 S5: circuit inputs replay into the circuit, not the
+            // tier. A tick marker closes the batch before it.
+            Record::Input(i) => {
+                recovered.push_input(i);
+                return Ok(());
+            }
+            Record::TickCommit => {
+                recovered.close_tick();
+                return Ok(());
+            }
+        };
         for (i, term) in rec.dict.iter().enumerate() {
             self.dictionary
                 .replay_append(rec.dict_first + i as u64, term)?;
@@ -128,6 +150,9 @@ impl Store {
                     mt.apply_at(&rec.dels, &rec.adds, Some(rec.version))?;
                 }
             }
+            // `decode` returns these as `Record::Input` / `Record::TickCommit`,
+            // never inside a `BatchRecord`.
+            Kind::Input | Kind::TickCommit => return Err(bad("circuit")),
         }
         Ok(())
     }
@@ -213,6 +238,42 @@ impl Store {
         Wal::write_checkpoint_record(&mut file, version, tag, &chunk)?;
         drop(snap);
         log.commit_generation(gen, file, stats.slots)
+    }
+
+    /// Append one circuit input (ADR-0018 `Input`, SPEC-24 S5) — a user
+    /// assert or retract the circuit has not drained into a tick yet. Durable
+    /// per the store's [`SyncPolicy`]. Errors on an in-memory store.
+    pub fn log_input(&self, rec: &InputRecord) -> Result<()> {
+        self.wal_or_err()?.lock().append(&wal::encode_input(rec))
+    }
+
+    /// Mark a tick boundary (ADR-0018 `TickCommit`): every input up to
+    /// `last_seq` is drained, at the store's current commit version. Always
+    /// syncs, so a tick is durable under any [`SyncPolicy`] — the "per-tick"
+    /// fsync setting is `SyncPolicy::Every` plus this call. Errors on an
+    /// in-memory store.
+    pub fn log_tick_commit(&self, last_seq: u64) -> Result<()> {
+        let version = self.memory_tier().version();
+        let mut log = self.wal_or_err()?.lock();
+        log.append(&wal::encode_tick_commit(version, last_seq))?;
+        log.sync()
+    }
+
+    /// Take the circuit inputs this store recovered at open (ADR-0018): the
+    /// batches a tick marker closed, plus the un-ticked tail. Empty after the
+    /// first call, and empty for a store with no log.
+    pub fn take_recovered_inputs(&self) -> RecoveredInputs {
+        match &self.wal {
+            Some(log) => std::mem::take(&mut log.lock().recovered),
+            None => RecoveredInputs::default(),
+        }
+    }
+
+    /// Whether this store has un-replayed circuit inputs from its last open.
+    pub fn has_recovered_inputs(&self) -> bool {
+        self.wal
+            .as_ref()
+            .is_some_and(|l| !l.lock().recovered.is_empty())
     }
 
     /// Force the write-ahead log to stable storage now — the explicit sync

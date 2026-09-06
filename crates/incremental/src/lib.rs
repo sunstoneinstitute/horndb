@@ -26,8 +26,9 @@
 //! - [`zset`]: `Zset<K>` and algebraic operations.
 //! - [`types`]: triple-id, multiplicity, logical-time, derivation-kind.
 //! - [`operator`]: `LinearRule`, `BilinearRule` traits; n-ary tree planner.
-//! - [`delta_log`]: pending `(triple, ±1)` log between checkpoints.
-//! - [`checkpoint`]: merge a delta log into the base store.
+//! - [`delta_log`]: pending `(triple, ±1)` log, durable behind the storage
+//!   write-ahead log when a store is attached (SPEC-24 S5, ADR-0018).
+//! - [`checkpoint`]: merge a delta log into the base store; the F8 cadence.
 //! - [`change_feed`]: ordered MPMC stream of committed deltas (F9), with
 //!   bounded subscribers and a per-subscriber lag policy (SPEC-24 S3).
 //! - [`circuit`]: top-level `Circuit` builder + tick driver.
@@ -45,7 +46,7 @@ pub mod types;
 pub mod zset;
 
 pub use change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
-pub use checkpoint::{Checkpoint, CheckpointReport};
+pub use checkpoint::{Checkpoint, CheckpointPolicy, CheckpointReport};
 pub use circuit::{Circuit, TickReport};
 pub use closure_plan::{ClosureRetractDelta, ClosureRule, TransitiveClosureRule};
 pub use delta_log::DeltaLog;

@@ -21,6 +21,18 @@ DBSP-style Z-set deltas, change feed, checkpointing.
   the normal shape for unit tests and benches; assert against
   `asserted_base()` / `derived_base()` there.
 
+- **The input log is durable behind the storage WAL** (SPEC-24 S5, #214,
+  ADR-0018). `Circuit::attach_input_log(store)` turns every
+  `assert_triple`/`retract_triple` into an `Input` record in the store's
+  SPEC-25 S3 log and every tick into a `TickCommit` marker;
+  `Circuit::recover()` replays what `Store::open` found — closed batches as
+  their own ticks, the un-ticked tail as pending input. Attaching it arms the
+  F8 checkpoint cadence (`CheckpointPolicy`, 1 min / 100K deltas), which
+  persists the store and truncates the log. **A checkpoint truncates the
+  input log**, so a driver that attaches one must have committed its tick
+  outcomes to the store by then. A circuit with no input log behaves exactly
+  as before — that is the shape unit tests and benches use.
+
 - **The change feed nets per tick and bounds its subscribers** (SPEC-24 S3,
   #212): derived emissions accumulate in `Circuit::pending_derived` (keyed by
   `(triple, kind)`, fed by the single `emit_derived` funnel) and publish as
@@ -32,6 +44,6 @@ DBSP-style Z-set deltas, change feed, checkpointing.
 See `INTEGRATION-NOTES.md` for the consumer-facing contract, and
 `FUTURE-WORK.md` and SPEC-06 for the retraction/MVCC roadmap. The
 Stage-2 contract is `docs/specs/SPEC-24-incremental-stage2.md` (epic #186;
-S1–S4 delivered, remaining phase sub-issues #214–#217): WAL, MVCC
-backing, join runtime. The engine wiring (S4) lives on the consumer side,
+S1–S6 delivered, remaining phase sub-issues #216–#217): the join
+runtime and the intra-tick joint fixpoint. The engine wiring (S4) lives on the consumer side,
 `crates/sparql/src/exec/circuit.rs`.

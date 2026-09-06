@@ -15,8 +15,13 @@
 //! `u32 dict_count` × (`u32 len`, `term_codec` bytes), `u32 n_dels` × four
 //! `u64`, `u32 n_adds` × four `u64`. The dictionary section carries every term
 //! interned since the previous record, so no row ever names an id the log has
-//! not spelled out (the S2 flush-vs-later-interns hazard). The kind byte
-//! leaves room for SPEC-24 S5's `Input` / `TickCommit` records (ADR-0018).
+//! not spelled out (the S2 flush-vs-later-interns hazard).
+//!
+//! The circuit's two record kinds (SPEC-24 S5, ADR-0018) share the framing
+//! but carry their own bodies: `Input` is `u8 kind`, `u64 seq`, three `u64`
+//! term ids, `i64 mult`, `u64 kind_tag`; `TickCommit` is `u8 kind`, `u64
+//! version`, `u64 last_seq`. They are inputs to a tick, not committed rows,
+//! so replay hands them to the circuit instead of the tier.
 //!
 //! Tail discipline: a record cut short by the file end, or the last record
 //! with a bad checksum, is a torn tail — dropped and truncated. A bad
@@ -60,9 +65,70 @@ pub(crate) enum Kind {
     Apply = 2,
     /// Rows visible at the checkpoint version; opens a generation.
     Checkpoint = 3,
+    /// SPEC-24 S5: one circuit input (a user assert/retract), durable on
+    /// append and not yet drained into a tick.
+    Input = 4,
+    /// SPEC-24 S5: a tick boundary — every `Input` up to `last_seq` is
+    /// drained, at the commit version the record carries.
+    TickCommit = 5,
 }
 
-pub(crate) struct Record {
+/// One circuit input (ADR-0018 `Input`): a user assert or retract the circuit
+/// has not drained into a tick yet. Storage stores it verbatim — `kind_tag`
+/// is opaque here, encoded by `horndb-incremental` from its `DerivationKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputRecord {
+    /// Append order within the input log; the circuit's logical time.
+    pub seq: u64,
+    /// Subject, predicate, object term ids.
+    pub triple: (u64, u64, u64),
+    /// Signed multiplicity: `+1` asserts, `-1` retracts.
+    pub mult: i64,
+    pub kind_tag: u64,
+}
+
+/// The circuit inputs a store recovered at open (ADR-0018).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RecoveredInputs {
+    /// Input batches a `TickCommit` closed, oldest first. Replaying each as
+    /// its own tick reproduces the pre-crash tick grouping — and with it the
+    /// derived state, which depends on where the tick boundaries fell.
+    pub ticks: Vec<Vec<InputRecord>>,
+    /// Inputs appended after the last tick marker. Never ticked, so they are
+    /// still pending after recovery.
+    pub pending: Vec<InputRecord>,
+}
+
+impl RecoveredInputs {
+    pub(crate) fn push_input(&mut self, rec: InputRecord) {
+        self.pending.push(rec);
+    }
+
+    /// Close the open batch at a `TickCommit`. A marker with nothing pending
+    /// (an empty tick, or a tick replayed by a previous recovery) adds no
+    /// batch.
+    pub(crate) fn close_tick(&mut self) {
+        if !self.pending.is_empty() {
+            self.ticks.push(std::mem::take(&mut self.pending));
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ticks.is_empty() && self.pending.is_empty()
+    }
+}
+
+/// A decoded record: a committed storage batch, or one of the circuit's two
+/// input-log records (ADR-0018).
+pub(crate) enum Record {
+    Batch(BatchRecord),
+    Input(InputRecord),
+    /// A tick boundary. Its body carries the tick's commit version and last
+    /// drained sequence for offline inspection; replay only needs the marker.
+    TickCommit,
+}
+
+pub(crate) struct BatchRecord {
     pub kind: Kind,
     pub version: u64,
     pub bnode_doc_tag: u64,
@@ -153,6 +219,29 @@ pub(crate) fn encode(
     Ok(buf)
 }
 
+/// Body of an `Input` record (ADR-0018).
+pub(crate) fn encode_input(rec: &InputRecord) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(49);
+    buf.push(Kind::Input as u8);
+    buf.extend_from_slice(&rec.seq.to_le_bytes());
+    buf.extend_from_slice(&rec.triple.0.to_le_bytes());
+    buf.extend_from_slice(&rec.triple.1.to_le_bytes());
+    buf.extend_from_slice(&rec.triple.2.to_le_bytes());
+    buf.extend_from_slice(&rec.mult.to_le_bytes());
+    buf.extend_from_slice(&rec.kind_tag.to_le_bytes());
+    buf
+}
+
+/// Body of a `TickCommit` record (ADR-0018): the tick's commit version and
+/// the last input sequence it drained.
+pub(crate) fn encode_tick_commit(version: u64, last_seq: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(17);
+    buf.push(Kind::TickCommit as u8);
+    buf.extend_from_slice(&version.to_le_bytes());
+    buf.extend_from_slice(&last_seq.to_le_bytes());
+    buf
+}
+
 struct Cursor<'a>(&'a [u8]);
 
 impl<'a> Cursor<'a> {
@@ -194,6 +283,19 @@ pub(crate) fn decode(body: &[u8]) -> Result<Record> {
         1 => Kind::Insert,
         2 => Kind::Apply,
         3 => Kind::Checkpoint,
+        4 => {
+            let rec = InputRecord {
+                seq: c.u64()?,
+                triple: (c.u64()?, c.u64()?, c.u64()?),
+                mult: c.u64()? as i64,
+                kind_tag: c.u64()?,
+            };
+            return finish(c, Record::Input(rec));
+        }
+        5 => {
+            let (_version, _last_seq) = (c.u64()?, c.u64()?);
+            return finish(c, Record::TickCommit);
+        }
         k => return Err(wal_err(format!("unknown record kind {k}"))),
     };
     let version = c.u64()?;
@@ -207,18 +309,25 @@ pub(crate) fn decode(body: &[u8]) -> Result<Record> {
     }
     let dels = c.quads()?;
     let adds = c.quads()?;
+    finish(
+        c,
+        Record::Batch(BatchRecord {
+            kind,
+            version,
+            bnode_doc_tag,
+            dict_first,
+            dict,
+            dels,
+            adds,
+        }),
+    )
+}
+
+fn finish(c: Cursor<'_>, rec: Record) -> Result<Record> {
     if !c.0.is_empty() {
         return Err(wal_err("trailing bytes in record body"));
     }
-    Ok(Record {
-        kind,
-        version,
-        bnode_doc_tag,
-        dict_first,
-        dict,
-        dels,
-        adds,
-    })
+    Ok(rec)
 }
 
 // --- the log file ------------------------------------------------------------
@@ -246,6 +355,8 @@ pub(crate) struct Wal {
     file: File,
     /// Highest dictionary index a record has carried (or the base holds).
     pub(crate) logged_len: u64,
+    /// Circuit inputs this generation's replay found (SPEC-24 S5).
+    pub(crate) recovered: RecoveredInputs,
     policy: SyncPolicy,
     last_sync: Instant,
     dirty: bool,
@@ -307,6 +418,7 @@ impl Wal {
             gen,
             file,
             logged_len: 0,
+            recovered: RecoveredInputs::default(),
             policy,
             last_sync: Instant::now(),
             dirty: false,
@@ -418,6 +530,8 @@ impl Wal {
             .open(self.wal_path(gen))?;
         drop(file);
         self.logged_len = logged_len;
+        // The old generation's input records are gone with its file.
+        self.recovered = RecoveredInputs::default();
         self.dirty = false;
         self.last_sync = Instant::now();
         Ok(())
@@ -458,12 +572,34 @@ mod tests {
             &[q, q],
         )
         .unwrap();
-        let rec = decode(&body).unwrap();
+        let Record::Batch(rec) = decode(&body).unwrap() else {
+            panic!("batch record")
+        };
         assert_eq!(rec.kind, Kind::Apply);
         assert_eq!((rec.version, rec.bnode_doc_tag, rec.dict_first), (7, 2, 5));
         assert_eq!(rec.dict, vec![term]);
         assert_eq!(rec.dels, vec![q]);
         assert_eq!(rec.adds, vec![q, q]);
+        assert!(decode(&body[..body.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn circuit_records_round_trip() {
+        let input = InputRecord {
+            seq: 9,
+            triple: (1, 2, 3),
+            mult: -1,
+            kind_tag: 7,
+        };
+        let body = encode_input(&input);
+        let Record::Input(back) = decode(&body).unwrap() else {
+            panic!("input record")
+        };
+        assert_eq!(back, input);
+        assert!(matches!(
+            decode(&encode_tick_commit(42, 9)).unwrap(),
+            Record::TickCommit
+        ));
         assert!(decode(&body[..body.len() - 1]).is_err());
     }
 }

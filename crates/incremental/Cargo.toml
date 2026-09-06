@@ -17,6 +17,7 @@ horndb-storage = { path = "../storage" }
 oxrdf.workspace = true
 proptest.workspace = true
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "insert_throughput"

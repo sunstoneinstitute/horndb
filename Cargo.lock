@@ -1361,6 +1361,7 @@ dependencies = [
  "horndb-storage",
  "oxrdf",
  "proptest",
+ "tempfile",
  "thiserror",
 ]
 
