@@ -14,7 +14,8 @@
 //!     in-memory overlay (`dict_base`, SPEC-25 S2).
 //!   * Cold, read-only, memory-mapped predicate partitions behind the same
 //!     read surface as the warm ones (`cold`, `partition::Partition`,
-//!     `Store::demote` / `Store::promote`, SPEC-25 S5).
+//!     `Store::demote` / `Store::promote`, SPEC-25 S5), plus the access-driven
+//!     placement policy that moves them (`tiering`, `Store::rebalance`).
 //!   * A write-ahead log with checkpoints and crash recovery (`wal`,
 //!     `Store::open` / `Store::checkpoint`, SPEC-25 S3). The same log carries
 //!     the circuit's input records (`Store::log_input`, SPEC-24 S5,
@@ -35,6 +36,7 @@ pub mod snapshot;
 pub mod store;
 pub mod term;
 pub mod tier;
+pub mod tiering;
 pub mod visibility;
 pub(crate) mod wal;
 
@@ -55,5 +57,6 @@ pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, InternedQuad, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{ApplyReport, Tier, TierStats, TierWrite};
+pub use tiering::{PlacementHints, RebalanceReport, TieringConfig};
 pub use visibility::{visible, CommitVersion, LATEST, UNSET_END};
 pub use wal::{InputRecord, RecoveredInputs, SyncPolicy};

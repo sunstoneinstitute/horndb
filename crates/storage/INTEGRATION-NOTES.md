@@ -24,17 +24,35 @@ future variants must take new bytes, never reuse `0x00` or `0x01`.
 
 ## F4 — Hot-set advisor input to tiering
 
-`horndb-ml::hotset::HotSetAdvisor::predict_hot(max)` returns
-`Vec<TripleId>`. SPEC-02's tier-placement policy should:
+The storage side is built (SPEC-25 S5, HDB-179); the advisor side is
+not yet connected.
 
-1. Hold an `Arc<MlRegistry>` provided at construction time.
-2. Periodically call `registry.hotset_advisor().predict_hot(window_size)`.
-3. Bias placement toward the returned IDs **alongside** actual
-   recent-access statistics (never instead of).
+**What storage exposes.** `Store::rebalance(&TieringConfig,
+&PlacementHints)` runs one placement round over every predicate
+partition. It demotes partitions that have gone unread for
+`demote_after_idle_rounds` rounds and promotes cold ones that were read
+(the recent-access statistics, collected per `(GraphId, TermId)` by
+`AccessStats`). `PlacementHints::keep_warm` is the bias input: a set of
+`(GraphId, TermId)` partitions to keep warm, or pull warm ahead of the
+statistics. Hints only ever add — nothing in the set can cause a
+demotion — so an empty `PlacementHints` gives exactly the stats-only
+placement. That is the `ml.enabled = false` contract: a disabled
+advisor produces no hints, and placement is then bit-identical to a
+build with no advisor wired.
 
-With `ml.enabled = false` the call returns an empty `Vec` (no-op);
-tier placement therefore uses recent-access stats only — bit-identical
-to a build with no advisor wired.
+**What is still open (HDB-184).** Connecting
+`HotSetAdvisor::predict_hot` to `PlacementHints.keep_warm` needs two
+things that do not exist in the tree yet:
+
+1. A definition of what a `TripleId` (`u64`) denotes and how it maps to
+   a `(GraphId, TermId)` partition. SPEC-08 documents it as opaque and
+   says SPEC-02 owns its meaning; SPEC-02 has not defined it.
+2. An `MlRegistry` held by whatever drives the rounds (the server).
+   Nothing outside `horndb-ml` constructs one today.
+
+`horndb-storage` must not gain a `horndb-ml` dependency — `ml` sits
+above `storage` in the workspace dependency order — so the wiring
+belongs in the caller that owns both, not in `Store::rebalance`.
 
 ## Snapshot format (SPEC-02 F9)
 

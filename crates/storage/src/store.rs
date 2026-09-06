@@ -251,7 +251,9 @@ impl Store {
             for p in snap.tier.predicates(g) {
                 let rows = snap
                     .tier
-                    .with_predicate(g, p, |part| part.scan_at(version).collect::<Vec<_>>())
+                    .with_predicate_uncounted(g, p, |part| {
+                        part.scan_at(version).collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 for (s, o) in rows {
                     chunk.push((g, s, p, o));
@@ -690,6 +692,23 @@ impl Store {
         Ok(demoted)
     }
 
+    /// Run one placement round over every partition: demote the ones that
+    /// have gone unread for `cfg.demote_after_idle_rounds` rounds, promote the
+    /// cold ones that were read (SPEC-25 S5). See
+    /// [`MemoryTier::rebalance`](crate::MemoryTier::rebalance) for the rules.
+    ///
+    /// The trigger is explicit, exactly like [`Self::compact`] — a caller (a
+    /// server timer, a test, the harness) decides the cadence. `hints` biases
+    /// placement toward keeping named partitions warm and is additive: an
+    /// empty [`PlacementHints`] gives the stats-only placement.
+    pub fn rebalance(
+        &self,
+        cfg: &crate::tiering::TieringConfig,
+        hints: &crate::tiering::PlacementHints,
+    ) -> Result<crate::tiering::RebalanceReport> {
+        self.memory_tier().rebalance(cfg, hints)
+    }
+
     pub fn intern_graph_uri(&self, graph_uri: &Term) -> Result<GraphId> {
         let id = self.dictionary.intern(graph_uri)?;
         Ok(GraphId(id.0))
@@ -945,7 +964,7 @@ impl StoreSnapshot<'_> {
         for p_id in preds {
             let p = self.term(p_id)?;
             self.tier
-                .with_predicate(g, p_id, |part| -> Result<()> {
+                .with_predicate_uncounted(g, p_id, |part| -> Result<()> {
                     for (s_id, o_id) in part.scan_at(version) {
                         out.push((self.term(s_id)?, p.clone(), self.term(o_id)?));
                     }
@@ -968,7 +987,7 @@ impl StoreSnapshot<'_> {
         preds.sort_by_key(|t| t.0);
         preds.into_iter().flat_map(move |p_id| {
             self.tier
-                .with_predicate(g, p_id, |part| {
+                .with_predicate_uncounted(g, p_id, |part| {
                     part.scan_at(version)
                         .map(move |(s, o)| (s, p_id, o))
                         .collect::<Vec<_>>()

@@ -194,8 +194,8 @@ use crate::exec::{
 use arrow::array::UInt64Array;
 use horndb_metrics::labels::LoadPhase;
 use horndb_storage::{
-    GraphId, InternedQuad, PinnedSnapshot, Store as ColumnStore, StoreSnapshot, TermId,
-    DEFAULT_GRAPH,
+    GraphId, InternedQuad, PinnedSnapshot, PlacementHints, RebalanceReport, Store as ColumnStore,
+    StoreSnapshot, TermId, TieringConfig, DEFAULT_GRAPH,
 };
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -919,6 +919,24 @@ impl HornBackend {
         self.store
             .demote_all()
             .map_err(|e| SparqlError::Executor(format!("demote_all: {e}")))
+    }
+
+    /// One placement round over this backend's store (SPEC-25 S5): partitions
+    /// unread for `cfg.demote_after_idle_rounds` rounds go cold, cold ones
+    /// that were read come back warm. `hints` can only keep or pull a
+    /// partition warm, never demote it.
+    ///
+    /// A passthrough so a server timer or the harness can drive placement —
+    /// there is no public store accessor. Explicit trigger, like
+    /// [`Self::demote_all`]; nothing calls it on a schedule yet.
+    pub fn rebalance_tiers(
+        &self,
+        cfg: &TieringConfig,
+        hints: &PlacementHints,
+    ) -> Result<RebalanceReport> {
+        self.store
+            .rebalance(cfg, hints)
+            .map_err(|e| SparqlError::Executor(format!("rebalance: {e}")))
     }
 
     /// [`Self::demote_all`] when [`cold_tier_enabled`] says so, otherwise
