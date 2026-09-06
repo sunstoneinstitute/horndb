@@ -3257,7 +3257,7 @@ numbers should not be compared to the target column above.
 
 | Bench | Crate | Notes |
 |---|---|---|
-| `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic 10K-triple fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. First hornbench numbers recorded in the SPEC-24 S1 row in *Measured* above (2026-07-20). |
+| `benches/insert_throughput.rs` | `horndb-incremental` | SPEC-06 NF1/NF2 scaffold. Synthetic chain-of-P-edges fixture — LUBM-1000 and LUBM-8000 are Stage-2 work. First hornbench numbers recorded in the SPEC-24 S1 row in *Measured* above (2026-07-20). HDB-174 moved the fixture rule onto `kernels::HashJoinRule`. The sweep is still capped at 10/50/100 edges: a chain's closure is a complete order, so the join sums ~N³/6 compositions whatever the kernel does. HDB-182 replaces the fixture so this can be measured at 10k+ edges. |
 | `benches/load_lubm.rs` | `horndb-storage` | SPEC-02 F8 / acceptance #1 scaffold. |
 | `benches/transitive.rs` | `horndb-closure` | SPEC-05 NF1 / acceptance #1 scaffold. |
 | `benches/sameas.rs` | `horndb-closure` | SPEC-05 `owl:sameAs` equivalence-class scaffold. |

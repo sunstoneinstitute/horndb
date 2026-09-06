@@ -9,7 +9,8 @@
 
 #![allow(dead_code)]
 
-use horndb_incremental::{BilinearRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_incremental::{BilinearRule, HashJoinRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_wcoj::{Term, TriplePattern, Var};
 
 pub const SC: u64 = 100;
 pub const SPO: u64 = 101;
@@ -20,9 +21,28 @@ pub const R2_SCM_SPO: RuleId = 2;
 pub const R3_CAX_SCO: RuleId = 3;
 
 /// Bilinear self-join on a single predicate `p`: (?x p ?y) ∧ (?y p ?z) → (?x p ?z).
+/// A thin `HashJoinRule` wrapper — kept as its own named struct (rather than
+/// a bare `HashJoinRule` value) because other fixtures/tests construct it by
+/// struct literal (`TransitiveOn { id, p }`).
 pub struct TransitiveOn {
     pub id: RuleId,
     pub p: u64,
+}
+
+impl TransitiveOn {
+    fn kernel(&self) -> HashJoinRule {
+        let x = Term::Var(Var(0));
+        let y = Term::Var(Var(1));
+        let z = Term::Var(Var(2));
+        let p = Term::Bound(self.p);
+        HashJoinRule::new(
+            self.id,
+            TriplePattern::new(x, p, y),
+            TriplePattern::new(y, p, z),
+            TriplePattern::new(x, p, z),
+        )
+        .expect("TransitiveOn's shape is a valid HashJoinRule")
+    }
 }
 
 impl BilinearRule for TransitiveOn {
@@ -30,21 +50,7 @@ impl BilinearRule for TransitiveOn {
         self.id
     }
     fn apply_full(&self, a: &Zset<TripleId>, b: &Zset<TripleId>) -> Zset<TripleId> {
-        let mut out = Zset::new();
-        for ((xs, xp, xo), ma) in a.iter() {
-            if *xp != self.p {
-                continue;
-            }
-            for ((ys, yp, yo), mb) in b.iter() {
-                if *yp != self.p {
-                    continue;
-                }
-                if xo == ys {
-                    out.add((*xs, self.p, *yo), ma * mb);
-                }
-            }
-        }
-        out
+        self.kernel().apply_full(a, b)
     }
     fn apply_delta(
         &self,
@@ -53,13 +59,10 @@ impl BilinearRule for TransitiveOn {
         da: &Zset<TripleId>,
         db: &Zset<TripleId>,
     ) -> Zset<TripleId> {
-        let mut out = self.apply_full(da, b);
-        out.add_assign(&self.apply_full(a, db));
-        out.add_assign(&self.apply_full(da, db));
-        out
+        self.kernel().apply_delta(a, b, da, db)
     }
     fn body_predicates(&self) -> [Option<u64>; 2] {
-        [Some(self.p), Some(self.p)]
+        self.kernel().body_predicates()
     }
 }
 
@@ -68,26 +71,27 @@ pub struct CaxScoRule {
     pub id: RuleId,
 }
 
+impl CaxScoRule {
+    fn kernel(&self) -> HashJoinRule {
+        let x = Term::Var(Var(0));
+        let c = Term::Var(Var(1));
+        let d = Term::Var(Var(2));
+        HashJoinRule::new(
+            self.id,
+            TriplePattern::new(x, Term::Bound(TYPE), c),
+            TriplePattern::new(c, Term::Bound(SC), d),
+            TriplePattern::new(x, Term::Bound(TYPE), d),
+        )
+        .expect("CaxScoRule's shape is a valid HashJoinRule")
+    }
+}
+
 impl BilinearRule for CaxScoRule {
     fn id(&self) -> RuleId {
         self.id
     }
     fn apply_full(&self, a: &Zset<TripleId>, b: &Zset<TripleId>) -> Zset<TripleId> {
-        let mut out = Zset::new();
-        for ((xs, xp, xo), ma) in a.iter() {
-            if *xp != TYPE {
-                continue;
-            }
-            for ((ys, yp, yo), mb) in b.iter() {
-                if *yp != SC {
-                    continue;
-                }
-                if xo == ys {
-                    out.add((*xs, TYPE, *yo), ma * mb);
-                }
-            }
-        }
-        out
+        self.kernel().apply_full(a, b)
     }
     fn apply_delta(
         &self,
@@ -96,13 +100,10 @@ impl BilinearRule for CaxScoRule {
         da: &Zset<TripleId>,
         db: &Zset<TripleId>,
     ) -> Zset<TripleId> {
-        let mut out = self.apply_full(da, b);
-        out.add_assign(&self.apply_full(a, db));
-        out.add_assign(&self.apply_full(da, db));
-        out
+        self.kernel().apply_delta(a, b, da, db)
     }
     fn body_predicates(&self) -> [Option<u64>; 2] {
-        [Some(TYPE), Some(SC)]
+        self.kernel().body_predicates()
     }
 }
 

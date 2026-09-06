@@ -28,6 +28,9 @@
 //! - [`extent`]: `PredExtent` — the base extent indexed by predicate, so
 //!   `NaryPlan` leaves can bind to a single predicate's rows (SPEC-24 S7).
 //! - [`operator`]: `LinearRule`, `BilinearRule` traits; n-ary tree planner.
+//! - [`kernels`]: `HashJoinRule` — the generic hash-join `BilinearRule`
+//!   runtime (SPEC-24 S7 leaf 2), the one join a rule author or codegen
+//!   instantiates instead of hand-writing a nested loop.
 //! - [`delta_log`]: pending `(triple, ±1)` log, durable behind the storage
 //!   write-ahead log when a store is attached (SPEC-24 S5, ADR-0018).
 //! - [`checkpoint`]: merge a delta log into the base store; the F8 cadence.
@@ -43,6 +46,7 @@ pub mod circuit;
 pub mod closure_plan;
 pub mod delta_log;
 pub mod extent;
+pub mod kernels;
 pub mod operator;
 pub mod snapshot;
 pub mod types;
@@ -54,6 +58,7 @@ pub use circuit::{Circuit, TickReport};
 pub use closure_plan::{ClosureRetractDelta, ClosureRule, TransitiveClosureRule};
 pub use delta_log::DeltaLog;
 pub use extent::PredExtent;
+pub use kernels::{HashJoinRule, KernelError};
 pub use operator::{BilinearRule, LinearRule, NaryPlan};
 pub use snapshot::Snapshot;
 pub use types::{DeltaRecord, DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};

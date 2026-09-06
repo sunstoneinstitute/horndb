@@ -12,6 +12,7 @@ crossbeam-channel.workspace = true
 horndb-closure = { path = "../closure" }
 horndb-metrics.workspace = true
 horndb-storage = { path = "../storage" }
+horndb-wcoj = { path = "../wcoj" }
 
 [dev-dependencies]
 oxrdf.workspace = true

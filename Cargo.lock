@@ -1359,6 +1359,7 @@ dependencies = [
  "horndb-closure",
  "horndb-metrics",
  "horndb-storage",
+ "horndb-wcoj",
  "oxrdf",
  "proptest",
  "tempfile",

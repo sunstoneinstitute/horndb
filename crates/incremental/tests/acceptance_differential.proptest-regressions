@@ -7,3 +7,4 @@
 cc 4aa77d5153c125dd271072cf401d235baaeccae8fea8c675bb0491f94538e46f # shrinks to inserts = [(0, 102, 1), (1, 100, 1), (0, 100, 0)]
 cc 44eeffb6973e14ef7ca1ffa47da316ae6fac7e88fab756cc46b68a4a6ceabb7a # shrinks to inserts = [(3, 100, 3), (0, 100, 0), (0, 100, 0)]
 cc 8e71eead57293374a588e3ca12ee707ab08b4208c24c5f0879836c661ba94068 # shrinks to inserts = [(5, 100, 0), (0, 102, 5), (0, 102, 0)]
+cc a56d7c950c0dd043a5535302a21f5dfb1d049987de5ffb1035d27527c65434ae # shrinks to ops = [((0, 102, 0), false), ((0, 100, 4), false), ((0, 100, 4), true)]
