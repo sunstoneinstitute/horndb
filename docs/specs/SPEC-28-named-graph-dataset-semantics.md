@@ -112,7 +112,7 @@ N-Quads loader routes each quad to its named graph. Above that line, nothing is.
 | D8 | The GSP surface mirrors `graph-server` §5 **minus branches**, and adds `?default`. `ETag`/`If-Match` conditional writes are **not** implemented. | HornDB has one lineage, so there is no branch path segment and no branch head to condition on. `graph-server` returns 400 for `?default` because its model has no default graph; HornDB has one (SPEC-02 F7), so it serves it. |
 | D9 | Idempotence is enforced **at the store boundary**, not by callers. | The consuming change feed is at-least-once and replays on restart. One enforcement point is one place to be right; every caller getting it right is a standing bug source. |
 | D10 | `WITH` / `USING` / `USING NAMED` are **in scope**, landing with the same dataset machinery as `FROM`. | They are the update-side spelling of the same construct; deferring them would leave a second silent-or-refusing surface for no saving. |
-| D11 | A named graph **exists iff it holds at least one visible quad**. No empty-graph registry. | Matches the RDF dataset model and keeps storage simple. `CREATE <g>` on an absent graph succeeds as a no-op; `DROP` of an absent graph is an error unless `SILENT`. See Risks for the conformance exposure. |
+| D11 | **Settled (HDB-80).** A named graph **exists iff it holds at least one visible quad**. No empty-graph registry — this is the permanent rule, not a placeholder pending grading. HornDB is a store that *does not record empty graphs* in the sense SPARQL 1.1 Update §3.2 uses: `CREATE <g>` on an absent graph succeeds as a no-op and cannot bring an empty graph into existence; `CLEAR <g>` and `DROP <g>` have the same effect (both retract every quad, after which the graph does not exist); `DROP`/`CLEAR` of an absent graph is an error unless `SILENT`. See the D11 settlement note in S4 for the full contract and what it costs. | Matches the RDF dataset model, and SPARQL 1.1 Update §3.2 explicitly allows it. Graph existence needs no state of its own: no registry to version under MVCC, log in the WAL, checkpoint, or replay. The consuming platform never needs an empty graph — the named graph is its whole-graph `PUT` unit, and an empty `PUT` means "delete". The three W3C `clear/` cases this excludes test an optional behaviour (S4 note). |
 
 ## Requirements
 
@@ -323,6 +323,92 @@ with real named-graph operations.
 - **Atomicity is preserved.** The existing preflight-then-apply structure —
   validate every operation before the first mutation, so a failing update never
   half-applies — stays. Its rejection set shrinks; its shape does not change.
+
+#### D11 settlement (HDB-80) — graph existence is quad count
+
+The Decisions table originally reserved D11 for re-examination once the W3C
+`clear/` and `drop/` manifests were graded. They have been graded (phase 4),
+the Graph Store Protocol has shipped against D11 as written (phase 5), and
+this note settles the rule. **HornDB keeps the quad-count rule. There is no
+explicit graph-existence set, and none is planned.** Nobody should reopen
+this without a consumer that needs an empty named graph to exist.
+
+**1. The rule.** A named graph exists at a pinned version iff at least one
+quad in it is visible at that version. Existence is therefore derived from
+the store's quads and never stored separately. Consequences, all already
+implemented:
+
+- `CREATE <g>` on an absent graph is a no-op that succeeds; on an existing
+  graph it errors unless `SILENT`. It cannot bring an empty graph into being.
+- `CLEAR <g>` and `DROP <g>` have identical effect: every quad is retracted
+  through the store boundary (the "never unlink partitions" rule above), after
+  which `g` does not exist. Both error on an absent graph unless `SILENT`.
+- `CLEAR ALL`/`CLEAR NAMED` likewise leave no named graph behind; only the
+  default graph persists, because it is a sentinel, not a named graph.
+- `GRAPH ?g` enumerates non-empty graphs only. A block that can produce rows
+  without reading a quad — `GRAPH ?g {}`, `GRAPH ?g { VALUES … }`,
+  `GRAPH ?g { BIND(…) }`, `GRAPH ?g { FILTER(…) }`, `GRAPH ?g { OPTIONAL … }`
+  — yields one row per non-empty named graph and no row for a graph that was
+  created or cleared. This is the answer the S3 amendment (HDB-171)
+  deferred to this note: `Executor::named_graphs()` keeps returning the
+  graphs holding a visible quad, and the `PerGraph` node needs no change.
+- GSP: `GET`/`HEAD` of a graph with no visible quads is 404; `DELETE` of one is
+  404; `PUT`/`POST` return 201 iff the graph held no visible quads before the
+  write **and** the write added at least one. `PUT` of an empty payload to an
+  absent graph is an empty diff: 204, nothing created, a following `GET` is
+  404. `PUT` of an empty payload to an existing graph retracts every quad
+  (204), after which the graph does not exist.
+
+**2. Why this rule, and what it costs.** SPARQL 1.1 Update §3.2.1 says an
+implementation that does not record empty graphs always succeeds on
+`CREATE`, and §3.2.3 says such a store may treat `CLEAR` as `DROP`. The
+standard names this class of store and permits it; HornDB is in it. The
+alternative — an explicit existence set — is state with its own lifecycle:
+a per-graph created/dropped version in `MemoryTier` so MVCC snapshots agree
+on existence, a new `DeltaLog` WAL record type (SPEC-24 S5) plus checkpoint
+and replay support so the set survives restart, a rule for whether
+SPEC-29's reserved inferred graphs exist while empty, a `named_graphs()` /
+`graphs()` / `graph_exists` change in `crates/sparql`, and a runner and
+fixture change in two conformance suites — all to make three W3C cases
+gradable that test an optional behaviour. The consuming platform gains
+nothing from it: the named graph is its whole-graph `PUT` unit, and an
+empty `PUT` means "delete". What the rule costs is exactly those three
+cases, listed in point 4, and one observable difference from stores that
+do record empty graphs (Oxigraph, Jena): after `CREATE <g>`, `ASK { GRAPH
+<g> {} }` is false here and true there. That difference is permitted by the
+standard and is not a bug.
+
+**3. Blast radius.** None: every site already implements the rule.
+
+- `crates/sparql/src/exec/mod.rs` — `Executor::named_graphs` (`GRAPH ?g`
+  enumeration), `Store::graph_exists`, `Store::graphs`. Unchanged.
+- `crates/sparql/src/exec/mem.rs`, `horn.rs` — the implementations; `horn.rs`
+  answers through `StoreSnapshot::graph_len` and `StoreSnapshot::graphs`,
+  which `MemoryTier::graphs` already filters to live partitions. Unchanged.
+- `crates/sparql/src/update.rs` — `CREATE`/`CLEAR`/`DROP` per point 1.
+  Unchanged.
+- `crates/sparql/src/server/graph_store.rs` — the status codes in point 1.
+  Unchanged.
+- `crates/sparql/tests/update_graph_mgmt.rs`, `graph_store_protocol.rs`,
+  `w3c_update_suite.rs` — already pin the rule. Unchanged.
+- `crates/harness/src/sparql_eval.rs` and `crates/sparql/tests/
+  w3c_update_suite.rs` — both grade an update case by comparing the visible
+  quad set. Neither needs a graph-existence comparison, and the fixture
+  format stays as it is (an empty `GRAPH <g> {}` block parses to zero quads,
+  which is the correct expected state under this rule).
+
+**4. The gate.** No W3C case moves. `clear-graph-01`, `clear-named-01` and
+`clear-all-01` stay out of `[sparql_update]` permanently: their expected
+state keeps an emptied graph in existence, which a quad-set comparison
+cannot check, so selecting them there would grade nothing. The same three
+cases also run under `sparql11-eval` (`include = ["*"]`, SPEC-00's
+harness-first rule), where the runner's quad-set comparison reports them
+green. That is a correct verdict, not a false one: the final quad state is
+what the standard allows a store in this class to produce. It is recorded as
+such in `harness/KNOWN-MANIFEST-BUGS.md`. All four `drop/` cases and
+`clear-default-01` stay selected.
+
+**5. Follow-up.** No implementation task. This note is the whole of HDB-80.
 
 ### S5. Graph Store Protocol
 
@@ -557,7 +643,9 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
    `store.rs::snapshot_len_is_default_graph_scoped` test), with the incremental
    circuit moved onto `graph_len` in the same change (S2).
 5. **Named-graph update works (S4).** The `sparql11` update graph families are
-   in the selection and green. A round trip — `INSERT DATA { GRAPH <g> {…} }`,
+   in the selection and green — 33 of 36 `UpdateEvaluationTest` cases; the
+   three `clear/` cases that test empty-graph existence are permanently
+   excluded under D11 (S4's settlement note). A round trip — `INSERT DATA { GRAPH <g> {…} }`,
    `COPY <g> TO <h>`, `DROP <g>`, `ASK { GRAPH <h> {…} }` — behaves per SPARQL
    1.1 §3, including `SILENT` on a missing source graph. A write targeting
    `https://horndb.io/graph/…` errors with and without `SILENT`.
@@ -587,12 +675,15 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
   HornDB-vs-Oxigraph differential harness must set the mode explicitly, or it
   will report a stream of false failures. Decide the mode per comparison, and
   say which one a recorded number was taken under.
-- **Empty named graphs and D11.** Declaring that a graph exists iff it holds a
-  visible quad keeps storage simple, but W3C `CREATE`/`DROP` cases that
-  distinguish an empty-but-existing graph from an absent one will fail. The
-  fallback is a small explicit graph-existence set in the tier, independent of
-  quad count. Settle this the moment the `clear/` and `drop/` manifests are
-  fetched and graded — before building on D11, not after.
+- **Empty named graphs and D11 — settled (HDB-80).** This entry used to
+  reserve the decision until the `clear/` and `drop/` manifests were graded,
+  with an explicit graph-existence set as the fallback. Grading (phase 4)
+  found three `clear/` cases, all testing a behaviour SPARQL 1.1 Update §3.2
+  makes optional, and phase 5 shipped GSP against D11 as written. The rule
+  stands permanently; the fallback is withdrawn. Full contract, cost, and gate:
+  S4's "D11 settlement" note. The S3 amendment's `PerGraph` node reads the
+  graph list through `named_graphs()` alone, so it inherits the rule with no
+  plan change: a quad-free `GRAPH ?g` block yields no row for a cleared graph.
 - **Thousands of small graphs versus per-partition overhead.** D7 makes the
   partition key `(graph, predicate)`. The platform expects thousands of graphs,
   each small, each with a handful of predicates — so the store holds a very

@@ -430,7 +430,7 @@ selected: `dawg-delete-with-02` and `dawg-delete-with-06` (fixture dirs
 17 `delete/` cases are simply **not mirrored yet** — no known failure, nothing
 excluded on grading grounds; mirror them when the family is next grown.
 
-## Empty-but-existing named graphs under D11 (3 `clear/` cases)
+## Empty-but-existing named graphs under D11 (3 `clear/` cases, permanent)
 
 SPEC-28 **D11**: a named graph exists iff it holds at least one visible quad —
 there is no empty-graph registry, so clearing a graph to zero quads makes it
@@ -457,19 +457,22 @@ exists regardless of D11, so emptying it is graded faithfully. All four `drop/`
 cases are selected — `DROP` removes graphs, which is exactly what D11 does, so
 they grade faithfully.
 
-**Count judged (SPEC-28 risk clause):** 3 of 36 evaluation cases, all one
-edge (empty-graph existence in `clear/`), with 33 selected and green on both
-backends. This is a handful of edge cases, **not** a material fraction — D11 is
-not costing real conformance here — so no escalation to epic #261's
-explicit-existence-set fallback is warranted. If a later family (or a re-fetch)
-pushes the empty-graph-existence exclusions materially higher, revisit #261
-before building further on D11.
+**Settled (SPEC-28 D11, HDB-80) — permanently excluded.** SPARQL 1.1 Update
+§3.2.1 and §3.2.3 name the class of store that does not record empty graphs:
+`CREATE` always succeeds there, and `CLEAR` may be treated as `DROP`. HornDB is
+in that class by decision, not by omission, and the explicit-existence-set
+fallback the spec once held in reserve is withdrawn. These three cases test the
+optional behaviour, so they cannot grade HornDB and stay out of
+`[sparql_update]` for good. `clear-default-01` and all four `drop/` cases stay
+selected.
 
-To make any of these three gradable, the runner would need a graph-existence
-set compared alongside the quad set, **and** the fixture format would need to
-represent an empty-but-existing graph (a `GRAPH <g> {}` block parses to zero
-quads and vanishes) — i.e. carry the expected graph set out of band. That is a
-runner + fixture change, gated on the #261 decision, not a bug fix.
+The same three cases also run under `sparql11-eval` (`include = ["*"]`, below)
+and grade green there: that runner compares visible quad sets
+(`crates/harness/src/sparql_eval.rs`), and HornDB's final quad state is the one
+the standard allows a store in this class to produce. That is a correct
+verdict, not a false green — but it is not evidence of empty-graph tracking,
+and it must not be read as such. No runner or fixture change is needed under
+the settled rule; the full contract is in SPEC-28 S4's "D11 settlement" note.
 
 # Known-failing W3C SPARQL 1.1 *evaluation* cases (`sparql11-eval`, HDB-128)
 
