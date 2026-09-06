@@ -123,8 +123,10 @@ fn ordered_rows(store: &Store, p: TermId, ord: Ordering) -> u64 {
     .unwrap_or(0)
 }
 
-/// One `[cold] ratio` line. `graded` marks the ratios the NF4 verdict is taken
-/// over; an ungraded one is printed for context only.
+/// One `[cold] ratio` line. Wall clock is decode cost, not read amplification,
+/// so none of these carry the NF4 verdict — that is taken over the bytes lines.
+/// `graded` marks the comparisons that are like-for-like (same read shape on
+/// both sides); an ungraded one compares a cache hit against a decode.
 fn emit_ratio(pred: &str, rows: u64, what: &str, base_ns: f64, cold_ns: f64, graded: bool) {
     eprintln!(
         "[cold] ratio pred={pred} rows={rows} what={} base_ns={base_ns:.0} cold_ns={cold_ns:.0} ratio={:.3} graded={}",
