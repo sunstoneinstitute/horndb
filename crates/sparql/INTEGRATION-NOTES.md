@@ -695,8 +695,8 @@ families are wired through the harness's `[sparql_update]` selection
 (`harness/selected.toml`): 33 of 36 fetched `UpdateEvaluationTest` cases are
 selected and green on both backends; the other 3 (`clear-graph-01`,
 `clear-named-01`, `clear-all-01`) test an empty-but-existing graph, which D11
-cannot distinguish from an absent one, and are excluded with rationale in
-`harness/KNOWN-MANIFEST-BUGS.md`.
+cannot distinguish from an absent one, and are permanently excluded (D11
+settled by HDB-80; rationale in `harness/KNOWN-MANIFEST-BUGS.md`).
 
 **Deferred:** remote (`http(s):`) `LOAD` still waits on an HTTP client
 decision (→ E5, #189); the Graph Store Protocol (direct REST access to named
