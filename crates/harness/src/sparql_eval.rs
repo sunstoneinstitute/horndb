@@ -101,6 +101,11 @@ fn load_file(store: &mut HornBackend, path: &Path, graph: Option<&str>) -> Resul
             Some(g) => store.insert_oxrdf_in_named_graph(g, &s, &p, &quad.object)?,
         };
     }
+    // SPEC-25 S5 acceptance #5: under `HORNDB_COLD_TIER=1` the whole store
+    // goes cold once the file is loaded, so every case below queries a cold
+    // store. Here rather than in `insert_oxrdf` because each demote encodes a
+    // whole partition — per triple it would be quadratic.
+    store.demote_all_if_cold_tier();
     Ok(())
 }
 
