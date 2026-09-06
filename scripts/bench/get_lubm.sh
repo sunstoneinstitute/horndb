@@ -4,16 +4,16 @@
 #
 # Tried in order:
 #   1. the files are already there (persistent bench dir survives checkouts)
-#   2. gen_lubm.sh — needs a JDK for the UBA generator
-#   3. the pre-generated tarball published as a `bench-corpora` release asset
+#   2. stage-lubm.sh — parallel, and fetches its own converter; needs a JDK
+#   3. gen_lubm.sh — serial, and needs a converter already on the host
+#   4. the pre-generated tarball published as a `bench-corpora` release asset
 #
-# Step 3 exists because regenerating LUBM from scratch every bench run wastes
-# wall clock, whatever tooling the host has (hornbench now has OpenJDK 21).
-# Only lubm-1 and lubm-10 are published as release assets today, so any
-# larger scale relies on step 2 succeeding on the host. The assets were
-# produced by this repo's own gen_lubm.sh (UBA1.7, seed 0, index 0).
+# Step 4 exists because regenerating LUBM every bench run wastes wall clock,
+# whatever tooling the host has. Only lubm-1 and lubm-10 are published as
+# release assets today (they were produced by this repo's own gen_lubm.sh —
+# UBA1.7, seed 0, index 0), so any larger scale relies on step 2.
 #
-# Exits non-zero if all three fail, so callers can pick their own fallback.
+# Exits non-zero if all four fail, so callers can pick their own fallback.
 set -uo pipefail
 
 N="${1:?usage: get_lubm.sh N DIR}"
@@ -27,6 +27,14 @@ if [ -s "$DIR/tbox.nt" ] && [ -s "$DIR/abox.nt" ]; then
 fi
 
 mkdir -p "$DIR" || exit 1
+# stage-lubm.sh first: it parallelises both phases and brings its own
+# RDF/XML -> N-Triples converter, so it works on a host that has a JDK but no
+# converter (hornbench) and it is the only path that finishes at LUBM-8000
+# scale. gen_lubm.sh stays as the fallback for a host where fetching Jena is
+# blocked but a converter is already installed.
+if "$SCRIPT_DIR/stage-lubm.sh" "$N" "$DIR"; then
+  exit 0
+fi
 if "$SCRIPT_DIR/gen_lubm.sh" --universities "$N" --out "$DIR"; then
   exit 0
 fi

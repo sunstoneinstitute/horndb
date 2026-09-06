@@ -40,6 +40,12 @@ fn main() {
 
     let store = Store::in_memory();
 
+    // `load_*_file` reads a document whole — and so parses it across threads
+    // — only between a floor and `max_slice_bytes`. Only the ceiling matters
+    // at LUBM scale, so report exactly that rather than restate the whole
+    // heuristic: over the cap, the import is single-threaded streaming.
+    let over_slice_cap = input_bytes > horndb_storage::loader::max_slice_bytes() as u64;
+
     if let Some(tbox_path) = optional_env_path("LUBM_TBOX") {
         // Loaded before the timer starts: acceptance 2 is about importing
         // the (huge) instance data, and the ontology is a few hundred
@@ -62,6 +68,21 @@ fn main() {
     println!("[s1] triples={triples}");
     println!("[s1] triples_per_sec={triples_per_sec:.1}");
     println!("[s1] input_bytes={input_bytes}");
+    // Which parse path the loader actually took, so a slow import is not
+    // mistaken for a slow parser. `load_*_file` only reads a document whole
+    // (and so only parses it across threads) up to `max_slice_bytes`, 2 GiB
+    // by default; anything larger streams through one thread. A LUBM-8000
+    // N-Triples file is ~188 GB, so it streams. That is the shipped default
+    // for a file this size, which is what acceptance 2 has to measure.
+    println!("[s1] over_slice_cap={over_slice_cap}");
+    println!(
+        "[s1] load_threads={}",
+        horndb_storage::loader::load_threads()
+    );
+    println!(
+        "[s1] load_max_slice_bytes={}",
+        horndb_storage::loader::max_slice_bytes()
+    );
     println!(
         "[s1] verdict_acceptance2={}",
         verdict(import_seconds <= IMPORT_TARGET_SECONDS)
@@ -124,7 +145,11 @@ fn main() {
     println!("[s1] scan_over_triad_1t={scan_over_triad_1t:.4}");
     println!(
         "[s1] verdict_acceptance4={}",
-        verdict(scan_over_triad_nt >= SCAN_OVER_TRIAD_TARGET)
+        if rdf_type_rows == 0 {
+            "NO-DATA"
+        } else {
+            verdict(scan_over_triad_nt >= SCAN_OVER_TRIAD_TARGET)
+        }
     );
 }
 
@@ -156,11 +181,15 @@ fn scan_rdf_type_partition(part: &horndb_storage::Partition) -> (u64, f64, u64) 
     (rows as u64, best.as_secs_f64(), scan_bytes)
 }
 
+/// Zero bytes means the scan never ran, not infinite bandwidth. Returning
+/// `INFINITY` here made acceptance 4 report PASS on a corpus with no
+/// `rdf:type` triples at all, which is the worst possible answer: a green
+/// verdict from a measurement that did not happen.
 fn gb_per_sec(bytes: u64, seconds: f64) -> f64 {
-    if seconds > 0.0 {
-        bytes as f64 / 1e9 / seconds
+    if bytes == 0 || seconds <= 0.0 {
+        0.0
     } else {
-        f64::INFINITY
+        bytes as f64 / 1e9 / seconds
     }
 }
 
