@@ -130,6 +130,17 @@ not-yet-committed files), then run the bench there and record the numbers (note
 the env) back in `docs/benchmarks.md`. Local `cargo bench` is fine only for a quick
 smoke-check you are *not* going to record.
 
+**`hel01` (Intel Sapphire Rapids, 48 cores, 256GB RAM) is a capacity fallback,
+not a benchmark host.** Its GitHub Actions runners are stopped so it stays free
+for large one-off jobs — LUBM-8000-scale corpus staging, an OOM-risk run that
+needs headroom `hornbench`'s 124GB doesn't have, or checking whether something
+completes at all. Numbers from `hel01` may only answer yes/no or capacity
+questions (did it finish, real peak RSS, bytes/triple footprint) and must say
+`hel01` explicitly wherever they're recorded. They must never go into a
+comparative series — import throughput, memory-bandwidth ratio, or any number
+meant to sit next to a `hornbench` result — since a different CPU generation
+and memory topology make the two incomparable.
+
 **macOS dev tip:** the workspace builds ~90 separate test binaries, and each freshly-linked one triggers a Gatekeeper (`syspolicyd`) + XProtect scan on first run — which can pin those daemons near 100% CPU during `cargo test`/`build`. Add your terminal to System Settings → Privacy & Security → **Developer Tools** (or run `sudo spctl developer-mode enable-terminal` once) to exempt its child processes from Gatekeeper assessment. This and `cargo nextest` (above) are complementary: the exemption removes the per-binary scan, nextest removes the serial-per-binary run.
 
 CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with the real engine; nightly runs LDBC SPB-256 on a self-hosted runner. **Pin every GitHub Action to a full 40-char commit SHA, never a floating tag** — full hygiene rules and the dependabot flow are in `.github/CLAUDE.md`.
