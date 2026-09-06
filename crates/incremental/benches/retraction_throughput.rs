@@ -76,6 +76,9 @@ impl BilinearRule for TransitiveSc {
         out.add_assign(&self.apply_full(da, db));
         out
     }
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(SC), Some(SC)]
+    }
 }
 
 /// (?x TYPE ?c) ∧ (?c SC ?d) → (?x TYPE ?d) — local copy of the fixture's
@@ -113,6 +116,9 @@ impl BilinearRule for CaxSco {
         out.add_assign(&self.apply_full(a, db));
         out.add_assign(&self.apply_full(da, db));
         out
+    }
+    fn body_predicates(&self) -> [Option<u64>; 2] {
+        [Some(TYPE), Some(SC)]
     }
 }
 

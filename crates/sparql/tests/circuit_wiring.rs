@@ -248,6 +248,9 @@ fn bilinear_rule_seam_derives_and_withdraws() {
             out.add_assign(&self.apply_full(da, db));
             out
         }
+        fn body_predicates(&self) -> [Option<u64>; 2] {
+            [Some(self.ty), Some(self.sub)]
+        }
     }
     let mut b = HornBackend::new();
     let rule = CaxSco {

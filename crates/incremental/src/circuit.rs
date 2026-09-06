@@ -56,6 +56,7 @@ use crate::change_feed::{ChangeFeed, ChangeFeedRx, LagPolicy};
 use crate::checkpoint::{Checkpoint, CheckpointPolicy};
 use crate::closure_plan::ClosureRule;
 use crate::delta_log::DeltaLog;
+use crate::extent::PredExtent;
 use crate::operator::NaryPlan;
 use crate::snapshot::Snapshot;
 use crate::types::{DerivationKind, LogicalTime, Multiplicity, RuleId, TripleId};
@@ -131,9 +132,12 @@ pub struct Circuit {
     /// per-rule entries and zero-total rows are pruned eagerly.
     rule_weights: BTreeMap<TripleId, BTreeMap<RuleId, i64>>,
     /// SPEC-24 S1 — the set-semantics extent rules join against (the shared
-    /// z⁻¹ integrated input trace). Invariant: `t ∈ extent` (at multiplicity
-    /// 1) iff `asserted_base.get(t) > 0 ∨ derived_base.get(t) > 0`.
-    extent: Zset<TripleId>,
+    /// z⁻¹ integrated input trace). Invariant: a present `t` sits in `extent`
+    /// at multiplicity exactly one, present meaning
+    /// `asserted_base.get(t) > 0 ∨ derived_base.get(t) > 0`. Indexed by
+    /// predicate (SPEC-24 S7) so `NaryPlan` leaves can bind to a single
+    /// predicate's rows instead of scanning the whole extent.
+    extent: PredExtent,
     /// When true, retraction-containing ticks run the Stage-1 recompute
     /// regime instead of the unified delta path (debug fallback), followed by
     /// `resync_incremental_state`. Insertion-only ticks always use the
@@ -190,7 +194,7 @@ impl Circuit {
             rule_attr: BTreeMap::new(),
             closure_support: BTreeSet::new(),
             rule_weights: BTreeMap::new(),
-            extent: Zset::new(),
+            extent: PredExtent::new(),
             recompute_fallback,
             checkpoint_policy: CheckpointPolicy::default(),
             deltas_since_checkpoint: 0,
@@ -1232,7 +1236,7 @@ impl Circuit {
     /// acceptable for a debug fallback. `rule_attr` stays as the recompute
     /// diff produced it.
     fn resync_incremental_state(&mut self) {
-        self.extent = self.materialize_presence();
+        self.extent = PredExtent::from_zset(&self.materialize_presence());
         self.rule_weights.clear();
         for (plan, rid) in &self.plans {
             let full = plan.apply_full(&self.extent);
@@ -1306,8 +1310,14 @@ impl Circuit {
         loop {
             rounds += 1;
             let mut changed = false;
+            // Rebuilt each round: `closure` grows as rows are added below, so
+            // a predicate index from a stale round would miss them. This
+            // recompute path is already O(store) per retraction tick (a
+            // debug fallback, not the production path), so an O(round size)
+            // rebuild is not a new cost class.
+            let pred_closure = PredExtent::from_zset(&closure);
             for (plan, rid) in &self.plans {
-                let dd = plan.apply_full(&closure);
+                let dd = plan.apply_full(&pred_closure);
                 for (triple, m) in dd.iter() {
                     if m != 0 && closure.get(triple) == 0 {
                         closure.add(*triple, 1);
