@@ -57,21 +57,26 @@ from a `GRAPH` block, where `name` is a ground IRI or a variable.
 `DatasetSpec` (all four `translate_query_with` arms — `SELECT`/`ASK`/
 `CONSTRUCT`/`DESCRIBE`).
 
-Lowering keeps **no** `Graph` node. `plan/lower.rs::lower_scoped` carries the
-enclosing scope down and stamps it on every scan leaf (`BgpScan`,
-`CountScan`, `GroupCountScan`, and transitively a `PathClosure`'s edge
-sub-plan) — SPEC-28 D5: the scope is a scan parameter, never a post-filter,
-because post-filtering a many-graph store to answer a one-graph question
-costs O(store). Nested `GRAPH` follows SPARQL: innermost wins (ground form; a
-nested `GRAPH` inside `GRAPH ?g` is refused — see below). There is no
-fallback path — a scope that cannot be pushed is an error, not a silent
-widening.
+`plan/lower.rs::lower_scoped` carries the enclosing scope down and stamps it
+on every scan leaf (`BgpScan`, `CountScan`, `GroupCountScan`, and
+transitively a `PathClosure`'s edge sub-plan) — SPEC-28 D5: the scope is a
+scan parameter, never a post-filter, because post-filtering a many-graph
+store to answer a one-graph question costs O(store). Nested `GRAPH` follows
+SPARQL: innermost wins. There is no fallback path — a scope that cannot be
+pushed is an error, not a silent widening.
+
+A ground `GRAPH <g>` leaves no node behind; the scope on its leaves is the
+whole record of it. `GRAPH ?g` keeps exactly one node, `PerGraph { var,
+inner }` — see the section below.
 
 At execution the plan-level `GraphScope` plus the query's `DatasetSpec` and
 mode make a `ScanScope` (`exec/scope.rs`), which resolves to a
-`ResolvedScope` — the operator-level view, and the only place `PerGraph`
-(`GRAPH ?g`) exists, because the scan operator loops the graphs itself and a
-backend's single-scope read never sees it. `HornBackend` maps the rest onto
+`ResolvedScope` — the operator-level view. `GRAPH ?g` has no variant there:
+the `PerGraph` operator substitutes the graph it is currently on before any
+leaf scope is resolved, so a backend only ever sees a single-graph read. (A
+leaf whose scope still holds the *variable* resolves to
+`ResolvedScope::UnboundGraphVar`, which every read path turns into a planner
+error rather than a widened scan.) `HornBackend` maps the rest onto
 its own `SnapshotScope` and builds a **scoped** WCOJ snapshot. Only the two
 no-dataset default-graph scopes (`union`, `strict`) are memoized. Every other
 scope — a ground `GRAPH <g>`, a `FROM` list, each graph a `GRAPH ?g` visits —
@@ -88,10 +93,10 @@ of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
 - **Ground `GRAPH <g>`** scans only `g`. An unknown graph IRI yields zero
   rows, never an error. `GRAPH <g> {}` — the standard existence probe —
   matches only if `g` holds a visible quad (SPEC-28 D11).
-- **`GRAPH ?g`** binds the graph as an extra **scan output column**
-  (`Slot::Id(TermId(g.0))`, since a `GraphId` *is* the interned `TermId`):
-  one scan node looping over the graphs, so plan size is independent of graph
-  count (D6). `?g` never binds the default graph (D3).
+- **`GRAPH ?g`** evaluates the block once per named graph with `?g` free,
+  then joins `{?g -> that graph}` onto that graph's rows — SPARQL 1.1
+  §18.2.2.2 as written. One `PerGraph` plan node whatever the graph count
+  (D6); the loop is in the operator. `?g` never binds the default graph (D3).
 - **`FROM` / `FROM NAMED`** build the dataset per SPARQL 1.1 §13.2, including
   `FROM NAMED` with no `FROM` = **empty** default graph. `FROM` is a
   term-level set union of the named graphs; RDF-merge blank-node renaming is
@@ -111,7 +116,10 @@ of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
 - **Count and group-count pushdowns** are scope-aware or **decline**
   (`Ok(None)`, falling back to the scan). Decline-by-default is what makes
   adding a scope safe: a shortcut that cannot express the scope can never
-  answer with a whole-store count. Cardinality *estimates* stay coarse (a
+  answer with a whole-store count. Under `GRAPH ?g` the rewrite simply does
+  not match — the `PerGraph` node sits between the aggregate and the scan —
+  which is right, because a sum over per-graph counts is not one scoped
+  count. Cardinality *estimates* stay coarse (a
   whole-store count is a valid upper bound under any scope) and reach only the
   planner and `EXPLAIN`, never a `Batch`.
 
@@ -174,37 +182,45 @@ blocking pool for this: it used to run the whole query on a runtime worker,
 which would have parked the very timer meant to interrupt it. The row cap
 applies to the streaming SELECT path, which is where every SELECT goes.
 
-### Two families of `GRAPH ?g` query are refused, not answered
+### `GRAPH ?g` is one `PerGraph` node (SPEC-28 S3 amendment, HDB-74)
 
-Both refusals are raised in `plan/lower.rs` as `UnsupportedAlgebra` (HTTP 400)
-and name the offending construct. Both exist because the graph name is bound
-on the scan **leaf**, not joined on after the block is evaluated.
+`plan/lower.rs` lowers `Algebra::Graph { name: Var(g), inner }` to
+`PerGraph { var: g, inner: lower_scoped(inner, Named(Var(g))) }`. The leaves
+below it still carry the *variable* as their scope; nothing resolves it until
+the operator runs.
 
-1. **A barrier between the wrapper and its scan leaves**
-   (`per_graph_barrier`): a sub-`SELECT`, `DISTINCT`, `GROUP BY`/aggregate,
-   `LIMIT`/`OFFSET`, any property path, a nested `GRAPH`, or a `VALUES` that
-   is not joined against a scoped arm. Each drops or merges the graph column,
-   so rows would come back with `?g` unbound or mixed across graphs. The same
-   constructs *above* the wrapper are fine. A quad-free arm is exempt where
-   the other arm's graph column reaches every joined row: either side of a
-   `Join`, or an `OPTIONAL`'s right arm — so
-   `GRAPH ?g { ?s ?p ?o VALUES ?o { … } }` answers
-   (`values_inside_graph_var_answers`).
-2. **The block reads `?g` where leaf-binding diverges from SPARQL 1.1
-   §18.2.2.2's post-join** (`per_graph_var_divergence`): any expression
-   (`FILTER`, a `BIND` expression, an `OPTIONAL` condition, `ORDER BY`),
-   `BIND(… AS ?g)`, or any mention of `?g` in a `LeftJoin`'s right arm.
-   Allowed — because there the leaf's equality filter *is* the post-join — is
-   `?g` in a `Bgp` triple position, or in a `VALUES` column joined against a
-   scoped arm. (The divergence rule also permits a `VALUES`-supplied `?g`
-   under `Union` or a `LeftJoin`'s left arm, but `per_graph_barrier` runs
-   first and refuses those, so only the `Join` case reaches evaluation.)
+`exec::op::per_graph::PerGraphOp` is the loop. On construction it fixes its
+output schema from the plan (`plan::pushdown::output_vars(inner)` plus `?g`,
+so a graph whose block matches nothing cannot narrow it) and asks
+`Executor::named_graphs` for the graph list — the one sanctioned
+graph-enumeration seam, which applies `FROM NAMED` and the reserved-graph
+filter. Then, for each graph in turn, it builds `inner`'s operator tree with
+that graph substituted for `?g` at the leaves (`exec::op::bind_scope`, which
+turns `Named(Var(g))` into `Named(Iri(thatGraph))` — the same
+`ResolvedScope::OneGraph` path a ground `GRAPH <g>` takes), streams its rows,
+joins the graph name on, and drops the tree before the next graph. Only one
+graph's tree is alive at a time.
 
-Lifting either means evaluating the whole block once per graph with `?g` free
-and joining the graph name on afterwards. That is a design change against
-D5/D6, not a bug fix — specified as SPEC-28's S3 amendment (HDB-171, the
-`PerGraph` node), implemented by HDB-74. `harness/KNOWN-MANIFEST-BUGS.md`
-names the W3C cases each refusal costs.
+The join is SPARQL 1.1 §18.2.2.2's: if the block does not bind `?g`, append
+it bound to this graph; if it does (`GRAPH ?g { ?g ?p ?o }`), keep a row only
+when its own `?g` is unbound or equal to this graph, then set it.
+
+Two consequences worth stating:
+
+- **`?g` is free inside the block.** `GRAPH ?g { FILTER(?g = <g1>) }` is zero
+  rows, not "the rows from `<g1>`" — the filter runs before the graph name
+  exists. To pick one graph, write the ground form.
+- **Plan size is independent of the graph count** (D6). `EXPLAIN` over
+  `GRAPH ?g { ?s ?p ?o }` shows one `PerGraph(?g)` and one `BgpScan`
+  whether the store holds two graphs or ten thousand. The per-graph cost is
+  the rebuild, not the plan.
+
+This replaced two refusals phase 3 shipped (a barrier between the wrapper and
+its scan leaves; a block that *reads* `?g`), both of which existed only
+because the graph name used to be bound on the scan leaf. Every shape they
+covered now answers: a sub-`SELECT` or aggregate, `DISTINCT`, `LIMIT`, a
+property path, a nested `GRAPH`, a bare `VALUES` arm, `FILTER`/`BIND` on
+`?g`, and `?g` inside an `OPTIONAL`'s right arm.
 
 ### History
 
@@ -212,8 +228,9 @@ Before SPEC-28 phase 1 (#264), `translate_pattern` **discarded** the `GRAPH`
 wrapper and the four `translate_query_with` arms bound `dataset: _`, so
 `GRAPH <g> { P }` evaluated `P` against the default graph and returned HTTP
 200 — a wrong answer a caller could not detect. Phase 1 turned that into a
-400; phase 3 (this section) replaced the refusal with real evaluation, except
-for the two families above. Storage had been quad-aware since SPEC-25 S1 (#225)
+400; phase 3 (this section) replaced the refusal with real evaluation, and
+its S3 amendment (HDB-74) lifted the last two refused families of
+`GRAPH ?g`. Storage had been quad-aware since SPEC-25 S1 (#225)
 the whole time, so the Stage-1 premise that there was nothing to scope against
 had already stopped being true.
 
@@ -224,9 +241,10 @@ W3C `graph/` and `dataset/` families, from the **SPARQL 1.0 (DAWG)** suite
 `crates/harness/tests/fixtures/sparql11/selected_subset/` and run by
 `crates/sparql/tests/w3c_suite.rs` on both backends via
 `harness/selected.toml`'s `[sparql_query]` section. A case dir may carry
-`data.trig` (quads routed to their graphs) instead of `data.nt`. 24 of 29
-cases are selected and green; the other 5, and the note that no selected case
-grades the shipping `union` mode, are in `harness/KNOWN-MANIFEST-BUGS.md`.
+`data.trig` (quads routed to their graphs) instead of `data.nt`. 26 of 29
+cases are selected and green; the other 3 (a blank-node grading gap), and the
+note that no selected case grades the shipping `union` mode, are in
+`harness/KNOWN-MANIFEST-BUGS.md`.
 Direct pins live in `crates/sparql/tests/graph_query.rs`.
 
 ## HornBackend — storage/WCOJ/closure wiring (2026-06-11, #67)

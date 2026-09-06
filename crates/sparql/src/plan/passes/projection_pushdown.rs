@@ -149,6 +149,18 @@ fn prune(node: LogicalPlan, demanded: &HashSet<String>) -> LogicalPlan {
                 inner: Box::new(prune(*inner, &want)),
             }
         }
+        // `GRAPH ?g { P }` binds `?g` on `P`'s rows after `P` runs, so `P`
+        // is demanded `?g` too — kept only when `P` binds it itself, since
+        // [`restrict`] intersects with `P`'s own schema.
+        PerGraph { var, inner } => {
+            let mut d = demanded.clone();
+            d.insert(var.name().to_owned());
+            let node2 = LogicalPlan::PerGraph {
+                inner: Box::new(prune(*inner, &d)),
+                var,
+            };
+            restrict(node2, demanded)
+        }
         Filter { expr, inner } => {
             let mut d = demanded.clone();
             referenced_vars(&expr, &mut d);

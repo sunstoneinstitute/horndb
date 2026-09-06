@@ -191,14 +191,6 @@ expected_failures = [
     "data-sparql11/negation/manifest#temporal-proximity-by-exclusion-nex-1",
     "data-sparql11/subquery/manifest#subquery10",
 
-    # A sub-SELECT or a property path nested inside `GRAPH ?g` (SPEC-28 S3).
-    "data-sparql11/property-path/manifest#pp35",
-    "data-sparql11/subquery/manifest#subquery01",
-    "data-sparql11/subquery/manifest#subquery02",
-    "data-sparql11/subquery/manifest#subquery03",
-    "data-sparql11/subquery/manifest#subquery04",
-    "data-sparql11/subquery/manifest#subquery05",
-
     # Unimplemented builtin functions: BNODE, IRI, ENCODE_FOR_URI, MD5, SHA1,
     # SHA256, SHA512, STRDT, STRLANG, UUID, STRUUID, RAND, NOW, TZ, TIMEZONE,
     # and the `xsd:` constructor call form.
@@ -504,8 +496,8 @@ tests = [
     # `crates/harness/scripts/fetch-w3c-suites.sh`. These cases take their
     # dataset from the upstream *manifest* (`qt:data` = default graph,
     # `qt:graphData` = named graphs), so each dir carries
-    # `default-graph = strict`. The 3 upstream cases left out are in
-    # `harness/KNOWN-MANIFEST-BUGS.md`.
+    # `default-graph = strict`. The one upstream case left out (`graph-11`,
+    # a blank-node grading gap) is in `harness/KNOWN-MANIFEST-BUGS.md`.
     "selected_subset/graph-01",
     "selected_subset/graph-02",
     "selected_subset/graph-03",
@@ -519,7 +511,9 @@ tests = [
     "selected_subset/graph-empty",
     "selected_subset/graph-exist",
     "selected_subset/graph-not-exist",
+    "selected_subset/graph-optional",
     "selected_subset/graph-variable-join",
+    "selected_subset/graph-variable-scope",
     # W3C SPARQL 1.0 `dataset/` family (SPEC-28 S7, #266) — `FROM` /
     # `FROM NAMED` dataset construction, including D4's empty default graph
     # for `FROM NAMED` with no `FROM` (dataset-02, dataset-04). Each query

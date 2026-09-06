@@ -4,19 +4,18 @@
 
 mod blocking;
 use blocking::{GroupOp, JoinOp, LeftJoinOp, MinusOp, OrderByOp, PathClosureOp, UnionOp};
+mod per_graph;
+use per_graph::PerGraphOp;
 mod source;
-/// The one scan-side helper outside this module needs (`GRAPH ?g`'s
-/// per-graph read); the operators themselves stay private.
-pub(crate) use source::scan_scoped;
 use source::{CountScanOp, GroupCountScanOp, ScanOp, ValuesOp};
 mod stream;
 use stream::{DistinctOp, ExtendOp, FilterOp, ProjectOp, SliceOp};
 
-use crate::algebra::Var;
+use crate::algebra::{GraphSpec, Var};
 use crate::error::Result;
 use crate::exec::phases;
 use crate::exec::{Batch, Executor, Row};
-use crate::plan::PhysicalPlan;
+use crate::plan::{GraphScope, PhysicalPlan};
 use horndb_metrics::labels::ExecPhase;
 
 /// Target rows per emitted chunk. Test builds can shrink this via
@@ -113,47 +112,70 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     where
         E: 'r,
     {
+        self.build_scoped(plan, &[])
+    }
+
+    /// [`Self::build`], with the graph each enclosing `PerGraph` node is
+    /// currently on. `binds` maps a `GRAPH ?g` variable to that graph's IRI,
+    /// innermost last; [`bind_scope`] applies it at the scan leaves so they
+    /// read one graph through the same path a ground `GRAPH <g>` uses.
+    pub(crate) fn build_scoped<'r>(
+        &'r self,
+        plan: &PhysicalPlan,
+        binds: &[(Var, String)],
+    ) -> Result<Box<dyn Op + 'r>>
+    where
+        E: 'r,
+    {
         match plan {
-            // `scan_scoped`, not `scan_bgp_ids`: `GRAPH ?g` is one scan node
-            // whose operator loops over the graphs and appends the `?g`
-            // column, so the plan never grows with the graph count (D6).
-            PhysicalPlan::BgpScan { patterns, scope } => Ok(Box::new(ScanOp::new(scan_scoped(
-                self.exec(),
-                patterns,
-                &self.scan_scope(scope),
-            )?))),
+            PhysicalPlan::BgpScan { patterns, scope } => {
+                let scope = bind_scope(scope, binds);
+                Ok(Box::new(ScanOp::new(
+                    self.exec()
+                        .scan_bgp_ids(patterns, &self.scan_scope(&scope))?,
+                )))
+            }
             PhysicalPlan::CountScan {
                 patterns,
                 out_var,
                 scope,
-            } => Ok(Box::new(CountScanOp::new(
-                self.exec(),
-                patterns,
-                out_var,
-                &self.scan_scope(scope),
-            )?)),
+            } => {
+                let scope = bind_scope(scope, binds);
+                Ok(Box::new(CountScanOp::new(
+                    self.exec(),
+                    patterns,
+                    out_var,
+                    &self.scan_scope(&scope),
+                )?))
+            }
             PhysicalPlan::GroupCountScan {
                 patterns,
                 keys,
                 out_vars,
                 scope,
-            } => Ok(Box::new(GroupCountScanOp::new(
-                self.exec(),
-                patterns,
-                keys,
-                out_vars,
-                &self.scan_scope(scope),
-            )?)),
+            } => {
+                let scope = bind_scope(scope, binds);
+                Ok(Box::new(GroupCountScanOp::new(
+                    self.exec(),
+                    patterns,
+                    keys,
+                    out_vars,
+                    &self.scan_scope(&scope),
+                )?))
+            }
+            PhysicalPlan::PerGraph { var, inner } => {
+                Ok(Box::new(PerGraphOp::new(self, var.clone(), inner, binds)?))
+            }
             PhysicalPlan::Filter { expr, inner } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(FilterOp::new(self, child, expr.clone())))
             }
             PhysicalPlan::Project { vars, inner } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(ProjectOp::new(self, child, vars.clone())))
             }
             PhysicalPlan::Extend { inner, var, expr } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(ExtendOp::new(
                     self,
                     child,
@@ -172,38 +194,38 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 // applies the offset and limit — `build_top_k` only narrows
                 // what reaches it.
                 let fused = match length.and_then(|len| start.checked_add(len)) {
-                    Some(n) => self.build_top_k(inner, n)?,
+                    Some(n) => self.build_top_k(inner, n, binds)?,
                     None => None,
                 };
                 let child = match fused {
                     Some(op) => op,
-                    None => self.build(inner)?,
+                    None => self.build_scoped(inner, binds)?,
                 };
                 Ok(Box::new(SliceOp::new(child, *start, *length)))
             }
             PhysicalPlan::Values { vars, rows } => Ok(Box::new(ValuesOp::new(vars, rows))),
             PhysicalPlan::Distinct { inner } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(DistinctOp::new(child)))
             }
             PhysicalPlan::Union { left, right } => {
-                let l = self.build(left)?;
-                let r = self.build(right)?;
+                let l = self.build_scoped(left, binds)?;
+                let r = self.build_scoped(right, binds)?;
                 Ok(Box::new(UnionOp::new(self, l, r)))
             }
             PhysicalPlan::Join { left, right } => {
-                let l = self.build(left)?;
-                let r = self.build(right)?;
+                let l = self.build_scoped(left, binds)?;
+                let r = self.build_scoped(right, binds)?;
                 Ok(Box::new(JoinOp::new(self, l, r)))
             }
             PhysicalPlan::LeftJoin { left, right, expr } => {
-                let l = self.build(left)?;
-                let r = self.build(right)?;
+                let l = self.build_scoped(left, binds)?;
+                let r = self.build_scoped(right, binds)?;
                 Ok(Box::new(LeftJoinOp::new(self, l, r, expr.clone())))
             }
             PhysicalPlan::Minus { left, right } => {
-                let l = self.build(left)?;
-                let r = self.build(right)?;
+                let l = self.build_scoped(left, binds)?;
+                let r = self.build_scoped(right, binds)?;
                 Ok(Box::new(MinusOp::new(self, l, r)))
             }
             PhysicalPlan::Group {
@@ -211,7 +233,7 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 keys,
                 aggregates,
             } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(GroupOp::new(
                     self,
                     child,
@@ -220,7 +242,7 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 )))
             }
             PhysicalPlan::OrderBy { inner, keys } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Box::new(OrderByOp::new(self, child, keys.clone())))
             }
             PhysicalPlan::PathClosure {
@@ -229,11 +251,10 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 edge,
                 reflexive,
             } => {
-                // A path under `GRAPH ?g` would flatten the edge relation's
-                // graph column and connect hops from different graphs.
-                // `plan::lower` refuses that shape before it gets here — the
-                // single refusal site (SPEC-28 S3).
-                let edge_op = self.build(edge)?;
+                // Under `GRAPH ?g` the enclosing `PerGraph` node rebuilds
+                // this operator per graph, so a path never connects hops
+                // from different graphs.
+                let edge_op = self.build_scoped(edge, binds)?;
                 Ok(Box::new(PathClosureOp::new(
                     self,
                     subject.clone(),
@@ -256,13 +277,18 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
     /// below it. Nothing else is see-through: `Distinct`, `Filter` and the
     /// rest drop rows *after* the sort, where `n` sorted rows are no longer
     /// enough to answer the limit.
-    fn build_top_k<'r>(&'r self, plan: &PhysicalPlan, n: usize) -> Result<Option<Box<dyn Op + 'r>>>
+    fn build_top_k<'r>(
+        &'r self,
+        plan: &PhysicalPlan,
+        n: usize,
+        binds: &[(Var, String)],
+    ) -> Result<Option<Box<dyn Op + 'r>>>
     where
         E: 'r,
     {
         match plan {
             PhysicalPlan::OrderBy { inner, keys } => {
-                let child = self.build(inner)?;
+                let child = self.build_scoped(inner, binds)?;
                 Ok(Some(Box::new(OrderByOp::top_k(
                     self,
                     child,
@@ -270,11 +296,25 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                     n,
                 ))))
             }
-            PhysicalPlan::Project { vars, inner } => match self.build_top_k(inner, n)? {
+            PhysicalPlan::Project { vars, inner } => match self.build_top_k(inner, n, binds)? {
                 Some(child) => Ok(Some(Box::new(ProjectOp::new(self, child, vars.clone())))),
                 None => Ok(None),
             },
             _ => Ok(None),
         }
+    }
+}
+
+/// A scan leaf's scope with `GRAPH ?g` replaced by the graph the enclosing
+/// [`PerGraphOp`] is currently on. Innermost binding wins, so a nested
+/// `GRAPH ?h` inside `GRAPH ?g` scopes its own leaves. Every other scope
+/// passes through unchanged.
+fn bind_scope(scope: &GraphScope, binds: &[(Var, String)]) -> GraphScope {
+    match scope {
+        GraphScope::Named(GraphSpec::Var(v)) => match binds.iter().rev().find(|(b, _)| b == v) {
+            Some((_, iri)) => GraphScope::Named(GraphSpec::Iri(iri.clone())),
+            None => scope.clone(),
+        },
+        _ => scope.clone(),
     }
 }

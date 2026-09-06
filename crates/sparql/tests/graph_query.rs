@@ -137,6 +137,30 @@ fn union_graph_rows<E: horndb_sparql::exec::Executor + ?Sized>(
     graph_rows(store, q, DefaultGraphMode::Union)
 }
 
+/// Run `q` under the default (`union`) mode and return its rows.
+fn union_rows<E: horndb_sparql::exec::Executor + ?Sized>(
+    store: &E,
+    q: &str,
+) -> Vec<horndb_sparql::exec::Bindings> {
+    let QueryAnswer::Solutions { rows, .. } =
+        execute_query_with(q, store, &SparqlConfig::default()).unwrap()
+    else {
+        panic!("expected solutions");
+    };
+    rows
+}
+
+/// The `(?a, ?b)` IRI pairs of `rows`, sorted, duplicates kept.
+fn iri_pairs(rows: &[horndb_sparql::exec::Bindings], a: &str, b: &str) -> Vec<(String, String)> {
+    let iri = |r: &horndb_sparql::exec::Bindings, v: &str| match r.get(v) {
+        Some(horndb_sparql::algebra::Term::Iri(s)) => s.clone(),
+        other => panic!("expected an IRI-bound ?{v}, got {other:?}"),
+    };
+    let mut out: Vec<(String, String)> = rows.iter().map(|r| (iri(r, a), iri(r, b))).collect();
+    out.sort();
+    out
+}
+
 /// The fixture's `(?g, ?s)` rows for an unrestricted `GRAPH ?g`: g1 holds
 /// t2, g2 holds t2 and t3. The default graph's t1 is absent (D3).
 fn all_graph_rows() -> Vec<(String, String)> {
@@ -331,18 +355,19 @@ fn bgps_under_different_graphs_do_not_coalesce<
     );
 }
 
-/// Decline-by-default (SPEC-28 S3): a count seam handed a scope it has not
-/// been taught must return `Ok(None)`, which routes the caller to the
-/// scope-correct scan fallback — never a whole-store or wrong-scope count.
+/// Two rules keep the count seams from ever widening a scope (SPEC-28 S3).
 ///
-/// `MemStore` implements neither count seam and inherits the `Ok(None)`
-/// trait defaults; `HornBackend` implements both and still declines under
-/// `GRAPH ?g`, which spans several snapshots and so has no single-scope
-/// count form. Asserting the *seam* (rather than a query result) is what
-/// makes this a guard on future scope additions: a new `ResolvedScope`
-/// variant an existing count cannot express keeps declining.
+/// **Decline by default**: a seam handed a scope it has not been taught
+/// returns `Ok(None)`, which routes the caller to the scope-correct scan
+/// fallback. `MemStore` implements neither seam and inherits that default.
+///
+/// **Refuse an unsubstituted graph variable**: `GRAPH ?g` is not one graph
+/// set. The `PerGraph` operator substitutes the graph it is currently on
+/// before any leaf scope is resolved, so a seam that still sees the
+/// *variable* was reached outside that operator — a planner error, not a
+/// number to guess at.
 #[test]
-fn count_declines_unknown_scope() {
+fn count_seams_never_widen_an_unknown_scope() {
     use horndb_sparql::algebra::{DatasetSpec, GraphSpec, Term, TriplePattern, Var};
     use horndb_sparql::exec::{Executor, ScanScope};
     use horndb_sparql::plan::GraphScope;
@@ -353,32 +378,32 @@ fn count_declines_unknown_scope() {
         object: Term::Var(Var::new("o")),
     }];
     let keys = [Var::new("s")];
-    let per_graph = GraphScope::Named(GraphSpec::Var(Var::new("g")));
+    let graph_var = GraphScope::Named(GraphSpec::Var(Var::new("g")));
     let dataset = DatasetSpec::default();
-    let scope = ScanScope::new(&per_graph, &dataset, DefaultGraphMode::Union);
+    let scope = ScanScope::new(&graph_var, &dataset, DefaultGraphMode::Union);
 
     let horn: HornBackend = fixture();
-    assert_eq!(
-        horn.count_bgp(&patterns, &scope).unwrap(),
-        None,
-        "HornBackend must decline a per-graph count, not widen it"
-    );
-    assert!(
-        horn.count_bgp_grouped(&patterns, &keys, &scope)
-            .unwrap()
-            .is_none(),
-        "HornBackend must decline a per-graph grouped count"
-    );
+    for err in [
+        horn.count_bgp(&patterns, &scope).err(),
+        horn.count_bgp_grouped(&patterns, &keys, &scope).err(),
+    ] {
+        let err = err
+            .expect("an unsubstituted graph variable must not count")
+            .to_string();
+        assert!(
+            err.contains("PerGraph"),
+            "the refusal must name the missing PerGraph node: {err}"
+        );
+    }
 
-    let mem: MemStore = fixture();
-    assert_eq!(mem.count_bgp(&patterns, &scope).unwrap(), None);
-    assert!(mem
-        .count_bgp_grouped(&patterns, &keys, &scope)
-        .unwrap()
-        .is_none());
     // A backend with no fast count declines under *every* scope, so the
     // scan fallback is the only path — the trait default is the decline.
+    let mem: MemStore = fixture();
     assert_eq!(mem.count_bgp(&patterns, &ScanScope::DEFAULT).unwrap(), None);
+    assert!(mem
+        .count_bgp_grouped(&patterns, &keys, &ScanScope::DEFAULT)
+        .unwrap()
+        .is_none());
 }
 
 // --- property paths inherit the scope (SPEC-28 S3) ---------------------
@@ -620,89 +645,127 @@ fn graph_var_is_one_scan_node_whatever_the_graph_count<
         text.contains("[graph=?g]"),
         "the scan carries the graph scope: {text}"
     );
+    assert_eq!(
+        text.matches("PerGraph(?g)").count(),
+        1,
+        "one PerGraph node for ten graphs — the loop is in the operator: {text}"
+    );
 }
 
-/// Everything `GRAPH ?g` cannot answer must **refuse**, never answer at
-/// HTTP 200 with the graph column dropped.
+/// Shapes inside `GRAPH ?g` that a scan-leaf graph column could not carry:
+/// a closure path, the `Distinct(Project(..))` wrapper the translator puts
+/// around an alternative or negated path, a globally-truncating existence
+/// path, an aggregating sub-`SELECT`, and a nested ground `GRAPH`.
 ///
-/// The graph variable is a column of the scan leaf, so any node between the
-/// `GRAPH` and its leaves that narrows columns, merges rows, truncates them
-/// or rewrites the relation loses it — and the rows come back merged across
-/// graphs. `plan::lower` refuses all of these in one place.
-///
-/// What each shape returned with only the refusal disabled (the `if let
-/// Some(barrier)` block in `plan::lower` commented out, everything else
-/// intact), on this fixture plus g1: `x q y`, g2: `y q z`:
-///
-/// * `?x :q+ ?y` — 3 rows, `?g` unbound in all of them, including the
-///   cross-graph `x → z` that no single graph contains.
-/// * `?s :p|:q ?o` — 4 rows, `?g` unbound; correct is 5 rows over the two
-///   graphs, so `Distinct` also collapsed g1's and g2's copies of
-///   `<b> :p <o2>`.
-/// * `?s !(:zzz) ?o` — the same 4 rows, `?g` unbound.
-/// * `<b> :p|:q <o2>` — 1 row (g1); correct is 2, the triple being in g1
-///   *and* g2, because `Slice(…, 0, 1)` truncates existence globally rather
-///   than once per graph.
-/// * the aggregating sub-SELECT — 1 row, `?c = 5` counted over every graph
-///   merged, `?g` unbound; correct is g1 → 2 and g2 → 3.
-/// * the nested `GRAPH <g1>` — 2 rows with the outer `?g` unbound.
-///
-/// Identical on both backends. The debug-only postcondition in
-/// `plan::planner` independently trips on these same plans, so observing the
-/// rows above meant disabling both guards.
-fn unsupported_shapes_inside_graph_var_refuse<
+/// Per-graph block evaluation (SPEC-28 S3/D6) answers all of them: the block
+/// runs once per named graph, so each shape sees exactly one graph's
+/// triples, and `?g` is joined on afterwards.
+fn complex_shapes_inside_graph_var_answer_per_graph<
     B: QuadSeed + Default + horndb_sparql::exec::Executor,
 >() {
     let mut b: B = fixture();
     b.seed_quad(Some(G1), "http://ex/x", "http://ex/q", "http://ex/y");
     b.seed_quad(Some(G2), "http://ex/y", "http://ex/q", "http://ex/z");
-    for (q, construct) in [
-        // A closure path: one closure over every graph's edges would join a
-        // hop in g1 to a hop in g2.
-        (
-            "SELECT ?g ?x ?y WHERE { GRAPH ?g { ?x <http://ex/q>+ ?y } }",
-            "property path",
+
+    // The closure runs over one graph's edges, so the cross-graph `x → z`
+    // (a hop in g1 joined to a hop in g2) is never derived.
+    assert_eq!(
+        iri_pairs(
+            &union_rows(
+                &b,
+                "SELECT ?g ?x ?y WHERE { GRAPH ?g { ?x <http://ex/q>+ ?y } }"
+            ),
+            "g",
+            "y"
         ),
-        // An alternative path stays a `Path` in the algebra, which the
-        // translator wraps in Distinct(Project(endpoints)) — the Project
-        // drops ?g and the Distinct then merges g1's and g2's rows.
-        (
-            "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/p>|<http://ex/q> ?o } }",
-            "property path",
-        ),
-        // Negated property set, same wrapper.
-        (
-            "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s !(<http://ex/zzz>) ?o } }",
-            "property path",
-        ),
-        // A ground-endpoint path becomes Slice(inner, 0, 1) — existence
-        // truncated globally instead of once per graph.
-        (
-            "SELECT ?g WHERE { GRAPH ?g { <http://ex/b> <http://ex/p>|<http://ex/q> <http://ex/o2> } }",
-            "property path",
-        ),
-        // A sub-SELECT aggregating inside the graph: the aggregate would run
-        // over the merged multi-graph relation and return one wrong number.
-        (
-            "SELECT ?g ?c WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }",
-            "an aggregate",
-        ),
-        // An inner GRAPH takes over the scan scope, leaving the outer ?g
-        // unbound.
-        (
-            "SELECT ?g ?s WHERE { GRAPH ?g { GRAPH <http://ex/g1> { ?s ?p ?o } } }",
-            "nested GRAPH",
-        ),
+        vec![
+            (G1.to_owned(), "http://ex/y".to_owned()),
+            (G2.to_owned(), "http://ex/z".to_owned()),
+        ],
+        "a closure path stays inside one graph"
+    );
+
+    // An alternative path and a negated property set both keep every graph's
+    // rows: the `Distinct` inside the block dedups within one graph, so g1's
+    // and g2's copies of t2 no longer collapse into one row.
+    let every_triple = vec![
+        (G1.to_owned(), "http://ex/b".to_owned()),
+        (G1.to_owned(), "http://ex/x".to_owned()),
+        (G2.to_owned(), "http://ex/b".to_owned()),
+        (G2.to_owned(), "http://ex/c".to_owned()),
+        (G2.to_owned(), "http://ex/y".to_owned()),
+    ];
+    for q in [
+        "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s <http://ex/p>|<http://ex/q> ?o } }",
+        "SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s !(<http://ex/zzz>) ?o } }",
     ] {
-        let err = match execute_query_with(q, &b, &SparqlConfig::default()) {
-            Err(e) => e.to_string(),
-            Ok(ans) => panic!("must refuse, not answer {q}: {ans:?}"),
-        };
-        assert!(
-            err.contains(construct) && err.contains("GRAPH ?g"),
-            "the error must name the construct ({construct}) for {q}: {err}"
+        assert_eq!(
+            iri_pairs(&union_rows(&b, q), "g", "s"),
+            every_triple,
+            "every graph's triples, deduped within the graph: {q}"
         );
     }
+
+    // A ground-endpoint path is an existence probe. It is truncated once per
+    // graph, so t2 being in both graphs gives two rows, not one.
+    assert_eq!(
+        iris_bound_to(
+            &b,
+            "SELECT ?g WHERE { GRAPH ?g { <http://ex/b> <http://ex/p>|<http://ex/q> \
+             <http://ex/o2> } }",
+            "g",
+            DefaultGraphMode::Union
+        ),
+        vec![G1.to_owned(), G2.to_owned()],
+        "existence is decided once per graph"
+    );
+
+    // An aggregating sub-SELECT counts one graph at a time.
+    let mut counted: Vec<(String, String)> = union_rows(
+        &b,
+        "SELECT ?g ?c WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }",
+    )
+    .iter()
+    .map(|r| {
+        let g = match r.get("g") {
+            Some(horndb_sparql::algebra::Term::Iri(s)) => s.clone(),
+            other => panic!("expected an IRI-bound ?g, got {other:?}"),
+        };
+        (g, format!("{:?}", r.get("c")))
+    })
+    .collect();
+    counted.sort();
+    assert_eq!(counted.len(), 2, "one count per graph: {counted:?}");
+    assert_eq!(counted[0].0, G1);
+    assert!(
+        counted[0].1.contains('2'),
+        "g1 holds two triples: {counted:?}"
+    );
+    assert_eq!(counted[1].0, G2);
+    assert!(
+        counted[1].1.contains('3'),
+        "g2 holds three triples: {counted:?}"
+    );
+
+    // A nested ground `GRAPH` scopes its own leaves; the outer `?g` still
+    // enumerates every named graph, so g1's rows come back once per graph.
+    assert_eq!(
+        iri_pairs(
+            &union_rows(
+                &b,
+                "SELECT ?g ?s WHERE { GRAPH ?g { GRAPH <http://ex/g1> { ?s ?p ?o } } }"
+            ),
+            "g",
+            "s"
+        ),
+        vec![
+            (G1.to_owned(), "http://ex/b".to_owned()),
+            (G1.to_owned(), "http://ex/x".to_owned()),
+            (G2.to_owned(), "http://ex/b".to_owned()),
+            (G2.to_owned(), "http://ex/x".to_owned()),
+        ],
+        "the inner scope picks the triples, the outer variable picks the graph"
+    );
 }
 
 /// `VALUES` is legal and correctly evaluable inside `GRAPH ?g`: it reads no
@@ -724,63 +787,81 @@ fn values_inside_graph_var_answers<B: QuadSeed + Default + horndb_sparql::exec::
 }
 
 /// SPARQL 1.1 §18.2.2.2 evaluates `GRAPH ?g { P }` with `?g` **free** inside
-/// `P` and joins the graph name on afterwards. HornDB binds `?g` on the scan
-/// leaf, so anything in `P` that *reads* `?g` — rather than binding it from
-/// the data — sees a bound variable where the spec sees a free one. Those
-/// shapes must refuse.
+/// `P` and joins the graph name on afterwards. Per-graph block evaluation
+/// does exactly that, so a read of `?g` *inside* the block sees an unbound
+/// variable — the graph name arrives only in the post-join.
 ///
-/// What the unfixed code returned, on the W3C fixtures these mirror
-/// (`graph-variable-scope`, `graph-optional`), identical on both backends:
-///
-/// * `GRAPH ?g { FILTER(BOUND(?g)) }` — 2 rows, one per named graph;
-///   the spec's answer is **0 rows**, because `BOUND(?g)` is false when the
-///   block is evaluated with `?g` free.
-/// * `GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } }` — 4 rows, every left row
-///   carrying its own graph; the spec's answer is **1 row**, because the
-///   OPTIONAL binds `?g` from the object and the post-join then keeps only
-///   the row where that object *is* the graph name.
-fn graph_var_read_inside_the_block_refuses<
-    B: QuadSeed + Default + horndb_sparql::exec::Executor,
->() {
-    let b: B = fixture();
-    for (q, construct) in [
-        // W3C graph-variable-scope.
-        (
-            "SELECT * WHERE { GRAPH ?g { FILTER(BOUND(?g)) } }",
-            "FILTER",
+/// These are the W3C `graph-variable-scope` and `graph-optional` shapes.
+/// Binding `?g` on the scan leaf instead used to give 2 and 4 rows here.
+fn graph_var_is_free_inside_the_block<B: QuadSeed + Default + horndb_sparql::exec::Executor>() {
+    let mut b: B = fixture();
+
+    // W3C graph-variable-scope: `BOUND(?g)` is false inside the block.
+    assert!(
+        union_rows(&b, "SELECT * WHERE { GRAPH ?g { FILTER(BOUND(?g)) } }").is_empty(),
+        "?g is free inside the block, so BOUND(?g) is false"
+    );
+
+    // The shape a user is most likely to write. The FILTER sees `?g`
+    // unbound, so it errors and drops every row — the answer is zero rows,
+    // not "the rows from <g1>".
+    assert!(
+        union_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g = <http://ex/g1>) } }"
+        )
+        .is_empty(),
+        "a FILTER on ?g inside the block cannot select a graph"
+    );
+
+    // An OPTIONAL condition reading `?g` is the same case: the right arm
+    // errors on the unbound variable, so every left row survives with the
+    // optional part unbound.
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o \
+             OPTIONAL { ?s ?p ?o2 FILTER(?o2 = ?g) } } }"
         ),
-        // The same class, and the shape a user is most likely to write: the
-        // FILTER *inside* the block sees ?g free per the spec, so its answer
-        // is zero rows — not "the rows from <g1>".
-        (
-            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o FILTER(?g = <http://ex/g1>) } }",
-            "FILTER",
+        all_graph_rows(),
+        "an unsatisfiable OPTIONAL leaves the left rows intact"
+    );
+
+    // BIND of the free `?g` produces an unbound `?x`, not the graph name.
+    let bound = union_rows(
+        &b,
+        "SELECT ?g ?x WHERE { GRAPH ?g { ?s ?p ?o BIND(?g AS ?x) } }",
+    );
+    assert_eq!(bound.len(), 3, "one row per quad in a named graph");
+    assert!(
+        bound.iter().all(|r| r.get("x").is_none()),
+        "BIND(?g AS ?x) inside the block binds nothing: {bound:?}"
+    );
+
+    // W3C graph-optional: the OPTIONAL binds `?g` from the object, and the
+    // post-join then keeps only the rows whose object *is* the graph name.
+    // No object in the base fixture is a graph IRI, so nothing survives.
+    assert!(
+        union_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } } }"
+        )
+        .is_empty(),
+        "no object names its own graph, so the post-join keeps nothing"
+    );
+    // Give g1 a triple whose object *is* `<g1>` and the post-join keeps it.
+    b.seed_quad(Some(G1), "http://ex/b", "http://ex/p", G1);
+    assert_eq!(
+        union_graph_rows(
+            &b,
+            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } } }"
         ),
-        // W3C graph-optional.
-        (
-            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?g } } }",
-            "OPTIONAL",
-        ),
-        // An OPTIONAL condition reading ?g diverges the same way.
-        (
-            "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o OPTIONAL { ?s ?p ?o2 FILTER(?o2 = ?g) } } }",
-            "OPTIONAL",
-        ),
-        // BIND reading the graph variable.
-        (
-            "SELECT ?g ?x WHERE { GRAPH ?g { ?s ?p ?o BIND(?g AS ?x) } }",
-            "BIND",
-        ),
-    ] {
-        let err = match execute_query_with(q, &b, &SparqlConfig::default()) {
-            Err(e) => e.to_string(),
-            Ok(ans) => panic!("must refuse, not answer {q}: {ans:?}"),
-        };
-        assert!(
-            err.contains(construct) && err.contains("?g") && err.contains("18.2.2.2"),
-            "the error must name the construct ({construct}) and the rule for {q}: {err}"
-        );
-    }
+        vec![
+            (G1.to_owned(), "http://ex/b".to_owned()),
+            (G1.to_owned(), "http://ex/b".to_owned()),
+        ],
+        "the two g1 rows whose OPTIONAL bound ?g to <g1> survive the post-join"
+    );
 }
 
 /// The equivalence boundary of that rule: an `OPTIONAL` whose right arm never
@@ -945,9 +1026,9 @@ both_backends!(
     graph_var_bound_by_the_pattern_itself,
     graph_var_count_counts_every_graph,
     graph_var_is_one_scan_node_whatever_the_graph_count,
-    unsupported_shapes_inside_graph_var_refuse,
+    complex_shapes_inside_graph_var_answer_per_graph,
     values_inside_graph_var_answers,
-    graph_var_read_inside_the_block_refuses,
+    graph_var_is_free_inside_the_block,
     graph_var_beside_an_optional_still_answers,
     distinct_and_limit_above_graph_var_still_answer,
     from_only_leaves_no_graphs_to_enumerate,

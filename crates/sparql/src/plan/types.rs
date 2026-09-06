@@ -132,17 +132,21 @@ fn add_term_vars(t: &Term, mask: TypeMask, out: &mut VarTypes) {
 pub fn infer(plan: &LogicalPlan) -> VarTypes {
     use LogicalPlan::*;
     match plan {
-        Bgp { patterns, scope } => {
+        Bgp { patterns, .. } => {
             let mut vt = VarTypes::default();
             for p in patterns {
                 add_pattern_vars(p, &mut vt);
             }
-            // A `GRAPH ?g` scan also binds `?g`, always to a graph name —
-            // i.e. an IRI (SPEC-28 S3).
-            if let Some(g) = scope.graph_var() {
-                vt.insert_union(g.clone(), TypeMask::from_bits(TypeMask::NAMED_NODE));
-            }
             vt
+        }
+        // `GRAPH ?g { P }` outputs `P`'s vars plus `?g`, always bound to a
+        // graph name — i.e. an IRI (SPEC-28 D6). The node binds it whether
+        // or not `P` does, so this overwrites rather than unions.
+        PerGraph { var, inner } => {
+            let mut out = infer(inner);
+            out.0
+                .insert(var.clone(), TypeMask::from_bits(TypeMask::NAMED_NODE));
+            out
         }
         // Join: shared vars intersect; each side's own vars pass through.
         Join { left, right } => {

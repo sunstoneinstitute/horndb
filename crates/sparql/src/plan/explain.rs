@@ -125,6 +125,10 @@ fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize
         | PhysicalPlan::Extend { inner, .. }
         | PhysicalPlan::OrderBy { inner, .. }
         | PhysicalPlan::Group { inner, .. } => estimate(inner, exec),
+        // `GRAPH ?g` runs `inner` once per graph, and the graph count is not
+        // a plan property — report the one-graph estimate, as loose as every
+        // other number here (SPEC-28 S3 allows coarse estimates).
+        PhysicalPlan::PerGraph { inner, .. } => estimate(inner, exec),
         // Slice caps the row count at `length` (when present).
         PhysicalPlan::Slice { inner, length, .. } => {
             let inner = estimate(inner, exec)?;
@@ -220,6 +224,7 @@ pub(crate) fn node_label(plan: &PhysicalPlan) -> String {
             format!("Project(?{})", names.join(", ?"))
         }
         PhysicalPlan::Distinct { .. } => "Distinct".to_owned(),
+        PhysicalPlan::PerGraph { var, .. } => format!("PerGraph(?{})", var.name()),
         PhysicalPlan::Slice { start, length, .. } => match length {
             Some(len) => format!("Slice(offset={start}, limit={len})"),
             None => format!("Slice(offset={start})"),
@@ -283,6 +288,7 @@ pub(crate) fn children(plan: &PhysicalPlan) -> Vec<&PhysicalPlan> {
         | PhysicalPlan::Slice { inner, .. }
         | PhysicalPlan::OrderBy { inner, .. }
         | PhysicalPlan::Extend { inner, .. }
+        | PhysicalPlan::PerGraph { inner, .. }
         | PhysicalPlan::Group { inner, .. } => vec![inner],
         PhysicalPlan::PathClosure { edge, .. } => vec![edge],
     }

@@ -65,23 +65,25 @@
 //! `GroupCountScan` it produces, and two rules keep that safe:
 //!
 //! * **Decline by default.** A count seam handed a scope it cannot express
-//!   returns `Ok(None)`; the caller then falls back to
-//!   `exec::op::source::scan_scoped`, the same read the plain scan would do,
-//!   so the answer is scope-correct by construction. `GRAPH ?g` is the live
-//!   case — it spans several snapshots, so both count seams decline it. A
-//!   count that widened its scope instead would be a silent wrong answer.
+//!   returns `Ok(None)`; the caller then falls back to `scan_bgp_ids`, the
+//!   same read the plain scan would do, so the answer is scope-correct by
+//!   construction. A count that widened its scope instead would be a silent
+//!   wrong answer.
 //! * **Estimates are not results.** `Executor::cardinality_estimate` may stay
 //!   coarse under any scope because it feeds only `EXPLAIN` text — see the
 //!   module docs of [`crate::plan::explain`], which holds its only call sites
 //!   in `src/`.
 //!
+//! Under `GRAPH ?g` the count rewrite simply does not fire: lowering puts a
+//! `PerGraph` node between the `Group` and its `BgpScan`, so the shape
+//! `lower_count_group` matches is no longer there. That is the right answer
+//! — a single scoped count cannot stand in for a sum over per-graph counts.
+//!
 //! `pushdown_is_result_invariant_under_every_graph_scope` is the regression
 //! net: every shape, unscoped and inside `GRAPH <g>` and `GRAPH ?g`, with the
 //! rewrite on and off. It **localises** failures rather than being the only
 //! thing that catches them — `graph_query.rs` already pins the *answers* for
-//! a scope-dropped count leaf and for the `CoalesceBgp` guard. The one
-//! regression it catches alone is a count seam that stops declining
-//! `GRAPH ?g`.
+//! a scope-dropped count leaf and for the `CoalesceBgp` guard.
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
@@ -385,6 +387,10 @@ fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> Phys
         Distinct { inner } => Distinct {
             inner: Box::new(f(*inner)),
         },
+        PerGraph { var, inner } => PerGraph {
+            var,
+            inner: Box::new(f(*inner)),
+        },
         Slice {
             inner,
             start,
@@ -437,16 +443,18 @@ fn map_children(node: PhysicalPlan, f: fn(PhysicalPlan) -> PhysicalPlan) -> Phys
 pub(crate) fn output_vars(node: &PhysicalPlan) -> Vec<String> {
     use PhysicalPlan::*;
     match node {
-        // The graph variable of a `GRAPH ?g` scan is an output column too
-        // (SPEC-28 D6) — see `GraphScope::graph_var`.
-        BgpScan { patterns, scope } => {
+        BgpScan { patterns, .. } => {
             let mut out = Vec::new();
             for p in patterns {
                 collect_pattern_vars(p, &mut out);
             }
-            if let Some(g) = scope.graph_var() {
-                push_unique(&mut out, g.name());
-            }
+            out
+        }
+        // `GRAPH ?g { P }` outputs `P`'s columns plus `?g` (SPEC-28 D6) —
+        // the node produces it, not the scan leaf below.
+        PerGraph { var, inner } => {
+            let mut out = output_vars(inner);
+            push_unique(&mut out, var.name());
             out
         }
         CountScan { out_var, .. } => vec![out_var.name().to_owned()],
@@ -602,6 +610,19 @@ fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
                 vars: vars.clone(),
                 inner: Box::new(prune(inner, &want)),
             }
+        }
+        // `GRAPH ?g { P }` needs `?g` from `P` when `P` binds it (the
+        // §18.2.2.2 post-join filters on it), so add it to the demand;
+        // `wrap_if_wider` below intersects it away when `P` does not.
+        PerGraph { var, inner } => {
+            let mut d = demanded.clone();
+            d.insert(var.name().to_owned());
+            let node2 = PerGraph {
+                var: var.clone(),
+                inner: Box::new(prune(inner, &d)),
+            };
+            let nat = output_vars(&node2);
+            wrap_if_wider(node2, &nat, demanded)
         }
         // FILTER must see its expression's vars even if the parent does not.
         Filter { expr, inner } => {
@@ -807,8 +828,8 @@ mod tests {
         plan_select_result(q).expect("planning failed")
     }
 
-    /// `plan_select` keeping the error: the graph-scope battery needs the
-    /// refusals lowering raises for shapes `GRAPH ?g` cannot carry.
+    /// `plan_select` keeping the error, so the graph-scope battery can say
+    /// which query failed to plan instead of a bare `expect`.
     ///
     /// Every query here is dataset-free, so the translated `DatasetSpec` is
     /// the default one `Runtime::new` already assumes and can be dropped.
@@ -1011,6 +1032,7 @@ mod tests {
             | PhysicalPlan::Union { left, right }
             | PhysicalPlan::Minus { left, right } => has_count_scan(left) || has_count_scan(right),
             PhysicalPlan::PathClosure { edge, .. } => has_count_scan(edge),
+            PhysicalPlan::PerGraph { inner, .. } => has_count_scan(inner),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::GroupCountScan { .. }
             | PhysicalPlan::Values { .. } => false,
@@ -1400,6 +1422,7 @@ mod tests {
                 has_group_count_scan(left) || has_group_count_scan(right)
             }
             PhysicalPlan::PathClosure { edge, .. } => has_group_count_scan(edge),
+            PhysicalPlan::PerGraph { inner, .. } => has_group_count_scan(inner),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
             | PhysicalPlan::Values { .. } => false,
@@ -1517,11 +1540,6 @@ mod tests {
         /// per arm, so a pass that silently stops firing under a graph scope
         /// fails here rather than being masked by the identity assertion.
         fires: Option<CountLeaf>,
-        /// True when lowering refuses this body inside `GRAPH ?gg` — the
-        /// graph column cannot survive the shape (`plan::lower`). Both
-        /// pushdown states must then refuse *identically*, which they do
-        /// because the refusal happens before any rewrite.
-        refuses_under_graph_var: bool,
     }
 
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1554,6 +1572,7 @@ mod tests {
                 count_leaves(right, out);
             }
             PhysicalPlan::PathClosure { edge, .. } => count_leaves(edge, out),
+            PhysicalPlan::PerGraph { inner, .. } => count_leaves(inner, out),
             PhysicalPlan::BgpScan { .. } | PhysicalPlan::Values { .. } => {}
         }
     }
@@ -1615,14 +1634,12 @@ mod tests {
             body,
             tail,
             fires: None,
-            refuses_under_graph_var: false,
         };
         let counting = |proj, body, tail, fires| Shape {
             proj,
             body,
             tail,
             fires: Some(fires),
-            refuses_under_graph_var: false,
         };
         vec![
             plain("*", "?s <http://ex/name> ?n", ""),
@@ -1689,28 +1706,20 @@ mod tests {
                 "GROUP BY ?n ORDER BY ?n LIMIT 2",
                 CountLeaf::GroupCount,
             ),
-            // A property path answers under both ground arms and refuses
-            // under `GRAPH ?gg` (the closure would drop the graph column).
-            Shape {
-                proj: "?x ?y",
-                body: "?x <http://ex/knows>+ ?y",
-                tail: "",
-                fires: None,
-                refuses_under_graph_var: true,
-            },
+            // A property path. Under `GRAPH ?gg` the `PerGraph` node
+            // rebuilds the closure per graph, so hops never cross graphs.
+            plain("?x ?y", "?x <http://ex/knows>+ ?y", ""),
             // An inner `GRAPH` block: the only shape here that survives as a
             // `PhysicalPlan::Join`, because two differently-scoped `Bgp`s
             // cannot coalesce. Every other body either coalesces (equal
-            // scopes) or lowers to `LeftJoin`/`Union`. Refuses under
-            // `GRAPH ?gg` — the inner scope takes over the scan, leaving the
-            // outer `?gg` unbound.
-            Shape {
-                proj: "?s ?y",
-                body: "?s <http://ex/name> ?n GRAPH <http://ex/g2> { ?y <http://ex/name> ?n2 }",
-                tail: "",
-                fires: None,
-                refuses_under_graph_var: true,
-            },
+            // scopes) or lowers to `LeftJoin`/`Union`. Under `GRAPH ?gg` the
+            // inner ground scope takes over its own leaf while the outer
+            // leaf still follows `?gg` (SPEC-28 D6).
+            plain(
+                "?s ?y",
+                "?s <http://ex/name> ?n GRAPH <http://ex/g2> { ?y <http://ex/name> ?n2 }",
+                "",
+            ),
         ]
     }
 
@@ -1728,9 +1737,8 @@ mod tests {
     /// 2. Every shape must yield rows in every arm it runs in.
     /// 3. Both scoped arms must total fewer rows than the union arm.
     ///
-    /// A shape lowering refuses under `GRAPH ?gg` is asserted to refuse; the
-    /// refusal happens before any rewrite, so both pushdown states refuse
-    /// identically.
+    /// Every shape answers in every arm — `GRAPH ?gg` no longer refuses any
+    /// of them (SPEC-28 S3, per-graph block evaluation).
     #[test]
     fn pushdown_is_result_invariant_under_every_graph_scope() {
         let horn = graph_fixture();
@@ -1751,14 +1759,10 @@ mod tests {
                 GraphScope::Named(crate::algebra::GraphSpec::Var(Var::new("gg"))),
             ),
         ];
-        // Row totals per arm, over the shapes that **run in all three arms**.
-        // Shapes that refuse under `GRAPH ?gg` are left out of every arm's
-        // total: counting them would let the refusal's own skipped rows
-        // satisfy `totals[2] < totals[0]`, so an arm whose scans all read the
-        // union default graph would still pass. Like-for-like, the fixture
-        // (see `graph_fixture`, invariant 1) makes both scoped arms strictly
-        // smaller than the union arm — equal totals mean the scope never
-        // reached the scans.
+        // Row totals per arm. Every shape runs in all three arms, so the
+        // comparison is like-for-like: the fixture (see `graph_fixture`,
+        // invariant 1) makes both scoped arms strictly smaller than the
+        // union arm — equal totals mean the scope never reached the scans.
         let mut totals = [0usize; 3];
         let mut rewrote_something = [false; 3];
 
@@ -1768,29 +1772,21 @@ mod tests {
                     "SELECT {} WHERE {{ {open} {} {close} }} {}",
                     shape.proj, shape.body, shape.tail
                 );
-                let refuses = want_scope.graph_var().is_some() && shape.refuses_under_graph_var;
-                let plan = match plan_select_result(&q) {
-                    Ok(p) => {
-                        assert!(!refuses, "expected {arm} to refuse:\n{q}");
-                        p
-                    }
-                    Err(e) => {
-                        assert!(refuses, "unexpected refusal for {arm}:\n{q}\n{e}");
-                        // The refusal is in lowering, before any rewrite, so
-                        // both pushdown states refuse identically — there is
-                        // no plan to run either way.
-                        assert!(
-                            e.to_string().contains("GRAPH ?gg"),
-                            "the refusal must name the graph variable: {e}"
-                        );
-                        continue;
-                    }
-                };
+                let plan = plan_select_result(&q)
+                    .unwrap_or_else(|e| panic!("unexpected refusal for {arm}:\n{q}\n{e}"));
 
                 let rewritten = rewrite(&plan).unwrap();
                 let mut leaves = Vec::new();
                 count_leaves(&rewritten, &mut leaves);
-                match shape.fires {
+                // Under `GRAPH ?gg` lowering puts a `PerGraph` node between
+                // the aggregate and the scan, so the count rewrite has no
+                // shape to match. That is the right answer: a sum over
+                // per-graph counts is not one scoped count.
+                let want_leaf = match want_scope.graph_var() {
+                    Some(_) => None,
+                    None => shape.fires,
+                };
+                match want_leaf {
                     Some(kind) => assert_eq!(
                         leaves,
                         vec![(kind, want_scope.clone())],
@@ -1816,9 +1812,7 @@ mod tests {
                     "every battery shape must yield rows under {arm}, or the \
                      identity assertion is vacuous:\n{q}"
                 );
-                if !shape.refuses_under_graph_var {
-                    totals[i] += with.len();
-                }
+                totals[i] += with.len();
             }
         }
 
@@ -1859,6 +1853,7 @@ mod tests {
                 scan_is_narrowed_to(left, want) || scan_is_narrowed_to(right, want)
             }
             PhysicalPlan::PathClosure { edge, .. } => scan_is_narrowed_to(edge, want),
+            PhysicalPlan::PerGraph { inner, .. } => scan_is_narrowed_to(inner, want),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
             | PhysicalPlan::GroupCountScan { .. }
@@ -1888,6 +1883,7 @@ mod tests {
                 find_bgp_vars(right, out);
             }
             PhysicalPlan::PathClosure { edge, .. } => find_bgp_vars(edge, out),
+            PhysicalPlan::PerGraph { inner, .. } => find_bgp_vars(inner, out),
             PhysicalPlan::CountScan { .. }
             | PhysicalPlan::GroupCountScan { .. }
             | PhysicalPlan::Values { .. } => {}
@@ -1910,6 +1906,7 @@ mod tests {
                 distinct_inner(left).or_else(|| distinct_inner(right))
             }
             PhysicalPlan::PathClosure { edge, .. } => distinct_inner(edge),
+            PhysicalPlan::PerGraph { inner, .. } => distinct_inner(inner),
             PhysicalPlan::BgpScan { .. }
             | PhysicalPlan::CountScan { .. }
             | PhysicalPlan::GroupCountScan { .. }

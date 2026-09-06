@@ -27,7 +27,7 @@ fn order_by(inner: PhysicalPlan) -> PhysicalPlan {
 fn fuses(plan: &PhysicalPlan) -> bool {
     let horn = HornBackend::new();
     let rt = Runtime::new(&horn);
-    let fused = rt.build_top_k(plan, 10).unwrap().is_some();
+    let fused = rt.build_top_k(plan, 10, &[]).unwrap().is_some();
     fused
 }
 

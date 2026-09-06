@@ -27,16 +27,17 @@ use std::collections::HashSet;
 pub(crate) fn schema(node: &LogicalPlan) -> Vec<Var> {
     use LogicalPlan::*;
     match node {
-        // A `GRAPH ?g` scan binds `?g` on top of its patterns' vars — miss
-        // it and `projection_pushdown` narrows the graph column away.
-        Bgp { patterns, scope } => {
+        Bgp { patterns, .. } => {
             let mut out = Vec::new();
             for p in patterns {
                 push_pattern_vars(p, &mut out);
             }
-            if let Some(g) = scope.graph_var() {
-                push_unique(&mut out, g.clone());
-            }
+            out
+        }
+        // `GRAPH ?g { P }` adds `?g` to `P`'s columns (SPEC-28 D6).
+        PerGraph { var, inner } => {
+            let mut out = schema(inner);
+            push_unique(&mut out, var.clone());
             out
         }
         Join { left, right } | LeftJoin { left, right, .. } | Union { left, right } => {
@@ -177,6 +178,10 @@ pub(crate) fn map_children(
             inner: Box::new(f(*inner)),
         },
         Distinct { inner } => Distinct {
+            inner: Box::new(f(*inner)),
+        },
+        PerGraph { var, inner } => PerGraph {
+            var,
             inner: Box::new(f(*inner)),
         },
         Slice {
