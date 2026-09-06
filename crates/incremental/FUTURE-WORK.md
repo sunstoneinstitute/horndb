@@ -130,9 +130,6 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   `DisconnectSlow` (default) drops a lagging subscriber and counts it,
   `Block` backpressures the tick. `subscribe()` stays unbounded as an explicit
   opt-out. See `INTEGRATION-NOTES.md`.
-- **NaryPlan cost model**: current planner is left-deep and naïve.
-  Cost-based reordering using SPEC-02's predicate-partition statistics
-  is a Stage 2 deliverable.
 - **`HashMap` vs `BTreeMap` in `Zset`**: BTreeMap was chosen for
   deterministic iteration (change-feed ordering). If profiling shows
   iteration is not the bottleneck and lookup dominates, swap to a

@@ -297,3 +297,149 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Cost-based leaf ordering (SPEC-06 F4, SPEC-24 §S7): `NaryPlan::from_body`
+// picks the join order from the SPEC-23 `Stats` seam.
+// ---------------------------------------------------------------------
+
+mod cost_ordering {
+    use horndb_incremental::{KernelError, NaryPlan, PredExtent, TripleId, Zset};
+    use horndb_wcoj::source::vec_source::VecTripleSource;
+    use horndb_wcoj::stats::{SnapshotStats, Stats, ZeroStats};
+    use horndb_wcoj::{Term, Triple, TriplePattern, Var};
+
+    const A: u64 = 101;
+    const B: u64 = 102;
+    const C: u64 = 103;
+    const TYPE: u64 = 104;
+
+    /// Rows on `A` and `B`; `C` is the selective one.
+    const WIDE: u64 = 10_000;
+    const NARROW: u64 = 10;
+
+    fn v(n: u8) -> Term {
+        Term::Var(Var(n))
+    }
+
+    /// Chain body `(?x A ?y), (?y B ?z), (?z C ?w)` in declaration order.
+    fn chain_body() -> [TriplePattern; 3] {
+        [
+            TriplePattern::new(v(0), Term::Bound(A), v(1)),
+            TriplePattern::new(v(1), Term::Bound(B), v(2)),
+            TriplePattern::new(v(2), Term::Bound(C), v(3)),
+        ]
+    }
+
+    /// Head `(?x TYPE ?w)` — the two chain endpoints.
+    fn chain_head() -> TriplePattern {
+        TriplePattern::new(v(0), Term::Bound(TYPE), v(3))
+    }
+
+    /// A skewed extent: `WIDE` rows each on `A` and `B`, `NARROW` on `C`,
+    /// wired so exactly `NARROW` chains run end to end.
+    fn skewed_rows() -> Vec<(u64, u64, u64)> {
+        let mut rows = Vec::new();
+        for i in 0..WIDE {
+            rows.push((i, A, 100_000 + i));
+            rows.push((100_000 + i, B, 200_000 + i));
+        }
+        for i in 0..NARROW {
+            rows.push((200_000 + i, C, 300_000 + i));
+        }
+        rows
+    }
+
+    fn extent_of(rows: &[(u64, u64, u64)]) -> PredExtent {
+        PredExtent::from_zset(&Zset::from_iter(
+            rows.iter().map(|r| (*r as TripleId, 1)).collect::<Vec<_>>(),
+        ))
+    }
+
+    fn stats_of(rows: &[(u64, u64, u64)]) -> SnapshotStats {
+        SnapshotStats::from_source(&VecTripleSource::from_triples(
+            rows.iter().map(|&(s, p, o)| Triple::new(s, p, o)).collect(),
+        ))
+    }
+
+    /// DoD: over a skewed extent the planner starts from the selective `C`
+    /// pattern, and the reordered plan derives exactly what the
+    /// declaration-order plan derives — reordering changes the cost, not
+    /// the answer.
+    #[test]
+    fn cost_order_starts_from_the_selective_pattern_and_preserves_the_answer() {
+        let rows = skewed_rows();
+        let extent = extent_of(&rows);
+        let body = chain_body();
+
+        let costed = NaryPlan::from_body(1, &body, chain_head(), &stats_of(&rows)).unwrap();
+        assert_eq!(
+            costed.leaf_order(),
+            [2, 1, 0],
+            "cheapest leaf must go first"
+        );
+
+        let declared = NaryPlan::from_body(1, &body, chain_head(), &ZeroStats::new(0)).unwrap();
+        assert_eq!(declared.leaf_order(), [0, 1, 2]);
+
+        let expected = declared.apply_full(&extent);
+        assert_eq!(costed.apply_full(&extent), expected);
+        // Not a vacuous comparison: one derivation per `C` row.
+        assert_eq!(expected.len(), NARROW as usize);
+        assert_eq!(expected.get(&(0, TYPE, 300_000)), 1);
+    }
+
+    /// `ZeroStats` has no per-predicate signal (`is_informed() == false`),
+    /// so the planner skips the cost search and keeps declaration order —
+    /// even though the extent is skewed.
+    #[test]
+    fn uninformed_stats_keep_declaration_order() {
+        let stats = ZeroStats::new(20_010);
+        assert!(!stats.is_informed());
+        let plan = NaryPlan::from_body(1, &chain_body(), chain_head(), &stats).unwrap();
+        assert_eq!(plan.leaf_order(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn single_pattern_body_is_not_this_planners_job() {
+        let err = NaryPlan::from_body(1, &chain_body()[..1], chain_head(), &ZeroStats::new(0))
+            .err()
+            .unwrap();
+        assert_eq!(err, KernelError::BodyTooShort(1));
+    }
+
+    /// Two components with no shared variable: a cross product, which the
+    /// planner refuses rather than costing.
+    #[test]
+    fn disconnected_body_is_rejected() {
+        let body = [
+            TriplePattern::new(v(0), Term::Bound(A), v(1)),
+            TriplePattern::new(v(2), Term::Bound(B), v(3)),
+        ];
+        let head = TriplePattern::new(v(0), Term::Bound(TYPE), v(3));
+        let err = NaryPlan::from_body(1, &body, head, &ZeroStats::new(0))
+            .err()
+            .unwrap();
+        assert_eq!(err, KernelError::DisconnectedBody);
+    }
+
+    /// A prefix whose intermediate would need four live variables has no
+    /// three-slot shape — `HashJoinRule`'s documented ceiling.
+    ///
+    /// `(?a ?b ?c), (?c ?d ?e), (?e F ?a)` with head `(?a ?b ?d)`: after
+    /// the first join, `?a`, `?b`, `?d` are still needed by the head and
+    /// `?e` by the last pattern — four live variables, one too many.
+    #[test]
+    fn more_than_three_live_variables_is_rejected() {
+        let body = [
+            TriplePattern::new(v(0), v(1), v(2)),
+            TriplePattern::new(v(2), v(3), v(4)),
+            TriplePattern::new(v(4), Term::Bound(A), v(0)),
+        ];
+        let head = TriplePattern::new(v(0), v(1), v(3));
+        let err = NaryPlan::from_body(1, &body, head, &ZeroStats::new(0))
+            .err()
+            .unwrap();
+        assert_eq!(err, KernelError::TooManyLiveVars(4));
+    }
+}

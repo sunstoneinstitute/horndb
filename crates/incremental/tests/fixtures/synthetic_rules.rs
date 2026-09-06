@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use horndb_incremental::{BilinearRule, HashJoinRule, NaryPlan, RuleId, TripleId, Zset};
+use horndb_wcoj::stats::ZeroStats;
 use horndb_wcoj::{Term, TriplePattern, Var};
 
 pub const SC: u64 = 100;
@@ -108,20 +109,43 @@ impl BilinearRule for CaxScoRule {
 }
 
 /// Build the three NaryPlans (each is a single bilinear) for the circuit.
+///
+/// Built through `NaryPlan::from_body` over `ZeroStats`: no per-predicate
+/// signal, so the planner keeps declaration order and these plans are the
+/// same left-deep shape the hand-pushed fixtures were.
 pub fn build_plans() -> Vec<(NaryPlan, RuleId)> {
-    let mut p1 = NaryPlan::new();
-    p1.push_join(Box::new(TransitiveOn {
-        id: R1_SCM_SCO,
-        p: SC,
-    }));
-    let mut p2 = NaryPlan::new();
-    p2.push_join(Box::new(TransitiveOn {
-        id: R2_SCM_SPO,
-        p: SPO,
-    }));
-    let mut p3 = NaryPlan::new();
-    p3.push_join(Box::new(CaxScoRule { id: R3_CAX_SCO }));
-    vec![(p1, R1_SCM_SCO), (p2, R2_SCM_SPO), (p3, R3_CAX_SCO)]
+    let x = Term::Var(Var(0));
+    let y = Term::Var(Var(1));
+    let z = Term::Var(Var(2));
+    let stats = ZeroStats::new(0);
+
+    let transitive = |id: RuleId, pred: u64| {
+        let p = Term::Bound(pred);
+        NaryPlan::from_body(
+            id,
+            &[TriplePattern::new(x, p, y), TriplePattern::new(y, p, z)],
+            TriplePattern::new(x, p, z),
+            &stats,
+        )
+        .expect("transitive self-join is a plannable two-pattern body")
+    };
+
+    let cax_sco = NaryPlan::from_body(
+        R3_CAX_SCO,
+        &[
+            TriplePattern::new(x, Term::Bound(TYPE), y),
+            TriplePattern::new(y, Term::Bound(SC), z),
+        ],
+        TriplePattern::new(x, Term::Bound(TYPE), z),
+        &stats,
+    )
+    .expect("cax-sco is a plannable two-pattern body");
+
+    vec![
+        (transitive(R1_SCM_SCO, SC), R1_SCM_SCO),
+        (transitive(R2_SCM_SPO, SPO), R2_SCM_SPO),
+        (cax_sco, R3_CAX_SCO),
+    ]
 }
 
 /// Brute-force fixed-point reference. Repeatedly applies all three

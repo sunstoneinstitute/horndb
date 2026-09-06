@@ -7,7 +7,12 @@
 //! inputs are accepted; bilinear retraction across joins is a Stage 2
 //! deliverable (F6 in SPEC-06).
 
+use horndb_wcoj::estimator::StatsEstimator;
+use horndb_wcoj::stats::Stats;
+use horndb_wcoj::{Term, TriplePattern, Var};
+
 use crate::extent::PredExtent;
+use crate::kernels::{vars_in, HashJoinRule, KernelError};
 use crate::types::{RuleId, TripleId};
 use crate::zset::Zset;
 
@@ -54,10 +59,16 @@ pub trait BilinearRule: Send + Sync {
 
 /// F4: n-ary rule planner.
 ///
-/// Stage 1: left-deep tree of bilinear joins. `push_join(rule)` appends
-/// a join whose left input is the running intermediate and whose right
-/// input is the base extent. Cost-based reordering is a Stage 2
-/// deliverable.
+/// A left-deep tree of bilinear joins. `push_join(rule)` appends a join
+/// whose left input is the running intermediate and whose right input is
+/// the base extent, in the order the caller pushes.
+///
+/// [`NaryPlan::from_body`] picks that order instead of taking it from the
+/// caller: given a rule body as triple patterns it greedily builds a
+/// connected left-deep order that minimises the estimated intermediate
+/// size, costed over the SPEC-23 §5.3 [`Stats`] seam (SPEC-06 F4,
+/// SPEC-24 §S7). Reordering only changes the cost — the plan derives the
+/// same rows either way.
 ///
 /// Each leaf binds to the predicate slice its rule declares via
 /// `BilinearRule::body_predicates` (SPEC-24 S7) — level 0 slices both
@@ -66,6 +77,9 @@ pub trait BilinearRule: Send + Sync {
 /// side reads the whole extent there, unchanged from Stage 1.
 pub struct NaryPlan {
     joins: Vec<Box<dyn BilinearRule>>,
+    /// Body indices in the order [`NaryPlan::from_body`] joined them.
+    /// Empty for a plan assembled with [`NaryPlan::push_join`].
+    leaf_order: Vec<usize>,
     /// Integrated left-input intermediates for joins[1..] (z⁻¹ state).
     /// None until the first stateful call (lazy cold-start from the base
     /// passed to that call). state[i] is the left input of joins[i+1].
@@ -85,6 +99,7 @@ impl NaryPlan {
     pub fn new() -> Self {
         Self {
             joins: Vec::new(),
+            leaf_order: Vec::new(),
             state: None,
         }
     }
@@ -96,6 +111,53 @@ impl NaryPlan {
     }
     pub fn arity(&self) -> usize {
         self.joins.len() + 1
+    }
+
+    /// The body indices this plan joins, in join order — the planner's
+    /// choice, exposed for tests and EXPLAIN. Empty for a plan assembled
+    /// with [`NaryPlan::push_join`].
+    pub fn leaf_order(&self) -> &[usize] {
+        &self.leaf_order
+    }
+
+    /// Build a left-deep plan for `body` in a cost-chosen order
+    /// (SPEC-06 F4, SPEC-24 §S7).
+    ///
+    /// Every level is a [`HashJoinRule`]: level 0 joins the two cheapest
+    /// connected patterns, each later level joins the running
+    /// intermediate against the next chosen pattern. The last level's
+    /// head is `head`; every earlier level's head is the three-slot
+    /// projection of the prefix's *live* variables (see the private
+    /// `intermediate_shape` helper).
+    ///
+    /// A single-pattern body is [`LinearRule`]'s job, not this planner's,
+    /// so `body.len() < 2` is an error. So is a body whose patterns do
+    /// not form one connected component (cross products are not planned)
+    /// and a prefix needing more than three live variables.
+    pub fn from_body(
+        id: RuleId,
+        body: &[TriplePattern],
+        head: TriplePattern,
+        stats: &dyn Stats,
+    ) -> Result<NaryPlan, KernelError> {
+        if body.len() < 2 {
+            return Err(KernelError::BodyTooShort(body.len()));
+        }
+        let order = choose_order(body, stats)?;
+        let mut plan = NaryPlan::new();
+        let mut left = body[order[0]];
+        for step in 0..order.len() - 1 {
+            let right = body[order[step + 1]];
+            let step_head = if step + 2 == order.len() {
+                head
+            } else {
+                intermediate_shape(&left, &right, body, &order[step + 2..], &head)?
+            };
+            plan.push_join(Box::new(HashJoinRule::new(id, left, right, step_head)?));
+            left = step_head;
+        }
+        plan.leaf_order = order;
+        Ok(plan)
     }
 
     /// Cold-start eval: fold the joins left-to-right starting from the
@@ -205,6 +267,109 @@ impl NaryPlan {
     pub fn reset_state(&mut self) {
         self.state = None;
     }
+}
+
+/// Value the unused slots of an intermediate shape carry. The shape is
+/// both the head a level writes and the left pattern the next level
+/// matches, so a `Bound` pad round-trips: the level writes it, the next
+/// level matches it back.
+const INTERMEDIATE_PAD: u64 = 0;
+
+/// The three-slot shape a join prefix hands to the next level: the
+/// prefix's *live* variables — those some later body pattern or the final
+/// head still needs — in first-appearance order across `left` then
+/// `right`, unused slots padded.
+///
+/// The live variables keep their own [`Var`] ids rather than getting
+/// fresh ones, so the `Var` -> slot map is the identity: the next level's
+/// left pattern *is* this pattern, and matching an intermediate row
+/// against it rebinds each variable to the value this level wrote.
+///
+/// `NaryPlan` threads intermediates as `Zset<TripleId>`, so a prefix
+/// needing a fourth live variable has no shape — that is
+/// [`HashJoinRule`]'s documented ceiling, reported as
+/// [`KernelError::TooManyLiveVars`].
+fn intermediate_shape(
+    left: &TriplePattern,
+    right: &TriplePattern,
+    body: &[TriplePattern],
+    rest: &[usize],
+    head: &TriplePattern,
+) -> Result<TriplePattern, KernelError> {
+    let mut still_needed = vars_in(head);
+    for &i in rest {
+        for v in vars_in(&body[i]) {
+            if !still_needed.contains(&v) {
+                still_needed.push(v);
+            }
+        }
+    }
+    let mut live: Vec<Var> = Vec::new();
+    for v in vars_in(left).into_iter().chain(vars_in(right)) {
+        if still_needed.contains(&v) && !live.contains(&v) {
+            live.push(v);
+        }
+    }
+    if live.len() > 3 {
+        return Err(KernelError::TooManyLiveVars(live.len()));
+    }
+    let slot = |i: usize| {
+        live.get(i)
+            .copied()
+            .map_or(Term::Bound(INTERMEDIATE_PAD), Term::Var)
+    };
+    Ok(TriplePattern::new(slot(0), slot(1), slot(2)))
+}
+
+/// Greedy connected left-deep leaf ordering: start from the cheapest
+/// single pattern, then repeatedly append the unused pattern that shares
+/// a variable with the prefix and minimises the estimated size of
+/// `prefix ∪ {p}`. Ties break by declaration order.
+///
+/// Uninformed statistics (`ZeroStats`) carry no per-predicate signal, so
+/// costing would only break ties — the walk then keeps declaration order,
+/// mirroring `horndb_wcoj::planner`, which also skips the cost search
+/// there.
+///
+/// ponytail: greedy, O(n²) estimator calls, no bushy trees. Fine for the
+/// handful of patterns an OWL 2 RL rule body has. Upgrade path if a body
+/// ever exceeds five patterns: SPEC-23 §5.5's connected-subset DP
+/// (`horndb_wcoj::planner::Planner::choose`).
+fn choose_order(body: &[TriplePattern], stats: &dyn Stats) -> Result<Vec<usize>, KernelError> {
+    let estimator = StatsEstimator::new(stats);
+    let costed = stats.is_informed();
+    let start = if costed {
+        (0..body.len())
+            .min_by_key(|&i| estimator.estimate_pattern(&body[i]).estimate)
+            .expect("body has at least two patterns")
+    } else {
+        0
+    };
+    let mut order = vec![start];
+    let mut prefix = vec![body[start]];
+    while order.len() < body.len() {
+        let prefix_vars: Vec<Var> = prefix.iter().flat_map(vars_in).collect();
+        let mut best: Option<(u64, usize)> = None;
+        for (i, pat) in body.iter().enumerate() {
+            if order.contains(&i) || !vars_in(pat).iter().any(|v| prefix_vars.contains(v)) {
+                continue;
+            }
+            let cost = if costed {
+                let mut candidate = prefix.clone();
+                candidate.push(*pat);
+                estimator.estimate_bgp(&candidate).estimate
+            } else {
+                0
+            };
+            if best.is_none_or(|(best_cost, _)| cost < best_cost) {
+                best = Some((cost, i));
+            }
+        }
+        let (_, pick) = best.ok_or(KernelError::DisconnectedBody)?;
+        order.push(pick);
+        prefix.push(body[pick]);
+    }
+    Ok(order)
 }
 
 impl Default for NaryPlan {
