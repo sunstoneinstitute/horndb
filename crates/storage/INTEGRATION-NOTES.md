@@ -454,8 +454,15 @@ code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
   like a bulk load.
 - **Call site for HDB-51 (`serve`).** `HornBackend::with_store(Store::open(
   &data_dir)?)` at startup; call `Store::checkpoint()` on a schedule
-  (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done here. Also not in: a directory lock against two processes, WAL metrics,
-  SPEC-24 S5 `Input` / `TickCommit` record kinds (the kind byte leaves room).
+  (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done here. Also not in: a directory lock against two processes, WAL metrics.
+- **SPEC-24 S5 input records** (HDB-52, ADR-0018). Kinds `Input` (4) and
+  `TickCommit` (5) share the framing and the fsync policy but carry their own
+  bodies, so `decode` returns `Record::Input` / `Record::TickCommit` instead of
+  a `BatchRecord` and replay hands them to the circuit, not the tier. Surface:
+  `Store::log_input`, `Store::log_tick_commit` (always syncs — the "per-tick"
+  fsync policy), `Store::take_recovered_inputs` / `has_recovered_inputs`. A
+  checkpoint's generation roll drops them, which is the log truncation SPEC-24
+  S5 pairs with the drain.
 
 Tests: `tests/wal_recovery.rs` (crash after append with ids, quads, version
 and stamps compared; id differential across recovery; checkpoint → append →

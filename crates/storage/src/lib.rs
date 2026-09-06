@@ -13,7 +13,9 @@
 //!   * A persistent dictionary: an immutable memory-mapped base under the
 //!     in-memory overlay (`dict_base`, SPEC-25 S2).
 //!   * A write-ahead log with checkpoints and crash recovery (`wal`,
-//!     `Store::open` / `Store::checkpoint`, SPEC-25 S3).
+//!     `Store::open` / `Store::checkpoint`, SPEC-25 S3). The same log carries
+//!     the circuit's input records (`Store::log_input`, SPEC-24 S5,
+//!     ADR-0018).
 //!
 //! Out of scope here: CXL/NVMe tiering, named-graph snapshots, rdfhdt
 //! wire-format compatibility, HDT bulk import.
@@ -49,4 +51,4 @@ pub use store::{FootprintReport, Store, StoreSnapshot};
 pub use term::{GraphId, InternedQuad, TermId, TermKind, DEFAULT_GRAPH};
 pub use tier::{ApplyReport, Tier, TierStats, TierWrite};
 pub use visibility::{visible, CommitVersion, LATEST, UNSET_END};
-pub use wal::SyncPolicy;
+pub use wal::{InputRecord, RecoveredInputs, SyncPolicy};
