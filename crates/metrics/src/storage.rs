@@ -135,7 +135,12 @@ pub struct StorageSnapshot {
     /// reverse-map term strings, and both containers' slot overhead (HDB-146).
     /// O(1) to read — the content totals are maintained at intern/GC time.
     pub dictionary_bytes: i64,
-    pub tier_bytes_estimated: i64,
+    /// Warm (DRAM-resident) estimated bytes: `bytes_estimated - bytes_cold`
+    /// from `horndb_storage::TierStats`. Emitted as `tier="dram"`.
+    pub tier_bytes_warm: i64,
+    /// Cold, memory-mapped partition bytes (SPEC-25 S5):
+    /// `horndb_storage::TierStats.bytes_cold`. Emitted as `tier="cold"`.
+    pub tier_bytes_cold: i64,
 }
 
 /// Scrape-time collector that emits the six storage size gauges. It holds a
@@ -186,17 +191,22 @@ impl Collector for StorageCollector {
             g.encode(me)?;
         }
         {
-            let g = ConstGauge::new(snap.tier_bytes_estimated);
+            let warm = ConstGauge::new(snap.tier_bytes_warm);
+            let cold = ConstGauge::new(snap.tier_bytes_cold);
             let mut me = enc.encode_descriptor(
                 "storage_tier_bytes_estimated",
-                "Estimated tier bytes",
+                "Estimated bytes per storage tier",
                 None,
-                g.metric_type(),
+                warm.metric_type(),
             )?;
             let sub = me.encode_family(&TierLabel {
-                tier: MemTier::Unknown,
+                tier: MemTier::Dram,
             })?;
-            g.encode(sub)?;
+            warm.encode(sub)?;
+            let sub = me.encode_family(&TierLabel {
+                tier: MemTier::Cold,
+            })?;
+            cold.encode(sub)?;
         }
         Ok(())
     }
@@ -218,7 +228,8 @@ mod tests {
                 dictionary_terms: 99,
                 dictionary_terms_live: 70,
                 dictionary_bytes: 4096,
-                tier_bytes_estimated: 1024,
+                tier_bytes_warm: 700,
+                tier_bytes_cold: 324,
             })
         })));
         let mut buf = String::new();
@@ -237,8 +248,16 @@ mod tests {
             "got:\n{buf}"
         );
         assert!(
-            buf.contains("horndb_storage_tier_bytes_estimated{tier=\"unknown\"}"),
+            buf.contains("horndb_storage_tier_bytes_estimated{tier=\"dram\"} 700"),
             "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_storage_tier_bytes_estimated{tier=\"cold\"} 324"),
+            "got:\n{buf}"
+        );
+        assert!(
+            !buf.contains("tier=\"unknown\""),
+            "unknown must no longer be emitted, got:\n{buf}"
         );
     }
 }

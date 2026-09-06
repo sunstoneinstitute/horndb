@@ -13,7 +13,15 @@ pub struct TierStats {
     pub graphs: u64,
     pub predicates: u64,
     pub triples: u64,
+    /// Total estimated bytes across every tier (warm + cold). Callers that
+    /// want the warm/cold split use [`Self::bytes_cold`] alongside this —
+    /// warm is `bytes_estimated - bytes_cold`.
     pub bytes_estimated: u64,
+    /// The part of `bytes_estimated` held by cold, memory-mapped partitions
+    /// (SPEC-25 S5): the summed mapped file length of every
+    /// [`crate::partition::Partition::is_cold`] partition. Zero until a
+    /// partition is demoted.
+    pub bytes_cold: u64,
 }
 
 /// Result of [`Tier::apply_quad_batch`]: how many quads were actually

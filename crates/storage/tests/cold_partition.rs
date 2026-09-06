@@ -522,6 +522,54 @@ fn cold_bytes_per_triple_under_six() {
     );
 }
 
+/// `TierStats.bytes_cold` (SPEC-25 S5, HDB-178) must track the real mapped
+/// file bytes of cold partitions, not a placeholder. Checked against file
+/// sizes read straight off disk (not the field compared to itself), so a
+/// `bytes_cold` hardwired to `0` or to the total would fail this.
+#[test]
+fn tier_stats_bytes_cold_matches_mapped_file_bytes() {
+    let store = Store::in_memory();
+    let triples: Vec<_> = (0..30u32)
+        .map(|i| {
+            (
+                iri(format!("http://ex/s{i}")),
+                iri(format!("http://ex/p{}", i % 3)),
+                iri(format!("http://ex/o{i}")),
+            )
+        })
+        .collect();
+    store.insert_triples(&triples).unwrap();
+
+    let before = store.stats();
+    assert_eq!(before.bytes_cold, 0, "nothing is cold yet");
+    assert!(before.bytes_estimated > 0);
+
+    assert_eq!(store.demote_all().unwrap(), 3);
+
+    // Sum every file actually written under the cold directory — the ground
+    // truth `bytes_cold` must match.
+    let disk_bytes: u64 = std::fs::read_dir(store.cold_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum();
+    assert!(disk_bytes > 0, "demote_all must have written cold files");
+
+    let after = store.stats();
+    assert_eq!(
+        after.bytes_cold, disk_bytes,
+        "bytes_cold must equal the real summed cold file lengths"
+    );
+    // `demote_all` demoted every one of the 3 predicate partitions (asserted
+    // above), so nothing warm is left: `bytes_estimated` is exactly the cold
+    // sum plus the fixed 16 B/physically-retained-predicate overhead
+    // `MemoryTier::stats` adds on top of the per-partition byte sum.
+    assert_eq!(
+        after.bytes_estimated,
+        after.bytes_cold + 3 * 16,
+        "bytes_estimated must stay the warm+cold total"
+    );
+}
+
 /// A cold file that outlives the mapping's directory entry still reads: the
 /// mapping holds the inode. This is what makes `promote`'s unlink safe while a
 /// reader is pinned on the cold partition.

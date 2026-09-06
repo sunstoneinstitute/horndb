@@ -1055,8 +1055,9 @@ impl Partition {
 
     /// Footprint in bytes: the warm columns, or the cold file's mapped length.
     ///
-    /// Both land in the tier's single `bytes_estimated` for now; splitting it
-    /// per tier is a separate task (SPEC-25 S5, HDB-179).
+    /// `MemoryTier::stats()` sums this into `TierStats.bytes_estimated`
+    /// (both tiers) and, for a cold partition, also into `bytes_cold`
+    /// (SPEC-25 S5).
     pub fn estimated_bytes(&self) -> u64 {
         match self {
             Partition::Warm(p) => p.estimated_bytes(),
