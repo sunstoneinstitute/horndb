@@ -70,8 +70,14 @@ label_value_enum!(Stage {
 
 label_value_enum!(MemTier {
     Dram => "dram",
+    // Mapped bytes of cold, memory-mapped partitions (SPEC-25 S5).
+    Cold => "cold",
+    // Reserved for SPEC-09 (Stage 3): no value emits these yet.
     Hbm => "hbm",
     Cxl => "cxl",
+    // No longer emitted (SPEC-25 S5 split `dram` from `cold`); kept as a
+    // label value for the collector test and any external dashboard that
+    // still filters on it.
     Unknown => "unknown",
 });
 

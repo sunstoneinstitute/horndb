@@ -522,7 +522,7 @@ once the pin drops and a later `compact()` reclaims the row.
 deletes `<dir>/cold` and replays every partition warm. Durable placement needs a
 manifest record; see the `ponytail:` comment in `Store::open_with`.
 
-Placement policy, access statistics, the `HotSetAdvisor` bias, and splitting
-`TierStats.bytes_estimated` into per-tier values are separate tasks. Today a
-cold partition's `estimated_bytes()` is its mapped file length and it is summed
-into the existing single `bytes_estimated`.
+Placement policy, access statistics, and the `HotSetAdvisor` bias are separate
+tasks. `TierStats.bytes_estimated` stays the warm+cold total; `bytes_cold`
+carries the same cold-partition sum on its own (SPEC-25 S5, HDB-178), so a
+caller that wants warm alone computes `bytes_estimated - bytes_cold`.

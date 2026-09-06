@@ -217,7 +217,11 @@ pub struct HornStorageStats {
     pub predicates: u64,
     pub dictionary_terms: u64,
     pub dictionary_terms_live: u64,
+    /// Total estimated bytes across every tier (warm + cold).
     pub bytes_estimated: u64,
+    /// The part of `bytes_estimated` held by cold, memory-mapped partitions
+    /// (SPEC-25 S5). Warm bytes are `bytes_estimated - bytes_cold`.
+    pub bytes_cold: u64,
     /// Approximate heap bytes the term dictionary owns (HDB-146). O(1) to
     /// read — see `horndb_storage::Dictionary::approx_bytes`.
     pub dictionary_bytes: u64,
@@ -1025,6 +1029,7 @@ impl HornBackend {
             dictionary_terms: self.store.dictionary().len() as u64,
             dictionary_terms_live: self.store.dictionary().live_len() as u64,
             bytes_estimated: tier.bytes_estimated,
+            bytes_cold: tier.bytes_cold,
             dictionary_bytes: self.store.dictionary().approx_bytes().total(),
         }
     }

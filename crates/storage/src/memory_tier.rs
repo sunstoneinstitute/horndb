@@ -211,24 +211,31 @@ impl TierSnapshot {
         // costs bytes until compaction): 32 B/row base (16 B for (s, o) + 16 B
         // for the begin/end visibility stamps), plus another 32 B/row when the
         // object-major layout is materialised for a hot predicate; plus
-        // ~16 bytes per physically-retained predicate of overhead.
+        // ~16 bytes per physically-retained predicate of overhead. A cold
+        // partition's `estimated_bytes()` is its mapped file length instead
+        // (SPEC-25 S5) — summed separately into `bytes_cold` so callers can
+        // split warm from cold, while `bytes_estimated` keeps counting both.
         let physical_predicates: u64 = self
             .graphs
             .values()
             .map(|g| g.partitions.len() as u64)
             .sum();
-        let column_bytes: u64 = self
-            .graphs
-            .values()
-            .flat_map(|g| g.partitions.values())
-            .map(|p| p.estimated_bytes())
-            .sum();
+        let mut column_bytes = 0u64;
+        let mut bytes_cold = 0u64;
+        for p in self.graphs.values().flat_map(|g| g.partitions.values()) {
+            let b = p.estimated_bytes();
+            column_bytes += b;
+            if p.is_cold() {
+                bytes_cold += b;
+            }
+        }
         let bytes_estimated = column_bytes + physical_predicates * 16;
         TierStats {
             graphs,
             predicates,
             triples,
             bytes_estimated,
+            bytes_cold,
         }
     }
 }
