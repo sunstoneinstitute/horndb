@@ -257,3 +257,32 @@ fn cold_parity_survives_writes_and_retractions() {
         }
     }
 }
+
+/// The `HORNDB_COLD_TIER` knob's *wiring*, which the parity tests above do
+/// not cover: they call `demote_all` by hand, so they would still pass if the
+/// write funnels had never been hooked up at all. Here the funnel is the only
+/// thing that can demote — if `demote_all_if_cold_tier` is missing from it,
+/// partitions are left warm and the follow-up `demote_all` finds work to do.
+///
+/// This is what stops the CI cold runs from being warm runs reporting a green
+/// that proves nothing.
+#[test]
+fn the_cold_tier_knob_demotes_from_the_write_funnel() {
+    const UPDATE: &str = "INSERT DATA { <http://ex/s0> <http://ex/p> <http://ex/knob> }";
+
+    let mut control = fixture_tiered(false, false);
+    execute_update(UPDATE, &mut control).unwrap();
+    assert!(
+        control.demote_all().unwrap() > 0,
+        "control: with the knob off the funnel must leave partitions warm"
+    );
+
+    let mut cold = fixture_tiered(false, false);
+    cold.set_cold_tier(true);
+    execute_update(UPDATE, &mut cold).unwrap();
+    assert_eq!(
+        cold.demote_all().unwrap(),
+        0,
+        "the write funnel did not demote — nothing was left cold"
+    );
+}

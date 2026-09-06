@@ -572,6 +572,13 @@ pub struct HornBackend {
     /// [`direct_source_enabled`]; [`Self::set_direct_source`] overrides it.
     direct_source: bool,
 
+    /// Whether every coarse write funnel demotes the whole store to the cold
+    /// tier when it finishes. Defaults to [`cold_tier_enabled`];
+    /// [`Self::set_cold_tier`] overrides it, which is how the parity tests
+    /// exercise the funnel wiring without depending on a process-wide env
+    /// var.
+    cold_tier: bool,
+
     /// The last [`StoreTripleSource`] handed to a query, with the tier version
     /// it was opened at. Shared with every pinned read view ([`Self::pin_read`]),
     /// the same way the snapshot memo is — a view is built per query, so a
@@ -698,6 +705,7 @@ impl HornBackend {
             stats_cache: Arc::new(Mutex::new(HashMap::new())),
             pin: None,
             direct_source: direct_source_enabled(),
+            cold_tier: cold_tier_enabled(),
             direct_cache: Arc::new(Mutex::new(None)),
             touched_graphs: BTreeSet::new(),
             visible_inferred: BTreeSet::new(),
@@ -728,6 +736,7 @@ impl HornBackend {
             stats_cache: Arc::clone(&self.stats_cache),
             pin: Some(self.store.pin()),
             direct_source: self.direct_source,
+            cold_tier: self.cold_tier,
             direct_cache: Arc::clone(&self.direct_cache),
             // Write-only routing state; a read view never records writes.
             touched_graphs: BTreeSet::new(),
@@ -887,6 +896,14 @@ impl HornBackend {
         self.direct_source = on;
     }
 
+    /// Per-instance form of the `HORNDB_COLD_TIER` knob, mirroring
+    /// [`Self::set_direct_source`]. The cold-parity tests use it to prove the
+    /// write funnels really demote, which a process-wide env var read once
+    /// into a `OnceLock` cannot pin.
+    pub fn set_cold_tier(&mut self, on: bool) {
+        self.cold_tier = on;
+    }
+
     /// Demote every settled partition of this backend's store to the cold,
     /// memory-mapped tier (SPEC-25 S5). Reads stay correct — the cold form
     /// sits behind the same warm read surface — and the next write to a cold
@@ -907,8 +924,12 @@ impl HornBackend {
     /// whole partition, so a per-triple hook would make a bulk load
     /// quadratic.
     pub fn demote_all_if_cold_tier(&self) {
-        if cold_tier_enabled() {
-            let _ = self.demote_all();
+        if self.cold_tier {
+            // Not `let _ =`: this knob exists to make the conformance run
+            // grade a cold store, so a demote that silently failed would
+            // leave the run warm and report a green that proves nothing.
+            self.demote_all()
+                .expect("HORNDB_COLD_TIER demote_all failed");
         }
     }
 

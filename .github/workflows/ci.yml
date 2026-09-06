@@ -319,6 +319,32 @@ jobs:
             --require-corpus \
             --junit target/junit-cold-direct.xml
 
+      # A cold run that quietly graded fewer cases would still report
+      # failures=0, so "the harness exited 0" is not the gate — the gate is
+      # that the cold runs graded exactly what the warm run graded. A
+      # difference in either direction fails, including a case that started
+      # passing (`expected_failures` in harness/selected.toml is
+      # bidirectional).
+      - name: conformance — cold runs must match the warm counts
+        run: |
+          python3 - <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+
+          def counts(path):
+              r = ET.parse(path).getroot()
+              return tuple(int(r.get(k)) for k in ("tests", "failures", "skipped"))
+
+          warm = counts("target/junit.xml")
+          bad = False
+          for name in ("target/junit-cold.xml", "target/junit-cold-direct.xml"):
+              got = counts(name)
+              print(f"{name}: tests/failures/skipped={got} warm={warm}")
+              if got != warm:
+                  print(f"::error::{name} graded {got}, warm run graded {warm}")
+                  bad = True
+          sys.exit(1 if bad else 0)
+          EOF
+
       - name: upload junit
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
