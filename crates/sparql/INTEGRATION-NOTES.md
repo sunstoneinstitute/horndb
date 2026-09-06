@@ -202,8 +202,9 @@ on the scan **leaf**, not joined on after the block is evaluated.
 
 Lifting either means evaluating the whole block once per graph with `?g` free
 and joining the graph name on afterwards. That is a design change against
-D5/D6, not a bug fix. `harness/KNOWN-MANIFEST-BUGS.md` names the W3C cases
-each refusal costs.
+D5/D6, not a bug fix — specified as SPEC-28's S3 amendment (HDB-171, the
+`PerGraph` node), implemented by HDB-74. `harness/KNOWN-MANIFEST-BUGS.md`
+names the W3C cases each refusal costs.
 
 ### History
 
