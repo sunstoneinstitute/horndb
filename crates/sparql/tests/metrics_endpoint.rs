@@ -185,4 +185,16 @@ async fn metrics_endpoint_reports_dram_and_cold_tier_bytes() {
         text.contains("horndb_storage_tier_bytes_estimated{tier=\"cold\"}"),
         "got:\n{text}"
     );
+    // Not just the series name: the backend was demoted above, so the cold
+    // value has to be real. A `bytes_cold` stuck at 0 still emits the series.
+    let cold: u64 = text
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("horndb_storage_tier_bytes_estimated{tier=\"cold\"} ")?
+                .trim()
+                .parse()
+                .ok()
+        })
+        .expect("cold series carries a numeric value");
+    assert!(cold > 0, "demoted store must report non-zero cold bytes");
 }

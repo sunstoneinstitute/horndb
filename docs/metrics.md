@@ -170,7 +170,7 @@ share one `HornBackend` across query threads behind an `Arc` (e.g.
 | `horndb_storage_dictionary_terms` | gauge | — | count | dictionary index space consumed — every id ever handed out, monotonic because ids are never re-issued **(scrape-time)** |
 | `horndb_storage_dictionary_terms_live` | gauge | — | count | dictionary terms still resolvable, i.e. total minus the slots `Store::compact()`'s sweep reclaimed (HDB-121). Under append + retract churn the total keeps climbing while this one plateaus; the gap is reclaimed lexical bytes, not a leak **(scrape-time)** |
 | `horndb_storage_dictionary_bytes` | gauge | — | bytes | approximate heap the term dictionary owns: forward-map key bytes + reverse-map term strings + both containers' slot capacity, excluding the memory-mapped base (file-backed, not heap). The content halves are maintained at intern/GC time, so the read is O(1) (HDB-146) **(scrape-time)** |
-| `horndb_storage_tier_bytes_estimated` | gauge | `tier` | bytes | estimated resident bytes per storage tier — `dram` is the warm columnar estimate (32 B/row, +32 B/row with an object-major layout), `cold` is the mapped byte length of cold partition files **(scrape-time)** |
+| `horndb_storage_tier_bytes_estimated` | gauge | `tier` | bytes | estimated resident bytes per storage tier — `dram` is the warm columnar estimate (32 B/row, +32 B/row with an object-major layout) plus the ~16 B/predicate map overhead every retained partition costs, cold ones included (their map entry is resident even though their rows are not), so `dram` does not reach zero while any predicate is retained; `cold` is the mapped byte length of cold partition files **(scrape-time)** |
 
 `phase` values, in the order a bulk load runs them:
 
