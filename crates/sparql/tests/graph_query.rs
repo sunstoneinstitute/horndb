@@ -987,6 +987,37 @@ fn empty_group_probes_graph_existence<B: QuadSeed + Default + horndb_sparql::exe
     );
 }
 
+/// Regression (HDB-74): `PerGraph` builds one operator tree per graph, so
+/// each graph decides its column provenance (`Slot::Id` vs `Slot::Term`)
+/// from its own data. Here the `OPTIONAL`'s right side matches in `g2` only,
+/// and binds `?o` from `VALUES` — so `?o` used to arrive as an id from `g1`
+/// and as a term from `g2`. That breaks the stream-wide column-homogeneity
+/// invariant every consumer keys on: `DISTINCT` counted the same IRI twice,
+/// and `GROUP BY`'s scalar fast path hit its `unreachable!`. Only the horn
+/// backend can show it — `MemStore` yields terms everywhere.
+fn per_graph_columns_are_homogeneous_across_graphs<
+    B: QuadSeed + Default + horndb_sparql::exec::Executor,
+>() {
+    let b: B = fixture();
+    const BLOCK: &str = "GRAPH ?g { ?s <http://ex/p> ?o \
+        OPTIONAL { ?x <http://ex/p> <http://ex/o3> VALUES ?o { <http://ex/o2> } } }";
+    assert_eq!(
+        iris_bound_to(
+            &b,
+            &format!("SELECT DISTINCT ?o WHERE {{ {BLOCK} }}"),
+            "o",
+            DefaultGraphMode::Union
+        ),
+        vec!["http://ex/o2".to_owned(), "http://ex/o3".to_owned()],
+        "DISTINCT must see one row per term, not one per column encoding"
+    );
+    let rows = union_rows(
+        &b,
+        &format!("SELECT ?o (COUNT(*) AS ?n) WHERE {{ {BLOCK} }} GROUP BY ?o"),
+    );
+    assert_eq!(rows.len(), 2, "one group per distinct ?o: {rows:?}");
+}
+
 /// Instantiate every case above for both backends.
 macro_rules! both_backends {
     ($($name:ident),+ $(,)?) => {
@@ -1034,4 +1065,5 @@ both_backends!(
     from_only_leaves_no_graphs_to_enumerate,
     reserved_graphs_do_not_enumerate,
     empty_group_probes_graph_existence,
+    per_graph_columns_are_homogeneous_across_graphs,
 );

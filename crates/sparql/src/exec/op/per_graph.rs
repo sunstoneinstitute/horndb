@@ -14,13 +14,27 @@
 //! is: if `P` does not bind `?g`, append it bound to this graph; if it does, a
 //! row survives only when its `?g` is unbound or equal to this graph, and is
 //! then set to it.
+//!
+//! **Why every emitted column is decoded to `Slot::Term`.** Each graph gets
+//! its own operator tree, and provenance decisions inside a tree are made
+//! from that graph's data: a `LeftJoin` whose build side is empty in `g1`
+//! leaves a column as `Slot::Id`, while in `g2` the same column picks up a
+//! `Slot::Term` from a `VALUES`. Concatenating the two streams would break
+//! the stream-wide column-homogeneity invariant in [`super`], and consumers
+//! that key on the slot (`DISTINCT`, `GROUP BY`) would then count one value
+//! twice. No mask computed before the last graph is read can be trusted, so
+//! this operator forces every column it does not control to `Slot::Term`.
+//! Cost: one dictionary decode per cell. The cheaper fix is to make the
+//! trees' provenance decisions data-independent, which is a change to every
+//! join and union, not to this operator.
 
 use super::Op;
 use crate::algebra::Var;
 use crate::error::Result;
 use crate::exec::runtime::Runtime;
-use crate::exec::{Batch, Executor, NamedGraph, Row, Slot};
+use crate::exec::{phases, Batch, Executor, NamedGraph, Row, Slot};
 use crate::plan::PhysicalPlan;
+use horndb_metrics::labels::ExecPhase;
 
 pub struct PerGraphOp<'r, E: Executor + ?Sized> {
     rt: &'r Runtime<'r, E>,
@@ -39,6 +53,8 @@ pub struct PerGraphOp<'r, E: Executor + ?Sized> {
     /// True when `P` itself binds `?g` (`GRAPH ?g { ?g ?p ?o }`): the join is
     /// then a filter on `P`'s own column, not an appended one.
     bound_by_inner: bool,
+    /// Columns decoded to `Slot::Term` on every emitted chunk (module doc).
+    forced_term: Vec<bool>,
 }
 
 impl<'r, E: Executor + ?Sized> PerGraphOp<'r, E> {
@@ -60,6 +76,12 @@ impl<'r, E: Executor + ?Sized> PerGraphOp<'r, E> {
             .iter()
             .position(|n| n == var.name())
             .expect("the graph variable is in the schema");
+        // Every column but `?g` comes from a per-graph tree and must be
+        // decoded. `?g` is written from `graph.binding` on every row, so it
+        // is homogeneous already — unless the executor itself mixes the two
+        // forms across graphs, in which case decode it too.
+        let mut forced_term = vec![true; names.len()];
+        forced_term[graph_col] = graphs.iter().any(|g| matches!(g.binding, Slot::Term(_)));
         Ok(Self {
             rt,
             var,
@@ -70,6 +92,7 @@ impl<'r, E: Executor + ?Sized> PerGraphOp<'r, E> {
             schema: names.iter().map(|n| Var::new(n.as_str())).collect(),
             graph_col,
             bound_by_inner,
+            forced_term,
         })
     }
 
@@ -114,10 +137,9 @@ impl<'r, E: Executor + ?Sized> Op for PerGraphOp<'r, E> {
     }
 
     fn may_emit_term(&self) -> Vec<bool> {
-        // Over-approximation (`true` is always sound): `P`'s tree is not
-        // built until the first graph is read, so its per-column provenance
-        // is not known here. Consumers fall back to lexical keys.
-        vec![true; self.schema.len()]
+        // Exact, because `next` makes it so: the forced columns are decoded
+        // to `Slot::Term`, and `?g` is whatever the executor binds.
+        self.forced_term.clone()
     }
 
     fn next(&mut self) -> Result<Option<Batch>> {
@@ -135,7 +157,14 @@ impl<'r, E: Executor + ?Sized> Op for PerGraphOp<'r, E> {
             match op.next()? {
                 Some(chunk) => {
                     let graph = graph.clone();
-                    let rows = self.join_graph_name(&graph, chunk)?;
+                    let n = chunk.rows.len() as u64;
+                    // Only this operator's own work is timed — `op.next()`
+                    // and the per-graph tree build report their own phases.
+                    let rows = phases::timed(ExecPhase::StreamOp, n, || {
+                        let mut rows = self.join_graph_name(&graph, chunk)?;
+                        self.rt.force_term_columns(&mut rows, &self.forced_term)?;
+                        Ok::<_, crate::error::SparqlError>(rows)
+                    })?;
                     // A chunk every row of which failed the join is not the
                     // end of the stream — pull the next one rather than
                     // yield an empty batch.

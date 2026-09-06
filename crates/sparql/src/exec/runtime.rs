@@ -1226,7 +1226,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// it keeps a join's output stream free of Id∧Term mixing without ever
     /// seeing the whole output. Id→Term decoding is semantically the
     /// identity at the Bindings boundary.
-    fn force_term_columns(&self, rows: &mut [Row], forced: &[bool]) -> Result<()> {
+    pub(crate) fn force_term_columns(&self, rows: &mut [Row], forced: &[bool]) -> Result<()> {
         for (c, &f) in forced.iter().enumerate() {
             if !f {
                 continue;
