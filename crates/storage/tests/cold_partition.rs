@@ -104,7 +104,6 @@ fn cold_bytes(store: &Store) -> (u64, usize) {
 
 #[test]
 fn cold_roundtrip_all_six_orderings() {
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::in_memory();
     let p = iri("http://ex/p");
     // Deliberately not in subject or object order, so the six orderings are
@@ -134,7 +133,7 @@ fn cold_roundtrip_all_six_orderings() {
     let before = view(&store, pid, &probes);
     assert!(!is_cold(&store, pid));
 
-    assert!(store.demote(DEFAULT_GRAPH, pid, dir.path()).unwrap());
+    assert!(store.demote(DEFAULT_GRAPH, pid).unwrap());
     assert!(is_cold(&store, pid), "demote must flip the partition cold");
     assert_eq!(
         view(&store, pid, &probes),
@@ -153,72 +152,91 @@ fn cold_roundtrip_all_six_orderings() {
 
 #[test]
 fn write_to_cold_partition_promotes_first() {
-    let dir = tempfile::tempdir().unwrap();
+    // Each scenario (insert / retract / apply) uses its own predicate. A
+    // demote refuses once its partition holds a dead row a live pin still
+    // needs (see `has_retractions` in `MemoryTier::demote`), so re-demoting
+    // the *same* predicate after retracting from it would be refused for the
+    // rest of this test's lifetime — that is the exact case
+    // `demote_runs_compaction_and_encodes_only_visible_rows` and
+    // `pinned_reader_survives_demote_and_dictionary_gc` exercise. Here we
+    // only care that a write to an already-cold partition promotes it first,
+    // so each predicate is demoted exactly once, before it has any dead
+    // history of its own.
     let store = Store::in_memory();
-    let p = iri("http://ex/p");
-    let t = |s: &str, o: &str| (iri(s), p.clone(), iri(o));
-    let (t1, t2, t3, t4) = (
-        t("http://ex/a", "http://ex/1"),
-        t("http://ex/b", "http://ex/2"),
-        t("http://ex/c", "http://ex/3"),
-        t("http://ex/d", "http://ex/4"),
-    );
-    store.insert_triples(&[t1.clone(), t2.clone()]).unwrap();
-    let pid = p_id(&store, &p);
+    let p_ins = iri("http://ex/p-ins");
+    let p_ret = iri("http://ex/p-ret");
+    let p_app = iri("http://ex/p-app");
+    let t = |p: &Term, s: &str, o: &str| (iri(s), p.clone(), iri(o));
+    let a = t(&p_ins, "http://ex/a", "http://ex/1");
+    let b = t(&p_ret, "http://ex/b", "http://ex/2");
+    let c = t(&p_app, "http://ex/c", "http://ex/3");
+    let d = t(&p_app, "http://ex/d", "http://ex/4");
+    store
+        .insert_triples(&[a.clone(), b.clone(), c.clone()])
+        .unwrap();
+    let pid_ins = p_id(&store, &p_ins);
+    let pid_ret = p_id(&store, &p_ret);
+    let pid_app = p_id(&store, &p_app);
 
     let pin_before = store.pin();
     let at_before = pin_before.version();
 
     // Insert lands on a demoted partition.
-    assert!(store.demote(DEFAULT_GRAPH, pid, dir.path()).unwrap());
-    store.insert_triples(std::slice::from_ref(&t3)).unwrap();
-    assert!(!is_cold(&store, pid), "an insert must promote first");
-    assert_eq!(view(&store, pid, &[]).2, 3);
+    let e = t(&p_ins, "http://ex/e", "http://ex/5");
+    assert!(store.demote(DEFAULT_GRAPH, pid_ins).unwrap());
+    store.insert_triples(std::slice::from_ref(&e)).unwrap();
+    assert!(!is_cold(&store, pid_ins), "an insert must promote first");
+    assert_eq!(view(&store, pid_ins, &[]).2, 2);
 
     // Retraction lands on a demoted partition.
-    assert!(store.demote(DEFAULT_GRAPH, pid, dir.path()).unwrap());
-    assert_eq!(store.retract_triples(std::slice::from_ref(&t1)).unwrap(), 1);
-    assert!(!is_cold(&store, pid), "a retraction must promote first");
-    assert_eq!(view(&store, pid, &[]).2, 2);
+    assert!(store.demote(DEFAULT_GRAPH, pid_ret).unwrap());
+    assert_eq!(store.retract_triples(std::slice::from_ref(&b)).unwrap(), 1);
+    assert!(!is_cold(&store, pid_ret), "a retraction must promote first");
+    assert_eq!(view(&store, pid_ret, &[]).2, 0);
 
     // Combined apply lands on a demoted partition.
-    assert!(store.demote(DEFAULT_GRAPH, pid, dir.path()).unwrap());
+    assert!(store.demote(DEFAULT_GRAPH, pid_app).unwrap());
     let quad = |t: &(Term, Term, Term)| (DEFAULT_GRAPH, t.0.clone(), t.1.clone(), t.2.clone());
-    let report = store
-        .apply_quads(&[quad(&t2)], &[quad(&t4)])
-        .expect("apply");
+    let report = store.apply_quads(&[quad(&c)], &[quad(&d)]).expect("apply");
     assert_eq!((report.retracted, report.inserted), (1, 1));
-    assert!(!is_cold(&store, pid), "an apply must promote first");
+    assert!(!is_cold(&store, pid_app), "an apply must promote first");
 
     // Visible set is right at the newest version …
     let now = triple_set(&store);
-    assert_eq!(now.len(), 2, "{now:?}");
+    assert_eq!(now.len(), 3, "{now:?}");
     assert!(now.contains(&(
-        "<http://ex/c>".into(),
-        "<http://ex/p>".into(),
-        "<http://ex/3>".into()
+        "<http://ex/a>".into(),
+        "<http://ex/p-ins>".into(),
+        "<http://ex/1>".into()
+    )));
+    assert!(now.contains(&(
+        "<http://ex/e>".into(),
+        "<http://ex/p-ins>".into(),
+        "<http://ex/5>".into()
     )));
     assert!(now.contains(&(
         "<http://ex/d>".into(),
-        "<http://ex/p>".into(),
+        "<http://ex/p-app>".into(),
         "<http://ex/4>".into()
     )));
 
-    // … and at the version pinned before any of this happened.
+    // … and at the version pinned before any of this happened: each
+    // predicate had exactly one row at `at_before`.
     let old = store.snapshot_at(&pin_before);
     assert_eq!(old.version(), at_before);
-    assert_eq!(
-        old.tier_arc()
-            .with_predicate(DEFAULT_GRAPH, pid, |part| part.len_at(at_before))
-            .unwrap(),
-        2,
-        "the pre-demotion pin must still see exactly its own two rows"
-    );
+    for pid in [pid_ins, pid_ret, pid_app] {
+        assert_eq!(
+            old.tier_arc()
+                .with_predicate(DEFAULT_GRAPH, pid, |part| part.len_at(at_before))
+                .unwrap(),
+            1,
+            "the pre-demotion pin must still see exactly its own row"
+        );
+    }
 }
 
 #[test]
 fn demote_is_not_a_logical_write() {
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::in_memory();
     let p = iri("http://ex/p");
     let t = |s: &str| (iri(s), p.clone(), iri("http://ex/o"));
@@ -251,16 +269,20 @@ fn demote_is_not_a_logical_write() {
     assert_eq!(pre_retract_rows.len(), 3);
     assert_eq!(pre_demote_rows.len(), 2);
 
-    assert!(store.demote(DEFAULT_GRAPH, pid, dir.path()).unwrap());
+    // `pin_pre_retract` sits below the compaction horizon and still needs
+    // t3's dead row (see `has_retractions` in `MemoryTier::demote`), so a
+    // demote here would be correctly refused while it is held — that
+    // contract is `pinned_reader_survives_demote_and_dictionary_gc`'s job to
+    // check. Drop it so `compact()` can reclaim the row and this test can
+    // get back to its own job: proving demote/promote never move the commit
+    // version and never disturb a pin that *doesn't* need reclaimed history.
+    drop(pin_pre_retract);
+
+    assert!(store.demote(DEFAULT_GRAPH, pid).unwrap());
     assert_eq!(
         store.snapshot().version(),
         v_now,
         "demotion must not advance the commit version"
-    );
-    assert_eq!(
-        read(&pin_pre_retract),
-        pre_retract_rows,
-        "a pin taken before the retraction must still see the retracted row"
     );
     assert_eq!(
         read(&pin_pre_demote),
@@ -274,13 +296,11 @@ fn demote_is_not_a_logical_write() {
         v_now,
         "promotion must not advance the commit version"
     );
-    assert_eq!(read(&pin_pre_retract), pre_retract_rows);
     assert_eq!(read(&pin_pre_demote), pre_demote_rows);
 }
 
 #[test]
 fn demote_runs_compaction_and_encodes_only_visible_rows() {
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::in_memory();
     let (pa, pb, pc) = (
         iri("http://ex/pa"),
@@ -302,7 +322,8 @@ fn demote_runs_compaction_and_encodes_only_visible_rows() {
     let (pa_id, pb_id, pc_id) = (p_id(&store, &pa), p_id(&store, &pb), p_id(&store, &pc));
 
     // Pinned before the retraction, so compaction cannot reclaim the rows it
-    // ends — the encoding is then the only thing that can leave them out.
+    // ends — dead history below this pin's version is exactly what a pinned
+    // reader can still resolve.
     let pin = store.pin();
     assert_eq!(
         store
@@ -316,22 +337,29 @@ fn demote_runs_compaction_and_encodes_only_visible_rows() {
     );
     let at = store.snapshot().version();
 
-    // --- with the pin alive: dead rows survive compaction, but not the file.
-    assert!(store.demote(DEFAULT_GRAPH, pc_id, dir.path()).unwrap());
+    // --- with the pin alive: demote must refuse rather than encode only the
+    // rows visible now and drop the dead row the pin still needs.
+    assert!(
+        !store.demote(DEFAULT_GRAPH, pc_id).unwrap(),
+        "a retraction below the pinned horizon must block demotion"
+    );
+    assert!(!is_cold(&store, pc_id), "the refused partition stays warm");
     assert_eq!(
         physical_len(&store, pa_id),
         3,
         "the pin must keep dead history alive, or this test proves nothing"
     );
-    let cold_c = ColdPartition::open(&cold_path(dir.path(), DEFAULT_GRAPH, pc_id)).unwrap();
-    assert_eq!(cold_c.len(), 1, "cold must hold only rows visible at `at`");
-    assert_eq!(cold_c.version(), at);
     drop(pin);
 
-    // --- with no pin: demotion's compaction pass reclaims the dead history in
-    // the partitions it leaves warm.
-    assert!(store.demote(DEFAULT_GRAPH, pa_id, dir.path()).unwrap());
-    let cold_a = ColdPartition::open(&cold_path(dir.path(), DEFAULT_GRAPH, pa_id)).unwrap();
+    // --- with no pin: demotion's compaction pass reclaims the dead history,
+    // and the cold file it writes holds only the rows still visible.
+    assert!(store.demote(DEFAULT_GRAPH, pc_id).unwrap());
+    let cold_c = ColdPartition::open(&cold_path(store.cold_dir(), DEFAULT_GRAPH, pc_id)).unwrap();
+    assert_eq!(cold_c.len(), 1, "cold must hold only rows visible at `at`");
+    assert_eq!(cold_c.version(), at);
+
+    assert!(store.demote(DEFAULT_GRAPH, pa_id).unwrap());
+    let cold_a = ColdPartition::open(&cold_path(store.cold_dir(), DEFAULT_GRAPH, pa_id)).unwrap();
     assert_eq!(cold_a.len(), 2);
     assert_eq!(cold_a.len(), view(&store, pa_id, &[]).2);
     assert_eq!(
@@ -341,9 +369,45 @@ fn demote_runs_compaction_and_encodes_only_visible_rows() {
     );
 }
 
+/// The bug this guards against (HDB-177 review): `demote` used to encode only
+/// the rows visible at its own version, dropping any row a pin below the
+/// compaction horizon still needed. `Store::compact()` is the only caller of
+/// the dictionary GC (`gc_dictionary`), which marks live terms from the rows
+/// the tier physically holds — so a cold file missing that dead row made the
+/// GC free its terms out from under the still-live pin, and the pin's next
+/// read failed with `InvalidTerm` instead of returning the triple.
+#[test]
+fn pinned_reader_survives_demote_and_dictionary_gc() {
+    let store = Store::in_memory();
+    let p = iri("http://ex/p");
+    let (t1, t2) = (
+        (iri("http://ex/a"), p.clone(), iri("http://ex/1")),
+        (iri("http://ex/b"), p.clone(), iri("http://ex/2")),
+    );
+    store.insert_triples(&[t1.clone(), t2.clone()]).unwrap();
+    let pid = p_id(&store, &p);
+
+    let pin = store.pin();
+    assert_eq!(store.retract_triples(std::slice::from_ref(&t1)).unwrap(), 1);
+
+    // Demotion must refuse — the pin still needs t1's dead row — and the
+    // dictionary sweep must not free t1's terms out from under it.
+    assert!(!store.demote(DEFAULT_GRAPH, pid).unwrap());
+    store.compact();
+
+    let pinned = store.snapshot_at(&pin);
+    let rows = pinned
+        .scan_graph(DEFAULT_GRAPH)
+        .expect("the pinned reader must still resolve both triples' terms");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both triples must still be visible to the pin"
+    );
+}
+
 #[test]
 fn export_snapshot_covers_cold_partitions() {
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::in_memory();
     let triples: Vec<_> = (0..40u32)
         .map(|i| {
@@ -357,7 +421,7 @@ fn export_snapshot_covers_cold_partitions() {
     store.insert_triples(&triples).unwrap();
     let before = triple_set(&store);
 
-    assert_eq!(store.demote_all(&dir.path().join("cold")).unwrap(), 3);
+    assert_eq!(store.demote_all().unwrap(), 3);
     assert_eq!(cold_bytes(&store).1, 3);
 
     let mut bytes = Vec::new();
@@ -384,7 +448,12 @@ fn cold_placement_is_not_durable() {
     let before = {
         let store = Store::open(dir.path()).unwrap();
         store.insert_triples(&triples).unwrap();
-        assert_eq!(store.demote_all(&cold_dir).unwrap(), 2);
+        assert_eq!(
+            store.cold_dir(),
+            cold_dir.as_path(),
+            "demote_all must derive `<dir>/cold`"
+        );
+        assert_eq!(store.demote_all().unwrap(), 2);
         assert!(cold_dir.exists());
         triple_set(&store)
     };
@@ -408,7 +477,6 @@ fn cold_placement_is_not_durable() {
 /// number is a separate task.
 #[test]
 fn cold_bytes_per_triple_under_six() {
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::in_memory();
     let base = "http://www.lehigh.edu/univ-bench";
     let type_p = iri(format!("{base}#type"));
@@ -443,7 +511,7 @@ fn cold_bytes_per_triple_under_six() {
     store.insert_triples(&triples).unwrap();
     let count = triples.len() as u64;
 
-    assert_eq!(store.demote_all(&dir.path().join("cold")).unwrap(), 4);
+    assert_eq!(store.demote_all().unwrap(), 4);
     let (bytes, cold) = cold_bytes(&store);
     assert_eq!(cold, 4);
     let bpt = bytes as f64 / count as f64;

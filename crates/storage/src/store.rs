@@ -15,8 +15,21 @@ use crate::wal::{
 };
 use oxrdf::Term;
 use parking_lot::Mutex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+/// A fresh, process-unique directory under the OS temp dir, for cold files
+/// belonging to a store with no directory of its own (`Store::in_memory` and
+/// friends). Not cleaned up on drop: cold placement already assumes a
+/// throwaway directory (`Store::open_with` deletes `<dir>/cold` on every
+/// reopen), and there is no existing "temp dir owned by a production struct"
+/// pattern in this crate to follow instead — `tempfile::TempDir` is a
+/// dev-dependency only. See HDB-177 review notes for the tradeoff.
+fn temp_cold_dir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    std::env::temp_dir().join(format!("horndb-cold-{}-{n}", std::process::id()))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct FootprintReport {
@@ -35,6 +48,12 @@ pub struct Store {
     /// S3); `None` for an in-memory store. Its mutex serializes every logged
     /// write with the append that precedes it, so log order is commit order.
     wal: Option<Mutex<Wal>>,
+    /// Where [`Store::demote`] / [`Store::demote_all`] write cold files
+    /// (SPEC-25 S5): `<dir>/cold` for a durable store, so it lines up with the
+    /// directory [`Store::open_with`] cleans on reopen; a fresh throwaway
+    /// directory for an in-memory store (see [`temp_cold_dir`]). Exactly one
+    /// place — this field's construction — knows the convention.
+    cold_dir: PathBuf,
 }
 
 impl Store {
@@ -44,6 +63,7 @@ impl Store {
             tier: Box::new(MemoryTier::new()),
             bnode_doc_tag: AtomicU64::new(0),
             wal: None,
+            cold_dir: temp_cold_dir(),
         }
     }
 
@@ -60,6 +80,7 @@ impl Store {
             tier: Box::new(MemoryTier::new()),
             bnode_doc_tag,
             wal: None,
+            cold_dir: temp_cold_dir(),
         }
     }
 
@@ -93,6 +114,7 @@ impl Store {
         // the placement-policy task re-demotes after a reopen.
         let _ = std::fs::remove_dir_all(dir.join("cold"));
         let mut store = Self::with_dictionary(dictionary);
+        store.cold_dir = dir.join("cold");
         let mut seen_batch = false;
         let mut recovered = RecoveredInputs::default();
         log.replay(|rec| store.replay(rec, &mut seen_batch, &mut recovered))?;
@@ -332,6 +354,7 @@ impl Store {
             tier: Box::new(MemoryTier::with_hot_threshold(hot_threshold)),
             bnode_doc_tag: AtomicU64::new(0),
             wal: None,
+            cold_dir: temp_cold_dir(),
         }
     }
 
@@ -623,14 +646,21 @@ impl Store {
         self.dictionary.gc(&marks);
     }
 
+    /// Where this store's cold files live (SPEC-25 S5) — `<dir>/cold` for a
+    /// durable store opened with [`Store::open`], a throwaway directory under
+    /// the OS temp dir for an in-memory one.
+    pub fn cold_dir(&self) -> &Path {
+        &self.cold_dir
+    }
+
     /// Demote one predicate partition to a cold, memory-mapped file under
-    /// `cold_dir` (SPEC-25 S5). Placement is by hand for now — no policy picks
-    /// the victim. Not a logical write: see [`MemoryTier::demote`].
+    /// [`Self::cold_dir`] (SPEC-25 S5). Placement is by hand for now — no
+    /// policy picks the victim. Not a logical write: see [`MemoryTier::demote`].
     ///
     /// Cold placement is **not durable**: [`Store::open`] deletes `<dir>/cold`
     /// and replays every partition warm.
-    pub fn demote(&self, g: GraphId, p: TermId, cold_dir: &Path) -> Result<bool> {
-        self.memory_tier().demote(g, p, cold_dir)
+    pub fn demote(&self, g: GraphId, p: TermId) -> Result<bool> {
+        self.memory_tier().demote(g, p, &self.cold_dir)
     }
 
     /// Bring one cold partition back into memory and delete its file.
@@ -639,9 +669,9 @@ impl Store {
     }
 
     /// Demote every warm partition in every graph, in `(graph, predicate)` id
-    /// order. Returns how many were actually demoted (a partition with no
-    /// visible rows is skipped).
-    pub fn demote_all(&self, cold_dir: &Path) -> Result<usize> {
+    /// order, into [`Self::cold_dir`]. Returns how many were actually demoted
+    /// (a partition with no visible rows is skipped).
+    pub fn demote_all(&self) -> Result<usize> {
         let mt = self.memory_tier();
         let snap = mt.snapshot();
         let mut targets: Vec<(GraphId, TermId)> = snap
@@ -653,7 +683,7 @@ impl Store {
         targets.sort_by_key(|(g, p)| (g.0, p.0));
         let mut demoted = 0usize;
         for (g, p) in targets {
-            if mt.demote(g, p, cold_dir)? {
+            if mt.demote(g, p, &self.cold_dir)? {
                 demoted += 1;
             }
         }

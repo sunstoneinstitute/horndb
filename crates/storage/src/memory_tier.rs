@@ -377,7 +377,10 @@ impl MemoryTier {
     /// Encode `(graph, predicate)`'s visible rows into a memory-mapped cold
     /// file under `cold_dir` and swap the cold partition into the live
     /// snapshot (SPEC-25 S5). Returns `false` — and writes nothing — when the
-    /// partition is absent, already cold, or holds no visible rows.
+    /// partition is absent, already cold, holds no visible rows, or (after the
+    /// compaction pass below) still holds a retraction some pin below the
+    /// compaction horizon needs — see the `has_retractions` check inside for
+    /// why. That last case is transient: a retry after the pin drops succeeds.
     ///
     /// **Not a logical write.** The new `TierSnapshot` carries the same
     /// version, exactly as [`Self::compact`] does, and a reader that pinned
@@ -394,6 +397,12 @@ impl MemoryTier {
     /// have promoted the partition back to warm first. So "visible at the
     /// encoded version" and "visible at `at`" name the same set, and the cold
     /// file needs no visibility stamps.
+    ///
+    /// ponytail: the encode runs under `writer`, the single-writer lock, so a
+    /// large partition stalls every other writer for the duration. Upgrade
+    /// path, once a placement policy caller exists (HDB-179): encode from a
+    /// pinned snapshot outside the lock, then re-check `current.version`
+    /// under the lock before swapping in the cold partition.
     pub fn demote(&self, graph: GraphId, predicate: TermId, cold_dir: &Path) -> Result<bool> {
         // Outside the writer lock: `compact()` takes it too, and
         // `parking_lot::Mutex` is not reentrant. SPEC-25 S5 asks demotion to
@@ -410,6 +419,17 @@ impl MemoryTier {
             return Ok(false); // absent, or already cold
         };
         if warm.len_at(cur.version) == 0 {
+            return Ok(false);
+        }
+        if warm.has_retractions() {
+            // Dead history below `min_pinned` is exactly what `gc_dictionary`
+            // marks from (see its doc comment in `store.rs`), so a partition
+            // still holding it cannot go cold — the cold encoding would drop
+            // those rows, `for_each_term_id` would stop walking them, and a
+            // pinned reader below the horizon would resolve their terms as
+            // `InvalidTerm` once the dictionary sweep ran. The demotion is
+            // only postponed: it succeeds once the pin holding the horizon
+            // down drops and a later `compact()` reclaims the dead rows.
             return Ok(false);
         }
 

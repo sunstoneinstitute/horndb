@@ -90,11 +90,6 @@ impl ColdPartition {
         rows: impl Iterator<Item = (TermId, TermId)>,
     ) -> Result<u64> {
         let rows: Vec<(TermId, TermId)> = rows.collect();
-        debug_assert!(
-            rows.windows(2)
-                .all(|w| (w[0].0 .0, w[0].1 .0) < (w[1].0 .0, w[1].1 .0)),
-            "cold encoding requires strictly ascending subject-major rows"
-        );
         let num_subjects = rows
             .windows(2)
             .filter(|w| w[0].0 != w[1].0)
@@ -117,7 +112,16 @@ impl ColdPartition {
         let mut prev_s = 0u64;
         while i < rows.len() {
             let s = rows[i].0 .0;
-            write_uvarint(&mut w, s - prev_s)?;
+            // `checked_sub` in place of the old debug-only assert: release
+            // builds strip `debug_assert!`, so a non-ascending row would
+            // otherwise underflow this subtraction and write a garbage gap
+            // instead of failing.
+            let gap_s = s.checked_sub(prev_s).ok_or_else(|| {
+                bad(format!(
+                    "cold encoding requires strictly ascending subjects: {s} after {prev_s}"
+                ))
+            })?;
+            write_uvarint(&mut w, gap_s)?;
             let start = i;
             while i < rows.len() && rows[i].0 .0 == s {
                 i += 1;
@@ -125,13 +129,21 @@ impl ColdPartition {
             write_uvarint(&mut w, (i - start) as u64)?;
             let mut prev_o = 0u64;
             for (_, o) in &rows[start..i] {
-                write_uvarint(&mut w, o.0 - prev_o)?;
+                let gap_o = o.0.checked_sub(prev_o).ok_or_else(|| {
+                    bad(format!(
+                        "cold encoding requires strictly ascending objects within a subject: {} after {prev_o}",
+                        o.0
+                    ))
+                })?;
+                write_uvarint(&mut w, gap_o)?;
                 prev_o = o.0;
             }
             prev_s = s;
         }
         let file = w.into_inner().map_err(|e| e.into_error())?;
-        file.sync_all()?;
+        // Cold placement is not durable (`Store::open_with` deletes `<dir>/cold`
+        // before replay), so an fsync here would only add latency protecting
+        // data the next open discards.
         let len = file.metadata()?.len();
         drop(file);
         std::fs::rename(&tmp, path)?;

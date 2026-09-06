@@ -508,6 +508,16 @@ route a cold partition through `warm_for_write`, which promotes it back to a
 That is also what keeps the paragraph above true: a retraction after a demotion
 promotes, so no row in a cold file is ever end-stamped behind its back.
 
+**Interaction with dictionary GC (HDB-177).** A cold encoding holds only the
+rows visible at demotion time, so `demote` refuses (`Ok(false)`) while the
+partition still physically holds a dead row a pin below the compaction
+horizon needs (`Columns::has_retractions()` after `compact()`'s pass) —
+otherwise dictionary GC's mark (see "Dictionary GC" above; it walks
+`for_each_term_id` over whatever the *current* snapshot holds) would stop
+seeing that row's term ids and free them out from under the pin, resolving as
+`InvalidTerm` on the next read. The demotion is only postponed: it succeeds
+once the pin drops and a later `compact()` reclaims the row.
+
 **Not durable.** Nothing records which predicates were demoted, so `Store::open`
 deletes `<dir>/cold` and replays every partition warm. Durable placement needs a
 manifest record; see the `ponytail:` comment in `Store::open_with`.
