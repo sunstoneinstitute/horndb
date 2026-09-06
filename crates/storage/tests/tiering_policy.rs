@@ -172,7 +172,10 @@ fn run_rounds(make_hints: impl Fn(TermId, TermId) -> PlacementHints, rounds: usi
 #[test]
 fn empty_hints_are_bit_identical_to_stats_only() {
     // `PlacementHints::default()` vs. an explicitly-constructed empty set:
-    // same reports and same placement, every round.
+    // same reports and same placement, every round. (`PlacementHints::default()`
+    // and an explicit empty `BTreeSet` are the same value, so this alone
+    // cannot catch a policy that mishandles the hint *sense* — the next
+    // check below is what actually constrains that.)
     let default_hints = run_rounds(|_, _| PlacementHints::default(), 5);
     let explicit_empty = run_rounds(
         |_, _| PlacementHints {
@@ -182,19 +185,37 @@ fn empty_hints_are_bit_identical_to_stats_only() {
     );
     assert_eq!(default_hints, explicit_empty);
 
-    // The control that makes the assertion above non-vacuous: a *non-empty*
-    // hint set over the same load and the same access sequence must produce a
-    // different trace. Without it, "empty hints change nothing" would also
-    // hold for a build that ignored hints outright.
+    // Hints only ever add (SPEC-25 S5): run the same access sequence with a
+    // real hint on `b` and assert the difference only ever goes warm-ward —
+    // per round, per predicate, the hinted run must never be cold where the
+    // stats-only run is warm. This is what actually constrains the hint
+    // *sense*: inverting it (making a hint cause demotion instead of
+    // preventing it) would still pass `assert_eq!` above but fails this.
     let hinted = run_rounds(
         |_, b_id| PlacementHints {
             keep_warm: BTreeSet::from([(DEFAULT_GRAPH, b_id)]),
         },
         5,
     );
+    for (round, ((_, stats_cold), (_, hint_cold))) in
+        default_hints.iter().zip(hinted.iter()).enumerate()
+    {
+        for (idx, (&stats, &hint)) in stats_cold.iter().zip(hint_cold.iter()).enumerate() {
+            assert!(
+                !hint || stats,
+                "round {round}, predicate {idx}: hinted run is cold where the \
+                 stats-only run is warm — a hint must never cause a demotion"
+            );
+        }
+    }
+
+    // The control that makes the checks above non-vacuous: a *non-empty*
+    // hint set over the same load and the same access sequence must produce a
+    // different trace. Without it, "hints never make it colder" would also
+    // hold for a build that ignored hints outright.
     assert_ne!(
         default_hints, hinted,
-        "hints must be load-bearing, or the equality above proves nothing"
+        "hints must be load-bearing, or the checks above prove nothing"
     );
 }
 
@@ -225,15 +246,21 @@ fn rebalance_never_changes_query_results() {
         })
         .collect();
     let expected_rows_per_predicate = 40usize;
+    let mut any_demoted = false;
 
     for round in 0..5 {
-        // Force real tier churn: demote everything on the even rounds, and let
-        // the policy promote it back on the odd ones (the verification reads
-        // below are what the policy sees as access).
-        if round % 2 == 0 {
+        // Force extra tier churn on top of `rebalance`'s own idle-based
+        // demotion: demote everything on the later even rounds, then let the
+        // policy promote back what gets read (the verification read of
+        // `a_id` below is what the policy sees as access). Skipped on round 0
+        // so the very first call sees `b_id` in its true post-load state —
+        // warm and never yet read — and demotes it through `rebalance`'s own
+        // logic rather than one this test forced ahead of it.
+        if round != 0 && round % 2 == 0 {
             store.demote_all().expect("demote_all");
         }
-        store.rebalance(&cfg, &hints).expect("rebalance");
+        let report = store.rebalance(&cfg, &hints).expect("rebalance");
+        any_demoted |= !report.demoted.is_empty();
 
         let actual: BTreeSet<(String, String, String)> = store
             .scan_all_term_ids()
@@ -248,22 +275,32 @@ fn rebalance_never_changes_query_results() {
             .collect();
         assert_eq!(actual, expected, "round {round}: whole-store scan changed");
 
+        // Only `a_id` goes through the counted accessor here. Reading `b_id`
+        // too would keep it permanently "read" from the policy's point of
+        // view, so it would never go idle and `rebalance`'s own demote path
+        // would never run — `b_id`'s content is still checked above, through
+        // the uncounted whole-store scan.
         let snap = store.snapshot();
-        for id in [a_id, b_id] {
-            for &ord in Ordering::ALL.iter() {
-                let cols = snap
-                    .tier_arc()
-                    .ordered_predicate_at(DEFAULT_GRAPH, id, ord)
-                    .expect("partition exists");
-                let rows: BTreeSet<(u64, u64)> = cols.scan().map(|(x, y)| (x.0, y.0)).collect();
-                assert_eq!(
-                    rows.len(),
-                    expected_rows_per_predicate,
-                    "round {round}, ordering {ord:?}: row count changed"
-                );
-            }
+        for &ord in Ordering::ALL.iter() {
+            let cols = snap
+                .tier_arc()
+                .ordered_predicate_at(DEFAULT_GRAPH, a_id, ord)
+                .expect("partition exists");
+            let rows: BTreeSet<(u64, u64)> = cols.scan().map(|(x, y)| (x.0, y.0)).collect();
+            assert_eq!(
+                rows.len(),
+                expected_rows_per_predicate,
+                "round {round}, ordering {ord:?}: row count changed"
+            );
         }
     }
+
+    assert!(
+        any_demoted,
+        "rebalance never exercised its own demote path — b_id never went idle"
+    );
+    // Silence an "unused" complaint if the assertion above is ever loosened.
+    let _ = b_id;
 }
 
 #[test]
@@ -281,4 +318,86 @@ fn min_rows_keeps_small_partitions_warm() {
     assert_eq!(report.demoted, vec![(DEFAULT_GRAPH, big_id)]);
     assert!(is_cold(&store, big_id));
     assert!(!is_cold(&store, small_id));
+}
+
+/// `demote` refuses while a pin below the compaction horizon still needs a
+/// dead row (`crates/storage/tests/cold_partition.rs` pins this at the
+/// `demote` level). `rebalance` must not treat that refusal as a reason to
+/// drop the idle count it has been building: it keeps retrying on later
+/// rounds and succeeds once the row is reclaimable.
+#[test]
+fn rebalance_retries_after_demote_refuses() {
+    let store = Store::in_memory();
+    let p = iri("http://ex/p");
+    load(&store, &p, "p", 40);
+    let id = p_id(&store, &p);
+    // Two idle rounds to demote, so the test can tell "the count survived a
+    // refused round" from "the count was silently reset and rebuilt" — a
+    // reset-on-refusal bug would need a *third* round to reach the threshold
+    // again from zero.
+    let cfg = cfg(&store, 2, 8);
+    let hints = PlacementHints::default();
+
+    // Pinned before a retraction, so the retracted row sits below the pin's
+    // horizon: `demote`'s compaction pass cannot reclaim it, and `demote`
+    // refuses rather than encode a file missing a row the pin still needs.
+    let pin = store.pin();
+    assert_eq!(
+        store
+            .retract_triples(&[(iri("http://ex/p/s0"), p.clone(), iri("http://ex/p/o0"))])
+            .unwrap(),
+        1
+    );
+
+    // Round 1: idle count reaches 1, below the threshold — no demote attempt.
+    let report = store.rebalance(&cfg, &hints).expect("rebalance");
+    assert!(report.demoted.is_empty());
+    assert!(!is_cold(&store, id));
+
+    // Round 2: idle count reaches 2, at the threshold — `demote` is attempted
+    // and refused (the pin is still alive), so nothing moves.
+    let report = store.rebalance(&cfg, &hints).expect("rebalance");
+    assert!(
+        report.demoted.is_empty(),
+        "demote must be refused while the pin is alive"
+    );
+    assert!(!is_cold(&store, id));
+
+    drop(pin);
+
+    // Round 3: still unread, and the idle count was never reset by the
+    // refusal — it is already at the threshold, so `demote` is retried
+    // immediately (not after two more idle rounds) and now succeeds.
+    let report = store.rebalance(&cfg, &hints).expect("rebalance");
+    assert_eq!(report.demoted, vec![(DEFAULT_GRAPH, id)]);
+    assert!(is_cold(&store, id));
+}
+
+/// F1 (HDB-179 review): `Store::scan_all_term_ids` walks every predicate in
+/// the default graph through `iter_graph_term_ids` — the entry point the
+/// default `VecTripleSource` rebuild uses on every SPARQL query. Before the
+/// fix, that whole-store walk counted as a per-partition read, so `read ==
+/// true` for every partition every round and `rebalance` never demoted
+/// anything. This pins the fix on the real read path: repeated whole-store
+/// sweeps must not stop an otherwise-idle partition from going cold.
+#[test]
+fn whole_store_sweep_does_not_block_demotion() {
+    let store = Store::in_memory();
+    let p = iri("http://ex/p");
+    load(&store, &p, "p", 40);
+    let id = p_id(&store, &p);
+    let cfg = cfg(&store, 1, 8);
+    let hints = PlacementHints::default();
+
+    for _ in 0..3 {
+        assert_eq!(store.scan_all_term_ids().len(), 40);
+    }
+
+    let report = store.rebalance(&cfg, &hints).expect("rebalance");
+    assert_eq!(
+        report.demoted,
+        vec![(DEFAULT_GRAPH, id)],
+        "a whole-store sweep must not keep an idle partition warm"
+    );
+    assert!(is_cold(&store, id));
 }
