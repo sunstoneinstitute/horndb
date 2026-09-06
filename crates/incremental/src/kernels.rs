@@ -33,6 +33,14 @@ pub enum KernelError {
     UnboundHeadVar(Var),
     #[error("left and right body patterns share no variable — would be a cross product")]
     NoSharedVar,
+    #[error("n-ary planning needs at least two body patterns, got {0}")]
+    BodyTooShort(usize),
+    #[error("body is disconnected — no unused pattern shares a variable with the join prefix")]
+    DisconnectedBody,
+    #[error(
+        "join prefix has {0} live variables; a triple-shaped intermediate holds at most three"
+    )]
+    TooManyLiveVars(usize),
 }
 
 /// A generic two-pattern hash join, correct for arbitrary Z-set
@@ -86,7 +94,7 @@ impl Bindings {
 }
 
 /// Distinct variables in a pattern, first-appearance order (S, P, O).
-fn vars_in(pattern: &TriplePattern) -> Vec<Var> {
+pub(crate) fn vars_in(pattern: &TriplePattern) -> Vec<Var> {
     let mut vars = Vec::new();
     for t in [pattern.s, pattern.p, pattern.o] {
         if let Term::Var(v) = t {

@@ -381,8 +381,11 @@ written when each increment is picked up.
    as the one clock (ADR-0018).
 7. **S7 — bilinear-join runtime**
    ([#216](https://github.com/sunstoneinstitute/horndb/issues/216)).
-   Per-predicate leaves, cost model over the SPEC-23 `Stats` seam,
-   hash/sort-merge kernels with E4 codegen.
+   Per-predicate leaves — **delivered**; cost model over the SPEC-23
+   `Stats` seam — **delivered** (`NaryPlan::from_body` greedily picks a
+   connected left-deep leaf order from `StatsEstimator`); the hash kernel
+   (`HashJoinRule`) — **delivered**. A sort-merge kernel and E4 codegen
+   emitting kernel instances remain.
 8. **S8 — intra-tick joint fixpoint + non-transitive closure shapes**
    ([#217](https://github.com/sunstoneinstitute/horndb/issues/217)).
    Completeness tail; ordering-independence property tests.
