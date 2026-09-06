@@ -44,6 +44,8 @@ enum Target {
 }
 
 impl Target {
+    /// `iri` was already validated by [`target`], the only place a `Named`
+    /// value is built — `new_unchecked` here just avoids re-parsing it.
     fn graph_target(&self) -> GraphTarget {
         match self {
             Target::Default => GraphTarget::DefaultGraph,
@@ -78,7 +80,11 @@ fn bad_request(msg: impl Into<String>) -> Box<Response> {
 }
 
 /// Resolve `?graph=<iri>` / `?default`. Anything else — an unknown
-/// parameter, neither, or both — is a 400 (SPEC-28 S5).
+/// parameter, neither, or both — is a 400 (SPEC-28 S5). A `graph` value that
+/// is not a valid IRI is also a 400, with the parser's message in the body —
+/// otherwise it would be interned as-is (`Target::graph_target` uses the
+/// unchecked constructor) and could fail later, when a `GET` tries to
+/// serialize it out as Turtle or N-Triples.
 fn target(params: &HashMap<String, String>) -> Result<Target, Box<Response>> {
     let mut graph = None;
     let mut default = false;
@@ -90,7 +96,10 @@ fn target(params: &HashMap<String, String>) -> Result<Target, Box<Response>> {
         }
     }
     match (graph, default) {
-        (Some(g), false) => Ok(Target::Named(g)),
+        (Some(g), false) => {
+            NamedNode::new(&g).map_err(|e| bad_request(e.to_string()))?;
+            Ok(Target::Named(g))
+        }
         (None, true) => Ok(Target::Default),
         (None, false) => Err(bad_request("one of `graph=<iri>` or `default` is required")),
         (Some(_), true) => Err(bad_request("`graph` and `default` are mutually exclusive")),

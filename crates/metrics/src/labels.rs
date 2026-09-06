@@ -40,6 +40,12 @@ label_value_enum!(Endpoint {
     Query => "query",
     Update => "update",
     Metrics => "metrics",
+    // The Graph Store Protocol's four verbs (SPEC-28 S5) share one label
+    // value, like `/query` and `/update` already share theirs across GET
+    // and POST — `method` (below) is what splits GET from everything else.
+    // A per-verb value would double the number of `sparql_requests` series
+    // this endpoint produces for no distinction the dashboards need.
+    Graphs => "graphs",
 });
 
 label_value_enum!(Method {

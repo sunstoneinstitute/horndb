@@ -266,6 +266,7 @@ async fn record_request(req: Request, next: Next) -> Response {
     let endpoint = match path.as_str() {
         "/query" => Some(Endpoint::Query),
         "/update" => Some(Endpoint::Update),
+        "/graphs" => Some(Endpoint::Graphs),
         "/metrics" => Some(Endpoint::Metrics),
         _ => None,
     };
