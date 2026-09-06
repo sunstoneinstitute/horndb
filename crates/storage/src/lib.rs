@@ -12,6 +12,9 @@
 //!   * An HDT-derived compact snapshot export/import (`snapshot`, SPEC-02 F9).
 //!   * A persistent dictionary: an immutable memory-mapped base under the
 //!     in-memory overlay (`dict_base`, SPEC-25 S2).
+//!   * Cold, read-only, memory-mapped predicate partitions behind the same
+//!     read surface as the warm ones (`cold`, `partition::Partition`,
+//!     `Store::demote` / `Store::promote`, SPEC-25 S5).
 //!   * A write-ahead log with checkpoints and crash recovery (`wal`,
 //!     `Store::open` / `Store::checkpoint`, SPEC-25 S3). The same log carries
 //!     the circuit's input records (`Store::log_input`, SPEC-24 S5,
@@ -20,6 +23,7 @@
 //! Out of scope here: CXL/NVMe tiering, named-graph snapshots, rdfhdt
 //! wire-format compatibility, HDT bulk import.
 
+pub mod cold;
 pub(crate) mod dict_base;
 pub mod dictionary;
 pub mod error;
@@ -37,14 +41,15 @@ pub(crate) mod wal;
 // Re-exports below are added incrementally as each module is implemented.
 // See plans/PLAN-02-01-storage.md tasks 2–9.
 
+pub use cold::ColdPartition;
 pub use dict_base::BaseStats;
 pub use dictionary::{Dictionary, DictionaryBytes};
 pub use error::StorageError;
 pub use memory_tier::{MemoryTier, PinnedSnapshot, TierSnapshot};
 pub use ordering::{Ordering, PartitionAxis};
 pub use partition::{
-    hot_threshold, set_hot_threshold, OrderedColumns, PredicatePartition, DEFAULT_HOT_THRESHOLD,
-    NEVER_EAGER,
+    hot_threshold, set_hot_threshold, OrderedColumns, Partition, PredicatePartition,
+    DEFAULT_HOT_THRESHOLD, NEVER_EAGER,
 };
 pub use snapshot::{export_snapshot, import_snapshot, SnapshotStats};
 pub use store::{FootprintReport, Store, StoreSnapshot};

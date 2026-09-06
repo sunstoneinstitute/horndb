@@ -1,21 +1,40 @@
 //! In-memory tier — Stage 1 sole implementation of `Tier`.
 
+use crate::cold::{cold_path, ColdPartition};
 use crate::error::Result;
-use crate::partition::{PartitionBuilder, PredicatePartition};
+use crate::partition::{Partition, PartitionBuilder, PredicatePartition};
 use crate::term::{GraphId, TermId};
 use crate::tier::{ApplyReport, Tier, TierStats, TierWrite};
 use crate::visibility::UNSET_END;
 use horndb_metrics::labels::LoadPhase;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// The warm form of `part`, promoting a cold partition into `scratch` first.
+///
+/// Writes never land on a cold partition (SPEC-25 S5): every write path needs
+/// the visibility stamp columns, which only a warm partition has, so a cold one
+/// is decoded back into a `PredicatePartition` and the write proceeds against
+/// that. `scratch` owns the promoted partition for the caller's borrow.
+fn warm_for_write<'a>(
+    part: &'a Partition,
+    scratch: &'a mut Option<PredicatePartition>,
+    hot_threshold: usize,
+) -> &'a PredicatePartition {
+    match part {
+        Partition::Warm(w) => w,
+        Partition::Cold(c) => scratch.insert(c.promote(hot_threshold)),
+    }
+}
 
 /// One graph's predicate partitions. Immutable once built; copy-on-write
 /// replaces the whole map (sharing untouched partitions by `Arc`) on each write.
 #[derive(Default)]
 struct GraphStore {
-    partitions: HashMap<TermId, Arc<PredicatePartition>>,
+    partitions: HashMap<TermId, Arc<Partition>>,
 }
 
 /// An immutable, versioned view of the entire tier. Readers clone the `Arc`
@@ -45,7 +64,7 @@ impl TierSnapshot {
     /// Run `f` against the partition for `(graph, predicate)`, if present.
     pub fn with_predicate<F, R>(&self, graph: GraphId, predicate: TermId, f: F) -> Option<R>
     where
-        F: FnOnce(&PredicatePartition) -> R,
+        F: FnOnce(&Partition) -> R,
     {
         self.graphs
             .get(&graph)
@@ -96,10 +115,9 @@ impl TierSnapshot {
             f(g.0);
             for (p, part) in gs.partitions.iter() {
                 f(p.0);
-                let (subjects, objects) = (part.subjects(), part.objects());
-                for i in 0..part.len() {
-                    f(subjects.value(i));
-                    f(objects.value(i));
+                for (s, o) in part.scan() {
+                    f(s.0);
+                    f(o.0);
                 }
             }
         }
@@ -136,7 +154,7 @@ impl TierSnapshot {
 
     /// True if `p` has at least one live row. Version-independent by
     /// construction: see `PredicatePartition::live_len`.
-    fn partition_is_live(p: &PredicatePartition) -> bool {
+    fn partition_is_live(p: &Partition) -> bool {
         p.live_len() > 0
     }
 
@@ -302,9 +320,14 @@ impl MemoryTier {
             let mut new_partitions = gs.partitions.clone();
             let mut graph_changed = false;
             for (p, part) in gs.partitions.iter() {
+                // A cold partition holds no retractions, so this also skips it
+                // — and `as_warm` below can only be `None` for a cold one.
                 if !part.has_retractions() {
                     continue;
                 }
+                let Some(part) = part.as_warm() else {
+                    continue;
+                };
                 // Reclaimable iff some row has end <= horizon.
                 let reclaimable = (0..part.len()).any(|i| part.ends().value(i) <= horizon);
                 if !reclaimable {
@@ -325,7 +348,9 @@ impl MemoryTier {
                 }
                 new_partitions.insert(
                     *p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                    Arc::new(Partition::Warm(
+                        builder.build_with_hot_threshold(self.hot_threshold),
+                    )),
                 );
                 graph_changed = true;
             }
@@ -347,6 +372,118 @@ impl MemoryTier {
             });
             *self.current.write() = next;
         }
+    }
+
+    /// Encode `(graph, predicate)`'s visible rows into a memory-mapped cold
+    /// file under `cold_dir` and swap the cold partition into the live
+    /// snapshot (SPEC-25 S5). Returns `false` — and writes nothing — when the
+    /// partition is absent, already cold, holds no visible rows, or (after the
+    /// compaction pass below) still holds a retraction some pin below the
+    /// compaction horizon needs — see the `has_retractions` check inside for
+    /// why. That last case is transient: a retry after the pin drops succeeds.
+    ///
+    /// **Not a logical write.** The new `TierSnapshot` carries the same
+    /// version, exactly as [`Self::compact`] does, and a reader that pinned
+    /// before the swap keeps its own `Arc<TierSnapshot>` — and with it the
+    /// warm partition, unchanged.
+    ///
+    /// **Why "the set visible now" is enough.** Every read goes through a
+    /// pinned `TierSnapshot` and passes that snapshot's own version as `at`;
+    /// there is no way to read a snapshot at some other version
+    /// ([`crate::Store::snapshot_at`] takes a pin, not a number). A snapshot
+    /// holding the cold partition was therefore created at or after this swap,
+    /// so its version is `>= ` the version encoded into the file. Every row in
+    /// the file was visible then and is still visible now: a retraction would
+    /// have promoted the partition back to warm first. So "visible at the
+    /// encoded version" and "visible at `at`" name the same set, and the cold
+    /// file needs no visibility stamps.
+    ///
+    /// ponytail: the encode runs under `writer`, the single-writer lock, so a
+    /// large partition stalls every other writer for the duration. Upgrade
+    /// path, once a placement policy caller exists (HDB-179): encode from a
+    /// pinned snapshot outside the lock, then re-check `current.version`
+    /// under the lock before swapping in the cold partition.
+    pub fn demote(&self, graph: GraphId, predicate: TermId, cold_dir: &Path) -> Result<bool> {
+        // Outside the writer lock: `compact()` takes it too, and
+        // `parking_lot::Mutex` is not reentrant. SPEC-25 S5 asks demotion to
+        // run the compaction pass so dead history is reclaimed rather than
+        // dropped silently on the floor by the encoding.
+        self.compact();
+
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let Some(gs) = cur.graphs.get(&graph) else {
+            return Ok(false);
+        };
+        let Some(warm) = gs.partitions.get(&predicate).and_then(|p| p.as_warm()) else {
+            return Ok(false); // absent, or already cold
+        };
+        if warm.len_at(cur.version) == 0 {
+            return Ok(false);
+        }
+        if warm.has_retractions() {
+            // Dead history below `min_pinned` is exactly what `gc_dictionary`
+            // marks from (see its doc comment in `store.rs`), so a partition
+            // still holding it cannot go cold — the cold encoding would drop
+            // those rows, `for_each_term_id` would stop walking them, and a
+            // pinned reader below the horizon would resolve their terms as
+            // `InvalidTerm` once the dictionary sweep ran. The demotion is
+            // only postponed: it succeeds once the pin holding the horizon
+            // down drops and a later `compact()` reclaims the dead rows.
+            return Ok(false);
+        }
+
+        std::fs::create_dir_all(cold_dir)?;
+        let path = cold_path(cold_dir, graph, predicate);
+        ColdPartition::write(
+            &path,
+            graph,
+            predicate,
+            cur.version,
+            warm.scan_at(cur.version),
+        )?;
+        let cold = ColdPartition::open(&path)?;
+
+        let mut partitions = gs.partitions.clone();
+        partitions.insert(predicate, Arc::new(Partition::Cold(cold)));
+        let mut graphs = cur.graphs.clone();
+        graphs.insert(graph, Arc::new(GraphStore { partitions }));
+        *self.current.write() = Arc::new(TierSnapshot {
+            version: cur.version,
+            graphs,
+        });
+        Ok(true)
+    }
+
+    /// Decode a cold partition back into a warm one and swap it in, deleting
+    /// the file. Returns `false` when the partition is absent or already warm.
+    /// Not a logical write either — same version, same argument as
+    /// [`Self::demote`].
+    pub fn promote(&self, graph: GraphId, predicate: TermId) -> Result<bool> {
+        let _w = self.writer.lock();
+        let cur = self.current.read().clone();
+        let Some(gs) = cur.graphs.get(&graph) else {
+            return Ok(false);
+        };
+        let Some(Partition::Cold(cold)) = gs.partitions.get(&predicate).map(|p| p.as_ref()) else {
+            return Ok(false);
+        };
+        let warm = cold.promote(self.hot_threshold);
+        let path = cold.path().to_path_buf();
+
+        let mut partitions = gs.partitions.clone();
+        partitions.insert(predicate, Arc::new(Partition::Warm(warm)));
+        let mut graphs = cur.graphs.clone();
+        graphs.insert(graph, Arc::new(GraphStore { partitions }));
+        *self.current.write() = Arc::new(TierSnapshot {
+            version: cur.version,
+            graphs,
+        });
+
+        // Best effort: a reader pinned before the swap still holds the
+        // mapping, and unlinking leaves that inode alive until it drops.
+        let _ = std::fs::remove_file(&path);
+        Ok(true)
     }
 }
 
@@ -466,12 +603,16 @@ impl MemoryTier {
                     .into_iter()
                     .map(|(s, o)| (s.0, o.0, new_version, UNSET_END))
                     .collect();
-                let part = match new_partitions.get(&p) {
+                let mut scratch = None;
+                let existing = new_partitions
+                    .get(&p)
+                    .map(|e| warm_for_write(e, &mut scratch, self.hot_threshold));
+                let part = match existing {
                     Some(existing) => existing.with_appended_rows(new_rows),
                     None => PartitionBuilder::from_rows(new_rows)
                         .build_with_hot_threshold(self.hot_threshold),
                 };
-                new_partitions.insert(p, Arc::new(part));
+                new_partitions.insert(p, Arc::new(Partition::Warm(part)));
                 build_ns += t_build.elapsed().as_nanos() as u64;
                 build_rows += added;
             }
@@ -592,7 +733,14 @@ impl MemoryTier {
             for p in touched_preds {
                 let del_targets = del_preds.and_then(|m| m.get(&p));
                 let add_targets = add_preds.and_then(|m| m.get(&p));
-                let has_existing = new_partitions.contains_key(&p);
+                // A write never lands on a cold partition: promote first
+                // (SPEC-25 S5). `scratch` owns the promoted partition for the
+                // rest of this predicate's borrow.
+                let mut scratch = None;
+                let existing: Option<&PredicatePartition> = new_partitions
+                    .get(&p)
+                    .map(|e| warm_for_write(e, &mut scratch, self.hot_threshold));
+                let has_existing = existing.is_some();
                 if !has_existing && add_targets.is_none() {
                     // Nothing to retract from (partition doesn't exist) and
                     // nothing to add: a true no-op for this predicate.
@@ -626,7 +774,7 @@ impl MemoryTier {
                     // which is what keeps this path off the O(existing) curve.
                     let t_merge = Instant::now();
                     let mut already_live = vec![false; targets.len()];
-                    if let Some(existing) = new_partitions.get(&p) {
+                    if let Some(existing) = existing {
                         existing.mark_live(targets, &mut already_live);
                     }
                     let new_rows: Vec<_> = targets
@@ -648,12 +796,12 @@ impl MemoryTier {
 
                     let added = new_rows.len() as u64;
                     let t_build = Instant::now();
-                    let part = match new_partitions.get(&p) {
+                    let part = match existing {
                         Some(existing) => existing.with_appended_rows(new_rows),
                         None => PartitionBuilder::from_rows(new_rows)
                             .build_with_hot_threshold(self.hot_threshold),
                     };
-                    new_partitions.insert(p, Arc::new(part));
+                    new_partitions.insert(p, Arc::new(Partition::Warm(part)));
                     build_ns += t_build.elapsed().as_nanos() as u64;
                     build_rows += added;
                     continue;
@@ -678,7 +826,7 @@ impl MemoryTier {
                 let mut still_visible: Vec<(u64, u64)> = Vec::new();
                 let mut carried = 0u64;
                 let t_copy = Instant::now();
-                if let Some(existing) = new_partitions.get(&p) {
+                if let Some(existing) = existing {
                     let n = existing.len();
                     carried = n as u64;
                     // The row count is known here, and at most one live pair
@@ -747,7 +895,9 @@ impl MemoryTier {
                 let t_build = Instant::now();
                 new_partitions.insert(
                     p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                    Arc::new(Partition::Warm(
+                        builder.build_with_hot_threshold(self.hot_threshold),
+                    )),
                 );
                 build_ns += t_build.elapsed().as_nanos() as u64;
                 build_rows += carried + added;
@@ -837,7 +987,11 @@ impl TierWrite for MemoryTier {
             };
             let mut new_partitions = gs.partitions.clone();
             for (p, targets) in pred_targets {
-                let Some(existing) = new_partitions.get(&p) else {
+                let mut scratch = None;
+                let Some(existing) = new_partitions
+                    .get(&p)
+                    .map(|e| warm_for_write(e, &mut scratch, self.hot_threshold))
+                else {
                     continue;
                 };
                 let mut builder = PartitionBuilder::default();
@@ -856,7 +1010,9 @@ impl TierWrite for MemoryTier {
                 }
                 new_partitions.insert(
                     p,
-                    Arc::new(builder.build_with_hot_threshold(self.hot_threshold)),
+                    Arc::new(Partition::Warm(
+                        builder.build_with_hot_threshold(self.hot_threshold),
+                    )),
                 );
             }
             graphs.insert(
@@ -889,7 +1045,7 @@ impl TierWrite for MemoryTier {
 }
 
 impl Tier for MemoryTier {
-    fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&PredicatePartition> {
+    fn predicate(&self, _graph: GraphId, _predicate: TermId) -> Option<&Partition> {
         // Returning `&PredicatePartition` across the snapshot pointer would
         // require a guard-bound borrow. Stage-1 callers use the guarded
         // accessors on `TierSnapshot` (`with_predicate` / `ordered_predicate`)
@@ -924,7 +1080,7 @@ impl MemoryTier {
     /// runs against a pinned snapshot, so it is consistent for its duration.
     pub fn with_predicate<F, R>(&self, graph: GraphId, predicate: TermId, f: F) -> Option<R>
     where
-        F: FnOnce(&PredicatePartition) -> R,
+        F: FnOnce(&Partition) -> R,
     {
         self.snapshot().with_predicate(graph, predicate, f)
     }
@@ -1055,6 +1211,7 @@ mod tests {
             let (a, b) = (one.snapshot(), many.snapshot());
             let read = |snap: &crate::memory_tier::TierSnapshot| {
                 snap.with_predicate(DEFAULT_GRAPH, pred, |p| {
+                    let p = p.as_warm().expect("insert-only tier stays warm");
                     (
                         p.len(),
                         p.live_len(),
@@ -1134,7 +1291,11 @@ mod tests {
         // Without the cap this would be all 4,104.
         let runs = many
             .snapshot()
-            .with_predicate(DEFAULT_GRAPH, pred, |p| p.run_count())
+            .with_predicate(DEFAULT_GRAPH, pred, |p| {
+                p.as_warm()
+                    .expect("insert-only tier stays warm")
+                    .run_count()
+            })
             .unwrap();
         assert_eq!(runs, 9, "cap did not fire: {runs} runs after {n} inserts");
 

@@ -58,6 +58,7 @@ fn state(store: &Store) -> State {
         for p in tier.predicates(g) {
             let mut v = tier
                 .with_predicate(g, p, |part| {
+                    let part = part.as_warm().expect("replay rebuilds warm partitions");
                     (0..part.len())
                         .map(|i| {
                             (
