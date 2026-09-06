@@ -26,6 +26,16 @@ fn iri(v: &str) -> oxrdf::Term {
 /// object-major axis has real fan-out; and named graphs so both the
 /// single-graph direct path and the multi-graph union fallback are covered.
 fn fixture(direct: bool) -> HornBackend {
+    fixture_tiered(direct, false)
+}
+
+/// [`fixture`], plus (when `cold`) a `demote_all` pass that pushes every
+/// settled partition into the memory-mapped cold tier (SPEC-25 S5). The
+/// backend is otherwise identical, so any answer that differs is a cold-path
+/// bug — this is what pins `PredicatePartition::ordered_at` over a
+/// `ColdPartition` in a unit test rather than only in the conformance
+/// harness.
+fn fixture_tiered(direct: bool, cold: bool) -> HornBackend {
     let mut b = HornBackend::new();
     b.set_direct_source(direct);
     for i in 0..24u64 {
@@ -54,6 +64,9 @@ fn fixture(direct: bool) -> HornBackend {
         .unwrap();
     b.insert_oxrdf_in_named_graph(&iri(G2), &iri("http://ex/c"), &iri(Q), &iri("http://ex/d"))
         .unwrap();
+    if cold {
+        assert!(b.demote_all().unwrap() > 0, "nothing was demoted");
+    }
     b
 }
 
@@ -197,4 +210,50 @@ fn a_pinned_view_reads_its_own_version_through_the_direct_source() {
     // have to be rejected on its version tag for this to hold.)
     assert_eq!(answer(&direct, Q), answer(&oracle, Q));
     assert_ne!(answer(&direct, Q), before_direct, "write never landed");
+}
+
+/// SPEC-25 S5 acceptance #5, unit-test half: the same oracle comparison with
+/// every partition demoted to the cold tier. Both read paths are covered —
+/// the `VecTripleSource` copy (which decodes a cold partition once via
+/// `scan_at`) and the direct source (which reads `ordered_at` straight off
+/// `ColdPartition`).
+#[test]
+fn cold_partitions_answer_what_warm_ones_do() {
+    let oracle = fixture_tiered(false, false);
+    for (direct, cold) in [(false, true), (true, false), (true, true)] {
+        let b = fixture_tiered(direct, cold);
+        for q in QUERIES {
+            assert_eq!(
+                answer(&b, q),
+                answer(&oracle, q),
+                "direct={direct} cold={cold}, query: {q}"
+            );
+        }
+    }
+}
+
+/// A write to a cold partition promotes it, applies, and (here, by hand)
+/// re-demotes — the promote/demote round-trip the `HORNDB_COLD_TIER` harness
+/// run puts every update case through.
+#[test]
+fn cold_parity_survives_writes_and_retractions() {
+    let mut cold = fixture_tiered(true, true);
+    let mut oracle = fixture_tiered(false, false);
+    for update in [
+        "INSERT DATA { <http://ex/s0> <http://ex/p> <http://ex/new> }",
+        "DELETE DATA { <http://ex/s1> <http://ex/p> <http://ex/s2> }",
+        "DELETE WHERE { ?s <http://ex/r> \"lit0\" }",
+        "INSERT DATA { <http://ex/s1> <http://ex/p> <http://ex/s2> }",
+    ] {
+        execute_update(update, &mut cold).unwrap();
+        execute_update(update, &mut oracle).unwrap();
+        cold.demote_all().unwrap();
+        for q in QUERIES {
+            assert_eq!(
+                answer(&cold, q),
+                answer(&oracle, q),
+                "after `{update}` on a cold store, query: {q}"
+            );
+        }
+    }
 }

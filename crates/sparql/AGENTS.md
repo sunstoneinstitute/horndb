@@ -21,6 +21,20 @@ on by default).
   `circuit-delete-01` case in `tests/w3c_update_suite.rs`.
 - HTTP server tests: `cargo test -p horndb-sparql --features server` — required for
   a full SPARQL pass.
+- Two env knobs on `HornBackend` (`exec/horn.rs`), both read once per process,
+  both off by default:
+  - `HORNDB_DIRECT_SOURCE=1` — reads go straight off the columnar partitions
+    instead of building a per-query `VecTripleSource` copy (HDB-120). Correct
+    but slower; see the doc on `direct_source_enabled`.
+  - `HORNDB_COLD_TIER=1` — every coarse write funnel (`commit_quad_ids`,
+    `Store::apply_quads`, `Store::clear_graph`) ends by demoting the whole
+    store to the memory-mapped cold tier (SPEC-25 S5). A test knob for the
+    mixed warm/cold conformance gate, not a placement policy. It is a boolean:
+    the store owns its cold directory, so there is nothing to point it at.
+    Hook it at coarse funnels only — each demote encodes a whole partition, so
+    a per-triple hook makes a bulk load quadratic. The conformance harness
+    calls `HornBackend::demote_all_if_cold_tier` itself after a per-triple file
+    load, which has no funnel of its own.
 - `serve --data` loads `.nt`/`.ttl`/`.nq`/`.trig` (HDB-112): `.nq`/`.trig` are dataset
   (quad) formats — each quad loads into the named graph it carries, not the default
   graph. `src/bin/serve.rs::load_file` routes them through `update::parse_rdf_bytes`,

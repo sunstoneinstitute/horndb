@@ -12,6 +12,13 @@
 # IDs are suffix-matched against the manifest entry IRI so the same
 # selection survives any workspace root path (worktrees, CI checkouts).
 #
+# SPEC-25 S5: CI grades this same selection twice more with
+# `HORNDB_COLD_TIER=1` (once with `HORNDB_DIRECT_SOURCE=1`), which demotes the
+# whole store to the cold tier after every write. Those runs only exercise the
+# `HornBackend`-backed suites — `sparql11-eval` and the `sparql11` /
+# `sparql11-syntax` update cases; the OWL 2 suites use `horndb_owlrl`'s own
+# `MemStore` and are tier-independent. Counts must match the warm run exactly.
+#
 # SPEC-10 `rdflib-compat` subset: the rdflib compatibility suite is a
 # Python-side *differential* gate (HornDB vs upstream `rdflib`), not a
 # manifest-driven Rust suite, so it does not appear as a `[suites.*]` entry

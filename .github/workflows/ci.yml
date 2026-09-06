@@ -288,18 +288,49 @@ jobs:
             --require-corpus \
             --junit target/junit.xml
 
+      # SPEC-25 S5 acceptance #5: the same subset against a mixed warm/cold
+      # store. `HORNDB_COLD_TIER=1` makes every write funnel demote the whole
+      # store to the memory-mapped cold tier when it finishes, so every case
+      # queries cold data and every update promotes, writes and re-demotes.
+      # Only the `HornBackend`-backed suites (`sparql11-eval` and the
+      # `sparql11`/`sparql11-syntax` update cases) can change answer under it;
+      # the OWL 2 suites run on `horndb_owlrl::Engine`, which has its own
+      # `MemStore` and is tier-independent. Both read paths are covered: the
+      # default `VecTripleSource` copy, then `HORNDB_DIRECT_SOURCE=1` reading
+      # the partitions directly. Counts must match the warm step exactly.
+      - name: conformance — mixed warm/cold store (SPEC-25 S5)
+        env:
+          HORNDB_COLD_TIER: "1"
+        run: |
+          ./target/conformance/harness \
+            --engine owlrl \
+            run \
+            --require-corpus \
+            --junit target/junit-cold.xml
+
+      - name: conformance — mixed warm/cold store, direct source
+        env:
+          HORNDB_COLD_TIER: "1"
+          HORNDB_DIRECT_SOURCE: "1"
+        run: |
+          ./target/conformance/harness \
+            --engine owlrl \
+            run \
+            --require-corpus \
+            --junit target/junit-cold-direct.xml
+
       - name: upload junit
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: junit-${{ github.run_id }}
-          path: target/junit.xml
+          path: target/junit*.xml
 
       - name: publish test report
         if: always()
         uses: mikepenz/action-junit-report@a9170d5795813c01ab4901ffb045b52bab4ab09d # v6.5.0
         with:
-          report_paths: target/junit.xml
+          report_paths: target/junit*.xml
           include_passed: true
           fail_on_failure: true
 

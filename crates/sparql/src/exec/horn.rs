@@ -372,6 +372,33 @@ fn direct_source_enabled() -> bool {
     })
 }
 
+/// Whether every coarse write funnel demotes the whole store to the cold tier
+/// when it finishes (SPEC-25 S5 acceptance #5).
+///
+/// **Off by default — opt in with `HORNDB_COLD_TIER=1`** (or `on`/`true`).
+///
+/// A boolean, not a directory: the store owns its cold directory
+/// (`horndb_storage::Store::cold_dir` — `<dir>/cold` for a durable store, a
+/// process-unique temp dir for an in-memory one), so there is nothing to
+/// inject. When set, [`HornBackend::demote_all_if_cold_tier`] runs at the end
+/// of each write funnel, so every subsequent query reads a fully cold store
+/// and every write promotes, writes, and re-demotes. That is the strictest
+/// "mixed warm/cold" configuration, and it is what the conformance harness
+/// runs in CI to prove the tier is transparent.
+///
+/// It is a test knob, not a placement policy: demoting everything after every
+/// write is far more aggressive than any real schedule would be.
+/// Read once per process and cached.
+fn cold_tier_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("HORNDB_COLD_TIER").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
+
 /// A delta touching more than `1 / SNAPSHOT_DELTA_REBUILD_DIVISOR` of a cached
 /// snapshot's rows is not worth merging in place: at that size a full rebuild
 /// from the store costs about the same and is simpler, so the memo is dropped
@@ -858,6 +885,31 @@ impl HornBackend {
     /// two backends that differ only here.
     pub fn set_direct_source(&mut self, on: bool) {
         self.direct_source = on;
+    }
+
+    /// Demote every settled partition of this backend's store to the cold,
+    /// memory-mapped tier (SPEC-25 S5). Reads stay correct — the cold form
+    /// sits behind the same warm read surface — and the next write to a cold
+    /// partition promotes it back first.
+    ///
+    /// Explicit placement, for tests and for the `HORNDB_COLD_TIER` gate; no
+    /// policy calls it on its own yet.
+    pub fn demote_all(&self) -> Result<usize> {
+        self.store
+            .demote_all()
+            .map_err(|e| SparqlError::Executor(format!("demote_all: {e}")))
+    }
+
+    /// [`Self::demote_all`] when [`cold_tier_enabled`] says so, otherwise
+    /// nothing. Every coarse write funnel here calls it; the conformance
+    /// harness calls it too, after a per-triple file load that has no funnel
+    /// of its own. Deliberately NOT called per triple: each demote encodes a
+    /// whole partition, so a per-triple hook would make a bulk load
+    /// quadratic.
+    pub fn demote_all_if_cold_tier(&self) {
+        if cold_tier_enabled() {
+            let _ = self.demote_all();
+        }
     }
 
     /// Drain the set of graphs mutated since the last call, as SPARQL graph
@@ -1403,6 +1455,7 @@ impl HornBackend {
         let t_inv = std::time::Instant::now();
         self.invalidate();
         record_load_phase(LoadPhase::Invalidate, t_inv.elapsed(), inserted);
+        self.demote_all_if_cold_tier();
 
         Ok(inserted)
     }
@@ -2090,6 +2143,7 @@ impl Store for HornBackend {
             // change-feed batch marks nothing dirty and derives nothing.
             self.touched_graphs
                 .extend(del_rows.iter().chain(add_rows.iter()).map(|(g, ..)| *g));
+            self.demote_all_if_cold_tier();
         }
         Ok(ApplyCounts {
             retracted: report.retracted,
@@ -2158,6 +2212,7 @@ impl Store for HornBackend {
             // SPEC-29 D7: `CLEAR`/`DROP` bypasses `apply_quads` (it sweeps
             // one tier level down), so it reports its own touched graphs.
             self.touched_graphs.extend(graphs_to_sweep.iter().copied());
+            self.demote_all_if_cold_tier();
         }
         Ok(report.retracted)
     }
