@@ -65,6 +65,8 @@ t1=$(date +%s); GEN_S=$((t1-t0))
 echo "generate ($GEN_P proc): $GEN_S s   (fail=$fail)"
 mapfile -t OWL < <(find "$WORK" -name 'University*.owl' -o -name '*University*.owl' | sort)
 echo "owl files:         ${#OWL[@]}"
+echo "sample names (od, so a backslash in the name is visible):"
+printf '%s\n' "${OWL[@]:0:2}" | od -c | head -4
 if [ "${#OWL[@]}" -eq 0 ]; then
   echo "no OWL files produced; generator logs:"; cat "$WORK"/gen*/gen.log 2>/dev/null | head -20
   echo '```'; exit 0
@@ -78,7 +80,7 @@ split -n "r/$CONV_P" -d "$WORK/list" "$WORK/chunk."
 pids=()
 for c in "$WORK"/chunk.*; do
   [ -s "$c" ] || continue
-  ( xargs -a "$c" -r riot --syntax=RDFXML --output=NT > "$c.nt" 2>"$c.err" ) &
+  ( xargs -d '\n' -a "$c" -r riot --syntax=RDFXML --output=NT > "$c.nt" 2>"$c.err" ) &
   pids+=($!)
 done
 fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
