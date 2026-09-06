@@ -59,3 +59,7 @@ harness = false
 [[bench]]
 name = "wal_append"
 harness = false
+
+[[bench]]
+name = "cold_tier"
+harness = false
