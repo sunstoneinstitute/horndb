@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# HDB-37 stage 4: make the SF=0.256 closure servable by every nightly leg.
+# Make an SPB closure servable by every nightly leg, at the scale named by SPB_SF.
 #
 # Three independent legs, each reported on its own so one failure does not cost
 # the others:
 #   P  query substitution parameters — the driver picks its aggregation-query
-#      constants by querying a loaded store, and the ones in the asset tree were
-#      generated against the old 200 k dataset, so they must be rebuilt.
+#      constants by querying a loaded store, so they must be rebuilt against
+#      whichever corpus is being served.
 #   G  GraphDB Free — bulk-loaded offline (`preload`/`importrdf`). The old
 #      bootstrap POSTs the file over HTTP, which is hours at this scale.
 #   O  Oxigraph — both persisted stores, via the existing bootstrap script.
 #   L  link the new dataset and generation dir into the asset tree under new
 #      names, so the nightly only switches over once every engine is loaded.
 #
-# Knobs: DATASET, LEGS (default "P G O L"), GRAPHDB_HEAP.
+# Knobs: SPB_SF (default sf128), DATASET, LEGS (default "P G O L"), GRAPHDB_HEAP.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 OUT="$PWD/bench-out"; mkdir -p "$OUT"
 SUM="$OUT/SUMMARY.md"
 
 DIST="${SPB_ASSETS:-/home/bench/src/horndb/crates/harness/data/ldbc-spb/dist}"
-WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-sf256}"
-DATASET="${DATASET:-$WORK/spb-sf256.nt}"
-GEN="${GEN_DIR:-$WORK/generated-sf256}"
+SF="${SPB_SF:-sf128}"
+WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-$SF}"
+DATASET="${DATASET:-$WORK/spb-$SF.nt}"
+GEN="${GEN_DIR:-$WORK/generated-$SF}"
 BIND="${HORNDB_BIND:-127.0.0.1:3842}"
 JAR="$DIST/semantic_publishing_benchmark-basic-standard.jar"
 LEGS="${LEGS:-P G O L}"
@@ -32,7 +33,7 @@ HEAP="${GRAPHDB_HEAP:-32g}"
 PORT="${GRAPHDB_PORT:-7200}"
 REPO="${GRAPHDB_REPO:-spb}"
 
-{ echo "# HDB-37 stage 4 — load the SF=0.256 closure into every A/B engine"
+{ echo "# Load the $SF closure into every A/B engine"
   echo; echo "Host \`$(hostname)\` · $(date -Is) · commit \`$(git rev-parse --short HEAD)\`"
   echo; echo "DATASET=\`$DATASET\` LEGS=\`$LEGS\`"; } > "$SUM"
 sec() { { echo; echo "## $*"; echo '```'; } >> "$SUM"; }
@@ -76,10 +77,9 @@ if [[ " $LEGS " == *" P "* ]]; then
     tail -8 "$OUT/subst.log" >> "$SUM"
     ls -la "$GEN"/query*SubstParameters.txt 2>&1 | head -15 >> "$SUM"
   fi
-  # Fallback: the driver refuses to start without these files. The old set was
-  # built against the 200 k dataset, so its constants are a worse sample of this
-  # corpus - but a stale sample beats a leg that cannot run at all, and it keeps
-  # a slow generation run from costing the whole dispatch.
+  # Fallback: the driver refuses to start without these files. A set sampled
+  # from another corpus is a worse sample — but it beats a leg that cannot run
+  # at all, and it keeps a slow generation run from costing the whole dispatch.
   if ! ls "$GEN"/query1SubstParameters.txt >/dev/null 2>&1; then
     note "no parameters generated - falling back to the old set in $DIST/generated"
     cp "$DIST"/generated/query*SubstParameters.txt "$GEN"/ 2>&1 >> "$SUM"
@@ -166,13 +166,13 @@ fi
 
 # --- L: publish into the asset tree -----------------------------------------
 if [[ " $LEGS " == *" L "* ]]; then
-  sec "L . link the dataset into the SPB asset tree"
-  # New names, so the old 512 k `spb-256.nt` / `generated` stay in place and the
-  # nightly keeps working on them until the workflow change lands.
-  ln -sfn "$DATASET" "$DIST/spb-sf256.nt"
-  ln -sfn "$GEN"     "$DIST/generated-sf256"
-  ls -la "$DIST/spb-sf256.nt" "$DIST/generated-sf256" >> "$SUM" 2>&1
-  ls "$DIST/generated-sf256/" | head -5 >> "$SUM" 2>&1
+  sec "L · link the dataset into the SPB asset tree"
+  # Scale-named links, so every earlier corpus stays in place and the nightly
+  # only switches over when the workflow points at the new name.
+  ln -sfn "$DATASET" "$DIST/spb-$SF.nt"
+  ln -sfn "$GEN"     "$DIST/generated-$SF"
+  ls -la "$DIST/spb-$SF.nt" "$DIST/generated-$SF" >> "$SUM" 2>&1
+  ls "$DIST/generated-$SF/" | head -5 >> "$SUM" 2>&1
   end
 fi
 

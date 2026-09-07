@@ -165,10 +165,10 @@ the only route to the `hornbench` host for anyone without ssh:
 |---|---|
 | `audit-pass.sh` | One pass over the benches that landed with the audit PRs. |
 | `exec-phases.sh`, `seminaive-ab.sh`, `footprint-split.sh`, `trainmarks.sh` | Per-topic bench legs. |
-| `spb-capacity-probe.sh` | Read-only: does hornbench have the RAM/disk/toolchain for SF=0.256? |
+| `spb-capacity-probe.sh` | Read-only: does hornbench have the RAM/disk/toolchain for a large SPB corpus? |
 | `spb-sf256-recon.sh` | Read-only: what the prepared SPB asset tree actually contains. |
 | `spb-sf256-calibrate.sh` | Runs the generate→materialize pipeline at 1/32 scale to measure its rates. |
-| `spb-sf256-materialize.sh` | Measures what closing and serving an SPB corpus costs (peak RSS, expansion). |
-| `spb-sf256-build.sh` | Builds the SF=0.256 closure: generate 256 M Creative Work triples, close them in slices. |
-| `spb-sf256-bootstrap-engines.sh` | Loads that closure into every nightly A/B engine and publishes it into the asset tree. |
-| `spb-sf256-smoke.sh` | Runs the nightly scenario (editorial agents on) against HornDB and GraphDB for a first reading. |
+| `spb-scale-materialize.sh` | Measures what closing and serving an SPB corpus costs (peak RSS, expansion). |
+| `spb-scale-build.sh` | Builds a closure at the scale `SPB_SF` names: generate the Creative Works, close them in slices. Default SF=0.128. |
+| `spb-scale-bootstrap-engines.sh` | Loads that closure into every nightly A/B engine and publishes it into the asset tree. |
+| `spb-scale-smoke.sh` | Runs the nightly scenario (editorial agents on) against HornDB and GraphDB for a first reading. |

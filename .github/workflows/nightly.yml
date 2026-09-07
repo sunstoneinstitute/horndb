@@ -8,9 +8,9 @@ on:
 # Stable, persisted SPB asset tree on the hornbench runner, OUTSIDE the
 # ephemeral Actions checkout. Prepared once (see TASKS.md). Holds:
 #   - the built LDBC SPB driver JAR,
-#   - spb-sf256.nt: the flat materialized closure every engine serves
-#     (the SF=0.256 one, HDB-37; the older 512 k stand-in `spb-256.nt`
-#     is kept alongside it),
+#   - spb-sf128.nt: the flat materialized closure every engine serves
+#     (the SF=0.128 one, HDB-37/HDB-167; earlier corpora are kept
+#     alongside it under their own names),
 #   - the queries + substitution params the scenario's relative paths
 #     resolve against (the Ant `dist/` tree).
 # The runner executes as user `bench`, so the job can read these paths.
@@ -48,15 +48,23 @@ env:
   # the runner does not already have it unpacked.
   GRAPHDB_VERSION: "10.8.14"
   # 8g (start-graphdb-free.sh default) was sized for the 512 k stand-in
-  # closure. The SF=0.256 closure is ~500x that, and GraphDB holds its
-  # entity pool on the heap, so the serving JVM needs a real one. The
-  # host has 124 GiB and the A/B legs are brought up one at a time.
+  # closure. This one is ~250x that, and GraphDB holds its entity pool on
+  # the heap, so the serving JVM needs a real one. The host has 124 GiB and
+  # the A/B legs are brought up one at a time.
   GRAPHDB_HEAP: "32g"
   # HornDB cancels every query at `[server.limits].query_timeout`, default
-  # 30s. No driver-side setting can raise it, so at SF=0.256 the heavier
+  # 30s. No driver-side setting can raise it, so at this scale the heavier
   # aggregation queries came back 504 and scored as errors. Matched to the
   # scenario's own `queryTimeoutSeconds=300`.
   HORNDB_SERVER__LIMITS__QUERY_TIMEOUT: "300s"
+  # Host guard. HornDB does not enforce a per-query memory bound
+  # (`[server.limits].max_query_memory` is parsed but not applied), and an
+  # uncapped SF=0.256 run exhausted the host's 124 GiB and took the runner
+  # off the network for a day (HDB-167). start-engine.sh puts the server in
+  # a transient cgroup with this ceiling, so a runaway query fails the leg
+  # instead of the machine. ~72% of RAM: the SF=0.128 store is ~26 GiB, and
+  # GraphDB's 32 g heap only runs in a later leg.
+  MEMORY_MAX: "90G"
   # Third + fourth A/B legs: Oxigraph (Rust SPARQL store, no reasoner)
   # serving the same flat closure as HornDB/GraphDB — once from the store
   # as bulk-loaded, once from an `oxigraph optimize`d copy, recorded as
@@ -80,8 +88,8 @@ jobs:
     # Dedicated benchmark machine (self-hosted). Labels match what ops
     # configured on hornbench (gh_runner_labels in hetzner-infra).
     runs-on: [self-hosted, bench, zen4]
-    # SF=0.256 (HDB-37): HornDB re-loads the ~533 M-triple closure at the top
-    # of its leg (~20 min), and there are four legs plus the W3C suites.
+    # HornDB re-loads the whole closure at the top of its leg (~13 min at
+    # SF=0.128), and there are four legs plus the W3C suites.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,9 +116,9 @@ jobs:
         # wait until the query endpoint answers, then run the driver.
         run: |
           set -euo pipefail
-          DATASET="$SPB_ASSETS/spb-sf256.nt"
+          DATASET="$SPB_ASSETS/spb-sf128.nt"
           test -f "$DATASET" || { echo "::error::SPB dataset missing at $DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
-          DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" \
+          DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" MEMORY_MAX="$MEMORY_MAX" \
             ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
           echo $! > /tmp/horndb-engine.pid
           if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600; then
@@ -119,7 +127,7 @@ jobs:
           # Liveness is not readiness. `serve` loads on a background thread and
           # answers /query with 200 the whole time, so waiting only on /query
           # starts the driver against a store that is still filling — at
-          # SF=0.256 the load takes ~20 min. /readyz reports 503 until it ends.
+          # this scale the load takes ~13 min. /readyz reports 503 until it ends.
           for i in $(seq 1 2400); do
             curl -fsS "http://$HORNDB_BIND/readyz" >/dev/null 2>&1 && break
             sleep 1

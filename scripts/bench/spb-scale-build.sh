@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# HDB-37 stage 3: build the true SF=0.256 SPB closure on hornbench.
+# Build an SPB closure at a chosen scale factor on hornbench.
 #
-# Why chunked: stage 2 measured the OWL 2 RL materialize peak at ~3.8 KB per
-# asserted triple (28 GiB for 8 M), so one process over 256 M would need ~900 GiB
-# on a 124 GiB host. Serving the result is cheap by comparison — 136 B per
-# closure triple, so the 533 M-triple closure fits in ~72 GiB.
+# The scale is one knob. `SPB_SF` names the run (`sf128`) and `TARGET_N` is the
+# LDBC `datasetSize` it generates. Everything else — work directory, generation
+# directory, closure file — derives from the name, so two scales never overwrite
+# each other. Default is **SF=0.128 (128 M asserted Creative Work triples)**,
+# which is the largest scale hornbench serves with real headroom: SF=0.256
+# left the 124 GiB host with ~73 GiB for the query mix and it ran out (HDB-167).
+#
+# Why chunked: an earlier calibration measured the OWL 2 RL materialize peak at
+# ~3.8 KB per asserted triple (28 GiB for 8 M), so one process over 128 M would
+# need ~450 GiB on a 124 GiB host. Serving the result is cheap by comparison —
+# ~115 B per closure triple.
 #
 # Creative Works are closed in slices. That is sound here because the SPB
 # ontologies are the only shared premises: CW subjects are disjoint per slice and
@@ -12,27 +19,30 @@
 # joins two CWs. Slices still overlap — each re-derives the ontology closure and
 # the shared schema triples — so the concatenated file carries duplicate lines,
 # which the store folds away on load (RDF is a set). Phase V proves the union of
-# two slices equals the whole-set closure before the full run starts.
+# two slices equals the whole-set closure; it needs the calibration artefacts
+# (CAL_DIR / CAL_CLOSURE) and skips itself when they are absent.
 #
 # Phases: V verify chunking · G generate · M materialize slices · S serve check.
-# Knobs: TARGET_N (default 256000000), CHUNK_FILES (default 178 ~ 8 M triples).
+# Knobs: SPB_SF (default sf128), TARGET_N (default 128000000),
+#        CHUNK_FILES (default 178 ~ 8 M triples), CAL_DIR, CAL_CLOSURE.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 OUT="$PWD/bench-out"; mkdir -p "$OUT"
 SUM="$OUT/SUMMARY.md"
 
 DIST="${SPB_ASSETS:-/home/bench/src/horndb/crates/harness/data/ldbc-spb/dist}"
-WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-sf256}"
-TARGET_N="${TARGET_N:-256000000}"
+SF="${SPB_SF:-sf128}"
+WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-$SF}"
+TARGET_N="${TARGET_N:-128000000}"
 CHUNK_FILES="${CHUNK_FILES:-178}"
 BIND="${HORNDB_BIND:-127.0.0.1:3842}"
 JAR="$DIST/semantic_publishing_benchmark-basic-standard.jar"
-GEN="$WORK/generated-sf256"
+GEN="$WORK/generated-$SF"
 CHUNKDIR="$WORK/chunks"
-FINAL="$WORK/spb-sf256.nt"
+FINAL="$WORK/spb-$SF.nt"
 mkdir -p "$WORK"
 
-{ echo "# HDB-37 stage 3 — build the SF=0.256 closure (datasetSize=$TARGET_N)"
+{ echo "# SPB corpus build — $SF closure (datasetSize=$TARGET_N)"
   echo; echo "Host \`$(hostname)\` · $(date -Is) · commit \`$(git rev-parse --short HEAD)\`"; } > "$SUM"
 sec() { { echo; echo "## $*"; echo '```'; } >> "$SUM"; }
 end() { echo '```' >> "$SUM"; }
@@ -52,12 +62,12 @@ note ok; end
 # labels for the ontology's blank nodes, so those lines can never match across
 # runs. The check that matters is that nothing is LOST — every blank-node-free
 # triple of the whole-set closure must appear in the union of the slices.
-sec "V . slice-soundness check on the 8 M calibration set"
-CAL="$WORK/generated-cal"
-WHOLEF="$WORK/closure-cal.nt"
+sec "V · slice-soundness check on the 8 M calibration set"
+CAL="${CAL_DIR:-$WORK/generated-cal}"
+WHOLEF="${CAL_CLOSURE:-$WORK/closure-cal.nt}"
 mapfile -t CALF < <(ls "$CAL"/generatedCreativeWorks-*.nt 2>/dev/null)
 if [ "${#CALF[@]}" -lt 4 ] || [ ! -s "$WHOLEF" ]; then
-  note "SKIPPED - stage-2 calibration artefacts missing ($CAL / $WHOLEF)"; end
+  note "SKIPPED — calibration artefacts absent ($CAL / $WHOLEF); slicing was proven at 8 M for HDB-37"; end
 else
   half=$(( ${#CALF[@]} / 2 ))
   ./target/release/horndb-bench materialize --dump-nt "$WORK/v-a.nt" --data "${ONTO[@]}" "${CALF[@]:0:$half}" >>"$OUT/verify.log" 2>&1
@@ -96,7 +106,7 @@ note "reference endpoint ready=$ready after $(( $(date +%s) - t0 ))s"
 if [ "$ready" != 1 ]; then note "ABORT: generation endpoint never came up"; tail -20 "$OUT/serve-gen.log" >> "$SUM"; end; exit 1; fi
 
 rm -rf "$GEN"; mkdir -p "$GEN"
-SCEN="$DIST/spb-gen-sf256.properties"
+SCEN="$DIST/spb-gen-$SF.properties"
 sed -e "s|^datasetSize=.*|datasetSize=$TARGET_N|" \
     -e "s|^creativeWorksPath=.*|creativeWorksPath=$GEN|" \
     -e "s|^endpointURL=.*|endpointURL=http://$BIND/query|" \
@@ -150,7 +160,7 @@ end
 [ "$FAILED" = 1 ] && { note "ABORT: a slice failed; $FINAL is incomplete"; exit 1; }
 
 # --- S: serve the result ----------------------------------------------------
-sec "S · HornDB serves the SF=0.256 closure"
+sec "S · HornDB serves the $SF closure"
 t0=$(date +%s)
 ./target/release/serve --bind "$BIND" --data "$FINAL" > "$OUT/serve-final.log" 2>&1 &
 SPID=$!; ready=0; SHWM=0

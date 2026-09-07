@@ -1,34 +1,42 @@
 #!/usr/bin/env bash
-# HDB-37 stage 5: first editorial-qps numbers on the SF=0.256 corpus.
+# editorial-qps + aggregation-qps on an SPB corpus, at the scale named by SPB_SF.
 #
 # Runs the nightly's own scenario (editorial agents on) against HornDB and
 # GraphDB Free in turn, exactly as nightly.yml does, but with a short run
 # period so it fits a bench dispatch. Results go to a scratch trend DB — the
 # nightly's cumulative series must not gain off-schedule points.
 #
-# Knobs: DURATION (default 300), LEGS (default "H G").
+# The HornDB leg runs under a hard memory ceiling (MEMORY_MAX). HornDB enforces
+# no per-query memory bound, and an uncapped run at SF=0.256 exhausted
+# hornbench and took the host off the network (HDB-167). With the ceiling a
+# runaway query kills the server, and the leg fails instead of the machine.
+#
+# Knobs: SPB_SF (default sf128), DURATION (default 300), LEGS (default "H G"),
+#        MEMORY_MAX (default 90G).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 OUT="$PWD/bench-out"; mkdir -p "$OUT"
 SUM="$OUT/SUMMARY.md"
 
 DIST="${SPB_ASSETS:-/home/bench/src/horndb/crates/harness/data/ldbc-spb/dist}"
-WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-sf256}"
-DATASET="${DATASET:-$WORK/spb-sf256.nt}"
+SF="${SPB_SF:-sf128}"
+WORK="${SPB_WORK:-/home/bench/horndb-bench/spb-$SF}"
+DATASET="${DATASET:-$WORK/spb-$SF.nt}"
 BIND="${HORNDB_BIND:-127.0.0.1:3842}"
 DURATION="${DURATION:-300}"
 LEGS="${LEGS:-H G}"
+MEMORY_MAX="${MEMORY_MAX:-90G}"
 VER="${GRAPHDB_VERSION:-10.8.14}"
 GDB_BASE="${GRAPHDB_HOME_BASE:-/home/bench/graphdb}"
 HEAP="${GRAPHDB_HEAP:-32g}"
-export HARNESS_DB="$OUT/sf256-smoke.sqlite"
+export HARNESS_DB="$OUT/$SF-smoke.sqlite"
 export SPB_DURATION_SECONDS="$DURATION"
 export SPB_DRIVER_JAR="$DIST/semantic_publishing_benchmark-basic-standard.jar"
 export SPB_SCENARIO="$DIST/spb-nightly.properties"
 
-{ echo "# HDB-37 stage 5 — first SF=0.256 editorial + aggregation numbers"
+{ echo "# SPB $SF — editorial + aggregation numbers"
   echo; echo "Host \`$(hostname)\` · $(date -Is) · commit \`$(git rev-parse --short HEAD)\`"
-  echo; echo "dataset \`$DATASET\` · run period ${DURATION}s"; } > "$SUM"
+  echo; echo "dataset \`$DATASET\` · run period ${DURATION}s · memory ceiling ${MEMORY_MAX}"; } > "$SUM"
 sec() { { echo; echo "## $*"; echo '```'; } >> "$SUM"; }
 end() { echo '```' >> "$SUM"; }
 note() { echo "$*" >> "$SUM"; }
@@ -36,7 +44,7 @@ note() { echo "$*" >> "$SUM"; }
 sec "scenario staged into the asset tree"
 cp crates/harness/scenarios/spb-nightly.properties "$SPB_SCENARIO"
 grep -E '^(aggregationAgents|editorialAgents|datasetSize|creativeWorksPath|queryTimeoutSeconds|warmupPeriodSeconds)=' "$SPB_SCENARIO" >> "$SUM"
-ls -la "$DIST/generated-sf256/dataset.info" "$DIST/generated-sf256/query1SubstParameters.txt" >> "$SUM" 2>&1
+ls -la "$DIST/generated-$SF/dataset.info" "$DIST/generated-$SF/query1SubstParameters.txt" >> "$SUM" 2>&1
 end
 
 sec "editorial query templates the agents will execute"
@@ -53,7 +61,7 @@ if [[ " $LEGS " == *" H "* ]]; then
   t0=$(date +%s)
   # The server cancels every query at `[server.limits].query_timeout` (default
   # 30s), which is what returned 504 on this corpus in stage 4.
-  DATA_FILES="$DATASET" RELEASE=1 BIND="$BIND" \
+  DATA_FILES="$DATASET" RELEASE=1 BIND="$BIND" MEMORY_MAX="$MEMORY_MAX" \
   HORNDB_SERVER__LIMITS__QUERY_TIMEOUT="${HORNDB_QUERY_TIMEOUT:-1800s}" \
     ./crates/harness/scripts/start-engine.sh > "$OUT/horndb-engine.log" 2>&1 &
   EPID=$!; ready=0
@@ -65,9 +73,9 @@ if [[ " $LEGS " == *" H "* ]]; then
   if [ "$ready" = 1 ] && [ "${GEN_SUBST:-1}" = 1 ]; then
     # Regenerate the query substitution constants against this corpus while the
     # store is already up - a separate dispatch would pay the ~26 min load again.
-    # The set in the asset tree was sampled from the old 200 k dataset.
+    # A set sampled from a different corpus names entities this one may not have.
     SCEN="$DIST/spb-subst.properties"
-    sed -e "s|^creativeWorksPath=.*|creativeWorksPath=$DIST/generated-sf256|" \
+    sed -e "s|^creativeWorksPath=.*|creativeWorksPath=$DIST/generated-$SF|" \
         -e "s|^endpointURL=.*|endpointURL=http://$BIND/query|" \
         -e "s|^endpointUpdateURL=.*|endpointUpdateURL=http://$BIND/update|" \
         -e "s|^generateCreativeWorks=.*|generateCreativeWorks=false|" \
@@ -78,7 +86,7 @@ if [[ " $LEGS " == *" H "* ]]; then
     ( cd "$DIST" && timeout 3600 java -Xmx8g -jar "$SPB_DRIVER_JAR" "$SCEN" ) > "$OUT/subst.log" 2>&1
     note "--- substitution parameters exit=$? wall=$(( $(date +%s) - t0 ))s ---"
     tail -5 "$OUT/subst.log" >> "$SUM"
-    ls -la "$DIST/generated-sf256"/query1SubstParameters.txt >> "$SUM" 2>&1
+    ls -la "$DIST/generated-$SF"/query1SubstParameters.txt >> "$SUM" 2>&1
   fi
   if [ "$ready" = 1 ]; then
     HORNDB_ENDPOINT="http://$BIND/query" HORNDB_UPDATE_ENDPOINT="http://$BIND/update" \

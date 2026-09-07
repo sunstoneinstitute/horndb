@@ -32,6 +32,8 @@
 #   DUMP_NT        path for the materialized closure
 #                  (default $ROOT/target/horndb-materialized.nt)
 #   RELEASE        1 to build/run the binaries in --release (default 0)
+#   MEMORY_MAX     hard memory ceiling for the server process, e.g. "90G"
+#                  (default: unset = no ceiling). See "Memory ceiling" below.
 #
 # Model: sibling scripts bootstrap-rdfox-spb.sh / run-spb-256.sh.
 set -euo pipefail
@@ -101,5 +103,43 @@ fi
 
 echo "start-engine: serving on $BIND" >&2
 echo "start-engine: SPARQL query endpoint -> http://$BIND/query" >&2
+
+# ---------------------------------------------------------------------------
+# Memory ceiling (optional).
+#
+# HornDB does not bound the memory a query may use: `[server.limits].
+# max_query_memory` is parsed and carried but never enforced (SPEC-26 S5
+# non-goal). On a large corpus that means nothing stops the server from
+# consuming the whole host — which is what happened in HDB-167, where an SPB
+# run at SF=0.256 exhausted hornbench's 124 GiB and took the machine off the
+# network, needing a manual restart.
+#
+# MEMORY_MAX puts the server in a transient cgroup with a hard ceiling, so a
+# runaway query kills the *server* (visible as a failed benchmark leg) instead
+# of the host. It is a host guard, not per-query accounting: the whole process
+# shares one budget.
+#
+# Prefers the caller's own user manager (no privilege). Falls back to a system
+# scope via passwordless sudo, then to running uncapped with a warning.
+# ---------------------------------------------------------------------------
+if [[ -n "${MEMORY_MAX:-}" ]]; then
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+    SCOPE=(--scope --quiet --collect -p "MemoryMax=$MEMORY_MAX" -p MemorySwapMax=0)
+    if systemd-run --user "${SCOPE[@]}" -- /bin/true >/dev/null 2>&1; then
+        echo "start-engine: memory ceiling $MEMORY_MAX (user scope)" >&2
+        # shellcheck disable=SC2086
+        exec systemd-run --user "${SCOPE[@]}" -- \
+            "$SERVE_BIN" --bind "$BIND" --data ${DATA_FILES}
+    elif sudo -n systemd-run "${SCOPE[@]}" -- /bin/true >/dev/null 2>&1; then
+        echo "start-engine: memory ceiling $MEMORY_MAX (system scope, via sudo)" >&2
+        # shellcheck disable=SC2086
+        exec sudo -n --preserve-env systemd-run "${SCOPE[@]}" -- \
+            "$SERVE_BIN" --bind "$BIND" --data ${DATA_FILES}
+    fi
+    echo "start-engine: MEMORY_MAX=$MEMORY_MAX requested but no usable systemd-run;" \
+         "serving UNCAPPED" >&2
+fi
+
 # shellcheck disable=SC2086
 exec "$SERVE_BIN" --bind "$BIND" --data ${DATA_FILES}
