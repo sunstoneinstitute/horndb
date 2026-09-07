@@ -3290,22 +3290,29 @@ own trend series. Each engine is brought up per run so none competes for RAM
 during another's measurement. The trend DB keeps a 90-day rolling window
 (`harness prune --keep-days 90` in the nightly).
 
-#### Scale: true SF=0.256 with editorial agents (HDB-37)
+#### Scale: SF=0.128 with editorial agents (HDB-37, HDB-167)
 
 Until 2026-09-05 the nightly ran at *feasible scale* — a ~512 k-triple stand-in
 closure with `editorialAgents=0`, so the headline `aggregation-qps` measured
 readers against a store nobody wrote to. It now runs the LDBC-intended
-workload: the real SF=0.256 corpus with 2 editorial agents alongside the 4
-aggregation ones, and **`editorial-qps` is the headline metric**.
+workload: 2 editorial agents alongside the 4 aggregation ones, and
+**`editorial-qps` is the headline metric**.
+
+The scale is **SF=0.128** (128 M asserted Creative Work triples), not the
+SF=0.256 first attempted. SF=0.256 fits the host at rest but not under load —
+see *What SF=0.256 cost* below.
 
 **Series break.** `aggregation-qps` history does *not* span this change. The
-corpus is ~500× bigger and the aggregation agents now share the store with
-writers, so points before and after HDB-37 are not comparable. Both metrics
-keep being recorded; read the older `aggregation-qps` points as a separate
-series that ends on 2026-09-05.
+corpus is ~250× bigger and the aggregation agents now share the store with
+writers, so points before and after are not comparable. Both metrics keep
+being recorded; read the older `aggregation-qps` points as a separate series
+that ends on 2026-09-05.
 
-Corpus build, hornbench (Ryzen 7 7700, 16 threads, 124 GiB, Debian 6.12,
-2026-09-05, commit `f3b9d69`), via `scripts/bench/spb-sf256-build.sh`:
+##### What SF=0.256 cost (HDB-167)
+
+The SF=0.256 corpus was built and both engines loaded it. The measured build,
+hornbench (Ryzen 7 7700, 16 threads, 124 GiB, Debian 6.12, 2026-09-05, commit
+`f3b9d69`):
 
 | step | value |
 |---|---|
@@ -3317,31 +3324,87 @@ Corpus build, hornbench (Ryzen 7 7700, 16 threads, 124 GiB, Debian 6.12,
 | distinct triples served | **465,633,142** |
 | HornDB `serve` load wall-clock | **1,570 s** |
 | HornDB `serve` peak RSS | **51,106 MiB** = **115 B per distinct triple** |
+| GraphDB Free 10.8.14 load | `importrdf preload`, **1,341 s**, 31 GB on disk, 104,273,561 entities, 32 g heap → 465,633,141 triples |
 
-Two findings from that build:
+Then the first smoke run took the host down. **The cause is memory
+exhaustion, confirmed from the host journal** (`journalctl`, single boot since
+2026-05-24, so the window is intact — all times CEST):
 
-- **Materialization had to be sliced.** A single-process materialize costs
-  ~3.8 kB per *asserted* triple (measured at 1/32 scale), which projects to
-  ~900 GiB for 256 M — far past the host's 124 GiB, with a ceiling around
-  29.7 M asserted triples. Slicing is sound because the closure of a subset is
-  contained in the closure of the whole: at the 8 M calibration scale the
-  sliced union lost **0** inferred triples and gained **0** extra, once
-  blank-node lines are excluded (each materialize run mints its own `_:bN`
-  labels, so those lines can never match textually across runs). Slices
+| time | event |
+|---|---|
+| 00:06:22 | smoke job starts on the runner |
+| ~00:32 | ~26 min store load ends, query mix begins |
+| 00:40 → 02:18 | ~400 kernel-log lines, `systemd-journald: Under memory pressure, flushing caches` — continuous for ~100 minutes |
+| 02:54:15 | `systemd-journald.service: Main process exited, code=killed, status=6/ABRT … Failed with result 'watchdog'`; on restart, `system.journal corrupted or uncleanly shut down, renaming and replacing` |
+| 02:54:26 | the job is marked `Abandoned`; GitHub reports "the self-hosted runner lost communication with the server" |
+
+No `oom_reaper` / "Killed process" line names the victim. That is not evidence
+against OOM: the logging daemon itself was starved to the point its watchdog
+fired and its journal file was replaced, so whichever record the kernel wrote
+in that window is gone. The host had 124 GiB and no swap, and the run held a
+~50 GiB store plus a six-agent query mix.
+
+**Why the memory was unbounded.** HornDB enforces no per-query memory limit:
+`[server.limits].max_query_memory` is parsed and carried into `QuerySettings`
+but never applied (`crates/sparql/src/server/query.rs`, a stated SPEC-26 S5
+non-goal), so the only backstop is `max_concurrent_queries`. HDB-146 separately
+measured ~578 MiB of query-side allocator retention on a **10 M**-triple corpus
+that is never returned to the OS.
+
+Two changes follow, and both are in effect:
+
+1. **Half the corpus.** SF=0.128 leaves roughly twice the headroom for the
+   query mix at the same store cost per triple.
+2. **A host guard.** `start-engine.sh` takes `MEMORY_MAX` and puts the server
+   in a transient cgroup with a hard ceiling (the nightly sets **90G**), so a
+   runaway query kills the server and fails the leg instead of taking the
+   machine off the network. This is a host guard, not per-query accounting —
+   one budget for the whole process. Real per-query enforcement is still open.
+
+##### The SF=0.128 corpus
+
+Built with `scripts/bench/spb-scale-build.sh` (`SPB_SF=sf128`,
+`TARGET_N=128000000`), hornbench, 2026-09-07, commit `7501e49`:
+
+| step | value |
+|---|---|
+| generated Creative Work triples (asserted) | **128,000,231** in 4,888,147 Creative Works, 2,835 files, 19 GB |
+| generation wall-clock (8 workers) | **104 s** |
+| OWL 2 RL closure — materialize wall-clock | **1,287 s** (16 slices of 178 files) |
+| materialize peak RSS, worst slice | **30,375 MiB** |
+| closure file | 265,897,064 lines / 38 GB (slices overlap; duplicates fold away on load) |
+| distinct triples served | **234,466,815** (1.83× the asserted count) |
+| HornDB `serve` load wall-clock | **794 s** |
+| HornDB `serve` peak RSS | **23,745 MiB** = **106 B per distinct triple** |
+| GraphDB Free 10.8.14 load | `importrdf preload`, **656 s**, 16 GB on disk, 32 g heap → 234,466,814 triples |
+
+GraphDB's count is one lower than HornDB's, the same off-by-one seen at
+SF=0.256; not chased. A typed `GROUP BY` aggregation over this store returns in
+**4.0 s** (7.5 s at SF=0.256); a store-wide `SELECT (COUNT(*) …)` still exceeds
+the query timeout.
+
+Two findings carried over from the SF=0.256 build, both still current:
+
+- **Materialization has to be sliced.** A single-process materialize costs
+  ~3.8 kB per *asserted* triple (measured at 1/32 scale), so even 128 M would
+  need ~450 GiB against the host's 124 GiB — the single-process ceiling is
+  around 29.7 M asserted triples. Slicing is sound because the closure of a
+  subset is contained in the closure of the whole: at the 8 M calibration
+  scale the sliced union lost **0** inferred triples and gained **0** extra,
+  once blank-node lines are excluded (each materialize run mints its own
+  `_:bN` labels, so those lines can never match textually across runs). Slices
   overlap on the shared ontology closure, so the concatenated file carries
-  duplicate lines; the store folds them away on load, which is the gap between
-  531.7 M lines and 465.6 M distinct triples.
-- **Serving fits comfortably.** 115 B/triple here against the 170 B/triple
-  HDB-146 measured on trainmarks — the SPB closure is dominated by a few
-  repeated predicates, so the dictionary amortizes better.
+  duplicate lines that the store folds away on load.
+- **Serving is cheap per triple.** ~115 B/triple at SF=0.256, against the
+  170 B/triple HDB-146 measured on trainmarks — the SPB closure is dominated
+  by a few repeated predicates, so the dictionary amortizes better.
 
 Consequences for the scenario (`crates/harness/scenarios/spb-nightly.properties`):
-a store-wide `SELECT (COUNT(*) …)` exceeds 300 s on this corpus while a typed
-`GROUP BY` aggregation returns in 7.5 s, so `queryTimeoutSeconds` is raised
-from 60 to 300 (a timeout is scored as an error) and `warmupPeriodSeconds`
-from 5 to 60. The nightly also now waits on `/readyz` rather than `/query`:
-`serve` answers `/query` with 200 the whole time it is loading, and at this
-scale the load takes ~26 minutes.
+a store-wide `SELECT (COUNT(*) …)` exceeds 300 s on a corpus this size while a
+typed `GROUP BY` aggregation returns in 7.5 s, so `queryTimeoutSeconds` is
+raised from 60 to 300 (a timeout is scored as an error) and
+`warmupPeriodSeconds` from 5 to 60. The nightly also waits on `/readyz` rather
+than `/query`: `serve` answers `/query` with 200 the whole time it is loading.
 
 A second server-side limit had to move with it. HornDB cancels every query at
 `[server.limits].query_timeout`, which defaults to **30 s**, and no driver-side
@@ -3349,36 +3412,61 @@ setting can raise it — at this scale the heavier aggregation queries came back
 `504` and scored as errors. The nightly now sets
 `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT=300s` to match the scenario.
 
-A/B engine load, same host and day:
-
-| engine | load | result |
-|---|---|---|
-| HornDB `serve` | 1,570 s, 51,106 MiB RSS | 465,633,142 triples |
-| GraphDB Free 10.8.14 | `importrdf preload`, **1,341 s**, 31 GB on disk, 104,273,561 entities, 32 g heap | 465,633,141 triples |
-
-GraphDB's count is one lower than HornDB's; the difference has not been
-chased. GraphDB's online loader (`importrdf load`) refuses a flat N-Triples
-dump outright — `preload`, which builds a single non-fragmented image and runs
-no inference, is the right tool for a pre-materialized closure in an
+GraphDB's online loader (`importrdf load`) refuses a flat N-Triples dump
+outright — `preload`, which builds a single non-fragmented image and runs no
+inference, is the right tool for a pre-materialized closure in an
 `empty`-ruleset repo.
 
-**First `editorial-qps` reading: not yet taken.** The smoke run
-(`scripts/bench/spb-sf256-smoke.sh`, 2026-09-05, 4 aggregation + 2 editorial
-agents over a 300 s period) died ~43 min in, right after the ~26 min load, with
-GitHub reporting *"the self-hosted runner lost communication with the server"*
-— the hornbench runner went offline and stayed offline, and the artifact upload
-never ran, so there are no numbers and no logs from it.
+##### First run at SF=0.128 — still no `editorial-qps`, and why (2026-09-07)
 
-The most likely cause is **memory exhaustion**, unconfirmed. It matters because
-HornDB has **no enforced per-query memory bound**: `[server.limits].max_query_memory`
-is parsed and carried but *not* enforced (`crates/sparql/src/server/query.rs`),
-so the only backstop is `max_concurrent_queries`. The store alone is ~50 GiB of
-the host's 124 GiB, and HDB-146 measured ~578 MiB of query-side allocator
-retention on a 10 M-triple corpus that is never returned to the OS; scaled to
-465 M triples across six concurrent agents that plausibly consumes the
-remaining ~74 GiB. **This has to be settled before the nightly switches over** —
-a benchmark that can take the bench host down is worse than one that runs at
-the wrong scale.
+The corpus loads and serves in half the memory, as intended. The benchmark
+run then failed for two reasons, both found by the run and neither fixed by
+the smaller scale.
+
+**1. A single query grew the server from 24 GiB to 90 GiB.** During the
+driver's query-substitution-parameter phase — the step that samples constants
+by querying the loaded store — `serve` went from its ~24 GiB resting size to
+the 90 GiB ceiling in under two minutes (sampled 59.5 GiB, then 92.0 GiB
+45 s later), with one 88-second query in the server log at that point. The
+kernel killed it inside the guard's cgroup:
+
+```
+Memory cgroup out of memory: Killed process 357573 (serve)
+  anon-rss:94176256kB … oom_memcg=…/run-p357573-i17133533.scope
+constraint=CONSTRAINT_MEMCG   memory: usage 94371840kB, limit 94371840kB
+```
+
+That is ~66 GiB of query-side memory on a 234 M-triple store, and it settles
+HDB-167's open question in a controlled way: the failure is real, it is
+query-side, and **halving the corpus does not avoid it**. What the smaller
+corpus plus the ceiling buy is that the *server* dies instead of the *host* —
+hornbench stayed up and the run was recoverable, where the SF=0.256 attempt
+cost a day of runner downtime. A benchmark reading still needs a real bound on
+query memory (HDB-167 deliverable 2); `max_query_memory` remains unenforced.
+
+**2. The corpus is missing the reference datasets.** `spb-scale-build.sh`
+closes the ontologies plus the generated Creative Works only. The ~24 M-triple
+reference datasets (dbpedia, geonames, football, parliament) are served to the
+*generator* but never enter the closure, so the driver's parameter step reports
+
+```
+(reference data entities size : 0, greatest Creative Work id : 4888147,
+ dbpedia locations : 0, geonames locations : 0)
+Exception … java.lang.IllegalArgumentException :: bound must be positive
+```
+
+and writes empty `query<N>SubstParameters.txt`, which the driver cannot run
+without. The old 512 k stand-in corpus does contain them — 266,793 of its
+lines mention dbpedia or geonames, against 3 in this one. SF=0.256 carried the
+same defect; the host dying first hid it. Fixing it means putting the
+reference datasets into the closure, which needs the slice-soundness argument
+re-checked: the current argument rests on Creative Works sharing no premises
+but the ontologies, and reference entities that Creative Works point at are
+exactly such a shared premise.
+
+One unexplained observation from the same run: the orphaned `harness spb-run`
+process held **64 GiB RSS** with no child process and no output. Not
+diagnosed.
 
 ### Running, internal only (no published numbers)
 
