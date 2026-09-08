@@ -3468,6 +3468,59 @@ One unexplained observation from the same run: the orphaned `harness spb-run`
 process held **64 GiB RSS** with no child process and no output. Not
 diagnosed.
 
+##### Which query, and where the memory goes (2026-09-08)
+
+Each of the four sampler queries was then run alone against a freshly loaded
+store, with the server RSS sampled around it. One of them accounts for
+everything:
+
+| query | wall | RSS after |
+|---|---|---|
+| `SELECT (COUNT(?cwUri)) { ?cwUri a cwork:CreativeWork }` — 4,888,147 matches | **88 s** | 23,748 → **64,382 MiB** |
+| `SELECT DISTINCT ?l { ?l a geo-ont:Feature }` (locations) | 0 s | no change |
+| the same, geonames | 0 s | no change |
+| the 3-way UNION + `hasRDFRank` + ORDER BY (reference data) | 0 s | no change |
+
+The three cheap ones return nothing because the corpus is missing the
+reference datasets (HDB-228). The COUNT — whose answer is a single integer —
+costs **+40.6 GiB**, and the RSS never comes back down.
+
+Re-running it with `HORNDB_DIRECT_SOURCE=1`, which drops the memoised row
+source, splits that growth:
+
+| mode | resting | after the COUNT | growth | wall |
+|---|---|---|---|---|
+| default (memoised `VecTripleSource`) | 23,748 MiB | 64,382 MiB | **+40.6 GiB** | 88 s |
+| `HORNDB_DIRECT_SOURCE=1` | 23,749 MiB | 40,383 MiB | **+16.6 GiB** | 67 s |
+
+- **~24 GiB is the memoised whole-scope snapshot** — `HornBackend`'s
+  `HashMap<SnapshotScope, Arc<VecTripleSource>>`, built by the first query on
+  a commit version and reused by every later one. Store-side and amortised,
+  not the fault of the query that triggers it.
+- **~16.6 GiB is the query's own execution** — ~3.6 kB per counted row, for
+  an aggregate returning one row. That is a defect in its own right
+  (HDB-229), and it is what SPEC-31's per-query budget has to charge.
+
+**SPEC-31's budget does not currently charge it.** Re-run on commit `917f8f0`
+with the server ceiling raised to 1 TiB so the query would complete and its
+charge be readable: HTTP 200 in 96 s, RSS 23,750 → 64,426 MiB, and
+`horndb_sparql_query_memory_peak_bytes_sum` = **0**. The same query with
+`?max_query_memory=8GiB` also returned 200, with `queries_over_budget_total`
+at 0. The aggregate is served by the `CountBgp` pushdown, which yields one row
+and drains nothing, so no blocking operator accumulates and there is nothing
+for the budget to charge — the memory is below the operator layer. The bound
+is real for the operators it covers (GROUP BY, ORDER BY, UNION, hash-join
+build sides, MINUS, path closure) and does not yet cover this shape.
+
+**A correction to how serving footprint is recorded here.** Every `serve peak
+RSS` number in this document is measured at *load*, before any query. The
+SF=0.128 corpus loads in 23.7 GiB and settles at **~64 GiB** once queried —
+2.7× the recorded figure. Applying the same ratio to SF=0.256 puts its served
+footprint past the 124 GiB host, so that run could never have completed; the
+load-time measurement is what made it look feasible. Read the per-triple
+figures below as *load* footprint, and expect a served store to cost
+substantially more.
+
 ### Running, internal only (no published numbers)
 
 **A/B vs RDFox** (SPEC-01 F10) — implemented and runnable via

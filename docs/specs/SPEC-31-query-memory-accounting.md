@@ -167,10 +167,46 @@ Writing that down is the point: an operator setting 8 GiB should read it as "no
 query's blocking operators may accumulate more than 8 GiB", not as "no query
 may add more than 8 GiB of RSS".
 
+## Status — phase 1 does not yet bound the query that motivated the spec
+
+Measured on hornbench, 2026-09-08, commit `917f8f0`, SF=0.128 corpus, server
+ceiling raised to 1 TiB so the query would complete and its charge be readable:
+
+| | |
+|---|---|
+| `SELECT (COUNT(?cwUri)) { ?cwUri a cwork:CreativeWork }` | HTTP 200 in 96 s |
+| server RSS | 23,750 → **64,426 MiB** |
+| `horndb_sparql_query_memory_peak_bytes_sum` | **0** |
+| the same query with `?max_query_memory=8GiB` | HTTP 200, `queries_over_budget_total` **0** |
+
+**Acceptance criterion 6 is not met.** The budget charged this query nothing
+while the server grew by 40.7 GiB, which means its memory is not in a blocking
+operator's row buffer: the aggregate is served by the `CountBgp` pushdown
+(#144), which yields one row and drains nothing, so there is no accumulation
+for `drain` to charge. The 16.6 GiB of query-side growth lives below the
+operator layer — in the scan / WCOJ / source machinery — where phase 1 does not
+reach.
+
+What phase 1 *does* do stands: GROUP BY, ORDER BY, UNION, the hash-join build
+sides, MINUS and path closure are charged and refuse over budget, proven by
+`crates/sparql/tests/server_http.rs`. That covers the operators that
+accumulate by construction. It does not yet cover this workload, and the spec
+records that rather than claiming the ceiling is load-bearing where it is not.
+
+Finding and charging the 16.6 GiB is **HDB-229**, and it is the gate on
+calling `max_query_memory` a real bound. Until it lands, the cgroup ceiling
+(`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`) is what actually
+keeps a bench host alive.
+
 ## Phases
 
 - **Phase 1 (this spec, landed).** Charge blocking-operator row buffers; refuse
-  over budget; 8 GiB default; the two metrics.
+  over budget; 8 GiB default; the two metrics. Measured above: necessary, not
+  yet sufficient.
+- **Phase 1.5 (HDB-229, open).** Locate the query-side memory the operator
+  layer does not see and charge it where it is allocated. Phase 1's peak metric
+  reading zero against a 40 GiB RSS growth is the instrument that found this,
+  and is how the fix will be confirmed.
 - **Phase 2.** Charge the derived structures those buffers feed — the join hash
   index, the group-by hash table, the top-k heap. Proportional to what phase 1
   already charges, so phase 1 bounds them within a constant; phase 2 makes the
