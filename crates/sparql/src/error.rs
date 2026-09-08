@@ -39,6 +39,15 @@ pub enum SparqlError {
     #[error("result row limit exceeded (max_result_rows = {0})")]
     ResultRowLimit(u64),
 
+    /// SPEC-31: the query's executor buffers would have exceeded
+    /// `max_query_memory`. Like [`SparqlError::ResultRowLimit`] the result is
+    /// NOT truncated — the query fails instead, so a short answer can never
+    /// be mistaken for a complete one. `requested` is what the charge would
+    /// have totalled, which tells an operator sizing a budget how far over it
+    /// went rather than only that it went over.
+    #[error("query memory limit exceeded (max_query_memory = {limit}, needed {requested})")]
+    QueryMemoryLimit { limit: u64, requested: u64 },
+
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

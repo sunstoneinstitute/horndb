@@ -174,8 +174,13 @@ Enforcement:
   short-but-well-formed document: a 400 while the headers are uncommitted, an
   aborted `ChannelBody` (chunked response with no terminator) after.
 - `rdf12` — becomes the request's `SparqlConfig.rdf12`.
-- `max_query_memory` — parsed, carried, **enforces nothing** (SPEC-26 S5
-  delegates real accounting to the companion memory spec).
+- `max_query_memory` — a per-query budget charged by the blocking operators
+  (`exec::op::blocking::drain` and `UnionOp`), on the same thread-local
+  footing as the cancel token (`exec::budget`). Over budget the query fails
+  with `SparqlError::QueryMemoryLimit` → HTTP **507**, never a truncated
+  result. Default **8 GiB**; `None` is unbounded. It bounds the executor's row
+  buffers, *not* process RSS — the store, dictionary, memoised query snapshots
+  and WCOJ state are not query-attributable and are not charged (SPEC-31).
 
 The materialized path (ASK/CONSTRUCT/DESCRIBE/EXPLAIN) moved onto the
 blocking pool for this: it used to run the whole query on a runtime worker,

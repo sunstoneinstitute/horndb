@@ -5,9 +5,8 @@
 //!
 //! Every request also builds its own [`QuerySettings`] (SPEC-26 S4): the
 //! server's `[server.limits]` defaults with the whitelisted URL/form
-//! overrides layered on top. `query_timeout`, `max_result_rows` and `rdf12`
-//! are enforced here (S5); `max_query_memory` is accepted and carried but
-//! **not yet enforced** — see [`resolve_settings`].
+//! overrides layered on top. `query_timeout`, `max_result_rows`, `rdf12`
+//! and (SPEC-31) `max_query_memory` are all enforced here.
 
 use super::stream_body::ChannelBody;
 use super::{AppState, QueryPermit};
@@ -66,9 +65,9 @@ fn param<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
 /// `default_graph`, …), never kebab-case — `default-graph` would sit one
 /// suffix from the protocol's reserved `default-graph-uri` above.
 ///
-/// **`max_query_memory` is accepted, parsed and carried, but not enforced**
-/// (SPEC-26 S5, non-goal): real per-query memory accounting is the companion
-/// spec's. Setting it bounds nothing today.
+/// `max_query_memory` is enforced by SPEC-31 — the companion spec SPEC-26 S5
+/// deferred it to. It bounds the executor's own row buffers, not the whole
+/// process; `crate::exec::budget` documents exactly what is counted.
 fn resolve_settings(
     limits: &horndb_config::Limits,
     layers: &[&[(String, String)]],
@@ -277,6 +276,10 @@ fn arm_timeout(timeout: Duration) -> (CancelToken, oneshot::Sender<()>) {
 fn error_status(e: &SparqlError) -> StatusCode {
     match e {
         SparqlError::QueryTimeout => StatusCode::GATEWAY_TIMEOUT,
+        // The query is well-formed; the server declined to spend the memory
+        // it would take. 507 says that, where 400 would blame the client for
+        // a request that is perfectly legal at a larger budget.
+        SparqlError::QueryMemoryLimit { .. } => StatusCode::INSUFFICIENT_STORAGE,
         _ => StatusCode::BAD_REQUEST,
     }
 }
@@ -410,6 +413,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     let store = Arc::clone(&state.store);
     let (cancel, running) = arm_timeout(settings.query_timeout.0);
     let max_rows = settings.max_result_rows;
+    let max_memory = settings.max_query_memory.map(|b| b.0);
 
     // Declared first inside the closure so it drops LAST — after the pinned
     // read view and the operator tree — and therefore stays armed for every
@@ -438,6 +442,11 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
         // query to be scheduled here does not inherit this one's cancel).
         let _running = running;
         let _cancel_scope = crate::exec::cancel::scope(cancel.clone());
+        // SPEC-31: the executor's row-buffer budget for this query, on the
+        // same thread-local footing as the cancel token and reset by the
+        // same guard-drop, so a reused blocking-pool thread never inherits
+        // the previous query's charge.
+        let _budget_scope = crate::exec::budget::scope(max_memory);
         // Solutions serialized so far, against `max_result_rows`. The cap
         // NEVER truncates: the response ends with a typed
         // `ResultRowLimit` error instead (a 400 while the headers are
@@ -610,6 +619,7 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
     settings: &QuerySettings,
 ) -> axum::response::Response {
     let (cancel, running) = arm_timeout(settings.query_timeout.0);
+    let max_memory = settings.max_query_memory.map(|b| b.0);
     let store = Arc::clone(&state.store);
     let (query, cfg) = (q.to_string(), *cfg);
 
@@ -627,6 +637,8 @@ async fn run_materialized<B: FullBackend + Send + Sync + 'static>(
         let _permit = permit;
         let _running = running;
         let _cancel_scope = crate::exec::cancel::scope(cancel.clone());
+        // SPEC-31, as on the streaming path above.
+        let _budget_scope = crate::exec::budget::scope(max_memory);
         let store = store.read();
         execute_query_with(&query, &*store, &cfg).map_err(|e| classify(e, &cancel))
     })

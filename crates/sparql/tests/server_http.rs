@@ -1882,15 +1882,47 @@ mod spec26_query_settings {
         assert_eq!(status, StatusCode::OK, "?rdf12=true must accept it: {body}");
     }
 
-    /// AC6: `max_query_memory` is accepted and carried on `QuerySettings`,
-    /// but enforces nothing — the companion memory-accounting spec turns the
-    /// stub real. A 200 on a value far below any real query's footprint is
-    /// the observable proof that it does not bound anything today.
+    /// SPEC-31: `max_query_memory` bounds a blocking operator's row buffer.
+    /// ORDER BY has to hold the whole input to sort it, so a 1-byte ceiling
+    /// refuses it rather than letting it accumulate.
     #[tokio::test]
-    async fn max_query_memory_is_accepted_but_enforces_nothing() {
+    async fn max_query_memory_refuses_a_blocking_operator_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20ORDER%20BY%20%3Fs";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(
+            status,
+            StatusCode::INSUFFICIENT_STORAGE,
+            "a well-formed query refused on budget is not a 400: {body}"
+        );
+        assert!(
+            body.contains("query memory limit exceeded"),
+            "the error names the limit it hit: {body}"
+        );
+    }
+
+    /// The same ceiling does NOT refuse a query with no blocking operator.
+    /// This is the bound working as specified, not a hole: a streaming
+    /// SELECT holds one operator chunk at a time whatever the result size,
+    /// so there is no growing buffer to charge. SPEC-31 bounds the
+    /// executor's accumulation, and a query that accumulates nothing is
+    /// already bounded — `max_result_rows` is the knob for result size.
+    #[tokio::test]
+    async fn max_query_memory_does_not_refuse_a_streaming_query() {
         let app = router_with_rows(5_000, Limits::default());
         let (status, body) = get(app, &format!("{SELECT_ALL}&max_query_memory=1")).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body.lines().count(), 5_001, "not truncated, not refused");
+    }
+
+    /// The default is a real ceiling, so an ordinary blocking query still
+    /// runs: 5 000 rows nowhere near 8 GiB.
+    #[tokio::test]
+    async fn the_default_budget_admits_an_ordinary_sort() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20ORDER%20BY%20%3Fs";
+        let (status, body) = get(app, q).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body.lines().count(), 5_001);
     }
 }

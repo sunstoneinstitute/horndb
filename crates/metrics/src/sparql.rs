@@ -32,6 +32,15 @@ pub struct SparqlMetrics {
     /// admission-controlled, and a rejection has one cause.
     pub queries_in_flight: Gauge,
     pub queries_rejected: Counter,
+    /// SPEC-31 query memory budget: the peak bytes one query charged to its
+    /// executor row buffers, and how many queries were refused for crossing
+    /// `[server.limits].max_query_memory`. Recorded once per query, after
+    /// execution — never from inside the charge path. The peak covers what
+    /// the budget counts (blocking-operator buffers), not process RSS, so it
+    /// reads lower than the server's growth; it is the number that says
+    /// which queries accumulate and how much.
+    pub query_memory_peak_bytes: Histogram,
+    pub queries_over_budget: Counter,
     /// Full rebuilds of the planner's `SnapshotStats` summary (HDB-123), and
     /// how long each took. A rebuild scans the whole snapshot, so a healthy
     /// write-then-read feed keeps this flat: writes merge their delta into the
@@ -42,6 +51,13 @@ pub struct SparqlMetrics {
 
 fn latency_hist() -> Histogram {
     Histogram::new(exponential_buckets(1e-4, 3.0, 12))
+}
+
+/// Buckets for the query memory peak: 1 MiB to ~1 TiB, ×4 per step. Wide
+/// because the interesting readings are orders of magnitude apart — a normal
+/// query is single-digit MiB, and HDB-167's was tens of GiB.
+fn query_memory_hist() -> Histogram {
+    Histogram::new(exponential_buckets(1_048_576.0, 4.0, 11))
 }
 
 impl SparqlMetrics {
@@ -59,6 +75,8 @@ impl SparqlMetrics {
         let exec_phase_rows = Family::<ExecPhaseLabel, Counter>::default();
         let queries_in_flight = Gauge::default();
         let queries_rejected = Counter::default();
+        let query_memory_peak_bytes = query_memory_hist();
+        let queries_over_budget = Counter::default();
         let stats_rebuild = Counter::default();
         let stats_rebuild_seconds = latency_hist();
 
@@ -117,6 +135,16 @@ impl SparqlMetrics {
             "SPARQL queries shed with 503 after waiting past the admission queue timeout",
             queries_rejected.clone(),
         );
+        reg.register(
+            "sparql_query_memory_peak_bytes",
+            "Peak executor row-buffer bytes charged by one SPARQL query (SPEC-31)",
+            query_memory_peak_bytes.clone(),
+        );
+        reg.register(
+            "sparql_queries_over_budget",
+            "SPARQL queries refused for exceeding max_query_memory",
+            queries_over_budget.clone(),
+        );
 
         reg.register(
             "sparql_stats_rebuild",
@@ -141,6 +169,8 @@ impl SparqlMetrics {
             exec_phase_rows,
             queries_in_flight,
             queries_rejected,
+            query_memory_peak_bytes,
+            queries_over_budget,
             stats_rebuild,
             stats_rebuild_seconds,
         }
