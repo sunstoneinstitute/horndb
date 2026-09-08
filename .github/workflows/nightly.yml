@@ -57,10 +57,10 @@ env:
   # aggregation queries came back 504 and scored as errors. Matched to the
   # scenario's own `queryTimeoutSeconds=300`.
   HORNDB_SERVER__LIMITS__QUERY_TIMEOUT: "300s"
-  # Host guard. HornDB does not enforce a per-query memory bound
-  # (`[server.limits].max_query_memory` is parsed but not applied), and an
-  # uncapped SF=0.256 run exhausted the host's 124 GiB and took the runner
-  # off the network for a day (HDB-167). start-engine.sh puts the server in
+  # Host guard. `max_query_memory` (SPEC-31) bounds only the executor's row
+  # buffers, not store-side index growth, and an uncapped SF=0.256 run
+  # exhausted the host's 124 GiB and took the runner off the network for a
+  # day (HDB-167). start-engine.sh puts the server in
   # a transient cgroup with this ceiling, so a runaway query fails the leg
   # instead of the machine. ~72% of RAM: the SF=0.128 store is ~26 GiB, and
   # GraphDB's 32 g heap only runs in a later leg.

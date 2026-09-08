@@ -67,7 +67,7 @@ Where it stops:
   `max_query_memory` but does not enforce it. Real accounting (allocation
   tracking across `wcoj`/`storage`, per-query attribution, over-budget abort) is
   the companion spec's job. Until then the knob is accepted and surfaced with a
-  metric, and documented as not-yet-enforced.
+  metric, and documented as not-yet-enforced. Enforcement landed as SPEC-31.
 - **A session tier / stateful cross-request sessions.** SPARQL over HTTP is
   session-less. A `SET VARIABLE k=v` that persists across multiple HTTP requests
   would need a session identity (a `session_id`), a server-side session registry,

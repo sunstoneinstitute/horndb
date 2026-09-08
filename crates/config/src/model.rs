@@ -618,10 +618,8 @@ impl QuerySettings {
                     _ => return Err(bad("expected `true` or `false`")),
                 }
             }
-            // SPEC-26 S5: parsed and stored, NOT enforced. Real per-query
-            // memory accounting is the companion spec's job; until it lands
-            // this knob is accepted so operators can write it, and the API
-            // docs say plainly that it does not yet bound anything.
+            // SPEC-31 enforces this against the executor's row buffers;
+            // it does not bound store-side memory (HDB-231).
             "max_query_memory" => {
                 self.max_query_memory = Some(value.parse().map_err(|e: String| bad(&e))?)
             }

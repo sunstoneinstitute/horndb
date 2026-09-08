@@ -3344,12 +3344,13 @@ fired and its journal file was replaced, so whichever record the kernel wrote
 in that window is gone. The host had 124 GiB and no swap, and the run held a
 ~50 GiB store plus a six-agent query mix.
 
-**Why the memory was unbounded.** HornDB enforces no per-query memory limit:
-`[server.limits].max_query_memory` is parsed and carried into `QuerySettings`
-but never applied (`crates/sparql/src/server/query.rs`, a stated SPEC-26 S5
-non-goal), so the only backstop is `max_concurrent_queries`. HDB-146 separately
-measured ~578 MiB of query-side allocator retention on a **10 M**-triple corpus
-that is never returned to the OS.
+**Why the memory was unbounded.** At the time, HornDB enforced no per-query
+memory limit: `[server.limits].max_query_memory` was parsed and carried into
+`QuerySettings` but not applied (`crates/sparql/src/server/query.rs`, a
+stated SPEC-26 S5 non-goal), so the only backstop was
+`max_concurrent_queries`. HDB-146 separately measured ~578 MiB of query-side
+allocator retention on a **10 M**-triple corpus that is never returned to the
+OS.
 
 Two changes follow, and both are in effect:
 
@@ -3359,7 +3360,9 @@ Two changes follow, and both are in effect:
    in a transient cgroup with a hard ceiling (the nightly sets **90G**), so a
    runaway query kills the server and fails the leg instead of taking the
    machine off the network. This is a host guard, not per-query accounting —
-   one budget for the whole process. Real per-query enforcement is still open.
+   one budget for the whole process; per-query enforcement has since landed
+   (SPEC-31) but bounds only the executor's row buffers, so the host guard
+   still covers store-side growth until HDB-231.
 
 ##### The SF=0.128 corpus
 
@@ -3436,13 +3439,15 @@ Memory cgroup out of memory: Killed process 357573 (serve)
 constraint=CONSTRAINT_MEMCG   memory: usage 94371840kB, limit 94371840kB
 ```
 
-That is ~66 GiB of query-side memory on a 234 M-triple store, and it settles
-HDB-167's open question in a controlled way: the failure is real, it is
-query-side, and **halving the corpus does not avoid it**. What the smaller
-corpus plus the ceiling buy is that the *server* dies instead of the *host* —
-hornbench stayed up and the run was recoverable, where the SF=0.256 attempt
-cost a day of runner downtime. A benchmark reading still needs a real bound on
-query memory (HDB-167 deliverable 2); `max_query_memory` remains unenforced.
+That is ~66 GiB of growth on a 234 M-triple store. It settles HDB-167's open
+question: the failure is real and halving the corpus does not avoid it. (It
+was later attributed — see the next section — to a whole-graph index build,
+not to the query's own buffers.) What the smaller corpus plus the ceiling buy
+is that the *server* dies instead of the *host* — hornbench stayed up and the
+run was recoverable, where the SF=0.256 attempt cost a day of runner downtime.
+A benchmark reading still needs a real bound on query memory (HDB-167
+deliverable 2); `max_query_memory` was unenforced at the time — SPEC-31
+landed it later on this branch.
 
 **2. The corpus is missing the reference datasets.** `spb-scale-build.sh`
 closes the ontologies plus the generated Creative Works only. The ~24 M-triple
@@ -3497,20 +3502,20 @@ source, splits that growth:
   `HashMap<SnapshotScope, Arc<VecTripleSource>>`, built by the first query on
   a commit version and reused by every later one. Store-side and amortised,
   not the fault of the query that triggers it.
-- **~16.6 GiB is the query's own execution** — ~3.6 kB per counted row, for
-  an aggregate returning one row. That is a defect in its own right
-  (HDB-229), and it is what SPEC-31's per-query budget has to charge.
+- **~16.6 GiB was a second index.** The pattern binds predicate and object,
+  so the trie reads an object-major ordering; building one laid out the
+  `(o, s)` columns of every predicate partition in the graph (HDB-229).
+  Store-side, retained, not the query's own buffers. HDB-229 removed the
+  build for this shape.
 
-**SPEC-31's budget does not currently charge it.** Re-run on commit `917f8f0`
-with the server ceiling raised to 1 TiB so the query would complete and its
-charge be readable: HTTP 200 in 96 s, RSS 23,750 → 64,426 MiB, and
-`horndb_sparql_query_memory_peak_bytes_sum` = **0**. The same query with
-`?max_query_memory=8GiB` also returned 200, with `queries_over_budget_total`
-at 0. The aggregate is served by the `CountBgp` pushdown, which yields one row
-and drains nothing, so no blocking operator accumulates and there is nothing
-for the budget to charge — the memory is below the operator layer. The bound
-is real for the operators it covers (GROUP BY, ORDER BY, UNION, hash-join
-build sides, MINUS, path closure) and does not yet cover this shape.
+Re-run on commit `917f8f0` with the server ceiling raised to 1 TiB so the
+query would complete and its charge be readable: HTTP 200 in 96 s, RSS
+23,750 → 64,426 MiB, and `horndb_sparql_query_memory_peak_bytes_sum` = **0**.
+The same query with `?max_query_memory=8GiB` also returned 200, with
+`queries_over_budget_total` at 0. That zero was the instrument reading
+correctly: none of the growth was in an operator buffer. Bounding
+store-side growth is HDB-231; the cgroup ceiling stays the host guard until
+it lands.
 
 **A correction to how serving footprint is recorded here.** Every `serve peak
 RSS` number in this document is measured at *load*, before any query. The

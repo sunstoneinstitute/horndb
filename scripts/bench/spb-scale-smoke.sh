@@ -6,10 +6,11 @@
 # period so it fits a bench dispatch. Results go to a scratch trend DB — the
 # nightly's cumulative series must not gain off-schedule points.
 #
-# The HornDB leg runs under a hard memory ceiling (MEMORY_MAX). HornDB enforces
-# no per-query memory bound, and an uncapped run at SF=0.256 exhausted
-# hornbench and took the host off the network (HDB-167). With the ceiling a
-# runaway query kills the server, and the leg fails instead of the machine.
+# The HornDB leg runs under a hard memory ceiling (MEMORY_MAX). `max_query_memory`
+# (SPEC-31) bounds only the executor's row buffers, not store-side index
+# growth, and an uncapped run at SF=0.256 exhausted hornbench and took the
+# host off the network (HDB-167). With the ceiling a runaway query kills the
+# server, and the leg fails instead of the machine.
 #
 # Knobs: SPB_SF (default sf128), DURATION (default 300), LEGS (default "H G"),
 #        MEMORY_MAX (default 90G).

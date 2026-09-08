@@ -107,9 +107,9 @@ echo "start-engine: SPARQL query endpoint -> http://$BIND/query" >&2
 # ---------------------------------------------------------------------------
 # Memory ceiling (optional).
 #
-# HornDB does not bound the memory a query may use: `[server.limits].
-# max_query_memory` is parsed and carried but never enforced (SPEC-26 S5
-# non-goal). On a large corpus that means nothing stops the server from
+# SPEC-31 bounds the executor's row buffers per query; it does not bound the
+# store-side index and snapshot memory a query can trigger (HDB-229, HDB-230,
+# HDB-231). On a large corpus that means nothing stops the server from
 # consuming the whole host — which is what happened in HDB-167, where an SPB
 # run at SF=0.256 exhausted hornbench's 124 GiB and took the machine off the
 # network, needing a manual restart.
