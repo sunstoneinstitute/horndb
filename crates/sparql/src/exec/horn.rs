@@ -1786,6 +1786,51 @@ impl HornBackend {
         }
     }
 
+    /// Solution count for a single-pattern BGP read straight off the one
+    /// predicate partition it names, or `None` when the shape does not
+    /// qualify and the caller must use the trie.
+    ///
+    /// Qualifies when: exactly one pattern, its predicate bound, its subject
+    /// free, and `scope` reads a single graph. Callers must have handled the
+    /// all-ground and within-pattern-diagonal cases first (`count_bgp` does).
+    ///
+    /// This is a memory fix, not only a speed one (HDB-229). The trie serves
+    /// `?s <p> <o>` from an *object-major* ordering, and producing one
+    /// materializes the object-major layout of **every** predicate in the
+    /// graph — 32 B/row over the whole graph, retained for the process's
+    /// life — to answer a question confined to one partition. On the LDBC
+    /// SPB corpus (234 M triples) that cost 16.6 GiB and 67 s for a query
+    /// whose answer is one integer.
+    ///
+    /// `<s> <p> ?o` is deliberately *not* claimed: it already reads a
+    /// subject-major ordering, which the store keeps materialized, and the
+    /// trie answers it with a binary search that a scan here would undo.
+    ///
+    /// ponytail: the object-bound arm is a linear pass over the partition.
+    /// When the object-major layout happens to be materialized already, a
+    /// binary search would be O(log n) — but asking for it through
+    /// `ordered_at` would *build* it, which is the cost this path exists to
+    /// avoid. Reach for it only behind an "is it already there" test.
+    fn count_one_partition(&self, wpatterns: &[WPattern], scope: &SnapshotScope) -> Option<usize> {
+        let [pat] = wpatterns else { return None };
+        let p = pat.p.as_bound()?;
+        if pat.s.as_bound().is_some() {
+            return None;
+        }
+        let graph = self.direct_graph(scope)?;
+        let tier = self.snap().tier_arc();
+        let at = tier.version();
+        let object = pat.o.as_bound();
+        Some(
+            tier.with_predicate(graph, TermId(p), |part| match object {
+                None => part.len_at(at),
+                Some(o) => part.scan_at(at).filter(|(_, po)| po.0 == o).count(),
+            })
+            // No partition for that predicate in this graph: no solutions.
+            .unwrap_or(0),
+        )
+    }
+
     /// Get-or-build the WCOJ snapshot for `scope`.
     ///
     /// **Only the two whole-store scopes are memoised.** They cost O(store)
@@ -2935,6 +2980,11 @@ impl Executor for HornBackend {
         // a bare row-count sum would overcount. Fall back to scan+len.
         if !diagonal_filters.is_empty() {
             return Ok(None);
+        }
+
+        // One pattern over one predicate partition: count it there (HDB-229).
+        if let Some(n) = self.count_one_partition(&wpatterns, &resolved) {
+            return Ok(Some(n));
         }
 
         // No diagonal filter: every WCOJ row is one solution, so the solution
