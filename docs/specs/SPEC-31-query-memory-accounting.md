@@ -98,13 +98,22 @@ it holds the rows:
 | `PathClosureOp` (`p+` / `p*`) | the edge set |
 
 These share one funnel — `exec::op::blocking::drain` — so the charge is levied
-in one place for five of the six. `UnionOp` accumulates inline (it must
+in one place for six of the seven. `UnionOp` accumulates inline (it must
 normalize across both children) and charges the same way.
 
-A **streaming** operator holds one chunk at a time whatever the result size and
-so charges nothing. That is the bound working as specified, not a gap: a query
-with no blocking operator is already bounded by construction, and result size
-is `max_result_rows`' job.
+A **streaming** operator that keeps no state across chunks holds one chunk at
+a time whatever the result size and so charges nothing. That is the bound
+working as specified, not a gap, for such an operator: a query with only
+those is already bounded by construction, and result size is
+`max_result_rows`'s job.
+
+`DistinctOp` is the exception, and it is a real gap, not a specified bound.
+It pulls one chunk at a time like any streaming operator, but keeps a `seen`
+set of every distinct row's key across the whole query — state that grows
+with the number of distinct rows and is never charged. A `SELECT DISTINCT`
+over a high-cardinality pattern can accumulate as much memory as a `GROUP
+BY` over the same pattern, uncharged. Charging it is HDB-232, not this
+phase — see "What the charge does and does not cover".
 
 ### S2. Refuse, never truncate
 
@@ -174,6 +183,35 @@ process. A query always uses somewhat more than its charge says. Not counted:
   `max_result_rows`; the materialized path is bounded by neither. Known gap,
   phase 2 candidate; found by reading, not measured.
 
+The list below is a different class from the one above: **per-query**
+memory, rows a query holds for its own duration and frees when it ends, the
+same class S1 charges — simply not charged yet. It is not the store-side
+growth in "the store, dictionary and indexes" bullet above, or in "What this
+spec does not bound, and why" below, either of which lives past any one
+query. Charging this per-query class is HDB-232:
+
+- `DistinctOp`'s `seen` set (see S1) — grows with the number of distinct
+  rows, held for the query's whole life;
+- the BGP scan itself. `ScanOp` wraps a fully materialized `Batch`, and the
+  default `scan_bgp_ids` accumulates every WCOJ output batch into one
+  `Vec<Row>` before returning it — the largest per-query row buffer in the
+  engine, and it exists even for a query with no blocking operator at all
+  (see acceptance criterion 2);
+- `UnionOp` charges each chunk before `normalize_columns` rewrites
+  `Slot::Id` cells into decoded `Slot::Term` strings, so on a column mixing
+  provenance across the two children the bytes it ends up retaining can run
+  several times what it charged;
+- the two operators where blocking output can exceed blocking input:
+  `PathClosureOp` charges the edge set it drains but not the closure it
+  computes from it (which can be quadratic in the edge count), and the hash
+  joins (`JoinOp`, `LeftJoinOp`, `MinusOp`) charge the build side but not a
+  probe chunk's matched-row fan-out held in `pending`;
+- `fallback_group_counts`, the path `GroupCountScan` takes when the backend
+  has no `count_bgp_grouped` fast path: it materializes a full scan batch
+  and a grouping hash map, both uncharged and, unlike the store-side memo
+  acceptance criterion 7 pins, invisible in `memory_split().snapshots` too —
+  there is no instrument that shows this growth at all today.
+
 Writing that down is the point: an operator setting 8 GiB should read it as "no
 query's blocking operators may accumulate more than 8 GiB", not as "no query
 may add more than 8 GiB of RSS".
@@ -224,8 +262,12 @@ said exactly that.
 GROUP BY, ORDER BY, UNION, the hash-join build sides, MINUS and path closure
 are charged and refuse over budget. Tasks 2–4 of this spec's implementation
 plan add the tests that prove each acceptance criterion below, including the
-rewritten criterion 6. That covers every operator that accumulates by
-construction, which is what this spec bounds.
+rewritten criterion 6. That covers every blocking operator S1 lists —
+what this phase set out to charge. It is not every uncharged per-query
+accumulation in the executor: `DistinctOp`'s seen-set, the whole BGP scan,
+and the under-charges in `UnionOp`, `PathClosureOp` and the hash joins are
+real gaps, tracked as HDB-232 (see "What the charge does and does not
+cover").
 
 The cgroup ceiling (`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`)
 remains the host guard against *store-side* growth until HDB-231 lands.
@@ -249,7 +291,10 @@ remains the host guard against *store-side* growth until HDB-231 lands.
 1. A query whose blocking operator would exceed `max_query_memory` fails with
    the typed error and HTTP 507; the response is never a truncated result.
 2. A query with no blocking operator is unaffected by the ceiling, at any
-   result size.
+   result size. This is a claim about the *charge*, not about memory held:
+   such a query still materializes its whole BGP scan (`ScanOp`,
+   `scan_bgp_ids`) uncharged, so "unaffected by the ceiling" must not be read
+   as "bounded footprint" — see "What the charge does and does not cover".
 3. A rejected charge leaves the budget unchanged, and a completed query leaves
    the thread's budget at zero — a second query on a reused blocking-pool
    thread starts from a clean charge.
@@ -270,4 +315,9 @@ remains the host guard against *store-side* growth until HDB-231 lands.
    `COUNT` that motivated this spec charges **0** bytes to its query, and any
    footprint it adds shows up in `HornBackend::memory_split().snapshots`, not
    in `horndb_sparql_query_memory_peak_bytes`. A change that starts charging
-   store-side memory to a query fails this criterion.
+   store-side memory to a query fails this criterion. This holds on the
+   count-pushdown fast path (`count_bgp`/`count_bgp_grouped`); when a backend
+   has no `count_bgp_grouped`, `fallback_group_counts` materializes an
+   uncharged scan batch and hash map that show up in neither series (see
+   "What the charge does and does not cover") — the criterion says nothing
+   about that path.

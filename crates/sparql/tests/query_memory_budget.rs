@@ -7,10 +7,12 @@
 //! `budget::peak()` is readable right after `execute_query` returns, before
 //! the guard drops.
 
-use horndb_sparql::api::{execute_query, QueryAnswer};
+use horndb_sparql::api::{execute_query, plan_select, QueryAnswer};
 use horndb_sparql::error::SparqlError;
 use horndb_sparql::exec::budget;
 use horndb_sparql::exec::horn::HornBackend;
+use horndb_sparql::plan::PhysicalPlan;
+use horndb_sparql::SparqlConfig;
 
 fn iri(v: &str) -> oxrdf::Term {
     oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(v))
@@ -40,6 +42,74 @@ const GROUP_BY_MAX: &str = "SELECT ?p (MAX(?o) AS ?m) WHERE { ?s ?p ?o } GROUP B
 
 fn run_group_by(b: &HornBackend) -> Result<QueryAnswer, SparqlError> {
     execute_query(GROUP_BY_MAX, b)
+}
+
+/// `n` triples, each with its own predicate:
+/// `<http://ex/s{i}> <http://ex/p{i}> <http://ex/o{i}>`. Unlike `store()`,
+/// `GROUP BY ?p` over this data does not collapse to one group — every row
+/// is its own group, so the `Group` output is as wide as its input. That
+/// matters for `stacked_blocking_operators_charge_the_sum_not_the_max`: an
+/// `OrderBy` stacked on top must charge a real, comparable amount, not a
+/// single row.
+fn store_unique_predicates(n: u64) -> HornBackend {
+    let mut b = HornBackend::new();
+    let triples = (0..n)
+        .map(|i| {
+            (
+                iri(&format!("http://ex/s{i}")),
+                iri(&format!("http://ex/p{i}")),
+                iri(&format!("http://ex/o{i}")),
+            )
+        })
+        .collect();
+    b.insert_oxrdf_batch(triples).unwrap();
+    b
+}
+
+const GROUP_THEN_ORDER: &str =
+    "SELECT ?p (MAX(?o) AS ?m) WHERE { ?s ?p ?o } GROUP BY ?p ORDER BY ?p";
+
+fn run_group_then_order(b: &HornBackend) -> Result<QueryAnswer, SparqlError> {
+    execute_query(GROUP_THEN_ORDER, b)
+}
+
+/// Walks a `PhysicalPlan`, reporting whether a `Group` and an `OrderBy` node
+/// are both present anywhere in the tree — used to confirm the query below
+/// really does lower to two stacked blocking operators, not one fused into
+/// the other or optimized away.
+fn plan_has_group_and_orderby(plan: &PhysicalPlan) -> (bool, bool) {
+    fn walk(plan: &PhysicalPlan, has_group: &mut bool, has_orderby: &mut bool) {
+        use PhysicalPlan::*;
+        match plan {
+            Group { inner, .. } => {
+                *has_group = true;
+                walk(inner, has_group, has_orderby);
+            }
+            OrderBy { inner, .. } => {
+                *has_orderby = true;
+                walk(inner, has_group, has_orderby);
+            }
+            Join { left, right }
+            | LeftJoin { left, right, .. }
+            | Minus { left, right }
+            | Union { left, right } => {
+                walk(left, has_group, has_orderby);
+                walk(right, has_group, has_orderby);
+            }
+            Filter { inner, .. }
+            | Project { inner, .. }
+            | Distinct { inner }
+            | Slice { inner, .. }
+            | Extend { inner, .. }
+            | PerGraph { inner, .. } => walk(inner, has_group, has_orderby),
+            PathClosure { edge, .. } => walk(edge, has_group, has_orderby),
+            BgpScan { .. } | CountScan { .. } | GroupCountScan { .. } | Values { .. } => {}
+        }
+    }
+    let mut has_group = false;
+    let mut has_orderby = false;
+    walk(plan, &mut has_group, &mut has_orderby);
+    (has_group, has_orderby)
 }
 
 /// AC6, first half: the charge is proportional to what the operator holds.
@@ -183,5 +253,65 @@ fn the_pushdown_count_charges_nothing_to_the_query() {
     assert!(
         after > before,
         "the store-side memo must still grow (HDB-231): before={before}, after={after}"
+    );
+}
+
+/// SPEC-31 M1: `budget::peak()` is a high-water mark, so a `Reservation`
+/// dropped early (e.g. right after its operator's own `drain` call, instead
+/// of when the operator itself drops) can still leave the smaller of two
+/// stacked charges as the observed peak, and every other test in this file
+/// would stay green. `GROUP BY ?p ... ORDER BY ?p` stacks a `GroupOp` under
+/// an `OrderByOp`: `OrderByOp::next` calls `drain` on its child, which pulls
+/// the still-live `GroupOp` to exhaustion without dropping it, so both
+/// reservations are held at once at the moment `OrderBy` finishes charging
+/// its own (aggregated) input. The combined peak must reflect both charges
+/// summed, not just the larger one.
+#[test]
+fn stacked_blocking_operators_charge_the_sum_not_the_max() {
+    let cfg = SparqlConfig::default();
+    let (_, plan, _) = plan_select(GROUP_THEN_ORDER, &cfg)
+        .unwrap()
+        .expect("a plain SELECT plans to Some((vars, plan, dataset))");
+    let (has_group, has_orderby) = plan_has_group_and_orderby(&plan);
+    assert!(
+        has_group,
+        "GROUP_THEN_ORDER must lower to a plan containing a Group node: {plan:?}"
+    );
+    assert!(
+        has_orderby,
+        "GROUP_THEN_ORDER must lower to a plan containing an OrderBy node: {plan:?}"
+    );
+
+    // Unique-per-row predicates: GROUP BY ?p does not collapse the rows, so
+    // OrderBy's own charge (over Group's output) is comparable in size to
+    // Group's charge (over the raw scan), not a single leftover row.
+    let s = store_unique_predicates(4_000);
+
+    let group_only_peak = {
+        let _g = budget::scope(None);
+        run_group_by(&s).unwrap();
+        budget::peak()
+    };
+
+    let stacked_peak = {
+        let _g = budget::scope(None);
+        run_group_then_order(&s).unwrap();
+        budget::peak()
+    };
+
+    assert!(
+        group_only_peak > 0,
+        "GROUP BY alone must charge something for 4,000 rows"
+    );
+    // Measured ~2.1x on this data; the RED check (dropping GroupOp's
+    // Reservation right after drain instead of holding it for the
+    // operator's life) measured 1.10x, so 1.3x leaves headroom on both
+    // sides without being so tight it flakes.
+    assert!(
+        stacked_peak as f64 > group_only_peak as f64 * 1.3,
+        "stacked peak={stacked_peak} must exceed the GROUP-BY-only peak={group_only_peak} \
+         by a wide margin — both operators' charges must be live at once, not just the \
+         larger one (a Reservation dropped right after its operator's drain call \
+         measured 1.10x here, not 2.1x)"
     );
 }
