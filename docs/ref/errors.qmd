@@ -1,9 +1,9 @@
 ---
 title: "Errors and diagnostics"
-description: "HTTP status codes and error categories from the SPARQL endpoint, and what HornDB does and does not yet guarantee about error stability."
+description: "HTTP status codes and error categories from the SPARQL and Graph Store Protocol endpoints, and what HornDB does and does not yet guarantee about error stability."
 ---
 
-This page describes the errors the SPARQL HTTP endpoint returns today: which
+This page describes the errors HornDB's HTTP endpoints return today: which
 HTTP status codes appear, what each one covers, and what a client can safely
 depend on. HornDB does not yet have a stable, versioned error-code registry —
 the kind of fixed code table PostgreSQL exposes as SQLSTATE. Read the
@@ -12,14 +12,50 @@ error.
 
 ## HTTP status codes
 
-The `/query` and `/update` endpoints return one of four status codes.
+These are the status codes `/query` and `/update` return. The Graph Store
+Protocol endpoint `/graphs` shares most of them and adds three of its own —
+see [Graph Store Protocol codes](#graph-store-protocol-codes).
 
 | Status code | Fires when | Meaning |
 |---|---|---|
 | `200 OK` | A query completes, in any result format (JSON, XML, CSV, TSV, or the N-Triples body of a `CONSTRUCT`). | The request succeeded. |
 | `204 No Content` | An `/update` request completes with no errors. | The update applied; the body is empty. |
-| `400 Bad Request` | Request parsing, SPARQL parsing, planning, or execution fails. See [Bad-request categories](#bad-request-categories). | The request as sent cannot be answered. Fix the request and retry. |
+| `400 Bad Request` | Request parsing, SPARQL parsing, planning, or execution fails; or an unknown or unparsable per-query setting. See [Bad-request categories](#bad-request-categories). | The request as sent cannot be answered. Fix the request and retry. |
+| `409 Conflict` | An `/update` request carries a change-feed id that does not match the id already recorded in the store. | Nothing was written. The request came from a different feed than the one this store is following. |
+| `413 Payload Too Large` | The request body exceeds `[server.limits].max_request_body` (default `4MiB`). | Rejected before the handler runs. Split the request or raise the limit. |
 | `500 Internal Server Error` | The result stream ends before producing any output (an internal invariant failure, not a client mistake). | Retry is unlikely to help; treat this as a HornDB bug and report it. |
+| `503 Service Unavailable` | The startup data load has not finished; or, on `/query`, the request waited longer than `[server.limits].queue_timeout` for an execution slot. | Temporary. A `Retry-After` header says when to try again; the request was shed, not attempted. |
+| `504 Gateway Timeout` | The query ran longer than `[server.limits].query_timeout` (default `30s`) and was cancelled. | The query was valid but too slow. This is deliberately distinct from `400`, so "too slow" and "wrong" are told apart. |
+
+`503` while loading is not an error in the request. `serve` binds its socket
+before it loads data, so the process is reachable during a long import; the
+data endpoints shed requests over that window rather than answer from a
+partly-loaded store. `GET /readyz` reports the same state directly.
+
+### The row limit does not truncate
+
+A query producing more solutions than `[server.limits].max_result_rows` fails
+rather than returning a short answer: `400` if the limit is hit before the
+response headers are sent, and an aborted response body if it is hit after.
+A client that reads a truncated body as a complete result would draw a wrong
+conclusion from a partial one, so there is no success path here.
+
+### Graph Store Protocol codes
+
+`/graphs` returns `400`, `413`, `500`, and `503` for the same reasons as
+above — `GET /graphs` takes an execution slot like `/query`, so it can also be
+shed on `queue_timeout` — plus:
+
+| Status code | Fires when | Meaning |
+|---|---|---|
+| `201 Created` | A `PUT` or `POST` writes to a graph that held no visible quads before. | The graph now exists. |
+| `204 No Content` | A `PUT`, `POST`, or `DELETE` succeeds, including when the request changes nothing. | Applied; the body is empty. |
+| `404 Not Found` | A `GET` or `DELETE` names a graph with no visible quads. | There is nothing there to read or remove. |
+| `415 Unsupported Media Type` | The request body's content type is neither `text/turtle` nor `application/n-triples` — including the dataset formats TriG and N-Quads. | A dataset format carries a graph name of its own, which this protocol has no room for; send triples instead. |
+
+A `400` here also covers an unknown query parameter, a request naming neither
+`graph` nor `default`, and a write to a graph under the reserved
+`https://horndb.io/graph/` namespace.
 
 ### Bad-request categories
 
@@ -29,6 +65,9 @@ that message tends to say, not a fixed vocabulary:
 
 - **Malformed HTTP request** — a `GET` with no `query` parameter, or a form
   POST body with no `query`/`update` field.
+- **Bad per-query setting** — an unrecognised override key on the request, or
+  a value the setting cannot parse (`query_timeout=30` with no unit,
+  `default_graph=Union` in the wrong case). The message names the parameter.
 - **SPARQL syntax error** — the query or update string does not parse.
 - **Unsupported construct** — the query parses but uses an algebra or
   property-path form HornDB does not translate yet.
@@ -38,7 +77,7 @@ that message tends to say, not a fixed vocabulary:
   running it (for example, a `SELECT` that starts streaming a valid plan but
   hits a pattern its executor cannot run).
 
-All five arrive as `400`, whether the request was self-inflicted (bad
+All six arrive as `400`, whether the request was self-inflicted (bad
 syntax) or exposes a real gap in HornDB's supported subset (an unsupported
 construct). Nothing distinguishes those cases beyond the message text.
 
@@ -48,8 +87,10 @@ A stable, versioned error-code registry — a fixed code plus symbolic name a
 client can match on, the way PostgreSQL's SQLSTATE or a well-known HTTP API's
 `error.type` field works — is not yet part of HornDB's contract. Today:
 
-- **The HTTP status code is stable.** Build retry and branching logic on
-  `200`/`204`/`400`/`500`.
+- **The HTTP status code is stable.** Build retry and branching logic on the
+  status code. `503` is the one to retry unchanged — it carries a
+  `Retry-After` saying when. `504` means the query needs longer than the
+  server allows, so retry it only with a raised `query_timeout`.
 - **The response body is a free-text message, not a machine-readable
   object.** No JSON error envelope, no error code field, no symbolic name.
   The message wording can change between releases without notice — it exists

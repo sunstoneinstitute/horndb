@@ -29,9 +29,17 @@ setting and exits rather than starting with a value it could not read.
 ## SPARQL HTTP server
 
 The `serve` binary loads one or more RDF files into a store and exposes SPARQL
-1.1 over HTTP on a single bind address, at three fixed routes: `GET`/`POST
-/query` for SPARQL queries, `POST /update` for SPARQL Update, and `GET
-/metrics` for Prometheus scraping (see [Metrics endpoint](#metrics-endpoint)).
+1.1 over HTTP on a single bind address, at six fixed routes:
+
+| Route | Methods | Purpose |
+|---|---|---|
+| `/query` | `GET`, `POST` | SPARQL 1.1 query. |
+| `/update` | `POST` | SPARQL 1.1 Update. |
+| `/graphs` | `GET`, `PUT`, `POST`, `DELETE` | Graph Store Protocol — read or write one whole named graph, selected with `?graph=<iri>` or `?default`. |
+| `/metrics` | `GET` | Prometheus scrape (see [Metrics endpoint](#metrics-endpoint)). |
+| `/healthz` | `GET` | Liveness: the process is up. |
+| `/readyz` | `GET` | Readiness: the startup data load has finished. Returns `503` until it has, and `/query`, `/update`, and `/graphs` shed requests with `503` over the same window rather than answer from a partly-loaded store. |
+
 The routes themselves are not configurable. `serve` resolves the rest of its
 settings through the layers listed above before it loads any data or binds the
 socket.
@@ -43,12 +51,16 @@ socket.
 
     **Scope:** CLI flag to the `serve` binary; read once at process start.
 
-    **Allowed values:** one or more paths to `.nt` (N-Triples) or `.ttl`
-    (Turtle) files, or to directories containing them. Repeat the flag to pass
-    more than one path.
+    **Allowed values:** one or more paths to `.nt` (N-Triples), `.ttl`
+    (Turtle), `.nq` (N-Quads), or `.trig` (TriG) files, or to directories
+    containing them. Repeat the flag to pass more than one path.
 
-    **Tuning notes:** point at a directory to load every `.nt`/`.ttl` file
-    under it, recursively.
+    **Tuning notes:** point at a directory to load every file of those four
+    types under it, recursively. `.nt` and `.ttl` carry triples and load into
+    the default graph. `.nq` and `.trig` carry quads: each quad loads into the
+    named graph it names, so these are how you populate named graphs at
+    startup. Blank-node labels are scoped per file, so two files can reuse a
+    label without colliding.
 
 `--config` (path)
 
@@ -159,20 +171,99 @@ socket.
 ## Query settings
 
 The `[server.limits]` config section holds the defaults for settings a single
-query may override through a URL query parameter on `/query`. One such setting
-is live today; the rest of the section is not yet wired to runtime behaviour and
-is therefore not documented here.
+query may override for itself. Five settings take a per-query override, listed
+below; three more in the same section are server-scoped only and are covered
+under [Admission control and request size](#admission-control-and-request-size).
 
-`[server.limits].default_graph` (string), `HORNDB_SERVER__LIMITS__DEFAULT_GRAPH`
+An override travels on all three protocol channels: as a URL query parameter on
+`GET /query`, as a URL query parameter on a `POST` with an
+`application/sparql-query` body, and as a form field in an
+`application/x-www-form-urlencoded` `POST` body. When a form-encoded `POST`
+carries the same key in both the URL and the body, the body wins. An
+unrecognised key, or a value the setting cannot parse, returns HTTP 400 naming
+the parameter; the query does not run. An override changes nothing on the
+server and does not affect any other query.
+
+| Setting | Default | Enforced |
+|---|---|---|
+| `query_timeout` | `30s` | Yes — the query is cancelled and the request ends `504 Gateway Timeout`. |
+| `max_result_rows` | `1000000` | Yes — see the entry below; the result is never silently truncated. |
+| `rdf12` | `false` | Yes — with it off, a query using an RDF 1.2 triple term is refused when the algebra is built. |
+| `default_graph` | `union` | Yes — see the entry below. |
+| `max_query_memory` | unset | **No.** Parsed and carried, but nothing enforces it yet. |
+
+`[server.limits].query_timeout` (duration), `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT`, `query_timeout` (per query)
+
+:   **Default:** `30s`.
+
+    **Scope:** config key, environment variable, or a per-query override. It is
+    one of the reloadable settings: an edit to the file takes effect on the
+    next request, with no restart.
+
+    **Allowed values:** a duration with an explicit unit — `250ms`, `5s`,
+    `2m`. A bare number is an error, so a value cannot be read under the wrong
+    unit.
+
+    **Tuning notes:** when the timeout elapses the query is cancelled mid-flight
+    through its cancellation token and the request ends `504 Gateway Timeout`,
+    which is a distinct status from the `400` a malformed or unanswerable query
+    gets — a client can tell "too slow" from "wrong". Raise it for one
+    known-heavy analytical query rather than for the whole server.
+
+`[server.limits].max_result_rows` (integer), `HORNDB_SERVER__LIMITS__MAX_RESULT_ROWS`, `max_result_rows` (per query)
+
+:   **Default:** `1000000`.
+
+    **Scope:** config key, environment variable, or a per-query override.
+    Reloadable, like `query_timeout`.
+
+    **Allowed values:** a non-negative integer. A negative value is an error.
+
+    **Tuning notes:** **the cap never truncates.** A query that produces more
+    solutions than the cap ends with an error, not a short answer: `400 Bad
+    Request` if the limit is reached before the response headers are sent, and
+    an aborted response body if it is reached after. That is deliberate — a
+    truncated result set that looked complete would be worse than a failure.
+
+`[server.limits].rdf12` (boolean), `HORNDB_SERVER__LIMITS__RDF12`, `rdf12` (per query)
+
+:   **Default:** `false`.
+
+    **Scope:** config key, environment variable, or a per-query override.
+    Reloadable.
+
+    **Allowed values:** exactly `true` or `false`, lower case.
+
+    **Tuning notes:** set it to `true` to let a query use RDF 1.2 triple terms.
+    With it off, a query containing one is refused when the algebra is built,
+    rather than evaluated under RDF 1.1 rules. Turn it on per query to try RDF
+    1.2 syntax without changing what every other client sees.
+
+`[server.limits].max_query_memory` (byte size), `HORNDB_SERVER__LIMITS__MAX_QUERY_MEMORY`, `max_query_memory` (per query)
+
+:   **Default:** unset — no limit.
+
+    **Scope:** config key, environment variable, or a per-query override.
+
+    **Allowed values:** a byte size in IEC units — `512MiB`, `2GiB`. Decimal
+    units such as `2GB` are an error.
+
+    **Tuning notes:** **not enforced yet.** The value is parsed, validated, and
+    carried with the query, but nothing acts on it: setting it does not stop a
+    query from using more memory than it names. It is documented because it is
+    a live, validated key — a bad value stops `serve` at startup — not because
+    it changes behaviour. Per-query memory accounting is specified separately.
+
+`[server.limits].default_graph` (string), `HORNDB_SERVER__LIMITS__DEFAULT_GRAPH`, `default_graph` (per query)
 
 :   **Default:** `union`.
 
-    **Scope:** config key or the matching environment variable. It sets the
-    server-wide default; a query overrides it with the `default_graph` URL
-    parameter below.
+    **Scope:** config key, environment variable, or a per-query override.
+    Reloadable.
 
-    **Allowed values:** `union` or `strict`, lower case. Any other value makes
-    `serve` exit at startup, naming the file and the key.
+    **Allowed values:** `union` or `strict`, lower case. Any other value in the
+    config file makes `serve` exit at startup, naming the file and the key; any
+    other value on a request returns HTTP 400 naming the parameter.
 
     **Tuning notes:** the setting decides what the *default graph* is for a
     query that names no dataset — one with no `FROM` and no `FROM NAMED`
@@ -185,24 +276,59 @@ is therefore not documented here.
     modes. Neither mode affects a query that names its own dataset, or what
     `GRAPH ?g` ranges over. Choose `strict` when comparing HornDB against
     another SPARQL store — most read the no-dataset case that way, so `union`
-    will show a difference on every unqualified query.
+    will show a difference on every unqualified query. Override it for one
+    query to check a difference without changing what other clients see:
+    `GET /query?query=…&default_graph=strict`.
 
-`default_graph` (URL query parameter on `/query`)
+## Admission control and request size
 
-:   **Default:** the value of `[server.limits].default_graph`.
+Three `[server.limits]` keys bound what the server accepts at once and how
+large a request may be. Unlike the query settings above they are **not**
+per-query and **not** reloadable: they are read once at startup and fixed for
+the life of the process, because the semaphore and the body-limit layer they
+build are wired into the router when it is constructed.
 
-    **Scope:** one query. Accepted on all three protocol channels: as a URL
-    query parameter on `GET /query` and on a direct `POST` with an
-    `application/sparql-query` body, and as a form field in an
-    `application/x-www-form-urlencoded` `POST` body. It changes nothing on the
-    server and does not affect other queries.
+`[server.limits].max_concurrent_queries` (integer), `HORNDB_SERVER__LIMITS__MAX_CONCURRENT_QUERIES`
 
-    **Allowed values:** `union` or `strict`, lower case. Any other value returns
-    HTTP 400 naming the parameter; the query does not run.
+:   **Default:** the host's available parallelism — the CPU count the process
+    can actually use.
 
-    **Tuning notes:** use it to run one query under the other mode, for example
-    `GET /query?query=…&default_graph=strict`. The meaning of each value is the
-    same as for the config key above.
+    **Allowed values:** an integer of 1 or more. `0` stops `serve` at startup
+    rather than being clamped, so a config typo is loud.
+
+    **Tuning notes:** this many read requests execute at once; the rest wait.
+    Slots gate `/query` and `GET /graphs`, the two routes that run a read over
+    the store. `/update` does not take a slot. A request holds its slot for
+    the *whole* response, not just until the first chunk, because it owns a
+    thread and a pinned read view for as long as the client is draining. Lower
+    it to protect a host from too many concurrent heavy queries; raise it when
+    requests are small and clients are numerous.
+
+`[server.limits].queue_timeout` (duration), `HORNDB_SERVER__LIMITS__QUEUE_TIMEOUT`
+
+:   **Default:** `5s`.
+
+    **Allowed values:** a duration with an explicit unit, as for
+    `query_timeout`.
+
+    **Tuning notes:** how long a request waits for a slot before the server
+    gives up on it and returns `503 Service Unavailable` with a `Retry-After`
+    header. Applies to the same two routes as `max_concurrent_queries`.
+    Shedding a request that would have queued for a long time is better than
+    holding a connection open behind an unbounded queue.
+
+`[server.limits].max_request_body` (byte size), `HORNDB_SERVER__LIMITS__MAX_REQUEST_BODY`
+
+:   **Default:** `4MiB`.
+
+    **Allowed values:** a byte size in IEC units — `1MiB`, `64MiB`.
+
+    **Tuning notes:** caps the request body on `/query`, `/update`, and
+    `/graphs`; a larger body is rejected with `413 Payload Too Large` before
+    the handler sees it. `/metrics`, `/healthz`, and `/readyz` are outside the
+    cap. Bulk ingest is unaffected: `LOAD` and `serve --data` read files from
+    disk, not request bodies. Raise it if you push large graphs over `PUT
+    /graphs`.
 
 ## Reasoning
 
@@ -367,6 +493,7 @@ catalog. It does not stop the server, and it does not affect any other view.
 
 `GET /metrics` on the server's bind address returns an OpenMetrics text
 exposition for Prometheus to scrape. No setting controls it: the route is
-always mounted alongside `/query` and `/update`, at a fixed path, with no
-separate address or port, and there is no flag or environment variable to
-disable it or move it.
+always mounted alongside the data routes, at a fixed path, with no separate
+address or port, and there is no flag or environment variable to disable it or
+move it. Unlike `/query`, `/update`, and `/graphs`, it is not subject to
+`[server.limits].max_request_body`.

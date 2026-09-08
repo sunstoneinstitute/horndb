@@ -11,7 +11,10 @@ compare. To *learn* a task, start with the [Guides](../guides/index.qmd) instead
 
 - [SPARQL functions and operators](functions.qmd) — every function, operator, and
   property-path operator HornDB evaluates, with signatures and examples.
-- [Configuration](configuration.qmd) — environment variables, CLI flags, and
-  build-time feature flags that control server and runtime behaviour.
+- [Configuration](configuration.qmd) — every setting that controls server and
+  runtime behaviour, across all four layers: the `config.toml` file (with
+  `config.d/*.toml` drop-ins), environment variables, `serve` command-line
+  flags, and build-time feature flags. Covers the named-graph and reasoning-view
+  settings as well as the server's own.
 - [Errors and diagnostics](errors.qmd) — the HTTP status codes and error
   categories the SPARQL endpoint returns today, and what is stable to rely on.

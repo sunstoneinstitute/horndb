@@ -409,9 +409,9 @@ on it; Stage 3 begins only after Stage 2 acceptance passes.
 A Python compatibility layer (PyO3/maturin) exposing rdflib-shaped term
 classes, a `Graph` facade, core operations, parse/serialize, and SPARQL
 passthrough to the Rust engine. The first increment ships the core
-graph-centric surface; `docs/rdflib.md` compares common rdflib workflows with
-the HornDB surface. Tracked as a MEDIUM *Completeness* epic in `TASKS.md`
-(#9), split into shippable increments.
+graph-centric surface; `docs/rdflib.md` explains why this binding, not the
+Rust API, is the compatibility surface. Tracked as a MEDIUM *Completeness*
+epic in `TASKS.md` (#9), split into shippable increments.
 
 The binding crate is **excluded from the Cargo workspace** so the hermetic
 `cargo build/clippy/test --workspace` never needs a Python interpreter; it is

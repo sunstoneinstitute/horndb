@@ -3,12 +3,33 @@ title: "HornDB docs"
 description: "Guides for learning HornDB and reference for looking up exact behaviour."
 ---
 
-HornDB is a graph database with a built-in OWL 2 RL reasoner: load RDF, run
-SPARQL, and get answers that include what the reasoner inferred — with
-provenance back to the facts that produced them. These docs cover two kinds of
-page, so you always know what you're reading.
+HornDB is a graph database with a built-in OWL 2 RL reasoner. Load RDF, query
+it with SPARQL 1.1 over HTTP, and — once you turn reasoning on — get answers
+that include triples the reasoner derived, not only the ones you wrote.
+
+## What the server does today
+
+- **SPARQL 1.1 query and update** at `/query` and `/update`, graded against the
+  W3C SPARQL 1.1 evaluation suite on every run so behaviour cannot drift
+  unnoticed.
+- **Named graphs and datasets.** `GRAPH` (with a ground IRI or a variable),
+  `FROM`/`FROM NAMED`, updates scoped to a named graph, and the SPARQL 1.1
+  Graph Store Protocol at `/graphs` for reading and writing one whole graph
+  over plain HTTP. Load quads from `.nq` and `.trig` files as well as triples
+  from `.nt` and `.ttl`.
+- **OWL 2 RL reasoning, off by default.** Turn it on per *view* — your
+  ontologies plus one data graph — and the triples it derives land in a
+  separate inferred graph, so reading a data graph back returns exactly the
+  quads you wrote to it. A view that derives a contradiction is flagged rather
+  than allowed to poison the rest of the store.
+- **Operations.** Layered configuration from `config.toml`, environment
+  variables, and flags, with a file watcher that applies edits to reloadable
+  settings without a restart; Prometheus metrics at `/metrics`; liveness and
+  readiness at `/healthz` and `/readyz`.
 
 ## Where to go
+
+These docs come in two kinds of page, so you always know what you're reading.
 
 - **[Guides](guides/index.qmd)** — tutorials that walk you through a task
   end-to-end, how-to guides for a specific goal, and explanations of the
