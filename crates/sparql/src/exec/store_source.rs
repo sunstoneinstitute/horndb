@@ -84,7 +84,40 @@ pub struct StoreTripleSource {
 impl StoreTripleSource {
     /// Open a source over the visible triples of `graph` in `tier`.
     pub fn new(tier: Arc<TierSnapshot>, graph: GraphId) -> Self {
-        let mut predicates = tier.predicates(graph);
+        let predicates = tier.predicates(graph);
+        Self::with_predicates(tier, graph, predicates)
+    }
+
+    /// Open a source over the triples of `graph` carrying one of `keep`.
+    ///
+    /// Only sound when the query cannot match any other predicate — every
+    /// pattern in the BGP must name a bound predicate in `keep`, which is
+    /// what `HornBackend::bgp_predicates` establishes. Rows on the omitted
+    /// predicates are invisible to this source, not merely deprioritised.
+    ///
+    /// The point is to not build leaves the cursor will never open. Serving
+    /// an object-major ordering materializes each leaf's `(o, s)` layout, and
+    /// doing that for every predicate in the graph to answer a one-predicate
+    /// pattern cost 16.6 GiB on the LDBC SPB corpus (HDB-229).
+    ///
+    /// [`Self::total_triples`] still reports the whole graph, as it does for
+    /// an unrestricted source: it feeds cardinality estimation, and changing
+    /// the number a restriction reports would move plan choices for reasons
+    /// that have nothing to do with the data.
+    pub fn for_predicates(tier: Arc<TierSnapshot>, graph: GraphId, keep: &[TermId]) -> Self {
+        let predicates = tier
+            .predicates(graph)
+            .into_iter()
+            .filter(|p| keep.contains(p))
+            .collect();
+        Self::with_predicates(tier, graph, predicates)
+    }
+
+    fn with_predicates(
+        tier: Arc<TierSnapshot>,
+        graph: GraphId,
+        mut predicates: Vec<TermId>,
+    ) -> Self {
         predicates.sort_by_key(|p| p.0);
         let total = tier.graph_len(graph);
         Self {

@@ -673,9 +673,11 @@ fn land_stats(
 }
 
 /// The one memoised direct source: the tier version it was opened at, the
-/// graph it reads, and the source itself. Version-tagged the same way
-/// [`StatsCacheEntry`] is — see `HornBackend::direct_cache`.
-type DirectCacheEntry = (u64, GraphId, Arc<StoreTripleSource>);
+/// graph it reads, the predicate restriction it was built with (`None` for
+/// the whole graph — see `HornBackend::bgp_predicates`), and the source
+/// itself. Version-tagged the same way [`StatsCacheEntry`] is — see
+/// `HornBackend::direct_cache`.
+type DirectCacheEntry = (u64, GraphId, Option<Vec<TermId>>, Arc<StoreTripleSource>);
 
 /// One full snapshot scan into a [`SnapshotStats`], counted and timed as
 /// `horndb_sparql_stats_rebuild`.
@@ -1725,33 +1727,93 @@ impl HornBackend {
     /// the direct source is opt-in until a hornbench A/B says it should not be
     /// (see [`direct_source_enabled`] and the `serving footprint` row in
     /// `docs/benchmarks.md`).
-    fn query_source(&self, scope: &SnapshotScope) -> QuerySource {
+    /// `patterns` narrows the direct source to the predicates the BGP can
+    /// match — see [`Self::bgp_predicates`]. It does not affect the memoised
+    /// copy, whose orderings are whole-scope by construction.
+    fn query_source(&self, scope: &SnapshotScope, patterns: &[TriplePattern]) -> QuerySource {
         if self.direct_source {
             if let Some(g) = self.direct_graph(scope) {
-                return QuerySource::Direct(self.direct_source_for(g));
+                let keep = self.bgp_predicates(patterns);
+                return QuerySource::Direct(self.direct_source_for(g, keep));
             }
         }
         QuerySource::Copy(self.wcoj_snapshot(scope))
     }
 
+    /// The bound predicate ids of every pattern in `patterns`, or `None` when
+    /// the BGP admits no restriction.
+    ///
+    /// A source holding only these predicates answers the BGP exactly: no
+    /// pattern can match a triple carrying any other predicate. `None` means
+    /// no restriction is sound — a free predicate ranges over the whole graph
+    /// — and yields the full leaf set. A predicate the dictionary does not
+    /// know matches nothing, so leaving it out of the set is correct.
+    ///
+    /// Empty `patterns` is `None` rather than "restrict to nothing": the
+    /// callers short-circuit the empty BGP before they ask for a source, and
+    /// an empty restriction reaching one would be indistinguishable from a
+    /// bug.
+    fn bgp_predicates(&self, patterns: &[TriplePattern]) -> Option<Vec<TermId>> {
+        if patterns.is_empty() {
+            return None;
+        }
+        let dict = self.store.dictionary();
+        let mut out = Vec::with_capacity(patterns.len());
+        for pattern in patterns {
+            match &pattern.predicate {
+                Term::Var(_) => return None,
+                constant => {
+                    let ox = algebra_to_oxrdf(constant).ok()?;
+                    if let Some(id) = dict.get(&ox) {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out.sort_unstable_by_key(|t| t.0);
+        out.dedup();
+        Some(out)
+    }
+
     /// A [`StoreTripleSource`] over `graph` at the version this backend reads
-    /// at, reusing the cached one when both still match — see `direct_cache`.
+    /// at, holding the leaves in `keep` (all of them when `None`), and reusing
+    /// the cached one when all three still match — see `direct_cache`.
     ///
     /// Goes through [`Self::snap`], so a pinned read view (HDB-119) opens the
     /// source over *its* tier state, not the store's latest: the returned
     /// `Arc<TierSnapshot>` is the pinned one, and its `version()` is the
     /// pinned commit version, which is what keys the cache.
-    fn direct_source_for(&self, graph: GraphId) -> Arc<StoreTripleSource> {
+    ///
+    /// `keep` is part of the cache key, so consecutive queries over different
+    /// predicates rebuild the source. The expensive half of a leaf — the
+    /// object-major layout — is memoised inside the partition, so an
+    /// insert-only store re-clones `Arc`s it has already paid for. A
+    /// partition holding retractions still materializes its visible subset
+    /// per `ordered_at` call, so a rebuild costs one copy of each *named*
+    /// partition; before the restriction the first query on a version paid
+    /// that for every partition in the graph, so the per-query worst case
+    /// only shrank. What it buys is not paying for the leaves the cursor
+    /// never opens (HDB-229): serving an object-major ordering used to
+    /// materialize that layout for *every* predicate in the graph, 32 B/row
+    /// over the whole graph, retained for the life of the process.
+    fn direct_source_for(
+        &self,
+        graph: GraphId,
+        keep: Option<Vec<TermId>>,
+    ) -> Arc<StoreTripleSource> {
         let tier = self.snap().tier_arc();
         let version = tier.version();
         let mut guard = self.direct_cache.lock().expect("direct cache poisoned");
-        if let Some((v, g, src)) = guard.as_ref() {
-            if *v == version && *g == graph {
+        if let Some((v, g, k, src)) = guard.as_ref() {
+            if *v == version && *g == graph && *k == keep {
                 return Arc::clone(src);
             }
         }
-        let src = Arc::new(StoreTripleSource::new(tier, graph));
-        *guard = Some((version, graph, Arc::clone(&src)));
+        let src = Arc::new(match keep.as_deref() {
+            Some(keep) => StoreTripleSource::for_predicates(tier, graph, keep),
+            None => StoreTripleSource::new(tier, graph),
+        });
+        *guard = Some((version, graph, keep, Arc::clone(&src)));
         src
     }
 
@@ -2423,7 +2485,7 @@ impl Executor for HornBackend {
             return Ok(Box::new(rows.into_iter()));
         }
 
-        let snapshot = self.query_source(&resolved);
+        let snapshot = self.query_source(&resolved, patterns);
         let dict = self.store.dictionary();
 
         // SPARQL variable name -> WCOJ var index, first-appearance order.
@@ -2683,7 +2745,7 @@ impl Executor for HornBackend {
             });
         }
 
-        let snapshot = self.query_source(&resolved);
+        let snapshot = self.query_source(&resolved, patterns);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -2910,7 +2972,7 @@ impl Executor for HornBackend {
             )));
         }
 
-        let snapshot = self.query_source(&resolved);
+        let snapshot = self.query_source(&resolved, patterns);
         let dict = self.store.dictionary();
 
         let mut var_index: HashMap<String, u8> = HashMap::new();
@@ -3024,7 +3086,7 @@ impl Executor for HornBackend {
             return Ok(None);
         }
 
-        let snapshot = self.query_source(&resolved);
+        let snapshot = self.query_source(&resolved, patterns);
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
