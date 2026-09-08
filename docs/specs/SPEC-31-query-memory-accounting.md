@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-09-08
-scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's blocking-operator row buffers, the refusal contract when a query crosses its ceiling, the default, and what each later phase adds to the accounting"
+scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's blocking-operator row buffers, the refusal contract when a query crosses its ceiling, the default, what each later phase adds to the accounting, and why store-side index growth is bounded elsewhere"
 ---
 
 # SPEC-31 — Per-query memory accounting
@@ -44,15 +44,16 @@ The cgroup ceiling is a host guard, not a fix: it converts "the machine dies"
 into "the server dies". Neither is an acceptable answer to one expensive query.
 The server should refuse the query and keep serving.
 
-**The growth has two distinct sources, and only one is this spec's.** The A/B
-above splits them: ~24 GiB is the memoised whole-scope `VecTripleSource` that
-the first query on a commit version builds and every later query reuses
-(`HornBackend`'s snapshot memo) — store-side, amortised, and *not* attributable
-to the query that happened to trigger it. The remaining **~16.6 GiB is the
-query's own execution**, for a COUNT whose answer is one row. That second
-number is what a per-query budget must bound, and ~3.6 kB per counted row is
-its own defect (HDB-229) — the bound stops the bleeding, it does not explain
-it.
+**Neither number in the A/B was query memory.** HDB-229 measured where the
+growth went. The ~24 GiB is the memoised whole-scope `VecTripleSource` that
+the first query on a commit version builds and every later query reuses. The
+~16.6 GiB was a second index: the query binds predicate and object, so the
+trie reads an object-major ordering, and building one laid out the `(o, s)`
+columns of every predicate partition in the graph. Both are store-side — built
+once, kept for the life of the process, shared by later queries. The executor
+holds none of it. HDB-229 removed the second index for this shape; HDB-230
+tracks what remains of the first. See "What this spec does not bound, and
+why" below.
 
 A corollary worth recording: a serving footprint measured at load time
 understates the real one badly. The SF=0.128 corpus loads in 23.7 GiB and
@@ -66,7 +67,11 @@ footprint past the 124 GiB host, which is why 2026-09-05 never had a chance.
   also tax every allocation in the process. This spec charges at the executor's
   accumulation points instead, which is where unbounded growth actually lives.
 - **Bounding the store, dictionary or index memory.** Those are sized by the
-  corpus, not by a query, and belong to SPEC-02/SPEC-25.
+  corpus, not by a query, and belong to SPEC-02/SPEC-25. This includes
+  index-like structures a query *triggers* but does not own: the snapshot
+  memo, derived orderings, and direct-source leaves. They are amortised
+  across queries, so a per-query budget is the wrong instrument for them (see
+  below). They get a separate bound, HDB-231.
 - **Spilling to disk.** An over-budget query is refused, not spilled. External
   sort/hash is a later phase and a much larger change (it makes blocking
   operators restartable); the bound has to exist before spilling has anything
@@ -161,13 +166,43 @@ process. A query always uses somewhat more than its charge says. Not counted:
 - WCOJ iterator state during a scan;
 - the response serialization buffer (bounded separately by the stream channel);
 - allocator overhead per allocation, and `Term::Triple`'s nested patterns,
-  neither of which `Row::heap_bytes` walks — so the charge reads slightly low.
+  neither of which `Row::heap_bytes` walks — so the charge reads slightly low;
+- the materialized result of the non-streaming path: `execute_query`'s
+  `QueryAnswer::Solutions { rows }` and the server's `run_materialized`
+  (ASK/CONSTRUCT/DESCRIBE/EXPLAIN) collect every row before serializing, and
+  that collection is not charged. Streaming SELECT is bounded by
+  `max_result_rows`; the materialized path is bounded by neither. Known gap,
+  phase 2 candidate; found by reading, not measured.
 
 Writing that down is the point: an operator setting 8 GiB should read it as "no
 query's blocking operators may accumulate more than 8 GiB", not as "no query
 may add more than 8 GiB of RSS".
 
-## Status — phase 1 does not yet bound the query that motivated the spec
+## What this spec does not bound, and why
+
+The 16.6 GiB in the Problem measurement was a second index, not query memory:
+the demonstration query binds predicate and object, so the trie reads an
+object-major ordering, and building one laid out the `(o, s)` columns of every
+predicate partition in the graph. Two paths can produce it — a direct source
+builds a leaf for every predicate; a memoised source derives one whole-scope
+ordering from the `Pso` anchor and reuses it. Either way, the index is
+store-side: built once, kept for the process, and shared by every later
+query, including ones that never asked for it.
+
+A per-query budget must not charge it, because the bound would depend on
+arrival order. The first query to need the ordering would be refused at
+8 GiB; an identical second query would be served from the index the first
+was refused for building. A per-query limit has to be a property of the
+query alone. Store-side growth needs a bound whose unit is the store — a
+ceiling on the memo, or a decision not to build — not a charge to whichever
+query arrives first.
+
+That bound is tracked separately: HDB-230 (do not derive the second ordering
+on the default path) and HDB-231 (the store-side ceiling). After HDB-229 the
+demonstration query allocates almost nothing on either path, which is why the
+original acceptance criterion 6 was replaced rather than kept open.
+
+## Status — phase 1 bounds what it says it bounds
 
 Measured on hornbench, 2026-09-08, commit `917f8f0`, SF=0.128 corpus, server
 ceiling raised to 1 TiB so the query would complete and its charge be readable:
@@ -179,34 +214,27 @@ ceiling raised to 1 TiB so the query would complete and its charge be readable:
 | `horndb_sparql_query_memory_peak_bytes_sum` | **0** |
 | the same query with `?max_query_memory=8GiB` | HTTP 200, `queries_over_budget_total` **0** |
 
-**Acceptance criterion 6 is not met.** The budget charged this query nothing
-while the server grew by 40.7 GiB, which means its memory is not in a blocking
-operator's row buffer: the aggregate is served by the `CountBgp` pushdown
-(#144), which yields one row and drains nothing, so there is no accumulation
-for `drain` to charge. The 16.6 GiB of query-side growth lives below the
-operator layer — in the scan / WCOJ / source machinery — where phase 1 does not
-reach.
+**The zero was correct, not a gap.** The budget charged this query nothing
+because the aggregate is served by the `CountBgp` pushdown (#144), which
+yields one row and drains nothing — there is no accumulation for `drain` to
+charge. The 40.7 GiB of RSS growth was in the store's snapshot memo and
+object-major index, not in a blocking operator's buffer, and the instrument
+said exactly that.
 
-What phase 1 *does* do stands: GROUP BY, ORDER BY, UNION, the hash-join build
-sides, MINUS and path closure are charged and refuse over budget, proven by
-`crates/sparql/tests/server_http.rs`. That covers the operators that
-accumulate by construction. It does not yet cover this workload, and the spec
-records that rather than claiming the ceiling is load-bearing where it is not.
+GROUP BY, ORDER BY, UNION, the hash-join build sides, MINUS and path closure
+are charged and refuse over budget. Tasks 2–4 of this spec's implementation
+plan add the tests that prove each acceptance criterion below, including the
+rewritten criterion 6. That covers every operator that accumulates by
+construction, which is what this spec bounds.
 
-Finding and charging the 16.6 GiB is **HDB-229**, and it is the gate on
-calling `max_query_memory` a real bound. Until it lands, the cgroup ceiling
-(`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`) is what actually
-keeps a bench host alive.
+The cgroup ceiling (`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`)
+remains the host guard against *store-side* growth until HDB-231 lands.
 
 ## Phases
 
 - **Phase 1 (this spec, landed).** Charge blocking-operator row buffers; refuse
-  over budget; 8 GiB default; the two metrics. Measured above: necessary, not
-  yet sufficient.
-- **Phase 1.5 (HDB-229, open).** Locate the query-side memory the operator
-  layer does not see and charge it where it is allocated. Phase 1's peak metric
-  reading zero against a 40 GiB RSS growth is the instrument that found this,
-  and is how the fix will be confirmed.
+  over budget; 8 GiB default; the two metrics. HDB-229 (merged) removed the
+  index build phase 1 was first blamed for.
 - **Phase 2.** Charge the derived structures those buffers feed — the join hash
   index, the group-by hash table, the top-k heap. Proportional to what phase 1
   already charges, so phase 1 bounds them within a constant; phase 2 makes the
@@ -229,9 +257,17 @@ keeps a bench host alive.
    `None` remains expressible and means unbounded.
 5. `horndb_sparql_query_memory_peak_bytes` is observed exactly once per query,
    on every exit path.
-6. The LDBC SPB parameter-sampling query that grew the server by 16.6 GiB of
-   query-side memory (HDB-167) charges that memory to its budget, and is
-   therefore refused at the 8 GiB default instead of being served. **This is
-   the criterion that proves the charge points are the right ones**: if the
-   query's peak charge reads near zero while its RSS grows by gigabytes, the
-   budget is measuring something other than where the memory goes.
+6. The charge tracks what a blocking operator holds, not a fixed trip-wire.
+   For a `GROUP BY` whose aggregate the count pushdown cannot serve — so
+   `GroupOp` drains its whole input — the query's peak charge grows in
+   proportion to the input: ten times the rows charges about ten times the
+   bytes. A ceiling set between the charge for N rows and the charge for 10N
+   rows admits the first query and refuses the second. **This is the
+   criterion that proves the charge points are the right ones:** a budget
+   that only trips at one byte, or that reads the same for 1 000 rows as for
+   10 000, is measuring something other than the rows the operator keeps.
+7. The boundary with the store-side bound is pinned. The single-predicate
+   `COUNT` that motivated this spec charges **0** bytes to its query, and any
+   footprint it adds shows up in `HornBackend::memory_split().snapshots`, not
+   in `horndb_sparql_query_memory_peak_bytes`. A change that starts charging
+   store-side memory to a query fails this criterion.

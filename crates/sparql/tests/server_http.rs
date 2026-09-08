@@ -1925,4 +1925,78 @@ mod spec26_query_settings {
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body.lines().count(), 5_001);
     }
+
+    /// SPEC-31 AC6 over HTTP: `GroupOp` drains its child (a `MAX` aggregate
+    /// keeps the plan on `GroupOp` rather than the `CountScan` pushdown a
+    /// plain `COUNT` would take), so its row buffer is sized, not just
+    /// present-or-absent. `MemStore` rows arrive as `Slot::Term` strings via
+    /// `Batch::from_bindings`; 500 rows stay well under 1 MiB even at 1 kB/row,
+    /// and 50 000 rows exceed it even at 24 B/row.
+    #[tokio::test]
+    async fn max_query_memory_sized_ceiling_group_by() {
+        let q = "/query?query=SELECT%20%3Fp%20(MAX(%3Fo)%20AS%20%3Fm)%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20GROUP%20BY%20%3Fp&max_query_memory=1MiB";
+
+        let (status, body) = get(router_with_rows(500, Limits::default()), q).await;
+        assert_eq!(status, StatusCode::OK, "500 rows must fit 1 MiB: {body}");
+
+        let (status, body) = get(router_with_rows(50_000, Limits::default()), q).await;
+        assert_eq!(
+            status,
+            StatusCode::INSUFFICIENT_STORAGE,
+            "50 000 rows must exceed 1 MiB: {body}"
+        );
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
+
+    /// SPEC-31: a 1-byte ceiling refuses every remaining `drain` funnel
+    /// entry (blocking.rs), one query shape per operator, so a future
+    /// change that drops any single operator's `Reservation` is caught here
+    /// rather than only by Task 2's proportionality test. `JoinOp`'s build
+    /// side is covered too — the subselect-join shape below was checked via
+    /// `EXPLAIN` to still produce a `Join` node (the planner does not fold
+    /// it into one BGP scan).
+    #[tokio::test]
+    async fn max_query_memory_refuses_union_op_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20UNION%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20%7D";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "body: {body}");
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn max_query_memory_refuses_left_join_op_build_side_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20%3Fo2%20WHERE%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fex%2Fp%3E%20%3Fo%20OPTIONAL%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fex%2Fp%3E%20%3Fo2%20%7D%20%7D";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "body: {body}");
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn max_query_memory_refuses_minus_op_build_side_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20MINUS%20%7B%20%3Fs%20%3Fp%20%3Fo%20%7D%20%7D";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "body: {body}");
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn max_query_memory_refuses_path_closure_op_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20%3Fo%20WHERE%20%7B%20%3Fs%20%3Chttp%3A%2F%2Fex%2Fp%3E%2B%20%3Fo%20%7D";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "body: {body}");
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn max_query_memory_refuses_join_op_build_side_over_budget() {
+        let app = router_with_rows(5_000, Limits::default());
+        let q = "/query?query=SELECT%20%3Fs%20WHERE%20%7B%20%3Fs%20%3Fp%20%3Fo%20.%20%7B%20SELECT%20%3Fo%20WHERE%20%7B%20%3Fx%20%3Chttp%3A%2F%2Fex%2Fp%3E%20%3Fo%20%7D%20%7D%20%7D";
+        let (status, body) = get(app, &format!("{q}&max_query_memory=1")).await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE, "body: {body}");
+        assert!(body.contains("query memory limit exceeded"), "body: {body}");
+    }
 }
