@@ -40,6 +40,8 @@
 //! See `plans/PLAN-04-01-owl-rl-rule-engine.md` for the full plan.
 
 pub mod backend;
+#[cfg(feature = "graphblas-backend")]
+pub(crate) mod closure_shape;
 pub mod datatype_literals;
 pub mod datatype_ranges;
 pub mod datatypes;
