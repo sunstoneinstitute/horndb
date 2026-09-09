@@ -46,6 +46,7 @@ Each entry names the spec (and crate notes) to read; current implementation stat
 - The WCOJ / join executor → [`architecture/wcoj.md`](architecture/wcoj.md) first, then [`specs/SPEC-03-query-engine.md`](specs/SPEC-03-query-engine.md) and the crate notes ([`../crates/wcoj/CLAUDE.md`](../crates/wcoj/CLAUDE.md) + `INTEGRATION-NOTES.md`).
 - The SPARQL HTTP surface → [`../crates/sparql/README.md`](../crates/sparql/README.md).
 - Operator configuration (config files, live reload, per-query settings) → [`specs/SPEC-26-config-system.md`](specs/SPEC-26-config-system.md); status in `architecture.md` §15.
+- Bounding what one query may allocate (`max_query_memory`) → [`specs/SPEC-31-query-memory-accounting.md`](specs/SPEC-31-query-memory-accounting.md), the companion SPEC-26 S5 deferred enforcement to; read its "what the charge does and does not cover" section before quoting the number — it bounds the executor's row buffers, not process RSS. Status in `architecture.md` §15.
 - Observability / metrics → [`specs/SPEC-17-metrics.md`](specs/SPEC-17-metrics.md) and [`metrics.md`](metrics.md); status in `architecture.md` §16.
 
 ## Progressive discovery guidance for agents

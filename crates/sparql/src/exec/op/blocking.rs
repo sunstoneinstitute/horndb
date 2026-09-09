@@ -14,6 +14,7 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::Result;
+use crate::exec::budget::Reservation;
 use crate::exec::phases;
 use crate::exec::runtime::{referenced_vars, JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
@@ -27,14 +28,30 @@ use std::collections::HashSet;
 /// input path, which HDB-99 left outside every named phase. `op.next()` is
 /// deliberately outside the clock: it is the child operator's own work, and
 /// timing it here would break `sum(named) <= exec`.
-pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>) -> Result<Batch> {
+///
+/// SPEC-31: every chunk is charged to `res` **before** it is appended, so a
+/// query that would blow past `max_query_memory` fails on the chunk that
+/// crosses the line rather than after allocating it. This is the executor's
+/// one unbounded accumulation point — a streaming operator holds one chunk,
+/// a blocking one holds the whole input — so charging here covers GROUP BY,
+/// ORDER BY, both hash joins, MINUS and property-path closure at once.
+/// `res` belongs to the calling operator and must outlive the rows it keeps.
+pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>, res: &mut Reservation) -> Result<Batch> {
     let schema = op.schema().to_vec();
     let mut rows: Vec<Row> = Vec::new();
     while let Some(b) = op.next()? {
+        res.grow(chunk_bytes(&b.rows))?;
         let n = b.rows.len() as u64;
         phases::timed(ExecPhase::DrainExtend, n, || rows.extend(b.rows));
     }
     Ok(Batch { schema, rows })
+}
+
+/// Bytes a chunk of rows adds to an accumulating `Vec<Row>`: each row's own
+/// slots and strings, plus the `Row` handle in the spine.
+pub(super) fn chunk_bytes(rows: &[Row]) -> u64 {
+    let spine = std::mem::size_of_val(rows) as u64;
+    spine + rows.iter().map(Row::heap_bytes).sum::<u64>()
 }
 
 /// Static `may_emit_term` for a two-child merge (`Union`, `Join`, `LeftJoin`):
@@ -78,6 +95,9 @@ pub struct UnionOp<'r, E: Executor + ?Sized> {
     schema: Vec<Var>,
     /// Populated on the first `next()` call; `None` before that point.
     buffer: Option<ChunkedBatch>,
+    /// SPEC-31 charge for the drained input. Released when the operator
+    /// drops, i.e. when the rows it paid for are gone.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> UnionOp<'r, E> {
@@ -89,6 +109,7 @@ impl<'r, E: Executor + ?Sized> UnionOp<'r, E> {
             right,
             schema,
             buffer: None,
+            res: Reservation::new(),
         }
     }
 }
@@ -109,12 +130,18 @@ impl<'r, E: Executor + ?Sized> Op for UnionOp<'r, E> {
         }
 
         // First call: drain both children and build the combined row set.
+        // SPEC-31: charged per chunk, like `drain`, but after
+        // `apply_union_chunk` — that is the shape actually retained.
         let mut rows: Vec<Row> = Vec::new();
         while let Some(chunk) = self.left.next()? {
-            rows.extend(self.rt.apply_union_chunk(chunk, &self.schema)?);
+            let mapped = self.rt.apply_union_chunk(chunk, &self.schema)?;
+            self.res.grow(chunk_bytes(&mapped))?;
+            rows.extend(mapped);
         }
         while let Some(chunk) = self.right.next()? {
-            rows.extend(self.rt.apply_union_chunk(chunk, &self.schema)?);
+            let mapped = self.rt.apply_union_chunk(chunk, &self.schema)?;
+            self.res.grow(chunk_bytes(&mapped))?;
+            rows.extend(mapped);
         }
 
         // Normalize over the combined row set (see module-level doc for why
@@ -142,6 +169,9 @@ pub struct JoinOp<'r, E: Executor + ?Sized> {
     pending: Option<ChunkedBatch>,
     done: bool,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained build side. Held as long as `state`
+    /// is, and released when the operator drops.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
@@ -155,6 +185,7 @@ impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
             pending: None,
             done: false,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -180,7 +211,7 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
             }
             // 2. First call: drain the build side and index it.
             if self.state.is_none() {
-                let build = drain(&mut self.right)?;
+                let build = drain(&mut self.right, &mut self.res)?;
                 if build.rows.is_empty() {
                     // Inner join over an empty build side is empty; end the
                     // stream without pulling the probe side at all.
@@ -233,6 +264,9 @@ pub struct MinusOp<'r, E: Executor + ?Sized> {
     pending: Option<ChunkedBatch>,
     done: bool,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained build side. Held as long as `state`
+    /// is, and released when the operator drops.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> MinusOp<'r, E> {
@@ -246,6 +280,7 @@ impl<'r, E: Executor + ?Sized> MinusOp<'r, E> {
             pending: None,
             done: false,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -273,7 +308,7 @@ impl<'r, E: Executor + ?Sized> Op for MinusOp<'r, E> {
             // 2. First call: drain the build side (right) and index it. An
             //    empty build side still streams — every `left` row survives.
             if self.state.is_none() {
-                let build = drain(&mut self.right)?;
+                let build = drain(&mut self.right, &mut self.res)?;
                 let left_may_term = self.left.may_emit_term();
                 let build_rows = build.rows.len() as u64;
                 self.state = Some(phases::timed(ExecPhase::JoinBuild, build_rows, || {
@@ -324,6 +359,9 @@ pub struct LeftJoinOp<'r, E: Executor + ?Sized> {
     pending: Option<ChunkedBatch>,
     done: bool,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained build side. Held as long as `state`
+    /// is, and released when the operator drops.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
@@ -348,6 +386,7 @@ impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
             pending: None,
             done: false,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -374,7 +413,7 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
             // 2. First call: drain the build side and index it. An empty
             //    build side still streams (probe rows get Unbound fills).
             if self.state.is_none() {
-                let build = drain(&mut self.right)?;
+                let build = drain(&mut self.right, &mut self.res)?;
                 let left_may_term = self.left.may_emit_term();
                 let build_rows = build.rows.len() as u64;
                 self.state = Some(phases::timed(ExecPhase::JoinBuild, build_rows, || {
@@ -416,6 +455,9 @@ pub struct GroupOp<'r, E: Executor + ?Sized> {
     aggregates: Vec<Aggregate>,
     buffer: Option<ChunkedBatch>,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained input. Released when the operator
+    /// drops, i.e. when the rows it paid for are gone.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> GroupOp<'r, E> {
@@ -433,6 +475,7 @@ impl<'r, E: Executor + ?Sized> GroupOp<'r, E> {
             aggregates,
             buffer: None,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -465,7 +508,7 @@ impl<'r, E: Executor + ?Sized> Op for GroupOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
-            let b = drain(&mut self.child)?;
+            let b = drain(&mut self.child, &mut self.res)?;
             self.buffer = Some(ChunkedBatch::new(self.rt.eval_group_native(
                 b,
                 &self.keys,
@@ -493,6 +536,9 @@ pub struct OrderByOp<'r, E: Executor + ?Sized> {
     limit: Option<usize>,
     buffer: Option<ChunkedBatch>,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained input. Released when the operator
+    /// drops, i.e. when the rows it paid for are gone.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> OrderByOp<'r, E> {
@@ -530,6 +576,7 @@ impl<'r, E: Executor + ?Sized> OrderByOp<'r, E> {
             limit,
             buffer: None,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -544,7 +591,7 @@ impl<'r, E: Executor + ?Sized> Op for OrderByOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
-            let b = drain(&mut self.child)?;
+            let b = drain(&mut self.child, &mut self.res)?;
             let sorted = match self.limit {
                 Some(n) => self.rt.compute_top_k(b, &self.keys, n)?,
                 None => self.rt.compute_order_by(b, &self.keys)?,
@@ -581,6 +628,9 @@ pub struct PathClosureOp<'r, E: Executor + ?Sized> {
     reflexive: bool,
     buffer: Option<ChunkedBatch>,
     schema: Vec<Var>,
+    /// SPEC-31 charge for the drained input. Released when the operator
+    /// drops, i.e. when the rows it paid for are gone.
+    res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
@@ -600,6 +650,7 @@ impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
             reflexive,
             buffer: None,
             schema,
+            res: Reservation::new(),
         }
     }
 }
@@ -614,7 +665,7 @@ impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
     }
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
-            let edge_batch = drain(&mut self.edge)?;
+            let edge_batch = drain(&mut self.edge, &mut self.res)?;
             self.buffer = Some(ChunkedBatch::new(self.rt.compute_path_closure(
                 edge_batch,
                 &self.subject,

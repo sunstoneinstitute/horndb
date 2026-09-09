@@ -5,6 +5,7 @@
 //! production implementation through the same trait.
 
 pub mod batch;
+pub mod budget;
 pub mod cancel;
 #[cfg(feature = "incremental")]
 pub mod circuit;

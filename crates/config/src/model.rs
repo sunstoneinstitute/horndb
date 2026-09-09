@@ -24,7 +24,10 @@ mod tests {
         assert_eq!(cfg.server.limits.query_timeout.0, Duration::from_secs(30));
         assert_eq!(cfg.server.limits.max_result_rows, 1_000_000);
         assert!(!cfg.server.limits.rdf12);
-        assert_eq!(cfg.server.limits.max_query_memory, None);
+        assert_eq!(
+            cfg.server.limits.max_query_memory,
+            Some(DEFAULT_MAX_QUERY_MEMORY)
+        );
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Union);
         assert_eq!(cfg.server.shutdown_drain.0, Duration::from_secs(30));
         assert_eq!(
@@ -311,6 +314,10 @@ pub struct Limits {
     pub query_timeout: HumanDuration,
     pub max_result_rows: u64,
     pub rdf12: bool,
+    /// SPEC-31: ceiling on the row buffers one query's executor may hold.
+    /// `None` is unbounded — accepted, but it is what let a single query
+    /// take a 124 GiB bench host down (HDB-167), so the default is a real
+    /// number rather than `None`.
     pub max_query_memory: Option<ByteSize>,
     /// SPEC-28 S3/D2: how the no-dataset default graph is composed.
     pub default_graph: DefaultGraph,
@@ -329,13 +336,25 @@ pub struct Limits {
 /// Fallback when the core count is unavailable (e.g. a restricted container).
 const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 8;
 
+/// Default `max_query_memory` (SPEC-31).
+///
+/// 8 GiB is chosen to be generous for any query a well-sized deployment
+/// actually runs and still small enough that `max_concurrent_queries`
+/// queries at the ceiling do not exhaust a normal server: it is a per-query
+/// bound, so the worst case is this times the concurrency limit. It is not
+/// derived from total RAM — the config layer has no reliable view of what
+/// else shares the machine, and a limit that silently grows with the host
+/// is one nobody can reason about. Operators sizing a box for concurrent
+/// heavy queries should set it explicitly.
+const DEFAULT_MAX_QUERY_MEMORY: ByteSize = ByteSize(8 * 1024 * 1024 * 1024);
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
             query_timeout: HumanDuration(Duration::from_secs(30)),
             max_result_rows: 1_000_000,
             rdf12: false,
-            max_query_memory: None,
+            max_query_memory: Some(DEFAULT_MAX_QUERY_MEMORY),
             default_graph: DefaultGraph::default(),
             max_concurrent_queries: std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -599,10 +618,8 @@ impl QuerySettings {
                     _ => return Err(bad("expected `true` or `false`")),
                 }
             }
-            // SPEC-26 S5: parsed and stored, NOT enforced. Real per-query
-            // memory accounting is the companion spec's job; until it lands
-            // this knob is accepted so operators can write it, and the API
-            // docs say plainly that it does not yet bound anything.
+            // SPEC-31 enforces this against the executor's row buffers;
+            // it does not bound store-side memory (HDB-231).
             "max_query_memory" => {
                 self.max_query_memory = Some(value.parse().map_err(|e: String| bad(&e))?)
             }

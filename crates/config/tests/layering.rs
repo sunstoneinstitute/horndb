@@ -116,8 +116,12 @@ fn missing_default_file_is_ok_missing_explicit_is_error() {
     assert!(load(&inputs).is_err());
 
     // No file anywhere (default path unlikely to exist in CI) -> defaults.
+    // SPEC-31: the built-in default is a real ceiling, not `None`.
     let cfg = load(&LoadInputs::default()).unwrap();
-    assert_eq!(cfg.server.limits.max_query_memory, None::<ByteSize>);
+    assert_eq!(
+        cfg.server.limits.max_query_memory,
+        Some(ByteSize(8 * 1024 * 1024 * 1024))
+    );
 }
 
 #[test]

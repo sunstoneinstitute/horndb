@@ -82,6 +82,31 @@ pub enum KeyPart {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row(pub Vec<Slot>);
 
+impl Row {
+    /// Bytes this row occupies, for the SPEC-31 memory budget: its slot
+    /// vector plus any string a `Slot::Term` owns.
+    ///
+    /// ponytail: allocator overhead and `Term::Triple`'s nested patterns are
+    /// not walked, so this reads low — by a small constant per row for the
+    /// former, and by however deep a triple term nests for the latter (RDF
+    /// 1.2 only, and never produced by a scan). The budget is a bound on
+    /// growth, not an exact measure; see SPEC-31.
+    pub fn heap_bytes(&self) -> u64 {
+        let slots = (self.0.capacity() * std::mem::size_of::<Slot>()) as u64;
+        let strings: u64 = self
+            .0
+            .iter()
+            .map(|s| match s {
+                Slot::Term(Term::Iri(t) | Term::BlankNode(t) | Term::Literal(t)) => {
+                    t.capacity() as u64
+                }
+                _ => 0,
+            })
+            .sum();
+        slots + strings
+    }
+}
+
 /// A block of rows sharing one schema.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
