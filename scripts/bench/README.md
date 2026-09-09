@@ -151,3 +151,24 @@ ships `examples/data/{univ-bench.owl,lubm1.ttl}`; feeding the same data to
 HornDB needs the `univ-bench.owl` TBox converted from OWL functional syntax to
 N-Triples (e.g. via RDFox `export`), since `horndb-bench` reads N-Triples only.
 That conversion step is the main missing piece and is left as a follow-up.
+
+## Other scripts in this directory
+
+`compare-rdfox.sh` is the only one this README documents in depth; the rest carry
+their contract in their own header comment. They are driven by
+[`../../.github/workflows/bench.yml`](../../.github/workflows/bench.yml), which is
+the only route to the `hornbench` host for anyone without ssh:
+
+    gh workflow run bench.yml --ref <branch> -f script=scripts/bench/<name>.sh
+
+| Script | What it does |
+|---|---|
+| `audit-pass.sh` | One pass over the benches that landed with the audit PRs. |
+| `exec-phases.sh`, `seminaive-ab.sh`, `footprint-split.sh`, `trainmarks.sh` | Per-topic bench legs. |
+| `spb-capacity-probe.sh` | Read-only: does hornbench have the RAM/disk/toolchain for SF=0.256? |
+| `spb-sf256-recon.sh` | Read-only: what the prepared SPB asset tree actually contains. |
+| `spb-sf256-calibrate.sh` | Runs the generate→materialize pipeline at 1/32 scale to measure its rates. |
+| `spb-sf256-materialize.sh` | Measures what closing and serving an SPB corpus costs (peak RSS, expansion). |
+| `spb-sf256-build.sh` | Builds the SF=0.256 closure: generate 256 M Creative Work triples, close them in slices. |
+| `spb-sf256-bootstrap-engines.sh` | Loads that closure into every nightly A/B engine and publishes it into the asset tree. |
+| `spb-sf256-smoke.sh` | Runs the nightly scenario (editorial agents on) against HornDB and GraphDB for a first reading. |
