@@ -35,7 +35,7 @@ Before writing the changelog, skim the commits since the last tag and confirm th
 - **docs/architecture.md** — Status fields for any subsystem whose state changed (this is the "current state" view; it should already be in sync per the repo's same-commit rule).
 - **docs/** and public API docs — any surface a downstream user touches.
 
-If everything is current, say so and move on. Do not treat internal-only docs (`TASKS.md`, plans, INTEGRATION-NOTES) as release blockers — they track outstanding work, not the release surface.
+If everything is current, say so and move on. Do not treat internal-only docs (plans, INTEGRATION-NOTES) or open Worklode tasks as release blockers — they track outstanding work, not the release surface.
 
 ## Step 3: Write the changelog entry
 
