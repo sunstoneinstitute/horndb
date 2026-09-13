@@ -13,13 +13,24 @@ These files drive the project — keep them in mind when planning work:
 
 - `docs/specs/SPEC-00..10-*.md` — subsystem contracts. Each ends with **Acceptance criteria** that gate the spec.
 - `docs/plans/PLAN-NN-MM-*.md` — implementation plans, numbered by origin spec (the `PLAN-NN-01` set for SPEC-01..09 is the Stage-1 pass).
-- `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and `TASKS.md` (outstanding work).
-- `TASKS.md` — Stage-1 follow-ups. Ordered CRITICAL → HIGH → MEDIUM → LOW. When picking up a task, move it to its own commit and check it off in the same commit. You can push commits that only contain task claims/updates to origin without asking. Its header carries the task↔GitHub-issue mirroring procedure.
-- `docs/benchmarks.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from `TASKS.md`.
+- `docs/architecture.md` — single-page architecture map synthesised from the SPECs and plans. Carries a **Status** field (implemented / specified / planned / deferred) for every subsystem and major feature. This is the "current state" view that sits between the SPECs (intent) and Worklode (outstanding work).
+- `docs/benchmarks.md` — per-subsystem performance targets, vendor baselines, and current measured numbers. Update the relevant row whenever a bench moves; do not let it drift from Worklode.
 - `docs/metrics.md` — authoritative inventory of every metric and label HornDB exposes (`crates/metrics/`), one row per series. Keep it in lockstep with the code (see sync rule below). The `horndb-perftest-with-metrics` skill maps performance symptoms onto these metrics.
 - `harness/curation/owl2-rl-50.md` and `harness/selected.toml` — the conformance subset every spec is graded against.
 
 The harness-first rule (from SPEC-00): a SPEC is not satisfied until its referenced subset in SPEC-01's harness is green. Implementation work may *grow* a subset but never bypass it.
+
+### Work tracking
+
+This project is tracked in Worklode. Work is claimed, not assigned — load
+the `worklode` skill before filing or finding a task, and before creating or
+reading a spec, ADR, or plan. `lode board` and `lode task list` show open
+work; there is no in-repo task file anymore.
+
+GitHub issues remain the intake channel for feature requests and bug
+reports from outside the loop. Label an issue `worklode` and it lands in the
+Worklode inbox (`lode inbox list`); use the `triage-github-issue-for-worklode`
+skill to decide whether to promote it into a task and with what kind/priority.
 
 ### Where specs and plans live
 
@@ -31,17 +42,31 @@ All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There 
 
 ### Keep the docs in sync (do this in the same commit)
 
-`docs/architecture.md`, `TASKS.md`, and the SPECs/plans are linked views of the same reality. When you edit one, update the others so they never drift:
+`docs/architecture.md` and the SPECs/plans are linked views of the same
+reality; Worklode tracks the outstanding work that connects them. When you
+edit one, update the others so they never drift:
 
-- **Change `TASKS.md`** (check off, add, remove, re-scope) → update the matching **Status** field in `docs/architecture.md`. Checking off a task usually flips a row **planned** → **implemented**; adding one usually flips **specified** → **planned**. Mirror the change to the task's GitHub issue too — procedure in the `TASKS.md` header.
-- **Change a SPEC or plan** such that the outstanding work changes → update `TASKS.md` (add or re-scope the tracking task), then reflect the new state in `docs/architecture.md`.
+- **File or re-scope a Worklode task** (`lode task add`, `lode task show`)
+  such that a subsystem's status changes → update the matching **Status**
+  field in `docs/architecture.md`. Closing a task usually flips a row
+  **planned** → **implemented**; filing one usually flips **specified** →
+  **planned**.
+- **Change a SPEC or plan** such that the outstanding work changes → file or
+  re-scope the matching Worklode task, then reflect the new state in
+  `docs/architecture.md`.
 - **Add, remove, rename, or re-type a metric or a metric label** (in `crates/metrics/`, or change an emit site / label-value enum in `crates/metrics/src/labels.rs`) → update the matching row in `docs/metrics.md` in the **same commit**. This covers the scraped name, type, labels, units/buckets, and meaning. `crates/metrics/src/*.rs` is the source of truth; if `docs/metrics.md` disagrees, fix the doc.
 
-**Feature-branch exception (sanctioned):** `TASKS.md` is lock-serialized on `main` via `.claude/scripts/tasks.sh` and never appears on a feature branch. A feature-branch PR carries the `docs/architecture.md` (and other docs) updates; the matching `TASKS.md` transition lands as a locked commit on `main` immediately after the merge. A PR that updates `architecture.md` without touching `TASKS.md` is therefore correct, not a sync violation — reviewers should not flag it. The two views converge on `main` within the same task.
+Source of truth: SPECs for *intent*, Worklode for *outstanding work*,
+`docs/architecture.md` for *current state*, `docs/metrics.md` for *the
+metrics surface*. When they disagree, **the code wins** — fix whichever is
+stale.
 
-Source of truth: SPECs for *intent*, `TASKS.md` for *outstanding work*, `docs/architecture.md` for *current state*, `docs/metrics.md` for *the metrics surface*. When they disagree, **the code wins** — fix whichever is stale.
-
-**Never write a `#N` issue reference you haven't verified** (`gh issue view N`). A bare `#N` used as informal shorthand for a topic — rather than the real issue number — propagates across `TASKS.md`, `docs/benchmarks.md`, `docs/architecture.md`, and the SPECs, and unwinding it later is a multi-file `sed` sweep. If the issue isn't filed yet, write `#TODO` (or file it first), not a placeholder number.
+**Never write a `#N` or `WL-N` reference you haven't verified** (`gh issue
+view N` for a GitHub issue, `lode task show WL-N` for a Worklode task). A
+bare id used as informal shorthand for a topic — rather than the real one —
+propagates across `docs/benchmarks.md`, `docs/architecture.md`, and the
+SPECs, and unwinding it later is a multi-file `sed` sweep. If the work isn't
+filed yet, write `#TODO` (or file it first), not a placeholder id.
 
 ## Workspace layout
 
