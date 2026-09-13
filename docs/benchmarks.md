@@ -5,7 +5,7 @@ is the single source of truth for the project's quantitative goals: targets
 come from the per-subsystem SPECs (non-functional requirements and acceptance
 criteria), baselines from the cited literature and vendor publications, and
 the *Current results* section records the measured state. Live gaps are
-tracked in [`../TASKS.md`](../TASKS.md).
+tracked in Worklode (`lode board`).
 
 ## Reference hardware
 
@@ -3273,7 +3273,7 @@ numbers should not be compared to the target column above.
   #2/#3). Gated on the storage + rule engine being usable on real corpora.
 - **ORE 2015 OWL 2 RL fragment full pass.** Ten-ontology subset is wired up
   (`../harness/ore2015-selected.toml`); the full corpus expansion is Stage-2
-  work (`../TASKS.md` MEDIUM).
+  work (tracked in Worklode, MEDIUM).
 
 ### Running — LDBC SPB nightly (published)
 
@@ -3541,8 +3541,8 @@ comparison into CI / the trend DB.
 All measured numbers above come from `cargo bench` invocations against the
 relevant crate, **run on `hornbench`** (see *Reference hardware*). Use
 `--quick` for development sweeps; record both means **and** the criterion HTML
-reports (under `target/criterion/`) for any number quoted in `TASKS.md`, a
-commit message, or a published artefact.
+reports (under `target/criterion/`) for any number quoted in a Worklode
+task, a commit message, or a published artefact.
 
 ```bash
 # WCOJ acceptance #2 — the headline Stage-1 perf bench
@@ -3623,7 +3623,7 @@ to `target/harness.sqlite` and are queryable via `harness report`.
 
 When a bench moves into *Measured* (or moves between RED and GREEN), update
 the relevant row, link the issue or plan that closed the gap, and update the
-corresponding entry in `../TASKS.md` and the Status field in
+corresponding Worklode task and the Status field in
 `architecture.md` in the same commit. Keep rows to *current state + pointer*:
 the measurement history lives in the harness trend DB (the harness records
 `(commit-sha, suite, hardware, throughput-metric, latency-metric)` per run —

@@ -16,7 +16,7 @@ section says so.
 - **SPECs** (`../specs/`) — the subsystem *contracts*: what each part must do.
 - **ADRs** (here) — the cross-cutting *decisions* and rationale behind those contracts.
 - **`../architecture.md`** — the *current-state* map, with a Status field per subsystem.
-- **`../../TASKS.md`** — the *outstanding work* to close the gaps.
+- **Worklode** (`lode board`, `lode task list`) — the *outstanding work* to close the gaps.
 
 When the architecture changes, add a new ADR rather than rewriting an old one;
 mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
@@ -50,4 +50,4 @@ mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
 1. Copy the structure of an existing record (Status / Date / Source / Context / Decision / Consequences / Related).
 2. Number it sequentially (`NNNN-kebab-title.md`).
 3. Add a row to the index above.
-4. If it changes outstanding work or current state, update `../../TASKS.md` and `../architecture.md` in the same commit (the docs-sync rule in the root `CLAUDE.md`).
+4. If it changes outstanding work or current state, file/update the matching Worklode task and `../architecture.md` in the same commit (the docs-sync rule in the root `CLAUDE.md`).

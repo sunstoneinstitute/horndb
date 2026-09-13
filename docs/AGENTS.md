@@ -80,7 +80,7 @@ cleanup) — verify with `lsof`/`ps` after render that nothing leaks.
 
 Keep these two separate — they answer different questions:
 
-- `docs/architecture.md` is the single-page **status map**: one row per subsystem/feature with an implemented / specified / planned / deferred **Status**, kept in sync with `../TASKS.md`. It says *what exists today*, briefly.
+- `docs/architecture.md` is the single-page **status map**: one row per subsystem/feature with an implemented / specified / planned / deferred **Status**, kept in sync with Worklode. It says *what exists today*, briefly.
 - `docs/architecture/<subsystem>.md` holds per-subsystem **deep-dive guides** (e.g. `architecture/wcoj.md`): how a subsystem actually works, its invariants, and its gotchas. These say *how it works*, at length.
 
 When you write a deep-dive, put it under `docs/architecture/`, link it from the index, and cross-link it from the relevant crate `AGENTS.md`/`INTEGRATION-NOTES.md`. Do not bloat the single-page map with deep-dive prose, and do not duplicate the status table inside a deep-dive.

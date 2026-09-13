@@ -8,12 +8,12 @@ This is the human-facing entry point for the docs directory, and the first stop 
 - [`specs/README.md`](specs/README.md) — index of the authoritative SPEC documents.
 - [`specs/AGENTS.md`](specs/AGENTS.md) and [`plans/AGENTS.md`](plans/AGENTS.md) — naming and frontmatter rules: specs are `SPEC-NN-<slug>.md`, plans are `PLAN-NN-MM-<slug>.md` (`NN` = origin spec, `00` if none), both with `status:` / `date:` / `scope:` frontmatter.
 - [`adr/README.md`](adr/README.md) — Architecture Decision Records: the *why* behind the cross-cutting choices (the six SPEC-00 bets plus major tech decisions).
-- [`../TASKS.md`](../TASKS.md) — live follow-up list and current gaps.
+- Outstanding work lives in Worklode (`lode board`, `lode task list`) — there is no in-repo task file.
 - [`benchmarks.md`](benchmarks.md) — performance targets, baselines, current measured results, and reproduction commands.
 
 ## Docs in this directory
 
-- [`architecture.md`](architecture.md) — single-page architecture map across all SPECs, with a **Status** field (implemented / specified / planned / deferred) per subsystem and feature. This is the detailed, kept-current status record — read it, not this index, for plan history, issue numbers, and bench numbers. Kept in sync with `../TASKS.md`.
+- [`architecture.md`](architecture.md) — single-page architecture map across all SPECs, with a **Status** field (implemented / specified / planned / deferred) per subsystem and feature. This is the detailed, kept-current status record — read it, not this index, for plan history, issue numbers, and bench numbers. Kept in sync with Worklode.
 - [`architecture/`](architecture/wcoj.md) — per-subsystem deep-dive guides: [`wcoj.md`](architecture/wcoj.md) (Leapfrog Triejoin internals) and [`simd.md`](architecture/simd.md) (per-host SIMD kernel selection). Read before touching either subsystem's internals.
 - [`adr/`](adr/README.md) — Architecture Decision Records (18 so far), one decision per file. Read for the rationale behind a choice; `architecture.md` has current status.
 - [`metrics.md`](metrics.md) — inventory of every metric and label HornDB exposes, one row per series. Read [`specs/SPEC-17-metrics.md`](specs/SPEC-17-metrics.md) for the *why*; use the `horndb-perftest-with-metrics` skill to map a symptom onto these metrics.
@@ -30,7 +30,7 @@ This is the human-facing entry point for the docs directory, and the first stop 
 
 ## Where to go next
 
-Each entry names the spec (and crate notes) to read; current implementation status, plan history, issue links, and bench numbers live in `architecture.md` (section noted) or the `TASKS.md`/epics table — not here.
+Each entry names the spec (and crate notes) to read; current implementation status, plan history, issue links, and bench numbers live in `architecture.md` (section noted) or Worklode — not here.
 
 - Query/update behavior → [`specs/SPEC-07-sparql-frontend.md`](specs/SPEC-07-sparql-frontend.md); status in `architecture.md` §9 (also covers named graphs/`GRAPH`/GSP under SPEC-28, reasoning scope under SPEC-29, and the change-feed materializer under SPEC-30 — all three are rows inside §9).
 - Named graphs, `GRAPH`, datasets, or the Graph Store Protocol → [`specs/SPEC-28-named-graph-dataset-semantics.md`](specs/SPEC-28-named-graph-dataset-semantics.md); status in `architecture.md` §9.

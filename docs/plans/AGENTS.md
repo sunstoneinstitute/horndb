@@ -32,5 +32,6 @@ These rules apply to every file in `docs/plans/`.
 - Executed plans are historical implementation logs — commit-message-grade
   context, not a source of truth for current behaviour (the code and
   `../architecture.md` win).
-- When a plan changes the outstanding work, update `TASKS.md` and
-  `../architecture.md` in the same commit (sync rules in the root `AGENTS.md`).
+- When a plan changes the outstanding work, file/update the matching
+  Worklode task and `../architecture.md` in the same commit (sync rules in
+  the root `AGENTS.md`).

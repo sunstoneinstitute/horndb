@@ -160,7 +160,7 @@ On non-x86-64 hosts (the aarch64 dev laptop) there is no accessible CPUID, so
 `aggregation-qps` on the host (on `hornbench`, never the laptop — see
 [run benchmarks on hornbench]), A/B the candidate ISA against scalar, add a match
 arm in `table_pick` citing the measurement, then sync `docs/benchmarks.md`,
-`docs/architecture.md`, and `TASKS.md`.
+`docs/architecture.md`, and the corresponding Worklode task.
 
 ## 4. The `intersect` skew gate
 
