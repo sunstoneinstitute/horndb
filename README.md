@@ -4,7 +4,7 @@ A hybrid forward/backward-chaining RDF reasoner targeting **OWL 2 RL** semantics
 
 Apache-2.0 license, built by [Sunstone Institute](https://sunstone.institute).
 
-> Status: **Stage 1 (feasibility prototype) in progress.** The workspace builds and the SPEC-01 conformance harness runs the Stage-1 OWL 2 RL subset against the real engine in CI — **100 of 115 selected W3C OWL 2 RL cases pass** (the 15 known-failing cases are catalogued in [`harness/KNOWN-MANIFEST-BUGS.md`](harness/KNOWN-MANIFEST-BUGS.md)). The WCOJ engine clears its 4-cycle acceptance gate (~34× a binary-hash-join baseline on a skewed 10⁶-edge graph), and the SPARQL 1.1 frontend now executes on real storage + WCOJ with `GROUP BY`/aggregates. See [`TASKS.md`](TASKS.md) for the live punch list, including remaining correctness and performance gaps.
+> Status: **Stage 1 (feasibility prototype) in progress.** The workspace builds and the SPEC-01 conformance harness runs the Stage-1 OWL 2 RL subset against the real engine in CI — **100 of 115 selected W3C OWL 2 RL cases pass** (the 15 known-failing cases are catalogued in [`harness/KNOWN-MANIFEST-BUGS.md`](harness/KNOWN-MANIFEST-BUGS.md)). The WCOJ engine clears its 4-cycle acceptance gate (~34× a binary-hash-join baseline on a skewed 10⁶-edge graph), and the SPARQL 1.1 frontend now executes on real storage + WCOJ with `GROUP BY`/aggregates. See Worklode (`lode board`) for the live punch list, including remaining correctness and performance gaps.
 
 ## Why this exists
 
@@ -89,7 +89,7 @@ cargo run -p horndb-harness --bin harness --features real-engine -- \
 ORE 2015 ten-ontology subset — *scaffolding only at Stage 1.* The selection
 (`harness/ore2015-selected.toml`) and fetch script ship, but the harness has no
 `ore-run` subcommand yet; wiring the corpus into a real-engine run is Stage-2
-work (tracked in `TASKS.md`). To fetch the corpus today:
+work — tracked in Worklode (`lode board`). To fetch the corpus today:
 
 ```bash
 ./crates/harness/scripts/fetch-ore2015-subset.sh
@@ -126,7 +126,6 @@ Harness state is persisted to `target/harness.sqlite`. Fetched corpora go under 
 docs/specs/               # SPEC-00..10 — the contracts
 docs/plans/               # Per-spec implementation plans (historical)
 docs/architecture.md      # Single-page current-state map (Status per subsystem)
-TASKS.md                  # Live follow-up list (CRITICAL → LOW)
 crates/                   # The nine workspace crates
 harness/                  # Workspace-level harness assets (selected.toml, curation/)
 .github/workflows/        # CI (per-PR) and nightly (SPB-256)
@@ -135,7 +134,7 @@ docs/ideas/               # Feasibility study, design sketches
 
 ## Performance
 
-Targets, baselines, current measurements, and reproduction commands live in [`docs/benchmarks.md`](docs/benchmarks.md). Live performance gaps are tracked in [`TASKS.md`](TASKS.md) alongside correctness gaps.
+Targets, baselines, current measurements, and reproduction commands live in [`docs/benchmarks.md`](docs/benchmarks.md). Live performance gaps are tracked in Worklode (`lode board`) alongside correctness gaps.
 
 ## The name
 

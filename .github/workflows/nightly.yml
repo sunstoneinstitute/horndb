@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 # Stable, persisted SPB asset tree on the hornbench runner, OUTSIDE the
-# ephemeral Actions checkout. Prepared once (see TASKS.md). Holds:
+# ephemeral Actions checkout. Prepared once (see Worklode, `lode board`). Holds:
 #   - the built LDBC SPB driver JAR,
 #   - spb-sf128.nt: the flat materialized closure every engine serves
 #     (the SF=0.128 one, HDB-37/HDB-167; earlier corpora are kept
@@ -117,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           DATASET="$SPB_ASSETS/spb-sf128.nt"
-          test -f "$DATASET" || { echo "::error::SPB dataset missing at $DATASET — prepare it on hornbench (see TASKS.md)"; exit 1; }
+          test -f "$DATASET" || { echo "::error::SPB dataset missing at $DATASET — prepare it on hornbench (see Worklode)"; exit 1; }
           DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" MEMORY_MAX="$MEMORY_MAX" \
             ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
           echo $! > /tmp/horndb-engine.pid

@@ -1,5 +1,5 @@
 ---
-status: draft
+status: executed
 date: 2026-09-13
 scope: "Remove TASKS.md and its tooling; point every doc/CLAUDE.md sync rule at Worklode; add a GitHub-issue-to-Worklode triage skill"
 ---

@@ -46,7 +46,7 @@ All specs go in `docs/specs/`, all implementation plans in `docs/plans/`. There 
 reality; Worklode tracks the outstanding work that connects them. When you
 edit one, update the others so they never drift:
 
-- **File or re-scope a Worklode task** (`lode task add`, `lode task show`)
+- **File or re-scope a Worklode task** (`lode task add`, `lode task edit`)
   such that a subsystem's status changes → update the matching **Status**
   field in `docs/architecture.md`. Closing a task usually flips a row
   **planned** → **implemented**; filing one usually flips **specified** →
