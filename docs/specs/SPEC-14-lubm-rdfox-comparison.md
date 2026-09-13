@@ -8,7 +8,7 @@ scope: "Design: Real LUBM-100 materialization comparison (HornDB vs RDFox)"
 
 **Date:** 2026-06-03
 **Status:** Design — approved for planning
-**Tracks:** TASKS.md MEDIUM · _Conformance_ — SPEC-01 harness (RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
+**Tracks:** Worklode MEDIUM · _Conformance_ — SPEC-01 harness (RDFox A/B) ([#10](https://github.com/sunstoneinstitute/horndb/issues/10))
 **Gate:** docs/benchmarks.md Stage-1 — *LUBM-100 materialization within 3× of RDFox*.
 
 ## Problem
@@ -190,5 +190,5 @@ gitignored under `target/bench-rdfox/`.
    cap **or** an explicit "did not complete within cap"), with the parity gate
    evaluated.
 5. `docs/benchmarks.md` Stage-1 row updated **status-only** (no RDFox number);
-   `TASKS.md` #10 reflects the new state; pre-push gate (clippy + build) stays
-   green.
+   the corresponding Worklode task reflects the new state; pre-push gate
+   (clippy + build) stays green.

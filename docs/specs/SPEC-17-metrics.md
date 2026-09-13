@@ -328,11 +328,10 @@ at which point adding real tiers is a value change, not a schema change.
    not maintained inline.
 6. Histogram instrumentation respects the §5.3 boundary (no per-tuple timing).
 7. Tests in §8 pass; `cargo clippy --workspace --all-targets -- -D warnings` is clean.
-8. `docs/architecture.md` and `TASKS.md` updated; GitHub tracking issue mirrored.
+8. `docs/architecture.md` updated; the corresponding Worklode task tracks remaining work.
 
 ## 10. Docs sync
 
 - `docs/architecture.md`: add an Observability/Metrics row (Status: implemented for
   Slice 1, planned for fan-out).
-- `TASKS.md`: add the metrics epic + slice-1 and fan-out tasks; mirror to a GitHub issue
-  per the TASKS.md header procedure.
+- Worklode: file the metrics epic + slice-1 and fan-out tasks (`lode task add`).

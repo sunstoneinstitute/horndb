@@ -850,9 +850,10 @@ makes HornDB usable as a standalone graph store, without `graph-server`.
    report an affected count of 0 and no error. `"01"^^xsd:integer` and
    `"1"^^xsd:integer` stay distinct quads through the whole path.
 8. **Docs stay in sync (in-commit).** `docs/architecture.md` (including the
-   stale `:319` claim that the store is default-graph-only), `TASKS.md`,
-   `docs/specs/README.md`, and `docs/index.md` are updated in the commits that
-   introduce the corresponding behaviour, per the root sync rules.
+   stale `:319` claim that the store is default-graph-only), the
+   corresponding Worklode task, `docs/specs/README.md`, and `docs/index.md`
+   are updated in the commits that introduce the corresponding behaviour,
+   per the root sync rules.
 
 ## Risks and open questions
 

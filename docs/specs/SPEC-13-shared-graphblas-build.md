@@ -186,6 +186,6 @@ concerns); the helper isolates everything that benefits from a unit test.
   layout, the flock+pid lock, the 30-min wait, and the NFS caveat.
 - `CLAUDE.md` — the closure gotcha and the "point `CARGO_TARGET_DIR` at a shared
   path" note now apply only to **rocksdb** (harness), not GraphBLAS; clarify.
-- `TASKS.md` — check for the LOW "disk pressure during parallel worktree runs"
-  operational item; cross-reference or update it (and its mirrored GitHub issue
-  per the repo's sync rule) if present.
+- Worklode — check `lode task list` for the LOW "disk pressure during
+  parallel worktree runs" operational item; cross-reference or update it if
+  present.
