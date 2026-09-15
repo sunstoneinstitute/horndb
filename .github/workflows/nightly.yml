@@ -113,7 +113,8 @@ jobs:
 
       - name: start HornDB engine
         # Per-run bring-up: serve the prepared flat closure (no reasoning),
-        # wait until the query endpoint answers, then run the driver.
+        # wait for the process to come up, then wait for the load to finish,
+        # then run the driver.
         run: |
           set -euo pipefail
           DATASET="$SPB_ASSETS/spb-sf128.nt"
@@ -121,13 +122,17 @@ jobs:
           DATA_FILES="$DATASET" RELEASE=1 BIND="$HORNDB_BIND" MEMORY_MAX="$MEMORY_MAX" \
             ./crates/harness/scripts/start-engine.sh > /tmp/horndb-engine.log 2>&1 &
           echo $! > /tmp/horndb-engine.pid
-          if ! ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600; then
-            echo "::error::HornDB engine did not become ready in 600s"; cat /tmp/horndb-engine.log; exit 1
+          for i in $(seq 1 60); do
+            curl -fsS "http://$HORNDB_BIND/healthz" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! curl -fsS "http://$HORNDB_BIND/healthz" >/dev/null 2>&1; then
+            echo "::error::HornDB engine did not start in 60s"; cat /tmp/horndb-engine.log; exit 1
           fi
-          # Liveness is not readiness. `serve` loads on a background thread and
-          # answers /query with 200 the whole time, so waiting only on /query
-          # starts the driver against a store that is still filling — at
-          # this scale the load takes ~13 min. /readyz reports 503 until it ends.
+          # /query and /update shed with 503 while the store is still loading
+          # (HDB-144), so /healthz (always 200) is the only liveness signal;
+          # /readyz is the real readiness gate — at this scale the load takes
+          # ~13 min.
           for i in $(seq 1 2400); do
             curl -fsS "http://$HORNDB_BIND/readyz" >/dev/null 2>&1 && break
             sleep 1
