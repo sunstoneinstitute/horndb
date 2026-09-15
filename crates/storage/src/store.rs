@@ -20,11 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 /// A fresh, process-unique directory under the OS temp dir, for cold files
 /// belonging to a store with no directory of its own (`Store::in_memory` and
-/// friends). Not cleaned up on drop: cold placement already assumes a
-/// throwaway directory (`Store::open_with` deletes `<dir>/cold` on every
-/// reopen), and there is no existing "temp dir owned by a production struct"
-/// pattern in this crate to follow instead — `tempfile::TempDir` is a
-/// dev-dependency only. See HDB-177 review notes for the tradeoff.
+/// friends). `Store::drop` removes it when the store that created it goes
+/// away (see the `owns_cold_dir` field) — a durable store's `<dir>/cold` is
+/// caller-owned and never touched by that cleanup.
 fn temp_cold_dir() -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
@@ -54,6 +52,10 @@ pub struct Store {
     /// directory for an in-memory store (see [`temp_cold_dir`]). Exactly one
     /// place — this field's construction — knows the convention.
     cold_dir: PathBuf,
+    /// Whether `cold_dir` is a temp directory this store created (`Drop`
+    /// removes it) rather than a caller-supplied durable path (`Drop` leaves
+    /// it alone — see `Store::open_with`).
+    owns_cold_dir: bool,
 }
 
 impl Store {
@@ -64,6 +66,7 @@ impl Store {
             bnode_doc_tag: AtomicU64::new(0),
             wal: None,
             cold_dir: temp_cold_dir(),
+            owns_cold_dir: true,
         }
     }
 
@@ -81,6 +84,7 @@ impl Store {
             bnode_doc_tag,
             wal: None,
             cold_dir: temp_cold_dir(),
+            owns_cold_dir: true,
         }
     }
 
@@ -115,6 +119,7 @@ impl Store {
         let _ = std::fs::remove_dir_all(dir.join("cold"));
         let mut store = Self::with_dictionary(dictionary);
         store.cold_dir = dir.join("cold");
+        store.owns_cold_dir = false;
         let mut seen_batch = false;
         let mut recovered = RecoveredInputs::default();
         log.replay(|rec| store.replay(rec, &mut seen_batch, &mut recovered))?;
@@ -357,6 +362,7 @@ impl Store {
             bnode_doc_tag: AtomicU64::new(0),
             wal: None,
             cold_dir: temp_cold_dir(),
+            owns_cold_dir: true,
         }
     }
 
@@ -784,6 +790,14 @@ impl Store {
     /// Import a snapshot into this store, quads and all.
     pub fn import_snapshot<R: std::io::Read>(&self, r: &mut R) -> Result<()> {
         crate::snapshot::import_snapshot_into(self, r)
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        if self.owns_cold_dir {
+            let _ = std::fs::remove_dir_all(&self.cold_dir);
+        }
     }
 }
 
