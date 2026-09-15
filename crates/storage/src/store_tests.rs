@@ -651,3 +651,38 @@ fn contains_quad_sees_past_retracted_history_rows() {
         "a live subject and a live object that never shared a row"
     );
 }
+
+#[test]
+fn in_memory_store_drop_removes_temp_cold_dir() {
+    let store = Store::in_memory();
+    let p = iri("http://ex/p");
+    store
+        .insert_triples(&[(iri("http://ex/s"), p.clone(), iri("http://ex/o"))])
+        .unwrap();
+    let pid = store.dictionary().get(&p).unwrap();
+    assert!(store.demote(DEFAULT_GRAPH, pid).unwrap());
+    let cold_dir = store.cold_dir().to_path_buf();
+    assert!(cold_dir.exists());
+    drop(store);
+    assert!(!cold_dir.exists(), "temp cold dir must be removed on drop");
+}
+
+#[test]
+fn durable_store_drop_leaves_cold_dir_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let p = iri("http://ex/p");
+    store
+        .insert_triples(&[(iri("http://ex/s"), p.clone(), iri("http://ex/o"))])
+        .unwrap();
+    let pid = store.dictionary().get(&p).unwrap();
+    assert!(store.demote(DEFAULT_GRAPH, pid).unwrap());
+    let cold_dir = store.cold_dir().to_path_buf();
+    assert_eq!(cold_dir, dir.path().join("cold"));
+    assert!(cold_dir.exists());
+    drop(store);
+    assert!(
+        cold_dir.exists(),
+        "a durable store's cold dir must not be removed by Store::drop"
+    );
+}
