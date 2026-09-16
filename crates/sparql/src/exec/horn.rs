@@ -2903,6 +2903,12 @@ impl Executor for HornBackend {
 
         let bgp = WBgp::new(wpatterns);
         let mut rows: Vec<Row> = Vec::new();
+        // SPEC-31: charge each WCOJ batch as it is appended, so a scan that
+        // would cross `max_query_memory` is refused while it is being built
+        // rather than once the whole thing exists. The reservation is local
+        // and releases on return; `ScanOp` re-charges the finished batch and
+        // holds that charge for the query.
+        let mut scan_res = crate::exec::budget::Reservation::new();
         // HDB-99: timed by hand rather than via `crate::exec::phases::timed`
         // because the phase's `rows` (the arrow batch's row count) is only
         // known from the value the iterator yields — `enabled()` gates the
@@ -2953,6 +2959,7 @@ impl Executor for HornBackend {
                 .collect();
             let schema_col_idx: Vec<Option<usize>> = schema.iter().map(|v| pos(v.name())).collect();
             // One pair per arrow batch, not per row (SPEC-17 §5.3/§5.4).
+            let before = rows.len();
             crate::exec::phases::timed(ExecPhase::ScanRowBuild, batch_rows, || {
                 for r in 0..batch.num_rows() {
                     // Diagonal filter: compare raw ids for alias pairs (no decode needed).
@@ -2974,6 +2981,7 @@ impl Executor for HornBackend {
                     rows.push(Row(slots));
                 }
             });
+            scan_res.grow(crate::exec::budget::chunk_bytes(&rows[before..]))?;
         }
         Ok(Batch { schema, rows })
     }

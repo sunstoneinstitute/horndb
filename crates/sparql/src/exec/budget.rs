@@ -8,11 +8,14 @@
 //!
 //! # What this counts, and what it does not
 //!
-//! It counts the **executor's own row buffers**: the row sets that blocking
-//! operators (GROUP BY, ORDER BY, UNION, the hash joins' build side,
-//! property-path closure) accumulate whole before they can emit anything.
-//! Those are the allocations with no upper bound but the data — a streaming
-//! operator holds one chunk, a blocking one holds the entire input.
+//! It counts the **executor's own per-query buffers**: everything the
+//! operator tree accumulates and holds for longer than one chunk. That is
+//! the row sets blocking operators (GROUP BY, ORDER BY, UNION, the hash
+//! joins' build side, property-path closure) take whole before they can emit
+//! anything, plus three accumulations that are not a blocking operator's
+//! input: the materialized BGP scan, `DistinctOp`'s seen-set, and a hash
+//! join's per-probe-chunk fan-out. These are the allocations with no upper
+//! bound but the data.
 //!
 //! It does **not** count the store, the dictionary, WCOJ iterator state, or
 //! the response serialization buffer. A query is therefore always using
@@ -21,7 +24,15 @@
 //! `docs/specs/SPEC-31-query-memory-accounting.md` for what each phase adds.
 
 use crate::error::{Result, SparqlError};
+use crate::exec::Row;
 use std::cell::Cell;
+
+/// Bytes a block of rows occupies: each row's own slots and strings, plus the
+/// `Row` handle in the holder's spine.
+pub(crate) fn chunk_bytes(rows: &[Row]) -> u64 {
+    let spine = std::mem::size_of_val(rows) as u64;
+    spine + rows.iter().map(Row::heap_bytes).sum::<u64>()
+}
 
 thread_local! {
     /// Bytes charged by this thread's current query.

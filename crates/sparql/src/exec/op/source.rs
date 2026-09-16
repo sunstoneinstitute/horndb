@@ -3,6 +3,7 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Term, TriplePattern, Var};
 use crate::error::Result;
+use crate::exec::budget::{chunk_bytes, Reservation};
 use crate::exec::runtime::{integer_literal, lex};
 use crate::exec::{Batch, Executor, GroupCount, KeyPart, Row, ScanScope, Slot};
 use horndb_metrics::labels::ExecPhase;
@@ -16,10 +17,21 @@ pub struct ScanOp {
     /// Per-column `may_emit_term` claim, computed from the materialized scan
     /// batch before it is wrapped for chunked iteration.
     term_columns: Vec<bool>,
+    /// SPEC-31 charge for the materialized scan batch — the largest per-query
+    /// row buffer in the engine. Held for the operator's life: the buffer
+    /// stays allocated until the operator drops, however many chunks have
+    /// been handed out. A blocking parent charges the rows again as it drains
+    /// them, so a scan feeding one is charged about twice over. That reads
+    /// high on purpose; releasing as chunks leave would cost an extra
+    /// `heap_bytes` pass per chunk on the hottest path in the executor.
+    ///
+    /// Never read: it is a drop guard, and the charge is released when the
+    /// operator drops.
+    _res: Reservation,
 }
 
 impl ScanOp {
-    pub fn new(batch: Batch) -> Self {
+    pub fn new(batch: Batch) -> Result<Self> {
         // Compute the per-column provenance claim from the actual rows:
         // column c may emit Term iff some row holds a Slot::Term there.
         // O(rows × cols); timed as its own phase since it was previously
@@ -35,10 +47,13 @@ impl ScanOp {
                 }
             }
         });
-        Self {
+        let mut res = Reservation::new();
+        res.grow(chunk_bytes(&batch.rows))?;
+        Ok(Self {
             inner: ChunkedBatch::new(batch),
             term_columns,
-        }
+            _res: res,
+        })
     }
 }
 
@@ -214,6 +229,10 @@ impl Op for GroupCountScanOp {
 /// columns. Grouping semantics are identical to `eval_group_native`:
 /// `KeyPart` per key slot, `Unbound` for a key column the scan does not
 /// produce, first-seen key slots kept per group.
+///
+/// SPEC-31: the scan batch is charged for as long as this function holds it.
+/// The grouping map it builds is not charged; it holds one entry per distinct
+/// key, so it is bounded by the batch that *is* charged.
 fn fallback_group_counts<E: Executor + ?Sized>(
     exec: &E,
     patterns: &[TriplePattern],
@@ -221,6 +240,8 @@ fn fallback_group_counts<E: Executor + ?Sized>(
     scope: &ScanScope<'_>,
 ) -> Result<Vec<GroupCount>> {
     let batch = exec.scan_bgp_ids(patterns, scope)?;
+    let mut res = Reservation::new();
+    res.grow(chunk_bytes(&batch.rows))?;
     let key_idx: Vec<Option<usize>> = keys.iter().map(|k| batch.col(k.name())).collect();
     let mut groups: HashMap<Vec<KeyPart>, (Vec<Slot>, usize)> = HashMap::new();
     for r in &batch.rows {
