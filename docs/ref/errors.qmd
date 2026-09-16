@@ -26,11 +26,28 @@ see [Graph Store Protocol codes](#graph-store-protocol-codes).
 | `500 Internal Server Error` | The result stream ends before producing any output (an internal invariant failure, not a client mistake). | Retry is unlikely to help; treat this as a HornDB bug and report it. |
 | `503 Service Unavailable` | The startup data load has not finished; or, on `/query`, the request waited longer than `[server.limits].queue_timeout` for an execution slot. | Temporary. A `Retry-After` header says when to try again; the request was shed, not attempted. |
 | `504 Gateway Timeout` | The query ran longer than `[server.limits].query_timeout` (default `30s`) and was cancelled. | The query was valid but too slow. This is deliberately distinct from `400`, so "too slow" and "wrong" are told apart. |
+| `507 Insufficient Storage` | The query's blocking operators would hold more than `[server.limits].max_query_memory`; or answering it needs a store-side index the server declines to build under `[server.limits].max_snapshot_memory`. See [Two memory ceilings](#two-memory-ceilings). | The query is well-formed and would succeed at a larger ceiling. Nothing is truncated; the query is refused. |
 
 `503` while loading is not an error in the request. `serve` binds its socket
 before it loads data, so the process is reachable during a long import; the
 data endpoints shed requests over that window rather than answer from a
 partly-loaded store. `GET /readyz` reports the same state directly.
+
+### Two memory ceilings {#two-memory-ceilings}
+
+Both return `507`, and the message says which one applied. They are not
+interchangeable, and a client can act on only one of them:
+
+- `query memory limit exceeded (max_query_memory = …)` — the *query's own*
+  row buffers. A client can retry with a larger `?max_query_memory=` or a
+  cheaper query.
+- `snapshot memo limit exceeded (max_snapshot_memory = …)` — the *store's*
+  memoised copy of the graph, which the query would have triggered the server
+  into building. This is server memory that outlives the request, so there is
+  no per-query override for it and no request the client can send that makes
+  it fit. Only the operator can raise the ceiling. Nothing was built, so the
+  server's footprint is unchanged, and a query the store already holds the
+  snapshot for keeps being served.
 
 ### The row limit does not truncate
 

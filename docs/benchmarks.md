@@ -3513,9 +3513,16 @@ query would complete and its charge be readable: HTTP 200 in 96 s, RSS
 23,750 → 64,426 MiB, and `horndb_sparql_query_memory_peak_bytes_sum` = **0**.
 The same query with `?max_query_memory=8GiB` also returned 200, with
 `queries_over_budget_total` at 0. That zero was the instrument reading
-correctly: none of the growth was in an operator buffer. Bounding
-store-side growth is HDB-231; the cgroup ceiling stays the host guard until
-it lands.
+correctly: none of the growth was in an operator buffer.
+
+Store-side growth now has its own ceiling, `[server.limits].max_snapshot_memory`
+(SPEC-31 S6, HDB-231): a snapshot the memo cannot afford is refused before it
+is built, and `horndb_sparql_snapshot_memo_bytes` reports what the memo holds.
+**Not yet re-measured at scale.** No hornbench run has been made with the
+ceiling set, so there is no number here yet showing the served footprint
+staying inside load + ceiling on the SPB `COUNT` and the `?s <p> <o>` SELECT.
+Until that run happens, the cgroup ceiling stays the belt-and-braces host
+guard.
 
 **A correction to how serving footprint is recorded here.** Every `serve peak
 RSS` number in this document is measured at *load*, before any query. The

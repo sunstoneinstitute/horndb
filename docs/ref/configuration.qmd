@@ -190,7 +190,7 @@ server and does not affect any other query.
 | `max_result_rows` | `1000000` | Yes — see the entry below; the result is never silently truncated. |
 | `rdf12` | `false` | Yes — with it off, a query using an RDF 1.2 triple term is refused when the algebra is built. |
 | `default_graph` | `union` | Yes — see the entry below. |
-| `max_query_memory` | unset | **No.** Parsed and carried, but nothing enforces it yet. |
+| `max_query_memory` | `8GiB` | Yes — see the entry below; the query fails with `507 Insufficient Storage` and the result is never truncated. |
 
 `[server.limits].query_timeout` (duration), `HORNDB_SERVER__LIMITS__QUERY_TIMEOUT`, `query_timeout` (per query)
 
@@ -280,13 +280,14 @@ server and does not affect any other query.
     query to check a difference without changing what other clients see:
     `GET /query?query=…&default_graph=strict`.
 
-## Admission control and request size
+## Admission control, request size, and store-side memory
 
-Three `[server.limits]` keys bound what the server accepts at once and how
-large a request may be. Unlike the query settings above they are **not**
-per-query and **not** reloadable: they are read once at startup and fixed for
-the life of the process, because the semaphore and the body-limit layer they
-build are wired into the router when it is constructed.
+Four `[server.limits]` keys bound what the server accepts at once, how large a
+request may be, and how much memory the store may keep on a query's behalf.
+Unlike the query settings above they are **not** per-query and **not**
+reloadable: they are read once at startup and fixed for the life of the
+process, because the semaphore, the body-limit layer, and the store they
+configure are all built when the server starts.
 
 `[server.limits].max_concurrent_queries` (integer), `HORNDB_SERVER__LIMITS__MAX_CONCURRENT_QUERIES`
 
@@ -329,6 +330,33 @@ build are wired into the router when it is constructed.
     cap. Bulk ingest is unaffected: `LOAD` and `serve --data` read files from
     disk, not request bodies. Raise it if you push large graphs over `PUT
     /graphs`.
+
+`[server.limits].max_snapshot_memory` (byte size), `HORNDB_SERVER__LIMITS__MAX_SNAPSHOT_MEMORY`
+
+:   **Default:** `64GiB`.
+
+    **Allowed values:** a byte size in IEC units — `8GiB`, `64GiB`. Write
+    `0` for no ceiling at all.
+
+    **Tuning notes:** bounds the *snapshot memo* — the sorted copy of the
+    graph the first query on a version builds, that every later query reuses,
+    and that the store keeps until the next write. That memory is triggered by
+    a query but owned by the store, so `max_query_memory` deliberately does
+    not charge it: the first query to need the index would be refused and an
+    identical second query served from the index the first was refused for
+    building.
+
+    A query that would push the memo past this ceiling fails with `507
+    Insufficient Storage` and a message naming `max_snapshot_memory`. Nothing
+    is built, so the memo is unchanged — and a query the store *already* has
+    the snapshot for is always served, however low the ceiling is.
+
+    The memo is sized by the corpus, so size this by the corpus too. The
+    ceiling is checked against the worst case, 144 bytes per triple (six
+    sorted orderings). Watch `horndb_sparql_snapshot_memo_bytes` on `/metrics`
+    to see how close a live server is running. Lower it on a host smaller than
+    a benchmark server; the default is a backstop against runaway growth, not
+    a tuning for a small machine.
 
 ## Reasoning
 

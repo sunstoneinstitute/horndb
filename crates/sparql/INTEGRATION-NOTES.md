@@ -182,6 +182,22 @@ Enforcement:
   buffers, *not* process RSS — the store, dictionary, memoised query snapshots
   and WCOJ state are not query-attributable and are not charged (SPEC-31).
 
+`max_snapshot_memory` is the other half of that last sentence, and is **not**
+a query setting: it is server scope, restart-only, and lives on the backend
+(`HornBackend::set_max_snapshot_memory`). It bounds the snapshot memo — the
+whole-scope `VecTripleSource` a query triggers but the store owns and reuses.
+`wcoj_snapshot` checks it before it builds, because the build *is* the
+allocation, and charges the worst case (144 B/triple: six orderings x three
+columns x 8 B) since the five non-anchor orderings are derived lazily inside
+`horndb-wcoj` where no ceiling is reachable. Over the ceiling the query fails
+with `SparqlError::SnapshotMemoryLimit` → HTTP **507**, the same status as
+`max_query_memory` for the same reason, told apart by the knob the message
+names. A memo hit never consults the ceiling. `wcoj_snapshot` and
+`query_source` return `Result` for this; `cardinality_estimate` maps the
+refusal to "unknown" rather than failing an `EXPLAIN`. Reported by
+`HornBackend::snapshot_memo_bytes` and the gauge
+`horndb_sparql_snapshot_memo_bytes` (SPEC-31 S6, HDB-231).
+
 The materialized path (ASK/CONSTRUCT/DESCRIBE/EXPLAIN) moved onto the
 blocking pool for this: it used to run the whole query on a runtime worker,
 which would have parked the very timer meant to interrupt it. The row cap

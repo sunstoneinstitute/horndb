@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-09-08
-scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's blocking-operator row buffers, the refusal contract when a query crosses its ceiling, the default, what each later phase adds to the accounting, and why store-side index growth is bounded elsewhere"
+scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's blocking-operator row buffers, the refusal contract when a query crosses its ceiling, the default, what each later phase adds to the accounting; and (S6) the separate store-side ceiling `max_snapshot_memory` puts on the snapshot memo"
 ---
 
 # SPEC-31 — Per-query memory accounting
@@ -71,7 +71,7 @@ footprint past the 124 GiB host, which is why 2026-09-05 never had a chance.
   index-like structures a query *triggers* but does not own: the snapshot
   memo, derived orderings, and direct-source leaves. They are amortised
   across queries, so a per-query budget is the wrong instrument for them (see
-  below). They get a separate bound, HDB-231.
+  below). They get a separate bound: **S6**, added by HDB-231.
 - **Spilling to disk.** An over-budget query is refused, not spilled. External
   sort/hash is a later phase and a much larger change (it makes blocking
   operators restartable); the bound has to exist before spilling has anything
@@ -166,6 +166,83 @@ Two series (`docs/metrics.md` carries the rows):
   is the series that answers "which queries accumulate, and how much".
 - `horndb_sparql_queries_over_budget` — counter, queries refused on budget.
 
+### S6. A separate ceiling on the snapshot memo (HDB-231)
+
+The sections above bound what a query *owns*. This one bounds what a query
+*triggers* and the store then *keeps*: the memoised whole-scope
+`VecTripleSource` that the first query on a commit version builds, that every
+later query reuses, and that no query can be charged for. See "What this spec
+does not bound, and why" for why a per-query budget is the wrong instrument
+for it.
+
+**The knob.** `[server.limits].max_snapshot_memory`, server scope, **not**
+per-query overridable — it is not in `QuerySettings`, because no client can
+be billed for the memo or fix it by sending a different request. `None` is
+unbounded and stays expressible. It sits in `[server.limits]` and not a new
+`[storage]` section for two reasons: SPEC-26 already puts the server-scope,
+non-overridable limits there (`max_concurrent_queries`, `queue_timeout`,
+`max_request_body`), and the memo is built by the SPARQL execution layer, not
+by `horndb-storage`. It is restart-only — `serve` installs it on the backend
+at startup — and `horndb_config::restart_only_changes` says so on reload.
+
+**The default is 64 GiB.** Unlike `max_query_memory`, this ceiling is sized
+by the corpus, so a default has to admit the corpora HornDB is built to serve
+and refuse only runaway growth. On the measured LDBC SPB series, SF=0.128
+(234 M triples) estimates at ~33 GiB and is admitted; SF=0.256 estimates at
+~67 GiB and is refused — and SF=0.256 is the run that exhausted a 124 GiB
+host on 2026-09-05. Like `max_query_memory` it is not derived from total RAM;
+an operator on a smaller host should lower it.
+
+**Behaviour at the ceiling: refuse the build, before it happens.** A scope
+whose snapshot would push the memo past the ceiling fails the query with
+`SparqlError::SnapshotMemoryLimit` and HTTP 507. A memo *hit* is never
+refused — the check guards the build only, so a ceiling cannot start failing
+queries the store already has the index for, and lowering the ceiling never
+changes an answer already being served.
+
+Refusal is chosen over the two alternatives because it is the only one of the
+three that bounds anything. Evicting the least-recently-used scope first does
+not: the build *is* the allocation, so the peak is paid whether or not
+something is dropped afterwards, and with at most two whole-store scopes in
+the memo the entry evicted is the same size as the one replacing it —
+thrashing, not a ceiling. Falling back to the anchor ordering does not bound
+it either: the anchor is the ~24 GiB, and the second ordering it would avoid
+deriving is the 16.6 GiB HDB-229 already removed on this shape. Refusal also
+gives the operator the one thing the other two hide — the error names
+`max_snapshot_memory`, what the memo holds, and what the refused entry would
+have cost, which is exactly what they need to size it. Silently declining to
+memoise would instead make every query pay a full rebuild, a large latency
+cliff with no signal at all.
+
+**507, like S2, and for the same reason** — the server declined to spend the
+memory, and the request is legal. The two are told apart by the message,
+which names the knob that applies: only `max_snapshot_memory` can be raised
+to make this query succeed, and a client cannot raise it.
+
+**What is charged.** The estimate is the worst case for the scope: rows x 144
+bytes (six orderings x three `TermId` columns x 8 B). The worst case rather
+than the current one, because the five non-anchor orderings are derived
+lazily, long after the snapshot was admitted, from inside `horndb-wcoj` where
+there is no ceiling to consult — so charging all six up front is the only
+estimate that still holds for the entry's whole life. It reads high: the SPB
+SF=0.128 memo measured ~102 B/triple against this 144. That is the right
+direction for a ceiling.
+
+**What it does not bound.** Non-memoisable scopes (`GRAPH <g>`, `FROM` unions
+— see `SnapshotScope::memoisable`) are rebuilt per query and freed with it,
+so they are not store-side and are not checked here; they are uncharged
+per-query memory, the class HDB-232 covers. The `direct_cache`
+(`StoreTripleSource`) is also outside it: its leaves may be `Arc`-clones of
+the partitions' own columns, so it has no byte figure of its own that would
+not double-count `partitions` — which is why `MemorySplit` leaves it out too.
+The planner's `SnapshotStats` cache is store-side but small, and is not
+checked.
+
+**Observability.** `horndb_sparql_snapshot_memo_bytes` — gauge, the bytes the
+memo holds, read at scrape time; `docs/metrics.md` carries the row. It is the
+same number the ceiling is compared against, so an operator watching the
+gauge sees the refusal coming.
+
 ## What the charge does and does not cover
 
 The budget bounds the executor's **growth**, and is not an accounting of the
@@ -235,10 +312,13 @@ query alone. Store-side growth needs a bound whose unit is the store — a
 ceiling on the memo, or a decision not to build — not a charge to whichever
 query arrives first.
 
-That bound is tracked separately: HDB-230 (do not derive the second ordering
-on the default path) and HDB-231 (the store-side ceiling). After HDB-229 the
-demonstration query allocates almost nothing on either path, which is why the
-original acceptance criterion 6 was replaced rather than kept open.
+That bound is **S6** above, added by HDB-231: a configured ceiling on the
+snapshot memo, with a refusal before the build and a gauge. It is a ceiling,
+not a reduction — HDB-230 (do not derive the second whole-scope ordering on
+the default path) is the reduction, and neither subsumes the other. After
+HDB-229 the demonstration query allocates almost nothing on either path,
+which is why the original acceptance criterion 6 was replaced rather than
+kept open.
 
 ## Status — phase 1 bounds what it says it bounds
 
@@ -270,13 +350,18 @@ real gaps, tracked as HDB-232 (see "What the charge does and does not
 cover").
 
 The cgroup ceiling (`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`)
-remains the host guard against *store-side* growth until HDB-231 lands.
+stays as a belt-and-braces host guard. S6 is what the server itself now
+enforces against store-side growth; the at-scale re-measurement that would
+show the served footprint no longer climbing past load + ceiling still has to
+run on hornbench.
 
 ## Phases
 
 - **Phase 1 (this spec, landed).** Charge blocking-operator row buffers; refuse
   over budget; 8 GiB default; the two metrics. HDB-229 (merged) removed the
-  index build phase 1 was first blamed for.
+  index build phase 1 was first blamed for. S6 (HDB-231) landed alongside it:
+  the store-side ceiling, which is a different bound on a different unit, not
+  a later phase of this one.
 - **Phase 2.** Charge the derived structures those buffers feed — the join hash
   index, the group-by hash table, the top-k heap. Proportional to what phase 1
   already charges, so phase 1 bounds them within a constant; phase 2 makes the
@@ -321,3 +406,10 @@ remains the host guard against *store-side* growth until HDB-231 lands.
    uncharged scan batch and hash map that show up in neither series (see
    "What the charge does and does not cover") — the criterion says nothing
    about that path.
+8. The store-side ceiling (S6) refuses a build, not a hit. With
+   `max_snapshot_memory` set below one whole-scope snapshot's worst case, a
+   query that would build the memo fails with `SnapshotMemoryLimit` and
+   HTTP 507 and leaves `horndb_sparql_snapshot_memo_bytes` unchanged; with
+   the memo already warm, the same query is served however low the ceiling
+   is set afterwards. `None` remains expressible and means unbounded, and
+   the built-in default is 64 GiB.

@@ -98,6 +98,7 @@ longer blocks writers to that partition while it is in flight.
 | `horndb_sparql_queries_rejected_total` | counter | none | count | `/query` requests shed with HTTP 503 + `Retry-After` because no permit came free within `[server.limits].queue_timeout` (HDB-118). Oversized bodies are *not* counted here — they are refused by the body-size layer and appear as `horndb_sparql_requests_total{status="413"}`. |
 | `horndb_sparql_query_memory_peak_bytes` | histogram | none | bytes `(1 MiB ×4 ×11)` | peak bytes one query charged to its executor row buffers (SPEC-31), observed once per query on every exit path — clean finish, error, over-budget refusal, client disconnect. Counts what the budget counts: the input a blocking operator (GROUP BY, ORDER BY, UNION, hash-join build side, property-path closure) holds whole. A query with no blocking operator observes **0**, correctly — it accumulates nothing. This is NOT process RSS and reads well below it: the store, dictionary, memoised query snapshots and WCOJ state are not query-attributable and are not charged. |
 | `horndb_sparql_queries_over_budget_total` | counter | none | count | queries refused with HTTP 507 for exceeding `[server.limits].max_query_memory` (SPEC-31). Distinct from `horndb_sparql_queries_rejected_total`, which is admission control (503, never got a permit): a query counted here got a permit, ran, and was stopped on its own footprint. |
+| `horndb_sparql_snapshot_memo_bytes` | gauge | none | bytes | heap the memoised query snapshots hold — every `VecTripleSource` the store keeps, summed over scopes (`HornBackend::memory_split().snapshots`). This is **store-side** memory a query triggers but the store owns: built by the first query on a commit version, reused by every later one, and dropped only by a write. Ceiling: `[server.limits].max_snapshot_memory`, over which a build is refused with HTTP 507 and `snapshot memo limit exceeded` (SPEC-31 S6). The counterpart to `horndb_sparql_query_memory_peak_bytes`, which deliberately charges none of this **(scrape-time)** |
 | `horndb_sparql_stats_rebuild_total` | counter | none | count | full rebuilds of the planner's `SnapshotStats` summary (an `O(store)` scan, run on the `horndb-stats` background thread so queries plan on `ZeroStats` until it lands). A write merges its quad delta into the cached summary instead, so a healthy write-then-read feed keeps this flat; it moves only when a scope is first planned, when a write cannot be expressed as a delta, or when accumulated drift passes `STATS_DRIFT_DIVISOR` (1/10 of the rows) |
 | `horndb_sparql_stats_rebuild_seconds` | histogram | none | s `(1e-4 ×3 ×12)` | latency of those full rebuilds |
 
@@ -106,6 +107,10 @@ admission control in `mod.rs`),
 `crates/sparql/src/api.rs` (`timed()`, query-kind classification),
 `crates/sparql/src/exec/horn.rs` (`snapshot_stats`, the planner-statistics
 cache), and `crates/sparql/src/exec/phases.rs` (the exec-phase split, below).
+`horndb_sparql_snapshot_memo_bytes` is the exception: it rides the
+`StorageCollector` in `crates/metrics/src/storage.rs`, so `serve` reads it
+under the same store guard as the storage gauges instead of taking a second
+one.
 
 ### SPARQL execution-time phases (`crates/sparql/src/exec/phases.rs`)
 

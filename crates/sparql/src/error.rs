@@ -48,6 +48,23 @@ pub enum SparqlError {
     #[error("query memory limit exceeded (max_query_memory = {limit}, needed {requested})")]
     QueryMemoryLimit { limit: u64, requested: u64 },
 
+    /// SPEC-31 S6: answering the query needs a memoised store snapshot whose
+    /// worst-case size would push the snapshot memo past
+    /// `max_snapshot_memory`. Store-side memory, so the knob named here is
+    /// the server's, not the client's — lowering `max_query_memory` cannot
+    /// make this query succeed. `held` is what the memo already keeps and
+    /// `requested` the worst-case size of the entry that was refused, which
+    /// together tell an operator what to raise the ceiling to.
+    #[error(
+        "snapshot memo limit exceeded (max_snapshot_memory = {limit}, \
+         memo holds {held}, this scope needs up to {requested})"
+    )]
+    SnapshotMemoryLimit {
+        limit: u64,
+        held: u64,
+        requested: u64,
+    },
+
     /// I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

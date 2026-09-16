@@ -28,6 +28,10 @@ mod tests {
             cfg.server.limits.max_query_memory,
             Some(DEFAULT_MAX_QUERY_MEMORY)
         );
+        assert_eq!(
+            cfg.server.limits.max_snapshot_memory,
+            Some(DEFAULT_MAX_SNAPSHOT_MEMORY)
+        );
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Union);
         assert_eq!(cfg.server.shutdown_drain.0, Duration::from_secs(30));
         assert_eq!(
@@ -61,6 +65,7 @@ mod tests {
             max_result_rows = 42
             rdf12 = true
             max_query_memory = "2GiB"
+            max_snapshot_memory = "4GiB"
             default_graph = "strict"
             max_concurrent_queries = 3
             queue_timeout = "250ms"
@@ -81,6 +86,10 @@ mod tests {
         assert_eq!(
             cfg.server.limits.max_query_memory,
             Some(ByteSize(2 * 1024 * 1024 * 1024))
+        );
+        assert_eq!(
+            cfg.server.limits.max_snapshot_memory,
+            Some(ByteSize(4 * 1024 * 1024 * 1024))
         );
         assert_eq!(cfg.server.limits.default_graph, DefaultGraph::Strict);
         assert_eq!(cfg.server.limits.max_concurrent_queries, 3);
@@ -108,6 +117,24 @@ mod tests {
             err.to_string().contains("rulefiring"),
             "error should name the bad value: {err}"
         );
+    }
+
+    /// SPEC-31 S6: the ceiling is expressible as a size, and `0` is how a
+    /// config file — which has no null — says "no ceiling".
+    #[test]
+    fn snapshot_memory_ceiling_folds_zero_into_unbounded() {
+        let cfg: ServerConfig = toml_from("");
+        assert_eq!(
+            cfg.server.limits.snapshot_memory_ceiling(),
+            Some(DEFAULT_MAX_SNAPSHOT_MEMORY.0)
+        );
+        let cfg: ServerConfig = toml_from("[server.limits]\nmax_snapshot_memory = \"4GiB\"\n");
+        assert_eq!(
+            cfg.server.limits.snapshot_memory_ceiling(),
+            Some(4 * 1024 * 1024 * 1024)
+        );
+        let cfg: ServerConfig = toml_from("[server.limits]\nmax_snapshot_memory = 0\n");
+        assert_eq!(cfg.server.limits.snapshot_memory_ceiling(), None);
     }
 
     #[test]
@@ -319,6 +346,15 @@ pub struct Limits {
     /// take a 124 GiB bench host down (HDB-167), so the default is a real
     /// number rather than `None`.
     pub max_query_memory: Option<ByteSize>,
+    /// SPEC-31 S6: ceiling on the memoised query snapshots the store keeps —
+    /// memory a query *triggers* but the store *owns* and reuses. Server
+    /// scope, not per-query overridable (it is not in [`QuerySettings`]): the
+    /// memo outlives the query that built it, so no client can be charged for
+    /// it or fix it. `None` is unbounded, and so is `0` — TOML has no null,
+    /// so a config file spells "no ceiling" as `max_snapshot_memory = 0`
+    /// (`serve` maps it to `None`). A literal zero ceiling would refuse every
+    /// query and is worth nothing, so nothing is given up by the spelling.
+    pub max_snapshot_memory: Option<ByteSize>,
     /// SPEC-28 S3/D2: how the no-dataset default graph is composed.
     pub default_graph: DefaultGraph,
     /// HDB-118 admission control: how many `/query` requests may execute at
@@ -331,6 +367,14 @@ pub struct Limits {
     /// Cap on the `/query` and `/update` request body. `LOAD` payloads are
     /// files, not request bodies, so this does not bound bulk ingest.
     pub max_request_body: ByteSize,
+}
+
+impl Limits {
+    /// The SPEC-31 S6 store-side ceiling in bytes, `None` for unbounded.
+    /// Folds the `0` spelling into `None` — see `max_snapshot_memory`.
+    pub fn snapshot_memory_ceiling(&self) -> Option<u64> {
+        self.max_snapshot_memory.map(|b| b.0).filter(|&b| b > 0)
+    }
 }
 
 /// Fallback when the core count is unavailable (e.g. a restricted container).
@@ -348,6 +392,20 @@ const DEFAULT_MAX_CONCURRENT_QUERIES: usize = 8;
 /// heavy queries should set it explicitly.
 const DEFAULT_MAX_QUERY_MEMORY: ByteSize = ByteSize(8 * 1024 * 1024 * 1024);
 
+/// Default `max_snapshot_memory` (SPEC-31 S6).
+///
+/// The snapshot memo is sized by the corpus, not by a query, so this default
+/// has to admit the corpora HornDB is built to serve and refuse only runaway
+/// growth. 64 GiB does both on the measured LDBC SPB series: the SF=0.128
+/// corpus (234 M triples) estimates at ~33 GiB and is admitted, while
+/// SF=0.256 estimates at ~67 GiB and is refused — and SF=0.256 is the run
+/// that exhausted a 124 GiB host on 2026-09-05.
+///
+/// Like `max_query_memory` it is not derived from total RAM. An operator on
+/// a host smaller than a benchmark server should lower it; the default is a
+/// backstop against unbounded growth, not a tuning for a small machine.
+const DEFAULT_MAX_SNAPSHOT_MEMORY: ByteSize = ByteSize(64 * 1024 * 1024 * 1024);
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -355,6 +413,7 @@ impl Default for Limits {
             max_result_rows: 1_000_000,
             rdf12: false,
             max_query_memory: Some(DEFAULT_MAX_QUERY_MEMORY),
+            max_snapshot_memory: Some(DEFAULT_MAX_SNAPSHOT_MEMORY),
             default_graph: DefaultGraph::default(),
             max_concurrent_queries: std::thread::available_parallelism()
                 .map(|n| n.get())

@@ -141,9 +141,14 @@ pub struct StorageSnapshot {
     /// Cold, memory-mapped partition bytes (SPEC-25 S5):
     /// `horndb_storage::TierStats.bytes_cold`. Emitted as `tier="cold"`.
     pub tier_bytes_cold: i64,
+    /// Heap bytes the memoised query snapshots hold (SPEC-31 S6):
+    /// `HornBackend::memory_split().snapshots`. This is store-side memory a
+    /// query triggers but the store keeps, and what
+    /// `[server.limits].max_snapshot_memory` bounds.
+    pub snapshot_memo_bytes: i64,
 }
 
-/// Scrape-time collector that emits the six storage size gauges. It holds a
+/// Scrape-time collector that emits the store's size gauges. It holds a
 /// closure that reads a [`StorageSnapshot`] from the live store (typically by
 /// upgrading a `Weak` ref); when the closure returns `None` (store gone) the
 /// gauges report zero.
@@ -184,6 +189,11 @@ impl Collector for StorageCollector {
                 "storage_dictionary_bytes",
                 "Approximate heap bytes held by the term dictionary",
                 snap.dictionary_bytes,
+            ),
+            (
+                "sparql_snapshot_memo_bytes",
+                "Heap bytes held by the memoised query snapshots, bounded by max_snapshot_memory",
+                snap.snapshot_memo_bytes,
             ),
         ] {
             let g = ConstGauge::new(val);
@@ -230,6 +240,7 @@ mod tests {
                 dictionary_bytes: 4096,
                 tier_bytes_warm: 700,
                 tier_bytes_cold: 324,
+                snapshot_memo_bytes: 1440,
             })
         })));
         let mut buf = String::new();
@@ -253,6 +264,10 @@ mod tests {
         );
         assert!(
             buf.contains("horndb_storage_tier_bytes_estimated{tier=\"cold\"} 324"),
+            "got:\n{buf}"
+        );
+        assert!(
+            buf.contains("horndb_sparql_snapshot_memo_bytes 1440"),
             "got:\n{buf}"
         );
         assert!(

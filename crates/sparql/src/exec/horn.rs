@@ -225,6 +225,10 @@ pub struct HornStorageStats {
     /// Approximate heap bytes the term dictionary owns (HDB-146). O(1) to
     /// read — see `horndb_storage::Dictionary::approx_bytes`.
     pub dictionary_bytes: u64,
+    /// Heap bytes the memoised query snapshots hold (SPEC-31 S6) — the same
+    /// number as `MemorySplit::snapshots`, carried here so the scrape-time
+    /// collector reads it with the rest in one pass.
+    pub snapshot_memo_bytes: u64,
 }
 
 /// Where a serving process's heap actually goes (HDB-146), for the components
@@ -518,6 +522,19 @@ fn record_load_phase(phase: LoadPhase, elapsed: std::time::Duration, rows: u64) 
         .record_load_phase(phase, elapsed, rows);
 }
 
+/// Worst-case heap bytes one memoised snapshot holds per triple: six
+/// orderings x three `TermId` columns x 8 B (see
+/// `VecTripleSource::approx_bytes`).
+///
+/// The **worst** case, not the current one, because the five non-anchor
+/// orderings are derived lazily (`VecTripleSource::columns`) long after the
+/// snapshot was admitted, from inside `horndb-wcoj`, where there is no
+/// ceiling to consult. Charging all six at admission is the only estimate
+/// that still holds for the entry's whole life. It reads high — the LDBC SPB
+/// SF=0.128 memo measured ~102 B/triple against this 144 — which is the
+/// right direction for a ceiling.
+const SNAPSHOT_BYTES_PER_TRIPLE: u64 = 6 * 3 * 8;
+
 /// The memoised WCOJ sources, tagged with the commit version they were built
 /// at (HDB-119). The tag is what makes the memo safe to share between the
 /// writable backend and pinned read views running without the store lock: an
@@ -582,6 +599,13 @@ pub struct HornBackend {
     /// exercise the funnel wiring without depending on a process-wide env
     /// var.
     cold_tier: bool,
+
+    /// SPEC-31 S6: ceiling on the snapshot memo, from
+    /// `[server.limits].max_snapshot_memory`. `None` is unbounded, which is
+    /// what an embedded caller that never set it gets — the ceiling is a
+    /// server policy, and `HornBackend::new()` has no config to read. See
+    /// [`Self::set_max_snapshot_memory`] and [`Self::wcoj_snapshot`].
+    max_snapshot_memory: Option<u64>,
 
     /// The last [`StoreTripleSource`] handed to a query, with the tier version
     /// it was opened at. Shared with every pinned read view ([`Self::pin_read`]),
@@ -712,6 +736,7 @@ impl HornBackend {
             pin: None,
             direct_source: direct_source_enabled(),
             cold_tier: cold_tier_enabled(),
+            max_snapshot_memory: None,
             direct_cache: Arc::new(Mutex::new(None)),
             touched_graphs: BTreeSet::new(),
             visible_inferred: BTreeSet::new(),
@@ -743,6 +768,7 @@ impl HornBackend {
             pin: Some(self.store.pin()),
             direct_source: self.direct_source,
             cold_tier: self.cold_tier,
+            max_snapshot_memory: self.max_snapshot_memory,
             direct_cache: Arc::clone(&self.direct_cache),
             // Write-only routing state; a read view never records writes.
             touched_graphs: BTreeSet::new(),
@@ -910,6 +936,16 @@ impl HornBackend {
         self.cold_tier = on;
     }
 
+    /// Install the SPEC-31 S6 snapshot-memo ceiling, from
+    /// `[server.limits].max_snapshot_memory`. `None` is unbounded.
+    ///
+    /// A setter rather than a `with_store` argument: `serve` builds one
+    /// backend before the config-driven load and swaps another in after it,
+    /// and both have to carry the ceiling.
+    pub fn set_max_snapshot_memory(&mut self, bytes: Option<u64>) {
+        self.max_snapshot_memory = bytes;
+    }
+
     /// Demote every settled partition of this backend's store to the cold,
     /// memory-mapped tier (SPEC-25 S5). Reads stay correct — the cold form
     /// sits behind the same warm read surface — and the next write to a cold
@@ -1051,21 +1087,28 @@ impl HornBackend {
             bytes_estimated: tier.bytes_estimated,
             bytes_cold: tier.bytes_cold,
             dictionary_bytes: self.store.dictionary().approx_bytes().total(),
+            snapshot_memo_bytes: self.snapshot_memo_bytes(),
         }
+    }
+
+    /// Heap bytes the snapshot memo holds right now — what
+    /// `[server.limits].max_snapshot_memory` bounds (SPEC-31 S6). O(entries),
+    /// and the memo holds at most one entry per scope a query has asked for.
+    pub fn snapshot_memo_bytes(&self) -> u64 {
+        self.snapshots
+            .lock()
+            .expect("snapshot lock poisoned")
+            .map
+            .values()
+            .map(|s| s.approx_bytes())
+            .sum()
     }
 
     /// Attribute this backend's heap across the components that can account
     /// for themselves (HDB-146). See [`MemorySplit`] for what is left out.
     pub fn memory_split(&self) -> MemorySplit {
         let dict = self.store.dictionary().approx_bytes();
-        let snapshots = self
-            .snapshots
-            .lock()
-            .expect("snapshot lock poisoned")
-            .map
-            .values()
-            .map(|s| s.approx_bytes())
-            .sum();
+        let snapshots = self.snapshot_memo_bytes();
         let stats = self
             .stats_cache
             .lock()
@@ -1730,14 +1773,18 @@ impl HornBackend {
     /// `patterns` narrows the direct source to the predicates the BGP can
     /// match — see [`Self::bgp_predicates`]. It does not affect the memoised
     /// copy, whose orderings are whole-scope by construction.
-    fn query_source(&self, scope: &SnapshotScope, patterns: &[TriplePattern]) -> QuerySource {
+    fn query_source(
+        &self,
+        scope: &SnapshotScope,
+        patterns: &[TriplePattern],
+    ) -> Result<QuerySource> {
         if self.direct_source {
             if let Some(g) = self.direct_graph(scope) {
                 let keep = self.bgp_predicates(patterns);
-                return QuerySource::Direct(self.direct_source_for(g, keep));
+                return Ok(QuerySource::Direct(self.direct_source_for(g, keep)));
             }
         }
-        QuerySource::Copy(self.wcoj_snapshot(scope))
+        Ok(QuerySource::Copy(self.wcoj_snapshot(scope)?))
     }
 
     /// The bound predicate ids of every pattern in `patterns`, or `None` when
@@ -1912,9 +1959,18 @@ impl HornBackend {
     /// A small write merges its delta into the memoised entries in place
     /// ([`Self::apply_delta_to_snapshots`]); every other write drops the memo
     /// wholesale ([`Self::invalidate`]).
-    fn wcoj_snapshot(&self, scope: &SnapshotScope) -> Arc<VecTripleSource> {
+    ///
+    /// **Refuses rather than builds when the memo is at its ceiling**
+    /// (SPEC-31 S6). A scope whose worst-case snapshot would push
+    /// `memory_split().snapshots` past `max_snapshot_memory` fails the query
+    /// with [`SparqlError::SnapshotMemoryLimit`] instead of being built. A
+    /// memo *hit* is never refused: the check guards the build, so a ceiling
+    /// cannot start failing queries the store already has the index for.
+    fn wcoj_snapshot(&self, scope: &SnapshotScope) -> Result<Arc<VecTripleSource>> {
         if !scope.memoisable() {
-            return Arc::new(VecTripleSource::from_triples(self.scope_triples(scope)));
+            return Ok(Arc::new(VecTripleSource::from_triples(
+                self.scope_triples(scope),
+            )));
         }
         // Hit, or a twin worth cloning from, decided under one lock
         // acquisition so it is atomic with whatever is cached right now.
@@ -1935,21 +1991,41 @@ impl HornBackend {
         // pays to keep an unused twin's delta merged; it starts paying only
         // once a second scope is actually read.
         let version = self.read_version();
-        let twin_src: Option<Arc<VecTripleSource>> = {
+        let (twin_src, held): (Option<Arc<VecTripleSource>>, u64) = {
             let guard = self.snapshots.lock().expect("snapshot lock poisoned");
             // Entries built at another commit version answer another store
-            // state — never reusable here (HDB-119).
+            // state — never reusable here (HDB-119). They are cleared before
+            // this build lands, so they hold nothing against the ceiling.
             if guard.version != version {
-                None
+                (None, 0)
             } else {
                 if let Some(s) = guard.map.get(scope) {
-                    return Arc::clone(s);
+                    return Ok(Arc::clone(s));
                 }
-                scope
-                    .default_twin()
-                    .and_then(|twin| guard.map.get(&twin).cloned())
+                (
+                    scope
+                        .default_twin()
+                        .and_then(|twin| guard.map.get(&twin).cloned()),
+                    guard.map.values().map(|s| s.approx_bytes()).sum(),
+                )
             }
         };
+        // SPEC-31 S6: the ceiling is checked *before* the build, because the
+        // build is the allocation — there is no point at which an
+        // already-materialised whole-scope source could be given back.
+        if let Some(limit) = self.max_snapshot_memory {
+            let requested = self
+                .snap()
+                .triple_count()
+                .saturating_mul(SNAPSHOT_BYTES_PER_TRIPLE);
+            if held.saturating_add(requested) > limit {
+                return Err(SparqlError::SnapshotMemoryLimit {
+                    limit,
+                    held,
+                    requested,
+                });
+            }
+        }
         // Build (or clone) with the lock RELEASED: neither a six-sort-pass
         // rebuild nor an O(n) clone of the twin's already-sorted data must
         // stall a concurrent reader whose own scope is already cached
@@ -1969,13 +2045,15 @@ impl HornBackend {
         if guard.version > version {
             // Someone reading a newer store owns the memo now; this build is
             // still correct for *this* reader, it just does not go in.
-            return Arc::new(built);
+            return Ok(Arc::new(built));
         }
         if guard.version < version {
             guard.map.clear();
             guard.version = version;
         }
-        Arc::clone(guard.map.entry(scope.clone()).or_insert(Arc::new(built)))
+        Ok(Arc::clone(
+            guard.map.entry(scope.clone()).or_insert(Arc::new(built)),
+        ))
     }
 
     /// True when [`SnapshotScope::DefaultStrict`] and [`SnapshotScope::DefaultUnion`]
@@ -2485,7 +2563,7 @@ impl Executor for HornBackend {
             return Ok(Box::new(rows.into_iter()));
         }
 
-        let snapshot = self.query_source(&resolved, patterns);
+        let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
         // SPARQL variable name -> WCOJ var index, first-appearance order.
@@ -2745,7 +2823,7 @@ impl Executor for HornBackend {
             });
         }
 
-        let snapshot = self.query_source(&resolved, patterns);
+        let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -2919,7 +2997,7 @@ impl Executor for HornBackend {
         }
         // A scope with no snapshot form (`GRAPH ?g`) is simply "unknown".
         let resolved = self.resolve_scope(scope).ok()?;
-        let snapshot = self.wcoj_snapshot(&resolved);
+        let snapshot = self.wcoj_snapshot(&resolved).ok()?;
         // Empty store: no pattern can match.
         if snapshot.total_triples() == 0 {
             return Some(0);
@@ -2972,7 +3050,7 @@ impl Executor for HornBackend {
             )));
         }
 
-        let snapshot = self.query_source(&resolved, patterns);
+        let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
         let mut var_index: HashMap<String, u8> = HashMap::new();
@@ -3086,7 +3164,7 @@ impl Executor for HornBackend {
             return Ok(None);
         }
 
-        let snapshot = self.query_source(&resolved, patterns);
+        let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
         // === VERBATIM copy from scan_bgp: pattern compilation ===
@@ -3460,7 +3538,7 @@ mod tests {
             &Term::Iri("http://ex/p".into()),
             &Term::Iri("http://ex/o".into()),
         );
-        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict); // warm: snapshot now has 0 triples
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict).unwrap(); // warm: snapshot now has 0 triples
         b.insert_algebra_triples_bulk(vec![(
             Term::Iri("http://ex/s".into()),
             Term::Iri("http://ex/p".into()),
@@ -3469,6 +3547,7 @@ mod tests {
         assert_eq!(b.len(), 1);
         assert_eq!(
             b.wcoj_snapshot(&SnapshotScope::DefaultStrict)
+                .unwrap()
                 .total_triples(),
             1,
             "snapshot must be rebuilt after a bulk resurrect"
@@ -3483,14 +3562,14 @@ mod tests {
             Term::Iri("http://ex/p".into()),
             Term::Iri("http://ex/o".into()),
         );
-        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict); // warm the cache
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultStrict).unwrap(); // warm the cache
         b.delete_triple(
             &Term::Iri("http://ex/s".into()),
             &Term::Iri("http://ex/p".into()),
             &Term::Iri("http://ex/o".into()),
         );
         assert_eq!(b.len(), 0);
-        let snap = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
+        let snap = b.wcoj_snapshot(&SnapshotScope::DefaultStrict).unwrap();
         assert_eq!(
             snap.total_triples(),
             0,
@@ -3523,7 +3602,7 @@ mod tests {
         // Nothing has asked for the `DefaultStrict` twin yet, so it is not
         // cloned in eagerly (HDB-97's twin-clone-on-miss is lazy — see
         // `wcoj_snapshot`).
-        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        let _ = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
         assert_eq!(b.memo_len(), 1, "warm-up: one memoised scope");
         // Capture the snapshot's identity as a raw pointer, then drop the
         // `Arc` clone: `apply_delta_to_snapshots` merges in place only when
@@ -3531,7 +3610,7 @@ mod tests {
         // would make it copy on write, and the pointer check below would say
         // nothing about the in-place path.
         let before_ptr = {
-            let snap = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+            let snap = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
             assert_eq!(snap.total_triples(), 10);
             Arc::as_ptr(&snap)
         };
@@ -3549,7 +3628,7 @@ mod tests {
             1,
             "a small delta must merge in place, not drop the memo"
         );
-        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
         assert_eq!(
             Arc::as_ptr(&after),
             before_ptr,
@@ -3581,14 +3660,14 @@ mod tests {
             );
         }
 
-        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
+        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict).unwrap();
         assert_eq!(
             b.memo_len(),
             1,
             "building DefaultStrict alone must not eagerly warm its twin"
         );
 
-        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
         assert_eq!(
             b.memo_len(),
             2,
@@ -3623,7 +3702,7 @@ mod tests {
         )
         .unwrap();
 
-        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict);
+        let strict = b.wcoj_snapshot(&SnapshotScope::DefaultStrict).unwrap();
         assert_eq!(b.memo_len(), 1, "only DefaultStrict is cached so far");
         assert_eq!(
             strict.total_triples(),
@@ -3631,7 +3710,7 @@ mod tests {
             "DefaultStrict sees only the default graph"
         );
 
-        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        let union = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
         assert_eq!(
             union.total_triples(),
             2,
@@ -3662,14 +3741,14 @@ mod tests {
     /// the cache took the merge path -- same `memo_len` + `Arc::as_ptr`
     /// identity check as `small_update_retains_and_merges_the_snapshot_cache`.
     fn assert_update_merges_in_place(b: &mut HornBackend, update: &str) {
-        let before_ptr = Arc::as_ptr(&b.wcoj_snapshot(&SnapshotScope::DefaultUnion));
+        let before_ptr = Arc::as_ptr(&b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap());
         crate::update::apply_update(&crate::parser::parse_update(update).unwrap(), b).unwrap();
         assert_eq!(
             b.memo_len(),
             1,
             "a warmed cache must survive the update via the merge path, not be dropped"
         );
-        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion);
+        let after = b.wcoj_snapshot(&SnapshotScope::DefaultUnion).unwrap();
         assert_eq!(
             Arc::as_ptr(&after),
             before_ptr,
@@ -3755,7 +3834,7 @@ mod tests {
         let mut b = two_thousand_rows();
         let scope = SnapshotScope::DefaultUnion;
         // The builder's view: the pre-merge snapshot, pinned outside the memo.
-        let pinned = b.wcoj_snapshot(&scope);
+        let pinned = b.wcoj_snapshot(&scope).unwrap();
         let version = b.read_version();
         b.stats_cache.lock().unwrap().insert(
             scope.clone(),
@@ -3778,7 +3857,7 @@ mod tests {
         .unwrap();
         assert_eq!(b.memo_len(), 1, "the memo survives a write during a build");
         assert_eq!(rebuilds(), base, "the write itself builds nothing");
-        let now = b.wcoj_snapshot(&scope);
+        let now = b.wcoj_snapshot(&scope).unwrap();
         assert_ne!(
             Arc::as_ptr(&now),
             Arc::as_ptr(&pinned),
@@ -3838,7 +3917,7 @@ mod tests {
         let rebuilds = || horndb_metrics::metrics().sparql.stats_rebuild.get();
         let mut b = two_thousand_rows();
         let scope = SnapshotScope::DefaultUnion;
-        let _pinned = b.wcoj_snapshot(&scope);
+        let _pinned = b.wcoj_snapshot(&scope).unwrap();
         let version = b.read_version();
         b.stats_cache
             .lock()
@@ -3860,7 +3939,7 @@ mod tests {
         );
         assert_eq!(b.memo_len(), 1, "the snapshot memo keeps merging");
         assert_eq!(
-            b.wcoj_snapshot(&scope).total_triples() as usize,
+            b.wcoj_snapshot(&scope).unwrap().total_triples() as usize,
             2000 + STATS_PENDING_CAP + 1
         );
         assert_eq!(
@@ -3877,7 +3956,7 @@ mod tests {
     fn stats_at_another_version_are_dropped_not_merged() {
         let mut b = two_thousand_rows();
         let scope = SnapshotScope::DefaultUnion;
-        let pinned = b.wcoj_snapshot(&scope);
+        let pinned = b.wcoj_snapshot(&scope).unwrap();
         let foreign = b.read_version() + 1000;
         let ready = StatsSlot::Ready(Arc::new(SnapshotStats::from_source(&pinned)));
         for (i, (name, slot)) in [("ready", ready), ("building", building_slot(2))]
