@@ -1,7 +1,7 @@
 ---
 status: draft
 date: 2026-09-08
-scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's blocking-operator row buffers, the refusal contract when a query crosses its ceiling, the default, what each later phase adds to the accounting; and (S6) the separate store-side ceiling `max_snapshot_memory` puts on the snapshot memo"
+scope: "SPEC-31 — what `max_query_memory` bounds: per-query charging of the executor's row buffers (blocking operators, the BGP scan, DISTINCT's seen-set, path-closure output, hash-join fan-out), the refusal contract when a query crosses its ceiling, the default, what each later phase adds to the accounting; and (S6) the separate store-side ceiling `max_snapshot_memory` puts on the snapshot memo"
 ---
 
 # SPEC-31 — Per-query memory accounting
@@ -99,21 +99,37 @@ it holds the rows:
 
 These share one funnel — `exec::op::blocking::drain` — so the charge is levied
 in one place for six of the seven. `UnionOp` accumulates inline (it must
-normalize across both children) and charges the same way.
+normalize across both children) and charges the same way, then tops its charge
+up after `normalize_columns` — that step rewrites `Slot::Id` cells into decoded
+`Slot::Term` strings, so the rows it retains are larger than the rows it first
+charged.
 
 A **streaming** operator that keeps no state across chunks holds one chunk at
-a time whatever the result size and so charges nothing. That is the bound
-working as specified, not a gap, for such an operator: a query with only
-those is already bounded by construction, and result size is
-`max_result_rows`'s job.
+a time whatever the result size, and charges nothing. **Not every operator
+outside the table above is such an operator.** An earlier version of this
+section said the opposite — that anything not blocking is "the bound working
+as specified, not a gap" — and that was wrong. Four more accumulations are
+per-query memory that grows with the data, and HDB-232 charges them too:
 
-`DistinctOp` is the exception, and it is a real gap, not a specified bound.
-It pulls one chunk at a time like any streaming operator, but keeps a `seen`
-set of every distinct row's key across the whole query — state that grows
-with the number of distinct rows and is never charged. A `SELECT DISTINCT`
-over a high-cardinality pattern can accumulate as much memory as a `GROUP
-BY` over the same pattern, uncharged. Charging it is HDB-232, not this
-phase — see "What the charge does and does not cover".
+| accumulation | what it holds |
+|---|---|
+| the BGP scan (`ScanOp`, `HornBackend::scan_bgp_ids`) | the whole materialized scan, for the query's life |
+| `DistinctOp`'s `seen` set | one key per distinct row, for the query's life |
+| `PathClosureOp`'s output | the computed closure, which can be quadratic in the edge set it drained |
+| `pending` on `JoinOp` / `LeftJoinOp` / `MinusOp` | one probe chunk's matched-row fan-out |
+
+The scan is charged in two places, on purpose. `scan_bgp_ids` charges each
+WCOJ output batch as it appends it, so a scan that would cross the ceiling is
+refused while it is being built rather than once the whole thing exists; that
+charge is released when the scan returns. `ScanOp` then charges the finished
+batch and holds it for the operator's life, because the buffer stays allocated
+however many chunks have been handed out.
+
+One consequence: a scan feeding a blocking operator is charged about twice —
+once by `ScanOp`, which is still holding, and again by the parent as it drains
+the rows. That reads high, never low, and the alternative (releasing the scan's
+charge chunk by chunk) costs a byte-counting pass per chunk on the executor's
+hottest path.
 
 ### S2. Refuse, never truncate
 
@@ -230,8 +246,10 @@ direction for a ceiling.
 
 **What it does not bound.** Non-memoisable scopes (`GRAPH <g>`, `FROM` unions
 — see `SnapshotScope::memoisable`) are rebuilt per query and freed with it,
-so they are not store-side and are not checked here; they are uncharged
-per-query memory, the class HDB-232 covers. The `direct_cache`
+so they are not store-side and are not checked here. They are per-query
+memory, but not the *row-buffer* kind S1 charges — a rebuilt triple source is
+not an operator's buffer — so HDB-232 does not charge them either, and they
+remain an open gap. The `direct_cache`
 (`StoreTripleSource`) is also outside it: its leaves may be `Arc`-clones of
 the partitions' own columns, so it has no byte figure of its own that would
 not double-count `partitions` — which is why `MemorySplit` leaves it out too.
@@ -260,38 +278,25 @@ process. A query always uses somewhat more than its charge says. Not counted:
   `max_result_rows`; the materialized path is bounded by neither. Known gap,
   phase 2 candidate; found by reading, not measured.
 
-The list below is a different class from the one above: **per-query**
-memory, rows a query holds for its own duration and frees when it ends, the
-same class S1 charges — simply not charged yet. It is not the store-side
-growth in "the store, dictionary and indexes" bullet above, or in "What this
-spec does not bound, and why" below, either of which lives past any one
-query. Charging this per-query class is HDB-232:
+The remaining **per-query** gaps — rows a query holds for its own duration and
+frees when it ends, the same class S1 charges — are small and bounded by
+something that *is* charged:
 
-- `DistinctOp`'s `seen` set (see S1) — grows with the number of distinct
-  rows, held for the query's whole life;
-- the BGP scan itself. `ScanOp` wraps a fully materialized `Batch`, and the
-  default `scan_bgp_ids` accumulates every WCOJ output batch into one
-  `Vec<Row>` before returning it — the largest per-query row buffer in the
-  engine, and it exists even for a query with no blocking operator at all
-  (see acceptance criterion 2);
-- `UnionOp` charges each chunk before `normalize_columns` rewrites
-  `Slot::Id` cells into decoded `Slot::Term` strings, so on a column mixing
-  provenance across the two children the bytes it ends up retaining can run
-  several times what it charged;
-- the two operators where blocking output can exceed blocking input:
-  `PathClosureOp` charges the edge set it drains but not the closure it
-  computes from it (which can be quadratic in the edge count), and the hash
-  joins (`JoinOp`, `LeftJoinOp`, `MinusOp`) charge the build side but not a
-  probe chunk's matched-row fan-out held in `pending`;
-- `fallback_group_counts`, the path `GroupCountScan` takes when the backend
-  has no `count_bgp_grouped` fast path: it materializes a full scan batch
-  and a grouping hash map, both uncharged and, unlike the store-side memo
-  acceptance criterion 7 pins, invisible in `memory_split().snapshots` too —
-  there is no instrument that shows this growth at all today.
+- the grouping hash map in `fallback_group_counts`, the path `GroupCountScan`
+  takes when the backend has no `count_bgp_grouped` fast path. Its scan batch
+  is charged; the map beside it is not. The map holds one entry per distinct
+  key, so the charged batch bounds it;
+- `GroupOp`'s and `OrderByOp`'s *output* buffers. Neither can exceed the input
+  the operator already charged, so the charge bounds them within a constant.
+  (`PathClosureOp`'s output can exceed its input, which is why that one is
+  charged in its own right.);
+- the per-query triple source a non-memoisable scope (`GRAPH <g>`, a `FROM`
+  union) rebuilds — see S6's "What it does not bound". It is sized by the
+  scope, not by any operator's row buffer, and nothing charges it.
 
 Writing that down is the point: an operator setting 8 GiB should read it as "no
-query's blocking operators may accumulate more than 8 GiB", not as "no query
-may add more than 8 GiB of RSS".
+query's own row buffers may accumulate more than 8 GiB", not as "no query may
+add more than 8 GiB of RSS".
 
 ## What this spec does not bound, and why
 
@@ -342,12 +347,16 @@ said exactly that.
 GROUP BY, ORDER BY, UNION, the hash-join build sides, MINUS and path closure
 are charged and refuse over budget. Tasks 2–4 of this spec's implementation
 plan add the tests that prove each acceptance criterion below, including the
-rewritten criterion 6. That covers every blocking operator S1 lists —
-what this phase set out to charge. It is not every uncharged per-query
-accumulation in the executor: `DistinctOp`'s seen-set, the whole BGP scan,
-and the under-charges in `UnionOp`, `PathClosureOp` and the hash joins are
-real gaps, tracked as HDB-232 (see "What the charge does and does not
-cover").
+rewritten criterion 6.
+
+HDB-232 then closed the gaps that left: the BGP scan, `DistinctOp`'s seen-set,
+the path closure's output, a hash join's probe fan-out, and `UnionOp`'s
+under-charge after normalization are all charged now, and
+`fallback_group_counts` charges the scan batch it materializes. What is left
+uncharged is listed under "What the charge does and does not cover" — each
+remaining item is bounded by something that is charged, except the two named
+there as open gaps (the materialized result path, and a non-memoisable scope's
+rebuilt triple source).
 
 The cgroup ceiling (`MEMORY_MAX` in `crates/harness/scripts/start-engine.sh`)
 stays as a belt-and-braces host guard. S6 is what the server itself now
@@ -361,7 +370,9 @@ run on hornbench.
   over budget; 8 GiB default; the two metrics. HDB-229 (merged) removed the
   index build phase 1 was first blamed for. S6 (HDB-231) landed alongside it:
   the store-side ceiling, which is a different bound on a different unit, not
-  a later phase of this one.
+  a later phase of this one. HDB-232 extended phase 1 to the four per-query
+  accumulations S1's second table lists; it is the same bound on the same
+  unit, not a later phase either.
 - **Phase 2.** Charge the derived structures those buffers feed — the join hash
   index, the group-by hash table, the top-k heap. Proportional to what phase 1
   already charges, so phase 1 bounds them within a constant; phase 2 makes the
@@ -375,11 +386,13 @@ run on hornbench.
 
 1. A query whose blocking operator would exceed `max_query_memory` fails with
    the typed error and HTTP 507; the response is never a truncated result.
-2. A query with no blocking operator is unaffected by the ceiling, at any
-   result size. This is a claim about the *charge*, not about memory held:
-   such a query still materializes its whole BGP scan (`ScanOp`,
-   `scan_bgp_ids`) uncharged, so "unaffected by the ceiling" must not be read
-   as "bounded footprint" — see "What the charge does and does not cover".
+2. A query with no blocking operator is charged for its BGP scan and for
+   nothing per result row on top of that. The scan is the whole materialized
+   `Batch` the query holds for its life, so a ceiling below it refuses the
+   query and the default ceiling serves it. (This criterion replaced an
+   earlier one claiming such a query was unaffected by the ceiling at any
+   result size — true of the charge as it then stood, and misleading about
+   the memory held. HDB-232 charges the scan instead.)
 3. A rejected charge leaves the budget unchanged, and a completed query leaves
    the thread's budget at zero — a second query on a reused blocking-pool
    thread starts from a clean charge.
@@ -402,10 +415,9 @@ run on hornbench.
    in `horndb_sparql_query_memory_peak_bytes`. A change that starts charging
    store-side memory to a query fails this criterion. This holds on the
    count-pushdown fast path (`count_bgp`/`count_bgp_grouped`); when a backend
-   has no `count_bgp_grouped`, `fallback_group_counts` materializes an
-   uncharged scan batch and hash map that show up in neither series (see
-   "What the charge does and does not cover") — the criterion says nothing
-   about that path.
+   has no `count_bgp_grouped`, `fallback_group_counts` scans, and that scan
+   batch is charged to the query — so the criterion applies to the fast path
+   only, and a charge on the fallback path is correct, not a violation.
 8. The store-side ceiling (S6) refuses a build, not a hit. With
    `max_snapshot_memory` set below one whole-scope snapshot's worst case, a
    query that would build the memo fails with `SnapshotMemoryLimit` and
@@ -413,3 +425,10 @@ run on hornbench.
    the memo already warm, the same query is served however low the ceiling
    is set afterwards. `None` remains expressible and means unbounded, and
    the built-in default is 64 GiB.
+9. Every per-query accumulation S1 names is charged, and each charge is
+   *held* while the rows are held, not merely seen in passing. Because the
+   peak is a high-water mark, a charge released early can still show up in
+   the metric, so the test for this compares two data sizes: the amount an
+   operator adds over the same scan must scale with the data, not sit at one
+   chunk's worth. Two stacked blocking operators must charge the sum of what
+   they hold, not the larger of the two.

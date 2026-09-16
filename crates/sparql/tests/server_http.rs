@@ -1901,18 +1901,24 @@ mod spec26_query_settings {
         );
     }
 
-    /// The same ceiling does NOT refuse a query with no blocking operator.
-    /// This is the bound working as specified, not a hole: a streaming
-    /// SELECT holds one operator chunk at a time whatever the result size,
-    /// so there is no growing buffer to charge. SPEC-31 bounds the
-    /// executor's accumulation, and a query that accumulates nothing is
-    /// already bounded — `max_result_rows` is the knob for result size.
+    /// SPEC-31 AC2 (HDB-232): a query with no blocking operator is charged
+    /// too. `ScanOp` holds the whole materialized BGP scan for the query's
+    /// life, so the ceiling applies to it. What such a query does *not* do is
+    /// accumulate per result row on top of that: the default ceiling serves
+    /// it whole, and a 1-byte ceiling refuses it just as it refuses a sort.
     #[tokio::test]
-    async fn max_query_memory_does_not_refuse_a_streaming_query() {
+    async fn max_query_memory_charges_a_streaming_query_scan() {
         let app = router_with_rows(5_000, Limits::default());
-        let (status, body) = get(app, &format!("{SELECT_ALL}&max_query_memory=1")).await;
+        let (status, body) = get(app.clone(), SELECT_ALL).await;
         assert_eq!(status, StatusCode::OK, "body: {body}");
         assert_eq!(body.lines().count(), 5_001, "not truncated, not refused");
+
+        let (status, body) = get(app, &format!("{SELECT_ALL}&max_query_memory=1")).await;
+        assert_eq!(
+            status,
+            StatusCode::INSUFFICIENT_STORAGE,
+            "the scan buffer is charged, so a 1-byte ceiling refuses it: {body}"
+        );
     }
 
     /// The default is a real ceiling, so an ordinary blocking query still

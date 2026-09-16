@@ -1,8 +1,11 @@
-//! Streaming operators: one child, per-chunk transform, no buffering.
+//! Streaming operators: one child, per-chunk transform, no row buffering.
+//! `DistinctOp` is the one that keeps state across chunks — a key per
+//! distinct row — and charges it (SPEC-31).
 
 use super::Op;
 use crate::algebra::{Expr, Var};
 use crate::error::Result;
+use crate::exec::budget::Reservation;
 use crate::exec::phases;
 use crate::exec::runtime::Runtime;
 use crate::exec::{Batch, Executor, KeyPart};
@@ -238,6 +241,10 @@ pub struct DistinctOp<'r> {
     child: Box<dyn Op + 'r>,
     seen: FxHashSet<Vec<KeyPart>>,
     schema: Vec<Var>,
+    /// SPEC-31 charge for `seen`. `DistinctOp` streams its rows but keeps one
+    /// key per distinct row for the whole query, so the set grows with the
+    /// data and is charged like a blocking operator's buffer.
+    res: Reservation,
 }
 
 impl<'r> DistinctOp<'r> {
@@ -247,8 +254,26 @@ impl<'r> DistinctOp<'r> {
             child,
             seen: FxHashSet::default(),
             schema,
+            res: Reservation::new(),
         }
     }
+}
+
+/// Bytes one retained `seen` entry occupies: the key's own parts and their
+/// lexical strings, plus the `Vec<KeyPart>` handle the hash table stores.
+/// The table's spare capacity and control bytes are not walked, so this
+/// reads low by a constant factor — the same approximation `chunk_bytes`
+/// makes for a row buffer.
+fn key_bytes(key: &[KeyPart]) -> u64 {
+    let parts = (std::mem::size_of_val(key) + std::mem::size_of::<Vec<KeyPart>>()) as u64;
+    let strings: u64 = key
+        .iter()
+        .map(|k| match k {
+            KeyPart::Lex(s) => s.capacity() as u64,
+            _ => 0,
+        })
+        .sum();
+    parts + strings
 }
 
 impl<'r> Op for DistinctOp<'r> {
@@ -262,16 +287,22 @@ impl<'r> Op for DistinctOp<'r> {
         while let Some(chunk) = self.child.next()? {
             let n = chunk.rows.len() as u64;
             let seen = &mut self.seen;
-            let kept = phases::timed(ExecPhase::StreamOp, n, move || {
+            // SPEC-31: charged once per chunk rather than per key, so at most
+            // one chunk's new keys exist before the budget sees them.
+            let mut added = 0u64;
+            let kept = phases::timed(ExecPhase::StreamOp, n, || {
                 let mut kept = Vec::new();
                 for row in chunk.rows {
                     let key: Vec<KeyPart> = row.0.iter().map(|s| s.key_part()).collect();
+                    let bytes = key_bytes(&key);
                     if seen.insert(key) {
+                        added += bytes;
                         kept.push(row);
                     }
                 }
                 kept
             });
+            self.res.grow(added)?;
             if !kept.is_empty() {
                 return Ok(Some(Batch {
                     schema: self.schema.clone(),

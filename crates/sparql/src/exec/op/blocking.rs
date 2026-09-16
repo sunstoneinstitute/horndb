@@ -14,7 +14,7 @@
 use super::{ChunkedBatch, Op};
 use crate::algebra::{Aggregate, Expr, OrderDir, Term, Var};
 use crate::error::Result;
-use crate::exec::budget::Reservation;
+use crate::exec::budget::{chunk_bytes, Reservation};
 use crate::exec::phases;
 use crate::exec::runtime::{referenced_vars, JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
@@ -31,11 +31,12 @@ use std::collections::HashSet;
 ///
 /// SPEC-31: every chunk is charged to `res` **before** it is appended, so a
 /// query that would blow past `max_query_memory` fails on the chunk that
-/// crosses the line rather than after allocating it. This is the executor's
-/// one unbounded accumulation point — a streaming operator holds one chunk,
-/// a blocking one holds the whole input — so charging here covers GROUP BY,
-/// ORDER BY, both hash joins, MINUS and property-path closure at once.
-/// `res` belongs to the calling operator and must outlive the rows it keeps.
+/// crosses the line rather than after allocating it. Charging here covers the
+/// *input* side of GROUP BY, ORDER BY, both hash joins, MINUS and
+/// property-path closure at once. It is not the executor's only accumulation
+/// point — the BGP scan, `DistinctOp`'s seen-set, the path closure's output
+/// and a probe chunk's fan-out are charged where they are built. `res`
+/// belongs to the calling operator and must outlive the rows it keeps.
 pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>, res: &mut Reservation) -> Result<Batch> {
     let schema = op.schema().to_vec();
     let mut rows: Vec<Row> = Vec::new();
@@ -45,13 +46,6 @@ pub(super) fn drain<'r>(op: &mut Box<dyn Op + 'r>, res: &mut Reservation) -> Res
         phases::timed(ExecPhase::DrainExtend, n, || rows.extend(b.rows));
     }
     Ok(Batch { schema, rows })
-}
-
-/// Bytes a chunk of rows adds to an accumulating `Vec<Row>`: each row's own
-/// slots and strings, plus the `Row` handle in the spine.
-pub(super) fn chunk_bytes(rows: &[Row]) -> u64 {
-    let spine = std::mem::size_of_val(rows) as u64;
-    spine + rows.iter().map(Row::heap_bytes).sum::<u64>()
 }
 
 /// Static `may_emit_term` for a two-child merge (`Union`, `Join`, `LeftJoin`):
@@ -147,6 +141,11 @@ impl<'r, E: Executor + ?Sized> Op for UnionOp<'r, E> {
         // Normalize over the combined row set (see module-level doc for why
         // per-child normalization is insufficient).
         self.rt.normalize_columns(&mut rows, self.schema.len())?;
+        // SPEC-31: normalization rewrites `Slot::Id` cells into decoded
+        // `Slot::Term` strings, so the rows retained are larger than the rows
+        // charged above. Top the charge up to what is actually held.
+        let held = chunk_bytes(&rows);
+        self.res.grow(held.saturating_sub(self.res.bytes()))?;
 
         let batch = Batch {
             schema: self.schema.clone(),
@@ -172,6 +171,10 @@ pub struct JoinOp<'r, E: Executor + ?Sized> {
     /// SPEC-31 charge for the drained build side. Held as long as `state`
     /// is, and released when the operator drops.
     res: Reservation,
+    /// SPEC-31 charge for `pending`, one probe chunk's fan-out. Replaced
+    /// wholesale each time `pending` is, so the charge tracks the one
+    /// fan-out actually held.
+    probe_res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
@@ -186,6 +189,7 @@ impl<'r, E: Executor + ?Sized> JoinOp<'r, E> {
             done: false,
             schema,
             res: Reservation::new(),
+            probe_res: Reservation::new(),
         }
     }
 }
@@ -239,6 +243,12 @@ impl<'r, E: Executor + ?Sized> Op for JoinOp<'r, E> {
                         self.rt.probe_join_chunk(st, &chunk)
                     })?;
                     if !rows.is_empty() {
+                        // SPEC-31: charge the fan-out this probe chunk
+                        // produced. The assignment drops the previous
+                        // chunk's reservation first, so only the fan-out
+                        // still held is charged.
+                        self.probe_res = Reservation::new();
+                        self.probe_res.grow(chunk_bytes(&rows))?;
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),
                             rows,
@@ -267,6 +277,10 @@ pub struct MinusOp<'r, E: Executor + ?Sized> {
     /// SPEC-31 charge for the drained build side. Held as long as `state`
     /// is, and released when the operator drops.
     res: Reservation,
+    /// SPEC-31 charge for `pending`, one probe chunk's fan-out. Replaced
+    /// wholesale each time `pending` is, so the charge tracks the one
+    /// fan-out actually held.
+    probe_res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> MinusOp<'r, E> {
@@ -281,6 +295,7 @@ impl<'r, E: Executor + ?Sized> MinusOp<'r, E> {
             done: false,
             schema,
             res: Reservation::new(),
+            probe_res: Reservation::new(),
         }
     }
 }
@@ -329,6 +344,12 @@ impl<'r, E: Executor + ?Sized> Op for MinusOp<'r, E> {
                         self.rt.probe_minus_chunk(st, &chunk)
                     })?;
                     if !rows.is_empty() {
+                        // SPEC-31: charge the fan-out this probe chunk
+                        // produced. The assignment drops the previous
+                        // chunk's reservation first, so only the fan-out
+                        // still held is charged.
+                        self.probe_res = Reservation::new();
+                        self.probe_res.grow(chunk_bytes(&rows))?;
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),
                             rows,
@@ -362,6 +383,10 @@ pub struct LeftJoinOp<'r, E: Executor + ?Sized> {
     /// SPEC-31 charge for the drained build side. Held as long as `state`
     /// is, and released when the operator drops.
     res: Reservation,
+    /// SPEC-31 charge for `pending`, one probe chunk's fan-out. Replaced
+    /// wholesale each time `pending` is, so the charge tracks the one
+    /// fan-out actually held.
+    probe_res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
@@ -387,6 +412,7 @@ impl<'r, E: Executor + ?Sized> LeftJoinOp<'r, E> {
             done: false,
             schema,
             res: Reservation::new(),
+            probe_res: Reservation::new(),
         }
     }
 }
@@ -435,6 +461,12 @@ impl<'r, E: Executor + ?Sized> Op for LeftJoinOp<'r, E> {
                             .probe_left_join_chunk(st, &chunk, self.expr.as_ref(), &self.want)
                     })?;
                     if !rows.is_empty() {
+                        // SPEC-31: charge the fan-out this probe chunk
+                        // produced. The assignment drops the previous
+                        // chunk's reservation first, so only the fan-out
+                        // still held is charged.
+                        self.probe_res = Reservation::new();
+                        self.probe_res.grow(chunk_bytes(&rows))?;
                         self.pending = Some(ChunkedBatch::new(Batch {
                             schema: self.schema.clone(),
                             rows,
@@ -631,6 +663,9 @@ pub struct PathClosureOp<'r, E: Executor + ?Sized> {
     /// SPEC-31 charge for the drained input. Released when the operator
     /// drops, i.e. when the rows it paid for are gone.
     res: Reservation,
+    /// SPEC-31 charge for the computed closure, which can be much larger than
+    /// the edge set `res` covers. Held for as long as `buffer` is.
+    out_res: Reservation,
 }
 
 impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
@@ -651,6 +686,7 @@ impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
             buffer: None,
             schema,
             res: Reservation::new(),
+            out_res: Reservation::new(),
         }
     }
 }
@@ -666,12 +702,18 @@ impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
     fn next(&mut self) -> Result<Option<Batch>> {
         if self.buffer.is_none() {
             let edge_batch = drain(&mut self.edge, &mut self.res)?;
-            self.buffer = Some(ChunkedBatch::new(self.rt.compute_path_closure(
+            let closure = self.rt.compute_path_closure(
                 edge_batch,
                 &self.subject,
                 &self.object,
                 self.reflexive,
-            )?));
+            )?;
+            // SPEC-31: the closure can be quadratic in the edge set `drain`
+            // charged, so it is charged in its own right. Charged after the
+            // fact — `compute_path_closure` has no seam to charge inside, so
+            // the ceiling refuses the next allocation, not this one.
+            self.out_res.grow(chunk_bytes(&closure.rows))?;
+            self.buffer = Some(ChunkedBatch::new(closure));
         }
         Ok(self.buffer.as_mut().unwrap().next_chunk())
     }

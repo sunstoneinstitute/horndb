@@ -35,6 +35,12 @@ fn store(n: u64) -> HornBackend {
     b
 }
 
+/// Three shapes with no blocking operator: only the scan (and, for the last,
+/// `DistinctOp`'s seen-set) can charge anything.
+const SELECT_ALL: &str = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
+const SELECT_S: &str = "SELECT ?s WHERE { ?s ?p ?o }";
+const SELECT_DISTINCT_S: &str = "SELECT DISTINCT ?s WHERE { ?s ?p ?o }";
+
 /// `MAX` is not a plain count (`plan/pushdown.rs::is_plain_count` is false
 /// for it), so this stays on `GroupOp` instead of the `CountScan` pushdown —
 /// the shape that actually charges the budget.
@@ -314,4 +320,94 @@ fn stacked_blocking_operators_charge_the_sum_not_the_max() {
          larger one (a Reservation dropped right after its operator's drain call \
          measured 1.10x here, not 2.1x)"
     );
+}
+
+/// HDB-232 item 2: the BGP scan is charged. A query with no blocking
+/// operator at all still materializes its whole scan into `ScanOp`, and
+/// holds it for the query's life, so the charge must be non-zero and must
+/// grow with the data — not with the plan shape.
+#[test]
+fn a_streaming_query_charges_its_scan() {
+    let small = {
+        let _g = budget::scope(None);
+        execute_query(SELECT_ALL, &store(400)).unwrap();
+        budget::peak()
+    };
+    let large = {
+        let _g = budget::scope(None);
+        execute_query(SELECT_ALL, &store(4_000)).unwrap();
+        budget::peak()
+    };
+    assert!(small > 0, "a scan of 400 rows must charge something");
+    let ratio = large as f64 / small as f64;
+    assert!(
+        (8.0..=12.0).contains(&ratio),
+        "10x the rows must charge about 10x the bytes: small={small}, large={large}, \
+         ratio={ratio}"
+    );
+}
+
+/// HDB-232 item 1: `DistinctOp`'s seen-set is charged, and the charge is
+/// held for the operator's life rather than released per chunk.
+///
+/// `DistinctOp` streams its rows, so the only thing separating it from the
+/// plain projection is the key it keeps per distinct row. Measure that
+/// difference at two data sizes: it must scale with the number of distinct
+/// rows. A charge released per chunk instead of held would cap the
+/// difference at one chunk's worth of keys — the same number at both sizes —
+/// and `batch_rows()` is 4 096 outside the crate's own `cfg(test)` build, so
+/// both sizes here span several chunks.
+#[test]
+fn distinct_charges_its_seen_set() {
+    /// (scan-only peak, DISTINCT peak) over the same `n`-row store.
+    fn peaks(n: u64) -> (u64, u64) {
+        let s = store(n);
+        let plain = {
+            let _g = budget::scope(None);
+            execute_query(SELECT_S, &s).unwrap();
+            budget::peak()
+        };
+        let distinct = {
+            let _g = budget::scope(None);
+            execute_query(SELECT_DISTINCT_S, &s).unwrap();
+            budget::peak()
+        };
+        assert!(
+            distinct > plain,
+            "DISTINCT holds a key per distinct row on top of the same scan: \
+             n={n}, plain={plain}, distinct={distinct}"
+        );
+        (plain, distinct)
+    }
+
+    let (small_plain, small_distinct) = peaks(5_000);
+    let (large_plain, large_distinct) = peaks(20_000);
+    let small = small_distinct - small_plain;
+    let large = large_distinct - large_plain;
+    let ratio = large as f64 / small as f64;
+    assert!(
+        (3.5..=4.5).contains(&ratio),
+        "4x the distinct rows must hold 4x the seen-set charge: small={small}, \
+         large={large}, ratio={ratio} (a charge released per chunk measures \
+         about 1.0 here)"
+    );
+
+    // The charge is a real ceiling, not just a number: a limit above the
+    // scan but below scan + seen-set refuses the DISTINCT and admits the
+    // plain projection over the same data.
+    let s = store(20_000);
+    let ceiling = large_plain + large / 2;
+    {
+        let _g = budget::scope(Some(ceiling));
+        execute_query(SELECT_S, &s).expect("the plain query fits under the ceiling");
+    }
+    {
+        let _g = budget::scope(Some(ceiling));
+        let err = execute_query(SELECT_DISTINCT_S, &s)
+            .expect_err("the seen-set pushes DISTINCT past the ceiling");
+        assert!(
+            matches!(err, SparqlError::QueryMemoryLimit { .. }),
+            "refused on budget, not something else: {err:?}"
+        );
+    }
 }

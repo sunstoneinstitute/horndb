@@ -133,7 +133,7 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 Ok(Box::new(ScanOp::new(
                     self.exec()
                         .scan_bgp_ids(patterns, &self.scan_scope(&scope))?,
-                )))
+                )?))
             }
             PhysicalPlan::CountScan {
                 patterns,
