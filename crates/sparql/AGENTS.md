@@ -108,6 +108,33 @@ router serves the basics a Kubernetes deployment needs on day one:
   socket is already bound is fatal (`std::process::exit(1)`), matching the
   pre-HDB-124 behavior of failing the whole process on a bad load.
 
+## Durable store (`[server].data_dir`, HDB-233)
+
+`bin/serve.rs` opens the SPEC-25 S3 write-ahead-log store when
+`[server].data_dir` is set, and serves an in-memory store when it is not.
+Three things about that path:
+
+- **It runs before the bind**, the one exception to the HDB-124 rule above.
+  Opening takes the store directory's lock, and a directory another `serve`
+  already holds must not produce a process that answers a single request.
+  Replay is also bounded by the checkpoint cadence, unlike the `--data` corpus
+  load, which is unbounded and stays behind the bind.
+- **The opened backend is moved through `run_load` by value** and swapped into
+  the shared `Arc<RwLock<_>>` at the end, exactly where the fresh in-memory one
+  used to be. Keep it that way: `set_max_snapshot_memory` (HDB-231) is applied
+  to that swapped-in backend, so a construction change that bypasses the swap
+  silently drops the snapshot-memory ceiling.
+- **`--data` is optional when `data_dir` is set.** A durable store already
+  holds what was loaded into it; passing both re-parses the corpus and
+  re-appends log records on every start.
+
+Test: `tests/serve_durability.rs` starts `serve` on an ephemeral port, writes
+over HTTP, `SIGKILL`s it, restarts against the same directory and queries the
+data back. What it pins is the default `SyncPolicy::EveryBatch` guarantee —
+the log record is fsynced before the write reaches the tier, so a write the
+HTTP response acknowledged is already on disk. No clean shutdown, drain or
+checkpoint is part of that claim.
+
 ## Aggregation perf profiling
 
 `examples/agg_profile.rs` is the diagnostic harness for the aggregation-qps

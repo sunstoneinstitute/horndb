@@ -136,6 +136,21 @@ pub fn restart_only_changes(old: &ServerConfig, new: &ServerConfig) -> Vec<&'sta
         old.server.limits.max_snapshot_memory != new.server.limits.max_snapshot_memory,
         "[server.limits].max_snapshot_memory",
     );
+    // SPEC-25 S3 / SPEC-24 S5: the store directory is opened once at startup
+    // (and locked for the process's life), and the checkpoint scheduler reads
+    // its cadence once when it starts.
+    check(
+        old.server.data_dir != new.server.data_dir,
+        "[server].data_dir",
+    );
+    check(
+        old.server.checkpoint_interval != new.server.checkpoint_interval,
+        "[server].checkpoint_interval",
+    );
+    check(
+        old.server.checkpoint_changes != new.server.checkpoint_changes,
+        "[server].checkpoint_changes",
+    );
     check(old.simd != new.simd, "[simd]");
     check(old.reasoning != new.reasoning, "[reasoning]");
     out
