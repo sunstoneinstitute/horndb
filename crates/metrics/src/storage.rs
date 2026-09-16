@@ -32,6 +32,18 @@ pub struct StorageMetrics {
     /// needs — a p99 of seconds is invisible in a sum.
     pub partition_merge_seconds: Histogram,
     pub partition_merges: Family<MergeTriggerLabel, Counter>,
+    /// Write-ahead log appends (SPEC-25 S3): one observation per logged write
+    /// batch, covering encode + write + whatever fsync the `SyncPolicy` does.
+    /// Under the default `EveryBatch` policy this histogram *is* the durability
+    /// cost of a write, so a p99 here is the first place to look when writes
+    /// stall on a slow disk.
+    pub wal_appends: Counter,
+    pub wal_append_seconds: Histogram,
+    /// Crash recovery: records replayed by `Store::open`, and how long the
+    /// whole replay took. One `wal_replay_seconds` observation per store
+    /// opened, so it is also the startup cost of reopening a durable store.
+    pub wal_replay_records: Counter,
+    pub wal_replay_seconds: Histogram,
 }
 
 impl StorageMetrics {
@@ -44,6 +56,14 @@ impl StorageMetrics {
         // one in seconds.
         let partition_merge_seconds = Histogram::new(exponential_buckets(1e-4, 4.0, 12));
         let partition_merges = Family::<MergeTriggerLabel, Counter>::default();
+        // 10 us to ~42 s: an append without fsync is microseconds, one that
+        // waits on a slow disk's fsync can be seconds.
+        let wal_appends = Counter::default();
+        let wal_append_seconds = Histogram::new(exponential_buckets(1e-5, 4.0, 12));
+        // 1 ms to ~4.4 min: replaying an empty log is instant, replaying a
+        // large one is a whole bulk load.
+        let wal_replay_records = Counter::default();
+        let wal_replay_seconds = Histogram::new(exponential_buckets(1e-3, 4.0, 10));
         reg.register(
             "storage_load_duration_seconds",
             "RDF load duration",
@@ -74,6 +94,26 @@ impl StorageMetrics {
             "Partition run merges, by what triggered them",
             partition_merges.clone(),
         );
+        reg.register(
+            "storage_wal_appends",
+            "Write-ahead log records appended for a write batch",
+            wal_appends.clone(),
+        );
+        reg.register(
+            "storage_wal_append_seconds",
+            "Duration of one write-ahead log append, fsync included",
+            wal_append_seconds.clone(),
+        );
+        reg.register(
+            "storage_wal_replay_records",
+            "Write-ahead log records replayed at store open",
+            wal_replay_records.clone(),
+        );
+        reg.register(
+            "storage_wal_replay_seconds",
+            "Duration of one store's write-ahead log replay at open",
+            wal_replay_seconds.clone(),
+        );
         Self {
             load_duration_seconds,
             load_bytes,
@@ -81,6 +121,10 @@ impl StorageMetrics {
             load_phase_rows,
             partition_merge_seconds,
             partition_merges,
+            wal_appends,
+            wal_append_seconds,
+            wal_replay_records,
+            wal_replay_seconds,
         }
     }
 

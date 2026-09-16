@@ -19,6 +19,7 @@ oxrdf.workspace = true
 horndb-simd = { workspace = true }
 fst.workspace = true
 memmap2.workspace = true
+fs4.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

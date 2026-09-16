@@ -1471,6 +1471,7 @@ dependencies = [
  "bytemuck",
  "criterion 0.8.2",
  "dashmap",
+ "fs4",
  "fst",
  "hashbrown 0.16.1",
  "horndb-metrics",

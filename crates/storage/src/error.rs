@@ -20,6 +20,8 @@ pub enum StorageError {
     Snapshot(String),
     #[error("write-ahead log: {0}")]
     Wal(String),
+    #[error("store directory is locked by another process: {0}")]
+    DirLocked(String),
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;

@@ -58,6 +58,10 @@ figment = { version = "0.10", features = ["toml", "env"] }
 notify = "8"
 arc-swap = "1"
 prometheus-client = "0.25"
+# Advisory file locks (flock on unix). `horndb-storage` keeps two processes off
+# one store directory with it. `crates/closure` declares its own copy under
+# `[build-dependencies]`, where a workspace dependency cannot reach.
+fs4 = "1.1"
 anyhow = "1"
 thiserror = "2"
 crossbeam-channel = "0.5"
