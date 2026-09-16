@@ -130,6 +130,12 @@ pub fn restart_only_changes(old: &ServerConfig, new: &ServerConfig) -> Vec<&'sta
         old.server.limits.max_request_body != new.server.limits.max_request_body,
         "[server.limits].max_request_body",
     );
+    // SPEC-31 S6: installed on the backend at startup
+    // (`HornBackend::set_max_snapshot_memory`), not re-read per query.
+    check(
+        old.server.limits.max_snapshot_memory != new.server.limits.max_snapshot_memory,
+        "[server.limits].max_snapshot_memory",
+    );
     check(old.simd != new.simd, "[simd]");
     check(old.reasoning != new.reasoning, "[reasoning]");
     out

@@ -280,6 +280,11 @@ fn error_status(e: &SparqlError) -> StatusCode {
         // it would take. 507 says that, where 400 would blame the client for
         // a request that is perfectly legal at a larger budget.
         SparqlError::QueryMemoryLimit { .. } => StatusCode::INSUFFICIENT_STORAGE,
+        // Also 507, and for the same reason: the server declined to spend the
+        // memory. The two are told apart by the error message, which names
+        // the knob that applies — `max_snapshot_memory` is the server's, and
+        // no request parameter can raise it.
+        SparqlError::SnapshotMemoryLimit { .. } => StatusCode::INSUFFICIENT_STORAGE,
         _ => StatusCode::BAD_REQUEST,
     }
 }

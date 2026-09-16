@@ -241,7 +241,15 @@ async fn main() -> Result<()> {
     // "connection refused", or the pod never leaves the load balancer's
     // rotation cleanly and a slow load can look indistinguishable from a
     // dead process.
-    let store = Arc::new(RwLock::new(HornBackend::new()));
+    // SPEC-31 S6: the store-side ceiling is server policy, so it is applied
+    // to every backend this process serves from — this one and the populated
+    // one `run_load` swaps in below.
+    let max_snapshot_memory = cfg.server.limits.snapshot_memory_ceiling();
+    let store = Arc::new(RwLock::new({
+        let mut b = HornBackend::new();
+        b.set_max_snapshot_memory(max_snapshot_memory);
+        b
+    }));
     let ready = Arc::new(AtomicBool::new(false));
     // SPEC-26 S2/S3: the server holds the live config; its `[server.limits]`
     // are the *defaults* each request layers its own URL/form overrides on top
@@ -279,6 +287,7 @@ async fn main() -> Result<()> {
                 dictionary_bytes: s.dictionary_bytes as i64,
                 tier_bytes_warm: (s.bytes_estimated - s.bytes_cold) as i64,
                 tier_bytes_cold: s.bytes_cold as i64,
+                snapshot_memo_bytes: s.snapshot_memo_bytes as i64,
             })
         },
     )));
@@ -305,7 +314,8 @@ async fn main() -> Result<()> {
     let reasoning = cfg.reasoning.clone();
     tokio::task::spawn_blocking(move || {
         match run_load(materialize, &files, reasoning_backend, on_inconsistency) {
-            Ok((loaded_store, total)) => {
+            Ok((mut loaded_store, total)) => {
+                loaded_store.set_max_snapshot_memory(max_snapshot_memory);
                 *store.write() = loaded_store;
                 // SPEC-29 P1's view materializer. The first pass runs before
                 // `ready` flips, so the first request that sees /readyz green

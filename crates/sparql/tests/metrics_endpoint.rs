@@ -151,6 +151,7 @@ async fn metrics_endpoint_reports_dram_and_cold_tier_bytes() {
                 dictionary_bytes: s.dictionary_bytes as i64,
                 tier_bytes_warm: (s.bytes_estimated - s.bytes_cold) as i64,
                 tier_bytes_cold: s.bytes_cold as i64,
+                snapshot_memo_bytes: s.snapshot_memo_bytes as i64,
             })
         },
     )));
