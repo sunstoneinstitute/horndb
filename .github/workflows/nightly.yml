@@ -102,8 +102,12 @@ jobs:
           # GitHub-hosted cache round trip or its shared quota.
           cache: false
 
-      - name: build harness
-        run: cargo build -p horndb-harness --bin harness --release --features real-engine
+      - name: build harness and server
+        # `serve` too: start-engine.sh builds it on demand, and that build
+        # would otherwise run inside the 60s liveness window below.
+        run: |
+          cargo build -p horndb-harness --bin harness --release --features real-engine
+          cargo build -p horndb-sparql --bin serve --release --features server
 
       - name: stage nightly scenario into asset tree
         # The driver resolves the scenario's relative path keys against the
