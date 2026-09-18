@@ -322,6 +322,22 @@ pub struct Server {
     /// HDB-124: how long a graceful shutdown (SIGTERM/SIGINT) waits for
     /// in-flight requests to finish before the process force-exits.
     pub shutdown_drain: HumanDuration,
+    /// SPEC-25 S3: the directory holding the durable store — write-ahead log,
+    /// dictionary base, and checkpoints. Unset (the default) means the store
+    /// is in memory only and every write is lost at exit. Created on first
+    /// use. Only one process may hold a directory at a time; a second `serve`
+    /// on the same one fails at startup rather than corrupting the log.
+    pub data_dir: Option<PathBuf>,
+    /// SPEC-24 S5 checkpoint cadence — a checkpoint runs when *either* trigger
+    /// fires. `checkpoint_interval` is the time trigger, and a checkpoint is
+    /// skipped when nothing was written since the last one. Ignored without
+    /// `data_dir`.
+    pub checkpoint_interval: HumanDuration,
+    /// The delta trigger of the same cadence: checkpoint once this many quads
+    /// have been inserted or retracted since the last checkpoint, without
+    /// waiting out `checkpoint_interval`. `0` disables the delta trigger and
+    /// leaves the time trigger alone.
+    pub checkpoint_changes: u64,
 }
 
 impl Default for Server {
@@ -331,6 +347,11 @@ impl Default for Server {
             config_dirs: vec![PathBuf::from("/etc/horndb/config.d")],
             limits: Limits::default(),
             shutdown_drain: HumanDuration(Duration::from_secs(30)),
+            data_dir: None,
+            // SPEC-24 S5 fixes the cadence: 1 minute or 100K deltas,
+            // whichever comes first.
+            checkpoint_interval: HumanDuration(Duration::from_secs(60)),
+            checkpoint_changes: 100_000,
         }
     }
 }

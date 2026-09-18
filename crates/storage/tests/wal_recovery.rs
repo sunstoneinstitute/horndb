@@ -4,9 +4,13 @@
 //! a torn tail is dropped; a corrupt record before the tail is an error;
 //! a checkpoint switches generations atomically.
 //!
-//! "Kill" here is `std::mem::forget(store)`: no `Drop`, no flush — the
-//! same bytes a SIGKILL would leave behind (everything the process wrote is
-//! already in the kernel).
+//! "Kill" here is `drop(store)`. `Store::drop` flushes nothing and touches no
+//! log file (it only removes a temp cold directory an in-memory store owns),
+//! so the bytes left behind are the same ones a SIGKILL leaves — everything
+//! the process wrote is already in the kernel. Dropping also closes the
+//! store's file descriptors, including its `LOCK`, which is what a SIGKILL
+//! does too; `std::mem::forget` would leak the lock and make the reopen below
+//! fail for a reason no real crash produces.
 
 use horndb_storage::loader::nquads::load_nquads_reader;
 use horndb_storage::loader::ntriples::load_ntriples_reader;
@@ -174,7 +178,7 @@ fn crash_after_append_recovers_ids_contents_and_stamps() {
         .get(&iri("http://example.org/x"))
         .unwrap();
     assert!(before.version > 0);
-    std::mem::forget(store);
+    drop(store); // kill
 
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(state(&store), before);
@@ -209,7 +213,7 @@ fn crash_after_append_recovers_ids_contents_and_stamps() {
         )])
         .unwrap();
     let after = state(&store);
-    std::mem::forget(store);
+    drop(store); // kill
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(state(&store), after);
     assert_eq!(
@@ -229,7 +233,7 @@ fn id_differential_across_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     load_ntriples_reader(&store, NT.as_bytes()).unwrap();
-    std::mem::forget(store);
+    drop(store); // kill
 
     let store = Store::open(dir.path()).unwrap();
     let len = store.dictionary().len();
@@ -251,7 +255,10 @@ fn checkpoint_then_append_then_reopen() {
     let g = write_history(&store);
     let checkpointed = state(&store);
     store.checkpoint().unwrap();
-    assert_eq!(dir_files(dir.path()), ["MANIFEST", "dict.1", "wal.1"]);
+    assert_eq!(
+        dir_files(dir.path()),
+        ["LOCK", "MANIFEST", "dict.1", "wal.1"]
+    );
     assert_eq!(
         state(&store),
         checkpointed,
@@ -281,7 +288,7 @@ fn checkpoint_then_append_then_reopen() {
         .dictionary()
         .get(&iri("http://example.org/z"))
         .unwrap();
-    std::mem::forget(store);
+    drop(store); // kill
 
     let store = Store::open(dir.path()).unwrap();
     let recovered = state(&store);
@@ -313,7 +320,10 @@ fn checkpoint_then_append_then_reopen() {
 
     // A second checkpoint retires the first generation.
     store.checkpoint().unwrap();
-    assert_eq!(dir_files(dir.path()), ["MANIFEST", "dict.2", "wal.2"]);
+    assert_eq!(
+        dir_files(dir.path()),
+        ["LOCK", "MANIFEST", "dict.2", "wal.2"]
+    );
     let after2 = state(&store);
     drop(store);
     // Rows the second checkpoint carried restart at its version and the dead
@@ -349,7 +359,7 @@ fn torn_tail_record_is_dropped_and_truncated() {
         .insert_triples(&[(iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b"))])
         .unwrap();
     let good = state(&store);
-    std::mem::forget(store);
+    drop(store); // kill
     let wal = dir.path().join("wal.0");
     let intact = fs::read(&wal).unwrap();
 
@@ -393,7 +403,7 @@ fn corrupted_middle_record_is_an_error() {
             )])
             .unwrap();
     }
-    std::mem::forget(store);
+    drop(store); // kill
     let wal = dir.path().join("wal.0");
     let mut bytes = fs::read(&wal).unwrap();
     // Byte 8 is the first body byte of the first record (its kind).
@@ -437,7 +447,7 @@ fn compaction_between_records_keeps_the_log_replayable() {
     let keep_id = store.dictionary().get(&keep.2).unwrap();
     assert!(keep_id.payload() > orphan.payload());
     let quads = state(&store).quads;
-    std::mem::forget(store);
+    drop(store); // kill
 
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(state(&store).quads, quads);
@@ -464,7 +474,7 @@ fn timed_policy_round_trips_and_in_memory_store_has_no_log() {
         .unwrap();
     store.sync_wal().unwrap();
     let s = state(&store);
-    std::mem::forget(store);
+    drop(store); // kill
     assert_eq!(state(&Store::open(dir.path()).unwrap()), s);
 
     let mem = Store::in_memory();
@@ -486,7 +496,8 @@ fn stale_generation_files_are_swept_on_open() {
     fs::write(dir.path().join("wal.1"), b"junk").unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(state(&store), s);
-    assert_eq!(dir_files(dir.path()), ["MANIFEST", "wal.0"]);
+    // `LOCK` is the directory lock this open holds; the sweep leaves it alone.
+    assert_eq!(dir_files(dir.path()), ["LOCK", "MANIFEST", "wal.0"]);
 }
 
 #[test]
@@ -497,13 +508,16 @@ fn crash_after_manifest_switch_before_unlink() {
     let old_log = fs::read(dir.path().join("wal.0")).unwrap();
     store.checkpoint().unwrap();
     let after = state(&store);
-    std::mem::forget(store);
-    // The checkpoint died after its MANIFEST rename but before the unlink:
-    // the previous generation is still on disk and must be ignored.
+    drop(store); // kill
+                 // The checkpoint died after its MANIFEST rename but before the unlink:
+                 // the previous generation is still on disk and must be ignored.
     fs::write(dir.path().join("wal.0"), old_log).unwrap();
     let reopened = state(&Store::open(dir.path()).unwrap());
     assert_eq!(reopened.quads, after.quads);
     assert_eq!(reopened.version, after.version);
     assert_eq!(reopened.dict_len, after.dict_len);
-    assert_eq!(dir_files(dir.path()), ["MANIFEST", "dict.1", "wal.1"]);
+    assert_eq!(
+        dir_files(dir.path()),
+        ["LOCK", "MANIFEST", "dict.1", "wal.1"]
+    );
 }

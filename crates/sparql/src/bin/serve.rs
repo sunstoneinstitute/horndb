@@ -60,7 +60,13 @@ struct Cli {
     /// TriG (`.trig`) files, or directories containing them, to load into the
     /// store. Repeatable. `.nq`/`.trig` are dataset (quad) formats: each
     /// quad loads into the named graph it carries, not the default graph.
-    #[arg(long = "data", required = true, num_args = 1..)]
+    ///
+    /// Required unless `[server].data_dir` names a durable store — that store
+    /// already holds what was loaded into it, so a restart against it needs no
+    /// files. Passing both re-loads the files into the durable store, which is
+    /// idempotent (a quad already present inserts nothing) but costs a parse
+    /// and a log record per batch on every start.
+    #[arg(long = "data", num_args = 1..)]
     data: Vec<PathBuf>,
 
     /// Path to a `config.toml` (SPEC-26). Highest precedence for *which* file
@@ -178,8 +184,11 @@ async fn main() -> Result<()> {
         collect_data_files(path, &mut files)
             .with_context(|| format!("enumerating {}", path.display()))?;
     }
-    if files.is_empty() {
-        anyhow::bail!("no .nt/.ttl/.nq/.trig files found in the provided --data paths");
+    if files.is_empty() && cfg.server.data_dir.is_none() {
+        anyhow::bail!(
+            "nothing to serve: pass --data with .nt/.ttl/.nq/.trig files, \
+             or set [server].data_dir to a durable store directory"
+        );
     }
     if cli.materialize && files.iter().any(|f| is_dataset_format(f)) {
         // --materialize parses every file into one oxrdf::Dataset default
@@ -234,8 +243,37 @@ async fn main() -> Result<()> {
     let _config_watcher = horndb_config::watch(inputs, config_handle.clone())
         .context("starting the config reload watcher")?;
 
-    // HDB-124: bind and start serving BEFORE the (potentially multi-minute,
-    // no-persistence-yet) data load, so `/healthz` (process up) and `/readyz`
+    // SPEC-25 S3 (HDB-233): open the durable store, if one is configured.
+    // This is the one slow startup step that stays AHEAD of the bind below,
+    // against HDB-124's rule, for two reasons. A directory another `serve`
+    // already holds must never produce a process that accepts a single
+    // request — the directory lock is taken here, and a conflict is fatal
+    // before anything is listening. And replay is bounded by the checkpoint
+    // cadence further down (at most one interval's or one delta budget's
+    // worth of records), unlike the unbounded `--data` corpus load HDB-124
+    // moved behind the bind.
+    let backend = match &cfg.server.data_dir {
+        Some(dir) => {
+            let store = horndb_storage::Store::open(dir)
+                .with_context(|| format!("opening the store directory {}", dir.display()))?;
+            let backend = HornBackend::with_store(store);
+            eprintln!(
+                "serve: durable store at {} — {} triple(s) recovered",
+                dir.display(),
+                backend.len()
+            );
+            backend
+        }
+        None => {
+            eprintln!(
+                "serve: no [server].data_dir — the store is in memory; writes are lost at exit"
+            );
+            HornBackend::new()
+        }
+    };
+
+    // HDB-124: bind and start serving BEFORE the (potentially multi-minute)
+    // data load, so `/healthz` (process up) and `/readyz`
     // (503 until loaded) are both reachable during the load — a Kubernetes
     // readiness probe must be able to see "up but not ready", not just
     // "connection refused", or the pod never leaves the load balancer's
@@ -312,8 +350,16 @@ async fn main() -> Result<()> {
     let reasoning_backend = cfg.reasoning.backend;
     #[cfg(feature = "reasoner")]
     let reasoning = cfg.reasoning.clone();
+    let shutdown_store = Arc::clone(&store);
+    let checkpoint_ready = Arc::clone(&ready);
     tokio::task::spawn_blocking(move || {
-        match run_load(materialize, &files, reasoning_backend, on_inconsistency) {
+        match run_load(
+            backend,
+            materialize,
+            &files,
+            reasoning_backend,
+            on_inconsistency,
+        ) {
             Ok((mut loaded_store, total)) => {
                 loaded_store.set_max_snapshot_memory(max_snapshot_memory);
                 *store.write() = loaded_store;
@@ -361,6 +407,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    if cfg.server.data_dir.is_some() {
+        spawn_checkpoint_scheduler(
+            Arc::clone(&shutdown_store),
+            checkpoint_ready,
+            cfg.server.checkpoint_interval.0,
+            cfg.server.checkpoint_changes,
+        );
+    }
+
     let drain = cfg.server.shutdown_drain.0;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let serve_task = tokio::spawn(async move {
@@ -387,7 +442,70 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     }
+
+    // SPEC-25 S3: a final checkpoint on clean shutdown, so the next start
+    // replays nothing. It is an optimization, not a durability step — every
+    // write was already logged and fsynced before it was acknowledged, so a
+    // failure here costs replay time at the next open and nothing else.
+    if cfg.server.data_dir.is_some() {
+        match shutdown_store.read().column_store().checkpoint() {
+            Ok(()) => eprintln!("serve: checkpointed on shutdown"),
+            Err(e) => eprintln!("serve: shutdown checkpoint failed: {e}"),
+        }
+    }
     Ok(())
+}
+
+/// Run the SPEC-24 S5 checkpoint cadence on a background thread: checkpoint
+/// once `interval` has passed with at least one write, or once `changes` quads
+/// have been written, whichever comes first (`changes == 0` turns the delta
+/// trigger off). A plain thread rather than a tokio task — a checkpoint is
+/// blocking CPU and disk work, and it sleeps between rounds either way.
+///
+/// It holds the backend's *read* guard while checkpointing, which is exactly
+/// the exclusion `Store::checkpoint` wants: writers (which need the write
+/// guard) wait, readers do not.
+///
+/// It waits for `ready`, because until the startup load finishes the shared
+/// handle still points at the empty pre-load backend, which has no log to
+/// checkpoint.
+fn spawn_checkpoint_scheduler(
+    store: Arc<RwLock<HornBackend>>,
+    ready: Arc<AtomicBool>,
+    interval: std::time::Duration,
+    changes: u64,
+) {
+    // A quarter of a second of slack on a cadence measured in tens of seconds.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    std::thread::spawn(move || {
+        let mut last = Instant::now();
+        loop {
+            std::thread::sleep(POLL);
+            if !ready.load(std::sync::atomic::Ordering::Acquire) {
+                last = Instant::now();
+                continue;
+            }
+            let pending = store.read().column_store().changes_since_checkpoint();
+            if pending == 0 {
+                // Nothing to write out; do not burn a checkpoint on an idle
+                // store, and do not let idle time count towards the next one.
+                last = Instant::now();
+                continue;
+            }
+            if last.elapsed() < interval && !(changes > 0 && pending >= changes) {
+                continue;
+            }
+            let started = Instant::now();
+            match store.read().column_store().checkpoint() {
+                Ok(()) => eprintln!(
+                    "serve: checkpointed {pending} change(s) in {:?}",
+                    started.elapsed()
+                ),
+                Err(e) => eprintln!("serve: checkpoint failed: {e}"),
+            }
+            last = Instant::now();
+        }
+    });
 }
 
 /// Wait for SIGTERM or SIGINT (Ctrl+C). `axum::serve(...).with_graceful_shutdown`
@@ -417,9 +535,12 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// Parse `files` and either bulk-load them directly or run OWL 2 RL
-/// materialization first (`materialize`), returning the populated store and
-/// the total triple count. Extracted from `main` so it can run on a
+/// Parse `files` into `store` — either bulk-loading them directly or running
+/// OWL 2 RL materialization first (`materialize`) — and return it with the
+/// total triple count. `store` comes from `main`, already open on
+/// `[server].data_dir` when one is configured, so a durable store's recovered
+/// data and the freshly loaded files end up in the same store rather than the
+/// load discarding what was recovered. Extracted from `main` so it can run on a
 /// `spawn_blocking` thread (HDB-124: the socket binds before this runs) and
 /// so the parse/materialize/load sequencing stays unit-testable in
 /// isolation from the HTTP boot sequence.
@@ -430,12 +551,12 @@ async fn wait_for_shutdown_signal() {
 /// the error returned here is fatal in the caller — the socket is already
 /// bound by then (HDB-124), so the process exits rather than never binding.
 fn run_load(
+    mut store: HornBackend,
     materialize: bool,
     files: &[PathBuf],
     reasoning_backend: horndb_config::ReasoningBackend,
     on_inconsistency: OnInconsistency,
 ) -> Result<(HornBackend, u64)> {
-    let mut store = HornBackend::new();
     let total;
 
     if materialize {

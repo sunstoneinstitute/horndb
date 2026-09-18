@@ -46,8 +46,9 @@ socket.
 
 `--data` (list of paths)
 
-:   **Default:** none. The flag is required — `serve` exits with an error if it
-    is missing.
+:   **Default:** none. Required unless `[server].data_dir` names a durable
+    store; with neither, `serve` exits with an error because it has nothing to
+    serve.
 
     **Scope:** CLI flag to the `serve` binary; read once at process start.
 
@@ -61,6 +62,61 @@ socket.
     named graph it names, so these are how you populate named graphs at
     startup. Blank-node labels are scoped per file, so two files can reuse a
     label without colliding.
+
+    **Tuning notes (with `data_dir`):** a durable store already holds what was
+    loaded into it, so a restart against one needs no `--data` at all. Passing
+    both re-loads the files on every start. That is safe — a quad already
+    present inserts nothing — but it costs a parse of the whole corpus and a
+    log record per batch each time.
+
+`[server].data_dir` (path)
+
+:   **Default:** unset, which means the store lives in memory only and every
+    write is lost when the process exits.
+
+    **Scope:** server. Restart-only — the directory is opened, and locked, once
+    at startup.
+
+    **Allowed values:** a path to a directory. It is created if it does not
+    exist. Environment form: `HORNDB_SERVER__DATA_DIR`.
+
+    **Tuning notes:** this is what makes writes survive a restart. The
+    directory holds a write-ahead log, the dictionary base, and checkpoints.
+    Every write is appended to the log and flushed to disk *before* the request
+    that made it is answered, so anything `/update` returned a success status
+    for is recoverable — including after a `kill -9` or a power loss.
+
+    Only one process may hold the directory at a time. A second `serve` on the
+    same one fails at startup with a clear error instead of interleaving
+    records into one log and corrupting it. The lock is the operating system's
+    and is tied to an open file, so it is released whenever the holder dies,
+    however abruptly — a restart after a crash is never blocked by a leftover
+    lock.
+
+    Put the directory on local disk. Write latency is a flush to this device on
+    every write batch, and a network filesystem's flush semantics are not
+    strong enough for the guarantee above.
+
+`[server].checkpoint_interval` (duration) and `[server].checkpoint_changes` (integer)
+
+:   **Defaults:** `60s` and `100000`.
+
+    **Scope:** server. Restart-only; both are ignored without `data_dir`.
+
+    **Allowed values:** a duration string (`30s`, `5m`) and a count. A
+    `checkpoint_changes` of `0` turns the change trigger off and leaves the
+    time trigger running.
+
+    **Tuning notes:** a checkpoint folds the log into a fresh base so the next
+    start replays less. One runs when either trigger fires: the interval has
+    passed with at least one write, or that many quads have been inserted or
+    retracted since the last one. An idle store never checkpoints.
+
+    Both knobs trade startup time against steady-state cost. Lower values
+    checkpoint more often — a shorter replay on the next start, but each
+    checkpoint writes the dictionary and every visible row, and blocks writers
+    (not readers) while it runs. Raise them on a write-heavy store where that
+    pause shows up, and accept the longer restart.
 
 `--config` (path)
 

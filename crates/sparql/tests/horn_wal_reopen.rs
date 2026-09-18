@@ -22,7 +22,9 @@ fn drop_graph_is_logged_and_replays() {
     );
     run("DROP GRAPH <http://g/1>", &mut b);
     run("INSERT DATA { <http://s> <http://p> <http://o3> }", &mut b);
-    std::mem::forget(b);
+    // Kill: nothing flushes on drop, so this leaves the bytes a SIGKILL would
+    // — and, like a SIGKILL, it closes the store's directory lock.
+    drop(b);
 
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(store.tier().graphs(), vec![DEFAULT_GRAPH]);

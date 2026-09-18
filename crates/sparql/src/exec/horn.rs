@@ -726,6 +726,13 @@ impl HornBackend {
         Self::with_store(ColumnStore::in_memory())
     }
 
+    /// The underlying storage store. `serve` needs it to drive the SPEC-24 S5
+    /// checkpoint cadence (`checkpoint`, `changes_since_checkpoint`); nothing
+    /// on the query path goes through here.
+    pub fn column_store(&self) -> &ColumnStore {
+        &self.store
+    }
+
     /// A backend over a caller-built store — `Store::open(dir)` for one that
     /// survives a restart (SPEC-25 S3), `Store::in_memory()` for [`Self::new`].
     pub fn with_store(store: ColumnStore) -> Self {

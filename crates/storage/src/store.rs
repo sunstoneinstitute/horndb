@@ -29,6 +29,36 @@ fn temp_cold_dir() -> PathBuf {
     std::env::temp_dir().join(format!("horndb-cold-{}-{n}", std::process::id()))
 }
 
+/// Take the exclusive advisory lock on `<dir>/LOCK`, so only one process at a
+/// time opens a durable store directory. Two processes replaying and appending
+/// to one write-ahead log would interleave records and corrupt it.
+///
+/// `flock` is the right primitive here because the kernel drops the lock when
+/// the file descriptor closes — including when the process is killed with
+/// `SIGKILL` or dies in any other way that runs no cleanup code. A lock file
+/// holding a PID would survive that and refuse the restart.
+fn lock_dir(dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("LOCK");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    // Fully-qualified: `fs4` puts `try_lock` on an extension trait, and the
+    // inherent `File::try_lock` that Rust 1.89 added would win method
+    // resolution under `-D warnings` (same reason `crates/closure/build.rs`
+    // spells it out).
+    match fs4::FileExt::try_lock(&file) {
+        Ok(()) => Ok(file),
+        Err(fs4::TryLockError::WouldBlock) => {
+            Err(crate::StorageError::DirLocked(dir.display().to_string()))
+        }
+        Err(fs4::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FootprintReport {
     pub triples: u64,
@@ -56,6 +86,17 @@ pub struct Store {
     /// removes it) rather than a caller-supplied durable path (`Drop` leaves
     /// it alone — see `Store::open_with`).
     owns_cold_dir: bool,
+    /// Quads inserted or retracted since the last [`Store::checkpoint`] — the
+    /// delta half of the SPEC-24 S5 checkpoint cadence. Counted at the same
+    /// funnel the log is written at, so it counts exactly what a replay would
+    /// have to redo.
+    changes_since_checkpoint: AtomicU64,
+    /// The advisory lock on `<dir>/LOCK` held for this store's whole life, so
+    /// two processes cannot open the same directory at once. Never read —
+    /// holding the open file *is* the lock, and closing it (on drop, or when
+    /// the process dies however abruptly) releases it. `None` for a store with
+    /// no directory.
+    _dir_lock: Option<std::fs::File>,
 }
 
 impl Store {
@@ -67,6 +108,8 @@ impl Store {
             wal: None,
             cold_dir: temp_cold_dir(),
             owns_cold_dir: true,
+            changes_since_checkpoint: AtomicU64::new(0),
+            _dir_lock: None,
         }
     }
 
@@ -85,6 +128,8 @@ impl Store {
             wal: None,
             cold_dir: temp_cold_dir(),
             owns_cold_dir: true,
+            changes_since_checkpoint: AtomicU64::new(0),
+            _dir_lock: None,
         }
     }
 
@@ -104,6 +149,9 @@ impl Store {
     /// [`Store::open`] with an explicit fsync policy — see [`SyncPolicy`] for
     /// each policy's data-loss window.
     pub fn open_with(dir: &Path, policy: SyncPolicy) -> Result<Self> {
+        // Take the directory lock before `Wal::open` — that call sweeps stale
+        // generation files, which two processes must not race on.
+        let dir_lock = lock_dir(dir)?;
         let mut log = Wal::open(dir, policy)?;
         let gen = log.generation();
         let dictionary = if gen == 0 {
@@ -120,9 +168,18 @@ impl Store {
         let mut store = Self::with_dictionary(dictionary);
         store.cold_dir = dir.join("cold");
         store.owns_cold_dir = false;
+        store._dir_lock = Some(dir_lock);
         let mut seen_batch = false;
         let mut recovered = RecoveredInputs::default();
-        log.replay(|rec| store.replay(rec, &mut seen_batch, &mut recovered))?;
+        let metrics = &horndb_metrics::metrics().storage;
+        let started = std::time::Instant::now();
+        log.replay(|rec| {
+            metrics.wal_replay_records.inc();
+            store.replay(rec, &mut seen_batch, &mut recovered)
+        })?;
+        metrics
+            .wal_replay_seconds
+            .observe(started.elapsed().as_secs_f64());
         log.logged_len = store.dictionary.len() as u64;
         log.recovered = recovered;
         store.wal = Some(Mutex::new(log));
@@ -210,10 +267,30 @@ impl Store {
         }
         let mut log = log.lock();
         self.append_record(&mut log, kind, dels, adds)?;
-        write()
+        let out = write()?;
+        self.changes_since_checkpoint
+            .fetch_add((dels.len() + adds.len()) as u64, AtomicOrdering::Relaxed);
+        Ok(out)
     }
 
     fn append_record(&self, log: &mut Wal, kind: Kind, dels: &[Quad], adds: &[Quad]) -> Result<()> {
+        let started = std::time::Instant::now();
+        let out = self.append_record_inner(log, kind, dels, adds);
+        let metrics = &horndb_metrics::metrics().storage;
+        metrics
+            .wal_append_seconds
+            .observe(started.elapsed().as_secs_f64());
+        metrics.wal_appends.inc();
+        out
+    }
+
+    fn append_record_inner(
+        &self,
+        log: &mut Wal,
+        kind: Kind,
+        dels: &[Quad],
+        adds: &[Quad],
+    ) -> Result<()> {
         let terms = self.dictionary.terms_after(log.logged_len)?;
         let body = wal::encode(
             kind,
@@ -272,7 +349,19 @@ impl Store {
         // Always one record, so an emptied store still restores its clock.
         Wal::write_checkpoint_record(&mut file, version, tag, &chunk)?;
         drop(snap);
-        log.commit_generation(gen, file, stats.slots)
+        log.commit_generation(gen, file, stats.slots)?;
+        self.changes_since_checkpoint
+            .store(0, AtomicOrdering::Relaxed);
+        Ok(())
+    }
+
+    /// Quads inserted or retracted since the last successful
+    /// [`Store::checkpoint`] — what a crash right now would make the next
+    /// `Store::open` replay. It is the trigger a checkpoint scheduler reads
+    /// (SPEC-24 S5's delta half); always 0 for a store with no log, which
+    /// cannot checkpoint anyway.
+    pub fn changes_since_checkpoint(&self) -> u64 {
+        self.changes_since_checkpoint.load(AtomicOrdering::Relaxed)
     }
 
     /// Append one circuit input (ADR-0018 `Input`, SPEC-24 S5) — a user
@@ -363,6 +452,8 @@ impl Store {
             wal: None,
             cold_dir: temp_cold_dir(),
             owns_cold_dir: true,
+            changes_since_checkpoint: AtomicU64::new(0),
+            _dir_lock: None,
         }
     }
 

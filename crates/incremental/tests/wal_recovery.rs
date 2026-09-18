@@ -2,9 +2,13 @@
 //! after a kill with the same Z-set state — the same asserted and derived
 //! bases, and the same un-ticked inputs still pending.
 //!
-//! "Kill" here is `std::mem::forget`: no `Drop`, no flush, the same bytes a
-//! SIGKILL would leave behind. It is the idiom the storage-side crash tests
-//! use (`crates/storage/tests/wal_recovery.rs`).
+//! "Kill" here is `drop`: nothing in the circuit or the store flushes on
+//! drop, so the bytes left behind are the ones a SIGKILL leaves — everything
+//! written is already in the kernel. Dropping also closes the store's file
+//! descriptors, including its `LOCK`, which is what a SIGKILL does too;
+//! `std::mem::forget` would leak the lock and make the reopen below fail for
+//! a reason no real crash produces. Same idiom as the storage-side crash
+//! tests (`crates/storage/tests/wal_recovery.rs`).
 //!
 //! Tick boundaries are part of the state: `[+a, -a]` inside one tick derives
 //! nothing, while the same pair split across two ticks derives and then
@@ -98,7 +102,7 @@ fn kill_and_replay_reproduces_pre_crash_zset() {
     let asserted = before.asserted_base().clone();
     let derived = before.derived_base().clone();
     assert!(!derived.is_empty(), "the script must derive something");
-    std::mem::forget(before); // kill
+    drop(before); // kill
 
     let mut after = durable_circuit(dir.path());
     assert_eq!(after.recover(), 8, "6 ticked inputs plus the 2 un-ticked");
@@ -124,7 +128,7 @@ fn checkpoint_drains_then_truncates_the_input_log() {
     script(&mut circuit);
     circuit.checkpoint().expect("checkpoint");
     let asserted = circuit.asserted_base().clone();
-    std::mem::forget(circuit);
+    drop(circuit); // kill
 
     // No un-ticked input crossed the boundary, and the new log generation
     // starts empty.
@@ -149,7 +153,7 @@ fn delta_cadence_fires_a_checkpoint() {
     circuit.assert_triple((0, P, 1));
     circuit.assert_triple((1, P, 2));
     circuit.tick(); // 2 asserted + 1 derived delta ≥ the limit
-    std::mem::forget(circuit);
+    drop(circuit); // kill
 
     let reopened = Store::open(dir.path()).expect("reopen");
     assert!(

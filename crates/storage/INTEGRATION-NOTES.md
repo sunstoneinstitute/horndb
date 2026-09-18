@@ -470,9 +470,28 @@ code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
   quads from `Dictionary::quad_from_ids`. Replay runs the tier's own insert
   and apply paths, so it is charged to the `storage_load_phase_*` metrics
   like a bulk load.
-- **Call site for HDB-51 (`serve`).** `HornBackend::with_store(Store::open(
-  &data_dir)?)` at startup; call `Store::checkpoint()` on a schedule
-  (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done here. Also not in: a directory lock against two processes, WAL metrics.
+- **Call site in `serve`** (HDB-233, `crates/sparql/src/bin/serve.rs`). Set
+  `[server].data_dir` and startup does
+  `HornBackend::with_store(Store::open(&data_dir)?)`, before the listener
+  binds — a directory another process holds must never produce a server that
+  answers even one request. Unset, the store stays in memory as before. A
+  background thread checkpoints on the SPEC-24 S5 cadence, whichever of
+  `[server].checkpoint_interval` (default `60s`) or `[server].checkpoint_changes`
+  (default 100,000 quads; `0` disables that half) comes first, skipping the
+  checkpoint when nothing was written; one more checkpoint runs on clean
+  shutdown. The delta half reads `Store::changes_since_checkpoint()`, counted
+  at the same funnel the log is written at, so it counts exactly what a replay
+  would redo.
+- **Directory lock** (HDB-233). `open_with` takes an advisory `flock` on
+  `<dir>/LOCK` before `Wal::open`, because that call sweeps stale generation
+  files and two processes must not race on it. A conflict is
+  `StorageError::DirLocked`. The lock is the kernel's and is tied to the open
+  file, so it is released whenever the holder dies, `SIGKILL` included — a
+  lock file carrying a PID would survive that and brick the restart. Anything
+  that simulates a crash by leaking the `Store` (`std::mem::forget`) leaks the
+  lock with it and cannot reopen the directory in the same process; drop the
+  store instead, which is also the more faithful kill (a real one closes the
+  file descriptors too).
 - **SPEC-24 S5 input records** (HDB-52, ADR-0018). Kinds `Input` (4) and
   `TickCommit` (5) share the framing and the fsync policy but carry their own
   bodies, so `decode` returns `Record::Input` / `Record::TickCommit` instead of
