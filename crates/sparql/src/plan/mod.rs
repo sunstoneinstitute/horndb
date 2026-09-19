@@ -1,6 +1,7 @@
 //! Physical plan tree. Each node is one work unit the runtime
 //! executes against an [`crate::exec::Executor`].
 
+pub mod closure_route;
 pub mod explain;
 pub mod logical;
 pub mod lower;
