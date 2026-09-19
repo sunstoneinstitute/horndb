@@ -1430,6 +1430,7 @@ dependencies = [
  "bytes",
  "clap",
  "criterion 0.8.2",
+ "horndb-closure",
  "horndb-config",
  "horndb-incremental",
  "horndb-metrics",

@@ -38,6 +38,7 @@
 
 use crate::algebra::GraphSpec;
 use crate::exec::{Executor, ScanScope};
+use crate::plan::closure_route::path_closure_route;
 use crate::plan::{GraphScope, PhysicalPlan};
 use std::fmt::Write as _;
 
@@ -86,7 +87,7 @@ pub fn explain<E: Executor + ?Sized>(
 
 /// Estimated output cardinality of a plan node, recursively. Returns
 /// `None` when the backend cannot estimate the underlying scans.
-fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize> {
+pub(crate) fn estimate<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> Option<usize> {
     match plan {
         PhysicalPlan::BgpScan { patterns, scope } => {
             exec.cardinality_estimate(patterns, &ScanScope::estimating(scope))
@@ -168,7 +169,7 @@ fn scope_suffix(scope: &GraphScope) -> String {
 }
 
 /// The operator label shown for a node (no children).
-pub(crate) fn node_label(plan: &PhysicalPlan) -> String {
+pub(crate) fn node_label<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) -> String {
     match plan {
         PhysicalPlan::BgpScan { patterns, scope } => {
             format!(
@@ -253,12 +254,20 @@ pub(crate) fn node_label(plan: &PhysicalPlan) -> String {
                 plural(aggregates.len())
             )
         }
-        PhysicalPlan::PathClosure { reflexive, .. } => {
-            if *reflexive {
-                "PathClosure(reflexive+transitive, p*)".to_owned()
+        PhysicalPlan::PathClosure {
+            reflexive, edge, ..
+        } => {
+            let kind = if *reflexive {
+                "PathClosure(reflexive+transitive, p*)"
             } else {
-                "PathClosure(transitive, p+)".to_owned()
-            }
+                "PathClosure(transitive, p+)"
+            };
+            // Which backend closes the path is a plan decision the reader
+            // cannot otherwise see (SPEC-07 F3).
+            format!(
+                "{kind} [backend={}]",
+                path_closure_route(edge, exec).label()
+            )
         }
     }
 }
@@ -318,7 +327,7 @@ fn render_text_node<E: Executor + ?Sized>(
         Some(n) => format!("~{n} rows"),
         None => "~? rows".to_owned(),
     };
-    let _ = writeln!(out, "{indent}{} [{card}]", node_label(plan));
+    let _ = writeln!(out, "{indent}{} [{card}]", node_label(plan, exec));
     for child in children(plan) {
         render_text_node(child, exec, depth + 1, out);
     }
@@ -337,7 +346,7 @@ fn render_json<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E, mode: Execut
 
 fn render_json_node<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E, out: &mut String) {
     out.push('{');
-    let _ = write!(out, "\"op\":{},", json_string(&node_label(plan)));
+    let _ = write!(out, "\"op\":{},", json_string(&node_label(plan, exec)));
     match estimate(plan, exec) {
         Some(n) => {
             let _ = write!(out, "\"estRows\":{n},");

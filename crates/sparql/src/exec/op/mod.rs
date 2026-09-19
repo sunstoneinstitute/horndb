@@ -15,6 +15,7 @@ use crate::algebra::{GraphSpec, Var};
 use crate::error::Result;
 use crate::exec::phases;
 use crate::exec::{Batch, Executor, Row};
+use crate::plan::closure_route::path_closure_route;
 use crate::plan::{GraphScope, PhysicalPlan};
 use horndb_metrics::labels::ExecPhase;
 
@@ -254,6 +255,9 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                 // Under `GRAPH ?g` the enclosing `PerGraph` node rebuilds
                 // this operator per graph, so a path never connects hops
                 // from different graphs.
+                // SPEC-07 F3: the backend that closes the path is chosen
+                // here, by the edge relation's estimated size.
+                let route = path_closure_route(edge, self.exec());
                 let edge_op = self.build_scoped(edge, binds)?;
                 Ok(Box::new(PathClosureOp::new(
                     self,
@@ -261,6 +265,7 @@ impl<'a, E: Executor + ?Sized> crate::exec::runtime::Runtime<'a, E> {
                     object.clone(),
                     edge_op,
                     *reflexive,
+                    route,
                 )))
             }
         }

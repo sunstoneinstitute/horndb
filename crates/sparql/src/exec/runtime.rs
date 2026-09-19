@@ -11,6 +11,7 @@ use crate::error::{Result, SparqlError};
 use crate::exec::numeric::Numeric;
 use crate::exec::phases;
 use crate::exec::{Batch, Bindings, Executor, KeyPart, Row, ScanScope, Slot};
+use crate::plan::closure_route::ClosureRoute;
 use crate::plan::{GraphScope, PhysicalPlan};
 use crate::DefaultGraphMode;
 use horndb_metrics::labels::ExecPhase;
@@ -418,14 +419,16 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     }
 
     /// Evaluate the transitive closure of the edge relation: decodes the edge
-    /// batch's endpoint vars (the two synthetic `?pp_*` vars) and delegates to
-    /// `eval_path_closure`. Shared by `PathClosureOp`.
+    /// batch's endpoint vars (the two synthetic `?pp_*` vars) and runs the
+    /// fixpoint on the backend the planner picked (SPEC-07 F3). Shared by
+    /// `PathClosureOp`.
     pub(crate) fn compute_path_closure(
         &self,
         edge_batch: Batch,
         subject: &Term,
         object: &Term,
         reflexive: bool,
+        route: ClosureRoute,
     ) -> Result<Batch> {
         let want: HashSet<String> = [PATH_SRC_VAR, PATH_DST_VAR]
             .iter()
@@ -436,9 +439,19 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             .iter()
             .map(|r| self.decode_subset(r, &edge_batch.schema, &want))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Batch::from_bindings(eval_path_closure(
-            subject, object, &edge_rows, reflexive,
-        )?))
+        let rows = match route {
+            #[cfg(feature = "graphblas")]
+            ClosureRoute::GraphBlas => {
+                eval_path_closure_graphblas(subject, object, &edge_rows, reflexive)?
+            }
+            // Without the backend compiled in there is nothing to delegate
+            // to; `path_closure_route` never picks it, so this is unreachable
+            // in practice and kept only to make the match exhaustive.
+            #[cfg(not(feature = "graphblas"))]
+            ClosureRoute::GraphBlas => eval_path_closure(subject, object, &edge_rows, reflexive)?,
+            ClosureRoute::Native => eval_path_closure(subject, object, &edge_rows, reflexive)?,
+        };
+        Ok(Batch::from_bindings(rows))
     }
 
     pub(crate) fn eval_group_native(
@@ -1530,8 +1543,32 @@ fn eval_path_closure(
         for k in node_term.keys() {
             closure.insert((k.clone(), k.clone()));
         }
-        // A ground endpoint pinned to a node absent from the relation
-        // still self-matches under the zero-length branch.
+    }
+
+    Ok(bind_path_closure(
+        subject, object, reflexive, closure, node_term,
+    ))
+}
+
+/// Shared tail of both closure backends: pin the zero-length match for a
+/// ground endpoint, then bind/filter every `(src, dst)` pair against the
+/// query endpoints.
+///
+/// `closure` is keyed by lexical form and `node_term` maps each key back to a
+/// representative [`Term`]. Both backends hand over the same two structures,
+/// so the rows they emit — and their order — are identical by construction.
+///
+/// A ground endpoint pinned to a node absent from the relation still
+/// self-matches under `*`'s zero-length branch, which is why the pin happens
+/// here and not in the fixpoint.
+fn bind_path_closure(
+    subject: &Term,
+    object: &Term,
+    reflexive: bool,
+    mut closure: std::collections::BTreeSet<(String, String)>,
+    mut node_term: std::collections::BTreeMap<String, Term>,
+) -> Vec<Bindings> {
+    if reflexive {
         for ep in [subject, object] {
             if !matches!(ep, Term::Var(_)) {
                 let k = lex(ep);
@@ -1541,7 +1578,6 @@ fn eval_path_closure(
         }
     }
 
-    // Bind/filter each closure pair against the query endpoints.
     let mut out = Vec::new();
     for (sk, ok) in &closure {
         let s_term = node_term.get(sk).cloned().unwrap();
@@ -1555,7 +1591,75 @@ fn eval_path_closure(
         }
         out.push(b);
     }
-    Ok(out)
+    out
+}
+
+/// `eval_path_closure`'s GraphBLAS twin (SPEC-07 F3 → SPEC-05): the same
+/// edge rows, closed by the sparse matrix kernel in `horndb-closure` instead
+/// of the BFS fixpoint.
+///
+/// Nodes are densely renumbered by lexical form — the same key the native
+/// path dedupes on — so the Boolean adjacency matrix covers exactly the nodes
+/// the relation touches. `p+` uses `transitive_closure` (identity excluded),
+/// `p*` uses `reflexive_transitive_closure` (identity over those same nodes),
+/// which is precisely what the native path's reflexive step adds. The result
+/// is converted back to the shared `(lex, lex)` pair set, so the two backends
+/// return identical rows in identical order.
+#[cfg(feature = "graphblas")]
+fn eval_path_closure_graphblas(
+    subject: &Term,
+    object: &Term,
+    edge_rows: &[Bindings],
+    reflexive: bool,
+) -> Result<Vec<Bindings>> {
+    use crate::algebra::{PATH_DST_VAR, PATH_SRC_VAR};
+    use horndb_closure::closure::schema::reflexive_transitive_closure;
+    use horndb_closure::closure::transitive::transitive_closure;
+    use horndb_closure::grb::{init_once, BoolMatrix};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let grb = |e: horndb_closure::error::GrbError| {
+        crate::error::SparqlError::Executor(format!("GraphBLAS path closure failed: {e}"))
+    };
+
+    // Dense renumbering. `keys` is the id -> lexical-form inverse.
+    let mut id_of: BTreeMap<String, u64> = BTreeMap::new();
+    let mut keys: Vec<String> = Vec::new();
+    let mut node_term: BTreeMap<String, Term> = BTreeMap::new();
+    let mut edges: Vec<(u64, u64)> = Vec::with_capacity(edge_rows.len());
+    for row in edge_rows {
+        let (Some(s), Some(o)) = (row.get(PATH_SRC_VAR), row.get(PATH_DST_VAR)) else {
+            continue;
+        };
+        let mut intern = |t: &Term| -> u64 {
+            let k = lex(t);
+            node_term.entry(k.clone()).or_insert_with(|| t.clone());
+            *id_of.entry(k.clone()).or_insert_with(|| {
+                keys.push(k);
+                (keys.len() - 1) as u64
+            })
+        };
+        let (si, oi) = (intern(s), intern(o));
+        edges.push((si, oi));
+    }
+
+    let mut closure: BTreeSet<(String, String)> = BTreeSet::new();
+    if !keys.is_empty() {
+        init_once().map_err(grb)?;
+        let m = BoolMatrix::from_edges(keys.len() as u64, &edges).map_err(grb)?;
+        let closed = if reflexive {
+            reflexive_transitive_closure(&m).map_err(grb)?
+        } else {
+            transitive_closure(&m).map_err(grb)?
+        };
+        for (i, j) in closed.extract_edges().map_err(grb)? {
+            closure.insert((keys[i as usize].clone(), keys[j as usize].clone()));
+        }
+    }
+
+    Ok(bind_path_closure(
+        subject, object, reflexive, closure, node_term,
+    ))
 }
 
 /// Match a closure endpoint against a query endpoint term, recording any
@@ -3920,5 +4024,90 @@ mod sameterm_tests {
             vars,
             ["p".to_string(), "q".to_string()].into_iter().collect()
         );
+    }
+}
+
+/// Result parity between the two `PathClosure` backends (PLAN-23-06
+/// acceptance, SPEC-07 F3): the GraphBLAS delegate must return exactly what
+/// the native BFS returns, for `p+` and `p*` and for every endpoint binding
+/// shape. Routing is a performance choice, so any divergence here is a bug.
+#[cfg(all(test, feature = "graphblas"))]
+mod graphblas_parity {
+    use super::{eval_path_closure, eval_path_closure_graphblas};
+    use crate::algebra::{Term, Var, PATH_DST_VAR, PATH_SRC_VAR};
+    use crate::exec::Bindings;
+
+    fn iri(s: &str) -> Term {
+        Term::Iri(format!("http://ex/{s}"))
+    }
+
+    fn var(s: &str) -> Term {
+        Term::Var(Var::new(s))
+    }
+
+    /// A cycle (a→b→c→a), a tail off it (c→d), and a disconnected edge
+    /// (e→f): enough that the closure is neither a DAG nor connected, and
+    /// that a naive fixpoint would not terminate without a `seen` set.
+    fn edge_rows() -> Vec<Bindings> {
+        [("a", "b"), ("b", "c"), ("c", "a"), ("c", "d"), ("e", "f")]
+            .iter()
+            .map(|(s, o)| {
+                let mut b = Bindings::new();
+                b.set(PATH_SRC_VAR.to_owned(), iri(s));
+                b.set(PATH_DST_VAR.to_owned(), iri(o));
+                b
+            })
+            .collect()
+    }
+
+    fn assert_parity(subject: Term, object: Term, reflexive: bool, case: &str) {
+        let rows = edge_rows();
+        let native = eval_path_closure(&subject, &object, &rows, reflexive).unwrap();
+        let grb = eval_path_closure_graphblas(&subject, &object, &rows, reflexive).unwrap();
+        assert_eq!(
+            native, grb,
+            "{case}: GraphBLAS delegate diverged from the native closure"
+        );
+        // A parity check that compares two empty results proves nothing;
+        // every case below must actually produce rows.
+        assert!(!native.is_empty(), "{case}: expected a non-empty closure");
+    }
+
+    #[test]
+    fn matches_native_for_every_endpoint_shape() {
+        for (reflexive, kind) in [(false, "p+"), (true, "p*")] {
+            assert_parity(var("x"), var("y"), reflexive, &format!("{kind} ?x ?y"));
+            assert_parity(iri("a"), var("y"), reflexive, &format!("{kind} <a> ?y"));
+            assert_parity(var("x"), iri("d"), reflexive, &format!("{kind} ?x <d>"));
+            assert_parity(iri("a"), iri("d"), reflexive, &format!("{kind} <a> <d>"));
+            // Repeated variable across both endpoints: only nodes on a cycle
+            // (or, under `*`, every node) may bind.
+            assert_parity(var("x"), var("x"), reflexive, &format!("{kind} ?x ?x"));
+        }
+    }
+
+    /// `p*`'s zero-length branch pins a ground endpoint that the relation
+    /// never mentions. That pin lives outside the matrix, so it is the case
+    /// most likely to drift between the backends.
+    #[test]
+    fn matches_native_for_p_star_endpoint_outside_the_relation() {
+        assert_parity(iri("zzz"), var("y"), true, "p* <zzz> ?y");
+        assert_parity(iri("zzz"), iri("zzz"), true, "p* <zzz> <zzz>");
+    }
+
+    /// An empty edge relation builds no matrix at all; `p*` must still pin a
+    /// ground endpoint, and `p+` must still return nothing.
+    #[test]
+    fn matches_native_on_an_empty_relation() {
+        let rows: Vec<Bindings> = Vec::new();
+        for (subject, object, reflexive) in [
+            (var("x"), var("y"), false),
+            (var("x"), var("y"), true),
+            (iri("a"), var("y"), true),
+        ] {
+            let native = eval_path_closure(&subject, &object, &rows, reflexive).unwrap();
+            let grb = eval_path_closure_graphblas(&subject, &object, &rows, reflexive).unwrap();
+            assert_eq!(native, grb);
+        }
     }
 }

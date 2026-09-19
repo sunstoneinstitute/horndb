@@ -14,7 +14,7 @@ reasoner = ["dep:horndb-owlrl"]
 # "graphblas"`. Off by default. Without it, `serve` rejects
 # `backend = "graphblas"` at startup naming this feature. The release image
 # builds with it (see `Dockerfile`).
-graphblas = ["reasoner", "horndb-owlrl/graphblas-backend"]
+graphblas = ["reasoner", "horndb-owlrl/graphblas-backend", "dep:horndb-closure"]
 # SPEC-24 S4 (HDB-51): the DBSP circuit behind `HornBackend`'s write funnel
 # (`exec::circuit`). Default-on so the SPARQL Update -> tick -> query gate runs
 # under `cargo nextest run -p horndb-sparql --features server`. It links
@@ -72,6 +72,13 @@ oxttl = { workspace = true }
 clap = { workspace = true }
 horndb-owlrl = { path = "../owlrl", optional = true }
 horndb-incremental = { path = "../incremental", optional = true }
+# SPEC-05 closure operator, called directly by the `PathClosure` GraphBLAS
+# delegate (`exec::runtime::eval_path_closure_graphblas`). Optional, pulled in
+# only by the `graphblas` feature: the default build has no path to it, so its
+# plans and results are unchanged. Reached directly rather than through
+# `horndb-incremental`, which re-exports none of the closure kernels and is
+# gated on an unrelated feature.
+horndb-closure = { path = "../closure", optional = true }
 horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
 # SPEC-08 F2: the planner's ML seam (`PlanCtx::plan_advisor`). Non-optional

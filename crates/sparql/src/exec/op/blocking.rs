@@ -18,6 +18,7 @@ use crate::exec::budget::{chunk_bytes, Reservation};
 use crate::exec::phases;
 use crate::exec::runtime::{referenced_vars, JoinState, Runtime};
 use crate::exec::{Batch, Executor, Row};
+use crate::plan::closure_route::ClosureRoute;
 use horndb_metrics::labels::ExecPhase;
 use std::collections::HashSet;
 
@@ -658,6 +659,8 @@ pub struct PathClosureOp<'r, E: Executor + ?Sized> {
     object: Term,
     edge: Box<dyn Op + 'r>,
     reflexive: bool,
+    /// Backend the planner picked for this node (SPEC-07 F3).
+    route: ClosureRoute,
     buffer: Option<ChunkedBatch>,
     schema: Vec<Var>,
     /// SPEC-31 charge for the drained input. Released when the operator
@@ -675,6 +678,7 @@ impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
         object: Term,
         edge: Box<dyn Op + 'r>,
         reflexive: bool,
+        route: ClosureRoute,
     ) -> Self {
         let schema = path_closure_schema(&subject, &object);
         Self {
@@ -683,6 +687,7 @@ impl<'r, E: Executor + ?Sized> PathClosureOp<'r, E> {
             object,
             edge,
             reflexive,
+            route,
             buffer: None,
             schema,
             res: Reservation::new(),
@@ -707,6 +712,7 @@ impl<'r, E: Executor + ?Sized> Op for PathClosureOp<'r, E> {
                 &self.subject,
                 &self.object,
                 self.reflexive,
+                self.route,
             )?;
             // SPEC-31: the closure can be quadratic in the edge set `drain`
             // charged, so it is charged in its own right. Charged after the
