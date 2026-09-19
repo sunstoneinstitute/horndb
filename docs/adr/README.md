@@ -45,6 +45,7 @@ mark the superseded record's **Status** as `Superseded by ADR-NNNN`.
 | [0018](0018-single-typed-wal-storage-commit-clock.md) | One typed WAL (Input / BaseBatch / TickCommit records, two replay roles); the storage commit version is the engine's logical clock | SPEC-24, SPEC-25 |
 | [0019](0019-vendor-graphblas-trimmed-source-subset.md) | Vendor a trimmed SuiteSparse:GraphBLAS source subset, not a submodule | SPEC-05, SPEC-13 |
 | [0020](0020-runtime-rule-ir-for-backward-chaining.md) | **Proposed:** a runtime rule IR for backward chaining, emitted from `rules.toml` (narrows 0004, realizes 0005) | SPEC-03, SPEC-04, SPEC-07, SPEC-23 |
+| [0021](0021-runtime-filters-in-the-wcoj-join-plan.md) | **Proposed:** runtime filters live in the WCOJ join plan (`JoinSpec::HashJoin`), switched through a reserved `PassId` (narrows SPEC-23 §5.6, §7.2) | SPEC-03, SPEC-23 |
 
 ## Adding a new ADR
 
