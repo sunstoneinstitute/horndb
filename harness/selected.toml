@@ -204,11 +204,6 @@ expected_failures = [
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
 
-    # A comparison operator returns a value where SPARQL 1.1 §17.4 requires an
-    # expression error, so `IF` takes the wrong branch and the variable stays
-    # bound instead of dropping out.
-    "data-sparql11/functions/manifest#if02",
-
     # Blank-node labels are compared literally. Grading these needs a
     # bijection between the answer's and the expected result's blank nodes
     # (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in

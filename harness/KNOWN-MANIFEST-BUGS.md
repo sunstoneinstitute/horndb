@@ -480,7 +480,7 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-19 with `--engine owlrl`: **443 pass, 64 fail, 40 skip**.
+Measured on 2026-09-19 with `--engine owlrl`: **444 pass, 63 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason. Which task fixed what is in the git log
@@ -501,7 +501,6 @@ cannot rot, and CI catches regressions in both directions.
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 2 | **RDF 1.1 collapses `"abc"` and `"abc"^^xsd:string` into one term**, so the store cannot tell them apart. `STRDT`/`STRLANG` must accept the plain literal and raise a type error on the explicitly typed one, and these two cases need both in the same answer (HDB-132). Every other `STRDT`/`STRLANG` case passes. | `functions/strdt03`, `strlang03` |
-| 1 | **A comparison operator returns a value where §17.4 requires an expression error**, so `IF` takes the wrong branch and the variable stays bound instead of dropping out. | `functions/if02` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 
 ## Harness gaps (grading, not the engine)
@@ -511,6 +510,19 @@ cannot rot, and CI catches regressions in both directions.
 | 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
 | 5 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in a blank node's label (`_:b` vs `_:b0`); every other cell of every row matches. `bnode01` (HDB-132) is the same gap from the other side: `BNODE` mints the right *pattern* of shared and distinct nodes, but which row gets `_:b0` follows our join order, so the labels pair with different rows than the upstream `.srx` spells out. | `json-res/jsonres01`, `jsonres02`, `functions/plus-1`, `plus-2`, `bnode01` |
 | 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |
+
+## ~~`IF`/`COALESCE` take the wrong branch on an erroring sub-expression~~ — FIXED (HDB-136)
+
+`functions/if02`: `IF(1/0, false, true)` — the condition itself (an exact-type
+division by zero) raises an expression error. §17.4.1.2 requires the whole
+`IF` to raise an error too, leaving the projected variable unbound; the
+evaluator instead treated the erroring condition as false and returned
+`true`. Fixed by routing `IF`'s condition through the term-level evaluator
+(which already represents an expression error as `None`) instead of the
+lossy boolean evaluator, which conflates "false" and "error" — correct for a
+bare `FILTER` condition, wrong for `IF`. `COALESCE` was checked for the same
+mistake and was already correct (`functions/coalesce01` passed both before
+and after).
 
 ## ~~`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` never reaches its `DROP`~~ — FIXED (HDB-137)
 
