@@ -146,6 +146,13 @@ bytes = "1"
 http-body = "1"
 pin-project-lite = "0.2"
 
+# Full debuginfo is ~70% of every artifact, and the workspace builds ~90 test
+# binaries — that is most of a multi-GB `target/` dir per checkout, which adds
+# up fast across worktrees. `line-tables-only` keeps file:line in panics and
+# backtraces; raise to `debug = 1` if you need variable inspection in a debugger.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
