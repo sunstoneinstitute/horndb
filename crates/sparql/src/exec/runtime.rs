@@ -2848,17 +2848,20 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope<'_>) -> Result<Optio
         // xsd:decimal, and division by zero errors for the exact types.
         Expr::Div(x, y) => arith(Numeric::div, numof(x)?, numof(y)?),
         Expr::Neg(x) => numof(x)?.and_then(Numeric::neg).map(Numeric::to_term),
-        // Stage-1 note: an erroring condition evaluates as false (the
-        // crate-wide error→false EBV convention) and takes the else
-        // branch, rather than propagating the error as SPARQL §17.4.1.2
-        // specifies.
-        Expr::If(c, t, f) => {
-            if eval_expr(c, b, q)? {
-                eval_expr_to_term(t, b, q)?
-            } else {
-                eval_expr_to_term(f, b, q)?
-            }
-        }
+        // §17.4.1.2: if evaluating the condition raises an error, `IF`
+        // itself raises an error — it must not fall through to `f`. Route
+        // the condition through `eval_expr_to_term` (not `eval_expr`) so an
+        // expression error is visible as `None` before computing EBV:
+        // `eval_expr` alone collapses "error" and "false" into the same
+        // `Ok(false)`, which is correct for a bare `FILTER` condition (an
+        // erroring filter excludes the row, same as false) but wrong here,
+        // where an erroring condition must propagate instead of silently
+        // selecting the else branch.
+        Expr::If(c, t, f) => match eval_expr_to_term(c, b, q)?.as_ref().map(ebv) {
+            Some(true) => eval_expr_to_term(t, b, q)?,
+            Some(false) => eval_expr_to_term(f, b, q)?,
+            None => None,
+        },
         Expr::Coalesce(args) => {
             // `?` is safe here because runtime expression errors are represented
             // as Ok(None), never Err — so error-skipping per SPARQL §17.4.1.6
@@ -3599,6 +3602,39 @@ mod slot_differential {
             matches!(batch.rows[0].0[x_idx], Slot::Term(_)),
             "?x from BIND should be Slot::Term; got {:?}",
             batch.rows[0].0[x_idx]
+        );
+    }
+
+    /// HDB-136 / functions/if02: `BIND` of an expression that raises an
+    /// error (an `IF` whose condition errors) must leave the variable
+    /// unbound (`Slot::Unbound`) rather than drop the row or bind a wrong
+    /// value — SPARQL 1.1 §17.2's error-propagation contract, end to end
+    /// through the real `Extend` operator.
+    #[test]
+    fn bind_of_erroring_if_leaves_variable_unbound_keeps_row() {
+        let mut horn = HornBackend::new();
+        let iri = |s: &str| Term::Iri(format!("http://ex/{s}"));
+        horn.insert_triple(iri("s"), iri("p"), iri("o"));
+
+        // SELECT ?s ?v WHERE { ?s <p> <o> . BIND(IF(1/0, false, true) AS ?v) }
+        let plan = plan_select(concat!(
+            "SELECT ?s ?v WHERE { ?s <http://ex/p> <http://ex/o> . ",
+            "BIND(IF(1/0, false, true) AS ?v) }",
+        ));
+
+        let rt = Runtime::new(&horn);
+        let batch = eval_to_batch(&rt, &plan);
+
+        assert_eq!(
+            batch.rows.len(),
+            1,
+            "an erroring BIND must keep the row, not drop it"
+        );
+        let v_idx = batch.col("v").expect("?v must be in output schema");
+        assert!(
+            matches!(batch.rows[0].0[v_idx], Slot::Unbound),
+            "?v should be Slot::Unbound after an erroring BIND; got {:?}",
+            batch.rows[0].0[v_idx]
         );
     }
 
@@ -4398,6 +4434,118 @@ mod sameterm_tests {
         assert_eq!(
             vars,
             ["p".to_string(), "q".to_string()].into_iter().collect()
+        );
+    }
+}
+
+/// HDB-136: SPARQL 1.1 §17.2 expression-error propagation through `IF`
+/// (§17.4.1.2) and `COALESCE` (§17.4.1.6) — an expression error must leave
+/// the variable unbound, never silently pick a value. Covers the W3C cases
+/// `functions/if02` and `functions/coalesce01`.
+#[cfg(test)]
+mod error_propagation_tests {
+    use super::*;
+    use crate::algebra::{Expr, Term, Var};
+
+    fn bound(name: &str, t: Term) -> Bindings {
+        let mut b = Bindings::new();
+        b.set(name, t);
+        b
+    }
+
+    /// `1/0`: an exact-type (`xsd:integer`) division by zero, the same
+    /// expression error `functions/if02`'s condition raises.
+    fn div_by_zero() -> Expr {
+        Expr::Div(
+            Box::new(Expr::Term(integer_literal(1))),
+            Box::new(Expr::Term(integer_literal(0))),
+        )
+    }
+
+    /// §17.4.1.2: an error evaluating `IF`'s condition makes the whole `IF`
+    /// an error — it must not fall through to the else branch. Mirrors
+    /// `functions/if02`: `IF(1/0, false, true)` must leave the projected
+    /// variable unbound, not bind it to `true`.
+    #[test]
+    fn if_condition_error_propagates() {
+        let e = Expr::If(
+            Box::new(div_by_zero()),
+            Box::new(Expr::Term(bool_typed_literal(false))),
+            Box::new(Expr::Term(bool_typed_literal(true))),
+        );
+        let b = Bindings::new();
+        assert_eq!(
+            eval_expr_to_term(&e, &b, &QueryScope::default()).unwrap(),
+            None,
+            "an erroring IF condition must be an expression error, not take the else branch"
+        );
+    }
+
+    /// Only the branch the condition selects is evaluated — an error in the
+    /// branch NOT taken must never surface.
+    #[test]
+    fn if_error_in_untaken_branch_does_not_propagate() {
+        let cond = |v: bool| bound("cond", bool_typed_literal(v));
+        let cond_var = || Box::new(Expr::Term(Term::Var(Var::new("cond"))));
+
+        // condition true: the `t` branch runs; the erroring `f` branch
+        // (division by zero) is never touched.
+        let e_true = Expr::If(
+            cond_var(),
+            Box::new(Expr::Term(integer_literal(42))),
+            Box::new(div_by_zero()),
+        );
+        assert_eq!(
+            eval_expr_to_term(&e_true, &cond(true), &QueryScope::default()).unwrap(),
+            Some(integer_literal(42))
+        );
+
+        // condition false: the `f` branch runs; the erroring `t` branch is
+        // never touched.
+        let e_false = Expr::If(
+            cond_var(),
+            Box::new(div_by_zero()),
+            Box::new(Expr::Term(integer_literal(7))),
+        );
+        assert_eq!(
+            eval_expr_to_term(&e_false, &cond(false), &QueryScope::default()).unwrap(),
+            Some(integer_literal(7))
+        );
+    }
+
+    /// §17.4.1.6: `COALESCE` returns the first argument that evaluates
+    /// without error — an unbound variable is skipped, not returned.
+    /// Mirrors `functions/coalesce01`'s `COALESCE(?x, -1)` with `?x`
+    /// unbound.
+    #[test]
+    fn coalesce_skips_erroring_argument() {
+        let e = Expr::Coalesce(vec![
+            Expr::Term(Term::Var(Var::new("unbound"))),
+            Expr::Term(integer_literal(-1)),
+        ]);
+        let b = Bindings::new();
+        assert_eq!(
+            eval_expr_to_term(&e, &b, &QueryScope::default()).unwrap(),
+            Some(integer_literal(-1))
+        );
+    }
+
+    /// `COALESCE` with every argument erroring (or no arguments at all) is
+    /// itself an expression error. Mirrors `functions/coalesce01`'s
+    /// `COALESCE(?z)` with `?z` always unbound.
+    #[test]
+    fn coalesce_all_erroring_raises() {
+        let one_erroring_arg = Expr::Coalesce(vec![Expr::Term(Term::Var(Var::new("unbound")))]);
+        let b = Bindings::new();
+        assert_eq!(
+            eval_expr_to_term(&one_erroring_arg, &b, &QueryScope::default()).unwrap(),
+            None
+        );
+
+        let no_args = Expr::Coalesce(vec![]);
+        assert_eq!(
+            eval_expr_to_term(&no_args, &b, &QueryScope::default()).unwrap(),
+            None
         );
     }
 }
