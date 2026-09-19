@@ -828,6 +828,14 @@ fn translate_path(subject: Term, path: &PropertyPathExpression, object: Term) ->
 /// collide with a query variable; the outer [`GraphPattern::Path`]
 /// caller projects the closure's output back down to the visible
 /// endpoint variables and `Distinct`s it.
+///
+/// **Zero-length branch of `*`.** `PathClosure`'s own reflexive step only
+/// self-matches the nodes the relation `p` touches, but §18.1.7's
+/// `ZeroLengthPath` ranges over every term in a subject or object position
+/// of the active graph — including terms no `p` triple mentions. With a
+/// ground endpoint that set collapses to the endpoint itself, which the
+/// runtime's pin already covers. With a variable at **both** ends we union
+/// in [`graph_nodes_self_match`], which enumerates those terms.
 fn translate_closure_path(
     subject: Term,
     inner: &PropertyPathExpression,
@@ -837,12 +845,66 @@ fn translate_closure_path(
     let src = Term::Var(Var::new(PATH_SRC_VAR));
     let dst = Term::Var(Var::new(PATH_DST_VAR));
     let edge = translate_path(src, inner, dst)?;
-    Ok(Algebra::PathClosure {
-        subject,
-        object,
+    let closure = Algebra::PathClosure {
+        subject: subject.clone(),
+        object: object.clone(),
         edge: Box::new(edge),
         reflexive,
-    })
+    };
+    match (reflexive, &subject, &object) {
+        (true, Term::Var(sv), Term::Var(ov)) => Ok(Algebra::Union {
+            left: Box::new(closure),
+            right: Box::new(graph_nodes_self_match(sv, ov)),
+        }),
+        _ => Ok(closure),
+    }
+}
+
+/// SPARQL 1.1 §18.1.7 `ZeroLengthPath` with a variable at **both** ends:
+/// one row per term that occurs in a subject or object position of the
+/// active graph, binding `sv` and `ov` to that same term.
+///
+/// A zero-length path matches a node against *itself*, and every node in
+/// the graph qualifies — not only the ones the path's own predicates
+/// touch. Predicates are deliberately left out: the spec's node set is
+/// subjects ∪ objects.
+///
+/// The two wildcard patterns are ordinary scan leaves, so `GRAPH` scoping
+/// pushes down onto them like any other pattern and the node set is taken
+/// from the right graph. Duplicates — a term in both positions, or in many
+/// triples — are collapsed by the `Distinct`.
+fn graph_nodes_self_match(sv: &Var, ov: &Var) -> Algebra {
+    fn any() -> Term {
+        Term::Var(Var::new(fresh_path_var("zlen")))
+    }
+    fn wildcard(subject: Term, object: Term) -> Algebra {
+        Algebra::Bgp {
+            patterns: vec![TriplePattern {
+                subject,
+                predicate: any(),
+                object,
+            }],
+        }
+    }
+    let nodes = Algebra::Distinct {
+        inner: Box::new(Algebra::Project {
+            vars: vec![sv.clone()],
+            inner: Box::new(Algebra::Union {
+                left: Box::new(wildcard(Term::Var(sv.clone()), any())),
+                right: Box::new(wildcard(any(), Term::Var(sv.clone()))),
+            }),
+        }),
+    };
+    if sv.name() == ov.name() {
+        // `?x p* ?x` — one variable, so the self-match is the node set.
+        nodes
+    } else {
+        Algebra::Extend {
+            inner: Box::new(nodes),
+            var: ov.clone(),
+            expr: Expr::Term(Term::Var(sv.clone())),
+        }
+    }
 }
 
 /// Combine two property-path sub-algebras. When both are plain BGPs we
@@ -878,12 +940,9 @@ fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
 /// data; the recursive `*`/`+` increment (#50) that routes through closure
 /// is the natural place to add proper node-set semantics.
 ///
-/// The genuinely unbounded cases — two *distinct* variables, **or the same
-/// variable on both ends** (`?x p? ?x`) — are rejected. Both would have to
-/// range the variable over every node in the graph (a zero-length path
-/// binds `?x` to each node, not to an unbound row), which is out of
-/// Stage-1 scope; they belong with the recursive `*`/`+` increment that
-/// routes through closure.
+/// * a variable at both ends — whether two distinct ones or the same one
+///   twice (`?x p? ?x`) — enumerates the graph's node set via
+///   [`graph_nodes_self_match`], the same lowering `p*` uses.
 ///
 /// Endpoints arrive already lowered (the caller runs them through
 /// [`match_term`]), so a blank-node endpoint minted by spargebra's
@@ -901,18 +960,10 @@ fn zero_length_path(subject: Term, object: Term) -> Result<Algebra> {
         rows: Vec::new(),
     };
     match (subject, object) {
-        (Term::Var(_), Term::Var(_)) => {
-            // Two variable endpoints (whether the same variable, `?x p? ?x`,
-            // or two distinct ones) require binding a variable to every node
-            // in the graph for the zero-length branch — out of Stage-1 scope.
-            // Returning the unit relation here would emit an *unbound* row
-            // instead of the per-node bindings, which is wrong, so reject.
-            Err(SparqlError::UnsupportedPathOp(
-                "zero-or-one path `?` with an unbound variable on both ends \
-                 (would enumerate every node) — out of Stage-1 scope"
-                    .into(),
-            ))
-        }
+        // Two variable endpoints: the zero-length path binds each to every
+        // node in the graph, so enumerate them. The unit relation would emit
+        // one *unbound* row instead of the per-node bindings, which is wrong.
+        (Term::Var(sv), Term::Var(ov)) => Ok(graph_nodes_self_match(&sv, &ov)),
         (Term::Var(v), other) | (other, Term::Var(v)) => Ok(Algebra::Values {
             vars: vec![v],
             rows: vec![vec![Some(other)]],

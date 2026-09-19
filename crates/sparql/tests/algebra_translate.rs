@@ -92,6 +92,9 @@ fn lowers_kleene_star_path_to_closure() {
             Algebra::Project { inner, .. }
             | Algebra::Distinct { inner }
             | Algebra::Slice { inner, .. } => find_closure(inner),
+            // HDB-141: with a variable at both ends, `*` unions the closure
+            // with the graph's node set for the zero-length branch.
+            Algebra::Union { left, .. } => find_closure(left),
             _ => None,
         }
     }
