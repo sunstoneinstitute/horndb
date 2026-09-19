@@ -36,6 +36,13 @@ pub struct Selected {
     /// older `selected.toml` still parses.
     #[serde(default)]
     pub sparql_update: Option<SparqlUpdateSection>,
+    /// SPEC-28 D2 default-graph mode subset — HornDB-specific fixtures, not
+    /// W3C cases (§13.2 leaves the no-`FROM` dataset implementation-defined,
+    /// so no upstream case grades it). Consumed by
+    /// `crates/sparql/tests/default_graph_suite.rs`. Optional, like the two
+    /// sections above, so an older `selected.toml` still parses.
+    #[serde(default)]
+    pub sparql_default_graph: Option<SparqlDefaultGraphSection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,6 +110,15 @@ pub struct SparqlUpdateSection {
     /// `crates/harness/tests/fixtures/sparql11/`, each holding
     /// `data.trig` (initial state), `request.ru` (the update), and
     /// `expected.trig` (expected final state).
+    pub tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SparqlDefaultGraphSection {
+    /// Fixture directories relative to
+    /// `crates/harness/tests/fixtures/sparql11/`, each holding `data.trig`,
+    /// `query.rq`, `form` and `expected.srj`. Every case runs under
+    /// `DefaultGraphMode::Union`.
     pub tests: Vec<String>,
 }
 

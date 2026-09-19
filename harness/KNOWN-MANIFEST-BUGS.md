@@ -311,10 +311,31 @@ its entry here, in the same commit.
 mode.** The `graph/` family takes its dataset from the upstream manifest, so
 those cases run in `strict`; every `dataset/` query carries its own `FROM` /
 `FROM NAMED`, which fixes the dataset whatever the mode is. No W3C case here
-exercises D2's *default*. That mode is covered by `crates/sparql/tests/
-graph_query.rs` (`union_mode_unqualified_sees_all_non_reserved_deduped`,
-`reserved_graph_excluded_from_union`, and the `GRAPH ?g` cases), not by
-conformance — do not read the headline count as covering it.
+exercises D2's *default*, and none can: SPARQL 1.1 §13.2 leaves the
+no-`FROM` dataset implementation-defined, so there is no upstream case to
+mirror. Do not read the headline count as covering it.
+
+Since HDB-77 the mode has its own gate — `[sparql_default_graph]` in
+`harness/selected.toml`, run by `crates/sparql/tests/default_graph_suite.rs`
+over fixtures in `crates/harness/tests/fixtures/sparql11/default_graph_subset/`.
+Those fixtures are **HornDB-specific and must never be counted as W3C
+conformance**. Three cases grade D2: the unqualified BGP sees every
+non-reserved graph as a set (the triple in two graphs comes back once),
+`https://horndb.io/graph/…` stays out of the union, and a property path over
+the union default graph crosses graph boundaries. The runner re-runs each
+case under `strict` as a negative control, so a case that is insensitive to
+the mode fails the build instead of looking like coverage.
+`crates/sparql/tests/graph_query.rs` keeps the finer-grained unit coverage.
+
+**`dataset-09b` / `dataset-10b` are near-identical upstream too — the mirror
+is faithful (checked 2026-09-19).** The two mirrored `query.rq` files differ
+only by a newline before the `{`, which looked like a mirroring slip. It is
+not: upstream `dataset-09b.rq` and `dataset-10b.rq` differ by exactly that
+newline (`FROM NAMED <data-g3.ttl>{` on one line versus the brace on its
+own), the manifest gives both the same two `qt:graphData` files, and both
+expected result sets (`dataset-09.ttl`, `dataset-10.ttl`) are empty with the
+same six variables. The pair is a whitespace-acceptance check on the
+dataset-clause parser. No fixture change is needed.
 
 ## Blank nodes in the expected result (3 cases)
 

@@ -109,7 +109,8 @@ required-features = ["server"]
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }
-# w3c_suite.rs's manifest drift guard (HDB-76) parses harness/selected.toml.
+# Parses harness/selected.toml: w3c_suite.rs's manifest drift guard (HDB-76),
+# and default_graph_suite.rs, which reads its case list from the manifest.
 toml = { workspace = true }
 tokio = { workspace = true }
 # `serve` binary integration tests (config-file/env/CLI bind precedence,

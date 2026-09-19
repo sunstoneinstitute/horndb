@@ -644,8 +644,10 @@ pub enum ViewOutput {
 }
 
 /// The per-query settings tier: the bounded subset a query may override,
-/// defaulting from `[server.limits]`. Override application (URL params) is
-/// PLAN-26-02; here it is only constructed from the limits defaults.
+/// defaulting from `[server.limits]`. URL-parameter overrides are SPEC-26
+/// Phase 2 ([#251](https://github.com/sunstoneinstitute/horndb/issues/251));
+/// [`QuerySettings::apply_override`] below is the closed whitelist of keys
+/// they may touch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuerySettings {
     pub query_timeout: HumanDuration,
