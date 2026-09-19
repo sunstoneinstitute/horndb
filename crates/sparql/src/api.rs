@@ -113,7 +113,13 @@ pub fn execute_query_with<E: Executor + ?Sized>(
     // any other parse error.
     let (parsed, ctx) = timed(Stage::Parse, || {
         let (body, disabled_passes) = strip_plan_pragmas(query)?;
-        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+        Ok((
+            parse_query(body)?,
+            PlanCtx {
+                disabled_passes,
+                ..Default::default()
+            },
+        ))
     })?;
     horndb_metrics::metrics()
         .sparql
@@ -228,7 +234,13 @@ pub fn plan_select(
     // error before the materialized fallback (which strips) could run.
     let (parsed, ctx) = timed(Stage::Parse, || {
         let (body, disabled_passes) = strip_plan_pragmas(query)?;
-        Ok((parse_query(body)?, PlanCtx { disabled_passes }))
+        Ok((
+            parse_query(body)?,
+            PlanCtx {
+                disabled_passes,
+                ..Default::default()
+            },
+        ))
     })?;
     let ParsedQuery::Select { inner } = parsed else {
         return Ok(None);

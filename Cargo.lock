@@ -1433,6 +1433,7 @@ dependencies = [
  "horndb-config",
  "horndb-incremental",
  "horndb-metrics",
+ "horndb-ml",
  "horndb-owlrl",
  "horndb-simd",
  "horndb-storage",

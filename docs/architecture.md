@@ -372,7 +372,7 @@ generator (Stage-2, native-linkage heavy) — see SPEC-08 / Worklode.
 | Component | Status | Notes |
 |---|---|---|
 | `CandidateGenerator` trait (propose `sameAs` etc.) | **implemented** | `candidate.rs` — interface + reference scaffolding. |
-| `PlanAdvisor` trait (cost/join-order hints) | **implemented** | `planner.rs`. |
+| `PlanAdvisor` trait (cost/join-order hints) | **implemented** | `planner.rs`. Reachable from the SPARQL planner: `horndb-sparql` depends on `horndb-ml`, and `PlanCtx::plan_advisor()` forwards to the registry (`PlanCtx::ml`). The default registry is disabled, so plans match a no-ML build. No pass consults it yet — the `JoinPlanning` call site is **planned** (PLAN-23-05 task 5). |
 | `HotSetAdvisor` trait (tier-placement hints) | **implemented** | `hotset.rs`. |
 | Provenance for ML-derived facts (F5) | **implemented** | `provenance.rs`. |
 | Model registry + config (`ml.enabled`) | **implemented** | `registry.rs`, `config.rs`. |

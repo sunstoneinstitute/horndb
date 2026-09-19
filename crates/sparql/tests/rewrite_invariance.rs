@@ -76,6 +76,7 @@ fn run_with(horn: &HornBackend, query: &str, disabled: HashSet<PassId>) -> Vec<S
     let alg = algebra_of(query);
     let ctx = PlanCtx {
         disabled_passes: disabled,
+        ..Default::default()
     };
     let plan = planner::plan_with_ctx(&alg, &ctx).expect("plan");
     let rows: Vec<Bindings> = Runtime::new(horn).run(&plan).expect("run").collect();

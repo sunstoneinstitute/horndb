@@ -74,6 +74,10 @@ horndb-owlrl = { path = "../owlrl", optional = true }
 horndb-incremental = { path = "../incremental", optional = true }
 horndb-storage = { path = "../storage" }
 horndb-wcoj = { path = "../wcoj" }
+# SPEC-08 F2: the planner's ML seam (`PlanCtx::plan_advisor`). Non-optional
+# and inert by default — `MlRegistry::default()` is disabled, so the advisor
+# is `DisabledPlanAdvisor` and plans match a no-ML build.
+horndb-ml = { path = "../ml" }
 horndb-metrics.workspace = true
 horndb-simd.workspace = true
 # SPEC-26 layered configuration. Mostly consumed by the `serve` binary; the
