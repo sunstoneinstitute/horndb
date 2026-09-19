@@ -133,6 +133,42 @@ pub enum Func {
     Hours,
     Minutes,
     Seconds,
+    /// `TZ` — the timezone part of an `xsd:dateTime` as a simple literal
+    /// (`"Z"`, `"-08:00"`, `""` when there is none).
+    Tz,
+    /// `TIMEZONE` — the same offset as an `xsd:dayTimeDuration`; a
+    /// timezone-less argument is an error, not `PT0S`.
+    Timezone,
+    // Hashing (§17.4.3.15-19). Argument must be a simple or `xsd:string`
+    // literal; the result is the lowercase hex digest as a simple literal.
+    Md5,
+    Sha1,
+    Sha256,
+    Sha384,
+    Sha512,
+    // Term constructors (§17.4.2).
+    /// `IRI`/`URI` — resolves a relative argument against the query's `BASE`.
+    Iri,
+    /// `BNODE` — zero-arg mints a fresh node per call; one-arg memoises per
+    /// evaluation environment (see `QueryScope::bnode`).
+    BNode,
+    StrDt,
+    StrLang,
+    EncodeForUri,
+    /// An `xsd:` constructor call such as `xsd:double(?x)`. The parser hands
+    /// these over as a generic function call on a datatype IRI, so the target
+    /// datatype rides as a synthetic **first argument** (`Expr::Term(Iri)`)
+    /// rather than as a payload — `Func` stays `Copy` and no `Expr` variant
+    /// or match arm elsewhere has to change.
+    Cast,
+    // Non-deterministic (§17.4.2.x). Unlike `Now`, every one of these is
+    // evaluated fresh per call.
+    Rand,
+    Uuid,
+    StrUuid,
+    /// `NOW` — one `xsd:dateTime` per *query*, shared by every call
+    /// (§17.4.5.1). Held in `QueryScope`, not read from the clock here.
+    Now,
 }
 
 /// Algebra operators supported in Stage 1.
@@ -296,6 +332,10 @@ pub struct DatasetSpec {
 pub struct TranslatedQuery {
     pub algebra: Algebra,
     pub dataset: DatasetSpec,
+    /// The query's `BASE` IRI, if it declared one. `IRI()`/`URI()` resolve a
+    /// relative argument against it at evaluation time (§17.4.2.8), which is
+    /// why it has to survive translation rather than being dropped here.
+    pub base: Option<String>,
 }
 
 /// Hidden source-endpoint variable threaded through a
