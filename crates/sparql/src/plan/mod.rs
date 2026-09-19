@@ -8,6 +8,7 @@ pub mod pass;
 pub mod passes;
 pub mod planner;
 pub mod pushdown;
+pub mod reasoning_catalog;
 pub mod types;
 
 use crate::algebra::{Aggregate, Expr, GraphSpec, OrderDir, Term, TriplePattern, Var};

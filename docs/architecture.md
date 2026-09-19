@@ -590,7 +590,19 @@ conflate live in different places:
   (before `JoinPlanning`), fed by a *reasoning/materialization catalog* seam
   **parallel to `Stats`** (what is already closed + resolver cost), and realized
   physically via the existing `PathClosure` node (`Algebra::l`) or a
-  closure-scan operator. The prior art SPEC-23 surveys (Oxigraph `sparopt`,
+  closure-scan operator. **The catalog seam itself now exists as a stub**
+  (HDB-211): `plan::reasoning_catalog::ReasoningCatalog`
+  (`crates/sparql/src/plan/reasoning_catalog.rs`) asks two things about one
+  triple pattern — `closure_state` (Closed / Partial / NotClosed) and
+  `cost(pattern, Strategy)` on the §5.5 additive "rows touched" scale, where
+  `Strategy` is Materialize / Rewrite / Delegate(CompiledRule |
+  GraphblasClosure | Crosswalk). The only implementation is
+  `UninformedCatalog`, which claims nothing is closed and prices every strategy
+  identically; both the trait-level `is_informed()` and the per-value
+  `Cost::measured` flag report the answers as unmeasured. **The cost values are
+  placeholders** until SPEC-23 §8 #4 (recursive-fixpoint costing) is settled,
+  and nothing consumes the seam yet — no rewrite pass, no `PassId`, no
+  `JoinPlanning` wiring. The prior art SPEC-23 surveys (Oxigraph `sparopt`,
   DuckDB, ClickHouse) are all **non-reasoning** engines, so none of them informs
   this layer — it is HornDB-specific.
 - **Now specified and decomposed.** This is the flagship of the Stage-2 push: the
