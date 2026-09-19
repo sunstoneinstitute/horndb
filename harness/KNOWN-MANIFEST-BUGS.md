@@ -483,14 +483,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-19 with `--engine owlrl`: **459 pass, 51 fail, 37 skip**.
+Measured on 2026-09-19 with `--engine owlrl`: **460 pass, 50 fail, 37 skip**.
 The 37 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`); they report with the type IRI
 in the reason. Which task fixed what is in the git log and in the
 per-root-cause tables below, not restated here — every branch that moved these
 numbers used to conflict on this paragraph.
 
-The 51 reds are listed one-by-one in `expected_failures` in
+The 50 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -504,7 +504,6 @@ cannot rot, and CI catches regressions in both directions.
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 2 | **RDF 1.1 collapses `"abc"` and `"abc"^^xsd:string` into one term**, so the store cannot tell them apart. `STRDT`/`STRLANG` must accept the plain literal and raise a type error on the explicitly typed one, and these two cases need both in the same answer (HDB-132). Every other `STRDT`/`STRLANG` case passes. | `functions/strdt03`, `strlang03` |
-| 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 | 1 | **`FROM <data.ttl>` does not load the graph it names.** The engine reads a `FROM` dataset clause as selecting among graphs already in the store, so with no `qt:data` the query runs over an empty default graph and constructs nothing (0 triples where 4 are wanted). | `construct/constructwhere04` |
 | 1 | **`BNODE(expr)` is not scoped to one solution.** §17.4.2.2: within one row, equal arguments give the same blank node; across rows they must give different ones. The expected answer uses 6 distinct blank nodes over 4 rows, the engine 4 — it reuses nodes across rows. Every other cell matches. | `functions/bnode01` |
 
@@ -556,6 +555,19 @@ only in a label and now pass.
 `mf:CSVResultFormatTest` is also recognised by the manifest reader now, so
 `csv-tsv-res/csv01`–`03` are selected and graded instead of skipped as an
 unknown test type. That grows the suite by 3 cases, all green.
+
+## ~~`p*`'s zero-length match skipped nodes the path never touches~~ — FIXED (HDB-141)
+
+`property-path/pp16` (`SELECT * WHERE { ?X foaf:knows* ?Y }`) returned 13 of 15
+rows, missing `(:h, :h)` and `("test", "test")`. Both terms are in the data —
+`:h` as the object of `foaf:homepage`, `"test"` as the object of `foaf:name` —
+but neither appears on a `foaf:knows` triple. The closure seeded `*`'s
+zero-length (reflexive) pairs from the nodes the *path relation* touches, while
+§18.1.7's `ZeroLengthPath` ranges over every term in a subject or object
+position of the **active graph**. Fixed in `algebra/translate.rs`: with a
+variable at both ends, `p*` now unions in a node enumeration over the graph.
+The same helper replaced the two `p?`-with-two-variables cases that used to be
+rejected outright — the identical gap, one rung down.
 
 ## ~~`IF`/`COALESCE` take the wrong branch on an erroring sub-expression~~ — FIXED (HDB-136)
 

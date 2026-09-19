@@ -50,17 +50,6 @@ fn run(q: &str, store: &MemStore) -> Vec<Bindings> {
     Runtime::new(store).run(&plan).unwrap().collect()
 }
 
-fn run_err(q: &str) -> String {
-    let inner = match parse_query(q).unwrap() {
-        ParsedQuery::Select { inner }
-        | ParsedQuery::Ask { inner }
-        | ParsedQuery::Construct { inner } => inner,
-        ParsedQuery::Describe { .. } => panic!("describe"),
-        ParsedQuery::Explain { .. } => panic!("explain"),
-    };
-    translate_query(&inner).unwrap_err().to_string()
-}
-
 /// Collect the IRI suffix bound to `var` across all rows, sorted+deduped.
 fn names(rows: &[Bindings], var: &str) -> Vec<String> {
     let mut v: Vec<String> = rows
@@ -70,6 +59,22 @@ fn names(rows: &[Bindings], var: &str) -> Vec<String> {
             Term::Iri(s) => s.rsplit('/').next().unwrap().to_owned(),
             other => panic!("expected IRI, got {other:?}"),
         })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Collect the `(var_a, var_b)` IRI suffix pairs across all rows as
+/// `"a->b"` strings, sorted+deduped.
+fn pairs(rows: &[Bindings], a: &str, b: &str) -> Vec<String> {
+    let suf = |t: &Term| match t {
+        Term::Iri(s) => s.rsplit('/').next().unwrap().to_owned(),
+        other => panic!("expected IRI, got {other:?}"),
+    };
+    let mut v: Vec<String> = rows
+        .iter()
+        .map(|r| format!("{}->{}", suf(r.get(a).unwrap()), suf(r.get(b).unwrap())))
         .collect();
     v.sort();
     v.dedup();
@@ -148,19 +153,33 @@ fn optional_both_ground_present_edge_matches_once_or_twice() {
 }
 
 #[test]
-fn optional_distinct_unbound_vars_rejected() {
-    // `?s p? ?o` with two distinct unbound endpoints would have to range
-    // over every node; we reject it rather than return wrong answers.
-    let msg = run_err("SELECT ?s ?o WHERE { ?s <http://ex/knows>? ?o }");
-    assert!(msg.contains("property-path"), "got: {msg}");
+fn optional_distinct_unbound_vars_enumerates_nodes() {
+    // `?s p? ?o` with two unbound endpoints: the zero-length branch pairs
+    // every graph node with itself (§18.1.7 ZeroLengthPath), plus the one
+    // `knows` step. `carol` and `dave` never appear on a `knows` triple but
+    // are still graph nodes, so they self-match.
+    let s = make_store();
+    let rows = run("SELECT ?s ?o WHERE { ?s <http://ex/knows>? ?o }", &s);
+    assert_eq!(
+        pairs(&rows, "s", "o"),
+        vec![
+            "alice->alice",
+            "alice->bob",
+            "bob->bob",
+            "bob->dave",
+            "carol->carol",
+            "dave->dave",
+        ]
+    );
 }
 
 #[test]
-fn optional_same_unbound_var_both_ends_rejected() {
-    // `?x p? ?x` would bind ?x to every node via the zero-length branch;
-    // emitting the unit (unbound-?x) row would be wrong, so we reject it.
-    let msg = run_err("SELECT ?x WHERE { ?x <http://ex/knows>? ?x }");
-    assert!(msg.contains("property-path"), "got: {msg}");
+fn optional_same_unbound_var_both_ends_enumerates_nodes() {
+    // `?x p? ?x` binds ?x to every graph node via the zero-length branch —
+    // never an unbound row.
+    let s = make_store();
+    let rows = run("SELECT ?x WHERE { ?x <http://ex/knows>? ?x }", &s);
+    assert_eq!(names(&rows, "x"), vec!["alice", "bob", "carol", "dave"]);
 }
 
 // ---- Negated property set `!` ----------------------------------------
@@ -383,6 +402,52 @@ fn star_adds_reflexive_pairs() {
         &s,
     );
     assert_eq!(names(&rows, "x"), vec!["alice", "bob", "dave"]);
+}
+
+#[test]
+fn star_both_variables_zero_matches_every_graph_node() {
+    // HDB-141 (W3C `property-path/pp16`): `?x p* ?y`'s zero-length branch
+    // ranges over every term in a subject or object position of the active
+    // graph (§18.1.7 ZeroLengthPath), not just the nodes `p` touches.
+    // `carol` only ever appears as the object of `likes`, so a closure that
+    // seeds its reflexive pairs from the `knows` relation alone drops
+    // (carol, carol) — that was the bug.
+    let s = make_store();
+    let rows = run("SELECT ?x ?y WHERE { ?x <http://ex/knows>* ?y }", &s);
+    assert_eq!(
+        pairs(&rows, "x", "y"),
+        vec![
+            "alice->alice",
+            "alice->bob",
+            "alice->dave",
+            "bob->bob",
+            "bob->dave",
+            "carol->carol",
+            "dave->dave",
+        ]
+    );
+}
+
+#[test]
+fn star_both_variables_excludes_predicates() {
+    // The zero-length node set is subjects ∪ objects. A term that occurs
+    // *only* as a predicate is not a node and must not self-match.
+    let mut s = make_store();
+    s.insert_triple(
+        iri("http://ex/alice"),
+        iri("http://ex/onlyPredicate"),
+        iri("http://ex/zed"),
+    );
+    let rows = run("SELECT ?x ?y WHERE { ?x <http://ex/knows>* ?y }", &s);
+    let bound = pairs(&rows, "x", "y");
+    assert!(
+        bound.iter().any(|p| p == "zed->zed"),
+        "object of the new triple is a node: {bound:?}"
+    );
+    assert!(
+        !bound.iter().any(|p| p.starts_with("onlyPredicate->")),
+        "a predicate-only term is not a node: {bound:?}"
+    );
 }
 
 #[test]

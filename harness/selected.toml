@@ -205,9 +205,6 @@ expected_failures = [
     # matches. An engine gap, not a labelling one — HDB-139's comparison pairs
     # blank nodes by bijection and reports that no bijection exists here.
     "data-sparql11/functions/manifest#bnode01",
-
-    # Property-path evaluation: `pp16` returns 13 of the 15 expected rows.
-    "data-sparql11/property-path/manifest#pp16",
 ]
 
 [suites.sparql11-gsp]
