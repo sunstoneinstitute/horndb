@@ -275,7 +275,7 @@ fn the_pushdown_count_charges_nothing_to_the_query() {
 #[test]
 fn stacked_blocking_operators_charge_the_sum_not_the_max() {
     let cfg = SparqlConfig::default();
-    let (_, plan, _) = plan_select(GROUP_THEN_ORDER, &cfg)
+    let (_, plan, _, _) = plan_select(GROUP_THEN_ORDER, &cfg)
         .unwrap()
         .expect("a plain SELECT plans to Some((vars, plan, dataset))");
     let (has_group, has_orderby) = plan_has_group_and_orderby(&plan);

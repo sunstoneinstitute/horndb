@@ -231,13 +231,14 @@ async fn run<B: FullBackend + Send + Sync + 'static>(
     // Planning needs no store access, so it runs here on the async thread.
     match plan_select(q, &cfg) {
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        Ok(Some((vars, plan, dataset))) => {
+        Ok(Some((vars, plan, dataset, base))) => {
             stream_select(
                 state,
                 q,
                 vars,
                 plan,
                 dataset,
+                base,
                 cfg.default_graph,
                 fmt,
                 permit,
@@ -408,6 +409,7 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
     vars: Vec<String>,
     plan: PhysicalPlan,
     dataset: DatasetSpec,
+    base: Option<String>,
     default_graph: DefaultGraphMode,
     fmt: ResultFormat,
     permit: QueryPermit,
@@ -470,7 +472,9 @@ async fn stream_select<B: FullBackend + Send + Sync + 'static>(
             let store = store.read();
             store.pin_read()
         };
-        let rt = Runtime::new(&view).with_dataset(dataset, default_graph);
+        let rt = Runtime::new(&view)
+            .with_dataset(dataset, default_graph)
+            .with_base(base);
         let mut ser = select_serializer(fmt);
         let start = Instant::now();
 

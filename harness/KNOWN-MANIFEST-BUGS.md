@@ -480,14 +480,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-06 with `--engine owlrl`: **407 pass, 100 fail, 40 skip**.
+Measured on 2026-09-19 with `--engine owlrl`: **429 pass, 78 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason. Which task fixed what is in the git log
 and in the per-root-cause tables below, not restated here — every branch that
 moved these numbers used to conflict on this paragraph.
 
-The 100 reds are listed one-by-one in `expected_failures` in
+The 78 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -499,9 +499,9 @@ cannot rot, and CI catches regressions in both directions.
 | # | Root cause | Where |
 |--:|---|---|
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
-| 25 | **Unimplemented builtins**: `BNODE`, `IRI`, `ENCODE_FOR_URI`, `MD5`, `SHA1/256/512`, `STRDT`, `STRLANG`, `UUID`, `STRUUID`, `RAND`, `NOW`, `TZ`, `TIMEZONE`, and the `xsd:` constructor call form. | `functions/`, `aggregates/agg-err-02` |
 | 14 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` (i.e. `MINUS`) works (HDB-133); the expression form does not translate. Includes 4 `negation/` cases whose `MINUS` right-hand pattern itself contains a `FILTER NOT EXISTS`. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
+| 2 | **RDF 1.1 collapses `"abc"` and `"abc"^^xsd:string` into one term**, so the store cannot tell them apart. `STRDT`/`STRLANG` must accept the plain literal and raise a type error on the explicitly typed one, and these two cases need both in the same answer (HDB-132). Every other `STRDT`/`STRLANG` case passes. | `functions/strdt03`, `strlang03` |
 | 1 | **A comparison operator returns a value where §17.4 requires an expression error**, so `IF` takes the wrong branch and the variable stays bound instead of dropping out. | `functions/if02` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
 
@@ -510,7 +510,7 @@ cannot rot, and CI catches regressions in both directions.
 | # | Root cause | Where |
 |--:|---|---|
 | 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
-| 4 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in a blank node's label (`_:b` vs `_:b0`); every other cell of every row matches. | `json-res/jsonres01`, `jsonres02`, `functions/plus-1`, `plus-2` |
+| 5 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in a blank node's label (`_:b` vs `_:b0`); every other cell of every row matches. `bnode01` (HDB-132) is the same gap from the other side: `BNODE` mints the right *pattern* of shared and distinct nodes, but which row gets `_:b0` follows our join order, so the labels pair with different rows than the upstream `.srx` spells out. | `json-res/jsonres01`, `jsonres02`, `functions/plus-1`, `plus-2`, `bnode01` |
 | 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |
 
 ## ~~`INSERT { GRAPH :g2 … } WHERE { GRAPH :g1 … }` never reaches its `DROP`~~ — FIXED (HDB-137)

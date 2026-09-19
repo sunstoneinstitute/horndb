@@ -54,6 +54,7 @@ pub fn translate_query(q: &Query) -> Result<Algebra> {
 /// [`DatasetSpec`] resolved from the query's `FROM`/`FROM NAMED` clause
 /// alongside the algebra (SPEC-28 S3).
 pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQuery> {
+    let base = q.base_iri().map(|b| b.as_str().to_owned());
     match q {
         Query::Select {
             pattern,
@@ -62,6 +63,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
         } => Ok(TranslatedQuery {
             algebra: translate_projection(pattern, cfg)?,
             dataset: dataset_spec_from(dataset),
+            base,
         }),
         Query::Ask {
             pattern,
@@ -75,6 +77,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
                     inner: Box::new(inner),
                 },
                 dataset: dataset_spec_from(dataset),
+                base,
             })
         }
         Query::Construct {
@@ -89,6 +92,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
             // template via Runtime::run_construct.
             algebra: translate_pattern(pattern, cfg)?,
             dataset: dataset_spec_from(dataset),
+            base,
         }),
         Query::Describe {
             pattern,
@@ -103,6 +107,7 @@ pub fn translate_query_with(q: &Query, cfg: &SparqlConfig) -> Result<TranslatedQ
             // turns those bound resources into a forward CBD graph.
             algebra: translate_projection(pattern, cfg)?,
             dataset: dataset_spec_from(dataset),
+            base,
         }),
     }
 }
@@ -496,12 +501,19 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
         ),
         E::FunctionCall(func, args) => {
             let f = translate_function(func)?;
-            Expr::Func(
-                f,
-                args.iter()
-                    .map(translate_expr)
-                    .collect::<Result<Vec<_>>>()?,
-            )
+            let mut out: Vec<Expr> = Vec::with_capacity(args.len() + 1);
+            // An `xsd:` constructor call carries its target datatype as a
+            // synthetic first argument — see `Func::Cast`.
+            if f == Func::Cast {
+                let Function::Custom(dt) = func else {
+                    unreachable!("Func::Cast is only produced from Function::Custom")
+                };
+                out.push(Expr::Term(Term::Iri(dt.as_str().to_owned())));
+            }
+            for a in args {
+                out.push(translate_expr(a)?);
+            }
+            Expr::Func(f, out)
         }
         other => {
             return Err(SparqlError::UnsupportedAlgebra(format!(
@@ -511,10 +523,9 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
     })
 }
 
-/// Map a spargebra builtin to the Stage-1 [`Func`] set. Functions
-/// outside the set (non-deterministic, hashing, SPARQL 1.2 triple
-/// accessors, custom IRIs) are rejected here so the planner and
-/// runtime never see them.
+/// Map a spargebra builtin to the [`Func`] set. What is still rejected here,
+/// so the planner and runtime never see it: the SPARQL 1.2 triple accessors,
+/// `ADJUST`, and custom function IRIs other than the `xsd:` constructors.
 fn translate_function(f: &Function) -> Result<Func> {
     Ok(match f {
         Function::Str => Func::Str,
@@ -547,6 +558,24 @@ fn translate_function(f: &Function) -> Result<Func> {
         Function::Hours => Func::Hours,
         Function::Minutes => Func::Minutes,
         Function::Seconds => Func::Seconds,
+        Function::Tz => Func::Tz,
+        Function::Timezone => Func::Timezone,
+        Function::Now => Func::Now,
+        Function::Md5 => Func::Md5,
+        Function::Sha1 => Func::Sha1,
+        Function::Sha256 => Func::Sha256,
+        Function::Sha384 => Func::Sha384,
+        Function::Sha512 => Func::Sha512,
+        Function::Iri => Func::Iri,
+        Function::BNode => Func::BNode,
+        Function::StrDt => Func::StrDt,
+        Function::StrLang => Func::StrLang,
+        Function::EncodeForUri => Func::EncodeForUri,
+        Function::Rand => Func::Rand,
+        Function::Uuid => Func::Uuid,
+        Function::StrUuid => Func::StrUuid,
+        // `xsd:integer(?x)` and friends parse as a call on a datatype IRI.
+        Function::Custom(dt) if dt.as_str().starts_with(XSD_NS) => Func::Cast,
         other => {
             return Err(SparqlError::UnsupportedAlgebra(format!(
                 "function: {other:?}"
@@ -554,6 +583,8 @@ fn translate_function(f: &Function) -> Result<Func> {
         }
     })
 }
+
+const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
 
 fn collect_visible_vars(p: &GraphPattern) -> Vec<Var> {
     // SELECT * means "all in-scope vars"; for Stage 1 we walk the

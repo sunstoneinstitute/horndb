@@ -51,6 +51,16 @@ fn timed<T>(stage: Stage, f: impl FnOnce() -> Result<T>) -> Result<T> {
     out
 }
 
+/// What [`plan_select`] hands the streaming `/query` path: the projected
+/// variable names, the physical plan, the query's resolved dataset, and its
+/// `BASE` IRI (which `IRI()`/`URI()` resolve against at evaluation time).
+pub type PlannedSelect = (
+    Vec<String>,
+    crate::plan::PhysicalPlan,
+    DatasetSpec,
+    Option<String>,
+);
+
 /// The scope of a scan outside any `GRAPH` wrapper — used to build the
 /// `DESCRIBE` expansion's scope, which has no plan node to read it from.
 const DEFAULT_GRAPH_SCOPE: crate::plan::GraphScope = crate::plan::GraphScope::DefaultGraph;
@@ -63,7 +73,9 @@ fn runtime_for<'a, E: Executor + ?Sized>(
     translated: &TranslatedQuery,
     cfg: &SparqlConfig,
 ) -> Runtime<'a, E> {
-    Runtime::new(exec).with_dataset(translated.dataset.clone(), cfg.default_graph)
+    Runtime::new(exec)
+        .with_dataset(translated.dataset.clone(), cfg.default_graph)
+        .with_base(translated.base.clone())
 }
 
 /// Classify a parsed query into its metric `QueryKind`. `EXPLAIN` is reported
@@ -224,10 +236,7 @@ pub fn execute_query_with<E: Executor + ?Sized>(
 /// fallback keeps per-kind counts exact (a non-SELECT query costs one
 /// extra `parse` stage observation from the routing double-parse — noted
 /// in `docs/metrics.md`).
-pub fn plan_select(
-    query: &str,
-    cfg: &SparqlConfig,
-) -> Result<Option<(Vec<String>, crate::plan::PhysicalPlan, DatasetSpec)>> {
+pub fn plan_select(query: &str, cfg: &SparqlConfig) -> Result<Option<PlannedSelect>> {
     // Strip plan pragmas here too: the HTTP /query handler routes EVERY
     // request through this function first, so without stripping a
     // pragma-carrying query of any form would die as a spargebra parse
@@ -257,7 +266,7 @@ pub fn plan_select(
     let plan = timed(Stage::Plan, || {
         planner::plan_with_ctx(&translated.algebra, &ctx)
     })?;
-    Ok(Some((vars, plan, translated.dataset)))
+    Ok(Some((vars, plan, translated.dataset, translated.base)))
 }
 
 /// Translate + plan a (non-EXPLAIN) parsed query into its physical plan,

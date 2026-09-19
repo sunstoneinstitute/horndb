@@ -51,6 +51,12 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 # SPARQL REGEX/REPLACE builtins (`exec::runtime::compile_regex`).
 regex = { workspace = true }
+# SPARQL 1.1 §17.4.3 hash builtins and §17.4.2 RAND/UUID/STRUUID.
+sha2 = { workspace = true }
+sha1 = { workspace = true }
+md-5 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
 # FxHash for the runtime's hot hash tables (join index, GROUP BY, DISTINCT);
 # matches owlrl/closure. See `exec::runtime`.
 rustc-hash = "2"

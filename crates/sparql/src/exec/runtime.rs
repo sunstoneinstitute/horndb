@@ -26,6 +26,74 @@ pub struct Runtime<'a, E: Executor + ?Sized> {
     /// it reads (SPEC-28 S3).
     dataset: DatasetSpec,
     mode: DefaultGraphMode,
+    /// State a few builtins fix for the whole query rather than per call.
+    scope: QueryScope,
+}
+
+/// Per-query evaluation state for the builtins SPARQL 1.1 does *not* define
+/// call-by-call.
+///
+/// One `Runtime` is built per query execution, so a field here is exactly
+/// query-scoped — no global and no `thread_local!`. `RefCell`/`OnceCell`
+/// because every evaluation path reaches the `Runtime` through `&self`.
+///
+/// `RAND`, `UUID` and `STRUUID` are deliberately *not* here: they are fresh
+/// on every call.
+#[derive(Debug, Default)]
+pub(crate) struct QueryScope {
+    /// `NOW()` — §17.4.5.1 requires every call in one query to return the
+    /// same `xsd:dateTime`, so the clock is read at most once per query.
+    now: std::cell::OnceCell<Term>,
+    /// `BNODE(str)` memo, keyed by the evaluation environment and the
+    /// argument's string, so the same literal in the same solution yields the
+    /// same node (§17.4.2.2).
+    ///
+    /// ponytail: the key is the *decoded subset* of the row the expression
+    /// referenced, not the whole solution mapping — two distinct solutions
+    /// that agree on every variable `BNODE`'s argument mentions therefore
+    /// share a blank node. Key on the physical `Row` instead if a case ever
+    /// needs them separated.
+    bnodes: std::cell::RefCell<std::collections::HashMap<(Bindings, String), Term>>,
+    /// Labels handed out so far; the source of `_:bN`'s N.
+    minted: std::cell::Cell<u64>,
+    /// The query's `BASE`, for `IRI()`/`URI()` relative resolution.
+    base: Option<String>,
+}
+
+impl QueryScope {
+    /// The query's single `NOW()` value, read from the clock on first use.
+    fn now(&self) -> Term {
+        self.now
+            .get_or_init(|| {
+                let t = time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+                Term::Literal(format!(
+                    "\"{t}\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+                ))
+            })
+            .clone()
+    }
+
+    /// A fresh blank node, distinct from every other this query has minted.
+    fn fresh_bnode(&self) -> Term {
+        let n = self.minted.get();
+        self.minted.set(n + 1);
+        Term::BlankNode(format!("_:b{n}"))
+    }
+
+    /// `BNODE(key)` within environment `env`: the same node for a repeat of
+    /// the same key, a fresh one otherwise.
+    fn bnode(&self, env: &Bindings, key: &str) -> Term {
+        if let Some(t) = self.bnodes.borrow().get(&(env.clone(), key.to_owned())) {
+            return t.clone();
+        }
+        let t = self.fresh_bnode();
+        self.bnodes
+            .borrow_mut()
+            .insert((env.clone(), key.to_owned()), t.clone());
+        t
+    }
 }
 
 impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
@@ -37,6 +105,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
             exec,
             dataset: DatasetSpec::default(),
             mode: DefaultGraphMode::default(),
+            scope: QueryScope::default(),
         }
     }
 
@@ -44,6 +113,13 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     pub fn with_dataset(mut self, dataset: DatasetSpec, mode: DefaultGraphMode) -> Self {
         self.dataset = dataset;
         self.mode = mode;
+        self
+    }
+
+    /// Attach the query's `BASE` IRI, which `IRI()`/`URI()` resolve a
+    /// relative argument against. Without it a relative argument is an error.
+    pub fn with_base(mut self, base: Option<String>) -> Self {
+        self.scope.base = base;
         self
     }
 
@@ -131,7 +207,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         let mut kept = Vec::with_capacity(batch.rows.len());
         for row in batch.rows {
             let b = self.decode_subset(&row, &batch.schema, &want)?;
-            if eval_expr(expr, &b)? {
+            if eval_expr(expr, &b, &self.scope)? {
                 kept.push(row);
             }
         }
@@ -190,7 +266,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         let mut out_rows = Vec::with_capacity(batch.rows.len());
         for r in &batch.rows {
             let env = self.decode_subset(r, &batch.schema, &want)?;
-            let slot = match eval_expr_to_term(expr, &env)? {
+            let slot = match eval_expr_to_term(expr, &env, &self.scope)? {
                 Some(t) => Slot::Term(t),
                 None => Slot::Unbound,
             };
@@ -346,7 +422,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                     None => SortCol::classify(
                         envs.iter()
                             .map(|env| {
-                                eval_expr_to_term(e, env)
+                                eval_expr_to_term(e, env, &self.scope)
                                     .ok()
                                     .flatten()
                                     .map(|t| SortVal::of(&t))
@@ -674,7 +750,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                         // over a bare scan-column var, folded off raw slots.
                         self.eval_fast_agg(fast, &members)?
                     } else {
-                        eval_aggregate(agg, &members_decoded)?
+                        eval_aggregate(agg, &members_decoded, &self.scope)?
                     };
                     match value {
                         Some(t) => slots.push(Slot::Term(t)),
@@ -1204,7 +1280,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
                 let keep = match expr {
                     Some(e) => {
                         let env = self.decode_subset(&m, &st.out_schema, want)?;
-                        eval_expr(e, &env)?
+                        eval_expr(e, &env, &self.scope)?
                     }
                     None => true,
                 };
@@ -2228,14 +2304,14 @@ fn compile_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
 }
 
 /// Compute one aggregate over a group's member rows.
-fn eval_aggregate(agg: &Aggregate, members: &[Bindings]) -> Result<Option<Term>> {
+fn eval_aggregate(agg: &Aggregate, members: &[Bindings], q: &QueryScope) -> Result<Option<Term>> {
     // Collect the aggregate's input multiset (the values of the inner
     // expression over the members), applying DISTINCT if requested.
     // For COUNT(*) the "input" is the rows themselves.
     let collect_values = |expr: &Expr| -> Result<Vec<Term>> {
         let mut vals = Vec::new();
         for m in members {
-            if let Some(t) = eval_expr_to_term(expr, m)? {
+            if let Some(t) = eval_expr_to_term(expr, m, q)? {
                 vals.push(t);
             }
         }
@@ -2552,36 +2628,38 @@ pub(crate) fn lex(t: &Term) -> String {
     }
 }
 
-fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
+fn eval_expr(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<bool> {
     use std::cmp::Ordering;
     let cmp = |a: &Expr, c: &Expr| -> Result<Option<Ordering>> {
-        Ok(match (eval_expr_to_term(a, b)?, eval_expr_to_term(c, b)?) {
-            (Some(x), Some(y)) => Some(compare_terms(&x, &y)),
-            _ => None,
-        })
+        Ok(
+            match (eval_expr_to_term(a, b, q)?, eval_expr_to_term(c, b, q)?) {
+                (Some(x), Some(y)) => Some(compare_terms(&x, &y)),
+                _ => None,
+            },
+        )
     };
     Ok(match e {
-        Expr::Eq(a, c) => eval_expr_to_term(a, b)? == eval_expr_to_term(c, b)?,
+        Expr::Eq(a, c) => eval_expr_to_term(a, b, q)? == eval_expr_to_term(c, b, q)?,
         // Identical to `Eq` today (structural `Term` equality) — see the
         // doc comment on `Expr::SameTerm`.
-        Expr::SameTerm(a, c) => eval_expr_to_term(a, b)? == eval_expr_to_term(c, b)?,
-        Expr::Ne(a, c) => eval_expr_to_term(a, b)? != eval_expr_to_term(c, b)?,
+        Expr::SameTerm(a, c) => eval_expr_to_term(a, b, q)? == eval_expr_to_term(c, b, q)?,
+        Expr::Ne(a, c) => eval_expr_to_term(a, b, q)? != eval_expr_to_term(c, b, q)?,
         Expr::Lt(a, c) => cmp(a, c)? == Some(Ordering::Less),
         Expr::Gt(a, c) => cmp(a, c)? == Some(Ordering::Greater),
         Expr::Le(a, c) => matches!(cmp(a, c)?, Some(Ordering::Less | Ordering::Equal)),
         Expr::Ge(a, c) => matches!(cmp(a, c)?, Some(Ordering::Greater | Ordering::Equal)),
-        Expr::And(a, c) => eval_expr(a, b)? && eval_expr(c, b)?,
-        Expr::Or(a, c) => eval_expr(a, b)? || eval_expr(c, b)?,
-        Expr::Not(a) => !eval_expr(a, b)?,
+        Expr::And(a, c) => eval_expr(a, b, q)? && eval_expr(c, b, q)?,
+        Expr::Or(a, c) => eval_expr(a, b, q)? || eval_expr(c, b, q)?,
+        Expr::Not(a) => !eval_expr(a, b, q)?,
         Expr::Bound(v) => b.get(v.name()).is_some(),
         Expr::In(a, list) => {
-            let lhs = eval_expr_to_term(a, b)?;
+            let lhs = eval_expr_to_term(a, b, q)?;
             match lhs {
                 None => false,
                 Some(x) => {
                     let mut found = false;
                     for item in list {
-                        if let Some(y) = eval_expr_to_term(item, b)? {
+                        if let Some(y) = eval_expr_to_term(item, b, q)? {
                             // Value equality (not variant equality): the
                             // Stage-1 store may bind the LHS as a
                             // different term kind than the constant RHS.
@@ -2602,7 +2680,7 @@ fn eval_expr(e: &Expr, b: &Bindings) -> Result<bool> {
         | Expr::Neg(..)
         | Expr::If(..)
         | Expr::Coalesce(..)
-        | Expr::Func(..) => match eval_expr_to_term(e, b)? {
+        | Expr::Func(..) => match eval_expr_to_term(e, b, q)? {
             Some(t) => ebv(&t),
             None => false,
         },
@@ -2677,11 +2755,11 @@ fn datetime_key(s: &str) -> Option<&str> {
     }
 }
 
-fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
+fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<Option<Term>> {
     // Evaluate an operand to its numeric value; an expression error
     // (non-numeric / unbound) surfaces as `Ok(None)`.
     let numof = |sub: &Expr| -> Result<Option<Numeric>> {
-        Ok(eval_expr_to_term(sub, b)?.as_ref().and_then(numeric_of))
+        Ok(eval_expr_to_term(sub, b, q)?.as_ref().and_then(numeric_of))
     };
     Ok(match e {
         Expr::Term(t) => match t {
@@ -2702,7 +2780,7 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         | Expr::And(_, _)
         | Expr::Or(_, _)
         | Expr::Not(_)
-        | Expr::Bound(_) => Some(bool_typed_literal(eval_expr(e, b)?)),
+        | Expr::Bound(_) => Some(bool_typed_literal(eval_expr(e, b, q)?)),
         Expr::Add(x, y) => arith(Numeric::add, numof(x)?, numof(y)?),
         Expr::Sub(x, y) => arith(Numeric::sub, numof(x)?, numof(y)?),
         Expr::Mul(x, y) => arith(Numeric::mul, numof(x)?, numof(y)?),
@@ -2715,10 +2793,10 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
         // branch, rather than propagating the error as SPARQL §17.4.1.2
         // specifies.
         Expr::If(c, t, f) => {
-            if eval_expr(c, b)? {
-                eval_expr_to_term(t, b)?
+            if eval_expr(c, b, q)? {
+                eval_expr_to_term(t, b, q)?
             } else {
-                eval_expr_to_term(f, b)?
+                eval_expr_to_term(f, b, q)?
             }
         }
         Expr::Coalesce(args) => {
@@ -2727,14 +2805,14 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
             // still holds.
             let mut found = None;
             for a in args {
-                if let Some(t) = eval_expr_to_term(a, b)? {
+                if let Some(t) = eval_expr_to_term(a, b, q)? {
                     found = Some(t);
                     break;
                 }
             }
             found
         }
-        Expr::Func(f, args) => eval_func(*f, args, b)?,
+        Expr::Func(f, args) => eval_func(*f, args, b, q)?,
     })
 }
 
@@ -2742,11 +2820,11 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings) -> Result<Option<Term>> {
 /// (the SPARQL error value): the binding stays unbound / the filter
 /// row drops. All value extraction goes through the raw lexical form
 /// because the Stage-1 `MemStore` erases term kinds on scan.
-fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
+fn eval_func(f: Func, args: &[Expr], b: &Bindings, q: &QueryScope) -> Result<Option<Term>> {
     // Evaluate one argument to a term; `None` short-circuits the call.
     let term = |i: usize| -> Result<Option<Term>> {
         match args.get(i) {
-            Some(e) => eval_expr_to_term(e, b),
+            Some(e) => eval_expr_to_term(e, b, q),
             None => Ok(None),
         }
     };
@@ -2971,7 +3049,244 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings) -> Result<Option<Term>> {
                 }
             }
         }
+        // TZ returns the offset as written (simple literal, "" when absent);
+        // TIMEZONE returns it as a canonical xsd:dayTimeDuration and errors
+        // when the argument carries no timezone at all.
+        Func::Tz | Func::Timezone => {
+            let t = match term(0)? {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+            let (v, _, dt) = literal_parts(&lex(&t));
+            if dt.as_deref() != Some("http://www.w3.org/2001/XMLSchema#dateTime")
+                || datetime_key(&v).is_none()
+            {
+                return Ok(None);
+            }
+            let tz = timezone_suffix(&v);
+            match f {
+                Func::Tz => Some(plain_literal(tz)),
+                _ => day_time_duration(tz).map(|d| {
+                    Term::Literal(format!(
+                        "\"{d}\"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>"
+                    ))
+                }),
+            }
+        }
+        // §17.4.3.15-19. The argument must be a simple or xsd:string literal
+        // — a language-tagged one is a type error, so `str_kind` gates this.
+        Func::Md5 | Func::Sha1 | Func::Sha256 | Func::Sha384 | Func::Sha512 => {
+            let t = match term(0)? {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+            match str_kind(&t) {
+                Some(StrKind::Simple) | Some(StrKind::XsdString) => {
+                    Some(plain_literal(&hash_hex(f, literal_value(&t).as_bytes())))
+                }
+                _ => None,
+            }
+        }
+        // §17.4.3.14. Unlike the hashes this accepts a language-tagged
+        // literal too, and always returns a simple literal.
+        Func::EncodeForUri => match term(0)? {
+            Some(t) if str_kind(&t).is_some() => {
+                Some(plain_literal(&encode_for_uri(&literal_value(&t))))
+            }
+            _ => None,
+        },
+        // §17.4.2.8. An IRI argument passes through; a string argument is
+        // resolved against the query's BASE, and is an error if it is
+        // relative and there is no BASE.
+        Func::Iri => match term(0)? {
+            Some(t) if term_kind(&t) == TermKind::Iri => Some(t),
+            Some(t) if matches!(str_kind(&t), Some(StrKind::Simple | StrKind::XsdString)) => {
+                let raw = literal_value(&t);
+                match &q.base {
+                    Some(base) => oxiri::Iri::parse(base.as_str())
+                        .ok()
+                        .and_then(|b| b.resolve(&raw).ok())
+                        .map(|abs| Term::Iri(abs.into_inner())),
+                    None => oxiri::Iri::parse(raw)
+                        .ok()
+                        .map(|i| Term::Iri(i.into_inner())),
+                }
+            }
+            _ => None,
+        },
+        // §17.4.2.2. Zero-arg: a fresh node every call. One-arg: the same
+        // node for the same simple literal in the same environment.
+        Func::BNode => {
+            if args.is_empty() {
+                Some(q.fresh_bnode())
+            } else {
+                match term(0)? {
+                    Some(t)
+                        if matches!(str_kind(&t), Some(StrKind::Simple | StrKind::XsdString)) =>
+                    {
+                        Some(q.bnode(b, &literal_value(&t)))
+                    }
+                    _ => None,
+                }
+            }
+        }
+        // §17.4.2.3/.4. The first argument must be a *simple* literal:
+        // a language-tagged or already-typed one (xsd:string included) is
+        // a type error, not a silent re-tag.
+        Func::StrDt | Func::StrLang => {
+            let lexical = match term(0)? {
+                Some(t) if str_kind(&t) == Some(StrKind::Simple) => literal_value(&t),
+                _ => return Ok(None),
+            };
+            match (f, term(1)?) {
+                (Func::StrDt, Some(dt)) if term_kind(&dt) == TermKind::Iri => Some(Term::Literal(
+                    format!("\"{}\"^^<{}>", escape_ntriples(&lexical), lex(&dt)),
+                )),
+                (Func::StrLang, Some(tag)) if str_kind(&tag).is_some() => {
+                    let tag = literal_value(&tag);
+                    if tag.is_empty() {
+                        None
+                    } else {
+                        // RDF stores language tags lowercased (oxrdf does the
+                        // same on parse), so "en-US" and "en-us" are one tag.
+                        Some(lang_literal(&lexical, &tag.to_ascii_lowercase()))
+                    }
+                }
+                _ => None,
+            }
+        }
+        // `xsd:double(?x)` and friends. arg 0 is the synthetic target
+        // datatype IRI the translator prepended (see `Func::Cast`).
+        Func::Cast => {
+            let dt = match term(0)? {
+                Some(Term::Iri(s)) => s,
+                _ => return Ok(None),
+            };
+            let src = match term(1)? {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+            // A language-tagged literal has no XSD value; casting it is a
+            // type error rather than a cast of its lexical form.
+            if matches!(str_kind(&src), Some(StrKind::Lang(_))) {
+                return Ok(None);
+            }
+            let v = literal_value(&src);
+            match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
+                Some("string") => Some(typed_string_literal(&v)),
+                Some("boolean") => match v.trim() {
+                    "true" | "1" => bool_lit(true),
+                    "false" | "0" => bool_lit(false),
+                    _ => None,
+                },
+                // ponytail: numerics only beyond string/boolean. xsd:dateTime
+                // and the duration types fall through as a type error; add
+                // them when a case needs one.
+                Some(_) => Numeric::parse(&v, &dt).map(Numeric::to_term),
+                None => None,
+            }
+        }
+        // Per *call*, unlike NOW.
+        Func::Rand => Some(Term::Literal(format!(
+            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>",
+            Numeric::Dbl(rand::random::<f64>().into()).lexical()
+        ))),
+        Func::Uuid => Some(Term::Iri(format!("urn:uuid:{}", uuid_v4()))),
+        Func::StrUuid => Some(plain_literal(&uuid_v4())),
+        Func::Now => Some(q.now()),
     })
+}
+
+/// The timezone part of a validated `xsd:dateTime` lexical form: `"Z"`,
+/// `"+05:30"`, `"-08:00"`, or `""` when it carries none.
+fn timezone_suffix(v: &str) -> &str {
+    // Everything before position 19 is the date and `hh:mm:ss`; the offset,
+    // if any, is the tail after the optional fractional seconds.
+    let tail = &v[19..];
+    let rest = tail.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if rest.starts_with('Z') || rest.starts_with('+') || rest.starts_with('-') {
+        rest
+    } else {
+        ""
+    }
+}
+
+/// An `xsd:dateTime` timezone offset as a canonical `xsd:dayTimeDuration`
+/// (`PT0S`, `-PT8H`, `PT5H30M`). `None` for the no-timezone case, which
+/// `TIMEZONE` reports as an error.
+fn day_time_duration(tz: &str) -> Option<String> {
+    if tz.is_empty() {
+        return None;
+    }
+    if tz == "Z" {
+        return Some("PT0S".to_owned());
+    }
+    let (sign, hhmm) = tz.split_at(1);
+    let (h, m) = hhmm.split_once(':')?;
+    let (h, m) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
+    if h == 0 && m == 0 {
+        return Some("PT0S".to_owned());
+    }
+    let mut out = String::new();
+    if sign == "-" {
+        out.push('-');
+    } else if sign != "+" {
+        return None;
+    }
+    out.push_str("PT");
+    if h > 0 {
+        out.push_str(&format!("{h}H"));
+    }
+    if m > 0 {
+        out.push_str(&format!("{m}M"));
+    }
+    Some(out)
+}
+
+/// Lowercase hex digest of `bytes` under the hash `f` names.
+fn hash_hex(f: Func, bytes: &[u8]) -> String {
+    use md5::Digest as _;
+    use sha2::Digest as _;
+    match f {
+        Func::Md5 => hex::encode(md5::Md5::digest(bytes)),
+        Func::Sha1 => hex::encode(sha1::Sha1::digest(bytes)),
+        Func::Sha256 => hex::encode(sha2::Sha256::digest(bytes)),
+        Func::Sha384 => hex::encode(sha2::Sha384::digest(bytes)),
+        _ => hex::encode(sha2::Sha512::digest(bytes)),
+    }
+}
+
+/// `ENCODE_FOR_URI` (§17.4.3.14): percent-encode every UTF-8 byte outside
+/// the RFC 3986 *unreserved* set, with uppercase hex digits.
+fn encode_for_uri(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// A random RFC 4122 version-4 UUID in the canonical lowercase form.
+/// `uuid` is not in the dependency graph and this is the whole of what
+/// `UUID`/`STRUUID` need.
+fn uuid_v4() -> String {
+    let mut b: [u8; 16] = rand::random();
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let h = hex::encode(b);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 /// Render a CONSTRUCT template against a stream of solution mappings.
@@ -3999,15 +4314,15 @@ mod sameterm_tests {
         let same = Expr::SameTerm(x(), c());
         let eq = Expr::Eq(x(), c());
         assert_eq!(
-            eval_expr(&same, &b_hit).unwrap(),
-            eval_expr(&eq, &b_hit).unwrap()
+            eval_expr(&same, &b_hit, &QueryScope::default()).unwrap(),
+            eval_expr(&eq, &b_hit, &QueryScope::default()).unwrap()
         );
         assert_eq!(
-            eval_expr(&same, &b_miss).unwrap(),
-            eval_expr(&eq, &b_miss).unwrap()
+            eval_expr(&same, &b_miss, &QueryScope::default()).unwrap(),
+            eval_expr(&eq, &b_miss, &QueryScope::default()).unwrap()
         );
-        assert!(eval_expr(&same, &b_hit).unwrap());
-        assert!(!eval_expr(&same, &b_miss).unwrap());
+        assert!(eval_expr(&same, &b_hit, &QueryScope::default()).unwrap());
+        assert!(!eval_expr(&same, &b_miss, &QueryScope::default()).unwrap());
     }
 
     /// `referenced_vars` must descend into `SameTerm` (else FilterPushdown
@@ -4108,6 +4423,86 @@ mod graphblas_parity {
             let native = eval_path_closure(&subject, &object, &rows, reflexive).unwrap();
             let grb = eval_path_closure_graphblas(&subject, &object, &rows, reflexive).unwrap();
             assert_eq!(native, grb);
+        }
+    }
+}
+
+/// The per-query vs per-call split that the W3C cases do not pin down:
+/// `bnode02` only proves `BNODE()` twice differs, and `now01` only proves
+/// `NOW()` has the right datatype.
+#[cfg(test)]
+mod query_scope_tests {
+    use super::*;
+    use crate::api::{execute_query, QueryAnswer};
+    use crate::exec::horn::HornBackend;
+    use crate::exec::Store;
+
+    /// One row with `?s <http://ex/p> <http://ex/o>` to hang expressions off.
+    fn one_row_store() -> HornBackend {
+        let mut horn = HornBackend::new();
+        horn.insert_triple(
+            Term::Iri("http://ex/s".into()),
+            Term::Iri("http://ex/p".into()),
+            Term::Iri("http://ex/o".into()),
+        );
+        horn
+    }
+
+    fn solutions(q: &str) -> Vec<Bindings> {
+        match execute_query(q, &one_row_store()).expect("query failed") {
+            QueryAnswer::Solutions { rows, .. } => rows,
+            other => panic!("expected solutions, got {other:?}"),
+        }
+    }
+
+    /// §17.4.5.1: every `NOW()` in one query returns the identical value,
+    /// so this is a query-scoped read of the clock, not a per-call one.
+    #[test]
+    fn now_is_fixed_for_the_whole_query() {
+        let rows = solutions(
+            "SELECT (NOW() AS ?a) (NOW() AS ?b) ?c \
+             WHERE { ?s <http://ex/p> ?o BIND(NOW() AS ?c) }",
+        );
+        assert_eq!(rows.len(), 1);
+        let (a, b) = (rows[0].get("a").unwrap(), rows[0].get("b").unwrap());
+        assert_eq!(a, b, "two NOW() calls in one query must be equal");
+        assert_eq!(rows[0].get("c").unwrap(), a, "including one in a BIND");
+    }
+
+    /// §17.4.2.2: `BNODE(str)` repeats its node for the same argument in the
+    /// same solution; the zero-argument form never repeats.
+    #[test]
+    fn bnode_repeats_by_key_but_never_without_one() {
+        let rows = solutions(
+            "SELECT (BNODE(\"x\") AS ?a) (BNODE(\"x\") AS ?b) (BNODE(\"y\") AS ?c) \
+             (BNODE() AS ?d) (BNODE() AS ?e) WHERE { ?s <http://ex/p> ?o }",
+        );
+        assert_eq!(rows.len(), 1);
+        let g = |v: &str| rows[0].get(v).cloned().unwrap();
+        assert_eq!(g("a"), g("b"), "BNODE(\"x\") twice must be the same node");
+        assert_ne!(g("a"), g("c"), "a different key must mint a different node");
+        assert_ne!(g("d"), g("e"), "BNODE() twice must be two distinct nodes");
+        for v in ["a", "c", "d", "e"] {
+            assert!(
+                matches!(g(v), Term::BlankNode(_)),
+                "BNODE must return a blank node, got {:?}",
+                g(v)
+            );
+        }
+    }
+
+    /// `RAND`/`UUID`/`STRUUID` are per call — they must NOT pick up the
+    /// query-scoped memoisation `NOW`/`BNODE` use. (A collision here is
+    /// possible in principle but has probability ~2^-64 or lower.)
+    #[test]
+    fn rand_and_uuid_are_per_call() {
+        let rows = solutions(
+            "SELECT (RAND() AS ?r1) (RAND() AS ?r2) (UUID() AS ?u1) (UUID() AS ?u2) \
+             (STRUUID() AS ?s1) (STRUUID() AS ?s2) WHERE { ?s <http://ex/p> ?o }",
+        );
+        assert_eq!(rows.len(), 1);
+        for (x, y) in [("r1", "r2"), ("u1", "u2"), ("s1", "s2")] {
+            assert_ne!(rows[0].get(x), rows[0].get(y), "{x} and {y} must differ");
         }
     }
 }
