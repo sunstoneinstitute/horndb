@@ -23,12 +23,32 @@
 //! A grading function returns `Ok(None)` for a pass and `Ok(Some(reason))` for
 //! a fail. `Err` is reserved for harness faults (unreadable fixture), which the
 //! runner surfaces separately so a broken fixture never reads as a test result.
+//!
+//! # Expected-result formats
+//!
+//! Five, each compared at the fidelity its own format carries:
+//!
+//! * `.srx` / `.srj` — SPARQL Query Results XML / JSON. Full terms, compared
+//!   exactly (modulo the `xsd:string` and numeric normalisation below).
+//! * `.tsv` — SPARQL Query Results TSV. Also full terms: TSV writes an IRI as
+//!   `<iri>` and a literal with its quotes, datatype and language tag, so it is
+//!   parsed by `sparesults` into the same shape as `.srx` and graded just as
+//!   strictly.
+//! * `.csv` — SPARQL Query Results CSV. **Lossy on purpose**; [`csv_cell`]
+//!   spells out what that comparison can and cannot catch.
+//! * `.ttl` — a CONSTRUCT / DESCRIBE result graph, compared by isomorphism:
+//!   both sides go through [`crate::rdf::canonical_graph`], which renames blank
+//!   nodes canonically, and are then compared as graphs.
+//!
+//! Blank-node labels are engine-minted, so **no** comparison here matches them
+//! literally: rows are paired under a bijection ([`match_blank_nodes`]) and
+//! graphs under canonicalization.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use horndb_sparql::algebra::Term as ATerm;
 use horndb_sparql::api::{execute_query_with, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
@@ -165,12 +185,22 @@ pub(crate) fn run_query_eval(
         (QueryAnswer::Solutions { vars, rows }, Expected::Solutions { vars: ev, rows: er }) => {
             compare_solutions(&write_select_json(&vars, &rows), &ev, &er)
         }
-        (QueryAnswer::Boolean(got), Expected::Solutions { .. }) => Some(format!(
+        (QueryAnswer::Solutions { vars, rows }, Expected::Csv { vars: ev, rows: er }) => {
+            compare_csv(&write_select_json(&vars, &rows), &ev, &er)
+        }
+        (QueryAnswer::Triples(got), Expected::Graph(want)) => compare_graph(&got, &want, query),
+        (QueryAnswer::Boolean(got), _) => Some(format!(
             "expected a result set, engine answered ASK {}",
             write_ask_json(got)
         )),
         (QueryAnswer::Solutions { .. }, Expected::Boolean(_)) => {
             Some("expected a boolean, engine answered a result set".into())
+        }
+        (QueryAnswer::Solutions { .. }, Expected::Graph(_)) => {
+            Some("expected a graph, engine answered a result set".into())
+        }
+        (QueryAnswer::Triples(_), _) => {
+            Some("expected a result set, engine answered a graph".into())
         }
         (other, _) => Some(format!("unsupported answer shape: {other:?}")),
     })
@@ -179,17 +209,33 @@ pub(crate) fn run_query_eval(
 /// The expected answer, in the same SPARQL-JSON shape the engine emits.
 enum Expected {
     Boolean(bool),
-    Solutions { vars: Vec<String>, rows: Vec<Value> },
+    Solutions {
+        vars: Vec<String>,
+        rows: Vec<Value>,
+    },
+    /// `.csv`: rows already projected into CSV's value space (see [`csv_cell`]).
+    Csv {
+        vars: Vec<String>,
+        rows: Vec<Value>,
+    },
+    /// `.ttl`: a CONSTRUCT / DESCRIBE result graph, already canonicalized.
+    Graph(Box<oxrdf::Graph>),
 }
 
 /// Read an `mf:result` file. `Ok(None)` means the format is one this runner
-/// does not grade yet (`.ttl` CONSTRUCT graphs, `.csv`/`.tsv` serializations)
-/// — the caller turns that into a visible failure rather than a silent pass.
+/// does not grade — the caller turns that into a visible failure rather than a
+/// silent pass.
 fn read_expected(path: &Path) -> Result<Option<Expected>> {
     use sparesults::{QueryResultsFormat, QueryResultsParser, ReaderQueryResultsParserOutput};
     let fmt = match path.extension().and_then(|e| e.to_str()) {
         Some("srx") => QueryResultsFormat::Xml,
         Some("srj") => QueryResultsFormat::Json,
+        // TSV keeps full term syntax, so `sparesults` can parse it back into
+        // real terms. CSV cannot be parsed back (`sparesults` refuses, for the
+        // reason spelled out in `csv_cell`), so it gets its own reader.
+        Some("tsv") => QueryResultsFormat::Tsv,
+        Some("csv") => return read_expected_csv(path).map(Some),
+        Some("ttl") | Some("nt") => return read_expected_graph(path).map(Some),
         _ => return Ok(None),
     };
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -230,6 +276,198 @@ fn oxterm_to_json(t: &oxrdf::Term) -> Value {
         },
         other => json!({ "type": "literal", "value": other.to_string() }),
     }
+}
+
+// ── CONSTRUCT / DESCRIBE graph results (`.ttl`) ──────────────────────────────
+
+fn read_expected_graph(path: &Path) -> Result<Expected> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let n_triples = path.extension().and_then(|e| e.to_str()) == Some("nt");
+    let graph = crate::rdf::canonical_graph(&text, &file_iri(path), n_triples)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Expected::Graph(Box::new(graph)))
+}
+
+/// Render one slot of a CONSTRUCT answer as N-Triples.
+///
+/// [`QueryAnswer::Triples`] carries each term as the lexical string the store
+/// holds, with no separate type tag: a literal already arrives in N-Triples
+/// form (`"x"`, `"x"@en`, `"x"^^<dt>`), a blank node as `_:label`, and an IRI
+/// bare. The leading character is therefore what tells them apart — exactly
+/// the N-Triples convention — so only the IRI case needs brackets added.
+fn nt_term(s: &str) -> String {
+    if s.starts_with('"') || s.starts_with("_:") {
+        s.to_owned()
+    } else {
+        format!("<{s}>")
+    }
+}
+
+/// Compare a CONSTRUCT answer against the expected graph by isomorphism: equal
+/// iff some one-to-one renaming of the answer's blank nodes makes the two
+/// triple sets identical. Both sides are canonicalized, so `==` *is* that test.
+fn compare_graph(got: &[(String, String, String)], want: &oxrdf::Graph, query: &Path) -> Verdict {
+    let mut nt = String::new();
+    for (s, p, o) in got {
+        nt.push_str(&format!("{} {} {} .\n", nt_term(s), nt_term(p), nt_term(o)));
+    }
+    let got = match crate::rdf::canonical_graph(&nt, &file_iri(query), true) {
+        Ok(g) => g,
+        Err(e) => {
+            return Some(format!(
+                "constructed graph is not well-formed N-Triples: {e}"
+            ))
+        }
+    };
+    if &got == want {
+        return None;
+    }
+    Some(format!(
+        "constructed graph is not isomorphic to the expected one ({} vs {} triples)",
+        got.len(),
+        want.len()
+    ))
+}
+
+// ── CSV results (`.csv`) ─────────────────────────────────────────────────────
+
+/// Project one expected CSV cell into the value space both sides are compared
+/// in.
+///
+/// **What CSV throws away** (SPARQL 1.1 Query Results CSV Format, §"Serializing
+/// a Result Set in CSV"): a cell holds an IRI as its bare IRI text and a
+/// literal as its bare lexical form, so the datatype, the language tag, and the
+/// IRI-vs-literal distinction are all gone; an unbound variable writes the
+/// empty string, indistinguishable from an empty literal. Grading a CSV case
+/// therefore cannot be term equality — it is equality of this projection.
+///
+/// So a green CSV case proves the answer has the right shape and the right
+/// *values*: right variables, right number of rows, right text in every cell.
+/// It does **not** prove the terms are right. These would all pass a CSV case
+/// they should fail: returning `"1"^^xsd:string` where `1`(`xsd:integer`) is
+/// wanted, `"chat"@fr` where a plain `"chat"` is wanted, the IRI
+/// `<http://ex/a>` where the literal `"http://ex/a"` is wanted, and an unbound
+/// variable where an empty literal is wanted. The `.srx`/`.srj`/`.tsv` cases,
+/// which do carry types, are what catches those.
+///
+/// A cell spelled `_:label` is read back as a blank node, so blank nodes still
+/// pair up by bijection rather than by label. A *literal* whose lexical form
+/// happens to start with `_:` is then read as a blank node too — CSV genuinely
+/// cannot tell those apart. That direction only ever turns a pass into a
+/// failure, never the reverse.
+fn csv_cell(text: &str) -> Value {
+    match text.strip_prefix("_:") {
+        Some(label) => json!({ "type": "bnode", "value": label }),
+        None => json!({ "type": "csv", "value": text }),
+    }
+}
+
+/// Project one row of the engine's SPARQL-JSON answer the same way, over the
+/// expected header's variables (CSV has a fixed column per variable).
+fn csv_row(row: &Value, vars: &[String]) -> Value {
+    let mut obj = serde_json::Map::new();
+    for v in vars {
+        let cell = match row.get(v) {
+            // Kept whole so the bijection can still pair blank nodes.
+            Some(t) if t.get("type").and_then(Value::as_str) == Some("bnode") => t.clone(),
+            Some(t) => json!({ "type": "csv", "value": t["value"].as_str().unwrap_or_default() }),
+            // Unbound. CSV writes the empty string for this and for an empty
+            // literal alike, so the projection must too.
+            None => json!({ "type": "csv", "value": "" }),
+        };
+        obj.insert(v.clone(), cell);
+    }
+    Value::Object(obj)
+}
+
+fn read_expected_csv(path: &Path) -> Result<Expected> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut records = read_csv_records(&text).into_iter();
+    let vars = records
+        .next()
+        .ok_or_else(|| anyhow!("{} is empty: no CSV header row", path.display()))?;
+    let mut rows = Vec::new();
+    for rec in records {
+        if rec.len() != vars.len() {
+            bail!(
+                "{}: CSV row has {} fields, header has {}",
+                path.display(),
+                rec.len(),
+                vars.len()
+            );
+        }
+        let obj: serde_json::Map<String, Value> = vars
+            .iter()
+            .cloned()
+            .zip(rec.iter().map(|c| csv_cell(c)))
+            .collect();
+        rows.push(Value::Object(obj));
+    }
+    Ok(Expected::Csv { vars, rows })
+}
+
+/// Split RFC 4180 CSV text into records of fields: `""` is an escaped quote
+/// inside a quoted field, and a quoted field may contain commas and newlines.
+/// Records end at `\n` or `\r\n` (the W3C fixtures use CRLF).
+fn read_csv_records(text: &str) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            } else {
+                field.push(c);
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            ',' => record.push(std::mem::take(&mut field)),
+            '\n' | '\r' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+            }
+            _ => field.push(c),
+        }
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
+/// Grade a `.csv` case: project the engine's answer into CSV's value space and
+/// compare it with the expected file, already projected.
+fn compare_csv(got_json: &str, want_vars: &[String], want_rows: &[Value]) -> Verdict {
+    let g: Value = serde_json::from_str(got_json).expect("engine emits valid JSON");
+    let gv: HashSet<&str> = g["head"]["vars"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let wv: HashSet<&str> = want_vars.iter().map(String::as_str).collect();
+    if gv != wv {
+        return Some(format!("vars differ: got {gv:?}, expected {wv:?}"));
+    }
+    let got: Vec<Value> = g["results"]["bindings"]
+        .as_array()
+        .map(|rows| rows.iter().map(|r| csv_row(r, want_vars)).collect())
+        .unwrap_or_default();
+    compare_rows(&got, want_rows)
 }
 
 /// One canonical spelling per numeric value, so two lexical forms of the same
@@ -294,38 +532,200 @@ fn compare_solutions(got_json: &str, want_vars: &[String], want_rows: &[Value]) 
     if gv != wv {
         return Some(format!("vars differ: got {gv:?}, expected {wv:?}"));
     }
-    let key = |rows: &[Value]| -> Vec<String> {
-        let mut v: Vec<String> = rows
-            .iter()
-            .map(|r| {
-                let obj: serde_json::Map<String, Value> = r
-                    .as_object()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(k, val)| (k, normalize(val)))
-                    .collect();
-                Value::Object(obj).to_string()
-            })
-            .collect();
-        v.sort();
-        v
-    };
     let got_rows: Vec<Value> = g["results"]["bindings"]
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let (gk, wk) = (key(&got_rows), key(want_rows));
-    if gk == wk {
-        return None;
+    compare_rows(&got_rows, want_rows)
+}
+
+/// Compare two row multisets, pairing blank nodes by bijection.
+///
+/// Two steps. First a multiset comparison with every blank-node label masked:
+/// that catches any real difference and gives a readable diff. Then, only if
+/// blank nodes are involved, [`match_blank_nodes`] checks that one consistent
+/// renaming explains the whole answer — masking alone would accept an answer
+/// that shares a blank node between two rows where the expected result does
+/// not.
+fn compare_rows(got: &[Value], want: &[Value]) -> Verdict {
+    let key = |rows: &[Value]| -> Vec<String> {
+        let mut v: Vec<String> = rows.iter().map(mask_blank_nodes).collect();
+        v.sort();
+        v
+    };
+    let (gk, wk) = (key(got), key(want));
+    if gk != wk {
+        let only_got: Vec<&String> = gk.iter().filter(|r| !wk.contains(r)).collect();
+        let only_want: Vec<&String> = wk.iter().filter(|r| !gk.contains(r)).collect();
+        return Some(format!(
+            "{} rows vs {} expected; only in answer: {only_got:?}; only in expected: {only_want:?}",
+            gk.len(),
+            wk.len()
+        ));
     }
-    let only_got: Vec<&String> = gk.iter().filter(|r| !wk.contains(r)).collect();
-    let only_want: Vec<&String> = wk.iter().filter(|r| !gk.contains(r)).collect();
-    Some(format!(
-        "{} rows vs {} expected; only in answer: {only_got:?}; only in expected: {only_want:?}",
-        gk.len(),
-        wk.len()
-    ))
+    if match_blank_nodes(got, want) {
+        None
+    } else {
+        Some(format!(
+            "{} rows match cell by cell, but no one-to-one renaming of the answer's blank nodes \
+             yields the expected rows (the answer uses {} distinct blank nodes, the expected \
+             result {} — so they share nodes between rows differently)",
+            gk.len(),
+            distinct_blank_nodes(got),
+            distinct_blank_nodes(want)
+        ))
+    }
+}
+
+/// One row as a sort key, with every blank-node label replaced by a fixed
+/// placeholder — labels are engine-minted, so they carry no information the
+/// comparison may rely on.
+fn mask_blank_nodes(row: &Value) -> String {
+    let obj: serde_json::Map<String, Value> = row
+        .as_object()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, val)| {
+            let val = normalize(val);
+            if bnode_label(&val).is_some() {
+                (k, json!({ "type": "bnode", "value": "?" }))
+            } else {
+                (k, val)
+            }
+        })
+        .collect();
+    Value::Object(obj).to_string()
+}
+
+/// How many distinct blank nodes a row set uses. Equal counts are necessary
+/// for a bijection to exist, so unequal ones name the reason it failed.
+fn distinct_blank_nodes(rows: &[Value]) -> usize {
+    rows.iter()
+        .filter_map(Value::as_object)
+        .flat_map(|o| o.values())
+        .filter_map(bnode_label)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn bnode_label(v: &Value) -> Option<&str> {
+    (v.get("type").and_then(Value::as_str) == Some("bnode"))
+        .then(|| v.get("value").and_then(Value::as_str))
+        .flatten()
+}
+
+/// Is there a bijection between the answer's blank-node labels and the expected
+/// rows' that turns one row multiset into the other?
+///
+/// ponytail: plain backtracking with a step budget, which is ample for W3C
+/// fixtures (a handful of rows, one or two blank nodes) and short-circuits
+/// entirely when neither side has a blank node. Exhausting the budget grades
+/// the case as a failure, never a pass. Upgrade path if some future suite needs
+/// it: match on masked-row groups first, or canonicalize the rows the way
+/// `oxrdf::Graph::canonicalize` does for graphs.
+fn match_blank_nodes(got: &[Value], want: &[Value]) -> bool {
+    let has_bnode = |r: &&Value| {
+        r.as_object()
+            .is_some_and(|o| o.values().any(|v| bnode_label(v).is_some()))
+    };
+    if !got.iter().chain(want.iter()).any(|r| has_bnode(&r)) {
+        return true;
+    }
+    let mut used = vec![false; want.len()];
+    let mut budget = 200_000usize;
+    backtrack(
+        0,
+        got,
+        want,
+        &mut used,
+        &mut HashMap::new(),
+        &mut HashMap::new(),
+        &mut budget,
+    )
+}
+
+/// Pair answer row `i` with some still-unused expected row, then recurse.
+fn backtrack(
+    i: usize,
+    got: &[Value],
+    want: &[Value],
+    used: &mut [bool],
+    fwd: &mut HashMap<String, String>,
+    rev: &mut HashMap<String, String>,
+    budget: &mut usize,
+) -> bool {
+    if i == got.len() {
+        return true;
+    }
+    for j in 0..want.len() {
+        if used[j] {
+            continue;
+        }
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let mut added = Vec::new();
+        if pair_rows(&got[i], &want[j], fwd, rev, &mut added) {
+            used[j] = true;
+            if backtrack(i + 1, got, want, used, fwd, rev, budget) {
+                return true;
+            }
+            used[j] = false;
+        }
+        for (a, b) in added {
+            fwd.remove(&a);
+            rev.remove(&b);
+        }
+    }
+    false
+}
+
+/// Can these two rows be the same row under the bijection built so far? Blank
+/// node pairs this call introduces are pushed onto `added` so the caller can
+/// undo them when the branch fails.
+fn pair_rows(
+    g: &Value,
+    w: &Value,
+    fwd: &mut HashMap<String, String>,
+    rev: &mut HashMap<String, String>,
+    added: &mut Vec<(String, String)>,
+) -> bool {
+    let (Some(go), Some(wo)) = (g.as_object(), w.as_object()) else {
+        return false;
+    };
+    if go.len() != wo.len() {
+        return false;
+    }
+    for (k, gv) in go {
+        let Some(wv) = wo.get(k) else { return false };
+        let (gv, wv) = (normalize(gv.clone()), normalize(wv.clone()));
+        let pair = (
+            bnode_label(&gv).map(str::to_owned),
+            bnode_label(&wv).map(str::to_owned),
+        );
+        match pair {
+            (Some(a), Some(b)) => match (fwd.get(&a), rev.get(&b)) {
+                (None, None) => {
+                    fwd.insert(a.clone(), b.clone());
+                    rev.insert(b.clone(), a.clone());
+                    added.push((a, b));
+                }
+                // Already paired: it must be paired with *this* partner.
+                (Some(x), Some(y)) if x == &b && y == &a => {}
+                _ => return false,
+            },
+            (None, None) => {
+                if gv != wv {
+                    return false;
+                }
+            }
+            // A blank node is never equal to a non-blank term.
+            _ => return false,
+        }
+    }
+    true
 }
 
 // ── Update evaluation (`mf:UpdateEvaluationTest`) ────────────────────────────
@@ -450,5 +850,203 @@ mod tests {
         assert!(compare_solutions(got, &["t".into()], &want)
             .expect("vars differ")
             .contains("vars differ"));
+    }
+
+    /// Build the SPARQL-JSON an engine answer would serialize to.
+    fn answer(vars: &[&str], rows: &[Value]) -> String {
+        json!({ "head": { "vars": vars }, "results": { "bindings": rows } }).to_string()
+    }
+
+    fn uri(v: &str) -> Value {
+        json!({ "type": "uri", "value": v })
+    }
+
+    fn bnode(v: &str) -> Value {
+        json!({ "type": "bnode", "value": v })
+    }
+
+    // ── Blank-node bijection ────────────────────────────────────────────────
+
+    #[test]
+    fn blank_nodes_pair_by_bijection_not_by_label() {
+        // Same shape, different labels: a pass.
+        let got = answer(&["a", "b"], &[json!({ "a": bnode("x"), "b": bnode("x") })]);
+        let want = vec![json!({ "a": bnode("b0"), "b": bnode("b0") })];
+        assert_eq!(
+            compare_solutions(&got, &["a".into(), "b".into()], &want),
+            None
+        );
+
+        // Different *sharing*: the answer uses two nodes where one is wanted.
+        // Labels alone cannot tell these apart — the bijection can.
+        let got = answer(&["a", "b"], &[json!({ "a": bnode("x"), "b": bnode("y") })]);
+        let why = compare_solutions(&got, &["a".into(), "b".into()], &want)
+            .expect("sharing pattern differs");
+        assert!(why.contains("no one-to-one renaming"), "{why}");
+
+        // A blank node never matches a non-blank term.
+        let got = answer(
+            &["a", "b"],
+            &[json!({ "a": bnode("x"), "b": uri("http://x") })],
+        );
+        assert!(compare_solutions(&got, &["a".into(), "b".into()], &want).is_some());
+    }
+
+    // ── `.tsv` ──────────────────────────────────────────────────────────────
+
+    /// TSV keeps full term syntax, so it is graded as strictly as `.srx`:
+    /// the datatype is part of the answer, not decoration.
+    #[test]
+    fn tsv_rejects_a_wrong_answer_and_keeps_datatypes() {
+        let tsv = "?s\t?o\n<http://ex/s>\t\"4\"^^<http://www.w3.org/2001/XMLSchema#integer>\n";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("r.tsv");
+        std::fs::write(&path, tsv).expect("write");
+        let Some(Expected::Solutions { vars, rows }) = read_expected(&path).expect("parse") else {
+            panic!("expected a TSV result set");
+        };
+
+        let lit = |dt: &str, v: &str| json!({ "type": "literal", "value": v, "datatype": dt });
+        let right = answer(
+            &["s", "o"],
+            &[json!({ "s": uri("http://ex/s"), "o": lit(&format!("{XSD}integer"), "4") })],
+        );
+        assert_eq!(compare_solutions(&right, &vars, &rows), None);
+
+        // Wrong value.
+        let wrong = answer(
+            &["s", "o"],
+            &[json!({ "s": uri("http://ex/s"), "o": lit(&format!("{XSD}integer"), "5") })],
+        );
+        assert!(compare_solutions(&wrong, &vars, &rows).is_some());
+
+        // Right lexical form, wrong datatype — CSV would miss this, TSV must not.
+        let mistyped = answer(
+            &["s", "o"],
+            &[json!({ "s": uri("http://ex/s"), "o": lit(&format!("{XSD}decimal"), "4") })],
+        );
+        assert!(compare_solutions(&mistyped, &vars, &rows).is_some());
+    }
+
+    // ── `.csv` ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn csv_reader_handles_quotes_commas_and_crlf() {
+        let recs = read_csv_records("a,b\r\n\"x,1\",\"he said \"\"hi\"\"\"\r\n");
+        assert_eq!(
+            recs,
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["x,1".to_string(), "he said \"hi\"".to_string()],
+            ]
+        );
+    }
+
+    /// The guard against a too-lenient CSV grader: it drops datatypes, but it
+    /// must still reject a genuinely different value, a missing row, and a
+    /// wrong variable.
+    #[test]
+    fn csv_rejects_a_wrong_answer_even_though_it_ignores_datatypes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("r.csv");
+        std::fs::write(&path, "s,o\r\nhttp://ex/s,4\r\nhttp://ex/t,\r\n").expect("write");
+        let Some(Expected::Csv { vars, rows }) = read_expected(&path).expect("parse") else {
+            panic!("expected a CSV result set");
+        };
+
+        let lit = |dt: &str, v: &str| json!({ "type": "literal", "value": v, "datatype": dt });
+        let row = |s: &str, o: Option<Value>| match o {
+            Some(o) => json!({ "s": uri(s), "o": o }),
+            None => json!({ "s": uri(s) }),
+        };
+
+        // Right values: a pass.
+        let right = answer(
+            &["s", "o"],
+            &[
+                row("http://ex/s", Some(lit(&format!("{XSD}integer"), "4"))),
+                row("http://ex/t", None),
+            ],
+        );
+        assert_eq!(compare_csv(&right, &vars, &rows), None);
+
+        // Wrong value: still caught, though the datatype is not compared.
+        let wrong = answer(
+            &["s", "o"],
+            &[
+                row("http://ex/s", Some(lit(&format!("{XSD}integer"), "5"))),
+                row("http://ex/t", None),
+            ],
+        );
+        assert!(compare_csv(&wrong, &vars, &rows).is_some());
+
+        // Missing row, and a wrong variable name.
+        let short = answer(
+            &["s", "o"],
+            &[row("http://ex/s", Some(lit(&format!("{XSD}integer"), "4")))],
+        );
+        assert!(compare_csv(&short, &vars, &rows).is_some());
+        assert!(compare_csv(&right, &["s".into(), "p".into()], &rows).is_some());
+    }
+
+    /// The documented blind spot, asserted so it cannot drift silently: CSV
+    /// carries no types, so a differently-typed term with the same text is
+    /// accepted. `.srx`/`.srj`/`.tsv` are what catch these.
+    #[test]
+    fn csv_cannot_see_datatype_language_or_iri_vs_literal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("r.csv");
+        std::fs::write(&path, "o\r\n4\r\n").expect("write");
+        let Some(Expected::Csv { vars, rows }) = read_expected(&path).expect("parse") else {
+            panic!("expected a CSV result set");
+        };
+        for term in [
+            json!({ "type": "literal", "value": "4", "datatype": format!("{XSD}integer") }),
+            json!({ "type": "literal", "value": "4", "datatype": format!("{XSD}decimal") }),
+            json!({ "type": "literal", "value": "4", "xml:lang": "en" }),
+            json!({ "type": "uri", "value": "4" }),
+        ] {
+            let got = answer(&["o"], &[json!({ "o": term })]);
+            assert_eq!(compare_csv(&got, &vars, &rows), None);
+        }
+    }
+
+    // ── `.ttl` ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn construct_graphs_compare_up_to_blank_node_renaming() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("r.ttl");
+        std::fs::write(
+            &path,
+            "<http://ex/s> <http://ex/p> _:x . _:x <http://ex/q> \"v\" .",
+        )
+        .expect("write");
+        let Some(Expected::Graph(want)) = read_expected(&path).expect("parse") else {
+            panic!("expected a graph result");
+        };
+        let t = |s: &str, p: &str, o: &str| (s.to_string(), p.to_string(), o.to_string());
+
+        // Same graph, a different blank-node label: a pass.
+        let right = [
+            t("http://ex/s", "http://ex/p", "_:b7"),
+            t("_:b7", "http://ex/q", "\"v\""),
+        ];
+        assert_eq!(compare_graph(&right, &want, &path), None);
+
+        // Two blank nodes where one is shared: not isomorphic.
+        let split = [
+            t("http://ex/s", "http://ex/p", "_:b7"),
+            t("_:b8", "http://ex/q", "\"v\""),
+        ];
+        assert!(compare_graph(&split, &want, &path).is_some());
+
+        // A wrong object value, and a missing triple.
+        let wrong = [
+            t("http://ex/s", "http://ex/p", "_:b7"),
+            t("_:b7", "http://ex/q", "\"other\""),
+        ];
+        assert!(compare_graph(&wrong, &want, &path).is_some());
+        assert!(compare_graph(&right[..1], &want, &path).is_some());
     }
 }

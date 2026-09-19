@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use oxrdf::{Dataset, GraphName, NamedNode, Quad, TermRef};
+use oxrdf::graph::CanonicalizationAlgorithm;
+use oxrdf::{Dataset, Graph, GraphName, NamedNode, Quad, TermRef};
 use oxttl::TurtleParser;
 use serde::Deserialize;
 
@@ -36,6 +37,36 @@ pub(crate) fn load_turtle_dataset(path: &Path) -> Result<Dataset> {
         ));
     }
     Ok(dataset)
+}
+
+/// Parse an RDF payload into a **canonicalized** [`Graph`], so two graphs
+/// compare equal with `==` exactly when they are isomorphic — that is, when
+/// some one-to-one renaming of one graph's blank nodes turns it into the
+/// other. `Graph::canonicalize` does that renaming for us, so the harness has
+/// one isomorphism implementation, not several.
+///
+/// `n_triples` picks the parser: N-Triples when true, Turtle otherwise
+/// (N-Triples is a subset of Turtle, so Turtle is the safe default). `base`
+/// resolves any relative IRI in the payload.
+///
+/// Used by the Graph Store Protocol runner (response bodies) and by
+/// `sparql_eval` (CONSTRUCT / DESCRIBE `.ttl` results).
+pub(crate) fn canonical_graph(text: &str, base: &str, n_triples: bool) -> Result<Graph> {
+    let mut graph = Graph::new();
+    if n_triples {
+        for t in oxttl::NTriplesParser::new().for_slice(text.as_bytes()) {
+            graph.insert(&t?);
+        }
+    } else {
+        for t in TurtleParser::new()
+            .with_base_iri(base)?
+            .for_slice(text.as_bytes())
+        {
+            graph.insert(&t?);
+        }
+    }
+    graph.canonicalize(CanonicalizationAlgorithm::Unstable);
+    Ok(graph)
 }
 
 /// Load a premise dataset and resolve its `owl:imports` against the

@@ -344,7 +344,10 @@ dataset-clause parser. No fixture change is needed.
 row binding a blank node can never match: the upstream result file's label
 and whatever label the engine mints are different strings, and both are
 equally correct RDF. Fixing this means matching expected against actual up
-to a blank-node bijection, in the runner — not in the engine.
+to a blank-node bijection, in the runner — not in the engine. The
+manifest-driven runner already has one: reuse
+`crates/harness/src/sparql_eval.rs::match_blank_nodes` (HDB-139) rather than
+writing a second.
 
 - `graph-11` — `{ ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } }` over
   `data-g3`/`data-g4`, whose subjects are blank nodes; 3 of the 8 expected
@@ -480,14 +483,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-19 with `--engine owlrl`: **444 pass, 63 fail, 40 skip**.
-The 40 skips are test types the harness does not grade at all
-(`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
-report with the type IRI in the reason. Which task fixed what is in the git log
-and in the per-root-cause tables below, not restated here — every branch that
-moved these numbers used to conflict on this paragraph.
+Measured on 2026-09-19 with `--engine owlrl`: **459 pass, 51 fail, 37 skip**.
+The 37 skips are test types the harness does not grade at all
+(`mf:ProtocolTest`, `mf:ServiceDescriptionTest`); they report with the type IRI
+in the reason. Which task fixed what is in the git log and in the
+per-root-cause tables below, not restated here — every branch that moved these
+numbers used to conflict on this paragraph.
 
-The 64 reds are listed one-by-one in `expected_failures` in
+The 51 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -502,14 +505,57 @@ cannot rot, and CI catches regressions in both directions.
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 2 | **RDF 1.1 collapses `"abc"` and `"abc"^^xsd:string` into one term**, so the store cannot tell them apart. `STRDT`/`STRLANG` must accept the plain literal and raise a type error on the explicitly typed one, and these two cases need both in the same answer (HDB-132). Every other `STRDT`/`STRLANG` case passes. | `functions/strdt03`, `strlang03` |
 | 1 | **Property-path evaluation:** `pp16` returns 13 of the 15 expected rows. | `property-path/pp16` |
+| 1 | **`FROM <data.ttl>` does not load the graph it names.** The engine reads a `FROM` dataset clause as selecting among graphs already in the store, so with no `qt:data` the query runs over an empty default graph and constructs nothing (0 triples where 4 are wanted). | `construct/constructwhere04` |
+| 1 | **`BNODE(expr)` is not scoped to one solution.** §17.4.2.2: within one row, equal arguments give the same blank node; across rows they must give different ones. The expected answer uses 6 distinct blank nodes over 4 rows, the engine 4 — it reuses nodes across rows. Every other cell matches. | `functions/bnode01` |
 
 ## Harness gaps (grading, not the engine)
 
 | # | Root cause | Where |
 |--:|---|---|
-| 9 | The runner grades `.srx` / `.srj` results only. **CONSTRUCT graph results** (`.ttl`, needing blank-node-isomorphic graph comparison) and **`.csv`/`.tsv`** serialisations are not graded yet; they report `result format not graded yet: …`. | `construct/`, `csv-tsv-res/`, `subquery/subquery12`, `subquery14` |
-| 5 | **Blank-node labels are compared literally.** Grading these needs a bijection between the answer's and the expected result's blank nodes (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in a blank node's label (`_:b` vs `_:b0`); every other cell of every row matches. `bnode01` (HDB-132) is the same gap from the other side: `BNODE` mints the right *pattern* of shared and distinct nodes, but which row gets `_:b0` follows our join order, so the labels pair with different rows than the upstream `.srx` spells out. | `json-res/jsonres01`, `jsonres02`, `functions/plus-1`, `plus-2`, `bnode01` |
 | 1 | Upstream `.srx` head quirk: the expected header omits a projected variable that is unbound in every row, so the variable *sets* differ even though the rows match. | `aggregates/agg-empty-group` |
+
+## ~~`.ttl` / `.csv` / `.tsv` expected results were not graded~~ — FIXED (HDB-139)
+
+The runner used to grade `.srx` / `.srj` only; every other expected-result
+format reported `result format not graded yet: …`. It now grades five formats,
+each at the fidelity that format actually carries. What each one can catch
+matters, because a green case means different things:
+
+| Format | Compared as | What a green case proves |
+|---|---|---|
+| `.srx` / `.srj` | full terms | value **and** type of every cell |
+| `.tsv` | full terms | same — TSV writes `<iri>` and `"lit"^^<dt>`, so no type is lost |
+| `.csv` | **lossy projection** (below) | shape and text only |
+| `.ttl` | graph isomorphism | the constructed graph, up to blank-node renaming |
+
+**Read a green `.csv` case narrowly.** The W3C CSV results format writes an IRI
+as its bare IRI text and a literal as its bare lexical form, so a cell carries
+no datatype, no language tag, and no IRI-vs-literal distinction; an unbound
+variable and an empty literal both write the empty string. The grader therefore
+compares that *projection*, not the terms. It still catches a wrong value, a
+missing or extra row, and a wrong variable set — but it would accept
+`"1"^^xsd:string` for `1`, `"chat"@fr` for `"chat"`, and the IRI `<http://ex/a>`
+for the literal `"http://ex/a"`. The `.srx`/`.srj`/`.tsv` cases are what catch
+those. `crates/harness/src/sparql_eval.rs::csv_cell` states this in code and
+`csv_cannot_see_datatype_language_or_iri_vs_literal` asserts it, so the blind
+spot cannot widen unnoticed.
+
+Blank nodes are never compared by label, in any format: result rows are paired
+under a bijection (`match_blank_nodes`), graphs by `oxrdf`'s canonicalization
+(`crate::rdf::canonical_graph`, shared with the Graph Store Protocol runner).
+
+Flipped green: `construct/constructwhere01`–`03`, `subquery/subquery12`,
+`subquery14`, `csv-tsv-res/tsv01`–`03`. Two cases in those directories stay red
+on real engine gaps, now listed under **Engine gaps** above:
+`constructwhere04` (`FROM`) and `bnode01` (`BNODE` scoping).
+
+The same bijection retired the old "blank-node labels are compared literally"
+row: `json-res/jsonres01`, `jsonres02`, `functions/plus-1` and `plus-2` differed
+only in a label and now pass.
+
+`mf:CSVResultFormatTest` is also recognised by the manifest reader now, so
+`csv-tsv-res/csv01`–`03` are selected and graded instead of skipped as an
+unknown test type. That grows the suite by 3 cases, all green.
 
 ## ~~`IF`/`COALESCE` take the wrong branch on an erroring sub-expression~~ — FIXED (HDB-136)
 
