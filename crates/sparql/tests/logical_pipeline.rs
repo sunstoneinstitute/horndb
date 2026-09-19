@@ -141,6 +141,7 @@ fn pipeline_reproduces_todays_physical_plans() {
             PassId::FilterPushdown,
             PassId::ProjectionPushdown,
         ]),
+        ..Default::default()
     };
     for q in GOLDEN_QUERIES {
         let alg = algebra_of(q);
@@ -194,6 +195,7 @@ fn coalesced_bgp_is_result_equivalent_to_nested_join() {
         &standard_passes(),
         &PlanCtx {
             disabled_passes: HashSet::from([PassId::CoalesceBgp]),
+            ..Default::default()
         },
     ));
     assert!(matches!(coalesced, PhysicalPlan::BgpScan { .. }));
@@ -307,6 +309,7 @@ fn disjoint_var_bgps_coalesce_and_stay_result_equivalent() {
         &alg,
         &horndb_sparql::plan::pass::PlanCtx {
             disabled_passes: HashSet::from([PassId::CoalesceBgp]),
+            ..Default::default()
         },
     )
     .expect("plan");

@@ -47,6 +47,13 @@ struct RegistryInner {
     disabled_translator: Arc<dyn Translator>,
 }
 
+/// A registry with ML off: every accessor returns its `Disabled*` no-op.
+impl Default for MlRegistry {
+    fn default() -> Self {
+        Self::new(MlConfig::default())
+    }
+}
+
 impl MlRegistry {
     pub fn new(config: MlConfig) -> Self {
         Self {

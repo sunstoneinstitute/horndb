@@ -84,7 +84,7 @@ Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`
 | `horndb-hardware-ext` | SPEC-09 | Empty placeholder; Stage-3 territory. |
 | `horndb-harness` | SPEC-01 | Conformance + benchmark runner, ships the `harness` binary. Loads `harness/selected.toml` at the workspace root. |
 
-Dependency order (for refactors): `storage` → `wcoj` → `{owlrl, closure}` → `incremental` → `sparql`; `harness` and `ml` sit on top.
+Dependency order (for refactors): `storage` → `wcoj` → `{owlrl, closure}` → `incremental` → `{ml, sparql}` (`sparql` depends on `ml` for the planner's advisor seam); `harness` sits on top.
 
 Per-crate build quirks, feature flags, and gotchas live in each crate's own
 `CLAUDE.md` and `INTEGRATION-NOTES.md` — they load when you work in that crate.

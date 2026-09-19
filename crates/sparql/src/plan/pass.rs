@@ -20,8 +20,11 @@
 use crate::plan::logical::LogicalPlan;
 #[cfg(debug_assertions)]
 use crate::plan::types::infer;
+use horndb_ml::planner::PlanAdvisor;
+use horndb_ml::MlRegistry;
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Identity of a logical pass. Source order in [`standard_passes`] is the run
 /// order; `must_follow` declares the constraints the driver asserts.
@@ -73,12 +76,34 @@ impl FromStr for PassId {
     }
 }
 
-/// Planning context threaded through every pass. Phase 1 carries only the
-/// disabled-pass set (config + pragma); a statistics/cost seam is added in a
-/// later phase.
-#[derive(Debug, Clone, Default)]
+/// Planning context threaded through every pass: the disabled-pass set
+/// (config + pragma) and the ML registry (SPEC-08). A statistics/cost seam
+/// is added in a later phase.
+///
+/// The default registry has ML off, so [`PlanCtx::plan_advisor`] hands back
+/// `DisabledPlanAdvisor` and plans are identical to a no-ML build.
+#[derive(Clone, Default)]
 pub struct PlanCtx {
     pub disabled_passes: HashSet<PassId>,
+    pub ml: Arc<MlRegistry>,
+}
+
+impl PlanCtx {
+    /// The advisor a pass consults for join-order/cardinality hints. Advice
+    /// is a hint only — the caller validates it against its own stats.
+    pub fn plan_advisor(&self) -> Arc<dyn PlanAdvisor> {
+        self.ml.plan_advisor()
+    }
+}
+
+// `MlRegistry` is not `Debug`; report the advisor's model id instead.
+impl std::fmt::Debug for PlanCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlanCtx")
+            .field("disabled_passes", &self.disabled_passes)
+            .field("plan_advisor", &self.plan_advisor().model_id().as_str())
+            .finish()
+    }
 }
 
 /// A logical optimization pass.
@@ -422,6 +447,7 @@ mod tests {
         );
         let ctx = PlanCtx {
             disabled_passes: HashSet::from([PassId::CoalesceBgp]),
+            ..Default::default()
         };
         let out = run_passes(plan, &standard_passes(), &ctx);
         assert!(
@@ -500,6 +526,16 @@ mod tests {
             bgp(vec![pat("s", "http://ex/p", "o")]),
             &passes,
             &PlanCtx::default(),
+        );
+    }
+
+    #[test]
+    fn default_ctx_uses_the_disabled_plan_advisor() {
+        // SPEC-08 F2 neutrality: unless a registry with ML on is threaded in,
+        // the planning seam sees the no-op advisor.
+        assert_eq!(
+            PlanCtx::default().plan_advisor().model_id().as_str(),
+            horndb_ml::planner::DisabledPlanAdvisor::MODEL_ID
         );
     }
 
