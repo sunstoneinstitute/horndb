@@ -459,6 +459,7 @@ mod tests {
             removed: vec![],
             sparql_query: None,
             sparql_update: None,
+            sparql_default_graph: None,
         };
 
         let mut engine = StubReasoner::new();
@@ -533,6 +534,7 @@ mod tests {
             removed: vec![],
             sparql_query: None,
             sparql_update: None,
+            sparql_default_graph: None,
         };
 
         let mut engine = StubReasoner::new();
@@ -658,6 +660,7 @@ mod tests {
             removed: vec![],
             sparql_query: None,
             sparql_update: None,
+            sparql_default_graph: None,
         };
 
         let mut engine = StubReasoner::new();

@@ -54,13 +54,23 @@ the path-based `[sparql_query]` section consumed by `crates/sparql/tests/w3c_sui
 Two query-evaluation gates coexist. `[suites.sparql11-eval]` (below) is the
 manifest-driven one and covers the full W3C suite. `[sparql_query]` is the older
 path-based one, consumed by `crates/sparql/tests/w3c_suite.rs` against
-hand-mirrored fixtures; it stays because it also exercises the
-`default_graph`-mode dimension the upstream manifests do not express. Each
-`[sparql_query]` entry names a fixture dir holding `query.rq`, `form`, `expected.srj`,
-and its data as either `data.nt` (default graph) or `data.trig` (named graphs),
-plus an optional `default-graph` file selecting the `default_graph` mode
-(SPEC-28 D2). W3C cases that are mirrored but cannot pass are listed with their
-reason in `harness/KNOWN-MANIFEST-BUGS.md`.
+hand-mirrored fixtures; it stays because the mirrors are checked in, so it
+grades with no corpus fetch. Each `[sparql_query]` entry names a fixture dir
+holding `query.rq`, `form`, `expected.srj`, and its data as either `data.nt`
+(default graph) or `data.trig` (named graphs), plus an optional `default-graph`
+file selecting the `default_graph` mode (SPEC-28 D2). W3C cases that are
+mirrored but cannot pass are listed with their reason in
+`harness/KNOWN-MANIFEST-BUGS.md`.
+
+A third section, `[sparql_default_graph]`, grades the shipped
+`default_graph = union` mode (SPEC-28 D2) — **HornDB-specific fixtures, never
+counted as W3C conformance**. No upstream case can grade that mode: SPARQL 1.1
+§13.2 leaves the no-`FROM` dataset implementation-defined, the `graph/` mirrors
+run `strict`, and the `dataset/` queries carry their own `FROM`. The runner is
+`crates/sparql/tests/default_graph_suite.rs`; it reads this list instead of
+repeating it and re-runs every case under `strict` as a negative control, so a
+case that is insensitive to the mode fails the build rather than look like
+coverage.
 
 ## Suite keys (`src/runner.rs`)
 

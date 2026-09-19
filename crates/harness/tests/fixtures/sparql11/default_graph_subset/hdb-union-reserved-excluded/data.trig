@@ -1,0 +1,3 @@
+<http://ex/a> <http://ex/p> <http://ex/o1> .
+<http://ex/g1> { <http://ex/b> <http://ex/p> <http://ex/o2> . }
+<https://horndb.io/graph/inferred/x> { <http://ex/z> <http://ex/p> <http://ex/o9> . }

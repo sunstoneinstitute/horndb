@@ -1,0 +1,6 @@
+<http://ex/a> <http://ex/p> <http://ex/o1> .
+<http://ex/g1> { <http://ex/b> <http://ex/p> <http://ex/o2> . }
+<http://ex/g2> {
+    <http://ex/c> <http://ex/p> <http://ex/o3> .
+    <http://ex/b> <http://ex/p> <http://ex/o2> .
+}

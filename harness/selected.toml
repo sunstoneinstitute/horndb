@@ -539,6 +539,35 @@ tests = [
     "selected_subset/dataset-10b",
 ]
 
+# SPEC-28 D2 default-graph mode subset — **HornDB-specific, not W3C**.
+#
+# The shipped `default_graph = union` mode (the deduped union of all
+# non-reserved graphs when a query names no dataset) cannot be graded by any
+# upstream case: SPARQL 1.1 §13.2 leaves the no-`FROM` dataset
+# implementation-defined, the `graph/` family above fixes its dataset in the
+# manifest (so those mirrors run `strict`), and the `dataset/` family carries
+# explicit `FROM` / `FROM NAMED`, which wins over the mode. These fixtures are
+# written for HornDB and must never be counted as W3C conformance.
+#
+# Each dir under `crates/harness/tests/fixtures/sparql11/default_graph_subset/`
+# holds `data.trig`, `query.rq`, `form` and `expected.srj`. The runner
+# (`crates/sparql/tests/default_graph_suite.rs`) reads this list, runs every
+# case under `union` on both backends, and re-runs each under `strict` as a
+# negative control — a case that passes under both modes fails the build,
+# because it would grade nothing.
+[sparql_default_graph]
+tests = [
+    # Unqualified BGP sees every non-reserved graph, as a set: the triple
+    # living in both `<g1>` and `<g2>` comes back once.
+    "default_graph_subset/hdb-union-all-graphs",
+    # `https://horndb.io/graph/…` is never in the union (SPEC-27 F6 /
+    # SPEC-29 D4); it is addressable only by explicit name.
+    "default_graph_subset/hdb-union-reserved-excluded",
+    # A property path over the union default graph legitimately crosses
+    # graph boundaries, because the union *is* the default graph.
+    "default_graph_subset/hdb-union-path-across-graphs",
+]
+
 # SPEC-28 W3C SPARQL 1.1 Update evaluation subset.
 #
 # Same fixture model as [sparql_query], but each dir under
