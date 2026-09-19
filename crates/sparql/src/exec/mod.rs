@@ -10,6 +10,7 @@ pub mod cancel;
 #[cfg(feature = "incremental")]
 pub mod circuit;
 pub use batch::{Batch, KeyPart, Row, Slot};
+pub(crate) mod exists;
 pub mod horn;
 pub mod mem;
 pub(crate) mod numeric;

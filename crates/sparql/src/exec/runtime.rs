@@ -5,7 +5,8 @@
 //! removed once Slice 2 landed).
 
 use crate::algebra::{
-    AggFunc, Aggregate, DatasetSpec, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR, PATH_SRC_VAR,
+    AggFunc, Aggregate, Algebra, DatasetSpec, Expr, Func, OrderDir, Term, Var, PATH_DST_VAR,
+    PATH_SRC_VAR,
 };
 use crate::error::{Result, SparqlError};
 use crate::exec::numeric::Numeric;
@@ -27,7 +28,7 @@ pub struct Runtime<'a, E: Executor + ?Sized> {
     dataset: DatasetSpec,
     mode: DefaultGraphMode,
     /// State a few builtins fix for the whole query rather than per call.
-    scope: QueryScope,
+    scope: QueryScope<'a>,
 }
 
 /// Per-query evaluation state for the builtins SPARQL 1.1 does *not* define
@@ -39,8 +40,8 @@ pub struct Runtime<'a, E: Executor + ?Sized> {
 ///
 /// `RAND`, `UUID` and `STRUUID` are deliberately *not* here: they are fresh
 /// on every call.
-#[derive(Debug, Default)]
-pub(crate) struct QueryScope {
+#[derive(Default)]
+pub(crate) struct QueryScope<'a> {
     /// `NOW()` — §17.4.5.1 requires every call in one query to return the
     /// same `xsd:dateTime`, so the clock is read at most once per query.
     now: std::cell::OnceCell<Term>,
@@ -58,9 +59,40 @@ pub(crate) struct QueryScope {
     minted: std::cell::Cell<u64>,
     /// The query's `BASE`, for `IRI()`/`URI()` relative resolution.
     base: Option<String>,
+    /// Evaluates one `EXISTS { P }` against a solution mapping (§18.6).
+    ///
+    /// A closure rather than a back-reference to the `Runtime`: the scope is
+    /// a field *of* the `Runtime`, so it cannot borrow it. The closure holds
+    /// only what the sub-query needs — the executor plus this query's dataset
+    /// and `BASE` — and builds its own `Runtime` per call. `Runtime::arm_exists`
+    /// installs it; a `QueryScope` without one (unit tests that build an
+    /// expression directly) reports `EXISTS` as an evaluation error.
+    #[allow(clippy::type_complexity)]
+    exists: Option<Box<dyn Fn(&Algebra, &Bindings) -> Result<bool> + 'a>>,
 }
 
-impl QueryScope {
+impl std::fmt::Debug for QueryScope<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryScope")
+            .field("now", &self.now)
+            .field("bnodes", &self.bnodes)
+            .field("minted", &self.minted)
+            .field("base", &self.base)
+            .field("exists", &self.exists.is_some())
+            .finish()
+    }
+}
+
+impl QueryScope<'_> {
+    /// `EXISTS { pattern }` under solution mapping `mu`.
+    fn exists(&self, pattern: &Algebra, mu: &Bindings) -> Result<bool> {
+        match &self.exists {
+            Some(f) => f(pattern, mu),
+            None => Err(SparqlError::Planner(
+                "EXISTS evaluated without a query scope".into(),
+            )),
+        }
+    }
     /// The query's single `NOW()` value, read from the clock on first use.
     fn now(&self) -> Term {
         self.now
@@ -101,18 +133,34 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// (`union`) default-graph mode. Callers that have a translated query
     /// should chain [`Self::with_dataset`].
     pub fn new(exec: &'a E) -> Self {
-        Self {
+        let mut rt = Self {
             exec,
             dataset: DatasetSpec::default(),
             mode: DefaultGraphMode::default(),
             scope: QueryScope::default(),
-        }
+        };
+        rt.arm_exists();
+        rt
+    }
+
+    /// (Re)install the `EXISTS` hook from the runtime's current dataset,
+    /// default-graph mode and `BASE`. Called from every builder method, so
+    /// the hook never captures a stale dataset whatever order they run in.
+    fn arm_exists(&mut self) {
+        let exec = self.exec;
+        let dataset = self.dataset.clone();
+        let mode = self.mode;
+        let base = self.scope.base.clone();
+        self.scope.exists = Some(Box::new(move |pattern, mu| {
+            crate::exec::exists::eval_exists(exec, &dataset, mode, base.as_deref(), pattern, mu)
+        }));
     }
 
     /// Attach the query's resolved dataset and default-graph mode.
     pub fn with_dataset(mut self, dataset: DatasetSpec, mode: DefaultGraphMode) -> Self {
         self.dataset = dataset;
         self.mode = mode;
+        self.arm_exists();
         self
     }
 
@@ -120,6 +168,7 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
     /// relative argument against. Without it a relative argument is an error.
     pub fn with_base(mut self, base: Option<String>) -> Self {
         self.scope.base = base;
+        self.arm_exists();
         self
     }
 
@@ -1803,6 +1852,7 @@ pub(crate) fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
                 referenced_vars(x, out);
             }
         }
+        Expr::Exists(p) => crate::exec::exists::pattern_vars(p, out),
     }
 }
 
@@ -2304,7 +2354,11 @@ fn compile_regex(pattern: &str, flags: &str) -> Option<regex::Regex> {
 }
 
 /// Compute one aggregate over a group's member rows.
-fn eval_aggregate(agg: &Aggregate, members: &[Bindings], q: &QueryScope) -> Result<Option<Term>> {
+fn eval_aggregate(
+    agg: &Aggregate,
+    members: &[Bindings],
+    q: &QueryScope<'_>,
+) -> Result<Option<Term>> {
     // Collect the aggregate's input multiset (the values of the inner
     // expression over the members), applying DISTINCT if requested.
     // For COUNT(*) the "input" is the rows themselves.
@@ -2628,7 +2682,7 @@ pub(crate) fn lex(t: &Term) -> String {
     }
 }
 
-fn eval_expr(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<bool> {
+fn eval_expr(e: &Expr, b: &Bindings, q: &QueryScope<'_>) -> Result<bool> {
     use std::cmp::Ordering;
     let cmp = |a: &Expr, c: &Expr| -> Result<Option<Ordering>> {
         Ok(
@@ -2652,6 +2706,9 @@ fn eval_expr(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<bool> {
         Expr::Or(a, c) => eval_expr(a, b, q)? || eval_expr(c, b, q)?,
         Expr::Not(a) => !eval_expr(a, b, q)?,
         Expr::Bound(v) => b.get(v.name()).is_some(),
+        // §18.6: substitute this row's bindings into the pattern and ask
+        // whether the result is non-empty. Per row, never hoisted.
+        Expr::Exists(p) => q.exists(p, b)?,
         Expr::In(a, list) => {
             let lhs = eval_expr_to_term(a, b, q)?;
             match lhs {
@@ -2755,7 +2812,7 @@ fn datetime_key(s: &str) -> Option<&str> {
     }
 }
 
-fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<Option<Term>> {
+fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope<'_>) -> Result<Option<Term>> {
     // Evaluate an operand to its numeric value; an expression error
     // (non-numeric / unbound) surfaces as `Ok(None)`.
     let numof = |sub: &Expr| -> Result<Option<Numeric>> {
@@ -2780,7 +2837,10 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<Option<Te
         | Expr::And(_, _)
         | Expr::Or(_, _)
         | Expr::Not(_)
-        | Expr::Bound(_) => Some(bool_typed_literal(eval_expr(e, b, q)?)),
+        | Expr::Bound(_)
+        // `BIND(EXISTS { … } AS ?v)` and `IF(EXISTS { … }, …)` need the same
+        // `xsd:boolean` value form as any other boolean expression.
+        | Expr::Exists(_) => Some(bool_typed_literal(eval_expr(e, b, q)?)),
         Expr::Add(x, y) => arith(Numeric::add, numof(x)?, numof(y)?),
         Expr::Sub(x, y) => arith(Numeric::sub, numof(x)?, numof(y)?),
         Expr::Mul(x, y) => arith(Numeric::mul, numof(x)?, numof(y)?),
@@ -2820,7 +2880,7 @@ fn eval_expr_to_term(e: &Expr, b: &Bindings, q: &QueryScope) -> Result<Option<Te
 /// (the SPARQL error value): the binding stays unbound / the filter
 /// row drops. All value extraction goes through the raw lexical form
 /// because the Stage-1 `MemStore` erases term kinds on scan.
-fn eval_func(f: Func, args: &[Expr], b: &Bindings, q: &QueryScope) -> Result<Option<Term>> {
+fn eval_func(f: Func, args: &[Expr], b: &Bindings, q: &QueryScope<'_>) -> Result<Option<Term>> {
     // Evaluate one argument to a term; `None` short-circuits the call.
     let term = |i: usize| -> Result<Option<Term>> {
         match args.get(i) {

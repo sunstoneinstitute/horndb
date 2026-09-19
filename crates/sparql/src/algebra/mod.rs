@@ -54,9 +54,9 @@ pub struct TriplePattern {
 }
 
 /// A SPARQL expression — Stage 1 covers comparisons, boolean connectives,
-/// arithmetic, IF, COALESCE and the common builtin functions. EXISTS,
-/// non-deterministic builtins and custom functions are out of scope.
-/// See [`Func`] for the full builtin list.
+/// arithmetic, IF, COALESCE, `EXISTS`/`NOT EXISTS` and the common builtin
+/// functions. Custom functions are out of scope. See [`Func`] for the full
+/// builtin list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Term(Term),
@@ -92,6 +92,12 @@ pub enum Expr {
     Coalesce(Vec<Expr>),
     /// A builtin function call, e.g. `STRLEN(?x)` or `REGEX(?x, "p", "i")`.
     Func(Func, Vec<Expr>),
+    /// `EXISTS { P }` — true when `P` has at least one solution *after the
+    /// current solution mapping is substituted into it* (SPARQL 1.1 §18.6).
+    /// `NOT EXISTS` arrives as `Not(Exists(..))`, so there is one node, not
+    /// two. The pattern is evaluated once per row, not hoisted out of the
+    /// row loop — see `crate::exec::exists`.
+    Exists(Box<Algebra>),
 }
 
 /// Builtin functions evaluated in Stage 1. Argument arity is checked
