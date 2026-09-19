@@ -32,13 +32,18 @@
 //! bound a real answer, so they decline any scope they cannot express
 //! (`plan::pushdown`).
 //!
+//! [`estimate`] has one caller outside this module: `plan::closure_route`
+//! reads it to pick a `PathClosure` backend (SPEC-07 F3). That is a choice of
+//! kernel, not of answer — both closure backends return identical rows — so
+//! the rule above still holds.
+//!
 //! The estimate deliberately ignores the query's dataset clause
 //! ([`ScanScope::estimating`]) — a leaf's own `GRAPH` scope is enough
 //! signal for a printer with no cost model.
 
 use crate::algebra::GraphSpec;
 use crate::exec::{Executor, ScanScope};
-use crate::plan::closure_route::path_closure_route;
+use crate::plan::closure_route::{path_closure_route, ClosureRoute};
 use crate::plan::{GraphScope, PhysicalPlan};
 use std::fmt::Write as _;
 
@@ -263,11 +268,13 @@ pub(crate) fn node_label<E: Executor + ?Sized>(plan: &PhysicalPlan, exec: &E) ->
                 "PathClosure(transitive, p+)"
             };
             // Which backend closes the path is a plan decision the reader
-            // cannot otherwise see (SPEC-07 F3).
-            format!(
-                "{kind} [backend={}]",
-                path_closure_route(edge, exec).label()
-            )
+            // cannot otherwise see (SPEC-07 F3). Only the delegated route is
+            // annotated, so a build without the `graphblas` feature — which
+            // can never delegate — renders exactly what it always did.
+            match path_closure_route(edge, exec) {
+                ClosureRoute::Native => kind.to_owned(),
+                route => format!("{kind} [backend={}]", route.label()),
+            }
         }
     }
 }
