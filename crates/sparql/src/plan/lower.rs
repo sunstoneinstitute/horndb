@@ -17,8 +17,8 @@
 //! (SPEC-28 S3/D5). `GRAPH ?g` becomes one [`LogicalPlan::PerGraph`] node
 //! over the same scoped leaves (SPEC-28 D6). See [`lower_scoped`].
 
-use crate::algebra::{Algebra, GraphSpec};
-use crate::error::Result;
+use crate::algebra::{Aggregate, Algebra, Expr, GraphSpec};
+use crate::error::{Result, SparqlError};
 use crate::plan::logical::LogicalPlan;
 use crate::plan::{GraphScope, PhysicalPlan};
 
@@ -44,6 +44,10 @@ pub fn lower_algebra(alg: &Algebra) -> Result<LogicalPlan> {
 ///
 /// `Values` is scope-free by construction — its rows are literals, not
 /// stored quads — so it needs no scope field.
+///
+/// An `EXISTS { P }` inside an expression carries `P` as a whole sub-algebra
+/// that is planned separately, per row, so the scope cannot reach it by
+/// recursion. [`scope_expr`] pushes it in explicitly.
 fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
     Ok(match alg {
         Algebra::Bgp { patterns } => LogicalPlan::Bgp {
@@ -57,14 +61,14 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
         Algebra::LeftJoin { left, right, expr } => LogicalPlan::LeftJoin {
             left: Box::new(lower_scoped(left, scope)?),
             right: Box::new(lower_scoped(right, scope)?),
-            expr: expr.clone(),
+            expr: expr.as_ref().map(|e| scope_expr(e, scope)).transpose()?,
         },
         Algebra::Minus { left, right } => LogicalPlan::Minus {
             left: Box::new(lower_scoped(left, scope)?),
             right: Box::new(lower_scoped(right, scope)?),
         },
         Algebra::Filter { expr, inner } => LogicalPlan::Filter {
-            expr: expr.clone(),
+            expr: scope_expr(expr, scope)?,
             inner: Box::new(lower_scoped(inner, scope)?),
         },
         Algebra::Union { left, right } => LogicalPlan::Union {
@@ -89,12 +93,15 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
         },
         Algebra::OrderBy { inner, keys } => LogicalPlan::OrderBy {
             inner: Box::new(lower_scoped(inner, scope)?),
-            keys: keys.clone(),
+            keys: keys
+                .iter()
+                .map(|(e, d)| Ok((scope_expr(e, scope)?, *d)))
+                .collect::<Result<Vec<_>>>()?,
         },
         Algebra::Extend { inner, var, expr } => LogicalPlan::Extend {
             inner: Box::new(lower_scoped(inner, scope)?),
             var: var.clone(),
-            expr: expr.clone(),
+            expr: scope_expr(expr, scope)?,
         },
         Algebra::Values { vars, rows } => LogicalPlan::Values {
             vars: vars.clone(),
@@ -107,7 +114,10 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
         } => LogicalPlan::Group {
             inner: Box::new(lower_scoped(inner, scope)?),
             keys: keys.clone(),
-            aggregates: aggregates.clone(),
+            aggregates: aggregates
+                .iter()
+                .map(|a| scope_aggregate(a, scope))
+                .collect::<Result<Vec<_>>>()?,
         },
         Algebra::PathClosure {
             subject,
@@ -131,6 +141,90 @@ fn lower_scoped(alg: &Algebra, scope: &GraphScope) -> Result<LogicalPlan> {
                 },
             }
         }
+    })
+}
+
+/// Push the graph scope in force at an expression's position into every
+/// `EXISTS { P }` it contains, by wrapping `P` in `Algebra::Graph`.
+///
+/// `P` is planned on its own, once per row (`exec::exists`), so it never sees
+/// the enclosing `Algebra::Graph` node — without this an `EXISTS` written
+/// inside `GRAPH <g> { … }` would silently read the default graph.
+///
+/// `GRAPH ?g { … FILTER EXISTS { … } }` is refused instead. `PerGraph` binds
+/// `?g` only *after* its block has been evaluated (SPEC-28 D6), so the graph
+/// the row came from is not in the solution mapping the `EXISTS` is
+/// substituted with — there is nothing to scope `P` to. Refusing is the
+/// honest answer; scoping to "any visible graph" would be a wrong one.
+fn scope_expr(e: &Expr, scope: &GraphScope) -> Result<Expr> {
+    if matches!(scope, GraphScope::DefaultGraph) {
+        return Ok(e.clone());
+    }
+    let sub = |x: &Expr| scope_expr(x, scope).map(Box::new);
+    let list = |xs: &[Expr]| {
+        xs.iter()
+            .map(|x| scope_expr(x, scope))
+            .collect::<Result<Vec<_>>>()
+    };
+    Ok(match e {
+        Expr::Exists(p) => {
+            let GraphScope::Named(name) = scope else {
+                unreachable!("DefaultGraph returned above")
+            };
+            let GraphSpec::Iri(_) = name else {
+                return Err(SparqlError::UnsupportedAlgebra(
+                    "EXISTS / NOT EXISTS inside GRAPH ?g { … }".into(),
+                ));
+            };
+            Expr::Exists(Box::new(Algebra::Graph {
+                name: name.clone(),
+                inner: p.clone(),
+            }))
+        }
+        Expr::Term(_) | Expr::Bound(_) => e.clone(),
+        Expr::Eq(a, b) => Expr::Eq(sub(a)?, sub(b)?),
+        Expr::SameTerm(a, b) => Expr::SameTerm(sub(a)?, sub(b)?),
+        Expr::Ne(a, b) => Expr::Ne(sub(a)?, sub(b)?),
+        Expr::Lt(a, b) => Expr::Lt(sub(a)?, sub(b)?),
+        Expr::Gt(a, b) => Expr::Gt(sub(a)?, sub(b)?),
+        Expr::Le(a, b) => Expr::Le(sub(a)?, sub(b)?),
+        Expr::Ge(a, b) => Expr::Ge(sub(a)?, sub(b)?),
+        Expr::And(a, b) => Expr::And(sub(a)?, sub(b)?),
+        Expr::Or(a, b) => Expr::Or(sub(a)?, sub(b)?),
+        Expr::Add(a, b) => Expr::Add(sub(a)?, sub(b)?),
+        Expr::Sub(a, b) => Expr::Sub(sub(a)?, sub(b)?),
+        Expr::Mul(a, b) => Expr::Mul(sub(a)?, sub(b)?),
+        Expr::Div(a, b) => Expr::Div(sub(a)?, sub(b)?),
+        Expr::Not(a) => Expr::Not(sub(a)?),
+        Expr::Neg(a) => Expr::Neg(sub(a)?),
+        Expr::If(c, t, f) => Expr::If(sub(c)?, sub(t)?, sub(f)?),
+        Expr::In(a, xs) => Expr::In(sub(a)?, list(xs)?),
+        Expr::Coalesce(xs) => Expr::Coalesce(list(xs)?),
+        Expr::Func(f, xs) => Expr::Func(*f, list(xs)?),
+    })
+}
+
+/// [`scope_expr`] over an aggregate's inner expression.
+fn scope_aggregate(a: &Aggregate, scope: &GraphScope) -> Result<Aggregate> {
+    use crate::algebra::AggFunc as A;
+    let boxed = |e: &Expr| scope_expr(e, scope).map(Box::new);
+    let func = match &a.func {
+        A::CountStar => A::CountStar,
+        A::Count(e) => A::Count(boxed(e)?),
+        A::Sum(e) => A::Sum(boxed(e)?),
+        A::Min(e) => A::Min(boxed(e)?),
+        A::Max(e) => A::Max(boxed(e)?),
+        A::Avg(e) => A::Avg(boxed(e)?),
+        A::Sample(e) => A::Sample(boxed(e)?),
+        A::GroupConcat { expr, separator } => A::GroupConcat {
+            expr: boxed(expr)?,
+            separator: separator.clone(),
+        },
+    };
+    Ok(Aggregate {
+        out: a.out.clone(),
+        func,
+        distinct: a.distinct,
     })
 }
 

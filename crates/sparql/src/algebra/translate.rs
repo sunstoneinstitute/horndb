@@ -251,10 +251,13 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         } => Ok(Algebra::LeftJoin {
             left: Box::new(translate_pattern(left, cfg)?),
             right: Box::new(translate_pattern(right, cfg)?),
-            expr: expression.as_ref().map(translate_expr).transpose()?,
+            expr: expression
+                .as_ref()
+                .map(|x| translate_expr(x, cfg))
+                .transpose()?,
         }),
         GraphPattern::Filter { expr, inner } => Ok(Algebra::Filter {
-            expr: translate_expr(expr)?,
+            expr: translate_expr(expr, cfg)?,
             inner: Box::new(translate_pattern(inner, cfg)?),
         }),
         GraphPattern::Union { left, right } => Ok(Algebra::Union {
@@ -281,8 +284,8 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             let mut keys = Vec::with_capacity(expression.len());
             for oe in expression {
                 let (e, dir) = match oe {
-                    OrderExpression::Asc(e) => (translate_expr(e)?, OrderDir::Asc),
-                    OrderExpression::Desc(e) => (translate_expr(e)?, OrderDir::Desc),
+                    OrderExpression::Asc(e) => (translate_expr(e, cfg)?, OrderDir::Asc),
+                    OrderExpression::Desc(e) => (translate_expr(e, cfg)?, OrderDir::Desc),
                 };
                 keys.push((e, dir));
             }
@@ -298,7 +301,7 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
         } => Ok(Algebra::Extend {
             inner: Box::new(translate_pattern(inner, cfg)?),
             var: translate_var(variable),
-            expr: translate_expr(expression)?,
+            expr: translate_expr(expression, cfg)?,
         }),
         GraphPattern::Values {
             variables,
@@ -326,7 +329,7 @@ fn translate_pattern(p: &GraphPattern, cfg: &SparqlConfig) -> Result<Algebra> {
             let keys = variables.iter().map(translate_var).collect();
             let mut aggs = Vec::with_capacity(aggregates.len());
             for (out_var, agg_expr) in aggregates {
-                aggs.push(translate_aggregate(out_var, agg_expr)?);
+                aggs.push(translate_aggregate(out_var, agg_expr, cfg)?);
             }
             Ok(Algebra::Group {
                 inner: Box::new(translate_pattern(inner, cfg)?),
@@ -414,7 +417,11 @@ fn ground_term_to_term(gt: &GroundTerm) -> Result<Term> {
     })
 }
 
-fn translate_aggregate(out_var: &Variable, agg: &AggregateExpression) -> Result<Aggregate> {
+fn translate_aggregate(
+    out_var: &Variable,
+    agg: &AggregateExpression,
+    cfg: &SparqlConfig,
+) -> Result<Aggregate> {
     let out = translate_var(out_var);
     Ok(match agg {
         AggregateExpression::CountSolutions { distinct } => Aggregate {
@@ -427,7 +434,7 @@ fn translate_aggregate(out_var: &Variable, agg: &AggregateExpression) -> Result<
             expr,
             distinct,
         } => {
-            let e = Box::new(translate_expr(expr)?);
+            let e = Box::new(translate_expr(expr, cfg)?);
             let func = match name {
                 AggregateFunction::Count => AggFunc::Count(e),
                 AggregateFunction::Sum => AggFunc::Sum(e),
@@ -455,48 +462,80 @@ fn translate_aggregate(out_var: &Variable, agg: &AggregateExpression) -> Result<
     })
 }
 
-fn translate_expr(e: &Expression) -> Result<Expr> {
+fn translate_expr(e: &Expression, cfg: &SparqlConfig) -> Result<Expr> {
     use Expression as E;
     Ok(match e {
         E::NamedNode(n) => Expr::Term(Term::Iri(n.as_str().to_owned())),
         E::Literal(l) => Expr::Term(Term::Literal(l.to_string())),
         E::Variable(v) => Expr::Term(Term::Var(translate_var(v))),
-        E::Equal(a, b) => Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::SameTerm(a, b) => Expr::Eq(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Less(a, b) => Expr::Lt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Greater(a, b) => Expr::Gt(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::LessOrEqual(a, b) => {
-            Expr::Le(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?))
-        }
-        E::GreaterOrEqual(a, b) => {
-            Expr::Ge(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?))
-        }
+        E::Equal(a, b) => Expr::Eq(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::SameTerm(a, b) => Expr::Eq(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Less(a, b) => Expr::Lt(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Greater(a, b) => Expr::Gt(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::LessOrEqual(a, b) => Expr::Le(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::GreaterOrEqual(a, b) => Expr::Ge(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
         E::In(a, list) => {
-            let head = Box::new(translate_expr(a)?);
+            let head = Box::new(translate_expr(a, cfg)?);
             let items = list
                 .iter()
-                .map(translate_expr)
+                .map(|x| translate_expr(x, cfg))
                 .collect::<Result<Vec<_>>>()?;
             Expr::In(head, items)
         }
-        E::And(a, b) => Expr::And(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Or(a, b) => Expr::Or(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Not(a) => Expr::Not(Box::new(translate_expr(a)?)),
+        E::And(a, b) => Expr::And(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Or(a, b) => Expr::Or(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Not(a) => Expr::Not(Box::new(translate_expr(a, cfg)?)),
         E::Bound(v) => Expr::Bound(translate_var(v)),
-        E::Add(a, b) => Expr::Add(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Subtract(a, b) => Expr::Sub(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Multiply(a, b) => Expr::Mul(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::Divide(a, b) => Expr::Div(Box::new(translate_expr(a)?), Box::new(translate_expr(b)?)),
-        E::UnaryPlus(a) => translate_expr(a)?,
-        E::UnaryMinus(a) => Expr::Neg(Box::new(translate_expr(a)?)),
+        E::Add(a, b) => Expr::Add(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Subtract(a, b) => Expr::Sub(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Multiply(a, b) => Expr::Mul(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::Divide(a, b) => Expr::Div(
+            Box::new(translate_expr(a, cfg)?),
+            Box::new(translate_expr(b, cfg)?),
+        ),
+        E::UnaryPlus(a) => translate_expr(a, cfg)?,
+        E::UnaryMinus(a) => Expr::Neg(Box::new(translate_expr(a, cfg)?)),
         E::If(c, t, f) => Expr::If(
-            Box::new(translate_expr(c)?),
-            Box::new(translate_expr(t)?),
-            Box::new(translate_expr(f)?),
+            Box::new(translate_expr(c, cfg)?),
+            Box::new(translate_expr(t, cfg)?),
+            Box::new(translate_expr(f, cfg)?),
         ),
         E::Coalesce(args) => Expr::Coalesce(
             args.iter()
-                .map(translate_expr)
+                .map(|x| translate_expr(x, cfg))
                 .collect::<Result<Vec<_>>>()?,
         ),
         E::FunctionCall(func, args) => {
@@ -511,15 +550,18 @@ fn translate_expr(e: &Expression) -> Result<Expr> {
                 out.push(Expr::Term(Term::Iri(dt.as_str().to_owned())));
             }
             for a in args {
-                out.push(translate_expr(a)?);
+                out.push(translate_expr(a, cfg)?);
             }
             Expr::Func(f, out)
         }
-        other => {
-            return Err(SparqlError::UnsupportedAlgebra(format!(
-                "expression: {other:?}"
-            )));
-        }
+        // `EXISTS { P }` / `NOT EXISTS { P }` (the latter reaches here as
+        // `Not(Exists(..))`). `P` is an ordinary graph pattern sharing the
+        // enclosing scope, so it translates with the same rules; the
+        // per-solution substitution happens at evaluation time.
+        E::Exists(p) => Expr::Exists(Box::new(translate_pattern(p, cfg)?)),
+        // No catch-all: every spargebra `Expression` variant is handled. The
+        // remaining refusals live in `translate_function`, which rejects the
+        // builtins Stage 1 does not evaluate.
     })
 }
 

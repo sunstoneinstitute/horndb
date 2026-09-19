@@ -480,14 +480,14 @@ read in place from the fetched corpus under `crates/harness/data/`. Nothing is
 deselected: SPEC-00's harness-first rule forbids narrowing a suite to make a run
 look better.
 
-Measured on 2026-09-19 with `--engine owlrl`: **429 pass, 78 fail, 40 skip**.
+Measured on 2026-09-19 with `--engine owlrl`: **443 pass, 64 fail, 40 skip**.
 The 40 skips are test types the harness does not grade at all
 (`mf:ProtocolTest`, `mf:ServiceDescriptionTest`, `mf:CSVResultFormatTest`); they
 report with the type IRI in the reason. Which task fixed what is in the git log
 and in the per-root-cause tables below, not restated here — every branch that
 moved these numbers used to conflict on this paragraph.
 
-The 78 reds are listed one-by-one in `expected_failures` in
+The 64 reds are listed one-by-one in `expected_failures` in
 `harness/selected.toml`, grouped by the same root causes as below. That list is
 an **allowlist, not an exclusion**: a listed case is still selected and still
 executed; a failure becomes a Skip carrying its reason, and a listed case that
@@ -499,7 +499,6 @@ cannot rot, and CI catches regressions in both directions.
 | # | Root cause | Where |
 |--:|---|---|
 | 38 | **Entailment regimes** (RDF/RDFS/OWL-RL/OWL-Direct/RIF). The engine answers under simple entailment; `sd:entailmentRegime` on the manifest entry is not read. 28 of the 66 `entailment/` cases pass anyway — their answer does not need the regime. | `entailment/` |
-| 14 | **`EXISTS` / `NOT EXISTS` as a FILTER *expression*.** The pattern form used in `negation/` (i.e. `MINUS`) works (HDB-133); the expression form does not translate. Includes 4 `negation/` cases whose `MINUS` right-hand pattern itself contains a `FILTER NOT EXISTS`. | `exists/`, `negation/`, `subquery/subquery10` |
 | 7 | **`SERVICE` (federated query).** No federation client — a SPEC-07 non-goal so far. | `service/` |
 | 2 | **RDF 1.1 collapses `"abc"` and `"abc"^^xsd:string` into one term**, so the store cannot tell them apart. `STRDT`/`STRLANG` must accept the plain literal and raise a type error on the explicitly typed one, and these two cases need both in the same answer (HDB-132). Every other `STRDT`/`STRLANG` case passes. | `functions/strdt03`, `strlang03` |
 | 1 | **A comparison operator returns a value where §17.4 requires an expression error**, so `IF` takes the wrong branch and the variable stays bound instead of dropping out. | `functions/if02` |
