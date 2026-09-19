@@ -104,7 +104,8 @@ it fits the SPEC-01 NF1 per-PR budget. Upstream source the subset is drawn from:
 types (issue #110, part of the SPEC-01 harness epic #10).
 
 `sparql11-eval` runs the W3C SPARQL 1.1 **evaluation** suite —
-`mf:QueryEvaluationTest` + `mf:UpdateEvaluationTest`, graded by executing the
+`mf:QueryEvaluationTest` + `mf:CSVResultFormatTest` + `mf:UpdateEvaluationTest`,
+graded by executing the
 real SPEC-07 engine (`horndb-sparql`, `default-features = false`) and comparing
 against the case's expected result. Unlike every other suite it is **not**
 mirrored into fixtures: `harness/selected.toml` points at
@@ -171,8 +172,29 @@ and each query/update gets one `BASE <file://…>` line prepended, so a relative
 IRI in the query (`GRAPH <exists02.ttl>`) resolves to the same IRI the
 `qt:graphData` file was loaded under. `qt:data` becomes the default graph and
 `qt:graphData` the named graphs, so queries run in `DefaultGraphMode::Strict`.
-Expected results are read from `.srx`/`.srj` via `sparesults`; other extensions
-report `result format not graded yet: …` (a visible red, not a silent pass).
+Five expected-result formats are graded, each at the fidelity it carries
+(HDB-139). `.srx`/`.srj` and `.tsv` are read by `sparesults` into full terms and
+compared exactly — TSV writes `<iri>` and `"lit"^^<dt>`, so it loses no type.
+`.ttl` is a CONSTRUCT/DESCRIBE graph, compared by isomorphism via
+`crate::rdf::canonical_graph` (the same `oxrdf` canonicalization the Graph Store
+Protocol runner uses — one isomorphism implementation, not two). Anything else
+still reports `result format not graded yet: …` (a visible red, not a silent
+pass).
+
+`.csv` is the exception, and **a green CSV case must be read narrowly**. The W3C
+CSV results format writes an IRI as bare text and a literal as its bare lexical
+form, so a cell carries no datatype, no language tag and no IRI-vs-literal
+distinction, and an unbound variable is written the same as an empty literal.
+The grader compares that projection, so it catches a wrong value, a missing or
+extra row and a wrong variable set — but it would accept `"1"^^xsd:string` for
+`1`, or the IRI `<http://ex/a>` for the literal `"http://ex/a"`. See
+`sparql_eval.rs::csv_cell`.
+
+Blank-node labels are never compared literally: result rows are paired under a
+bijection (`sparql_eval.rs::match_blank_nodes` — plain backtracking with a step
+budget, ample for these fixtures; exhausting the budget grades as a failure,
+never a pass), graphs by canonicalization.
+
 Solutions compare as a set of variables plus a sorted multiset of rows, with an
 explicit `xsd:string` datatype normalised away on both sides, and **numeric
 literals compared by value within their datatype** — `"3"` and `"3.0"` are the

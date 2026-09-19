@@ -186,37 +186,25 @@ expected_failures = [
     "data-sparql11/functions/manifest#strdt03",
     "data-sparql11/functions/manifest#strlang03",
 
-    # Harness gap, not an engine gap: the runner grades `.srx`/`.srj` results
-    # only. CONSTRUCT graph results (`.ttl`, needing blank-node-isomorphic
-    # graph comparison) and `.csv`/`.tsv` serialisations are not graded yet.
-    "data-sparql11/construct/manifest#constructwhere01",
-    "data-sparql11/construct/manifest#constructwhere02",
-    "data-sparql11/construct/manifest#constructwhere03",
+    # `FROM <data.ttl>` names a dataset the engine must go and load; it reads
+    # `FROM` as selecting among graphs already in the store, so the query runs
+    # over an empty default graph and constructs nothing. The case's expected
+    # result is now graded (HDB-139) — the graph comparison is what reports
+    # the 0-vs-4-triple difference.
     "data-sparql11/construct/manifest#constructwhere04",
-    "data-sparql11/csv-tsv-res/manifest#tsv01",
-    "data-sparql11/csv-tsv-res/manifest#tsv02",
-    "data-sparql11/csv-tsv-res/manifest#tsv03",
-    "data-sparql11/subquery/manifest#subquery12",
-    "data-sparql11/subquery/manifest#subquery14",
 
     # Upstream `.srx` head quirk: the result header omits a projected variable
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
 
-    # Blank-node labels are compared literally. Grading these needs a
-    # bijection between the answer's and the expected result's blank nodes
-    # (SPARQL 1.1 result-set isomorphism). `plus-1`/`plus-2` differ *only* in
-    # a blank node's label (`_:b` vs `_:b0`) since HDB-131 fixed their numeric
-    # typing; every other cell of every row matches. `bnode01` (HDB-132) is the
-    # same gap: `BNODE` mints the right *pattern* of shared and distinct nodes,
-    # but which row gets `_:b0` follows the join order, so the labels pair up
-    # with different rows than the upstream `.srx` spells out.
+    # `BNODE(expr)` is scoped to one solution: within a row, equal arguments
+    # give the same blank node; across rows they must give different ones. The
+    # expected answer therefore uses 6 distinct blank nodes over 4 rows; the
+    # engine produces 4, so it is reusing nodes across rows. Every other cell
+    # matches. An engine gap, not a labelling one — HDB-139's comparison pairs
+    # blank nodes by bijection and reports that no bijection exists here.
     "data-sparql11/functions/manifest#bnode01",
-    "data-sparql11/functions/manifest#plus-1",
-    "data-sparql11/functions/manifest#plus-2",
-    "data-sparql11/json-res/manifest#jsonres01",
-    "data-sparql11/json-res/manifest#jsonres02",
 
     # Property-path evaluation: `pp16` returns 13 of the 15 expected rows.
     "data-sparql11/property-path/manifest#pp16",

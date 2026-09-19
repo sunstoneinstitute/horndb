@@ -172,6 +172,10 @@ struct EntryProjector {
     cons_iri: String,
     incons_iri: String,
     qet_iri: String,
+    /// `mf:CSVResultFormatTest` — a query evaluation test whose expected
+    /// result is a `.csv` file. Same action shape as `mf:QueryEvaluationTest`;
+    /// only the result format differs.
+    csv_iri: String,
     uet_iri: String,
     qt_query_iri: String,
     qt_data_iri: String,
@@ -200,6 +204,7 @@ impl EntryProjector {
             cons_iri: format!("{MF}ConsistencyTest"),
             incons_iri: format!("{MF}InconsistencyTest"),
             qet_iri: format!("{MF}QueryEvaluationTest"),
+            csv_iri: format!("{MF}CSVResultFormatTest"),
             uet_iri: format!("{MF}UpdateEvaluationTest"),
             qt_query_iri: format!("{QT}query"),
             qt_data_iri: format!("{QT}data"),
@@ -334,10 +339,12 @@ fn project_entry(
     // The whole-manifest SPARQL 1.1 *evaluation* suite grades the two
     // evaluation types itself; every other suite keeps the curated Stage-1
     // projections below (notably `mf:QueryEvaluationTest` -> SparqlAsk).
-    if suite == Suite::Sparql11Eval && (kind_str == p.qet_iri || kind_str == p.uet_iri) {
+    if suite == Suite::Sparql11Eval
+        && (kind_str == p.qet_iri || kind_str == p.csv_iri || kind_str == p.uet_iri)
+    {
         let action_node = action.ok_or_else(|| anyhow!("missing mf:action"))?;
         let action_subj = term_to_subject(&action_node)?;
-        let kind = if kind_str == p.qet_iri {
+        let kind = if kind_str != p.uet_iri {
             TestKind::SparqlQueryEval {
                 query: resolve(
                     graph

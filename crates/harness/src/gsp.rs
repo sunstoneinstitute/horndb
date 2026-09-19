@@ -29,7 +29,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use oxrdf::graph::CanonicalizationAlgorithm;
 use oxrdf::Graph;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -183,27 +182,16 @@ fn parse_response(raw: &[u8]) -> Result<(u16, String, String)> {
 }
 
 /// Parse an RDF payload into a canonicalized graph, so two graphs compare
-/// equal exactly when they are isomorphic. The media type picks the parser;
-/// anything that is not N-Triples is read as Turtle (which N-Triples is a
-/// subset of anyway).
+/// equal exactly when they are isomorphic. The media type picks the parser.
+///
+/// Bodies in these manifests use absolute IRIs, but a base is still needed for
+/// the parser to accept a relative one if upstream ever adds it.
 fn parse_graph(text: &str, media_type: Option<&str>) -> Result<Graph> {
-    let mut graph = Graph::new();
-    // Bodies in these manifests use absolute IRIs, but a base is still needed
-    // for the parser to accept a relative one if upstream ever adds it.
-    if media_type.is_some_and(|m| m.contains("n-triples")) {
-        for t in oxttl::NTriplesParser::new().for_slice(text.as_bytes()) {
-            graph.insert(&t?);
-        }
-    } else {
-        for t in oxttl::TurtleParser::new()
-            .with_base_iri("http://www.example/gsp/")?
-            .for_slice(text.as_bytes())
-        {
-            graph.insert(&t?);
-        }
-    }
-    graph.canonicalize(CanonicalizationAlgorithm::Unstable);
-    Ok(graph)
+    crate::rdf::canonical_graph(
+        text,
+        "http://www.example/gsp/",
+        media_type.is_some_and(|m| m.contains("n-triples")),
+    )
 }
 
 #[cfg(test)]
