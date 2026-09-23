@@ -8,6 +8,13 @@
 #
 # Cargo deliberately leaves --remap-path-prefix out of its fingerprint, so this
 # does not force rebuilds or change artifact hashes.
+#
+# This script takes cargo's one `build.rustc-wrapper` slot, which hides a
+# global `rustc-wrapper = "sccache"` in ~/.cargo/config.toml. So chain to
+# sccache here whenever it is installed.
 RUSTC="$1"
 shift
+if command -v sccache >/dev/null 2>&1; then
+    exec sccache "$RUSTC" "$@" --remap-path-prefix "$PWD=/horndb"
+fi
 exec "$RUSTC" "$@" --remap-path-prefix "$PWD=/horndb"

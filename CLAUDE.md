@@ -106,10 +106,18 @@ built-in eviction and grows unbounded (every distinct crate/feature/rustc-flags
 combination adds new content-hashed artifacts under `deps/` that are never
 pruned). sccache caches at the compiler-invocation level with a size-bounded,
 LRU-evicted cache, so worktrees keep separate `target/` dirs but still share
-compiled objects. Config: `~/.cargo/config.toml` with `build.rustc-wrapper =
-"sccache"` and `build.incremental = false` (sccache can't cache incremental
-artifacts, so leaving incremental on defeats the cache), plus
-`SCCACHE_CACHE_SIZE` in your shell profile to bound cache size.
+compiled objects. Install `sccache` on your `PATH` and bound its cache with
+`SCCACHE_CACHE_SIZE` in your shell profile. The repo's `scripts/rustc-remap.sh`
+(set as `build.rustc-wrapper` in `.cargo/config.toml`) calls sccache when it
+finds it. A `rustc-wrapper` in `~/.cargo/config.toml` has no effect here, because
+the repo setting overrides it.
+
+Keep incremental builds on. sccache shares dependency builds across worktrees,
+and incremental does not change that. Only our own workspace crates skip the
+cache when incremental is on, and they miss the cache across worktrees anyway.
+Measured: 76 of 83 compiles hit the cache with incremental on, and the same 76
+with it off. Do not export `CARGO_INCREMENTAL=1`: sccache refuses to run at all
+when it is set.
 
 Day-to-day commands:
 
