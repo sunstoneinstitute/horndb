@@ -121,6 +121,22 @@ done
 # does not sit between the timed reps.
 # --------------------------------------------------------------------------
 declare -A BUILT
+# The SPB driver (`harness`) is the measuring tool, not the thing measured, so
+# it is built once at baseline and shared by every variant. It also cannot be
+# built with target-cpu=x86-64-v3/v4: oxrocksdb-sys (via oxigraph) turns on
+# RocksDB's AVX2 CRC path whenever avx2 is on, and that path needs PCLMUL,
+# which neither level includes -- the C++ build fails.
+HARNESS_OK=0
+if want spb; then
+  variant_env baseline
+  note "== build harness (baseline, shared by all variants)"
+  if cargo build --release -p horndb-harness --bin harness --features real-engine > "$OUT/build-harness.log" 2>&1; then
+    HARNESS_OK=1
+  else
+    echo "- **harness build failed** (see build-harness.log); spb leg skipped" >> "$SUMMARY"
+    tail -40 "$OUT/build-harness.log" >&2
+  fi
+fi
 for v in "${RUN_VARIANTS[@]}"; do
   variant_env "$v"
   note "== build $v (RUSTFLAGS='$RUSTFLAGS', target $CARGO_TARGET_DIR)"
@@ -129,8 +145,7 @@ for v in "${RUN_VARIANTS[@]}"; do
     cargo build --release -p horndb-bench-trainmarks --bin store_load > "$OUT/build-$v.log" 2>&1 || ok=0
   fi
   if want spb && [ "$ok" = 1 ]; then
-    { cargo build --release -p horndb-harness --bin harness --features real-engine \
-      && cargo build --release -p horndb-sparql --bin serve --features server; } >> "$OUT/build-$v.log" 2>&1 || ok=0
+    cargo build --release -p horndb-sparql --bin serve --features server >> "$OUT/build-$v.log" 2>&1 || ok=0
   fi
   if [ "$ok" = 1 ]; then
     BUILT[$v]=1
@@ -211,6 +226,7 @@ wait_for_ready() {
 }
 
 leg_spb() {
+  [ "$HARNESS_OK" = 1 ] || return 1
   local dataset="$SPB_DATASET"
   local jar="$SPB_ASSETS/semantic_publishing_benchmark-basic-standard.jar"
   if [ ! -f "$dataset" ] || [ ! -f "$jar" ]; then
@@ -232,6 +248,9 @@ leg_spb() {
     # /readyz, not /query: serve answers /query while still loading.
     if ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600 \
        && wait_for_ready "http://$HORNDB_BIND/readyz" 2400; then
+      # The driver runs from the shared baseline build (see HARNESS_OK):
+      # run-spb-256.sh does `cargo run`, which honours these two variables.
+      CARGO_TARGET_DIR="$PERSIST/target-cpu-ab/baseline" RUSTFLAGS="" \
       SPB_DRIVER_JAR="$jar" \
       SPB_SCENARIO="$SPB_ASSETS/spb-nightly.properties" \
       HORNDB_ENDPOINT="http://$HORNDB_BIND/query" \
