@@ -27,8 +27,9 @@
 # Legs:
 #   load  `store_load` (a real `Store` bulk load plus first read) on trainmarks
 #         xlarge, N-Triples and Turtle. Median wall of REPS.
-#   spb   LDBC SPB-256 via the same bring-up as audit-pass.sh's spb leg, one run
-#         per variant. Writes to a scratch HARNESS_DB, never the nightly's.
+#   spb   LDBC SPB with nightly.yml's bring-up (same dataset, scenario and
+#         memory ceiling), one run per variant. Writes to a scratch HARNESS_DB,
+#         never the nightly's.
 #
 # Output: bench-out/<leg>-<variant>*.log and bench-out/SUMMARY.md.
 #
@@ -57,6 +58,10 @@ mkdir -p "$PERSIST"
 export HARNESS_DB="$OUT/target-cpu-harness.sqlite"
 SPB_ASSETS="${SPB_ASSETS:-/home/bench/src/horndb/crates/harness/data/ldbc-spb/dist}"
 HORNDB_BIND="${HORNDB_BIND:-127.0.0.1:3841}"
+# Match nightly.yml: its dataset (the true-scale corpus since HDB-37, not the
+# older spb-256.nt stand-in) and its server memory ceiling.
+SPB_DATASET="${SPB_DATASET:-$SPB_ASSETS/spb-sf128.nt}"
+MEMORY_MAX="${MEMORY_MAX:-90G}"
 
 note() { echo "$*" >&2; }
 want() { case " $LEGS " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -131,6 +136,10 @@ for v in "${RUN_VARIANTS[@]}"; do
     BUILT[$v]=1
   else
     echo "- **build failed for \`$v\`** (see build-$v.log)" >> "$SUMMARY"
+    # Also into the job log: the artifact is not always reachable, the log is.
+    note ">> build failed for $v; last lines of build-$v.log:"
+    grep -E '^(error|warning)|^\s+-->' "$OUT/build-$v.log" | head -40 >&2
+    tail -40 "$OUT/build-$v.log" >&2
   fi
 done
 unset RUSTFLAGS CARGO_TARGET_DIR
@@ -190,7 +199,7 @@ leg_load() {
 }
 
 # --------------------------------------------------------------------------
-# spb: SPB-256 per variant, same bring-up as audit-pass.sh leg_spb.
+# spb: SPB per variant, same bring-up as nightly.yml.
 # --------------------------------------------------------------------------
 wait_for_ready() {
   local url="$1" timeout="$2" t=0
@@ -202,7 +211,7 @@ wait_for_ready() {
 }
 
 leg_spb() {
-  local dataset="$SPB_ASSETS/spb-256.nt"
+  local dataset="$SPB_DATASET"
   local jar="$SPB_ASSETS/semantic_publishing_benchmark-basic-standard.jar"
   if [ ! -f "$dataset" ] || [ ! -f "$jar" ]; then
     note ">> SPB assets missing under $SPB_ASSETS — skipping"
@@ -217,12 +226,12 @@ leg_spb() {
     variant_env "$v"
     log="$OUT/spb-$v.log"
     note "== spb variant $v"
-    DATA_FILES="$dataset" RELEASE=1 BIND="$HORNDB_BIND" \
+    DATA_FILES="$dataset" RELEASE=1 BIND="$HORNDB_BIND" MEMORY_MAX="$MEMORY_MAX" \
       ./crates/harness/scripts/start-engine.sh > "$OUT/spb-engine-$v.log" 2>&1 &
     pid=$!
     # /readyz, not /query: serve answers /query while still loading.
     if ./crates/harness/scripts/wait-for-sparql.sh "http://$HORNDB_BIND/query" 600 \
-       && wait_for_ready "http://$HORNDB_BIND/readyz" 1800; then
+       && wait_for_ready "http://$HORNDB_BIND/readyz" 2400; then
       SPB_DRIVER_JAR="$jar" \
       SPB_SCENARIO="$SPB_ASSETS/spb-nightly.properties" \
       HORNDB_ENDPOINT="http://$HORNDB_BIND/query" \
@@ -239,7 +248,7 @@ leg_spb() {
   unset RUSTFLAGS CARGO_TARGET_DIR
 
   {
-    echo "## spb — LDBC SPB-256, nightly scenario (one run per variant)"
+    echo "## spb — LDBC SPB, \`$(basename "$dataset")\`, nightly scenario (one run per variant)"
     echo
     echo "| variant | editorial-ops/s | aggregation-qps |"
     echo "|---|---|---|"
