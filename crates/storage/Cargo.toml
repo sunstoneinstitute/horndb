@@ -12,6 +12,7 @@ thiserror.workspace = true
 arrow.workspace = true
 roaring.workspace = true
 dashmap.workspace = true
+foldhash.workspace = true
 parking_lot.workspace = true
 bytemuck.workspace = true
 oxttl.workspace = true

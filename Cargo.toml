@@ -124,6 +124,9 @@ tempfile = "3"
 arrow = { version = "59", default-features = false }
 roaring = "0.11"
 dashmap = "6"
+# Hasher for the storage dictionary's forward maps: several times cheaper than
+# the std SipHash default on the ~50-byte term keys a bulk load probes.
+foldhash = "0.2"
 parking_lot = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 spargebra = "0.4"

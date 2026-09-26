@@ -2,7 +2,8 @@
 //!
 //! Forward map: `DashMap<Box<[u8]>, TermId>` (lock-free reads, sharded writes),
 //! keyed on a compact byte encoding of the term rather than on the
-//! `oxrdf::Term` itself — see [`encode_key`].
+//! `oxrdf::Term` itself — see [`encode_key`]. Hashed with foldhash, not the
+//! std SipHash default: see [`MapHasher`].
 //! Reverse map: `RwLock<Vec<Option<Term>>>` indexed by `payload - 1`; a
 //! `None` slot is a term [`Dictionary::gc`] reclaimed.
 //!
@@ -96,6 +97,21 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Hasher for the dictionary's forward maps.
+///
+/// The forward-map probe is the bulk load's serial hot path: HDB-106 measured
+/// it at ~48 ns of a ~54 ns intern hit, on 93% of intern calls. The std
+/// default, SipHash-1-3, spends a large share of that hashing a ~50-byte key;
+/// foldhash hashes it several times cheaper (a lookup microbenchmark on
+/// 2M IRI-shaped keys ran ~1.8x faster). Term ids are assigned in insertion
+/// order, never hash order, so the hasher cannot change which id a term gets.
+///
+/// foldhash is randomly seeded, so flooding one bucket with colliding keys
+/// needs the seed. It resists a determined attacker less well than SipHash
+/// does; for terms arriving through untrusted `INSERT DATA`, that weakness is
+/// accepted in exchange for the faster load.
+type MapHasher = foldhash::fast::RandomState;
+
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 
@@ -124,7 +140,7 @@ static NEXT_DICT_ID: AtomicU64 = AtomicU64::new(0);
 /// `Dictionary::len()` with entries no triple refers to. A side table keeps
 /// `TermId` assignment byte-identical to before this change.
 struct AuxTable {
-    map: DashMap<Box<str>, u32>,
+    map: DashMap<Box<str>, u32, MapHasher>,
     /// First-seen order, and the allocation lock. Ids are assigned in the
     /// order strings are first seen, so a document interned twice produces
     /// the same table.
@@ -134,7 +150,7 @@ struct AuxTable {
 impl AuxTable {
     fn new() -> Self {
         Self {
-            map: DashMap::new(),
+            map: DashMap::default(),
             order: RwLock::new(Vec::new()),
         }
     }
@@ -359,7 +375,7 @@ struct Overlay {
 
 pub struct Dictionary {
     id: u64,
-    forward: DashMap<Box<[u8]>, TermId>,
+    forward: DashMap<Box<[u8]>, TermId, MapHasher>,
     reverse: RwLock<Overlay>,
     /// How many indices resolve to nothing: base tombstones, `base_dead`, and
     /// `None` overlay slots. Cheaper than counting them, and `len()` minus
@@ -433,7 +449,7 @@ impl Dictionary {
         let (base_len, freed) = base.as_ref().map_or((0, 0), |b| (b.slots(), b.freed()));
         Self {
             id: NEXT_DICT_ID.fetch_add(1, Ordering::Relaxed),
-            forward: DashMap::new(),
+            forward: DashMap::default(),
             reverse: RwLock::new(Overlay {
                 terms: Vec::new(),
                 base_dead: RoaringTreemap::new(),
