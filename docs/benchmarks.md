@@ -3250,6 +3250,44 @@ the buffer sets not just parse overlap and transient memory but also how far
 ahead of the consumer the probe runs, and therefore how much of `intern` it can
 resolve. The table above is that curve; the wall-clock column still says 8 M.
 
+#### foldhash replaces SipHash in the dictionary's forward map (2026-09-26)
+
+`Dictionary`'s forward maps (term bytes -> id, and the datatype/language side
+table) used `DashMap`'s default hasher, the std SipHash-1-3. SipHash is built to
+resist hash-flooding attacks, not for speed, and HDB-106 above put the
+forward-map probe at ~48 ns of a ~54 ns intern hit. The maps now use
+`foldhash::fast::RandomState` (commit `1184b78`). Term ids are assigned in
+insertion order, never hash order, so the swap cannot change any id.
+
+Same-session A/B on `hornbench` (Ryzen 7 7700, 8 cores / 16 threads, Debian
+6.12, rustc 1.90.0, snmalloc), bench run #40 driven by
+`scripts/bench/target-cpu-ab.sh`: `siphash` is the parent commit `ce8e57c`,
+`foldhash` is `4edafd5`, whose only code change from `ce8e57c` is the swap (the
+rest is bench scripts and CI). Both baseline x86-64, no `target-cpu`.
+`store_load` into a fresh in-memory `Store` plus a first read, trainmarks xlarge
+(9,995,000 triples), median of 5 reps interleaved siphash/foldhash:
+
+| corpus | threads | SipHash | foldhash | change | peak RSS (both) |
+|---|---|---|---|---|---|
+| `xlarge.nt` | 1 | 9.956s | 9.369s | **−5.9%** | 2,682 / 2,685 MiB |
+| `xlarge.ttl` | 1 | 12.817s | 12.220s | **−4.7%** | 1,926 / 1,932 MiB |
+| `xlarge.nt` | **8 (shipped)** | 4.573s | 4.215s | **−7.8%** | 4,331 / 4,326 MiB |
+| `xlarge.ttl` | **8 (shipped)** | 5.160s | 4.881s | **−5.4%** | 3,535 / 3,534 MiB |
+
+The reps do not overlap in any cell: the slowest foldhash rep beats the fastest
+SipHash rep every time (e.g. N-Triples at 8 threads: foldhash 4.191–4.278s,
+SipHash 4.515–4.601s). Peak RSS is unchanged. The gain is larger at 8 threads
+than at 1 because at 8 the parse threads also probe the dictionary (HDB-106),
+so both the consumer's intern calls and the parse threads' probes get cheaper,
+and the consumer is the critical path.
+
+**Trade-off:** foldhash is randomly seeded but resists a deliberate
+collision-flooding attack less well than SipHash. That matters only for terms
+from untrusted input (`INSERT DATA` over HTTP), and was accepted for the load
+speed. The SPB leg of the same run produced no numbers (a bench-script problem,
+not the engine; the nightly's SPB legs pass), so the query-side effect is
+**not yet measured**.
+
 ### Scaffolded but not yet evaluated against targets
 
 These benches compile and run on synthetic fixtures so future regressions are
