@@ -346,6 +346,9 @@ leg_spb() {
     # nothing to do (the failure spb-256.nt produced in run #39).
     if [ -z "$ed" ] || [ -z "$agg" ] || awk -v e="$ed" 'BEGIN{exit !(e+0 == 0)}'; then
       fail "spb produced no usable numbers for \`$v\` (see spb-$v.log)"
+      # Into the job log too: the artifact is not reachable from every session.
+      note ">> tail of spb-$v.log:"; tail -60 "$log" >&2
+      note ">> tail of spb-engine-$v.log:"; tail -30 "$OUT/spb-engine-$v.log" >&2
     fi
     if [ "$v" = "$first" ]; then
       bed="$ed"; bagg="$agg"
