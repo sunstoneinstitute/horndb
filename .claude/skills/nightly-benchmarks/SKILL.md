@@ -121,6 +121,13 @@ sqlite3 /tmp/harness.sqlite "
 - GraphDB / Oxigraph versions are pinned via `GRAPHDB_VERSION` / `OXIGRAPH_VERSION` in
   the workflow, not the runner's install; the per-run `start-*.sh` downloads the pinned
   build if absent (cached across runs).
+- **Editorial ops failing on every engine.** `editorial-insert-count` 0 with
+  large `editorial-insert-errors` means the driver's entity lists came back
+  empty: the served corpus lacks the reference datasets, so each INSERT throws
+  inside the driver before any request is sent (HDB-37 corpora until
+  `scripts/bench/spb-scale-refdata.sh`). The driver prints the exception per op
+  to stdout, which `spb-run` discards. Deletes are `CLEAR GRAPH`, which the nightly
+  rewrites to `CLEAR SILENT GRAPH` because the flat corpus has no CW graphs.
 - **Oxigraph precondition:** the persisted RocksDB stores (`spb-store` and the
   `oxigraph optimize`d `spb-store-optimized`) must be built once on the runner before
   the first leg — `DATASET=$SPB_ASSETS/spb-256.nt
