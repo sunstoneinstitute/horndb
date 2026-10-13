@@ -177,9 +177,13 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 
 ## Where deeper guidance lives
 
-**`CLAUDE.md` is the real file; `AGENTS.md` includes it** (this directory and
-every crate). Edit `CLAUDE.md` only, never `AGENTS.md.
-New agent-doc directory → create `CLAUDE.md`, then `echo @CLAUDE.md > AGENTS.md`.
+**Which file is real:**
+- Repo root: `CLAUDE.md` is the real file. `AGENTS.md` only includes it
+  (`@CLAUDE.md`, `@CLAUDE.local.md`). Edit `CLAUDE.md`.
+- Every nested directory: `AGENTS.md` is the real file and `CLAUDE.md` is a
+  symlink to it. Edit `AGENTS.md`, so a tool that replaces files cannot break
+  the link.
+- New agent-doc directory: write `AGENTS.md`, then `ln -s AGENTS.md CLAUDE.md`.
 
 These nested `CLAUDE.md`/`AGENTS.md` files load on-demand when you work in their directory:
 
