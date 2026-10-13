@@ -541,8 +541,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1dce859f0832a7d088c4f1119888ab94ef4b5d6795d1ce05afb7fe159d79f98"
 dependencies = [
  "find-msvc-tools",
- "jobserver",
- "libc",
  "shlex",
 ]
 
@@ -1323,7 +1321,6 @@ dependencies = [
  "horndb-owlrl",
  "horndb-sparql",
  "insta",
- "oxigraph",
  "oxrdf",
  "oxrdfio",
  "oxsdatatypes",
@@ -1335,12 +1332,11 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2",
  "snmalloc-rs",
  "sparesults",
  "spargebra",
  "tempfile",
- "thiserror",
  "time",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
@@ -1378,7 +1374,6 @@ dependencies = [
 name = "horndb-ml"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "axum",
  "chrono",
  "horndb-metrics",
@@ -1407,7 +1402,6 @@ dependencies = [
  "serde",
  "smallvec",
  "syn 3.0.4",
- "thiserror",
  "toml 1.1.4+spec-1.1.0",
 ]
 
@@ -1441,7 +1435,6 @@ dependencies = [
  "horndb-storage",
  "horndb-wcoj",
  "http-body",
- "hyper",
  "insta",
  "md-5",
  "oxiri",
@@ -1458,7 +1451,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
- "sha2 0.11.0",
+ "sha2",
  "snmalloc-rs",
  "sparesults",
  "spargebra",
@@ -1474,7 +1467,6 @@ dependencies = [
 name = "horndb-storage"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "arrow",
  "bytemuck",
  "criterion 0.8.2",
@@ -1499,7 +1491,6 @@ dependencies = [
 name = "horndb-wcoj"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "arrow",
  "criterion 0.8.2",
  "horndb-metrics",
@@ -1743,16 +1734,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-
-[[package]]
-name = "jobserver"
-version = "0.1.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9afb3de4395d6b3e67a780b6de64b51c978ecf11cb9a462c66be7d4ca9039d33"
-dependencies = [
- "getrandom 0.3.4",
- "libc",
-]
 
 [[package]]
 name = "js-sys"
@@ -2116,29 +2097,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
-name = "oxigraph"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d945cbe78640ab719a73697b9bd250054ea82c60470754efea79c21d5fc1cd1"
-dependencies = [
- "dashmap",
- "getrandom 0.3.4",
- "libc",
- "oxiri",
- "oxrdf",
- "oxrdfio",
- "oxrocksdb-sys",
- "oxsdatatypes",
- "rand 0.9.5",
- "rustc-hash",
- "siphasher",
- "sparesults",
- "spareval",
- "spargebra",
- "thiserror",
-]
-
-[[package]]
 name = "oxilangtag"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2172,12 +2130,9 @@ version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0afd5c28e4a399c57ee2bc3accd40c7b671fdc7b6537499f14e95b265af7d7e0"
 dependencies = [
- "hex",
  "oxilangtag",
  "oxiri",
- "oxsdatatypes",
  "rand 0.9.5",
- "sha2 0.10.9",
  "thiserror",
 ]
 
@@ -2205,16 +2160,6 @@ dependencies = [
  "oxrdf",
  "quick-xml 0.37.5",
  "thiserror",
-]
-
-[[package]]
-name = "oxrocksdb-sys"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6977c1d1827fcbf14480e768e4dede0b39c2961f6028497d012f9c04bcda91c6"
-dependencies = [
- "bindgen",
- "cc",
 ]
 
 [[package]]
@@ -2939,17 +2884,6 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
@@ -2989,12 +2923,6 @@ name = "similar"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
-name = "siphasher"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "slab"
@@ -3050,29 +2978,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spareval"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8eab80b96dc836e4cf8fda72daa67ccc0244dc5303be5d4566e8fd04adbdde5"
-dependencies = [
- "hex",
- "json-event-parser",
- "md-5",
- "oxiri",
- "oxrdf",
- "oxsdatatypes",
- "rand 0.9.5",
- "regex",
- "rustc-hash",
- "sha1",
- "sha2 0.10.9",
- "sparesults",
- "spargebra",
- "sparopt",
- "thiserror",
-]
-
-[[package]]
 name = "spargebra"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3084,17 +2989,6 @@ dependencies = [
  "peg",
  "rand 0.9.5",
  "thiserror",
-]
-
-[[package]]
-name = "sparopt"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aed7a854b8ea67618f8ce69aabb0e904d7704226060e9d5a2930eb3136c3fa3b"
-dependencies = [
- "oxrdf",
- "rand 0.9.5",
- "spargebra",
 ]
 
 [[package]]

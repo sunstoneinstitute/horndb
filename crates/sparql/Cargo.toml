@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["server", "reasoner", "snmalloc", "incremental"]
-server = ["dep:axum", "dep:tokio", "dep:tower", "dep:hyper", "dep:http-body", "dep:bytes", "dep:pin-project-lite", "dep:parking_lot"]
+server = ["dep:axum", "dep:tokio", "dep:tower", "dep:http-body", "dep:bytes", "dep:pin-project-lite", "dep:parking_lot"]
 reasoner = ["dep:horndb-owlrl"]
 # SPEC-05 GraphBLAS closure backend, reachable as `[reasoning].backend =
 # "graphblas"`. Off by default. Without it, `serve` rejects
@@ -63,7 +63,6 @@ rustc-hash = "2"
 axum = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true }
 http-body = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 pin-project-lite = { workspace = true, optional = true }
@@ -138,3 +137,7 @@ harness = false
 name = "view_derivation"
 harness = false
 required-features = ["reasoner"]
+
+# cargo-machete matches package names in source; `md-5` is imported as `md5`.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]

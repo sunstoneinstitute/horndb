@@ -96,11 +96,9 @@ The pre-commit configuration is split intentionally — keep this split when add
 - **Pre-commit (fast):** `cargo fmt --all -- --check` only.
 - **Pre-push (slow):** `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --workspace`.
 
-First pre-push after a fresh checkout (or `cargo clean`) takes several minutes: the
-harness pulls in `oxrocksdb-sys` (a ~700 MB artifact) transitively via `oxigraph`.
+First pre-push after a fresh checkout (or `cargo clean`) takes several minutes.
 Subsequent pushes reuse the cache. Vendored GraphBLAS is already shared across
-worktrees automatically. To also share the rocksdb build (and everything else)
-across worktrees, use [sccache](https://github.com/mozilla/sccache) rather than
+worktrees automatically. To also share everything else across worktrees, use [sccache](https://github.com/mozilla/sccache) rather than
 pointing `CARGO_TARGET_DIR` at one shared path — a shared target dir has no
 built-in eviction and grows unbounded (every distinct crate/feature/rustc-flags
 combination adds new content-hashed artifacts under `deps/` that are never
@@ -115,13 +113,13 @@ Day-to-day commands:
 
 ```bash
 cargo fmt --all                                          # auto-format
-cargo nextest run                                        # local: production crates only (no harness/bench-rdfox, no oxrocksdb-sys)
+cargo nextest run                                        # local: production crates only (no harness/bench-rdfox)
 cargo nextest run -p horndb-sparql --features server     # SPARQL HTTP server tests (required for full SPARQL pass)
 cargo nextest run -p <crate> <test_name>                 # single test
 cargo bench -p <crate> --bench <name>                    # criterion benches (e.g. four_cycle, per_tuple, load_lubm, transitive, sameas, insert_throughput)
 ```
 
-CI / full-workspace commands (include harness + bench-rdfox, pulls in oxrocksdb-sys):
+CI / full-workspace commands (include harness + bench-rdfox):
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings    # what CI runs
@@ -175,7 +173,7 @@ CI (`.github/workflows/ci.yml`) mirrors the above plus a conformance run with th
 - Common deps go in the root `[workspace.dependencies]` and are referenced with `dep.workspace = true` from each crate. Add new shared deps there, not per-crate.
 - Each subsystem crate has an `INTEGRATION-NOTES.md` (sometimes also `FUTURE-WORK.md` or `STAGE1-ACCEPTANCE.md`). Read these before changing the public API of a crate — they record decisions that aren't in the specs.
 - Executed plans (`docs/plans/PLAN-*.md` with `status: executed`) are historical implementation logs; treat them as commit-message-grade context, not as a source of truth for current behaviour.
-- `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (#13, closed not-planned; rocksdb duplication is the driver).
+- `.claude/worktrees/` is the local worktree pool — the multi-agent Stage-1 pass dispatched parallel subagents into worktrees there. Disk pressure during such runs is a known operational risk (#13, closed not-planned).
 
 ## Where deeper guidance lives
 

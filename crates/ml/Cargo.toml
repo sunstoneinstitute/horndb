@@ -13,7 +13,6 @@ default = []
 server = ["dep:axum", "dep:tokio", "dep:tower", "dep:serde", "dep:serde_json", "dep:horndb-metrics"]
 
 [dependencies]
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 

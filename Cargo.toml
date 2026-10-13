@@ -16,9 +16,9 @@ members = [
     "crates/bench-trainmarks",
     "crates/config",
 ]
-# harness and bench-rdfox are excluded from default builds to avoid pulling in
-# oxigraph → oxrocksdb-sys (~700 MB) during local development. Use --workspace
-# in CI or pass -p horndb-harness explicitly to include them.
+# harness and bench-rdfox are excluded from default builds to keep local
+# development builds small. Use --workspace in CI or pass -p horndb-harness
+# explicitly to include them.
 default-members = [
     "crates/simd",
     "crates/storage",
@@ -97,7 +97,6 @@ oxsdatatypes = "0.2"
 oxiri = "=0.2.11"
 oxrdfio = { version = "0.2", features = ["rdf-12"] }
 oxttl = { version = "0.2", features = ["rdf-12"] }
-oxigraph = { version = "0.5", features = ["rdf-12"] }
 sparesults = { version = "0.3", features = ["sparql-12"] }
 quick-xml = { version = "0.41", features = ["serialize"] }
 walkdir = "2"
@@ -133,7 +132,6 @@ axum = "0.8"
 # server (`crates/sparql/src/server/query.rs::arm_timeout`).
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tower = "0.5"
-hyper = "1"
 pretty_assertions = "1"
 # HDB-93 spike only (SPEC-25 S2 base-structure bench). Dev-dependencies of
 # `horndb-storage`'s `dict_base_bench` example; never a library dependency.
@@ -166,7 +164,7 @@ inherits = "release"
 # conformance`, used by .github/workflows/ci.yml). The Stage-1 conformance
 # subset runs in seconds, so it does not need the bench-grade release profile
 # above — thin LTO + codegen-units=1 + debug info across the ~500-crate
-# harness dependency tree (oxigraph/rocksdb included) is what made the CI
+# harness dependency tree is what made the CI
 # harness build take ~10 minutes. Light optimization keeps the run fast while
 # compiling several times quicker. Never use this profile for numbers that go
 # into docs/benchmarks.md.

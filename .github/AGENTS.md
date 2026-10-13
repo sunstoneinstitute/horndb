@@ -21,7 +21,7 @@ like any other; do not hand-bump pins outside that flow unless patching an urgen
 
 `workflows/ci.yml` mirrors the local fmt + clippy + workspace build plus a
 conformance run with the real engine, split into three parallel build jobs so no
-compile pipeline waits behind another: `lint` (fmt + workspace clippy + ml
+compile pipeline waits behind another: `lint` (fmt + `cargo machete` + workspace clippy + ml
 server-feature clippy), `tests` (nextest, doctests), and `conformance` (harness
 built once with `--features real-engine` under the `conformance` cargo profile —
 release-like but cheaply optimized, see root `Cargo.toml` — then the real-engine
