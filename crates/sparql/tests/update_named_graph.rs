@@ -1410,3 +1410,268 @@ fn template_bnode_is_fresh_per_operation_mem() {
 fn template_bnode_is_fresh_per_operation_horn() {
     template_bnode_is_fresh_per_operation::<HornBackend>();
 }
+
+// ── ADD/MOVE/COPY source existence in multi-op requests (HDB-154) ────────────
+
+/// `INSERT DATA { GRAPH :g1 … } ; COPY :g1 TO :g2` — the `COPY` source is
+/// created by the earlier `INSERT`, so it must not be judged against the
+/// pre-request store. The `;` inside the data block must not be mistaken for
+/// an operation separator.
+fn insert_then_copy_created_source<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "PREFIX : <http://g/> \
+         INSERT DATA { GRAPH :g1 { :s :p :o ; :q :r } } ; COPY :g1 TO :g2",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/g1"), 2, "source untouched");
+    assert_eq!(count_graph(&store, "http://g/g2"), 2, "destination copied");
+}
+
+#[test]
+fn insert_then_copy_created_source_mem() {
+    insert_then_copy_created_source::<MemStore>();
+}
+#[test]
+fn insert_then_copy_created_source_horn() {
+    insert_then_copy_created_source::<HornBackend>();
+}
+
+/// A `MOVE` (three desugared ops) ahead of a `COPY` and an `ADD`: each later
+/// source is judged against the store as the earlier operations left it.
+fn chained_move_copy_add<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } } ; \
+         MOVE <http://g/1> TO <http://g/2> ; COPY <http://g/2> TO <http://g/3> ; \
+         ADD <http://g/3> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/1"), 0, "moved away");
+    assert_eq!(count_graph(&store, "http://g/2"), 1);
+    assert_eq!(count_graph(&store, "http://g/3"), 1);
+    assert_eq!(count_default(&store), 1);
+}
+
+#[test]
+fn chained_move_copy_add_mem() {
+    chained_move_copy_add::<MemStore>();
+}
+#[test]
+fn chained_move_copy_add_horn() {
+    chained_move_copy_add::<HornBackend>();
+}
+
+/// `COPY <absent> TO DEFAULT` as a *later* operation still errors before its
+/// destructive `Drop{DEFAULT}` runs, and the earlier insert is rolled back.
+fn later_copy_absent_to_default_keeps_default<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    let err = run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } } ; \
+         COPY <http://g/absent> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+    assert_eq!(count_graph(&store, "http://g/1"), 0, "request rolled back");
+}
+
+#[test]
+fn later_copy_absent_to_default_keeps_default_mem() {
+    later_copy_absent_to_default_keeps_default::<MemStore>();
+}
+#[test]
+fn later_copy_absent_to_default_keeps_default_horn() {
+    later_copy_absent_to_default_keeps_default::<HornBackend>();
+}
+
+/// A source that only an *earlier* operation drops is absent by the time the
+/// `COPY` runs: the check must use the live store, not the pre-request one.
+fn copy_source_dropped_earlier_errors<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://g/1"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    let err = run(
+        "DROP GRAPH <http://g/1> ; COPY <http://g/1> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+    assert_eq!(count_graph(&store, "http://g/1"), 1, "request rolled back");
+}
+
+#[test]
+fn copy_source_dropped_earlier_errors_mem() {
+    copy_source_dropped_earlier_errors::<MemStore>();
+}
+#[test]
+fn copy_source_dropped_earlier_errors_horn() {
+    copy_source_dropped_earlier_errors::<HornBackend>();
+}
+
+/// A `<` comparison in a `FILTER` must not be lexed as an IRI that swallows a
+/// `{`/`}`: the shifted scan used to pin the `COPY` check onto a later
+/// `DROP SILENT`, after the `INSERT DATA` had created the source, and the
+/// request wiped the default graph.
+fn filter_lt_does_not_shift_copy_check<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    let err = run(
+        "DELETE { ?s ?p ?o } WHERE { FILTER(?o<5){?s ?p ?o} ?s ?p ?o ; ?q ?r ; ?t ?u ; ?v ?w } ;\n\
+         COPY <http://g/absent> TO DEFAULT ;\n\
+         INSERT DATA { GRAPH <http://g/absent> { <http://ex/x> <http://ex/p> <http://ex/y> } } ;\n\
+         DROP SILENT GRAPH <http://g/z> ;\n\
+         DELETE { ?s ?p ?o } WHERE { ?s ?p ?o FILTER(?o<5)} ;\n\
+         DROP SILENT GRAPH <http://g/z1> ; DROP SILENT GRAPH <http://g/z2> ; DROP SILENT GRAPH <http://g/z3>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+}
+
+#[test]
+fn filter_lt_does_not_shift_copy_check_mem() {
+    filter_lt_does_not_shift_copy_check::<MemStore>();
+}
+#[test]
+fn filter_lt_does_not_shift_copy_check_horn() {
+    filter_lt_does_not_shift_copy_check::<HornBackend>();
+}
+
+/// `FILTER(1<2)` in an earlier op must not break locating the later `COPY`,
+/// whose source that earlier op creates.
+fn filter_lt_then_copy_created_source<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "INSERT { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> 1 } } WHERE { FILTER(1<2)} ; \
+         COPY <http://g/1> TO <http://g/2>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/2"), 1, "destination copied");
+}
+
+#[test]
+fn filter_lt_then_copy_created_source_mem() {
+    filter_lt_then_copy_created_source::<MemStore>();
+}
+#[test]
+fn filter_lt_then_copy_created_source_horn() {
+    filter_lt_then_copy_created_source::<HornBackend>();
+}
+
+/// Non-ASCII prefixed-name locals lex as whole names: `ex:gé` is not `ex:g`,
+/// and `ex:aé TO ex:aà` is not the identity case.
+fn non_ascii_pname_operands<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://ex/g"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://ex/aà"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    let err = run("PREFIX ex: <http://ex/> COPY ex:gé TO DEFAULT", &mut store).unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+
+    let err = run("PREFIX ex: <http://ex/> COPY ex:aé TO ex:aà", &mut store).unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_graph(&store, "http://ex/aà"), 1, "destination kept");
+}
+
+#[test]
+fn non_ascii_pname_operands_mem() {
+    non_ascii_pname_operands::<MemStore>();
+}
+#[test]
+fn non_ascii_pname_operands_horn() {
+    non_ascii_pname_operands::<HornBackend>();
+}
+
+/// A user-written op shaped exactly like a desugared copy makes the pairing
+/// ambiguous, so every source falls back to the pre-request check. `;{}` inside
+/// a string and a comment must not disturb the scan either way.
+fn lookalike_copy_falls_back<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        Some("http://g/1"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    run(
+        "# ; { } COPY <http://g/absent> TO DEFAULT\n\
+         INSERT { GRAPH <http://g/3> { ?s ?p ?o } } WHERE { GRAPH <http://g/1> { ?s ?p ?o } } ;\n\
+         INSERT DATA { <http://ex/s> <http://ex/p> \"x ; { } COPY <http://g/absent> TO DEFAULT\" } ;\n\
+         COPY <http://g/1> TO <http://g/2>",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/2"), 1);
+    assert_eq!(count_graph(&store, "http://g/3"), 1);
+
+    let err = run(
+        "INSERT { GRAPH <http://g/3> { ?s ?p ?o } } WHERE { GRAPH <http://g/1> { ?s ?p ?o } } ;\n\
+         INSERT DATA { <http://ex/s> <http://ex/p> \"; }\" } # ; {\n\
+         ; COPY <http://g/absent> TO <http://g/2>",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_graph(&store, "http://g/2"), 1, "destination kept");
+}
+
+#[test]
+fn lookalike_copy_falls_back_mem() {
+    lookalike_copy_falls_back::<MemStore>();
+}
+#[test]
+fn lookalike_copy_falls_back_horn() {
+    lookalike_copy_falls_back::<HornBackend>();
+}
