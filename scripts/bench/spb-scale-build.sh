@@ -14,15 +14,18 @@
 # ~115 B per closure triple.
 #
 # Creative Works are closed in slices. That is sound here because the SPB
-# ontologies are the only shared premises: CW subjects are disjoint per slice and
-# the reference datasets are not part of the closure input, so no OWL 2 RL rule
-# joins two CWs. Slices still overlap — each re-derives the ontology closure and
-# the shared schema triples — so the concatenated file carries duplicate lines,
+# ontologies are the only shared premises: CW subjects are disjoint per slice, so
+# no OWL 2 RL rule joins two CWs. The reference datasets are closed in their own
+# slice (phase R); inferences that would join a CW with reference data (e.g. via
+# an `owl:sameAs` in DBpedia) are not derived, identically for every engine.
+# Slices still overlap — each re-derives the ontology closure and the shared
+# schema triples — so the concatenated file carries duplicate lines,
 # which the store folds away on load (RDF is a set). Phase V proves the union of
 # two slices equals the whole-set closure; it needs the calibration artefacts
 # (CAL_DIR / CAL_CLOSURE) and skips itself when they are absent.
 #
-# Phases: V verify chunking · G generate · M materialize slices · S serve check.
+# Phases: V verify chunking · G generate · M materialize slices · R reference data ·
+# S serve check.
 # Knobs: SPB_SF (default sf128), TARGET_N (default 128000000),
 #        CHUNK_FILES (default 178 ~ 8 M triples), CAL_DIR, CAL_CLOSURE.
 set -uo pipefail
@@ -158,6 +161,15 @@ rmdir "$CHUNKDIR" 2>/dev/null
 df -h / | tail -1 >> "$SUM"
 end
 [ "$FAILED" = 1 ] && { note "ABORT: a slice failed; $FINAL is incomplete"; exit 1; }
+
+# --- R: reference data -------------------------------------------------------
+# The driver reads its entity lists from the store; without the reference data
+# every editorial INSERT fails. Closed on its own, after the CW slices.
+sec "R · append the reference-data closure"
+rm -f "$FINAL.refdata"
+SPB_SF="$SF" SPB_WORK="$WORK" SPB_ASSETS="$DIST" ./scripts/bench/spb-scale-refdata.sh >> "$SUM" 2>&1 \
+  || { note "ABORT: reference-data append failed"; end; exit 1; }
+end
 
 # --- S: serve the result ----------------------------------------------------
 sec "S · HornDB serves the $SF closure"
