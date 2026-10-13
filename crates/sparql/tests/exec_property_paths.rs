@@ -646,8 +646,8 @@ fn zero_length_ground_endpoint_absent_from_graph_still_self_matches() {
     // the graph. SPARQL 1.1 section 18.5 evaluates the term-to-term case as
     // `{ {} } if X = Y` and seeds ALP with the start term unconditionally;
     // `nodes(G)` appears only in the variable-to-variable cases. The WG's
-    // approved test `property-path/pp15` ("Zero Length Paths on an empty
-    // graph") expects the self-match on an empty graph.
+    // approved test `property-path/pp15` (later dropped from the manifest
+    // with the `{0}` syntax it uses) expects the self-match on an empty graph.
     let s = make_store();
     for q in [
         "SELECT ?x WHERE { ?x <http://ex/knows>? <http://ex/absent> }",

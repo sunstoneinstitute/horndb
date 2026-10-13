@@ -1602,11 +1602,9 @@ fn build_merge_plan(
 /// query endpoints `subject`/`object`, each of which may be ground
 /// (filter) or a variable (bind).
 ///
-/// Stage-1 reflexive note: `p*`'s zero-length match is seeded only over
-/// nodes that appear in the path relation (plus a ground endpoint, if
-/// pinned), not over every node in the active graph. This matches the
-/// documented approximation in [`crate::algebra::translate`]'s
-/// `zero_length_path`; full graph-node enumeration for `*` is deferred.
+/// `*`'s reflexive pairs here cover only nodes the relation touches (plus a
+/// pinned ground endpoint). For two variable endpoints the translator unions
+/// in the rest of the graph's nodes (`translate_closure_path`, HDB-141).
 fn eval_path_closure(
     subject: &Term,
     object: &Term,
