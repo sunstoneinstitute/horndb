@@ -39,9 +39,9 @@
 //!   ops execute; the flag — plus the source operand (resolved to an absolute
 //!   IRI against the update's own `PREFIX`/`BASE` prologue) and whether the op
 //!   is the identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
-//!   source-text pre-scan (see [`recover_amc_hints`]), which also records the
-//!   index of the verb's first desugared op. The source check reads only those
-//!   hints, never the desugared ops' contents.
+//!   source-text pre-scan (see [`recover_amc_hints`]). [`locate_amc_hints`]
+//!   then pairs each hint with its desugared ops to find where to check the
+//!   source; any doubt falls back to checking against the pre-request store.
 //! * **The reserved namespace is closed to writes** (S4): every write form
 //!   touching `https://horndb.io/graph/…` is refused. This is a
 //!   permission-shaped error that `SILENT` does **not** suppress; it is
@@ -59,7 +59,8 @@
 //! operation runs on, so checking it for the rest rejected requests that are
 //! legal in request order (`INSERT DATA { GRAPH <g> … } ; COPY <g> TO <h>`).
 //! A later `ADD`/`MOVE`/`COPY` source is checked against the live store just
-//! before its first desugared op. Either way `COPY <absent> TO DEFAULT` — which
+//! before its first desugared op, when [`locate_amc_hints`] can pin that op
+//! exactly; otherwise it too is checked against the pre-update store. Either way `COPY <absent> TO DEFAULT` — which
 //! desugars to a destructive `Drop{DEFAULT}` + a copy from a missing source —
 //! errors before the `Drop` and never clears the default graph.
 //!
@@ -83,7 +84,8 @@ use oxiri::Iri;
 use spargebra::algebra::{GraphPattern, GraphTarget, QueryDataset};
 use spargebra::term::{
     GraphName as SpgGraphName, GraphNamePattern, GroundQuadPattern, GroundTerm, GroundTermPattern,
-    NamedNodePattern, NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern,
+    NamedNodePattern, NamedOrBlankNode, QuadPattern, Term as SpgTerm, TermPattern, TriplePattern,
+    Variable,
 };
 use spargebra::GraphUpdateOperation;
 use std::collections::HashMap;
@@ -207,11 +209,10 @@ pub fn apply_update_with_feed<B: FullBackend>(
     // every `ADD`/`MOVE`/`COPY` from the raw text — spargebra drops all three on
     // desugaring. Operands are resolved to absolute IRIs against the update's
     // own `PREFIX`/`BASE` prologue (see [`recover_amc_hints`]).
-    let (mut amc_hints, scanned_ops) = recover_amc_hints(source, base_iri);
-    // If the scan's operation count or a hint's position disagrees with the
-    // desugared list, the correlation is untrustworthy: judge every hint
-    // against the pre-request store (index 0) — may false-error, never wipes.
-    if scanned_ops != ops.len() || amc_hints.iter().any(|h| !h.matches(ops)) {
+    let mut amc_hints = recover_amc_hints(source, base_iri);
+    // If the hints can't be paired exactly with the desugared ops, judge every
+    // hint against the pre-request store (index 0).
+    if !locate_amc_hints(&mut amc_hints, ops) {
         for h in &mut amc_hints {
             h.op_index = 0;
         }
@@ -1107,17 +1108,18 @@ enum AmcSource {
 }
 
 /// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, resolved
-/// source operand, whether it is the W3C identity case (`source ==
-/// destination`), and where its desugared ops sit in the operation list.
+/// operands, whether it is the W3C identity case (`source == destination`),
+/// and where its desugared ops start in the operation list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AmcHint {
     silent: bool,
     source: AmcSource,
-    /// Index of this verb's first desugared op. spargebra emits `ADD` as one
-    /// copy `DeleteInsert`, `COPY` as `Drop` + copy, `MOVE` as `Drop` + copy +
-    /// `Drop`, and every other operation as exactly one op.
+    dest: AmcSource,
+    /// Index of this verb's first desugared op, set by [`locate_amc_hints`]
+    /// (0 until then, and on fallback).
     op_index: usize,
-    /// How many ops the verb desugared to: 1/2/3, or 0 for identity.
+    /// How many ops the verb desugars to when not identity: 1 `ADD`, 2 `COPY`,
+    /// 3 `MOVE`.
     op_count: usize,
     /// `true` when the resolved source and destination operands are equal —
     /// spargebra's own identity check (`from == to`), which always desugars to
@@ -1128,16 +1130,99 @@ struct AmcHint {
     is_identity: bool,
 }
 
-impl AmcHint {
-    /// Does the desugared op at `op_index` have the shape this verb starts
-    /// with? Guards against a scan that mis-located operation boundaries.
-    fn matches(&self, ops: &[GraphUpdateOperation]) -> bool {
-        matches!(
-            (self.op_count, ops.get(self.op_index)),
-            (0, _)
-                | (1, Some(GraphUpdateOperation::DeleteInsert { .. }))
-                | (2 | 3, Some(GraphUpdateOperation::Drop { silent: true, .. }))
-        )
+/// Set each non-identity hint's `op_index` from the desugared `ops`.
+///
+/// spargebra 0.4.6 emits every non-identity `ADD`/`COPY`/`MOVE` as one copy op
+/// (see [`copy_op_operands`]): `ADD` as just the copy, `COPY` as
+/// `Drop{SILENT, dst}` + copy, `MOVE` as `COPY`'s two + `Drop{silent, src}`;
+/// identity emits nothing. So the k-th copy op belongs to the k-th
+/// non-identity hint. Returns `false` when the copy-op count, an operand pair,
+/// or a surrounding `Drop` disagrees — a user-written look-alike or a
+/// mis-scanned verb. The caller then falls back, so a bad scan can never pin a
+/// check to the wrong op.
+fn locate_amc_hints(hints: &mut [AmcHint], ops: &[GraphUpdateOperation]) -> bool {
+    let copies: Vec<(usize, AmcSource, AmcSource)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| copy_op_operands(op).map(|(s, d)| (i, s, d)))
+        .collect();
+    let mut live: Vec<&mut AmcHint> = hints.iter_mut().filter(|h| !h.is_identity).collect();
+    if live.len() != copies.len() {
+        return false;
+    }
+    let drop_at = |i: Option<usize>| i.and_then(|i| ops.get(i)).and_then(drop_operand);
+    for (h, (ci, src, dst)) in live.iter_mut().zip(copies) {
+        if h.source != src || h.dest != dst {
+            return false;
+        }
+        let dst_dropped = drop_at(ci.checked_sub(1)) == Some((true, dst));
+        let shape_ok = match h.op_count {
+            1 => true,
+            2 => dst_dropped,
+            3 => dst_dropped && drop_at(Some(ci + 1)) == Some((h.silent, src)),
+            _ => false,
+        };
+        if !shape_ok {
+            return false;
+        }
+        h.op_index = if h.op_count == 1 { ci } else { ci - 1 };
+    }
+    true
+}
+
+/// `(source, destination)` of a desugared copy op: `INSERT { ?s ?p ?o }` into
+/// the destination, `WHERE` exactly `?s ?p ?o` in the source (bare for
+/// `DEFAULT`, wrapped in `GRAPH <src>` otherwise), no `DELETE`, no `USING`.
+fn copy_op_operands(op: &GraphUpdateOperation) -> Option<(AmcSource, AmcSource)> {
+    let GraphUpdateOperation::DeleteInsert {
+        delete,
+        insert,
+        using: None,
+        pattern,
+    } = op
+    else {
+        return None;
+    };
+    let var = |n: &str| TermPattern::Variable(Variable::new_unchecked(n));
+    let p_var = NamedNodePattern::Variable(Variable::new_unchecked("p"));
+    let spo = GraphPattern::Bgp {
+        patterns: vec![TriplePattern {
+            subject: var("s"),
+            predicate: p_var.clone(),
+            object: var("o"),
+        }],
+    };
+    let [q] = insert.as_slice() else {
+        return None;
+    };
+    if !delete.is_empty() || q.subject != var("s") || q.predicate != p_var || q.object != var("o") {
+        return None;
+    }
+    let dest = match &q.graph_name {
+        GraphNamePattern::NamedNode(n) => AmcSource::Named(n.as_str().to_owned()),
+        GraphNamePattern::DefaultGraph => AmcSource::Default,
+        GraphNamePattern::Variable(_) => return None,
+    };
+    let source = match pattern.as_ref() {
+        p if *p == spo => AmcSource::Default,
+        GraphPattern::Graph {
+            name: NamedNodePattern::NamedNode(n),
+            inner,
+        } if **inner == spo => AmcSource::Named(n.as_str().to_owned()),
+        _ => return None,
+    };
+    Some((source, dest))
+}
+
+/// `(silent, graph)` of a `DROP [SILENT] (DEFAULT | GRAPH <g>)` op.
+fn drop_operand(op: &GraphUpdateOperation) -> Option<(bool, AmcSource)> {
+    match op {
+        GraphUpdateOperation::Drop { silent, graph } => match graph {
+            GraphTarget::NamedNode(n) => Some((*silent, AmcSource::Named(n.as_str().to_owned()))),
+            GraphTarget::DefaultGraph => Some((*silent, AmcSource::Default)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1157,7 +1242,7 @@ fn amc_source_check<B: FullBackend>(store: &B, h: &AmcHint) -> Result<()> {
 
 /// Recover the `SILENT` flag, resolved source operand, and identity check
 /// (`source == destination`) of every `ADD`/`MOVE`/`COPY` in the raw update
-/// text, in source order, plus the number of ops the whole request desugars to.
+/// text, in source order. Positions are found later by [`locate_amc_hints`].
 ///
 /// **Why this exists.** spargebra 0.4.6 desugars `ADD`/`MOVE`/`COPY` into
 /// `Drop` + `DeleteInsert` pairs and **discards the `SILENT` flag**. That was
@@ -1171,11 +1256,8 @@ fn amc_source_check<B: FullBackend>(store: &B, h: &AmcHint) -> Result<()> {
 /// operand to an absolute IRI against them — a prefixed name via the prefix map,
 /// a relative `<…>` against the current base (`base_iri` seeds the base with any
 /// externally supplied one, e.g. an HTTP request base). So both the source IRI
-/// **and** `is_identity` come purely from text, for every operand form. The
-/// preflight then checks each non-silent, non-identity `Named` source directly
-/// (see [`apply_update_with`]) — no inspection of the desugared ops, so nothing
-/// can collide with a user-written `DeleteInsert` and a prefixed identity op is
-/// recognised like any other.
+/// **and** `is_identity` come purely from text, for every operand form, so a
+/// prefixed identity op is recognised like any other.
 ///
 /// **Escapes fail closed.** An operand IRI that needs a `\uXXXX` (UCHAR) or a
 /// `PN_LOCAL_ESC` backslash escape can't be reproduced by the raw scan, so the
@@ -1187,34 +1269,14 @@ fn amc_source_check<B: FullBackend>(store: &B, h: &AmcHint) -> Result<()> {
 /// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
 /// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
 /// number). Delete this whole machinery the day that ships.
-fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> (Vec<AmcHint>, usize) {
+fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> Vec<AmcHint> {
     let toks = amc_tokenize(src);
     let mut prefixes: HashMap<String, String> = HashMap::new();
     let mut base: Option<Iri<String>> = base_iri.cloned();
     let mut hints = Vec::new();
-    // Operations are separated by `;` outside any `{…}`. `next_op` is the
-    // desugared index of the current operation's first op; `cur_ops` is how
-    // many ops it desugars to (`None` until a non-prologue token is seen, so a
-    // trailing `;` adds nothing).
-    let mut depth = 0usize;
-    let mut next_op = 0usize;
-    let mut cur_ops: Option<usize> = None;
     let mut i = 0;
     while i < toks.len() {
         match &toks[i] {
-            AmcTok::Open => {
-                depth += 1;
-                cur_ops.get_or_insert(1);
-                i += 1;
-            }
-            AmcTok::Close => {
-                depth = depth.saturating_sub(1);
-                i += 1;
-            }
-            AmcTok::Semi if depth == 0 => {
-                next_op += cur_ops.take().unwrap_or(0);
-                i += 1;
-            }
             // `BASE <iri>` — resolve against the current base, then adopt it.
             AmcTok::Base => {
                 if let Some(AmcTok::Iri(raw)) = toks.get(i + 1) {
@@ -1251,35 +1313,28 @@ fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> (Vec<AmcHint>
                     j += 1;
                 }
                 let (source, after_source) = amc_parse_operand(&toks, j, &prefixes, base.as_ref());
-                let destination = after_source
-                    .map(|k| amc_parse_operand(&toks, k + 1, &prefixes, base.as_ref()).0);
-                let is_identity = match (&source, &destination) {
-                    (AmcSource::Default, Some(AmcSource::Default)) => true,
-                    (AmcSource::Named(a), Some(AmcSource::Named(b))) => a == b,
+                let dest = after_source.map_or(AmcSource::Unknown, |k| {
+                    amc_parse_operand(&toks, k + 1, &prefixes, base.as_ref()).0
+                });
+                let is_identity = match (&source, &dest) {
+                    (AmcSource::Default, AmcSource::Default) => true,
+                    (AmcSource::Named(a), AmcSource::Named(b)) => a == b,
                     _ => false,
                 };
-                let op_count = if is_identity { 0 } else { *n };
-                if depth == 0 {
-                    cur_ops = Some(op_count);
-                }
                 hints.push(AmcHint {
                     silent,
                     source,
-                    op_index: next_op,
-                    op_count,
+                    dest,
+                    op_index: 0,
+                    op_count: *n,
                     is_identity,
                 });
                 i += 1;
             }
-            _ => {
-                if depth == 0 {
-                    cur_ops.get_or_insert(1);
-                }
-                i += 1;
-            }
+            _ => i += 1,
         }
     }
-    (hints, next_op + cur_ops.unwrap_or(0))
+    hints
 }
 
 /// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? iri`) starting at token
@@ -1348,10 +1403,6 @@ enum AmcTok {
     /// `ADD`/`COPY`/`MOVE`, carrying how many ops spargebra desugars it to
     /// (1/2/3) when it is not the identity case.
     Amc(usize),
-    /// `{`, `}`, `;` — enough structure to find operation boundaries.
-    Open,
-    Close,
-    Semi,
     Silent,
     Default,
     Graph,
@@ -1372,9 +1423,10 @@ enum AmcTok {
 }
 
 /// A byte that can start a keyword or a prefixed name: ASCII alphanumeric, `_`,
-/// or `:` (an empty-prefix name like `:g`).
+/// `:` (an empty-prefix name like `:g`), or any non-ASCII UTF-8 byte (so
+/// `ex:gé` is one name, not `ex:g`).
 fn is_pname_start(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b':'
+    b.is_ascii_alphanumeric() || b == b'_' || b == b':' || b >= 0x80
 }
 
 /// A byte that continues a keyword or prefixed name. Adds `-`, `.`, `:`, and `%`
@@ -1403,29 +1455,29 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 }
             }
             b'<' => {
-                // Treat every `<` as an IRIREF open: no `>` or whitespace
-                // inside; if unterminated, stop at end (best-effort — the parser
-                // already accepted the update). A `<` used as a comparison
-                // operator (e.g. `FILTER(?x < 5)`) tokenizes to a short/empty
-                // `Iri`, but that is harmless: recovery only reads the fixed
-                // operand window right after each verb (`SILENT? src TO dst`),
-                // and that grammar has no comparison, so such a token never
-                // reaches an operand slot.
+                // IRIREF: `<` ([^<>"{}|^`\] minus #x00-#x20)* `>`. The `\` is
+                // let through here so a UCHAR escape is caught below. If no `>`
+                // closes it, this `<` is a comparison operator: emit `Other`
+                // and resume right after it.
                 let start = i + 1;
                 let mut j = start;
-                while j < n && b[j] != b'>' && !b[j].is_ascii_whitespace() {
+                while j < n && b[j] > b' ' && !b"<>\"{}|^`".contains(&b[j]) {
                     j += 1;
                 }
-                let inner = &b[start..j];
-                // A `\` in an IRIREF is a `\uXXXX`/`\UXXXXXXXX` UCHAR escape the
-                // raw scan can't expand — mark the operand unresolvable, don't
-                // pass the literal backslash on as an IRI.
-                out.push(if inner.contains(&b'\\') {
-                    AmcTok::Escaped
+                if j < n && b[j] == b'>' {
+                    let inner = &b[start..j];
+                    // A `\` is a `\uXXXX`/`\UXXXXXXXX` UCHAR escape the raw scan
+                    // can't expand — mark the operand unresolvable.
+                    out.push(if inner.contains(&b'\\') {
+                        AmcTok::Escaped
+                    } else {
+                        AmcTok::Iri(String::from_utf8_lossy(inner).into_owned())
+                    });
+                    i = j + 1;
                 } else {
-                    AmcTok::Iri(String::from_utf8_lossy(inner).into_owned())
-                });
-                i = if j < n && b[j] == b'>' { j + 1 } else { j };
+                    out.push(AmcTok::Other);
+                    i += 1;
+                }
             }
             b'"' | b'\'' => {
                 i = amc_skip_string(b, i);
@@ -1478,12 +1530,7 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 i = j;
             }
             _ => {
-                out.push(match c {
-                    b'{' => AmcTok::Open,
-                    b'}' => AmcTok::Close,
-                    b';' => AmcTok::Semi,
-                    _ => AmcTok::Other,
-                });
+                out.push(AmcTok::Other);
                 i += 1;
             }
         }
