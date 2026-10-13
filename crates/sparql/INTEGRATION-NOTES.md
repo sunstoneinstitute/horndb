@@ -493,15 +493,11 @@ Two design points worth recording:
    sequences were only ever joined correctly when both steps landed in a single
    BGP — across a `Join` boundary they silently produced no rows.
 
-2. **Zero-length `?` is bounded.** `p?` is `Union(zero-length, single-step)`.
-   The zero-length branch is lowered without enumerating the graph: both
+2. **Zero-length `?`.** `p?` is `Union(zero-length, single-step)`. Both
    endpoints ground → equality test; one variable + one ground → bind the
-   variable to the ground endpoint. Both endpoints being variables — whether
-   two *distinct* ones (`?s p? ?o`) or the *same* one (`?x p? ?x`) — would have
-   to range the variable over every node in the graph, so those cases are
-   rejected with `UnsupportedPathOp` (returning the unit relation for `?x p? ?x`
-   would wrongly emit an unbound `?x` row). They belong with the recursive
-   `*`/`+` increment (#50) that routes through closure.
+   variable to the ground endpoint, with no graph access. Both endpoints
+   variables (`?s p? ?o`, `?x p? ?x`) → enumerate the graph's subjects and
+   objects via `translate.rs::graph_nodes_self_match` (HDB-141).
 
 3. **Hidden path variables are query-globally unique and user-unspellable.**
    The intermediate variables minted during path/blank-node lowering (the
@@ -534,13 +530,11 @@ Two design points worth recording:
    because the runtime reads an empty projection as `SELECT *` and would keep
    the hidden columns.
 
-Two Stage-1 approximations are documented in code: a zero-length `?` does not
-node-membership-check a ground endpoint (so `?s p? <urn:absent>` self-matches an
-absent term — see `zero_length_path`), and both-variable `?` endpoints are
-rejected rather than enumerated. Both belong with the recursive `*`/`+`
-increment (#50), which routes through closure and is the natural home for proper
-node-set semantics. Kleene `*`/`+` themselves remain rejected
-(`UnsupportedPathOp`).
+A zero-length path with a ground endpoint self-matches even when that term is
+absent from the graph (`?s p? <urn:absent>` binds `?s = <urn:absent>`). This is
+the SPARQL 1.1 section 18.5 rule, pinned by
+`tests/exec_property_paths.rs::zero_length_ground_endpoint_absent_from_graph_still_self_matches`
+(HDB-249); only the two-variable case ranges over the graph's nodes (HDB-141).
 
 ## Named-graph Update (#52, SPEC-28 phase 4 / S4+S6, #267)
 
