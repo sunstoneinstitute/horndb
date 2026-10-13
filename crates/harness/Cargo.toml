@@ -24,7 +24,6 @@ oxrdf = { workspace = true }
 oxsdatatypes = { workspace = true }
 oxrdfio = { workspace = true }
 oxttl = { workspace = true }
-oxigraph = { workspace = true }
 # SPARQL 1.1 syntax suite: grade positive/negative syntax cases by parse
 # accept/reject with the same grammar the SPEC-07 engine uses. The
 # `sep-0006`/`sparql-12` features match `horndb-sparql` so the harness and the

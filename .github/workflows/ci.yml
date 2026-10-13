@@ -100,9 +100,8 @@ jobs:
 
   # fmt + clippy in their own job so linting runs in PARALLEL with the test and
   # conformance jobs instead of serially in front of them. Clippy still runs
-  # every build script (the vendored GraphBLAS and oxrocksdb-sys C/C++ builds
-  # included), so this job needs the GraphBLAS build cache; all
-  # build jobs share the same GraphBLAS cache key, and rust-cache keys per job
+  # every build script (the vendored GraphBLAS C build included), so this job
+  # needs the GraphBLAS build cache; all build jobs share the same GraphBLAS cache key, and rust-cache keys per job
   # so their cargo caches don't clobber each other.
   #
   # cache-save-if: only runs on main save the cargo cache. PR runs restore
