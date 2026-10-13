@@ -93,6 +93,21 @@ pub fn run_selected(
         }
         let cases = manifest_loader(&manifest_path, suite)
             .with_context(|| format!("loading manifest {}", manifest_path.display()))?;
+        // An explicit id (no trailing `*`) that matches nothing is a typo or a
+        // renamed case; erroring keeps it from silently shrinking the subset.
+        let unmatched: Vec<&str> = suite_entry
+            .include
+            .iter()
+            .filter(|p| !p.ends_with('*') && !cases.iter().any(|c| pattern_matches(p, &c.id)))
+            .map(String::as_str)
+            .collect();
+        if !unmatched.is_empty() {
+            anyhow::bail!(
+                "suite {suite_name}: include id(s) match no case in {}: {}",
+                manifest_path.display(),
+                unmatched.join(", ")
+            );
+        }
         for case in &cases {
             // Selected IDs may be either exact (absolute IRI) or a
             // suffix (e.g. `#trivial-entail-true`) so they survive
@@ -498,6 +513,38 @@ mod tests {
         assert_eq!(
             by_id("negative-subclass-no-instance").status,
             Status::Passed
+        );
+    }
+
+    #[test]
+    fn unmatched_explicit_include_id_is_an_error() {
+        let mut suites = BTreeMap::new();
+        suites.insert(
+            "owl2".to_string(),
+            crate::selected::SuiteEntry {
+                manifest: "crates/harness/tests/fixtures/owl2/manifest.ttl".to_string(),
+                include: vec!["*".to_string(), "#no-such-case".to_string()],
+                expected_failures: vec![],
+                fetched: false,
+            },
+        );
+        let selected = Selected {
+            version: 1,
+            suites,
+            removed: vec![],
+            sparql_query: None,
+            sparql_update: None,
+            sparql_default_graph: None,
+        };
+        let mut engine = StubReasoner::new();
+        let err = run_selected(&mut engine, &selected, &fixtures(), false, &|p, s| {
+            crate::manifest::parse(p, s)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("owl2") && err.contains("#no-such-case"),
+            "{err}"
         );
     }
 
