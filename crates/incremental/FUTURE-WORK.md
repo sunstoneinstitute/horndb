@@ -53,11 +53,12 @@ with the SPEC-06 requirement ID and the trigger for promotion.
   tier pin-count bump — and the circuit materializes no presence set of its own.
   `Snapshot::logical_time()` is the storage commit version (ADR-0018: one
   clock). Readers and writers never block; a pin survives later ticks.
+- **Done (HDB-151)**: ADR-0018's "one tick, one storage batch" holds on the
+  engine write path — an Update commits its base rows and derived mirror as one
+  storage version. The engine still attaches no circuit input log: that one
+  logged batch is the durable tick boundary, and reopen re-seeds the circuit.
 - **Still deferred**: point queries against partially-applied in-flight deltas
-  mid-tick, and enforcing ADR-0018's "one tick, one storage batch" on the engine
-  write path (today an Update commits its base batch and its derived mirror as
-  two storage versions, so a snapshot between them sees base rows without their
-  consequences).
+  mid-tick.
 
 ### F5 — Closure-operator deltas (SPEC-05 integration) — DELIVERED (insertion + retraction)
 - **Done (2026-06-01, #44)**: `Circuit::add_closure_plan(Box<dyn ClosureRule>)`

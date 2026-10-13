@@ -523,3 +523,56 @@ fn reopen_from_wal_and_reattach_drops_stale_derived_rows() {
     assert!(b.circuit().unwrap().derived_base().is_empty());
     assert_derived_graph_mirrors_circuit(&mut b);
 }
+
+/// ADR-0018 (HDB-151): one Update is one tick is one storage commit version,
+/// so no snapshot can see base rows without their derived consequences. Holds
+/// on the drain path, the resync path, and `CLEAR`.
+#[test]
+fn one_update_commits_base_and_derived_as_one_version() {
+    for capacity in [1 << 10, 2] {
+        let mut b = transitive_backend(capacity);
+        let version = |b: &HornBackend| b.column_store().snapshot().version();
+
+        let v0 = version(&b);
+        let counts = b
+            .apply_quads(
+                vec![],
+                vec![
+                    (None, iri("http://ex/a"), iri(P), iri("http://ex/b")),
+                    (None, iri("http://ex/b"), iri(P), iri("http://ex/c")),
+                ],
+            )
+            .unwrap();
+        assert_eq!(counts.inserted, 2, "counts are base rows only");
+        assert_eq!(version(&b), v0 + 1, "capacity {capacity}: insert");
+        assert!(edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
+
+        let v1 = version(&b);
+        let counts = b
+            .apply_quads(
+                vec![(None, iri("http://ex/b"), iri(P), iri("http://ex/c"))],
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(counts.retracted, 1, "counts are base rows only");
+        assert_eq!(version(&b), v1 + 1, "capacity {capacity}: delete");
+        assert!(!edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
+        assert_derived_graph_mirrors_circuit(&mut b);
+
+        execute_update(
+            "INSERT DATA { <http://ex/b> <http://ex/p> <http://ex/c> }",
+            &mut b,
+        )
+        .unwrap();
+        let v2 = version(&b);
+        let cleared = b.clear_graph(&GraphTarget::DefaultGraph).unwrap();
+        assert_eq!(cleared, 2, "counts are base rows only");
+        assert_eq!(version(&b), v2 + 1, "capacity {capacity}: clear");
+        assert!(edges(&b).is_empty());
+        assert_derived_graph_mirrors_circuit(&mut b);
+    }
+}
+
+fn iri(s: &str) -> Term {
+    Term::Iri(s.to_owned())
+}

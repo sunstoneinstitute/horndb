@@ -5,9 +5,11 @@
 //! then its own change-feed subscriber: it drains the records the tick just
 //! published, nets them **per triple** (never one record at a time — a tick
 //! may carry both a `RuleInferred` and a `ClosureInferred` record for the same
-//! triple, and a withdrawal's per-triple total may reach −2), and mirrors the
-//! net into the reserved graph [`DERIVED_GRAPH`] with one idempotent tier
-//! batch. Derived rows live in their own graph, not the default graph, so a
+//! triple, and a withdrawal's per-triple total may reach −2), and hands the
+//! net back as rows for the reserved graph [`DERIVED_GRAPH`]. The caller
+//! commits them in the **same** storage batch as the base change (ADR-0018:
+//! one tick, one storage commit version), so no snapshot sees base rows
+//! without their consequences. Derived rows live in their own graph, not the default graph, so a
 //! user `DELETE DATA` of a derived triple and an `INSERT DATA` of an
 //! already-derived one can never desynchronise the circuit from storage.
 //!
@@ -27,7 +29,7 @@
 //! [`HornBackend`]: crate::exec::horn::HornBackend
 
 use horndb_incremental::{ChangeFeedRx, Circuit, DeltaRecord, DerivationKind, LagPolicy, TripleId};
-use horndb_storage::{ApplyReport, GraphId, Store as ColumnStore, TermId};
+use horndb_storage::{ApplyReport, GraphId, InternedQuad, Store as ColumnStore, TermId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
@@ -86,14 +88,21 @@ impl Wiring {
     /// Callers compute `retracts` from storage presence, which also holds
     /// rows bulk-loaded below the funnel; only rows in the asserted base are
     /// retracted, so its multiplicities never go negative (HDB-150).
-    /// Returns storage's report for that mirror batch (all zero when nothing
-    /// derived changed).
+    /// Returns the mirror rows without writing them: the caller folds them
+    /// into the base batch so the tick is one commit version (ADR-0018). Each
+    /// row is an exact flip against `store`, so the caller can subtract their
+    /// counts to recover the base-only report.
+    ///
+    /// Call this *before* committing the base batch. If that commit then
+    /// fails, the circuit is one tick ahead of storage until a reattach
+    /// re-seeds it; a failed commit is a write-ahead-log I/O error, which
+    /// already leaves the store unfit for writes.
     pub(crate) fn apply(
         &mut self,
         store: &ColumnStore,
         asserts: &[TripleId],
         retracts: &[TripleId],
-    ) -> ApplyReport {
+    ) -> Mirror {
         let report = {
             let c = self.circuit();
             for t in retracts {
@@ -106,20 +115,20 @@ impl Wiring {
             }
             c.tick()
         };
-        // Durability: the base change is already in the store's write-ahead
-        // log (SPEC-25 S3) and the mirror below goes through the same logged
-        // `Store` entry point, so nothing here needs its own log append.
+        // Durability: the caller commits base and mirror as one logged
+        // `Store` batch (SPEC-25 S3), so that one write-ahead-log record is the
+        // tick boundary. No circuit input log (`Circuit::attach_input_log`) is
+        // attached: replaying the store restores base and derived rows at one
+        // consistent version, and reattach re-seeds the circuit from them.
         let published = report.asserted_merged + report.derived_merged;
-        match self.drain(published) {
-            Some(records) => {
-                let (dels, adds) = net_derived(&records);
-                self.write(store, &dels, &adds)
-            }
+        let (dels, adds) = match self.drain(published) {
+            Some(records) => net_derived(&records),
             None => {
                 self.resyncs += 1;
                 self.resync(store)
             }
-        }
+        };
+        self.flips(store, &dels, &adds)
     }
 
     /// Attach-time seed: assert `base` (the default graph as it stands) in
@@ -133,7 +142,11 @@ impl Wiring {
             c.assert_triple(*t);
         }
         c.tick();
-        self.resync(store)
+        let (dels, adds) = self.resync(store);
+        let (dels, adds) = self.flips(store, &dels, &adds);
+        store
+            .apply_quad_ids(&dels, &adds)
+            .expect("derived-graph seed batch")
     }
 
     /// The `published` records the tick just put on the feed, or `None` if
@@ -149,10 +162,11 @@ impl Wiring {
         Some(out)
     }
 
-    /// Resubscribe, then make the derived graph equal the circuit's derived
-    /// base (`mult > 0`) with one diff batch. Whatever the old subscription
-    /// still held is discarded — the base already includes it.
-    fn resync(&mut self, store: &ColumnStore) -> ApplyReport {
+    /// Resubscribe, then return the `(dels, adds)` diff that makes the
+    /// derived graph equal the circuit's derived base (`mult > 0`). Whatever
+    /// the old subscription still held is discarded — the base already
+    /// includes it.
+    fn resync(&mut self, store: &ColumnStore) -> (Vec<TripleId>, Vec<TripleId>) {
         let capacity = self.capacity;
         let (rx, want) = {
             let c = self.circuit();
@@ -173,27 +187,28 @@ impl Wiring {
             .collect();
         let dels: Vec<TripleId> = have.difference(&want).copied().collect();
         let adds: Vec<TripleId> = want.difference(&have).copied().collect();
-        self.write(store, &dels, &adds)
+        (dels, adds)
     }
 
-    /// Mirror one net derived delta into the derived graph at the id level
-    /// (the ids are already dictionary ids, so no decode/re-intern round
-    /// trip). Goes through `Store::apply_quad_ids`, a logged `Store` entry
-    /// point (SPEC-25 S3), so the mirror replays with the rest of the store.
-    fn write(&self, store: &ColumnStore, dels: &[TripleId], adds: &[TripleId]) -> ApplyReport {
-        if dels.is_empty() && adds.is_empty() {
-            return ApplyReport::default();
-        }
+    /// One net derived delta as derived-graph quads (the ids are already
+    /// dictionary ids, so no decode/re-intern round trip), keeping only rows
+    /// that change storage: dels that are present, adds that are absent.
+    fn flips(&self, store: &ColumnStore, dels: &[TripleId], adds: &[TripleId]) -> Mirror {
         let dict = store.dictionary();
+        let snap = store.snapshot();
         let quad =
             |t: &TripleId| dict.quad_from_ids(self.graph, TermId(t.0), TermId(t.1), TermId(t.2));
-        let dels: Vec<_> = dels.iter().map(quad).collect();
-        let adds: Vec<_> = adds.iter().map(quad).collect();
-        store
-            .apply_quad_ids(&dels, &adds)
-            .expect("derived-graph mirror batch")
+        let present =
+            |t: &TripleId| snap.contains_quad(self.graph, TermId(t.0), TermId(t.1), TermId(t.2));
+        (
+            dels.iter().filter(|t| present(t)).map(quad).collect(),
+            adds.iter().filter(|t| !present(t)).map(quad).collect(),
+        )
     }
 }
+
+/// Derived-graph mirror rows `(dels, adds)` for one tick, each an exact flip.
+pub(crate) type Mirror = (Vec<InternedQuad>, Vec<InternedQuad>);
 
 /// Sum a tick's derived records per triple (SPEC-24 S3 consumer rule): a
 /// triple with total `> 0` became present, `< 0` became absent, `0` did not
