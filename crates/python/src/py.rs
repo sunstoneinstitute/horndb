@@ -373,7 +373,7 @@ impl Graph {
             let this = slf.borrow();
             let mut g = this.inner.lock().unwrap();
             for (ts, tp, to) in g.triples(s.as_ref(), p.as_ref(), o.as_ref()) {
-                g.remove(&ts, &tp, &to);
+                g.remove(&ts, &tp, &to).map_err(to_py_err)?;
             }
         }
         Ok(slf)
@@ -387,7 +387,7 @@ impl Graph {
             let this = slf.borrow();
             let mut g = this.inner.lock().unwrap();
             for (ts, tp, to) in g.triples(Some(&s), Some(&p), None) {
-                g.remove(&ts, &tp, &to);
+                g.remove(&ts, &tp, &to).map_err(to_py_err)?;
             }
             g.add(&s, &p, &o).map_err(to_py_err)?;
         }

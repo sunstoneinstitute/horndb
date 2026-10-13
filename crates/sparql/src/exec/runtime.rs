@@ -3534,7 +3534,7 @@ mod slot_differential {
     use super::*;
     use crate::algebra::translate::translate_query_with;
     use crate::exec::horn::HornBackend;
-    use crate::exec::Store;
+    use crate::exec::StoreTestExt;
     use crate::parser::parse_query;
     use crate::plan::planner;
     use crate::SparqlConfig;
@@ -4643,7 +4643,7 @@ mod query_scope_tests {
     use super::*;
     use crate::api::{execute_query, QueryAnswer};
     use crate::exec::horn::HornBackend;
-    use crate::exec::Store;
+    use crate::exec::StoreTestExt;
 
     /// One row with `?s <http://ex/p> <http://ex/o>` to hang expressions off.
     fn one_row_store() -> HornBackend {

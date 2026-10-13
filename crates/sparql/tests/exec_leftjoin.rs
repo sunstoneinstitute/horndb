@@ -10,7 +10,7 @@
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 
 const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
 

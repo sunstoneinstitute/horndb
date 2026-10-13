@@ -5,8 +5,9 @@
 use horndb_sparql::algebra::{Term, TriplePattern, Var};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
+use horndb_sparql::exec::Executor;
 use horndb_sparql::exec::ScanScope;
-use horndb_sparql::exec::{Executor, Store};
+use horndb_sparql::exec::StoreTestExt;
 
 fn iri(s: &str) -> Term {
     Term::Iri(format!("http://ex/{s}"))

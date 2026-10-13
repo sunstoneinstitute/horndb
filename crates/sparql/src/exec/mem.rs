@@ -566,6 +566,7 @@ impl Store for MemStore {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+    use crate::exec::StoreTestExt;
     use spargebra::algebra::GraphTarget;
     use spargebra::term::NamedNode;
 

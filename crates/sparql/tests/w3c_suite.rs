@@ -16,6 +16,7 @@ use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query_with, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::exec::{FullBackend, Store};
 use horndb_sparql::results::json::{write_ask_json, write_select_json};
 use horndb_sparql::{DefaultGraphMode, SparqlConfig};

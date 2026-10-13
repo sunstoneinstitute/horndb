@@ -11,6 +11,7 @@ use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
 use horndb_sparql::exec::mem::MemStore;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::exec::{FullBackend, Store};
 use horndb_sparql::parser::parse_update;
 use horndb_sparql::update::apply_update;

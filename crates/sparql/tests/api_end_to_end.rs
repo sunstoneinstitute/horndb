@@ -1,7 +1,7 @@
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 
 fn iri(s: &str) -> Term {
     Term::Iri(s.into())

@@ -9,7 +9,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::server::{build_router, flag_materialized, AppState};
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;

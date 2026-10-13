@@ -5,7 +5,7 @@ use horndb_sparql::algebra::translate::{translate_query, translate_query_with};
 use horndb_sparql::algebra::{DatasetSpec, Term};
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::parser::{parse_query, ParsedQuery};
 use horndb_sparql::SparqlConfig;
 

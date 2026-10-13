@@ -9,7 +9,7 @@
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::execute_query;
 use horndb_sparql::exec::horn::HornBackend;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use std::collections::HashMap;
 
 fn iri(s: &str) -> Term {
