@@ -7,7 +7,6 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 # Stage-1 keeps `rdf-12` (oxrdf 0.3's RDF 1.2 / triple-term feature) OFF.
 # The OWL 2 RL engine rejects triple-term inputs; lifting that is the
 # Stage-2 PR2 of the RDF 1.2 migration (see TASKS.md HIGH and CLAUDE.md).

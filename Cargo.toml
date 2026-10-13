@@ -132,7 +132,6 @@ axum = "0.8"
 # server (`crates/sparql/src/server/query.rs::arm_timeout`).
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tower = "0.5"
-hyper = "1"
 pretty_assertions = "1"
 # HDB-93 spike only (SPEC-25 S2 base-structure bench). Dev-dependencies of
 # `horndb-storage`'s `dict_base_bench` example; never a library dependency.

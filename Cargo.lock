@@ -1337,7 +1337,6 @@ dependencies = [
  "sparesults",
  "spargebra",
  "tempfile",
- "thiserror",
  "time",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
@@ -1375,7 +1374,6 @@ dependencies = [
 name = "horndb-ml"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "axum",
  "chrono",
  "horndb-metrics",
@@ -1404,7 +1402,6 @@ dependencies = [
  "serde",
  "smallvec",
  "syn 3.0.4",
- "thiserror",
  "toml 1.1.4+spec-1.1.0",
 ]
 
@@ -1438,7 +1435,6 @@ dependencies = [
  "horndb-storage",
  "horndb-wcoj",
  "http-body",
- "hyper",
  "insta",
  "md-5",
  "oxiri",
@@ -1471,7 +1467,6 @@ dependencies = [
 name = "horndb-storage"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "arrow",
  "bytemuck",
  "criterion 0.8.2",
@@ -1496,7 +1491,6 @@ dependencies = [
 name = "horndb-wcoj"
 version = "0.6.0"
 dependencies = [
- "anyhow",
  "arrow",
  "criterion 0.8.2",
  "horndb-metrics",

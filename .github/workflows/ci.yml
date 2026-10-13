@@ -146,6 +146,15 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
 
+      # Fails on a dependency no source file uses. An unused `oxigraph` once
+      # cost every CI job a cold RocksDB C++ build (docs/ci-build-speed.md).
+      - uses: taiki-e/install-action@37f7c5781271959fb65b6b35224e28652ff2b63d # v2.87.0
+        with:
+          tool: cargo-machete
+
+      - name: unused dependencies
+        run: cargo machete
+
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
