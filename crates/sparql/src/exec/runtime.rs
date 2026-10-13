@@ -53,20 +53,20 @@ pub(crate) struct QueryScope<'a> {
         std::collections::HashMap<(Option<Vec<KeyPart>>, Bindings, String), Term>,
     >,
     /// The solution `apply_extend` is evaluating: the row's slots minus every
-    /// column a `BIND`/`SELECT` expression added. Dropping those columns is
-    /// what lets a chain of `(BNODE(?x) AS ?b1) (BNODE(?x) AS ?b2)` see one
+    /// column an earlier `BNODE` extend added. Dropping those columns is what
+    /// lets a chain of `(BNODE(?x) AS ?b1) (BNODE(?x) AS ?b2)` see one
     /// solution. When set it replaces the environment in the key (the
     /// environment holds only the variables the argument mentions, so it
     /// differs between `BNODE(?x)` and `BNODE(?y)` of one row). `None` outside
-    /// `apply_extend`, where the key falls back to the environment. The
+    /// a `BNODE` extend, where the key falls back to the environment. The
     /// projection-pushdown passes keep every column below a `BNODE` extend
     /// (`mentions_bnode`), so pruning cannot merge two rows into one key.
     ///
-    /// ponytail: rows equal on every non-extended column are one solution —
-    /// bag duplicates, or rows told apart only by a subquery's `BIND`. Carry a
-    /// per-row id through `Batch` if a case ever needs them apart.
+    /// ponytail: rows equal on every column are one solution, so bag
+    /// duplicates share a node; and the memo holds one entry per row for the
+    /// whole query. Carry a hidden per-row id column if either matters.
     solution: std::cell::RefCell<Option<Vec<KeyPart>>>,
-    /// Variables bound by any `Extend` so far, excluded from `solution`.
+    /// Variables bound by a `BNODE` extend so far, excluded from `solution`.
     extended: std::cell::RefCell<HashSet<String>>,
     /// Labels handed out so far; the source of `_:bN`'s N.
     minted: std::cell::Cell<u64>,
@@ -333,9 +333,12 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         if existing.is_none() {
             schema.push(var.clone());
         }
+        let has_bnode = mentions_bnode(expr);
         let base: Vec<usize> = {
             let mut ext = self.scope.extended.borrow_mut();
-            ext.insert(var.name().to_owned());
+            if has_bnode {
+                ext.insert(var.name().to_owned());
+            }
             (0..batch.schema.len())
                 .filter(|&i| !ext.contains(batch.schema[i].name()))
                 .collect()
@@ -343,8 +346,10 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         let mut out_rows = Vec::with_capacity(batch.rows.len());
         for r in &batch.rows {
             let env = self.decode_subset(r, &batch.schema, &want)?;
-            *self.scope.solution.borrow_mut() =
-                Some(base.iter().map(|&i| r.0[i].key_part()).collect());
+            if has_bnode {
+                *self.scope.solution.borrow_mut() =
+                    Some(base.iter().map(|&i| r.0[i].key_part()).collect());
+            }
             let slot = eval_expr_to_term(expr, &env, &self.scope);
             *self.scope.solution.borrow_mut() = None;
             let slot = match slot? {
@@ -4787,6 +4792,27 @@ mod query_scope_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get("a"), rows[0].get("b"));
         assert_ne!(rows[0].get("a"), rows[1].get("a"), "rows must not share");
+    }
+
+    /// HDB-248: rows that differ only in a column a plain `BIND` added are
+    /// still different solutions, so they must not share a `BNODE` node.
+    #[test]
+    fn bnode_separates_rows_told_apart_by_a_bind() {
+        let distinct_b = |q: &str| {
+            let rows = solutions(q);
+            assert_eq!(rows.len(), 2, "{q}");
+            assert_ne!(rows[0].get("b"), rows[1].get("b"), "{q}");
+        };
+        distinct_b(
+            "SELECT ?t (BNODE(SUBSTR(?t, 1, 1)) AS ?b) \
+             WHERE { { BIND(\"A1\" AS ?t) } UNION { BIND(\"A2\" AS ?t) } }",
+        );
+        distinct_b(
+            "SELECT ?t (BNODE(STR(?s)) AS ?b) WHERE { \
+             { ?s ?p ?o BIND(\"A\" AS ?t) } UNION { ?s ?p ?o BIND(\"B\" AS ?t) } }",
+        );
+        // `BNODE` nested inside another expression is scoped the same way.
+        distinct_b("SELECT (STR(BNODE(\"x\")) AS ?b) WHERE { VALUES ?z { 1 2 } }");
     }
 
     /// `RAND`/`UUID`/`STRUUID` are per call — they must NOT pick up the

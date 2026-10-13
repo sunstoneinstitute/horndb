@@ -164,10 +164,6 @@ fn prune(node: LogicalPlan, demanded: &HashSet<String>) -> LogicalPlan {
         Filter { expr, inner } => {
             let mut d = demanded.clone();
             referenced_vars(&expr, &mut d);
-            // `BNODE` needs the whole solution; see `plan::pushdown::prune`.
-            if mentions_bnode(&expr) {
-                d.extend(schema(&inner).iter().map(|v| v.name().to_owned()));
-            }
             let pi = prune(*inner, &d);
             let node2 = LogicalPlan::Filter {
                 expr,
