@@ -470,6 +470,7 @@ code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
   quads from `Dictionary::quad_from_ids`. Replay runs the tier's own insert
   and apply paths, so it is charged to the `storage_load_phase_*` metrics
   like a bulk load.
+<<<<<<< Updated upstream
 - **Call site in `serve`** (HDB-233, `crates/sparql/src/bin/serve.rs`). Set
   `[server].data_dir` and startup does
   `HornBackend::with_store(Store::open(&data_dir)?)`, before the listener
@@ -492,6 +493,11 @@ code: `src/wal.rs` plus the `logged` wrapper in `store.rs`.
   lock with it and cannot reopen the directory in the same process; drop the
   store instead, which is also the more faithful kill (a real one closes the
   file descriptors too).
+=======
+- **Call site for HDB-233 (`serve`).** `HornBackend::with_store(Store::open(
+  &data_dir)?)` at startup; call `Store::checkpoint()` on a schedule
+  (SPEC-24 S5 owns the cadence) and on clean shutdown. Not done here. Also not in: a directory lock against two processes, WAL metrics.
+>>>>>>> Stashed changes
 - **SPEC-24 S5 input records** (HDB-52, ADR-0018). Kinds `Input` (4) and
   `TickCommit` (5) share the framing and the fsync policy but carry their own
   bodies, so `decode` returns `Record::Input` / `Record::TickCommit` instead of
@@ -557,7 +563,8 @@ once the pin drops and a later `compact()` reclaims the row.
 
 **Not durable.** Nothing records which predicates were demoted, so `Store::open`
 deletes `<dir>/cold` and replays every partition warm. Durable placement needs a
-manifest record; see the `ponytail:` comment in `Store::open_with`.
+manifest record; see the `ponytail:` comment in `Store::open_with`. Tracked as
+HDB-234.
 
 Placement policy, access statistics, and the `HotSetAdvisor` bias are separate
 tasks. `TierStats.bytes_estimated` stays the warm+cold total; `bytes_cold`
