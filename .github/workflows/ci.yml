@@ -35,7 +35,7 @@ jobs:
   # build does not block merging. The `can-be-tested` label overrides the
   # docs-only skip — a maintainer can apply it to force a full build.
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       build: ${{ steps.decide.outputs.build }}
@@ -111,7 +111,7 @@ jobs:
   lint:
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
@@ -169,7 +169,7 @@ jobs:
   tests:
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
@@ -242,7 +242,7 @@ jobs:
   conformance:
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
@@ -377,7 +377,7 @@ jobs:
   python-rdflib-compat:
     needs: gate
     if: needs.gate.outputs.build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
@@ -417,7 +417,7 @@ jobs:
   checks:
     needs: [gate, lint, tests, conformance, python-rdflib-compat]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     steps:
       - name: Fail if any job failed or was cancelled
