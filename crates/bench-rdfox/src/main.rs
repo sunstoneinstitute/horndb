@@ -288,11 +288,12 @@ fn run_materialize(
 
     // Optional: dump the materialized closure to N-Triples so a
     // lightweight serve binary can load it without the OWL/GraphBLAS stack.
+    let mut dump_skipped_literal_subject = 0;
     if let Some(path) = dump_nt {
         let triples = engine
             .materialized_triples()
             .context("materialized_triples returned None after a successful load")?;
-        write_ntriples(path, &triples)
+        dump_skipped_literal_subject = write_ntriples(path, &triples)
             .with_context(|| format!("writing materialized N-Triples to {}", path.display()))?;
     }
     let secs = reason.as_secs_f64();
@@ -318,29 +319,36 @@ fn run_materialize(
         ("apply_ms", ms(timings.apply)),
         ("input_tps", format!("{tps_in:.1}")),
         ("output_tps", format!("{tps_out:.1}")),
+        // Closure triples left out of `--dump-nt` (literal subject), so the
+        // dump holds `total - dump_skipped_literal_subject` lines.
+        (
+            "dump_skipped_literal_subject",
+            dump_skipped_literal_subject.to_string(),
+        ),
     ]);
     Ok(())
 }
 
 /// Serialize lexical `(s, p, o)` triples (as produced by
-/// `Engine::materialized_triples`) to an N-Triples file.
+/// `Engine::materialized_triples`) to an N-Triples file. Returns how many
+/// triples were left out because their subject is a literal.
 ///
 /// The term lexical convention from the engine is: IRIs are bare,
 /// blank nodes carry the `_:` prefix, and literals already arrive in
 /// N-Triples object form (`"v"@lang` or `"v"^^<dt>`). We only need to
 /// angle-bracket IRIs; blank nodes and literals pass through verbatim.
-fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<()> {
+fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<usize> {
     use std::io::Write;
     let file = File::create(path)?;
     let mut w = std::io::BufWriter::new(file);
     let mut line = String::new();
     let mut skipped_literal_subject = 0usize;
     for (s, p, o) in triples {
-        // OWL 2 RL datatype rules (dt-type*) can derive `rdf:type` triples
-        // whose subject is a literal (e.g. a dateTime literal typed as
-        // xsd:date). N-Triples forbids literal subjects, and such triples
-        // are not addressable as subjects in standard SPARQL, so drop them
-        // from the flat dump rather than emit illegal syntax.
+        // OWL 2 RL runs over generalized RDF: prp-rng on a datatype
+        // property (`p rdfs:range xsd:string`) derives `"v" rdf:type
+        // xsd:string`, and cax-sco lifts it up the XSD lattice. The engine
+        // keeps these for dt-not-type checking, but N-Triples forbids
+        // literal subjects, so drop them here and report the count.
         if s.starts_with('"') {
             skipped_literal_subject += 1;
             continue;
@@ -356,13 +364,7 @@ fn write_ntriples(path: &Path, triples: &[(String, String, String)]) -> Result<(
         w.write_all(line.as_bytes())?;
     }
     w.flush()?;
-    if skipped_literal_subject > 0 {
-        eprintln!(
-            "write_ntriples: skipped {skipped_literal_subject} triple(s) with a literal subject \
-             (not representable in N-Triples)"
-        );
-    }
-    Ok(())
+    Ok(skipped_literal_subject)
 }
 
 /// Append one N-Triples term.
@@ -410,5 +412,34 @@ fn escape_nt_literal(out: &mut String, value: &str) {
             '\t' => out.push_str("\\t"),
             other => out.push(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_ntriples_reports_skipped_literal_subjects() {
+        let path = std::env::temp_dir().join(format!("hdb168-{}.nt", std::process::id()));
+        let t = |s: &str, p: &str, o: &str| (s.to_string(), p.to_string(), o.to_string());
+        let triples = [
+            t(
+                "http://e/a",
+                "http://e/p",
+                "\"x\"^^<http://www.w3.org/2001/XMLSchema#string>",
+            ),
+            // prp-rng over a datatype property: generalized RDF, not N-Triples.
+            t(
+                "\"x\"^^<http://www.w3.org/2001/XMLSchema#string>",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "http://www.w3.org/2001/XMLSchema#string",
+            ),
+        ];
+        let skipped = write_ntriples(&path, &triples).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(skipped, 1);
+        assert_eq!(written.lines().count(), 1);
     }
 }
