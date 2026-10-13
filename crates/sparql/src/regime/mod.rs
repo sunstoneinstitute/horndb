@@ -20,9 +20,15 @@ pub mod simple;
 /// hold the static W3C identifier — but the trait surface is the
 /// integration point SPEC-04 will plug rule logic into in Stage 2.
 pub trait EntailmentRegime: Send + Sync {
-    /// Stable identifier: either `"simple"` or the W3C entailment
-    /// regime IRI for OWL 2 RL.
+    /// Stable identifier: either `"simple"` or a W3C SPARQL 1.1
+    /// entailment regime IRI from the registry (e.g. `ent:OWL-RDF-Based`).
     fn name(&self) -> &'static str;
+
+    /// OWL profile IRI, advertised as `sd:supportedEntailmentProfile`
+    /// next to the regime. `None` when the regime has no profile.
+    fn profile(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 impl Default for Box<dyn EntailmentRegime> {
