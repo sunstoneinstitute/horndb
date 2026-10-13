@@ -726,9 +726,11 @@ operation (SPARQL 1.1 §4.1.4). `apply_delete_insert` takes one
 `hdb<tag>_<label>_r<row>` (reusing `horndb_storage::loader::scope_blank_node_label`,
 the same rename `LOAD` applies to a parsed document). Without the per-operation
 half, `_:b` written by two operations of one request collapsed onto one node
-(W3C `insert-where-same-bnode`, HDB-137). `INSERT DATA` is deliberately *not*
-scoped this way: its quads are one operation, and the same label inside it must
-stay the same node (W3C `insert-data-same-bnode`).
+(W3C `insert-where-same-bnode`, HDB-137). `INSERT DATA` needs no such scoping:
+the parser (spargebra) already rejects a label shared by two `INSERT DATA`
+operations of one request ("cannot be shared by multiple blocks"), as the
+SPARQL 1.1 grammar requires. Within one operation the same label stays the same
+node (W3C `insert-data-same-bnode`); HDB-155.
 
 **Turtle/TriG base IRI.** `LOAD` passes the source IRI as the parser base, so a
 document with relative IRIs (`<s> <p> <o> .`) resolves against its own IRI —
