@@ -2624,8 +2624,114 @@ impl Store for HornBackend {
     }
 }
 
+/// Result of [`compile_bgp_patterns`].
+enum CompiledBgp {
+    /// No solutions: a constant missing from the dictionary, or a ground
+    /// pattern absent from the snapshot.
+    Empty,
+    /// Every pattern is ground and present: the unit relation.
+    Unit,
+    Patterns {
+        /// SPARQL variable name -> WCOJ var index, first-appearance order.
+        var_index: HashMap<String, u8>,
+        /// `(original, alias)` for variables repeated within one pattern.
+        diagonal_filters: Vec<(String, String)>,
+        wpatterns: Vec<WPattern>,
+    },
+}
+
+/// Shared prologue of `scan_bgp`, `scan_bgp_ids`, `count_bgp` and
+/// `count_bgp_grouped`: lower `patterns` to WCOJ patterns over dictionary ids.
+/// Callers map `Empty`/`Unit` to their own result type.
+fn compile_bgp_patterns(
+    patterns: &[TriplePattern],
+    dict: &horndb_storage::Dictionary,
+    snapshot: &QuerySource,
+) -> Result<CompiledBgp> {
+    // SPARQL variable name -> WCOJ var index, first-appearance order.
+    let mut var_index: HashMap<String, u8> = HashMap::new();
+    // (original, alias) pairs introduced for variables repeated
+    // *within a single pattern* — the trie executor must not see the
+    // same WVar twice in one pattern, so the repeat becomes a fresh
+    // alias plus a post-filter to the diagonal.
+    let mut diagonal_filters: Vec<(String, String)> = Vec::new();
+    let mut wpatterns: Vec<WPattern> = Vec::new();
+    let mut ground: Vec<WTriple> = Vec::new();
+
+    for pattern in patterns {
+        let mut seen_here: HashSet<&str> = HashSet::new();
+        let mut slots = [WTerm::Var(WVar(0)); 3];
+        let mut all_bound = true;
+        let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
+        for (slot_no, term) in slot_terms.into_iter().enumerate() {
+            slots[slot_no] = match term {
+                Term::Var(v) => {
+                    all_bound = false;
+                    let name = v.name();
+                    let effective = if seen_here.contains(name) {
+                        // The leading space guarantees freshness: SPARQL
+                        // VARNAME can never contain U+0020, so this alias
+                        // cannot collide with any parsed user variable.
+                        // It lives only in the internal var table and the
+                        // diagonal-filter list, and is stripped from rows
+                        // before they leave scan_bgp.
+                        let alias = format!(" dup_{name}_{slot_no}");
+                        diagonal_filters.push((name.to_owned(), alias.clone()));
+                        alias
+                    } else {
+                        seen_here.insert(name);
+                        name.to_owned()
+                    };
+                    let idx = match var_index.get(&effective) {
+                        Some(&i) => i,
+                        None => {
+                            let next = var_index.len();
+                            if next > u8::MAX as usize {
+                                return Err(SparqlError::Executor(
+                                    "BGP exceeds 256 distinct variables".into(),
+                                ));
+                            }
+                            var_index.insert(effective, next as u8);
+                            next as u8
+                        }
+                    };
+                    WTerm::Var(WVar(idx))
+                }
+                constant => {
+                    let ox = algebra_to_oxrdf(constant)?;
+                    match dict.get(&ox) {
+                        Some(id) => WTerm::Bound(id.0),
+                        // A constant the dictionary has never seen
+                        // cannot match any stored triple.
+                        None => return Ok(CompiledBgp::Empty),
+                    }
+                }
+            };
+        }
+        if all_bound {
+            let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
+            ground.push(WTriple::new(ids[0], ids[1], ids[2]));
+        } else {
+            wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
+        }
+    }
+
+    // Fully-ground patterns are membership tests against the snapshot;
+    // any miss zeroes the whole BGP.
+    if ground.iter().any(|t| !snapshot.contains(t)) {
+        return Ok(CompiledBgp::Empty);
+    }
+    if wpatterns.is_empty() {
+        return Ok(CompiledBgp::Unit);
+    }
+    Ok(CompiledBgp::Patterns {
+        var_index,
+        diagonal_filters,
+        wpatterns,
+    })
+}
+
 impl Executor for HornBackend {
-    // keep in sync with scan_bgp_ids (its compilation loop is a verbatim copy of this one)
     fn scan_bgp(
         &self,
         patterns: &[TriplePattern],
@@ -2648,83 +2754,17 @@ impl Executor for HornBackend {
         let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
-        // SPARQL variable name -> WCOJ var index, first-appearance order.
-        let mut var_index: HashMap<String, u8> = HashMap::new();
-        // (original, alias) pairs introduced for variables repeated
-        // *within a single pattern* — the trie executor must not see the
-        // same WVar twice in one pattern, so the repeat becomes a fresh
-        // alias plus a post-filter to the diagonal.
-        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
-        let mut wpatterns: Vec<WPattern> = Vec::new();
-        let mut ground: Vec<WTriple> = Vec::new();
-
-        for pattern in patterns {
-            let mut seen_here: HashSet<&str> = HashSet::new();
-            let mut slots = [WTerm::Var(WVar(0)); 3];
-            let mut all_bound = true;
-            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
-            for (slot_no, term) in slot_terms.into_iter().enumerate() {
-                slots[slot_no] = match term {
-                    Term::Var(v) => {
-                        all_bound = false;
-                        let name = v.name();
-                        let effective = if seen_here.contains(name) {
-                            // The leading space guarantees freshness: SPARQL
-                            // VARNAME can never contain U+0020, so this alias
-                            // cannot collide with any parsed user variable.
-                            // It lives only in the internal var table and the
-                            // diagonal-filter list, and is stripped from rows
-                            // before they leave scan_bgp.
-                            let alias = format!(" dup_{name}_{slot_no}");
-                            diagonal_filters.push((name.to_owned(), alias.clone()));
-                            alias
-                        } else {
-                            seen_here.insert(name);
-                            name.to_owned()
-                        };
-                        let idx = match var_index.get(&effective) {
-                            Some(&i) => i,
-                            None => {
-                                let next = var_index.len();
-                                if next > u8::MAX as usize {
-                                    return Err(SparqlError::Executor(
-                                        "BGP exceeds 256 distinct variables".into(),
-                                    ));
-                                }
-                                var_index.insert(effective, next as u8);
-                                next as u8
-                            }
-                        };
-                        WTerm::Var(WVar(idx))
-                    }
-                    constant => {
-                        let ox = algebra_to_oxrdf(constant)?;
-                        match dict.get(&ox) {
-                            Some(id) => WTerm::Bound(id.0),
-                            // A constant the dictionary has never seen
-                            // cannot match any stored triple.
-                            None => return Ok(Box::new(std::iter::empty())),
-                        }
-                    }
-                };
-            }
-            if all_bound {
-                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
-                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
-            } else {
-                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
-            }
-        }
-
-        // Fully-ground patterns are membership tests against the snapshot;
-        // any miss zeroes the whole BGP.
-        if ground.iter().any(|t| !snapshot.contains(t)) {
-            return Ok(Box::new(std::iter::empty()));
-        }
-        // All patterns ground and present: one empty row (ASK semantics).
-        if wpatterns.is_empty() {
-            return Ok(Box::new(std::iter::once(Bindings::new())));
-        }
+        let (var_index, diagonal_filters, wpatterns) =
+            match compile_bgp_patterns(patterns, dict, &snapshot)? {
+                CompiledBgp::Empty => return Ok(Box::new(std::iter::empty())),
+                // All patterns ground and present: one empty row (ASK semantics).
+                CompiledBgp::Unit => return Ok(Box::new(std::iter::once(Bindings::new()))),
+                CompiledBgp::Patterns {
+                    var_index,
+                    diagonal_filters,
+                    wpatterns,
+                } => (var_index, diagonal_filters, wpatterns),
+            };
 
         let bgp = WBgp::new(wpatterns);
         let mut rows: Vec<Bindings> = Vec::new();
@@ -2885,7 +2925,6 @@ impl Executor for HornBackend {
     /// Scan a BGP returning id-carrying slot rows without decoding TermId → String.
     /// The diagonal filter is applied inline by comparing raw ids; aliases are
     /// excluded from the output schema.
-    // keep in sync with scan_bgp
     fn scan_bgp_ids(
         &self,
         patterns: &[crate::algebra::TriplePattern],
@@ -2908,69 +2947,16 @@ impl Executor for HornBackend {
         let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
-        // === VERBATIM copy from scan_bgp: pattern compilation ===
-        let mut var_index: HashMap<String, u8> = HashMap::new();
-        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
-        let mut wpatterns: Vec<WPattern> = Vec::new();
-        let mut ground: Vec<WTriple> = Vec::new();
-
-        for pattern in patterns {
-            let mut seen_here: HashSet<&str> = HashSet::new();
-            let mut slots = [WTerm::Var(WVar(0)); 3];
-            let mut all_bound = true;
-            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
-            for (slot_no, term) in slot_terms.into_iter().enumerate() {
-                slots[slot_no] = match term {
-                    Term::Var(v) => {
-                        all_bound = false;
-                        let name = v.name();
-                        let effective = if seen_here.contains(name) {
-                            let alias = format!(" dup_{name}_{slot_no}");
-                            diagonal_filters.push((name.to_owned(), alias.clone()));
-                            alias
-                        } else {
-                            seen_here.insert(name);
-                            name.to_owned()
-                        };
-                        let idx = match var_index.get(&effective) {
-                            Some(&i) => i,
-                            None => {
-                                let next = var_index.len();
-                                if next > u8::MAX as usize {
-                                    return Err(SparqlError::Executor(
-                                        "BGP exceeds 256 distinct variables".into(),
-                                    ));
-                                }
-                                var_index.insert(effective, next as u8);
-                                next as u8
-                            }
-                        };
-                        WTerm::Var(WVar(idx))
-                    }
-                    constant => {
-                        let ox = algebra_to_oxrdf(constant)?;
-                        match dict.get(&ox) {
-                            Some(id) => WTerm::Bound(id.0),
-                            None => return Ok(Batch::empty()),
-                        }
-                    }
-                };
-            }
-            if all_bound {
-                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
-                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
-            } else {
-                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
-            }
-        }
-
-        if ground.iter().any(|t| !snapshot.contains(t)) {
-            return Ok(Batch::empty());
-        }
-        if wpatterns.is_empty() {
-            return Ok(Batch::unit());
-        }
-        // === END verbatim copy ===
+        let (var_index, diagonal_filters, wpatterns) =
+            match compile_bgp_patterns(patterns, dict, &snapshot)? {
+                CompiledBgp::Empty => return Ok(Batch::empty()),
+                CompiledBgp::Unit => return Ok(Batch::unit()),
+                CompiledBgp::Patterns {
+                    var_index,
+                    diagonal_filters,
+                    wpatterns,
+                } => (var_index, diagonal_filters, wpatterns),
+            };
 
         // Output schema: var_index entries in ascending WVar (u8) order,
         // minus diagonal aliases (stripped from output like scan_bgp does).
@@ -3122,7 +3108,6 @@ impl Executor for HornBackend {
     /// needs a per-row "diagonal" filter to drop off-diagonal WCOJ rows, which
     /// cannot be done by a bare `num_rows()` sum. Returning `None` keeps the
     /// result correct via the caller's scan+len fallback.
-    // keep in sync with scan_bgp_ids
     fn count_bgp(
         &self,
         patterns: &[TriplePattern],
@@ -3143,68 +3128,16 @@ impl Executor for HornBackend {
         let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
-        let mut var_index: HashMap<String, u8> = HashMap::new();
-        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
-        let mut wpatterns: Vec<WPattern> = Vec::new();
-        let mut ground: Vec<WTriple> = Vec::new();
-
-        for pattern in patterns {
-            let mut seen_here: HashSet<&str> = HashSet::new();
-            let mut slots = [WTerm::Var(WVar(0)); 3];
-            let mut all_bound = true;
-            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
-            for (slot_no, term) in slot_terms.into_iter().enumerate() {
-                slots[slot_no] = match term {
-                    Term::Var(v) => {
-                        all_bound = false;
-                        let name = v.name();
-                        let effective = if seen_here.contains(name) {
-                            let alias = format!(" dup_{name}_{slot_no}");
-                            diagonal_filters.push((name.to_owned(), alias.clone()));
-                            alias
-                        } else {
-                            seen_here.insert(name);
-                            name.to_owned()
-                        };
-                        let idx = match var_index.get(&effective) {
-                            Some(&i) => i,
-                            None => {
-                                let next = var_index.len();
-                                if next > u8::MAX as usize {
-                                    return Err(SparqlError::Executor(
-                                        "BGP exceeds 256 distinct variables".into(),
-                                    ));
-                                }
-                                var_index.insert(effective, next as u8);
-                                next as u8
-                            }
-                        };
-                        WTerm::Var(WVar(idx))
-                    }
-                    constant => {
-                        let ox = algebra_to_oxrdf(constant)?;
-                        match dict.get(&ox) {
-                            Some(id) => WTerm::Bound(id.0),
-                            None => return Ok(Some(0)),
-                        }
-                    }
-                };
-            }
-            if all_bound {
-                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
-                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
-            } else {
-                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
-            }
-        }
-
-        if ground.iter().any(|t| !snapshot.contains(t)) {
-            return Ok(Some(0));
-        }
-        if wpatterns.is_empty() {
+        let (diagonal_filters, wpatterns) = match compile_bgp_patterns(patterns, dict, &snapshot)? {
+            CompiledBgp::Empty => return Ok(Some(0)),
             // All patterns ground and present: one solution (ASK/unit).
-            return Ok(Some(1));
-        }
+            CompiledBgp::Unit => return Ok(Some(1)),
+            CompiledBgp::Patterns {
+                diagonal_filters,
+                wpatterns,
+                ..
+            } => (diagonal_filters, wpatterns),
+        };
 
         // A within-pattern repeated variable needs the per-row diagonal filter;
         // a bare row-count sum would overcount. Fall back to scan+len.
@@ -3241,7 +3174,6 @@ impl Executor for HornBackend {
     /// fallback supplies the (identical) semantics. Empty `patterns`/`keys`
     /// are the caller's job (`GroupCountScanOp` routes no-key shapes through
     /// `count_bgp`).
-    // keep in sync with scan_bgp_ids
     fn count_bgp_grouped(
         &self,
         patterns: &[TriplePattern],
@@ -3257,74 +3189,21 @@ impl Executor for HornBackend {
         let snapshot = self.query_source(&resolved, patterns)?;
         let dict = self.store.dictionary();
 
-        // === VERBATIM copy from scan_bgp: pattern compilation ===
-        let mut var_index: HashMap<String, u8> = HashMap::new();
-        let mut diagonal_filters: Vec<(String, String)> = Vec::new();
-        let mut wpatterns: Vec<WPattern> = Vec::new();
-        let mut ground: Vec<WTriple> = Vec::new();
-
-        for pattern in patterns {
-            let mut seen_here: HashSet<&str> = HashSet::new();
-            let mut slots = [WTerm::Var(WVar(0)); 3];
-            let mut all_bound = true;
-            let slot_terms = [&pattern.subject, &pattern.predicate, &pattern.object];
-            for (slot_no, term) in slot_terms.into_iter().enumerate() {
-                slots[slot_no] = match term {
-                    Term::Var(v) => {
-                        all_bound = false;
-                        let name = v.name();
-                        let effective = if seen_here.contains(name) {
-                            let alias = format!(" dup_{name}_{slot_no}");
-                            diagonal_filters.push((name.to_owned(), alias.clone()));
-                            alias
-                        } else {
-                            seen_here.insert(name);
-                            name.to_owned()
-                        };
-                        let idx = match var_index.get(&effective) {
-                            Some(&i) => i,
-                            None => {
-                                let next = var_index.len();
-                                if next > u8::MAX as usize {
-                                    return Err(SparqlError::Executor(
-                                        "BGP exceeds 256 distinct variables".into(),
-                                    ));
-                                }
-                                var_index.insert(effective, next as u8);
-                                next as u8
-                            }
-                        };
-                        WTerm::Var(WVar(idx))
-                    }
-                    constant => {
-                        let ox = algebra_to_oxrdf(constant)?;
-                        match dict.get(&ox) {
-                            Some(id) => WTerm::Bound(id.0),
-                            // Unknown constant: no stored triple can match —
-                            // zero groups (parity with the empty scan).
-                            None => return Ok(Some(Vec::new())),
-                        }
-                    }
-                };
-            }
-            if all_bound {
-                let ids: Vec<u64> = slots.iter().map(|t| t.as_bound().unwrap()).collect();
-                ground.push(WTriple::new(ids[0], ids[1], ids[2]));
-            } else {
-                wpatterns.push(WPattern::new(slots[0], slots[1], slots[2]));
-            }
-        }
-
-        if ground.iter().any(|t| !snapshot.contains(t)) {
-            return Ok(Some(Vec::new()));
-        }
-        // === END verbatim copy ===
-
-        // All patterns ground (unit relation) — no key columns exist here;
-        // let the scan-based fallback supply the Unbound-key semantics.
-        if wpatterns.is_empty() {
-            return Ok(None);
-        }
+        let (var_index, diagonal_filters, wpatterns) =
+            match compile_bgp_patterns(patterns, dict, &snapshot)? {
+                // Unknown constant or absent ground pattern: zero groups
+                // (parity with the empty scan).
+                CompiledBgp::Empty => return Ok(Some(Vec::new())),
+                // All patterns ground (unit relation) — no key columns exist
+                // here; let the scan-based fallback supply the Unbound-key
+                // semantics.
+                CompiledBgp::Unit => return Ok(None),
+                CompiledBgp::Patterns {
+                    var_index,
+                    diagonal_filters,
+                    wpatterns,
+                } => (var_index, diagonal_filters, wpatterns),
+            };
         // A within-pattern repeated variable needs the per-row diagonal
         // filter, which a key-column hash cannot apply. Fall back.
         if !diagonal_filters.is_empty() {
