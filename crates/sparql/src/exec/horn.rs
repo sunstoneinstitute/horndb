@@ -194,8 +194,8 @@ use crate::exec::{
 use arrow::array::UInt64Array;
 use horndb_metrics::labels::LoadPhase;
 use horndb_storage::{
-    GraphId, InternedQuad, PinnedSnapshot, PlacementHints, RebalanceReport, Store as ColumnStore,
-    StoreSnapshot, TermId, TieringConfig, DEFAULT_GRAPH,
+    ApplyReport, GraphId, InternedQuad, PinnedSnapshot, PlacementHints, RebalanceReport,
+    Store as ColumnStore, StoreSnapshot, TermId, TieringConfig, DEFAULT_GRAPH,
 };
 use horndb_wcoj::estimator::StatsEstimator;
 use horndb_wcoj::executor::Executor as WcojExecutor;
@@ -857,6 +857,71 @@ impl HornBackend {
             .intern(term)
             .map(|id| id.0)
             .map_err(|e| SparqlError::Executor(format!("intern: {e}")))
+    }
+
+    /// `Store::apply_quads` without a circuit: one batch, base rows only.
+    fn apply_plain(
+        &self,
+        del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+        add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+    ) -> Result<ApplyReport> {
+        self.store
+            .apply_quads(del_rows, add_rows)
+            .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))
+    }
+
+    /// `Store::apply_quads` with a circuit: tick on the batch's default-graph
+    /// flips, then commit the base rows and the tick's derived mirror as
+    /// **one** storage batch, so the tick is one commit version (ADR-0018).
+    /// Returns the base-only report (the mirror rows are exact flips, so
+    /// their counts subtract out) and whether the mirror changed anything.
+    #[cfg(feature = "incremental")]
+    fn apply_with_circuit(
+        &mut self,
+        del_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+        add_rows: &[(GraphId, OxTerm, OxTerm, OxTerm)],
+    ) -> Result<(ApplyReport, bool)> {
+        let (asserts, retracts) = self.default_graph_flips(del_rows, add_rows)?;
+        let dict = self.store.dictionary();
+        // Same resolution as `Store::apply_quads`: dels looked up, adds interned.
+        let mut dels: Vec<InternedQuad> = del_rows
+            .iter()
+            .filter_map(|(g, s, p, o)| {
+                Some(dict.quad_from_ids(*g, dict.get(s)?, dict.get(p)?, dict.get(o)?))
+            })
+            .collect();
+        let t_intern = std::time::Instant::now();
+        let mut adds = add_rows
+            .iter()
+            .map(|(g, s, p, o)| dict.intern_quad(*g, s, p, o))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| SparqlError::Executor(format!("intern: {e}")))?;
+        if !add_rows.is_empty() {
+            record_load_phase(LoadPhase::Intern, t_intern.elapsed(), add_rows.len() as u64);
+        }
+        let wiring = self.circuit.as_mut().expect("caller checked");
+        // The count subtraction below needs base rows and mirror rows to be
+        // disjoint; Update and GSP cannot write the reserved derived graph.
+        debug_assert!(
+            dels.iter()
+                .chain(&adds)
+                .all(|q| q.graph() != wiring.graph()),
+            "base row in the circuit's derived graph"
+        );
+        let ((md, ma), fed) = wiring.apply(&self.store, &asserts, &retracts, &[]);
+        let (nd, na) = (md.len(), ma.len());
+        dels.extend(md);
+        adds.extend(ma);
+        let mut report = match self.store.apply_quad_ids(&dels, &adds) {
+            Ok(r) => r,
+            Err(e) => {
+                wiring.rollback(fed);
+                return Err(SparqlError::Executor(format!("storage apply_quads: {e}")));
+            }
+        };
+        report.retracted -= nd;
+        report.inserted -= na;
+        Ok((report, nd + na > 0))
     }
 
     /// The default-graph triples `apply_quads`'s batch will flip, as the
@@ -2341,31 +2406,19 @@ impl Store for HornBackend {
         }
 
         debug_assert!(self.pin.is_none(), "write through a pinned read view");
-        #[cfg(feature = "incremental")]
-        let flips = match self.circuit {
-            Some(_) => Some(self.default_graph_flips(&del_rows, &add_rows)?),
-            None => None,
-        };
         let base = self.store.snapshot().version();
-        let report = self
-            .store
-            .apply_quads(&del_rows, &add_rows)
-            .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
-
-        // SPEC-24 S4: one circuit tick per Update operation, right after the
-        // operation's batch committed. The derived mirror is a second commit
-        // in another graph, which the memo delta below cannot express, so a
-        // tick that changed anything drops the memo instead.
+        // SPEC-24 S4: with a circuit, one tick per Update operation, committed
+        // with the base rows as one storage batch (ADR-0018). The derived
+        // mirror lands in another graph, which the memo delta below cannot
+        // express, so a tick that changed anything drops the memo instead.
         #[cfg(feature = "incremental")]
-        let derived_changed = match (&mut self.circuit, flips) {
-            (Some(wiring), Some((asserts, retracts))) => {
-                let derived = wiring.apply(&self.store, &asserts, &retracts);
-                derived.inserted > 0 || derived.retracted > 0
-            }
-            _ => false,
+        let (report, derived_changed) = if self.circuit.is_some() {
+            self.apply_with_circuit(&del_rows, &add_rows)?
+        } else {
+            (self.apply_plain(&del_rows, &add_rows)?, false)
         };
         #[cfg(not(feature = "incremental"))]
-        let derived_changed = false;
+        let (report, derived_changed) = (self.apply_plain(&del_rows, &add_rows)?, false);
 
         let changed = report.retracted > 0 || report.inserted > 0;
         if derived_changed {
@@ -2431,19 +2484,41 @@ impl Store for HornBackend {
             } else {
                 Vec::new()
             };
+        // The tick's derived mirror commits with the sweep as one storage
+        // version (ADR-0018). Mirror dels in a graph the sweep already
+        // covers are dropped, so `retracted` counts each row once.
+        #[allow(unused_mut)]
+        let (mut dels, mut adds, mut derived_dels) = (dels, Vec::new(), 0);
+        #[cfg(feature = "incremental")]
+        let mut fed = None;
+        #[cfg(feature = "incremental")]
+        if let Some(wiring) = &mut self.circuit {
+            if !retracts.is_empty() {
+                let ((md, ma), f) = wiring.apply(&self.store, &[], &retracts, &graphs_to_sweep);
+                fed = Some(f);
+                let before = dels.len();
+                dels.extend(
+                    md.into_iter()
+                        .filter(|q| !graphs_to_sweep.contains(&q.graph())),
+                );
+                derived_dels = dels.len() - before;
+                adds = ma;
+            }
+        }
         // Through the store, not the tier: the write-ahead log must see the
         // sweep, or the next logged batch cannot replay (SPEC-25 S3).
-        let report = self
-            .store
-            .apply_quad_ids(&dels, &[])
-            .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
-        if report.retracted > 0 {
-            #[cfg(feature = "incremental")]
-            if let Some(wiring) = &mut self.circuit {
-                if !retracts.is_empty() {
-                    wiring.apply(&self.store, &[], &retracts);
+        let mut report = match self.store.apply_quad_ids(&dels, &adds) {
+            Ok(r) => r,
+            Err(e) => {
+                #[cfg(feature = "incremental")]
+                if let (Some(wiring), Some(fed)) = (&mut self.circuit, fed) {
+                    wiring.rollback(fed);
                 }
+                return Err(SparqlError::Executor(format!("clear_graph: {e}")));
             }
+        };
+        report.retracted -= derived_dels;
+        if report.retracted > 0 {
             self.invalidate();
             // SPEC-29 D7: `CLEAR`/`DROP` bypasses `apply_quads` (it sweeps
             // one tier level down), so it reports its own touched graphs.

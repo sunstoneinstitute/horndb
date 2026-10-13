@@ -1013,10 +1013,19 @@ caller and the next phases need to know:
   the tick just published, sums derived records **per triple** (`Asserted`
   records are the caller's own writes, already in storage; a tick can carry
   `RuleInferred` and `ClosureInferred` for one triple, and a withdrawal's
-  total can be −2), and mirrors the net into the reserved graph
-  `exec::circuit::DERIVED_GRAPH` (`https://horndb.io/graph/circuit-derived`)
-  with one idempotent `Store::apply_quad_ids` batch. `attach_circuit` admits
-  that graph to the default union (`set_visible_inferred`-style), so a plain
+  total can be −2), and returns the net as rows for the reserved graph
+  `exec::circuit::DERIVED_GRAPH` (`https://horndb.io/graph/circuit-derived`),
+  filtered to exact flips against storage.
+- **One tick, one storage batch (ADR-0018, HDB-151).** The tick runs
+  *before* the commit: `HornBackend::apply_with_circuit` (and `clear_graph`)
+  append the mirror rows to the base rows and commit both in one
+  `Store::apply_quad_ids` call, so no snapshot sees their base rows without
+  their consequences. Bulk loaders (`insert_oxrdf_batch` and friends) bypass
+  the circuit. If the commit fails, `Wiring::rollback` ticks the inverse of
+  what the tick fed, so the circuit never runs ahead of storage. Mirror rows
+  are exact flips, so `apply_quads` subtracts their counts and its
+  `ApplyCounts` stays base-only; `CLEAR ALL`/`CLEAR NAMED` also count the
+  derived rows they sweep. `attach_circuit` admits that graph to the default union (`set_visible_inferred`-style), so a plain
   `SELECT` sees derived rows. Derived rows deliberately do not go into the
   default graph: a user `DELETE DATA` of a derived triple, or `INSERT DATA`
   of one already derived, would otherwise desynchronise circuit and store.
@@ -1035,26 +1044,30 @@ caller and the next phases need to know:
   background applier thread is ever wanted, it must never take the
   `AppState` lock (lock-order inversion with the ticking writer); write
   through a cloned `Arc<ColumnStore>` instead. Read-your-writes across
-  requests holds today because the mirror commits before `/update` returns.
-- **Snapshot memo.** The derived mirror is a second commit in another graph,
-  which `apply_delta_to_snapshots` cannot express, so a tick that changed
+  requests holds because the mirror commits before `/update` returns.
+- **Snapshot memo.** The derived mirror lands in another graph, which
+  `apply_delta_to_snapshots` cannot express, so a tick that changed
   anything drops the memo (`invalidate`) instead of merging the delta. Once
   derived rows exist the union spans two graphs anyway, which already takes
   the rebuild path.
-- **Durability (SPEC-25 S3, #345).** The base change is in the store's
-  write-ahead log before the tick runs, and the derived mirror goes through
-  `Store::apply_quad_ids` (a logged `Store` entry point, never `tier()`), so
-  both replay on `Store::open`. The circuit itself is not persisted:
+- **Durability (SPEC-25 S3, #345).** Base and mirror go through
+  `Store::apply_quad_ids` (a logged `Store` entry point, never `tier()`) as
+  one write-ahead-log record, so they replay together on `Store::open`. That
+  record is the durable tick boundary, which is why the engine attaches no
+  `Circuit::attach_input_log`: it would add an fsynced record per input for
+  no durability gain (HDB-151). The circuit itself is not persisted:
   `attach_circuit` re-asserts the default graph in one tick and then diffs
   the derived graph against `Circuit::derived_base` (`Wiring::seed` →
   `resync`), which also removes rows a previous circuit derived and this one
   does not.
 - **`CLEAR`/`DROP`.** `clear_graph`'s default-graph sweep is the circuit's
   retract list (every swept row is present, so no before/after check), fed
-  through the same `Wiring::apply` after the logged sweep commits. Named
-  graphs do not enter the circuit. `CLEAR ALL` also sweeps the derived graph
-  itself, and the retract tick that follows withdraws every derived row from
-  the circuit, so store and circuit both end empty.
+  through the same `Wiring::apply`; its mirror commits in the sweep's batch.
+  Named graphs do not enter the circuit. `CLEAR ALL` also sweeps the derived
+  graph itself: mirror dels for a swept graph are dropped, so each row counts
+  once, and mirror adds into it skip the presence filter, since the sweep
+  deletes them first. The retract tick withdraws every derived row from the
+  circuit, so store and circuit both end empty.
 - **Not wired yet.** SPEC-29 views and the circuit are separate pipelines
   (`publish` replaces `visible_inferred`, which would hide the derived graph
   if both ran on one backend — `serve` runs neither today).
