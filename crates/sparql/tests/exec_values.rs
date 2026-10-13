@@ -86,12 +86,19 @@ fn values_single_var_all_bound() {
 #[test]
 fn order_by_variable_free_key_keeps_all_rows() {
     let store = MemStore::default();
-    for key in ["RAND()", r#"BNODE("x")"#] {
-        let q = format!("SELECT ?z WHERE {{ VALUES ?z {{ 1 2 }} }} ORDER BY {key}");
+    // Mixed keys, DESC, and the LIMIT (top-k) path all decorate the same way.
+    for (key, limit, want) in [
+        ("RAND()", "", 2),
+        (r#"BNODE("x")"#, "", 2),
+        ("?z RAND()", "", 2),
+        ("DESC(RAND()) ?z", "", 2),
+        ("RAND()", "LIMIT 1", 1),
+    ] {
+        let q = format!("SELECT ?z WHERE {{ VALUES ?z {{ 1 1 }} }} ORDER BY {key} {limit}");
         let QueryAnswer::Solutions { rows, .. } = execute_query(&q, &store).expect("query ok")
         else {
             panic!("expected Solutions");
         };
-        assert_eq!(rows.len(), 2, "{key}");
+        assert_eq!(rows.len(), want, "{key} {limit}");
     }
 }
