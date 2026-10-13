@@ -931,14 +931,11 @@ fn join_algebra(left: Algebra, right: Algebra) -> Algebra {
 ///   → no solution;
 /// * one variable, one ground → bind the variable to the ground term.
 ///
-/// **Stage-1 approximation:** a strict reading of SPARQL restricts the
-/// zero-length match to terms that actually occur in the active graph, so
-/// `?s p? <urn:absent>` should bind nothing. We do not run that
-/// node-membership check here (it would need a graph scan / subquery), so
-/// a ground endpoint absent from the graph still yields its self-match.
-/// This only affects queries that pin an endpoint to a term not in the
-/// data; the recursive `*`/`+` increment (#50) that routes through closure
-/// is the natural place to add proper node-set semantics.
+/// A ground endpoint self-matches even when it does not occur in the
+/// graph. That is the spec, not an approximation: SPARQL 1.1 section 18.5
+/// evaluates the term-to-term case as `X = Y` and ALP includes its start
+/// term unconditionally; `nodes(G)` only bounds the two-variable case
+/// (HDB-249). Oxigraph's `spareval` checks graph membership here instead.
 ///
 /// * a variable at both ends — whether two distinct ones or the same one
 ///   twice (`?x p? ?x`) — enumerates the graph's node set via

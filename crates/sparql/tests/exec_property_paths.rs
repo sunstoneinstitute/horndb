@@ -639,3 +639,31 @@ fn user_var_named_like_old_hidden_var_does_not_collide() {
     assert_eq!(names(&rows, "o"), vec!["dave"]);
     assert_eq!(names(&rows, "__path_seq_0"), vec!["carol"]);
 }
+
+#[test]
+fn zero_length_ground_endpoint_absent_from_graph_still_self_matches() {
+    // HDB-249: a ground endpoint self-matches whether or not it occurs in
+    // the graph. SPARQL 1.1 section 18.5 evaluates the term-to-term case as
+    // `{ {} } if X = Y` and seeds ALP with the start term unconditionally;
+    // `nodes(G)` appears only in the variable-to-variable cases. The WG's
+    // approved test `property-path/pp15` ("Zero Length Paths on an empty
+    // graph") expects the self-match on an empty graph.
+    let s = make_store();
+    for q in [
+        "SELECT ?x WHERE { ?x <http://ex/knows>? <http://ex/absent> }",
+        "SELECT ?x WHERE { <http://ex/absent> <http://ex/knows>* ?x }",
+    ] {
+        assert_eq!(names(&run(q, &s), "x"), vec!["absent"], "{q}");
+    }
+    let rows = run(
+        "ASK { <http://ex/absent> <http://ex/knows>? <http://ex/absent> }",
+        &s,
+    );
+    assert_eq!(rows.len(), 1, "term-to-term self-match expected");
+    // A ground endpoint present in the graph self-matches the same way.
+    let rows = run(
+        "SELECT ?x WHERE { ?x <http://ex/likes>? <http://ex/carol> }",
+        &s,
+    );
+    assert_eq!(names(&rows, "x"), vec!["alice", "carol"]);
+}
