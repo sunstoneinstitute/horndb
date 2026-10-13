@@ -398,7 +398,7 @@ impl AlgTermFromKind for horndb_sparql::algebra::Term {
     fn from_lexical_kind(t: &RdfTerm) -> Self {
         use horndb_sparql::algebra::Term as T;
         // The algebra `Term`'s inner string is the *stored lexical form*, so
-        // the store's `delete_triple` keys match what `add` inserted.
+        // the store's `apply_quads` keys match what `add` inserted.
         match t {
             RdfTerm::Iri(_) => T::Iri(t.to_store_lexical()),
             RdfTerm::Blank(_) => T::BlankNode(t.to_store_lexical()),
