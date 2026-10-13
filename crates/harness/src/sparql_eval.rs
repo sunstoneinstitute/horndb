@@ -138,19 +138,57 @@ fn with_base(text: &str, path: &Path) -> String {
 
 // ── Query evaluation (`mf:QueryEvaluationTest`) ──────────────────────────────
 
+/// Local files a query's `FROM` / `FROM NAMED` clauses name.
+///
+/// SPARQL 1.1 lets a `FROM <iri>` mean "fetch this document", and a case such
+/// as `construct/constructwhere04` relies on that with no `qt:data`. The engine
+/// never fetches: `FROM` only selects among graphs already in the store, so a
+/// public endpoint cannot be made to read arbitrary URLs. The runner therefore
+/// does the fetch, as other engines' W3C runners do — each `file://` IRI that
+/// names an existing file is loaded as a named graph under that IRI before the
+/// query runs. A query that fails to parse yields nothing; the engine reports
+/// the parse error itself.
+fn from_files(text: &str) -> Vec<std::path::PathBuf> {
+    let Ok(q) = spargebra::Query::from_str(text) else {
+        return Vec::new();
+    };
+    let Some(ds) = q.dataset() else {
+        return Vec::new();
+    };
+    ds.default
+        .iter()
+        .chain(ds.named.iter().flatten())
+        .filter_map(|n| n.as_str().strip_prefix("file://"))
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect()
+}
+
 pub(crate) fn run_query_eval(
     query: &Path,
     data: Option<&Path>,
     graph_data: &[std::path::PathBuf],
     result: &Path,
 ) -> Result<Verdict> {
+    let text = std::fs::read_to_string(query)
+        .with_context(|| format!("reading query {}", query.display()))?;
+    let text = with_base(&text, query);
+
     let mut store = HornBackend::new();
     if let Some(d) = data {
         load_file(&mut store, d, None)?;
     }
+    let mut loaded: HashSet<String> = HashSet::new();
     for g in graph_data {
         let name = file_iri(g);
         load_file(&mut store, g, Some(&name))?;
+        loaded.insert(name);
+    }
+    for path in from_files(&text) {
+        let name = file_iri(&path);
+        if loaded.insert(name.clone()) {
+            load_file(&mut store, &path, Some(&name))?;
+        }
     }
 
     let expected = match read_expected(result)? {
@@ -163,13 +201,11 @@ pub(crate) fn run_query_eval(
         }
     };
 
-    let text = std::fs::read_to_string(query)
-        .with_context(|| format!("reading query {}", query.display()))?;
     let cfg = SparqlConfig {
         default_graph: DefaultGraphMode::Strict,
         ..SparqlConfig::default()
     };
-    let answer = match execute_query_with(&with_base(&text, query), &store, &cfg) {
+    let answer = match execute_query_with(&text, &store, &cfg) {
         Ok(a) => a,
         Err(e) => return Ok(Some(format!("query failed: {e}"))),
     };
