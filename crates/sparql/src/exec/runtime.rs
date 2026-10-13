@@ -45,16 +45,29 @@ pub(crate) struct QueryScope<'a> {
     /// `NOW()` — §17.4.5.1 requires every call in one query to return the
     /// same `xsd:dateTime`, so the clock is read at most once per query.
     now: std::cell::OnceCell<Term>,
-    /// `BNODE(str)` memo, keyed by the evaluation environment and the
-    /// argument's string, so the same literal in the same solution yields the
-    /// same node (§17.4.2.2).
+    /// `BNODE(str)` memo, keyed by the solution, the evaluation environment
+    /// and the argument's string, so the same literal in the same solution
+    /// yields the same node and never one from another solution (§17.4.2.2).
+    #[allow(clippy::type_complexity)]
+    bnodes: std::cell::RefCell<
+        std::collections::HashMap<(Option<Vec<KeyPart>>, Bindings, String), Term>,
+    >,
+    /// The solution `apply_extend` is evaluating: the row's slots minus every
+    /// column an earlier `BNODE` extend added. Dropping those columns is what
+    /// lets a chain of `(BNODE(?x) AS ?b1) (BNODE(?x) AS ?b2)` see one
+    /// solution. When set it replaces the environment in the key (the
+    /// environment holds only the variables the argument mentions, so it
+    /// differs between `BNODE(?x)` and `BNODE(?y)` of one row). `None` outside
+    /// a `BNODE` extend, where the key falls back to the environment. The
+    /// projection-pushdown passes keep every column below a `BNODE` extend
+    /// (`mentions_bnode`), so pruning cannot merge two rows into one key.
     ///
-    /// ponytail: the key is the *decoded subset* of the row the expression
-    /// referenced, not the whole solution mapping — two distinct solutions
-    /// that agree on every variable `BNODE`'s argument mentions therefore
-    /// share a blank node. Key on the physical `Row` instead if a case ever
-    /// needs them separated.
-    bnodes: std::cell::RefCell<std::collections::HashMap<(Bindings, String), Term>>,
+    /// ponytail: rows equal on every column are one solution, so bag
+    /// duplicates share a node; and the memo holds one entry per row for the
+    /// whole query. Carry a hidden per-row id column if either matters.
+    solution: std::cell::RefCell<Option<Vec<KeyPart>>>,
+    /// Variables bound by a `BNODE` extend so far, excluded from `solution`.
+    extended: std::cell::RefCell<HashSet<String>>,
     /// Labels handed out so far; the source of `_:bN`'s N.
     minted: std::cell::Cell<u64>,
     /// The query's `BASE`, for `IRI()`/`URI()` relative resolution.
@@ -76,6 +89,8 @@ impl std::fmt::Debug for QueryScope<'_> {
         f.debug_struct("QueryScope")
             .field("now", &self.now)
             .field("bnodes", &self.bnodes)
+            .field("solution", &self.solution)
+            .field("extended", &self.extended)
             .field("minted", &self.minted)
             .field("base", &self.base)
             .field("exists", &self.exists.is_some())
@@ -114,16 +129,22 @@ impl QueryScope<'_> {
         Term::BlankNode(format!("_:b{n}"))
     }
 
-    /// `BNODE(key)` within environment `env`: the same node for a repeat of
-    /// the same key, a fresh one otherwise.
+    /// `BNODE(key)` in the current solution (or, outside `apply_extend`, in
+    /// environment `env`): the same node for a repeat of the same key, a
+    /// fresh one otherwise.
     fn bnode(&self, env: &Bindings, key: &str) -> Term {
-        if let Some(t) = self.bnodes.borrow().get(&(env.clone(), key.to_owned())) {
+        let solution = self.solution.borrow().clone();
+        let env = if solution.is_some() {
+            Bindings::new()
+        } else {
+            env.clone()
+        };
+        let k = (solution, env, key.to_owned());
+        if let Some(t) = self.bnodes.borrow().get(&k) {
             return t.clone();
         }
         let t = self.fresh_bnode();
-        self.bnodes
-            .borrow_mut()
-            .insert((env.clone(), key.to_owned()), t.clone());
+        self.bnodes.borrow_mut().insert(k, t.clone());
         t
     }
 }
@@ -312,10 +333,26 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         if existing.is_none() {
             schema.push(var.clone());
         }
+        let has_bnode = mentions_bnode(expr);
+        let base: Vec<usize> = {
+            let mut ext = self.scope.extended.borrow_mut();
+            if has_bnode {
+                ext.insert(var.name().to_owned());
+            }
+            (0..batch.schema.len())
+                .filter(|&i| !ext.contains(batch.schema[i].name()))
+                .collect()
+        };
         let mut out_rows = Vec::with_capacity(batch.rows.len());
         for r in &batch.rows {
             let env = self.decode_subset(r, &batch.schema, &want)?;
-            let slot = match eval_expr_to_term(expr, &env, &self.scope)? {
+            if has_bnode {
+                *self.scope.solution.borrow_mut() =
+                    Some(base.iter().map(|&i| r.0[i].key_part()).collect());
+            }
+            let slot = eval_expr_to_term(expr, &env, &self.scope);
+            *self.scope.solution.borrow_mut() = None;
+            let slot = match slot? {
                 Some(t) => Slot::Term(t),
                 None => Slot::Unbound,
             };
@@ -1808,6 +1845,31 @@ fn bind_endpoint(endpoint: &Term, node: &Term, b: &mut Bindings) -> bool {
     }
 }
 
+/// Whether `e` calls `BNODE` outside an `EXISTS` (which runs in its own scope).
+pub(crate) fn mentions_bnode(e: &Expr) -> bool {
+    match e {
+        Expr::Func(Func::BNode, _) => true,
+        Expr::Term(_) | Expr::Bound(_) | Expr::Exists(_) => false,
+        Expr::Not(a) | Expr::Neg(a) => mentions_bnode(a),
+        Expr::Eq(a, b)
+        | Expr::SameTerm(a, b)
+        | Expr::Ne(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Le(a, b)
+        | Expr::Ge(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b) => mentions_bnode(a) || mentions_bnode(b),
+        Expr::If(a, b, c) => mentions_bnode(a) || mentions_bnode(b) || mentions_bnode(c),
+        Expr::In(a, l) => mentions_bnode(a) || l.iter().any(mentions_bnode),
+        Expr::Coalesce(l) | Expr::Func(_, l) => l.iter().any(mentions_bnode),
+    }
+}
+
 /// Collect the variable names an expression reads, so a slot operator can
 /// decode only those columns into a transient `Bindings`.
 pub(crate) fn referenced_vars(e: &Expr, out: &mut HashSet<String>) {
@@ -3178,7 +3240,7 @@ fn eval_func(f: Func, args: &[Expr], b: &Bindings, q: &QueryScope<'_>) -> Result
             _ => None,
         },
         // §17.4.2.2. Zero-arg: a fresh node every call. One-arg: the same
-        // node for the same simple literal in the same environment.
+        // node for the same simple literal in the same solution.
         Func::BNode => {
             if args.is_empty() {
                 Some(q.fresh_bnode())
@@ -4697,6 +4759,60 @@ mod query_scope_tests {
                 g(v)
             );
         }
+    }
+
+    /// HDB-248, W3C `functions/bnode01`: `BNODE(expr)` is scoped to one
+    /// solution. Equal arguments in one row share a node (even across chained
+    /// `SELECT` expressions); the same argument in two rows never does.
+    #[test]
+    fn bnode_shares_within_a_row_never_across_rows() {
+        let rows = solutions(
+            "SELECT ?x ?y (BNODE(?x) AS ?b1) (BNODE(?y) AS ?b2) \
+             WHERE { VALUES ?x { \"foo\" \"bar\" } VALUES ?y { \"foo\" \"bar\" } }",
+        );
+        assert_eq!(rows.len(), 4);
+        let mut seen = std::collections::HashSet::new();
+        for r in &rows {
+            let (b1, b2) = (r.get("b1").unwrap(), r.get("b2").unwrap());
+            if r.get("x") == r.get("y") {
+                assert_eq!(b1, b2, "equal arguments in one row share a node");
+            } else {
+                assert_ne!(b1, b2, "different arguments mint different nodes");
+            }
+            seen.insert(b1.clone());
+            seen.insert(b2.clone());
+        }
+        assert_eq!(seen.len(), 6, "no node may be shared across rows");
+
+        // Rows told apart only by a variable no projection or `BNODE` reads.
+        let rows = solutions(
+            "SELECT (BNODE(\"k\") AS ?a) (BNODE(\"k\") AS ?b) \
+             WHERE { VALUES ?x { \"foo\" \"bar\" } }",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("a"), rows[0].get("b"));
+        assert_ne!(rows[0].get("a"), rows[1].get("a"), "rows must not share");
+    }
+
+    /// HDB-248: rows that differ only in a column a plain `BIND` added are
+    /// still different solutions, so they must not share a `BNODE` node.
+    #[test]
+    fn bnode_separates_rows_told_apart_by_a_bind() {
+        let distinct_b = |q: &str| {
+            let rows = solutions(q);
+            assert_eq!(rows.len(), 2, "{q}");
+            assert_ne!(rows[0].get("b"), rows[1].get("b"), "{q}");
+        };
+        distinct_b(
+            "SELECT ?t (BNODE(SUBSTR(?t, 1, 1)) AS ?b) \
+             WHERE { { BIND(\"A1\" AS ?t) } UNION { BIND(\"A2\" AS ?t) } }",
+        );
+        distinct_b(
+            "SELECT ?t (BNODE(STR(?s)) AS ?b) WHERE { \
+             { ?s ?p ?o BIND(\"A\" AS ?t) } UNION { ?s ?p ?o BIND(\"B\" AS ?t) } }",
+        );
+        // `BNODE` nested inside another expression is scoped the same way.
+        distinct_b("SELECT (STR(BNODE(\"x\")) AS ?b) WHERE { VALUES ?z { 1 2 } }");
     }
 
     /// `RAND`/`UUID`/`STRUUID` are per call — they must NOT pick up the

@@ -52,7 +52,7 @@
 //! own schema, so every kept var is already bound there.
 
 use crate::algebra::{AggFunc, Var};
-use crate::exec::runtime::{agg_inner_exprs, referenced_vars};
+use crate::exec::runtime::{agg_inner_exprs, mentions_bnode, referenced_vars};
 use crate::plan::logical::LogicalPlan;
 use crate::plan::pass::{LogicalPass, PassId, PlanCtx};
 use crate::plan::passes::schema;
@@ -258,6 +258,10 @@ fn prune(node: LogicalPlan, demanded: &HashSet<String>) -> LogicalPlan {
             let mut d = demanded.clone();
             d.remove(var.name());
             referenced_vars(&expr, &mut d);
+            // `BNODE` needs the whole solution; see `plan::pushdown::prune`.
+            if mentions_bnode(&expr) {
+                d.extend(schema(&inner).iter().map(|v| v.name().to_owned()));
+            }
             let pi = prune(*inner, &d);
             let node2 = LogicalPlan::Extend {
                 inner: Box::new(pi),

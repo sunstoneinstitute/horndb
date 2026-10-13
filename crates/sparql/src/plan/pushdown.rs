@@ -87,7 +87,7 @@
 
 use crate::algebra::{AggFunc, Aggregate, Expr, Term, TriplePattern, Var};
 use crate::error::Result;
-use crate::exec::runtime::{agg_inner_exprs, referenced_vars};
+use crate::exec::runtime::{agg_inner_exprs, mentions_bnode, referenced_vars};
 use crate::plan::{GraphScope, PhysicalPlan};
 use std::collections::HashSet;
 
@@ -745,11 +745,16 @@ fn prune(node: &PhysicalPlan, demanded: &HashSet<String>) -> PhysicalPlan {
             wrap_if_wider(node2, &nat, demanded)
         }
         // BIND: the child needs the expr's vars; `var` is produced here, so it
-        // is removed from the child's demand.
+        // is removed from the child's demand. `BNODE(..)` additionally needs
+        // the whole solution: the runtime tells solutions apart by their
+        // columns, so pruning one could merge two rows into one blank node.
         Extend { inner, var, expr } => {
             let mut d = demanded.clone();
             d.remove(var.name());
             referenced_vars(expr, &mut d);
+            if mentions_bnode(expr) {
+                d.extend(output_vars(inner));
+            }
             let pi = prune(inner, &d);
             let node2 = Extend {
                 inner: Box::new(pi),

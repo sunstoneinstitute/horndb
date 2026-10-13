@@ -190,14 +190,6 @@ expected_failures = [
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.
     "data-sparql11/aggregates/manifest#agg-empty-group",
-
-    # `BNODE(expr)` is scoped to one solution: within a row, equal arguments
-    # give the same blank node; across rows they must give different ones. The
-    # expected answer therefore uses 6 distinct blank nodes over 4 rows; the
-    # engine produces 4, so it is reusing nodes across rows. Every other cell
-    # matches. An engine gap, not a labelling one — HDB-139's comparison pairs
-    # blank nodes by bijection and reports that no bijection exists here.
-    "data-sparql11/functions/manifest#bnode01",
 ]
 
 [suites.sparql11-gsp]
