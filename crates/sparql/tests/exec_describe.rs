@@ -9,7 +9,8 @@ use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::mem::MemStore;
 use horndb_sparql::exec::runtime::describe_triples;
 use horndb_sparql::exec::ScanScope;
-use horndb_sparql::exec::{Bindings, Executor, Store};
+use horndb_sparql::exec::StoreTestExt;
+use horndb_sparql::exec::{Bindings, Executor};
 use horndb_sparql::Result;
 
 fn iri(s: &str) -> Term {

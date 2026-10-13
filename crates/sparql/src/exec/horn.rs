@@ -3264,6 +3264,7 @@ impl Executor for HornBackend {
 mod tests {
     use super::*;
     use crate::algebra::Var;
+    use crate::exec::StoreTestExt;
     use spargebra::algebra::GraphTarget;
 
     /// The snapshot memo must not grow with the number of graphs a client

@@ -4,7 +4,7 @@
 use crate::algebra::{Expr, Term, TriplePattern, Var};
 use crate::exec::horn::HornBackend;
 use crate::exec::runtime::Runtime;
-use crate::exec::Store;
+use crate::exec::StoreTestExt;
 use crate::plan::PhysicalPlan;
 
 fn iri(s: &str) -> Term {

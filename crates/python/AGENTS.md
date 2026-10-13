@@ -45,6 +45,10 @@ maturin develop --features extension-module
 pytest tests/         # differential vs upstream rdflib (SPEC-10 acceptance #2/#6)
 ```
 
+If `cargo test` fails to link `-lpython3.x` (no system libpython dev package),
+run it inside a venv made by `uv venv --managed-python`, with `PYO3_PYTHON`
+set to that venv's `python`.
+
 The `extension-module` feature is OFF by default so `cargo test` can link
 libpython and run the Rust unit tests; maturin turns it on for the wheel (abi3,
 one wheel for CPython 3.10+).

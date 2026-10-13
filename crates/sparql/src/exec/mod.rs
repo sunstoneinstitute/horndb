@@ -338,27 +338,6 @@ pub trait Store {
         graph: &spargebra::algebra::GraphTarget,
     ) -> Result<Vec<AlgebraTriple>>;
 
-    /// Insert one triple into the default graph. A back-compat convenience
-    /// wrapper over [`Store::apply_quads`], kept for the pre-SPEC-28-phase-4
-    /// test suite's ~180 call sites that seed default-graph fixtures;
-    /// production writes (`crate::update`) call `apply_quads` directly so
-    /// they can target any graph. Silently drops a term `apply_quads`
-    /// cannot represent (a variable, or an RDF 1.2 triple term), matching
-    /// this method's pre-recut behaviour.
-    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term) {
-        let _ = self.apply_quads(Vec::new(), vec![(None, subject, predicate, object)]);
-    }
-
-    /// Delete one triple from the default graph. See
-    /// [`Store::insert_triple`] for why this stays a default method rather
-    /// than a call-site rewrite.
-    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
-        let _ = self.apply_quads(
-            vec![(None, subject.clone(), predicate.clone(), object.clone())],
-            Vec::new(),
-        );
-    }
-
     /// A fresh tag for one document `LOAD`s into this store (HDB-113): blank
     /// node labels are document-scoped in N-Triples/Turtle/N-Quads, so
     /// `update.rs::fetch_and_parse` renames every one it parses with
@@ -375,6 +354,33 @@ pub trait Store {
         GLOBAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+/// Triple-shaped fixture helpers for tests, blanket-implemented for every
+/// [`Store`]. Compiled only for this crate's own tests and for dependents that
+/// enable the `test-util` feature, so production code cannot reach them.
+///
+/// Both helpers hardcode the default graph and ignore `apply_quads` errors
+/// (a variable or RDF 1.2 triple term is silently dropped). Production writes
+/// call [`Store::apply_quads`] directly so they can target any graph and see
+/// errors.
+#[cfg(any(test, feature = "test-util"))]
+pub trait StoreTestExt: Store {
+    /// Insert one triple into the default graph.
+    fn insert_triple(&mut self, subject: Term, predicate: Term, object: Term) {
+        let _ = self.apply_quads(Vec::new(), vec![(None, subject, predicate, object)]);
+    }
+
+    /// Delete one triple from the default graph.
+    fn delete_triple(&mut self, subject: &Term, predicate: &Term, object: &Term) {
+        let _ = self.apply_quads(
+            vec![(None, subject.clone(), predicate.clone(), object.clone())],
+            Vec::new(),
+        );
+    }
+}
+
+#[cfg(any(test, feature = "test-util"))]
+impl<S: Store + ?Sized> StoreTestExt for S {}
 
 /// Pin a read view that outlives the store lock (HDB-119).
 ///

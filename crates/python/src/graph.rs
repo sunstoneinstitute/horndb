@@ -106,13 +106,16 @@ impl RdfGraph {
     }
 
     /// Remove a triple (no-op if absent, matching rdflib).
-    pub fn remove(&mut self, s: &RdfTerm, p: &RdfTerm, o: &RdfTerm) {
+    pub fn remove(&mut self, s: &RdfTerm, p: &RdfTerm, o: &RdfTerm) -> Result<()> {
         use horndb_sparql::algebra::Term as AlgTerm;
         let st = AlgTerm::from_lexical_kind(s);
         let pt = AlgTerm::from_lexical_kind(p);
         let ot = AlgTerm::from_lexical_kind(o);
         use horndb_sparql::exec::Store;
-        self.store.delete_triple(&st, &pt, &ot);
+        self.store
+            .apply_quads(vec![(None, st, pt, ot)], Vec::new())
+            .map(|_| ())
+            .map_err(|e| GraphError::Sparql(e.to_string()))
     }
 
     /// True if the exact triple is asserted (rdflib `(s,p,o) in graph`).
@@ -395,7 +398,7 @@ impl AlgTermFromKind for horndb_sparql::algebra::Term {
     fn from_lexical_kind(t: &RdfTerm) -> Self {
         use horndb_sparql::algebra::Term as T;
         // The algebra `Term`'s inner string is the *stored lexical form*, so
-        // the store's `delete_triple` keys match what `add` inserted.
+        // the store's `apply_quads` keys match what `add` inserted.
         match t {
             RdfTerm::Iri(_) => T::Iri(t.to_store_lexical()),
             RdfTerm::Blank(_) => T::BlankNode(t.to_store_lexical()),
@@ -448,7 +451,7 @@ mod tests {
         let mut g = RdfGraph::new();
         let (s, p, o) = (iri("http://ex/s"), iri("http://ex/p"), iri("http://ex/o"));
         g.add(&s, &p, &o).unwrap();
-        g.remove(&s, &p, &o);
+        g.remove(&s, &p, &o).unwrap();
         assert_eq!(g.len(), 0);
     }
 

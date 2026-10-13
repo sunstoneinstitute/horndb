@@ -28,6 +28,9 @@ incremental = ["dep:horndb-incremental"]
 # the owning arena's lock. Default-on; disabling it restores the system
 # allocator and is the revert path.
 snmalloc = ["dep:snmalloc-rs"]
+# HDB-78: test-only helpers (`exec::StoreTestExt`). Never enable in production;
+# this crate's own integration tests get it via the dev self-dependency below.
+test-util = []
 
 [dependencies]
 snmalloc-rs = { workspace = true, optional = true }
@@ -111,6 +114,7 @@ path = "src/bin/serve.rs"
 required-features = ["server"]
 
 [dev-dependencies]
+horndb-sparql = { path = ".", features = ["test-util"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 tempfile = { workspace = true }

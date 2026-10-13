@@ -15,7 +15,7 @@ use axum::http::{Request, StatusCode};
 use horndb_config::Limits;
 use horndb_sparql::algebra::Term;
 use horndb_sparql::exec::mem::MemStore;
-use horndb_sparql::exec::Store;
+use horndb_sparql::exec::StoreTestExt;
 use horndb_sparql::server::{build_router, AppState};
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
