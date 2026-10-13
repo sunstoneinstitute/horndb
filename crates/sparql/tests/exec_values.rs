@@ -80,3 +80,18 @@ fn values_single_var_all_bound() {
         "bound values in order"
     );
 }
+
+/// ORDER BY a key that reads no variables (`RAND()`, `BNODE("x")`) once
+/// panicked in the sort: no per-row key values were built (HDB-326).
+#[test]
+fn order_by_variable_free_key_keeps_all_rows() {
+    let store = MemStore::default();
+    for key in ["RAND()", r#"BNODE("x")"#] {
+        let q = format!("SELECT ?z WHERE {{ VALUES ?z {{ 1 2 }} }} ORDER BY {key}");
+        let QueryAnswer::Solutions { rows, .. } = execute_query(&q, &store).expect("query ok")
+        else {
+            panic!("expected Solutions");
+        };
+        assert_eq!(rows.len(), 2, "{key}");
+    }
+}

@@ -451,12 +451,16 @@ impl<'a, E: Executor + ?Sized> Runtime<'a, E> {
         keys: &[(Expr, OrderDir)],
     ) -> Result<Vec<(SortCol, OrderDir)>> {
         let mut want: HashSet<String> = HashSet::new();
+        let mut computed = false;
         for (e, _) in keys {
             if bare_var_col(e, schema).is_none() {
+                computed = true;
                 referenced_vars(e, &mut want);
             }
         }
-        let envs: Vec<Bindings> = if want.is_empty() {
+        // A variable-free computed key (`RAND()`, `BNODE("x")`) still needs
+        // one (empty) env per row.
+        let envs: Vec<Bindings> = if !computed {
             Vec::new()
         } else {
             rows.iter()
