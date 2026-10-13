@@ -7,8 +7,13 @@ fn regimes_are_distinguishable_by_name() {
     assert_eq!(SimpleRegime.name(), "simple");
     assert_eq!(
         MaterializedOwlRlRegime.name(),
-        "http://www.w3.org/ns/entailment/OWL-RL"
+        "http://www.w3.org/ns/entailment/OWL-RDF-Based"
     );
+    assert_eq!(
+        MaterializedOwlRlRegime.profile(),
+        Some("http://www.w3.org/ns/owl-profile/RL")
+    );
+    assert_eq!(SimpleRegime.profile(), None);
 }
 
 #[test]

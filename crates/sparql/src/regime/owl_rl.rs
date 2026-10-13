@@ -16,7 +16,12 @@ pub struct MaterializedOwlRlRegime;
 
 impl EntailmentRegime for MaterializedOwlRlRegime {
     fn name(&self) -> &'static str {
-        // W3C SPARQL 1.1 Entailment Regimes registry IRI:
-        "http://www.w3.org/ns/entailment/OWL-RL"
+        // OWL 2 RL is a profile, not a regime. The W3C registry entry is
+        // OWL-RDF-Based; the profile goes in `profile()`.
+        "http://www.w3.org/ns/entailment/OWL-RDF-Based"
+    }
+
+    fn profile(&self) -> Option<&'static str> {
+        Some("http://www.w3.org/ns/owl-profile/RL")
     }
 }
