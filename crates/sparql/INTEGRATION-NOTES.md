@@ -101,6 +101,13 @@ of graphs holding `triples[i]`), so its indexes and joins stay triple-keyed.
   `FROM NAMED` with no `FROM` = **empty** default graph. `FROM` is a
   term-level set union of the named graphs; RDF-merge blank-node renaming is
   not implemented (the platform skolemizes upstream).
+  **Deliberate deviation (HDB-247):** `FROM <iri>` only *selects* a graph
+  already in the store; it never fetches `<iri>`. §13.2 lets an engine
+  dereference it, but that would let any query make a public endpoint read
+  arbitrary URLs or local files. A graph that is not loaded contributes
+  nothing. Load data first (`LOAD`, Graph Store Protocol, import). The W3C
+  runner does that fetch itself for local test files
+  (`crates/harness/src/sparql_eval.rs::from_files`).
 - **No dataset clause** → the default graph follows the `default_graph` mode:
   `union` (the default) is every non-reserved graph, deduped so a triple in
   two graphs is one row; `strict` is the default-graph sentinel alone. The

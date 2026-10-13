@@ -172,6 +172,10 @@ and each query/update gets one `BASE <file://…>` line prepended, so a relative
 IRI in the query (`GRAPH <exists02.ttl>`) resolves to the same IRI the
 `qt:graphData` file was loaded under. `qt:data` becomes the default graph and
 `qt:graphData` the named graphs, so queries run in `DefaultGraphMode::Strict`.
+A `FROM`/`FROM NAMED` IRI that names a local file is loaded by the runner as a
+named graph under that IRI (`from_files`). The engine deliberately never fetches
+what `FROM` names (HDB-247), so the runner does it, as other engines' W3C
+runners do.
 Five expected-result formats are graded, each at the fidelity it carries
 (HDB-139). `.srx`/`.srj` and `.tsv` are read by `sparesults` into full terms and
 compared exactly — TSV writes `<iri>` and `"lit"^^<dt>`, so it loses no type.

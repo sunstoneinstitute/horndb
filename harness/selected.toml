@@ -186,13 +186,6 @@ expected_failures = [
     "data-sparql11/functions/manifest#strdt03",
     "data-sparql11/functions/manifest#strlang03",
 
-    # `FROM <data.ttl>` names a dataset the engine must go and load; it reads
-    # `FROM` as selecting among graphs already in the store, so the query runs
-    # over an empty default graph and constructs nothing. The case's expected
-    # result is now graded (HDB-139) — the graph comparison is what reports
-    # the 0-vs-4-triple difference.
-    "data-sparql11/construct/manifest#constructwhere04",
-
     # Upstream `.srx` head quirk: the result header omits a projected variable
     # that is unbound in every row, so the variable sets differ even though the
     # rows match.
