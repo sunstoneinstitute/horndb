@@ -1410,3 +1410,124 @@ fn template_bnode_is_fresh_per_operation_mem() {
 fn template_bnode_is_fresh_per_operation_horn() {
     template_bnode_is_fresh_per_operation::<HornBackend>();
 }
+
+// ── ADD/MOVE/COPY source existence in multi-op requests (HDB-154) ────────────
+
+/// `INSERT DATA { GRAPH :g1 … } ; COPY :g1 TO :g2` — the `COPY` source is
+/// created by the earlier `INSERT`, so it must not be judged against the
+/// pre-request store. The `;` inside the data block must not be mistaken for
+/// an operation separator.
+fn insert_then_copy_created_source<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "PREFIX : <http://g/> \
+         INSERT DATA { GRAPH :g1 { :s :p :o ; :q :r } } ; COPY :g1 TO :g2",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/g1"), 2, "source untouched");
+    assert_eq!(count_graph(&store, "http://g/g2"), 2, "destination copied");
+}
+
+#[test]
+fn insert_then_copy_created_source_mem() {
+    insert_then_copy_created_source::<MemStore>();
+}
+#[test]
+fn insert_then_copy_created_source_horn() {
+    insert_then_copy_created_source::<HornBackend>();
+}
+
+/// A `MOVE` (three desugared ops) ahead of a `COPY` and an `ADD`: each later
+/// source is judged against the store as the earlier operations left it.
+fn chained_move_copy_add<B: FullBackend + Default>() {
+    let mut store = B::default();
+    run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } } ; \
+         MOVE <http://g/1> TO <http://g/2> ; COPY <http://g/2> TO <http://g/3> ; \
+         ADD <http://g/3> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap();
+    assert_eq!(count_graph(&store, "http://g/1"), 0, "moved away");
+    assert_eq!(count_graph(&store, "http://g/2"), 1);
+    assert_eq!(count_graph(&store, "http://g/3"), 1);
+    assert_eq!(count_default(&store), 1);
+}
+
+#[test]
+fn chained_move_copy_add_mem() {
+    chained_move_copy_add::<MemStore>();
+}
+#[test]
+fn chained_move_copy_add_horn() {
+    chained_move_copy_add::<HornBackend>();
+}
+
+/// `COPY <absent> TO DEFAULT` as a *later* operation still errors before its
+/// destructive `Drop{DEFAULT}` runs, and the earlier insert is rolled back.
+fn later_copy_absent_to_default_keeps_default<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    let err = run(
+        "INSERT DATA { GRAPH <http://g/1> { <http://ex/s> <http://ex/p> <http://ex/o> } } ; \
+         COPY <http://g/absent> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+    assert_eq!(count_graph(&store, "http://g/1"), 0, "request rolled back");
+}
+
+#[test]
+fn later_copy_absent_to_default_keeps_default_mem() {
+    later_copy_absent_to_default_keeps_default::<MemStore>();
+}
+#[test]
+fn later_copy_absent_to_default_keeps_default_horn() {
+    later_copy_absent_to_default_keeps_default::<HornBackend>();
+}
+
+/// A source that only an *earlier* operation drops is absent by the time the
+/// `COPY` runs: the check must use the live store, not the pre-request one.
+fn copy_source_dropped_earlier_errors<B: FullBackend + Default>() {
+    let mut store = B::default();
+    seed_quad(
+        &mut store,
+        None,
+        "http://ex/a",
+        "http://ex/p",
+        "http://ex/b",
+    );
+    seed_quad(
+        &mut store,
+        Some("http://g/1"),
+        "http://ex/s",
+        "http://ex/p",
+        "http://ex/o",
+    );
+    let err = run(
+        "DROP GRAPH <http://g/1> ; COPY <http://g/1> TO DEFAULT",
+        &mut store,
+    )
+    .unwrap_err();
+    assert!(err.contains("does not exist"), "{err}");
+    assert_eq!(count_default(&store), 1, "default graph must survive");
+    assert_eq!(count_graph(&store, "http://g/1"), 1, "request rolled back");
+}
+
+#[test]
+fn copy_source_dropped_earlier_errors_mem() {
+    copy_source_dropped_earlier_errors::<MemStore>();
+}
+#[test]
+fn copy_source_dropped_earlier_errors_horn() {
+    copy_source_dropped_earlier_errors::<HornBackend>();
+}

@@ -39,8 +39,9 @@
 //!   ops execute; the flag — plus the source operand (resolved to an absolute
 //!   IRI against the update's own `PREFIX`/`BASE` prologue) and whether the op
 //!   is the identity case (`<g> TO <g>`) — is recovered per verb occurrence by a
-//!   source-text pre-scan (see [`recover_amc_hints`]). The preflight reads only
-//!   those hints, never the desugared ops.
+//!   source-text pre-scan (see [`recover_amc_hints`]), which also records the
+//!   index of the verb's first desugared op. The source check reads only those
+//!   hints, never the desugared ops' contents.
 //! * **The reserved namespace is closed to writes** (S4): every write form
 //!   touching `https://horndb.io/graph/…` is refused. This is a
 //!   permission-shaped error that `SILENT` does **not** suppress; it is
@@ -51,15 +52,16 @@
 //! deliver that.
 //!
 //! *Preflight* rejects most bad requests before the first mutation, against the
-//! pre-update store: a recovered-`SILENT` source existence sweep over the
-//! `ADD`/`MOVE`/`COPY` hints, then `validate_op` per operation (reserved
-//! namespace, D11 existence, `LOAD` routing/fetch). This is why `COPY <absent>
-//! TO DEFAULT` — which desugars to a destructive `Drop{DEFAULT}` + a copy from
-//! a missing source — never clears the default graph. D11 existence is
-//! preflighted for the **first** operation only: the pre-update store is the
-//! one only that operation runs on, so checking it for the rest rejected
-//! requests that are legal in request order (`INSERT { GRAPH <g> … } WHERE
-//! { … } ; DROP GRAPH <g>`).
+//! pre-update store: the `ADD`/`MOVE`/`COPY` source check, then `validate_op`
+//! per operation (reserved namespace, D11 existence, `LOAD` routing/fetch).
+//! Existence — D11 and the `ADD`/`MOVE`/`COPY` source — is preflighted for the
+//! **first** operation only: the pre-update store is the one only that
+//! operation runs on, so checking it for the rest rejected requests that are
+//! legal in request order (`INSERT DATA { GRAPH <g> … } ; COPY <g> TO <h>`).
+//! A later `ADD`/`MOVE`/`COPY` source is checked against the live store just
+//! before its first desugared op. Either way `COPY <absent> TO DEFAULT` — which
+//! desugars to a destructive `Drop{DEFAULT}` + a copy from a missing source —
+//! errors before the `Drop` and never clears the default graph.
 //!
 //! *Rollback* ([`Journal`]) covers what preflight cannot see: a later operation
 //! that fails only because an earlier one in the same request changed the store
@@ -205,29 +207,28 @@ pub fn apply_update_with_feed<B: FullBackend>(
     // every `ADD`/`MOVE`/`COPY` from the raw text — spargebra drops all three on
     // desugaring. Operands are resolved to absolute IRIs against the update's
     // own `PREFIX`/`BASE` prologue (see [`recover_amc_hints`]).
-    let amc_hints = recover_amc_hints(source, base_iri);
+    let (mut amc_hints, scanned_ops) = recover_amc_hints(source, base_iri);
+    // If the scan's operation count or a hint's position disagrees with the
+    // desugared list, the correlation is untrustworthy: judge every hint
+    // against the pre-request store (index 0) — may false-error, never wipes.
+    if scanned_ops != ops.len() || amc_hints.iter().any(|h| !h.matches(ops)) {
+        for h in &mut amc_hints {
+            h.op_index = 0;
+        }
+    }
 
     // Atomicity (§3.1.3), part 1: a non-silent `ADD`/`MOVE`/`COPY` whose source
-    // is absent (or unresolvable) is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5),
-    // caught before any mutation. The identity case (`<g> TO <g>`) desugars to
-    // zero ops and is a no-op even when `<g>` is absent, so it is excluded. A
-    // `DEFAULT` source always exists. A source the scan could not resolve (an
-    // escaped IRI — see [`AmcSource::Unknown`]) **fails closed**: a non-silent op
-    // errors rather than fall through to a silent no-op that could wipe a
-    // destination. This reads only the recovered hints — never the desugared ops
-    // — so it cannot collide with a user-written `DeleteInsert`.
+    // is absent (or unresolvable) is an error (SPARQL 1.1 §3.2.3/§3.2.4/§3.2.5).
+    // An unresolvable source fails closed for every op. Source existence is
+    // checked here only for an op that starts the request — the same
+    // first-operation rule as D11 in `validate_op`; a later op's source is
+    // checked at apply time, just before its first desugared op (see part 3).
     for h in &amc_hints {
-        if h.silent || h.is_identity {
-            continue;
+        if !h.silent && !h.is_identity && matches!(h.source, AmcSource::Unknown) {
+            return Err(amc_source_unresolvable_error());
         }
-        match &h.source {
-            AmcSource::Named(g) => {
-                if !store.graph_exists(g) {
-                    return Err(amc_source_missing_error(g));
-                }
-            }
-            AmcSource::Unknown => return Err(amc_source_unresolvable_error()),
-            AmcSource::Default => {}
+        if h.op_index == 0 {
+            amc_source_check(store, h)?;
         }
     }
 
@@ -250,9 +251,17 @@ pub fn apply_update_with_feed<B: FullBackend>(
     // each one reads the previous ones' writes), journalled so a failure undoes
     // the whole request. A single-op request is already one atomic batch, so its
     // journal is disabled and costs nothing.
+    // Before an `ADD`/`MOVE`/`COPY`'s first desugared op (for `COPY`/`MOVE`, the
+    // destructive `Drop` of the destination), its source is checked against the
+    // live store, so `… ; COPY <absent> TO DEFAULT` errors before the wipe.
     let mut journal = Journal::new(ops.len() > 1);
-    for op in ops {
-        if let Err(e) = apply_op(store, cfg, op, &mut journal) {
+    for (i, op) in ops.iter().enumerate() {
+        let res = amc_hints
+            .iter()
+            .filter(|h| h.op_index == i && i > 0)
+            .try_for_each(|h| amc_source_check(store, h))
+            .and_then(|()| apply_op(store, cfg, op, &mut journal));
+        if let Err(e) = res {
             journal.rollback(store);
             return Err(e);
         }
@@ -308,7 +317,7 @@ fn apply_op<B: FullBackend>(
         } => {
             // An `ADD`/`COPY` copy-op reading an absent named source binds
             // zero rows, so it is a natural no-op; a non-silent absent
-            // source was already rejected in the preflight sweep above.
+            // source was already rejected before its first desugared op.
             apply_delete_insert(store, cfg, delete, insert, using.as_ref(), pattern, journal)?;
         }
         GraphUpdateOperation::Clear { silent, graph } => {
@@ -420,7 +429,7 @@ impl Journal {
 /// Preflight one operation: return the error it *would* produce at apply time,
 /// without mutating (SPARQL Update atomicity, §3.1.3). Mirrors every rejecting
 /// path in the apply loop except the `ADD`/`MOVE`/`COPY` source-existence
-/// check, which runs once over the recovered hints in [`apply_update_with`].
+/// check, which runs over the recovered hints in [`apply_update_with`].
 ///
 /// Two apply-time checks read state the preflight cannot see, so they cannot be
 /// mirrored exactly: (a) D11 existence, which only the *first* operation reads
@@ -1098,12 +1107,18 @@ enum AmcSource {
 }
 
 /// One recovered `ADD`/`MOVE`/`COPY` occurrence: its `SILENT` flag, resolved
-/// source operand, and whether it is the W3C identity case (`source ==
-/// destination`).
+/// source operand, whether it is the W3C identity case (`source ==
+/// destination`), and where its desugared ops sit in the operation list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AmcHint {
     silent: bool,
     source: AmcSource,
+    /// Index of this verb's first desugared op. spargebra emits `ADD` as one
+    /// copy `DeleteInsert`, `COPY` as `Drop` + copy, `MOVE` as `Drop` + copy +
+    /// `Drop`, and every other operation as exactly one op.
+    op_index: usize,
+    /// How many ops the verb desugared to: 1/2/3, or 0 for identity.
+    op_count: usize,
     /// `true` when the resolved source and destination operands are equal —
     /// spargebra's own identity check (`from == to`), which always desugars to
     /// zero operations and is a no-op regardless of whether the graph exists
@@ -1113,9 +1128,36 @@ struct AmcHint {
     is_identity: bool,
 }
 
+impl AmcHint {
+    /// Does the desugared op at `op_index` have the shape this verb starts
+    /// with? Guards against a scan that mis-located operation boundaries.
+    fn matches(&self, ops: &[GraphUpdateOperation]) -> bool {
+        matches!(
+            (self.op_count, ops.get(self.op_index)),
+            (0, _)
+                | (1, Some(GraphUpdateOperation::DeleteInsert { .. }))
+                | (2 | 3, Some(GraphUpdateOperation::Drop { silent: true, .. }))
+        )
+    }
+}
+
+/// Error if a non-silent, non-identity `ADD`/`MOVE`/`COPY` names a source graph
+/// that does not exist in `store` now (D11). A `DEFAULT` source always exists;
+/// an unresolvable one is rejected in the preflight.
+fn amc_source_check<B: FullBackend>(store: &B, h: &AmcHint) -> Result<()> {
+    if h.silent || h.is_identity {
+        return Ok(());
+    }
+    match &h.source {
+        AmcSource::Named(g) if !store.graph_exists(g) => Err(amc_source_missing_error(g)),
+        AmcSource::Unknown => Err(amc_source_unresolvable_error()),
+        _ => Ok(()),
+    }
+}
+
 /// Recover the `SILENT` flag, resolved source operand, and identity check
 /// (`source == destination`) of every `ADD`/`MOVE`/`COPY` in the raw update
-/// text, in source order.
+/// text, in source order, plus the number of ops the whole request desugars to.
 ///
 /// **Why this exists.** spargebra 0.4.6 desugars `ADD`/`MOVE`/`COPY` into
 /// `Drop` + `DeleteInsert` pairs and **discards the `SILENT` flag**. That was
@@ -1145,14 +1187,34 @@ struct AmcHint {
 /// Upstream: `# TODO` — file an issue asking oxigraph/spargebra to preserve the
 /// `SILENT` flag on `ADD`/`MOVE`/`COPY` (no issue filed yet; do not invent a
 /// number). Delete this whole machinery the day that ships.
-fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> Vec<AmcHint> {
+fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> (Vec<AmcHint>, usize) {
     let toks = amc_tokenize(src);
     let mut prefixes: HashMap<String, String> = HashMap::new();
     let mut base: Option<Iri<String>> = base_iri.cloned();
     let mut hints = Vec::new();
+    // Operations are separated by `;` outside any `{…}`. `next_op` is the
+    // desugared index of the current operation's first op; `cur_ops` is how
+    // many ops it desugars to (`None` until a non-prologue token is seen, so a
+    // trailing `;` adds nothing).
+    let mut depth = 0usize;
+    let mut next_op = 0usize;
+    let mut cur_ops: Option<usize> = None;
     let mut i = 0;
     while i < toks.len() {
         match &toks[i] {
+            AmcTok::Open => {
+                depth += 1;
+                cur_ops.get_or_insert(1);
+                i += 1;
+            }
+            AmcTok::Close => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            AmcTok::Semi if depth == 0 => {
+                next_op += cur_ops.take().unwrap_or(0);
+                i += 1;
+            }
             // `BASE <iri>` — resolve against the current base, then adopt it.
             AmcTok::Base => {
                 if let Some(AmcTok::Iri(raw)) = toks.get(i + 1) {
@@ -1182,7 +1244,7 @@ fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> Vec<AmcHint> 
             }
             // A verb: `SILENT? GraphOrDefault TO GraphOrDefault`. Whitespace and
             // comments are not emitted, so the operands are consecutive tokens.
-            AmcTok::Amc => {
+            AmcTok::Amc(n) => {
                 let mut j = i + 1;
                 let silent = matches!(toks.get(j), Some(AmcTok::Silent));
                 if silent {
@@ -1196,17 +1258,28 @@ fn recover_amc_hints(src: &str, base_iri: Option<&Iri<String>>) -> Vec<AmcHint> 
                     (AmcSource::Named(a), Some(AmcSource::Named(b))) => a == b,
                     _ => false,
                 };
+                let op_count = if is_identity { 0 } else { *n };
+                if depth == 0 {
+                    cur_ops = Some(op_count);
+                }
                 hints.push(AmcHint {
                     silent,
                     source,
+                    op_index: next_op,
+                    op_count,
                     is_identity,
                 });
                 i += 1;
             }
-            _ => i += 1,
+            _ => {
+                if depth == 0 {
+                    cur_ops.get_or_insert(1);
+                }
+                i += 1;
+            }
         }
     }
-    hints
+    (hints, next_op + cur_ops.unwrap_or(0))
 }
 
 /// Parse one `GraphOrDefault` operand (`DEFAULT | GRAPH? iri`) starting at token
@@ -1272,7 +1345,13 @@ fn resolve_iri(raw: &str, base: Option<&Iri<String>>) -> Option<String> {
 /// into an operand slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AmcTok {
-    Amc,
+    /// `ADD`/`COPY`/`MOVE`, carrying how many ops spargebra desugars it to
+    /// (1/2/3) when it is not the identity case.
+    Amc(usize),
+    /// `{`, `}`, `;` — enough structure to find operation boundaries.
+    Open,
+    Close,
+    Semi,
     Silent,
     Default,
     Graph,
@@ -1376,11 +1455,12 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                     AmcTok::Escaped
                 } else if word.as_bytes().contains(&b':') {
                     AmcTok::PName(word.to_owned())
-                } else if word.eq_ignore_ascii_case("ADD")
-                    || word.eq_ignore_ascii_case("MOVE")
-                    || word.eq_ignore_ascii_case("COPY")
-                {
-                    AmcTok::Amc
+                } else if word.eq_ignore_ascii_case("ADD") {
+                    AmcTok::Amc(1)
+                } else if word.eq_ignore_ascii_case("COPY") {
+                    AmcTok::Amc(2)
+                } else if word.eq_ignore_ascii_case("MOVE") {
+                    AmcTok::Amc(3)
                 } else if word.eq_ignore_ascii_case("SILENT") {
                     AmcTok::Silent
                 } else if word.eq_ignore_ascii_case("DEFAULT") {
@@ -1398,7 +1478,12 @@ fn amc_tokenize(src: &str) -> Vec<AmcTok> {
                 i = j;
             }
             _ => {
-                out.push(AmcTok::Other);
+                out.push(match c {
+                    b'{' => AmcTok::Open,
+                    b'}' => AmcTok::Close,
+                    b';' => AmcTok::Semi,
+                    _ => AmcTok::Other,
+                });
                 i += 1;
             }
         }
