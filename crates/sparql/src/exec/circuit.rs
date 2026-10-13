@@ -9,9 +9,10 @@
 //! net back as rows for the reserved graph [`DERIVED_GRAPH`]. The caller
 //! commits them in the **same** storage batch as the base change (ADR-0018:
 //! one tick, one storage commit version), so no snapshot sees base rows
-//! without their consequences. Derived rows live in their own graph, not the default graph, so a
-//! user `DELETE DATA` of a derived triple and an `INSERT DATA` of an
-//! already-derived one can never desynchronise the circuit from storage.
+//! without their consequences. Derived rows live in their own graph, not the
+//! default graph, so a user `DELETE DATA` of a derived triple and an `INSERT
+//! DATA` of an already-derived one can never desynchronise the circuit from
+//! storage.
 //!
 //! **Threading model.** Tick and drain run on the *same* thread — the one
 //! holding the backend's `&mut self` (the server's `AppState` write lock).
@@ -84,36 +85,41 @@ impl Wiring {
     }
 
     /// One Update operation's worth of base changes: retract, assert, tick,
-    /// then mirror the tick's net derived delta into [`DERIVED_GRAPH`].
+    /// and return the tick's net derived delta as mirror rows for
+    /// [`DERIVED_GRAPH`], without writing them. The caller folds them into
+    /// the base batch so the tick is one commit version (ADR-0018). Each row
+    /// is an exact flip against `store` (except adds into a `swept` graph,
+    /// whose rows the same batch deletes), so the caller can subtract their
+    /// counts to recover the base-only report.
+    ///
     /// Callers compute `retracts` from storage presence, which also holds
     /// rows bulk-loaded below the funnel; only rows in the asserted base are
     /// retracted, so its multiplicities never go negative (HDB-150).
-    /// Returns the mirror rows without writing them: the caller folds them
-    /// into the base batch so the tick is one commit version (ADR-0018). Each
-    /// row is an exact flip against `store`, so the caller can subtract their
-    /// counts to recover the base-only report.
     ///
-    /// Call this *before* committing the base batch. If that commit then
-    /// fails, the circuit is one tick ahead of storage until a reattach
-    /// re-seeds it; a failed commit is a write-ahead-log I/O error, which
-    /// already leaves the store unfit for writes.
+    /// Call this *before* committing the batch, and pass the returned
+    /// [`Fed`] to [`Self::rollback`] if that commit fails, so the circuit
+    /// does not stay a tick ahead of storage.
     pub(crate) fn apply(
         &mut self,
         store: &ColumnStore,
         asserts: &[TripleId],
         retracts: &[TripleId],
-    ) -> Mirror {
-        let report = {
+        swept: &[GraphId],
+    ) -> (Mirror, Fed) {
+        let (report, fed) = {
             let c = self.circuit();
-            for t in retracts {
-                if c.asserted_base().get(t) > 0 {
-                    c.retract_triple(*t);
-                }
+            let retracts: Vec<TripleId> = retracts
+                .iter()
+                .copied()
+                .filter(|t| c.asserted_base().get(t) > 0)
+                .collect();
+            for t in &retracts {
+                c.retract_triple(*t);
             }
             for t in asserts {
                 c.assert_triple(*t);
             }
-            c.tick()
+            (c.tick(), (asserts.to_vec(), retracts))
         };
         // Durability: the caller commits base and mirror as one logged
         // `Store` batch (SPEC-25 S3), so that one write-ahead-log record is the
@@ -128,7 +134,29 @@ impl Wiring {
                 self.resync(store)
             }
         };
-        self.flips(store, &dels, &adds)
+        (self.flips(store, &dels, &adds, swept), fed)
+    }
+
+    /// Undo an [`Self::apply`] whose storage commit failed: tick the inverse
+    /// of what it fed, then resubscribe so the inverse tick's records (and
+    /// any undrained ones) never reach a later `apply`. Z-set ticks are
+    /// exactly invertible, so the derived base returns to what storage holds.
+    pub(crate) fn rollback(&mut self, (asserts, retracts): Fed) {
+        let capacity = self.capacity;
+        let c = self.circuit();
+        for t in &asserts {
+            c.retract_triple(*t);
+        }
+        for t in &retracts {
+            c.assert_triple(*t);
+        }
+        c.tick();
+        self.rx = c.subscribe_bounded(capacity, LagPolicy::DisconnectSlow);
+    }
+
+    /// The reserved graph this wiring mirrors derived rows into.
+    pub(crate) fn graph(&self) -> GraphId {
+        self.graph
     }
 
     /// Attach-time seed: assert `base` (the default graph as it stands) in
@@ -143,7 +171,7 @@ impl Wiring {
         }
         c.tick();
         let (dels, adds) = self.resync(store);
-        let (dels, adds) = self.flips(store, &dels, &adds);
+        let (dels, adds) = self.flips(store, &dels, &adds, &[]);
         store
             .apply_quad_ids(&dels, &adds)
             .expect("derived-graph seed batch")
@@ -192,8 +220,17 @@ impl Wiring {
 
     /// One net derived delta as derived-graph quads (the ids are already
     /// dictionary ids, so no decode/re-intern round trip), keeping only rows
-    /// that change storage: dels that are present, adds that are absent.
-    fn flips(&self, store: &ColumnStore, dels: &[TripleId], adds: &[TripleId]) -> Mirror {
+    /// that change storage: dels that are present, adds that are absent. If
+    /// the batch also sweeps the derived graph, every add is kept: the sweep
+    /// deletes its present rows first, so presence before says nothing.
+    fn flips(
+        &self,
+        store: &ColumnStore,
+        dels: &[TripleId],
+        adds: &[TripleId],
+        swept: &[GraphId],
+    ) -> Mirror {
+        let keep_all_adds = swept.contains(&self.graph);
         let dict = store.dictionary();
         let snap = store.snapshot();
         let quad =
@@ -202,13 +239,19 @@ impl Wiring {
             |t: &TripleId| snap.contains_quad(self.graph, TermId(t.0), TermId(t.1), TermId(t.2));
         (
             dels.iter().filter(|t| present(t)).map(quad).collect(),
-            adds.iter().filter(|t| !present(t)).map(quad).collect(),
+            adds.iter()
+                .filter(|t| keep_all_adds || !present(t))
+                .map(quad)
+                .collect(),
         )
     }
 }
 
 /// Derived-graph mirror rows `(dels, adds)` for one tick, each an exact flip.
 pub(crate) type Mirror = (Vec<InternedQuad>, Vec<InternedQuad>);
+
+/// The `(asserts, retracts)` one [`Wiring::apply`] actually fed the circuit.
+pub(crate) type Fed = (Vec<TripleId>, Vec<TripleId>);
 
 /// Sum a tick's derived records per triple (SPEC-24 S3 consumer rule): a
 /// triple with total `> 0` became present, `< 0` became absent, `0` did not

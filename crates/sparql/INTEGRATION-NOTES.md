@@ -1019,10 +1019,13 @@ caller and the next phases need to know:
 - **One tick, one storage batch (ADR-0018, HDB-151).** The tick runs
   *before* the commit: `HornBackend::apply_with_circuit` (and `clear_graph`)
   append the mirror rows to the base rows and commit both in one
-  `Store::apply_quad_ids` call, so a snapshot never sees base rows without
-  their consequences. Because mirror rows are exact flips, their counts
-  subtract out of the report and `ApplyCounts` stays base-only. `attach_circuit` admits
-  that graph to the default union (`set_visible_inferred`-style), so a plain
+  `Store::apply_quad_ids` call, so no snapshot sees their base rows without
+  their consequences. Bulk loaders (`insert_oxrdf_batch` and friends) bypass
+  the circuit. If the commit fails, `Wiring::rollback` ticks the inverse of
+  what the tick fed, so the circuit never runs ahead of storage. Mirror rows
+  are exact flips, so `apply_quads` subtracts their counts and its
+  `ApplyCounts` stays base-only; `CLEAR ALL`/`CLEAR NAMED` also count the
+  derived rows they sweep. `attach_circuit` admits that graph to the default union (`set_visible_inferred`-style), so a plain
   `SELECT` sees derived rows. Derived rows deliberately do not go into the
   default graph: a user `DELETE DATA` of a derived triple, or `INSERT DATA`
   of one already derived, would otherwise desynchronise circuit and store.
@@ -1042,7 +1045,8 @@ caller and the next phases need to know:
   `AppState` lock (lock-order inversion with the ticking writer); write
   through a cloned `Arc<ColumnStore>` instead. Read-your-writes across
   requests holds because the mirror commits before `/update` returns.
-- **Snapshot memo.** The derived mirror lands in another graph, which `apply_delta_to_snapshots` cannot express, so a tick that changed
+- **Snapshot memo.** The derived mirror lands in another graph, which
+  `apply_delta_to_snapshots` cannot express, so a tick that changed
   anything drops the memo (`invalidate`) instead of merging the delta. Once
   derived rows exist the union spans two graphs anyway, which already takes
   the rebuild path.
@@ -1058,10 +1062,12 @@ caller and the next phases need to know:
   does not.
 - **`CLEAR`/`DROP`.** `clear_graph`'s default-graph sweep is the circuit's
   retract list (every swept row is present, so no before/after check), fed
-  through the same `Wiring::apply`; its mirror commits in the sweep's batch. Named
-  graphs do not enter the circuit. `CLEAR ALL` also sweeps the derived graph
-  itself (mirror dels for a swept graph are dropped, so each row counts
-  once), and the retract tick withdraws every derived row from the circuit, so store and circuit both end empty.
+  through the same `Wiring::apply`; its mirror commits in the sweep's batch.
+  Named graphs do not enter the circuit. `CLEAR ALL` also sweeps the derived
+  graph itself: mirror dels for a swept graph are dropped, so each row counts
+  once, and mirror adds into it skip the presence filter, since the sweep
+  deletes them first. The retract tick withdraws every derived row from the
+  circuit, so store and circuit both end empty.
 - **Not wired yet.** SPEC-29 views and the circuit are separate pipelines
   (`publish` replaces `visible_inferred`, which would hide the derived graph
   if both ran on one backend — `serve` runs neither today).

@@ -529,7 +529,7 @@ fn reopen_from_wal_and_reattach_drops_stale_derived_rows() {
 /// on the drain path, the resync path, and `CLEAR`.
 #[test]
 fn one_update_commits_base_and_derived_as_one_version() {
-    for capacity in [1 << 10, 2] {
+    for capacity in [1 << 10, 1] {
         let mut b = transitive_backend(capacity);
         let version = |b: &HornBackend| b.column_store().snapshot().version();
 
@@ -545,9 +545,15 @@ fn one_update_commits_base_and_derived_as_one_version() {
             .unwrap();
         assert_eq!(counts.inserted, 2, "counts are base rows only");
         assert_eq!(version(&b), v0 + 1, "capacity {capacity}: insert");
+        let resynced = |b: &HornBackend, before: u64| capacity > 1 || b.circuit_resyncs() > before;
+        assert!(
+            resynced(&b, 0),
+            "capacity {capacity}: insert took the resync path"
+        );
         assert!(edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
 
         let v1 = version(&b);
+        let r1 = b.circuit_resyncs();
         let counts = b
             .apply_quads(
                 vec![(None, iri("http://ex/b"), iri(P), iri("http://ex/c"))],
@@ -556,6 +562,10 @@ fn one_update_commits_base_and_derived_as_one_version() {
             .unwrap();
         assert_eq!(counts.retracted, 1, "counts are base rows only");
         assert_eq!(version(&b), v1 + 1, "capacity {capacity}: delete");
+        assert!(
+            resynced(&b, r1),
+            "capacity {capacity}: delete took the resync path"
+        );
         assert!(!edges(&b).contains(&pair("http://ex/a", "http://ex/c")));
         assert_derived_graph_mirrors_circuit(&mut b);
 
@@ -565,9 +575,14 @@ fn one_update_commits_base_and_derived_as_one_version() {
         )
         .unwrap();
         let v2 = version(&b);
+        let r2 = b.circuit_resyncs();
         let cleared = b.clear_graph(&GraphTarget::DefaultGraph).unwrap();
         assert_eq!(cleared, 2, "counts are base rows only");
         assert_eq!(version(&b), v2 + 1, "capacity {capacity}: clear");
+        assert!(
+            resynced(&b, r2),
+            "capacity {capacity}: clear took the resync path"
+        );
         assert!(edges(&b).is_empty());
         assert_derived_graph_mirrors_circuit(&mut b);
     }

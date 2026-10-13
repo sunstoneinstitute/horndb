@@ -900,14 +900,25 @@ impl HornBackend {
             record_load_phase(LoadPhase::Intern, t_intern.elapsed(), add_rows.len() as u64);
         }
         let wiring = self.circuit.as_mut().expect("caller checked");
-        let (md, ma) = wiring.apply(&self.store, &asserts, &retracts);
+        // The count subtraction below needs base rows and mirror rows to be
+        // disjoint; Update and GSP cannot write the reserved derived graph.
+        debug_assert!(
+            dels.iter()
+                .chain(&adds)
+                .all(|q| q.graph() != wiring.graph()),
+            "base row in the circuit's derived graph"
+        );
+        let ((md, ma), fed) = wiring.apply(&self.store, &asserts, &retracts, &[]);
         let (nd, na) = (md.len(), ma.len());
         dels.extend(md);
         adds.extend(ma);
-        let mut report = self
-            .store
-            .apply_quad_ids(&dels, &adds)
-            .map_err(|e| SparqlError::Executor(format!("storage apply_quads: {e}")))?;
+        let mut report = match self.store.apply_quad_ids(&dels, &adds) {
+            Ok(r) => r,
+            Err(e) => {
+                wiring.rollback(fed);
+                return Err(SparqlError::Executor(format!("storage apply_quads: {e}")));
+            }
+        };
         report.retracted -= nd;
         report.inserted -= na;
         Ok((report, nd + na > 0))
@@ -2479,9 +2490,12 @@ impl Store for HornBackend {
         #[allow(unused_mut)]
         let (mut dels, mut adds, mut derived_dels) = (dels, Vec::new(), 0);
         #[cfg(feature = "incremental")]
+        let mut fed = None;
+        #[cfg(feature = "incremental")]
         if let Some(wiring) = &mut self.circuit {
             if !retracts.is_empty() {
-                let (md, ma) = wiring.apply(&self.store, &[], &retracts);
+                let ((md, ma), f) = wiring.apply(&self.store, &[], &retracts, &graphs_to_sweep);
+                fed = Some(f);
                 let before = dels.len();
                 dels.extend(
                     md.into_iter()
@@ -2493,10 +2507,16 @@ impl Store for HornBackend {
         }
         // Through the store, not the tier: the write-ahead log must see the
         // sweep, or the next logged batch cannot replay (SPEC-25 S3).
-        let mut report = self
-            .store
-            .apply_quad_ids(&dels, &adds)
-            .map_err(|e| SparqlError::Executor(format!("clear_graph: {e}")))?;
+        let mut report = match self.store.apply_quad_ids(&dels, &adds) {
+            Ok(r) => r,
+            Err(e) => {
+                #[cfg(feature = "incremental")]
+                if let (Some(wiring), Some(fed)) = (&mut self.circuit, fed) {
+                    wiring.rollback(fed);
+                }
+                return Err(SparqlError::Executor(format!("clear_graph: {e}")));
+            }
+        };
         report.retracted -= derived_dels;
         if report.retracted > 0 {
             self.invalidate();
