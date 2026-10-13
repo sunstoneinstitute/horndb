@@ -83,6 +83,9 @@ impl Wiring {
 
     /// One Update operation's worth of base changes: retract, assert, tick,
     /// then mirror the tick's net derived delta into [`DERIVED_GRAPH`].
+    /// Callers compute `retracts` from storage presence, which also holds
+    /// rows bulk-loaded below the funnel; only rows in the asserted base are
+    /// retracted, so its multiplicities never go negative (HDB-150).
     /// Returns storage's report for that mirror batch (all zero when nothing
     /// derived changed).
     pub(crate) fn apply(
@@ -94,7 +97,9 @@ impl Wiring {
         let report = {
             let c = self.circuit();
             for t in retracts {
-                c.retract_triple(*t);
+                if c.asserted_base().get(t) > 0 {
+                    c.retract_triple(*t);
+                }
             }
             for t in asserts {
                 c.assert_triple(*t);

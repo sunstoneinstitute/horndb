@@ -441,6 +441,41 @@ fn clear_default_withdraws_derived_and_does_not_resurrect() {
     assert_derived_graph_mirrors_circuit(&mut b);
 }
 
+/// HDB-150: rows bulk-loaded after attach sit in storage but not in the
+/// circuit's asserted base. Removing them must not retract from the circuit,
+/// or the base goes negative and a later re-insert nets to zero, losing every
+/// derivation from it for good.
+#[test]
+fn removing_bulk_loaded_rows_does_not_drive_the_base_negative() {
+    for removal in [
+        "CLEAR DEFAULT",
+        "DELETE DATA { <http://ex/a> <http://ex/p> <http://ex/b> . <http://ex/b> <http://ex/p> <http://ex/c> }",
+    ] {
+        let mut b = transitive_backend(1 << 10);
+        b.insert_oxrdf_batch(vec![
+            (ox("http://ex/a"), ox(P), ox("http://ex/b")),
+            (ox("http://ex/b"), ox(P), ox("http://ex/c")),
+        ])
+        .unwrap();
+        assert!(b.circuit().unwrap().asserted_base().is_empty());
+        execute_update(removal, &mut b).unwrap();
+        assert!(
+            b.circuit().unwrap().asserted_base().is_empty(),
+            "{removal}: retracted rows the circuit never asserted"
+        );
+        execute_update(
+            "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> . <http://ex/b> <http://ex/p> <http://ex/c> }",
+            &mut b,
+        )
+        .unwrap();
+        assert!(
+            edges(&b).contains(&pair("http://ex/a", "http://ex/c")),
+            "{removal}: re-inserted rows must derive again"
+        );
+        assert_derived_graph_mirrors_circuit(&mut b);
+    }
+}
+
 /// SPEC-29 D7: an update that derives something still reports its touched
 /// graphs to the view router.
 #[test]
