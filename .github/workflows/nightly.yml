@@ -119,7 +119,13 @@ jobs:
         # and Oxigraph reject CLEAR of a missing graph (SPARQL 1.1 allows
         # that) while GraphDB treats it as a no-op, so every HornDB/Oxigraph
         # delete scored as an error. SILENT makes all engines do the same no-op.
+        #
+        # The driver writes its detailed query logs (`saveDetailedQueryLogs`)
+        # under `$SPB_ASSETS/logs/`, outside the wiped checkout; they grew to
+        # ~1.1 TB. Keep a week for investigating failed runs, drop the rest.
         run: |
+          find "$SPB_ASSETS/logs" -type f -mtime +7 -delete 2>/dev/null || true
+          find "$SPB_ASSETS/logs" -mindepth 1 -type d -empty -delete 2>/dev/null || true
           cp crates/harness/scenarios/spb-nightly.properties "$SPB_ASSETS/spb-nightly.properties"
           sed -i 's/^CLEAR GRAPH /CLEAR SILENT GRAPH /' "$SPB_ASSETS/data/sparql/editorial/delete.txt"
 
