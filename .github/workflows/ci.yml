@@ -148,7 +148,7 @@ jobs:
 
       # Fails on a dependency no source file uses. An unused `oxigraph` once
       # cost every CI job a cold RocksDB C++ build (docs/ci-build-speed.md).
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-machete
 
@@ -190,7 +190,7 @@ jobs:
       # (task #108). install-action fetches a prebuilt binary, so the rustc-1.90
       # pin does not constrain the nextest version (that limit is for building
       # nextest from source, not running it).
-      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest
 
