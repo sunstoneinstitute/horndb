@@ -148,7 +148,7 @@ jobs:
 
       # Fails on a dependency no source file uses. An unused `oxigraph` once
       # cost every CI job a cold RocksDB C++ build (docs/ci-build-speed.md).
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-machete
 
@@ -190,7 +190,7 @@ jobs:
       # (task #108). install-action fetches a prebuilt binary, so the rustc-1.90
       # pin does not constrain the nextest version (that limit is for building
       # nextest from source, not running it).
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-nextest
 
@@ -392,7 +392,7 @@ jobs:
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
