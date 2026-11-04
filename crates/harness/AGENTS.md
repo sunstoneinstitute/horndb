@@ -150,6 +150,10 @@ fetched, not mirrored, so the entry carries `fetched = true`.
 
 ### Fetched corpora: `fetched = true` and `--require-corpus`
 
+Every suite `fetch-w3c-suites.sh` takes from `w3c/rdf-tests` is fetched at the
+commit pinned by `RDF_TESTS_REV`, so an upstream edit cannot change CI results
+unannounced. Bump the pin in its own change and fix what the new cases expose.
+
 A suite whose manifest comes from a fetched corpus rather than a checked-in
 fixture sets `fetched = true` in its `selected.toml` entry (`sparql11-eval`
 and `sparql11-gsp`). It changes what happens when that manifest is **absent**:

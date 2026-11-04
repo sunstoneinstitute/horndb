@@ -549,6 +549,7 @@ fn status_code(iri: &str) -> Result<u16> {
     match iri.strip_prefix(HTS) {
         Some("OK") => Ok(200),
         Some("Created") => Ok(201),
+        Some("Accepted") => Ok(202),
         Some("NoContent") => Ok(204),
         Some("NotFound") => Ok(404),
         _ => bail!("unrecognised mf:expectedStatus {iri}"),
@@ -690,6 +691,20 @@ mod tests {
         let mut f = fs::File::create(&p).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         p
+    }
+
+    #[test]
+    fn status_code_maps_every_hts_name_the_gsp_suite_uses() {
+        for (name, code) in [
+            ("OK", 200),
+            ("Created", 201),
+            ("Accepted", 202),
+            ("NoContent", 204),
+            ("NotFound", 404),
+        ] {
+            assert_eq!(status_code(&format!("{HTS}{name}")).unwrap(), code);
+        }
+        assert!(status_code(&format!("{HTS}Teapot")).is_err());
     }
 
     #[test]

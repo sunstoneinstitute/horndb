@@ -28,9 +28,13 @@ mkdir -p "$DATA"
 
 OWL2_PROFILE_RL_URL="https://www.w3.org/2009/11/owl-test/profile-RL.rdf"
 SPARQL_URL="https://www.w3.org/2009/sparql/docs/tests/sparql11-test-suite-20121023.tar.gz"
-RDF12_NT_BASE="https://w3c.github.io/rdf-tests/rdf/rdf12/rdf-n-triples/syntax"
-SPARQL10_BASE="https://w3c.github.io/rdf-tests/sparql/sparql10"
-GSP_BASE="https://w3c.github.io/rdf-tests/sparql/sparql11/graph-store-protocol"
+# w3c/rdf-tests commit every rdf-tests suite below is fetched at. Pinned so an
+# upstream edit cannot change CI results unannounced; bump it deliberately.
+RDF_TESTS_REV="${RDF_TESTS_REV:-671354f3f5337e267193aa0a1eb3e9fca91a3401}"
+RDF_TESTS="https://raw.githubusercontent.com/w3c/rdf-tests/$RDF_TESTS_REV"
+RDF12_NT_BASE="$RDF_TESTS/rdf/rdf12/rdf-n-triples/syntax"
+SPARQL10_BASE="$RDF_TESTS/sparql/sparql10"
+GSP_BASE="$RDF_TESTS/sparql/sparql11/graph-store-protocol"
 
 OWL2_DIR="$DATA/w3c-owl2-rl-tests"
 SPARQL_DIR="$DATA/w3c-sparql11-tests"
