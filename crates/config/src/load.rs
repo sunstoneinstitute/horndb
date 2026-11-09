@@ -206,6 +206,8 @@ fn config_d_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, ConfigError> {
 }
 
 #[cfg(test)]
+// figment::Jail closures must return figment::Error, which is large.
+#[allow(clippy::result_large_err)]
 mod env_tests {
     use super::*;
     use crate::model::DefaultGraph;

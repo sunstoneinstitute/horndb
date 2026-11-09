@@ -70,7 +70,7 @@ filed yet, write `#TODO` (or file it first), not a placeholder id.
 
 ## Workspace layout
 
-Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.90.0` via `rust-toolchain.toml`:
+Nine Rust crates under `crates/`, all `publish = false`, all on `edition = 2021`, pinned to Rust `1.91.1` via `rust-toolchain.toml`:
 
 | Crate | SPEC | Role |
 |---|---|---|
@@ -132,7 +132,7 @@ time, which dominates `cargo test --workspace` wall-clock. `cargo nextest`
 schedules every test across all binaries in one concurrent pool — same tests,
 no source changes, materially faster (locally ~40% on a quiet machine; more
 under contention / in CI). Config lives in `.config/nextest.toml`. Install a
-rustc-1.90-compatible version (the workspace is pinned to 1.90.0; nextest
+rustc-1.91-compatible version (the workspace is pinned to 1.91.1; nextest
 >= 0.9.79 needs a newer rustc to *build* — a prebuilt binary has no such limit):
 
 ```bash

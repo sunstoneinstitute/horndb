@@ -362,6 +362,8 @@ print_report() {
   echo "notes:"
   echo "  * transitive/materialize 'reason ms' isolates reasoning: data is imported"
   echo "    first, so the RDFox rule-import time is materialization-only."
+  echo "  * HornDB materialize reason_ms excludes encode/build (reported as"
+  echo "    load_ms), matching RDFox's data-first, rules-last timing."
   echo "  * HornDB transitive 'reason' = matrix build + GraphBLAS closure compute;"
   echo "    RDFox materializes triples into its store (broader work). See README."
   echo "  * materialize totals differ by HornDB's injected XSD datatype axioms;"

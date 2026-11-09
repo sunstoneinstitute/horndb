@@ -3909,7 +3909,7 @@ mod tests {
         );
         assert_eq!(b.memo_len(), 1, "the snapshot memo keeps merging");
         assert_eq!(
-            b.wcoj_snapshot(&scope).unwrap().total_triples() as usize,
+            b.wcoj_snapshot(&scope).unwrap().total_triples(),
             2000 + STATS_PENDING_CAP + 1
         );
         assert_eq!(

@@ -50,7 +50,7 @@ jobs:
       # captures the real HTTP response rather than a hand-typed example.
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
       - run: cargo build -p horndb-sparql --bin serve
 
       # `.qmd` pages with `jupyter: python3` front matter need a registered

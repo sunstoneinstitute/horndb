@@ -7,7 +7,7 @@
 # binary at a time. nextest interleaves them, cutting wall-clock substantially
 # with no source changes and no loss of coverage.
 #
-# Install a rustc-1.90-compatible version (the workspace is pinned to 1.90.0 via
+# Install a rustc-1.91-compatible version (the workspace is pinned to 1.91.1 via
 # rust-toolchain.toml; nextest >= 0.9.79 requires a newer rustc):
 #
 #     cargo install cargo-nextest --version '0.9.78' --locked

@@ -202,6 +202,7 @@ impl Engine {
     /// Discard prior state and load `dataset`'s default graph into a fresh
     /// store, then run materialization to fixed point.
     pub fn load(&mut self, dataset: &Dataset) -> Result<()> {
+        let t_load = std::time::Instant::now();
         let mut state = LoadState {
             dict: self.base_dict.clone(),
             next_id: USER_TERMS_BASE,
@@ -216,7 +217,9 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
+        let load = t_load.elapsed();
+        let mut stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
+        stats.timings.load = load;
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -235,6 +238,7 @@ impl Engine {
         &mut self,
         triples: impl IntoIterator<Item = (String, String, String)>,
     ) -> Result<()> {
+        let t_load = std::time::Instant::now();
         let mut state = LoadState {
             dict: self.base_dict.clone(),
             next_id: USER_TERMS_BASE,
@@ -246,7 +250,9 @@ impl Engine {
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
+        let load = t_load.elapsed();
+        let mut stats = finish(&self.vocab, self.backend, self.opts, &mut state, true);
+        stats.timings.load = load;
         self.last_stats = Some(stats);
         self.state = Some(state);
         Ok(())
@@ -289,12 +295,15 @@ impl Engine {
             .state
             .as_mut()
             .ok_or_else(|| anyhow!("extend called before load_base"))?;
+        let t_load = std::time::Instant::now();
         for (s, p, o) in triples {
             let triple = intern_lexical_triple(state, &s, &p, &o);
             state.store.assert(triple);
             state.loaded_count += 1;
         }
-        let stats = finish(&vocab, backend, opts, state, false);
+        let load = t_load.elapsed();
+        let mut stats = finish(&vocab, backend, opts, state, false);
+        stats.timings.load = load;
         self.last_stats = Some(stats);
         Ok(())
     }

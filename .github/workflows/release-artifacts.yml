@@ -70,10 +70,10 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust 1.90
+      - name: Install Rust 1.91
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
 
       - name: Install build deps
         run: brew install cmake libomp pkg-config
