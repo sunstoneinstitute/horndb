@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -274,12 +274,13 @@ fn run_materialize(
         firing: firing.strategy(),
         ..Default::default()
     });
-    let reason_start = Instant::now();
+    let wall_start = Instant::now();
     engine.load(&dataset).context("materializing")?;
-    let reason = reason_start.elapsed();
+    let wall = wall_start.elapsed();
     // Per-phase wall-clock attribution (summed across semi-naïve rounds).
     let stats = engine.last_stats();
     let timings = stats.map(|s| s.timings.clone()).unwrap_or_default();
+    let (load, reason) = split_load_reason(wall, timings.load);
     let rounds = stats.map(|s| s.rounds).unwrap_or(0);
 
     let asserted = engine.asserted_len().unwrap_or(0);
@@ -311,7 +312,13 @@ fn run_materialize(
         ("total", total.to_string()),
         ("rounds", rounds.to_string()),
         ("parse_ms", ms(parse)),
+        // Encode + store build, excluded from reason_ms (RDFox loads data
+        // first and times only rule import).
+        ("load_ms", ms(load)),
+        // Fixpoint only: wall time of Engine::load minus load_ms.
         ("reason_ms", ms(reason)),
+        // Old total: load_ms + reason_ms.
+        ("wall_ms", ms(wall)),
         // Phase attribution within reason_ms (#61). Sums across all rounds.
         ("compiled_rules_ms", ms(timings.compiled_rules)),
         ("list_rules_ms", ms(timings.list_rules)),
@@ -415,9 +422,40 @@ fn escape_nt_literal(out: &mut String, value: &str) {
     }
 }
 
+/// Split the wall time of `Engine::load` into (load, fixpoint).
+fn split_load_reason(wall: Duration, load: Duration) -> (Duration, Duration) {
+    let load = load.min(wall);
+    (load, wall - load)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_plus_reason_matches_wall() {
+        use oxrdf::{Dataset, NamedNode, Quad};
+        let n = |i: &str| NamedNode::new(format!("http://e/{i}")).unwrap();
+        let mut ds = Dataset::new();
+        for i in 0..50 {
+            ds.insert(&Quad::new(
+                n(&format!("s{i}")),
+                n("p"),
+                n(&format!("o{i}")),
+                oxrdf::GraphName::DefaultGraph,
+            ));
+        }
+        let mut engine = horndb_owlrl::Engine::new();
+        let t = Instant::now();
+        engine.load(&ds).unwrap();
+        let wall = t.elapsed();
+        let load = engine.last_stats().unwrap().timings.load;
+        assert!(load > Duration::ZERO);
+        let (l, r) = split_load_reason(wall, load);
+        let diff = (l + r).abs_diff(wall);
+        assert!(diff < Duration::from_millis(1), "diff {diff:?}");
+        assert!(l <= wall);
+    }
 
     #[test]
     fn write_ntriples_reports_skipped_literal_subjects() {

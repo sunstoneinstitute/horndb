@@ -25,6 +25,9 @@ pub struct Stats {
 /// Per-phase wall-clock totals summed across every semi-naïve round.
 #[derive(Debug, Default, Clone)]
 pub struct PhaseTimings {
+    /// Time in `Engine::load` / `load_base` / `extend` before the fixpoint
+    /// starts: state setup, term encoding and store assertion.
+    pub load: std::time::Duration,
     /// Time in the compiled `rules.toml` fire functions (incl. `eq-rep-p`).
     pub compiled_rules: std::time::Duration,
     /// Time in the hand-written list-axiom rules (`list_rules::fire_all`).
