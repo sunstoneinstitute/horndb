@@ -127,3 +127,31 @@ fn rce2_broad_then_exact_propagates_broad() {
     });
     assert!(s.contains(&t(a, v.skos_broad_match, c)));
 }
+
+#[test]
+fn ri_skos_symmetric_mapping_predicates() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_exact_match, b));
+        s.assert(t(a, v.skos_close_match, b));
+        s.assert(t(a, v.skos_related_match, b));
+    });
+    assert!(s.contains(&t(b, v.skos_exact_match, a)));
+    assert!(s.contains(&t(b, v.skos_close_match, a)));
+    assert!(s.contains(&t(b, v.skos_related_match, a)));
+}
+
+#[test]
+fn rg3_exact_match_generalises_to_close_match() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_exact_match, b));
+    });
+    assert!(s.contains(&t(a, v.skos_close_match, b)));
+    assert!(
+        !s.contains(&t(a, v.owl_same_as, b)),
+        "ADR-0017: no sameAs bridge"
+    );
+}
