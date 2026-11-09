@@ -190,6 +190,6 @@ pub fn degree_order(bgp: &Bgp) -> Vec<Var> {
         })
         .collect();
     // Stable sort: first-appearance order survives ties.
-    degrees.sort_by(|a, b| b.1.cmp(&a.1));
+    degrees.sort_by_key(|d| std::cmp::Reverse(d.1));
     degrees.into_iter().map(|(v, _)| v).collect()
 }

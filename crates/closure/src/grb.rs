@@ -423,7 +423,7 @@ impl ValuedMatrix {
             .zip(vals)
             .map(|((r, c), v)| (r, c, v))
             .collect();
-        out.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        out.sort_unstable_by_key(|a| (a.0, a.1));
         Ok(out)
     }
 }

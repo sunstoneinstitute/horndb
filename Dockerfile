@@ -10,7 +10,7 @@
 # (crates/closure/vendor/GraphBLAS) — CI checks out with submodules: recursive.
 
 # ---- build stage ----
-FROM rust:1.90-bookworm AS build
+FROM rust:1.91-bookworm AS build
 
 # cmake + a C/C++ toolchain build the vendored GraphBLAS; pkg-config resolves
 # its static .pc. libgomp is pulled in transitively by gcc for the OpenMP link.

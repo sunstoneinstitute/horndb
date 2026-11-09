@@ -91,13 +91,12 @@ fn hash64(b: &[u8]) -> u64 {
     const K0: u64 = 0x9e37_79b9_7f4a_7c15;
     const K1: u64 = 0xc2b2_ae3d_27d4_eb4f;
     let mut h = K0 ^ (b.len() as u64).wrapping_mul(K1);
-    let mut c = b.chunks_exact(8);
-    for w in &mut c {
-        let v = u64::from_le_bytes(w.try_into().unwrap());
+    let (words, r) = b.as_chunks::<8>();
+    for w in words {
+        let v = u64::from_le_bytes(*w);
         h = (h ^ v).wrapping_mul(K1);
         h = h.rotate_left(29).wrapping_add(v);
     }
-    let r = c.remainder();
     if !r.is_empty() {
         let mut buf = [0u8; 8];
         buf[..r.len()].copy_from_slice(r);
@@ -953,8 +952,10 @@ fn main() {
             let src = Keys::read(&sd.join("keys.bin"));
             let raw = std::fs::read(sd.join("stream.bin")).unwrap();
             let src_stream: Vec<u32> = raw
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c))
                 .collect();
             let (k, stream) = scale_keys(&src, &src_stream, factor, n_keys);
             eprintln!(
@@ -1700,8 +1701,10 @@ fn do_query(dir: &Path, probes: usize, reps: usize, zipf: f64, arm: &str) {
 fn read_stream(path: &Path) -> Vec<u32> {
     std::fs::read(path)
         .unwrap()
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 

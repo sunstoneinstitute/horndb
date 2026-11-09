@@ -469,10 +469,9 @@ mod tests {
     #[test]
     fn parse_brand_bytes_trims_nul_and_padding() {
         // CPUID space-pads and NUL-terminates; both must be stripped.
-        let mut b = *b"   AMD Ryzen 7 7700 8-Core Processor\0\0\0\0\0\0\0\0\0\0\0\0";
+        let b = *b"   AMD Ryzen 7 7700 8-Core Processor\0\0\0\0\0\0\0\0\0\0\0\0";
         assert_eq!(parse_brand_bytes(&b), "AMD Ryzen 7 7700 8-Core Processor");
         // No NUL at all: still trims the padding.
-        b[36] = b' ';
         let full = b"Intel(R) Xeon(R) Gold 5412U             ";
         assert_eq!(parse_brand_bytes(full), "Intel(R) Xeon(R) Gold 5412U");
         // Empty / all-NUL yields empty (identity() then falls back to the key).

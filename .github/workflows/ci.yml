@@ -123,7 +123,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
           components: rustfmt, clippy
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -181,13 +181,13 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # cargo-nextest runs the workspace's ~90 integration-test binaries in one
       # concurrently-scheduled pool instead of cargo's serial-per-binary default
-      # (task #108). install-action fetches a prebuilt binary, so the rustc-1.90
+      # (task #108). install-action fetches a prebuilt binary, so the rustc-1.91
       # pin does not constrain the nextest version (that limit is for building
       # nextest from source, not running it).
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
@@ -254,7 +254,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -388,7 +388,7 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
-          toolchain: "1.90.0"
+          toolchain: "1.91.1"
           cache: true
           cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 

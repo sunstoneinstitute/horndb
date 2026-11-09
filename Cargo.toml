@@ -40,7 +40,7 @@ default-members = [
 # deliberately outside this workspace, so it keeps its own version.
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.91"
 license = "Apache-2.0"
 repository = "https://github.com/sunstoneinstitute/horndb"
 authors = ["Sunstone Institute"]

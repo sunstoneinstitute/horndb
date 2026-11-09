@@ -80,8 +80,7 @@ pub fn write_snapshot<W: Write>(
 
     // Triples: SPO adjacency, gap-coded, per graph.
     for g in graphs.iter_mut() {
-        g.triples
-            .sort_unstable_by(|a, b| (a.s, a.p, a.o).cmp(&(b.s, b.p, b.o)));
+        g.triples.sort_unstable_by_key(|t| (t.s, t.p, t.o));
     }
     graphs.sort_by_key(|g| g.graph_local);
     let mut tri_buf = Vec::new();
