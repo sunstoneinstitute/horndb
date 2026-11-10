@@ -155,3 +155,18 @@ fn rg3_exact_match_generalises_to_close_match() {
         "ADR-0017: no sameAs bridge"
     );
 }
+
+/// Symmetry + exactMatch chaining entails self-matches (see the RI note in
+/// rules.toml). Pinned so a change to this behaviour is deliberate.
+#[test]
+fn exact_match_symmetry_entails_self_match() {
+    let a = TermId(1);
+    let b = TermId(2);
+    let (s, v) = run(|s, v| {
+        s.assert(t(a, v.skos_exact_match, b));
+    });
+    for x in [a, b] {
+        assert!(s.contains(&t(x, v.skos_exact_match, x)));
+        assert!(s.contains(&t(x, v.skos_close_match, x)));
+    }
+}

@@ -522,6 +522,10 @@ body = [
 head = { s = "?a", p = "skos:closeMatch", o = "?b" }
 
 # --- SPEC-11 F3: SSSOM inversion rules (RI1-8) — tagged semapv:MappingInversion ---
+# RI6 symmetry plus exactMatch chaining (RCE1/T1) derives a self-match
+# `a exactMatch a` (and, via RG3, `a closeMatch a`) for every matched concept.
+# This is the correct SKOS entailment, like eq-ref for owl:sameAs. Readers that
+# do not want self-pairs (crosswalk index, SSSOM export) must filter s = o.
 [[rule]]
 id = "sssom-ri1"
 comment = "SSSOM RI1: skos:narrowMatch inverts to skos:broadMatch."
