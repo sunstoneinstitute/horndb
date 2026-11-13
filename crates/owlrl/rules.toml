@@ -494,7 +494,7 @@ body = [
 ]
 head = { s = "?s", p = "?p", o = "?o2" }
 
-# --- SPEC-11 F3: SSSOM generalisation rules (RG1, RG2) ---
+# --- SPEC-11 F3: SSSOM generalisation rules (RG1-3) ---
 # Deliberate weakening: OWL-strength axioms generalise to SKOS-strength
 # crosswalk edges so OWL- and SKOS-sourced mappings compose in one layer.
 [[rule]]
@@ -513,7 +513,19 @@ body = [
 ]
 head = { s = "?a", p = "skos:broadMatch", o = "?b" }
 
-# --- SPEC-11 F3: SSSOM inversion rules (RI1-5) — tagged semapv:MappingInversion ---
+[[rule]]
+id = "sssom-rg3"
+comment = "SSSOM RG3: skos:exactMatch generalises to skos:closeMatch (SKOS Reference: exactMatch is a sub-property of closeMatch)."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+]
+head = { s = "?a", p = "skos:closeMatch", o = "?b" }
+
+# --- SPEC-11 F3: SSSOM inversion rules (RI1-8) — tagged semapv:MappingInversion ---
+# RI6 symmetry plus exactMatch chaining (RCE1/T1) derives a self-match
+# `a exactMatch a` (and, via RG3, `a closeMatch a`) for every matched concept.
+# This is the correct SKOS entailment, like eq-ref for owl:sameAs. Readers that
+# do not want self-pairs (crosswalk index, SSSOM export) must filter s = o.
 [[rule]]
 id = "sssom-ri1"
 comment = "SSSOM RI1: skos:narrowMatch inverts to skos:broadMatch."
@@ -553,6 +565,30 @@ body = [
   { s = "?a", p = "semapv:crossSpeciesBroadMatch", o = "?b" },
 ]
 head = { s = "?b", p = "semapv:crossSpeciesNarrowMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri6"
+comment = "SSSOM RI6: skos:exactMatch is symmetric (self-inverse; SKOS Reference)."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:exactMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri7"
+comment = "SSSOM RI7: skos:closeMatch is symmetric (self-inverse; SKOS Reference)."
+body = [
+  { s = "?a", p = "skos:closeMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:closeMatch", o = "?a" }
+
+[[rule]]
+id = "sssom-ri8"
+comment = "SSSOM RI8: skos:relatedMatch is symmetric (self-inverse; SKOS Reference)."
+body = [
+  { s = "?a", p = "skos:relatedMatch", o = "?b" },
+]
+head = { s = "?b", p = "skos:relatedMatch", o = "?a" }
 
 # --- SPEC-11 F3: SSSOM role-chain rules (RCE1/RCE2) ---
 # RCE1: exactMatch o p  => p   (leading exactMatch, p in {broad,narrow,exact}).

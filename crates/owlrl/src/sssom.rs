@@ -9,9 +9,9 @@ use crate::vocab::Vocabulary;
 /// The `semapv:*` justification a derived mapping carries, per SPEC-11 F3.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Justification {
-    /// Derived by transitivity / role-chain / generalisation (T1, RCE, RG).
+    /// Derived by transitivity / role-chain / generalisation (T1, RCE, RG1-3).
     Chaining,
-    /// Derived by inversion (RI1-5).
+    /// Derived by inversion or symmetry (RI1-8).
     Inversion,
 }
 

@@ -456,7 +456,7 @@ identity (ADR-0017). Tracked as a HIGH *Completeness* task in Worklode.
 |---|---|---|
 | Mapping-predicate vocabulary in `vocab.rs` (SKOS/OWL/semapv) | **implemented** | SPEC-11 F1. |
 | Mapping representation (n-ary `sssom:Mapping` node + positive base triple; negated = n-ary only) | **partial** | F2; n-ary node builder exists, full materialization-on-inference is follow-up. RDF 1.2 deferred (ADR-0014, ADR-0002 D10). |
-| SSSOM chaining rules in `rules.toml` (T1 / RCE1-2 / RI1-5 / RG1-2; transitive → closure) | **implemented** | F3; rides SPEC-04 codegen + SPEC-05 closure. RCE-N OWL rules already entailed by `cax-*`/`scm-*`. |
+| SSSOM chaining rules in `rules.toml` (T1 / RCE1-2 / RI1-8 / RG1-3; transitive → closure) | **implemented** | F3; rides SPEC-04 codegen + SPEC-05 closure. RCE-N OWL rules already entailed by `cax-*`/`scm-*`. |
 | Negative-mapping chaining (monotone, `Not` as distinct predicate) | **implemented** | F4; preserves SPEC-04 negation-free stratification. |
 | Compact crosswalk index (rung-2 EF+FOR baseline → rung-4 PGM) | **planned** | F5; ~10 B/pair bidi target (NF2). |
 | Crosswalk spine (designated sets always-resident; identity rides ADR-0007 spine) | **planned** | F6. |
