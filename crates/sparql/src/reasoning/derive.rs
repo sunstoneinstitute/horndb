@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
-use horndb_config::Reasoning;
+use horndb_config::{BuiltinSchema, Reasoning};
 use horndb_owlrl::Engine;
 
 use super::{ViewCatalog, ViewSource, SPINE_CLOSURE_GRAPH, VIEWS_GRAPH};
@@ -124,9 +124,23 @@ impl ViewManager {
             BTreeSet::new()
         };
 
+        // Bundled schemas join the closure but are not in `asserted`, so the
+        // diff below publishes them in the spine-closure graph.
+        let schemas: Vec<LexTriple> = if self.cfg.views.include_spine {
+            self.cfg
+                .builtin_schemas
+                .iter()
+                .flat_map(|s| match s {
+                    BuiltinSchema::SkosCore => horndb_owlrl::schemas::skos_core(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let mut engine = Engine::new();
         engine
-            .load_base(asserted.iter().cloned())
+            .load_base(asserted.iter().cloned().chain(schemas))
             .map_err(|e| crate::SparqlError::Executor(format!("spine closure: {e}")))?;
         self.spine_materialized = engine
             .materialized_triples()

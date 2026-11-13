@@ -53,6 +53,7 @@ pub mod graphblas_backend;
 pub mod integration;
 pub mod list_rules;
 pub mod provenance;
+pub mod schemas;
 pub mod sssom;
 pub mod store;
 pub mod types;

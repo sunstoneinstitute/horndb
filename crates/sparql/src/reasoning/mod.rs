@@ -221,7 +221,16 @@ pub fn validate(cfg: &Reasoning) -> std::result::Result<Vec<String>, String> {
         );
     }
 
-    if cfg.enabled && cfg.spine.is_empty() {
+    if !cfg.builtin_schemas.is_empty() && (!cfg.enabled || !cfg.views.include_spine) {
+        warnings.push(
+            "[reasoning].builtin_schemas only loads into the reasoning-view spine; \
+             it has no effect unless [reasoning].enabled = true and \
+             views.include_spine = true (and none under serve --materialize)."
+                .to_string(),
+        );
+    }
+
+    if cfg.enabled && cfg.spine.is_empty() && cfg.builtin_schemas.is_empty() {
         warnings.push(
             "[reasoning].enabled is set with an empty [reasoning].spine: every view \
              will derive only from its own graph, so no shared vocabulary axiom \
@@ -341,9 +350,18 @@ mod tests {
         assert!(ok[0].contains("spine"), "{ok:?}");
 
         // Disabled with an empty spine: not even a warning.
-        let mut off = cfg(&[], all);
+        let mut off = cfg(&[], all.clone());
         off.enabled = false;
         assert!(validate(&off).unwrap().is_empty());
+
+        // builtin_schemas silences the empty-spine warning when enabled, and
+        // warns that it does nothing when disabled.
+        let mut skos = cfg(&[], all.clone());
+        skos.builtin_schemas = vec![horndb_config::BuiltinSchema::SkosCore];
+        assert!(validate(&skos).unwrap().is_empty());
+        skos.enabled = false;
+        let w = validate(&skos).unwrap();
+        assert!(w.len() == 1 && w[0].contains("builtin_schemas"), "{w:?}");
 
         // views.output = "none" is P4, and says so.
         let mut virtual_view = cfg(&["https://ex.org/vocab/"], ViewSelect::Patterns(vec![]));

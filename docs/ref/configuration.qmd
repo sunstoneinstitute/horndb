@@ -532,6 +532,29 @@ queries disagreeing about what was entailed is not a setting, it is a bug.
     spine is legal and warned about at startup: with no shared axioms, no
     `rdfs:subClassOf` (or similar) can fire.
 
+`[reasoning].builtin_schemas` (list of strings)
+
+:   **Default:** `[]`. Schemas that ship with HornDB, added to the spine by
+    name, so you need not load them into a graph yourself. Their triples
+    appear in the spine-closure graph, never in a graph of yours.
+
+    **Allowed values:** `"skos-core"` — the SKOS concept-hierarchy axioms:
+    `broader`/`narrower` are inverses, `broaderTransitive` is transitive,
+    `related` is symmetric, `prefLabel`/`altLabel`/`hiddenLabel` are
+    sub-properties of `rdfs:label`, and the note properties are
+    sub-properties of `skos:note`. It leaves out two parts of the published
+    SKOS schema. The mapping properties (`broadMatch ⊑ broader` and
+    friends) are left out because HornDB's SSSOM rules turn every
+    `rdfs:subClassOf` into a `broadMatch`, which would put your whole class
+    hierarchy into `skos:broader`. The `rdfs:domain`/`rdfs:range` axioms are
+    left out because they would type every related term as a
+    `skos:Concept`. Any other name stops `serve` at startup.
+
+    **Tuning notes:** only reasoning views read this key. It has no effect
+    unless `[reasoning].enabled` and `[reasoning].views.include_spine` are
+    both `true`, and none under `serve --materialize`; `serve` warns at
+    startup if it is set where it does nothing.
+
 `[reasoning].views.select` (string or list of strings)
 
 :   **Default:** `"all-except-spine"` — every graph that is not a spine graph
