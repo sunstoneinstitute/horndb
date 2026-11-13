@@ -6,7 +6,7 @@
 
 #![cfg(feature = "reasoner")]
 
-use horndb_config::{Reasoning, ViewSelect, Views};
+use horndb_config::{BuiltinSchema, Reasoning, ViewSelect, Views};
 use horndb_sparql::algebra::Term;
 use horndb_sparql::api::{execute_query, QueryAnswer};
 use horndb_sparql::exec::horn::HornBackend;
@@ -120,6 +120,51 @@ fn view_derives_spine_x_data() {
         "https://ex.org/b".into(),
         TYPE.into(),
         "https://ex.org/D".into()
+    )));
+}
+
+/// HDB-352: `builtin_schemas = ["skos-core"]` adds SKOS axioms to the spine
+/// with no spine graph holding them; a view's `skos:broader` data closes
+/// against them, and the schema triples land in the spine-closure graph.
+#[test]
+fn builtin_skos_core_schema_joins_the_spine() {
+    const SKOS: &str = "http://www.w3.org/2004/02/skos/core#";
+    let mut store = HornBackend::new();
+    seed(
+        &mut store,
+        Some(G1),
+        "https://ex.org/a",
+        &format!("{SKOS}broader"),
+        "https://ex.org/b",
+    );
+    seed(
+        &mut store,
+        Some(G1),
+        "https://ex.org/b",
+        &format!("{SKOS}broader"),
+        "https://ex.org/c",
+    );
+    let mut c = cfg(true);
+    c.builtin_schemas = vec![BuiltinSchema::SkosCore];
+    let mut mgr = ViewManager::new(&c);
+    mgr.run_until_clean(&mut store).unwrap();
+
+    let inferred = graph_triples(&store, &inferred_of(G1));
+    for want in [
+        ("https://ex.org/a", "broaderTransitive", "https://ex.org/c"),
+        ("https://ex.org/b", "narrower", "https://ex.org/a"),
+    ] {
+        let t = (
+            want.0.to_string(),
+            format!("{SKOS}{}", want.1),
+            want.2.to_string(),
+        );
+        assert!(inferred.contains(&t), "missing {t:?}");
+    }
+    assert!(graph_triples(&store, SPINE_CLOSURE_GRAPH).contains(&(
+        format!("{SKOS}broader"),
+        "http://www.w3.org/2002/07/owl#inverseOf".into(),
+        format!("{SKOS}narrower"),
     )));
 }
 

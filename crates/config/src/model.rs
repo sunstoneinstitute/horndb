@@ -573,6 +573,11 @@ pub struct Reasoning {
     /// vocabulary and identity graphs, closed once and reused by every view
     /// (SPEC-29 D3). Restart-only.
     pub spine: Vec<String>,
+    /// Schemas bundled with HornDB to add to the spine, by name (HDB-352).
+    /// They take part in the spine closure and their triples are published
+    /// in the spine-closure graph; nothing is written to a user graph.
+    /// Ignored when `views.include_spine = false`. Restart-only.
+    pub builtin_schemas: Vec<BuiltinSchema>,
     pub views: Views,
     /// Whether a query's default dataset (no explicit `FROM`/`FROM NAMED`)
     /// includes inferred graphs. Hot-reloadable.
@@ -628,6 +633,16 @@ pub enum ViewSelectKeyword {
     /// (SPEC-29 D2's shipped default template).
     #[default]
     AllExceptSpine,
+}
+
+/// A schema bundled with HornDB (`[reasoning].builtin_schemas`). Unknown
+/// names are rejected at parse time.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuiltinSchema {
+    /// The SKOS concept-hierarchy axioms, without mapping predicates or
+    /// domain/range typing (`horndb_owlrl::schemas::skos_core`).
+    SkosCore,
 }
 
 /// Where a reasoning view's inferred triples go (SPEC-29 D9).
