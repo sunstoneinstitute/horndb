@@ -575,8 +575,8 @@ body = [
 head = { s = "?b", p = "skos:relatedMatch", o = "?a" }
 
 # --- SPEC-11 F3: SSSOM role-chain rules (RCE1/RCE2) ---
-# RCE1: exactMatch o p  => p   (leading exactMatch, p in {broad,narrow,exact}).
-# RCE2: p o exactMatch  => p   (trailing exactMatch mirror).
+# RCE1: e o p  => p   (leading e in {exactMatch, equivalentClass}; p in {broad,narrow,exact}).
+# RCE2: p o e  => p   (trailing mirror).
 # p is restricted to mapping predicates (ADR-0017): exactMatch is a crosswalk
 # edge, never an identity that substitutes across arbitrary triples.
 [[rule]]
@@ -621,6 +621,62 @@ comment = "SSSOM RCE2: narrowMatch o exactMatch => narrowMatch."
 body = [
   { s = "?a", p = "skos:narrowMatch", o = "?b" },
   { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+# RCE1/RCE2 anchored on owl:equivalentClass. Each needs a mapping edge and
+# keeps that edge's predicate, so OWL axioms alone still derive no mapping.
+[[rule]]
+id = "sssom-rce1-eqc-exact"
+comment = "SSSOM RCE1: equivalentClass o exactMatch => exactMatch."
+body = [
+  { s = "?a", p = "owl:equivalentClass", o = "?b" },
+  { s = "?b", p = "skos:exactMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-eqc-exact"
+comment = "SSSOM RCE2: exactMatch o equivalentClass => exactMatch."
+body = [
+  { s = "?a", p = "skos:exactMatch", o = "?b" },
+  { s = "?b", p = "owl:equivalentClass", o = "?c" },
+]
+head = { s = "?a", p = "skos:exactMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-eqc-broad"
+comment = "SSSOM RCE1: equivalentClass o broadMatch => broadMatch."
+body = [
+  { s = "?a", p = "owl:equivalentClass", o = "?b" },
+  { s = "?b", p = "skos:broadMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-eqc-broad"
+comment = "SSSOM RCE2: broadMatch o equivalentClass => broadMatch."
+body = [
+  { s = "?a", p = "skos:broadMatch", o = "?b" },
+  { s = "?b", p = "owl:equivalentClass", o = "?c" },
+]
+head = { s = "?a", p = "skos:broadMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce1-eqc-narrow"
+comment = "SSSOM RCE1: equivalentClass o narrowMatch => narrowMatch."
+body = [
+  { s = "?a", p = "owl:equivalentClass", o = "?b" },
+  { s = "?b", p = "skos:narrowMatch", o = "?c" },
+]
+head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
+
+[[rule]]
+id = "sssom-rce2-eqc-narrow"
+comment = "SSSOM RCE2: narrowMatch o equivalentClass => narrowMatch."
+body = [
+  { s = "?a", p = "skos:narrowMatch", o = "?b" },
+  { s = "?b", p = "owl:equivalentClass", o = "?c" },
 ]
 head = { s = "?a", p = "skos:narrowMatch", o = "?c" }
 
