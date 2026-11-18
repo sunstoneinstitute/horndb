@@ -9,7 +9,7 @@ use crate::vocab::Vocabulary;
 /// The `semapv:*` justification a derived mapping carries, per SPEC-11 F3.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Justification {
-    /// Derived by transitivity / role-chain / generalisation (T1, RCE, RG1-3).
+    /// Derived by transitivity / role-chain / generalisation (T1, RCE, RG3).
     Chaining,
     /// Derived by inversion or symmetry (RI1-8).
     Inversion,
@@ -83,7 +83,7 @@ mod tests {
             Some(Justification::Inversion)
         );
         assert_eq!(
-            rule_justification("sssom-rg1"),
+            rule_justification("sssom-rg3"),
             Some(Justification::Chaining)
         );
         assert_eq!(

@@ -3,24 +3,12 @@
 
 <#manifest> a mf:Manifest ;
     mf:entries (
-        <#sssom-rg1-exact>
-        <#sssom-rg2-broad>
         <#sssom-ri-narrow-broad>
         <#sssom-rce1-broad>
         <#sssom-t1-broad>
         <#sssom-neg-exact>
         <#sssom-biomappings-slice>
     ) .
-
-<#sssom-rg1-exact> a mf:PositiveEntailmentTest ;
-    mf:name "SSSOM RG1: owl:equivalentClass generalises to skos:exactMatch" ;
-    mf:action <rg1-exact-premise.ttl> ;
-    mf:result <rg1-exact-conclusion.ttl> .
-
-<#sssom-rg2-broad> a mf:PositiveEntailmentTest ;
-    mf:name "SSSOM RG2: rdfs:subClassOf generalises to skos:broadMatch" ;
-    mf:action <rg2-broad-premise.ttl> ;
-    mf:result <rg2-broad-conclusion.ttl> .
 
 <#sssom-ri-narrow-broad> a mf:PositiveEntailmentTest ;
     mf:name "SSSOM RI1/2: skos:narrowMatch inverts to skos:broadMatch" ;

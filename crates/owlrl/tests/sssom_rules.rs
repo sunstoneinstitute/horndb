@@ -1,4 +1,4 @@
-//! SPEC-11 F3 — SSSOM chaining rule conformance (RG / RI / RCE).
+//! SPEC-11 F3 — SSSOM chaining rule conformance (RG3 / RI / RCE).
 use horndb_owlrl::backend::RuleFiringBackend;
 use horndb_owlrl::engine::materialize;
 use horndb_owlrl::store::{MemStore, TripleStore};
@@ -17,24 +17,27 @@ fn run(setup: impl FnOnce(&mut MemStore, &Vocabulary)) -> (MemStore, Vocabulary)
     (s, v)
 }
 
+/// SPEC-11 F3: RG1/RG2 are withdrawn. A store holding only OWL axioms
+/// derives no mapping-predicate triple.
 #[test]
-fn rg1_equivalent_class_generalises_to_exact_match() {
-    let a = TermId(1);
-    let b = TermId(2);
+fn owl_axioms_alone_derive_no_mapping_predicate() {
+    let (a, b, c, d) = (TermId(1), TermId(2), TermId(3), TermId(4));
     let (s, v) = run(|s, v| {
-        s.assert(t(a, v.owl_equivalent_class, b));
-    });
-    assert!(s.contains(&t(a, v.skos_exact_match, b)));
-}
-
-#[test]
-fn rg2_subclass_generalises_to_broad_match() {
-    let a = TermId(1);
-    let b = TermId(2);
-    let (s, v) = run(|s, v| {
+        for x in [a, b, c, d] {
+            s.assert(t(x, v.rdf_type, v.owl_class));
+        }
         s.assert(t(a, v.rdfs_sub_class_of, b));
+        s.assert(t(c, v.owl_equivalent_class, d));
     });
-    assert!(s.contains(&t(a, v.skos_broad_match, b)));
+    for p in [
+        v.skos_exact_match,
+        v.skos_close_match,
+        v.skos_broad_match,
+        v.skos_narrow_match,
+        v.skos_related_match,
+    ] {
+        assert_eq!(s.scan_predicate(p).count(), 0);
+    }
 }
 
 #[test]

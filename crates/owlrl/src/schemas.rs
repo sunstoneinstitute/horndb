@@ -20,11 +20,9 @@ const OWL_TRANSITIVE: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
 /// (<http://www.w3.org/2004/02/skos/core>), trimmed in two ways:
 ///
 /// - **No mapping predicates.** `skos.rdf` makes `broadMatch ⊑ broader`,
-///   `relatedMatch ⊑ related` and `mappingRelation ⊑ semanticRelation`. The
-///   SSSOM rule RG2 turns every `rdfs:subClassOf` into `broadMatch`, so those
-///   links would put every class hierarchy into `skos:broader`. Mapping edges
-///   stay in the mapping layer (ADR-0017); the SSSOM rules in `rules.toml`
-///   own their semantics.
+///   `relatedMatch ⊑ related` and `mappingRelation ⊑ semanticRelation`.
+///   Mapping edges stay in the mapping layer (ADR-0017); the SSSOM rules in
+///   `rules.toml` own their semantics.
 /// - **No `rdfs:domain` / `rdfs:range`.** `semanticRelation`'s domain and
 ///   range `skos:Concept` would type every related term as a concept.
 pub fn skos_core() -> Vec<(String, String, String)> {
