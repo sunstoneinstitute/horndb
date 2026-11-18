@@ -50,12 +50,12 @@ fn hierarchy_entailments_fire() {
     }
 }
 
-/// SSSOM RG2 turns `subClassOf` into `broadMatch`; the trimmed schema must not
-/// lift that into `skos:broader` or type the classes as `skos:Concept`.
+/// A class hierarchy stays out of SKOS: no mapping edge, no `skos:broader`,
+/// no `skos:Concept` typing.
 #[test]
 fn class_hierarchy_does_not_leak_into_concepts() {
     let c = close(vec![t(&ex("Dog"), SUB_CLASS_OF, &ex("Animal"))]);
-    assert!(c.contains(&t(&ex("Dog"), &skos("broadMatch"), &ex("Animal"))));
+    assert!(!c.contains(&t(&ex("Dog"), &skos("broadMatch"), &ex("Animal"))));
     assert!(!c.contains(&t(&ex("Dog"), &skos("broader"), &ex("Animal"))));
     assert!(!c
         .iter()

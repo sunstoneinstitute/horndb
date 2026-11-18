@@ -7,8 +7,6 @@ from a real SSSOM/TSV slice via the §F9 harness loader.
 
 | Fixture id | Exercises | SPEC-11 ref |
 |---|---|---|
-| `#sssom-rg1-exact` | owl:equivalentClass ⟹ skos:exactMatch | F3 RG1 |
-| `#sssom-rg2-broad` | rdfs:subClassOf ⟹ skos:broadMatch | F3 RG2 |
 | `#sssom-ri-narrow-broad` | narrowMatch ⟹ inverse broadMatch | F3 RI1/2 |
 | `#sssom-rce1-broad` | exactMatch ∘ broadMatch ⟹ broadMatch | F3 RCE1 |
 | `#sssom-t1-broad` | broadMatch transitivity | F3 T1 |
