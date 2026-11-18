@@ -173,3 +173,28 @@ fn exact_match_symmetry_entails_self_match() {
         assert!(s.contains(&t(x, v.skos_close_match, x)));
     }
 }
+
+/// SPEC-11 F3 RCE1/RCE2: a mapping chains across `owl:equivalentClass`, in
+/// both positions, and keeps its own predicate.
+#[test]
+fn rce_chains_mappings_across_equivalent_class() {
+    let (a, b, c) = (TermId(1), TermId(2), TermId(3));
+    for p in [
+        |v: &Vocabulary| v.skos_exact_match,
+        |v: &Vocabulary| v.skos_broad_match,
+        |v: &Vocabulary| v.skos_narrow_match,
+    ] {
+        // RCE1: A equivalentClass B, B p C  =>  A p C
+        let (s, v) = run(|s, v| {
+            s.assert(t(a, v.owl_equivalent_class, b));
+            s.assert(t(b, p(v), c));
+        });
+        assert!(s.contains(&t(a, p(&v), c)));
+        // RCE2: A p B, B equivalentClass C  =>  A p C
+        let (s, v) = run(|s, v| {
+            s.assert(t(a, p(v), b));
+            s.assert(t(b, v.owl_equivalent_class, c));
+        });
+        assert!(s.contains(&t(a, p(&v), c)));
+    }
+}
