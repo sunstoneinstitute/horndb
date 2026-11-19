@@ -57,7 +57,7 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # `ServerConfig` atomically so request handlers take a cheap per-request snapshot.
 notify = "8"
 arc-swap = "1"
-prometheus-client = "0.25"
+prometheus-client = "0.26"
 # Advisory file locks (flock on unix). `horndb-storage` keeps two processes off
 # one store directory with it. `crates/closure` declares its own copy under
 # `[build-dependencies]`, where a workspace dependency cannot reach.
