@@ -106,7 +106,7 @@ sha2 = "0.11"
 # lock file, so the two lines coexist and each crate's `Digest` trait is
 # imported as `_` at its use site.
 md-5 = "0.10"
-sha1 = "0.10"
+sha1 = "0.11"
 hex = "0.4"
 # SPARQL 1.1 `RAND`/`UUID`/`STRUUID`. Already in the lock file via proptest.
 rand = "0.9"
